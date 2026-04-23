@@ -139,6 +139,53 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void sessionSendHelpersAcceptSlicesAndByteBuffers() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            byte[] bidiSource = "xhelloz".getBytes(StandardCharsets.UTF_8);
+            ZmuxNativeStream bidi = pair.client().openAndSend(bidiSource, 1, 5);
+            bidi.closeWrite();
+
+            ByteBuffer uniSource = ByteBuffer.wrap("!event?".getBytes(StandardCharsets.UTF_8));
+            uniSource.position(1);
+            uniSource.limit(6);
+            ZmuxNativeSendStream uni = pair.client().openUniAndSend(uniSource);
+
+            ByteBuffer timedBidiSource = ByteBuffer.wrap("ab".getBytes(StandardCharsets.UTF_8));
+            ZmuxNativeStream timedBidi = pair.client().openAndSendWithTimeout(Duration.ofSeconds(1), timedBidiSource);
+            timedBidi.closeWrite();
+
+            byte[] timedUniSource = "pqrs".getBytes(StandardCharsets.UTF_8);
+            ZmuxNativeSendStream timedUni = pair.client().openUniAndSendWithTimeout(
+                    Duration.ofSeconds(1),
+                    timedUniSource,
+                    1,
+                    2
+            );
+
+            ZmuxStream inboundBidi = pair.server().acceptStream(Duration.ofSeconds(1));
+            ZmuxRecvStream inboundUni = pair.server().acceptUniStream(Duration.ofSeconds(1));
+            ZmuxStream inboundTimedBidi = pair.server().acceptStream(Duration.ofSeconds(1));
+            ZmuxRecvStream inboundTimedUni = pair.server().acceptUniStream(Duration.ofSeconds(1));
+
+            assertEquals("hello", new String(inboundBidi.readAllBytes(), StandardCharsets.UTF_8));
+            assertEquals("event", new String(inboundUni.readAllBytes(), StandardCharsets.UTF_8));
+            assertEquals("ab", new String(inboundTimedBidi.readAllBytes(), StandardCharsets.UTF_8));
+            assertEquals("qr", new String(inboundTimedUni.readAllBytes(), StandardCharsets.UTF_8));
+            assertEquals(6, uniSource.position(), "openUniAndSend(ByteBuffer) should advance the source position");
+            assertEquals(2, timedBidiSource.position(), "openAndSendWithTimeout(ByteBuffer) should advance the source position");
+
+            inboundBidi.close();
+            inboundUni.close();
+            inboundTimedBidi.close();
+            inboundTimedUni.close();
+            bidi.close();
+            uni.close();
+            timedBidi.close();
+            timedUni.close();
+        }
+    }
+
+    @Test
     void readDeadlineTimesOutLocallyAndCanBeCleared() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxStream outbound = pair.client().openStream();

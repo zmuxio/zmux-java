@@ -198,8 +198,9 @@ Core session and stream APIs:
   `InputStream` / `OutputStream`, `ByteChannel`, split NIO channels, or a custom
   `DuplexConnection`.
 - `ZmuxSession`: accepts and opens bidirectional streams, accepts and opens
-  unidirectional streams, provides `openAndSend` helpers, reports state/stats,
-  closes gracefully or with an application error, and waits for termination.
+  unidirectional streams, provides `openAndSend` helpers for whole arrays,
+  array slices, and `ByteBuffer`, reports state/stats, closes gracefully or
+  with an application error, and waits for termination.
 - `ZmuxStream`: bidirectional stream interface combining send and receive
   operations.
 - `ZmuxSendStream`: write side interface for `byte[]`, `ByteBuffer`,
@@ -361,6 +362,19 @@ try (ZmuxSendStream send = session.openUniStream()) {
 try (ZmuxRecvStream recv = session.acceptUniStream()) {
     String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
 }
+```
+
+### Existing Buffers
+
+If your payload already lives in a slice or `ByteBuffer`, you can send it
+directly without opening the stream and writing in two separate steps:
+
+```java
+import java.nio.ByteBuffer;
+
+byte[] frame = ...;
+ZmuxStream bidi = session.openAndSend(frame, 4, 128);
+ZmuxSendStream uni = session.openUniAndSend(ByteBuffer.wrap(frame, 132, 64));
 ```
 
 ### Open Metadata And Priority
