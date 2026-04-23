@@ -1,0 +1,125 @@
+package io.zmux.internal;
+
+import io.zmux.ErrorCode;
+import io.zmux.FrameType;
+import io.zmux.ZmuxErrorDirection;
+import io.zmux.ZmuxErrorSource;
+
+import java.io.IOException;
+import java.util.Objects;
+
+final class SessionLateDataHandler {
+    private final SessionReaderCoordinator.Owner owner;
+    private final SessionReceiveWindowUpdater receiveWindowUpdater;
+
+    SessionLateDataHandler(SessionReaderCoordinator.Owner owner,
+                           SessionReceiveWindowUpdater receiveWindowUpdater) {
+        this.owner = Objects.requireNonNull(owner, "owner");
+        this.receiveWindowUpdater = Objects.requireNonNull(receiveWindowUpdater, "receiveWindowUpdater");
+    }
+
+    void handleTerminalDataFrameLocked(FrameCodec.Frame frame,
+                                       int appDataLength,
+                                       SessionTerminalBookkeeping.TerminalDataDisposition disposition)
+            throws IOException {
+        if ((frame.flags() & 0x20) != 0) {
+            throw this.owner.sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle DATA",
+                    "OPEN_METADATA is only valid on the opening DATA frame",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+        switch (disposition.action()) {
+            case ABORT_CLOSED:
+                this.owner.enqueueControlLocked(new FrameCodec.Frame(
+                        FrameType.ABORT,
+                        0,
+                        frame.streamId(),
+                        FrameCodec.buildErrorPayload(
+                                ErrorCode.STREAM_CLOSED.code(),
+                                "",
+                                this.owner.controlPayloadLimitLocked()
+                        )
+                ));
+                this.owner.notifyWriterWaiters();
+                break;
+            case ABORT_STATE:
+                this.owner.enqueueControlLocked(new FrameCodec.Frame(
+                        FrameType.ABORT,
+                        0,
+                        frame.streamId(),
+                        FrameCodec.buildErrorPayload(
+                                ErrorCode.STREAM_STATE.code(),
+                                "",
+                                this.owner.controlPayloadLimitLocked()
+                        )
+                ));
+                this.owner.notifyWriterWaiters();
+                break;
+            case IGNORE:
+                if (appDataLength > 0) {
+                    this.discardLatePeerDataLocked(null, appDataLength, disposition.cause());
+                }
+                break;
+            default:
+                throw new IllegalStateException("unexpected late-data action: " + disposition.action());
+        }
+    }
+
+    void discardLatePeerDataLocked(StreamRuntime streamRuntime, int length) throws IOException {
+        LateDataCause cause = streamRuntime == null ? LateDataCause.NONE : streamRuntime.lateDataCauseLocked();
+        this.discardLatePeerDataLocked(streamRuntime, length, cause);
+    }
+
+    void discardLatePeerDataLocked(StreamRuntime streamRuntime, int length, LateDataCause cause) throws IOException {
+        if (length <= 0) {
+            return;
+        }
+        if (RuntimeFlow.receiveWindowExceeded(
+                this.owner.recvSessionReceivedBytes(),
+                this.owner.recvSessionAdvertised(),
+                length
+        )) {
+            throw this.owner.sessionError(
+                    ErrorCode.FLOW_CONTROL,
+                    "handle DATA",
+                    "session max_data exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+        long received = RuntimeFlow.saturatingAdd(this.owner.recvSessionReceivedBytes(), length);
+        this.owner.setRecvSessionReceivedBytes(received);
+        this.owner.addReceivedDataBytes(length);
+        this.owner.setRecvSessionPending(SessionRuntime.saturatingAdd(this.owner.recvSessionPending(), length));
+        this.owner.setAggregateLateDataReceived(RuntimeFlow.saturatingAdd(this.owner.aggregateLateDataReceived(), length));
+        this.owner.noteLateDataDiscardLocked(length, cause);
+        if (streamRuntime != null) {
+            streamRuntime.recordLateDataReceivedLocked(length);
+            streamRuntime.clearRecvPendingLocked();
+        }
+        if (this.receiveWindowUpdater.maybeReplenishSessionLocked(false)) {
+            this.owner.notifyWriterWaiters();
+        }
+        if (this.owner.aggregateLateDataReceived() > this.owner.aggregateLateDataCap()) {
+            throw this.owner.sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle DATA",
+                    "late-data cap exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+        if (streamRuntime != null && streamRuntime.lateDataReceivedLocked() > this.owner.lateDataPerStreamCap(streamRuntime)) {
+            throw this.owner.sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle DATA",
+                    "late-data cap exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+    }
+}

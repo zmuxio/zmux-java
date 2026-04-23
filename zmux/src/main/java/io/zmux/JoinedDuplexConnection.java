@@ -1,0 +1,591 @@
+package io.zmux;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.io.OutputStream;
+import java.net.SocketAddress;
+import java.net.SocketTimeoutException;
+import java.nio.channels.GatheringByteChannel;
+import java.time.Duration;
+import java.util.IdentityHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+
+@SuppressWarnings("resource")
+public final class JoinedDuplexConnection implements DuplexConnection {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition inputChanged = lock.newCondition();
+    private final Condition outputChanged = lock.newCondition();
+    private final InputStream inputView = new JoinedInputStream();
+    private final OutputStream outputView = new JoinedOutputStream();
+    private final SocketAddress localAddress;
+    private final SocketAddress remoteAddress;
+
+    private InputStream inputHalf;
+    private OutputStream outputHalf;
+    private GatheringByteChannel gatheringOutput;
+    private boolean inputPaused;
+    private boolean outputPaused;
+    private int activeInputOperations;
+    private int activeOutputOperations;
+    private int inputWaiters;
+    private int outputWaiters;
+    private boolean closed;
+
+    public JoinedDuplexConnection(InputStream inputHalf, OutputStream outputHalf) {
+        this(inputHalf, outputHalf, null, null, null);
+    }
+
+    public JoinedDuplexConnection(InputStream inputHalf,
+                                  OutputStream outputHalf,
+                                  GatheringByteChannel gatheringOutput,
+                                  SocketAddress localAddress,
+                                  SocketAddress remoteAddress) {
+        this.inputHalf = inputHalf;
+        this.outputHalf = outputHalf;
+        this.gatheringOutput = gatheringOutput;
+        this.localAddress = localAddress;
+        this.remoteAddress = remoteAddress;
+    }
+
+    private static SocketTimeoutException pauseTimeout() {
+        return new SocketTimeoutException("zmux: joined connection pause timed out");
+    }
+
+    private static IOException closeOnce(AutoCloseable closeable,
+                                         IdentityHashMap<Object, Boolean> closedObjects,
+                                         IOException current) {
+        if (closeable == null || closedObjects.put(closeable, Boolean.TRUE) != null) {
+            return current;
+        }
+        try {
+            closeable.close();
+            return current;
+        } catch (IOException error) {
+            return appendCloseFailure(current, error);
+        } catch (Exception error) {
+            return appendCloseFailure(current, new IOException("zmux: failed to close joined connection half", error));
+        }
+    }
+
+    private static IOException appendCloseFailure(IOException current, IOException next) {
+        if (current == null) {
+            return next;
+        }
+        current.addSuppressed(next);
+        return current;
+    }
+
+    @Override
+    public InputStream input() {
+        return inputView;
+    }
+
+    @Override
+    public OutputStream output() {
+        return outputView;
+    }
+
+    @Override
+    public GatheringByteChannel gatheringOutput() {
+        lock.lock();
+        try {
+            return outputPaused || closed ? null : gatheringOutput;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public SocketAddress localAddress() {
+        return localAddress;
+    }
+
+    @Override
+    public SocketAddress remoteAddress() {
+        return remoteAddress;
+    }
+
+    public PausedInput pauseInput() throws IOException, InterruptedException {
+        return pauseInput(null);
+    }
+
+    public PausedInput pauseInput(Duration timeout) throws IOException, InterruptedException {
+        lock.lockInterruptibly();
+        boolean ownsPause = false;
+        try {
+            PauseDeadline deadline = PauseDeadline.from(timeout);
+            while (inputPaused && !closed) {
+                awaitInput(deadline);
+            }
+            ensureOpenLocked();
+            inputPaused = true;
+            ownsPause = true;
+            signalInputChangedLocked();
+            while (activeInputOperations > 0 && !closed) {
+                awaitInput(deadline);
+            }
+            ensureOpenLocked();
+            InputStream current = inputHalf;
+            inputHalf = null;
+            signalInputChangedLocked();
+            return new PausedInput(this, current);
+        } catch (IOException | InterruptedException error) {
+            if (ownsPause) {
+                inputPaused = false;
+                signalInputChangedLocked();
+            }
+            throw error;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public PausedOutput pauseOutput() throws IOException, InterruptedException {
+        return pauseOutput(null);
+    }
+
+    public PausedOutput pauseOutput(Duration timeout) throws IOException, InterruptedException {
+        lock.lockInterruptibly();
+        boolean ownsPause = false;
+        try {
+            PauseDeadline deadline = PauseDeadline.from(timeout);
+            while (outputPaused && !closed) {
+                awaitOutput(deadline);
+            }
+            ensureOpenLocked();
+            outputPaused = true;
+            ownsPause = true;
+            signalOutputChangedLocked();
+            while (activeOutputOperations > 0 && !closed) {
+                awaitOutput(deadline);
+            }
+            ensureOpenLocked();
+            OutputStream current = outputHalf;
+            outputHalf = null;
+            GatheringByteChannel currentGathering = gatheringOutput;
+            gatheringOutput = null;
+            signalOutputChangedLocked();
+            return new PausedOutput(this, current, currentGathering);
+        } catch (IOException | InterruptedException error) {
+            if (ownsPause) {
+                outputPaused = false;
+                signalOutputChangedLocked();
+            }
+            throw error;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        InputStream input;
+        OutputStream output;
+        GatheringByteChannel gathering;
+        lock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            input = inputHalf;
+            output = outputHalf;
+            gathering = gatheringOutput;
+            inputHalf = null;
+            outputHalf = null;
+            gatheringOutput = null;
+            inputPaused = false;
+            outputPaused = false;
+            signalInputChangedLocked();
+            signalOutputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+
+        IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(3);
+        IOException error = closeOnce(input, closedObjects, null);
+        error = closeOnce(output, closedObjects, error);
+        error = closeOnce(gathering, closedObjects, error);
+        if (error != null) {
+            throw error;
+        }
+    }
+
+    private InputStream enterInput() throws IOException {
+        lock.lock();
+        try {
+            while (inputPaused && !closed) {
+                awaitInputUninterruptiblyAsIo();
+            }
+            ensureOpenLocked();
+            activeInputOperations++;
+            return inputHalf;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void leaveInput() {
+        lock.lock();
+        try {
+            if (activeInputOperations > 0) {
+                activeInputOperations--;
+            }
+            signalInputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private OutputStream enterOutput() throws IOException {
+        lock.lock();
+        try {
+            while (outputPaused && !closed) {
+                awaitOutputUninterruptiblyAsIo();
+            }
+            ensureOpenLocked();
+            activeOutputOperations++;
+            return outputHalf;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void leaveOutput() {
+        lock.lock();
+        try {
+            if (activeOutputOperations > 0) {
+                activeOutputOperations--;
+            }
+            signalOutputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void resumeInput(PausedInput paused) throws IOException {
+        lock.lock();
+        try {
+            if (paused.resumed) {
+                return;
+            }
+            ensureOpenLocked();
+            inputHalf = paused.current;
+            inputPaused = false;
+            paused.resumed = true;
+            signalInputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void resumeOutput(PausedOutput paused) throws IOException {
+        lock.lock();
+        try {
+            if (paused.resumed) {
+                return;
+            }
+            ensureOpenLocked();
+            outputHalf = paused.current;
+            gatheringOutput = paused.gathering;
+            outputPaused = false;
+            paused.resumed = true;
+            signalOutputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void ensureOpenLocked() throws IOException {
+        if (closed) {
+            throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+        }
+    }
+
+    private void awaitInput(PauseDeadline deadline) throws IOException, InterruptedException {
+        inputWaiters++;
+        try {
+            if (!deadline.await(inputChanged)) {
+                throw pauseTimeout();
+            }
+        } finally {
+            inputWaiters--;
+        }
+    }
+
+    private void awaitOutput(PauseDeadline deadline) throws IOException, InterruptedException {
+        outputWaiters++;
+        try {
+            if (!deadline.await(outputChanged)) {
+                throw pauseTimeout();
+            }
+        } finally {
+            outputWaiters--;
+        }
+    }
+
+    private void awaitInputUninterruptiblyAsIo() throws IOException {
+        inputWaiters++;
+        try {
+            inputChanged.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException io = new InterruptedIOException("zmux: interrupted while waiting for input half resume");
+            io.initCause(interrupted);
+            throw io;
+        } finally {
+            inputWaiters--;
+        }
+    }
+
+    private void awaitOutputUninterruptiblyAsIo() throws IOException {
+        outputWaiters++;
+        try {
+            outputChanged.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException io = new InterruptedIOException("zmux: interrupted while waiting for output half resume");
+            io.initCause(interrupted);
+            throw io;
+        } finally {
+            outputWaiters--;
+        }
+    }
+
+    private void signalInputChangedLocked() {
+        if (inputWaiters > 0) {
+            inputChanged.signalAll();
+        }
+    }
+
+    private void signalOutputChangedLocked() {
+        if (outputWaiters > 0) {
+            outputChanged.signalAll();
+        }
+    }
+
+    public static final class PausedInput {
+        private final JoinedDuplexConnection owner;
+        private InputStream current;
+        private boolean resumed;
+
+        private PausedInput(JoinedDuplexConnection owner, InputStream current) {
+            this.owner = owner;
+            this.current = current;
+        }
+
+        public InputStream current() {
+            return current;
+        }
+
+        public InputStream set(InputStream next) {
+            InputStream previous = current;
+            current = next;
+            return previous;
+        }
+
+        public void resume() throws IOException {
+            owner.resumeInput(this);
+        }
+    }
+
+    public static final class PausedOutput {
+        private final JoinedDuplexConnection owner;
+        private OutputStream current;
+        private GatheringByteChannel gathering;
+        private boolean resumed;
+
+        private PausedOutput(JoinedDuplexConnection owner, OutputStream current, GatheringByteChannel gathering) {
+            this.owner = owner;
+            this.current = current;
+            this.gathering = gathering;
+        }
+
+        public OutputStream current() {
+            return current;
+        }
+
+        public OutputStream set(OutputStream next) {
+            OutputStream previous = current;
+            current = next;
+            return previous;
+        }
+
+        public GatheringByteChannel gatheringOutput() {
+            return gathering;
+        }
+
+        public GatheringByteChannel setGatheringOutput(GatheringByteChannel next) {
+            GatheringByteChannel previous = gathering;
+            gathering = next;
+            return previous;
+        }
+
+        public void resume() throws IOException {
+            owner.resumeOutput(this);
+        }
+    }
+
+    private static final class PauseDeadline {
+        private final long deadlineNanos;
+        private final boolean bounded;
+
+        private PauseDeadline(long deadlineNanos, boolean bounded) {
+            this.deadlineNanos = deadlineNanos;
+            this.bounded = bounded;
+        }
+
+        static PauseDeadline from(Duration timeout) {
+            if (timeout == null) {
+                return new PauseDeadline(0L, false);
+            }
+            if (timeout.isNegative() || timeout.isZero()) {
+                return new PauseDeadline(System.nanoTime(), true);
+            }
+            long nanos;
+            try {
+                nanos = timeout.toNanos();
+            } catch (ArithmeticException overflow) {
+                nanos = Long.MAX_VALUE;
+            }
+            long now = System.nanoTime();
+            long deadline = now > Long.MAX_VALUE - nanos ? Long.MAX_VALUE : now + nanos;
+            return new PauseDeadline(deadline, true);
+        }
+
+        boolean await(Condition condition) throws InterruptedException {
+            if (!bounded) {
+                condition.await();
+                return true;
+            }
+            long now = System.nanoTime();
+            long remaining = deadlineNanos - now;
+            if (remaining <= 0L && deadlineNanos > now) {
+                remaining = Long.MAX_VALUE;
+            }
+            if (remaining <= 0L) {
+                return false;
+            }
+            return condition.await(remaining, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private final class JoinedInputStream extends InputStream {
+        @Override
+        public int read() throws IOException {
+            InputStream input = enterInput();
+            try {
+                if (input == null) {
+                    throw new StreamNotReadableException();
+                }
+                return input.read();
+            } finally {
+                leaveInput();
+            }
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            RangeChecks.checkFromIndexSize(offset, length, buffer.length);
+            if (length == 0) {
+                return 0;
+            }
+            InputStream input = enterInput();
+            try {
+                if (input == null) {
+                    throw new StreamNotReadableException();
+                }
+                return input.read(buffer, offset, length);
+            } finally {
+                leaveInput();
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            InputStream input;
+            lock.lock();
+            try {
+                input = inputHalf;
+                inputHalf = null;
+                inputPaused = false;
+                signalInputChangedLocked();
+            } finally {
+                lock.unlock();
+            }
+            if (input != null) {
+                input.close();
+            }
+        }
+    }
+
+    private final class JoinedOutputStream extends OutputStream {
+        @Override
+        public void write(int value) throws IOException {
+            OutputStream output = enterOutput();
+            try {
+                if (output == null) {
+                    throw new StreamNotWritableException();
+                }
+                output.write(value);
+            } finally {
+                leaveOutput();
+            }
+        }
+
+        @Override
+        public void write(byte[] buffer, int offset, int length) throws IOException {
+            RangeChecks.checkFromIndexSize(offset, length, buffer.length);
+            if (length == 0) {
+                return;
+            }
+            OutputStream output = enterOutput();
+            try {
+                if (output == null) {
+                    throw new StreamNotWritableException();
+                }
+                output.write(buffer, offset, length);
+            } finally {
+                leaveOutput();
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            OutputStream output = enterOutput();
+            try {
+                if (output != null) {
+                    output.flush();
+                }
+            } finally {
+                leaveOutput();
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            OutputStream output;
+            GatheringByteChannel gathering;
+            lock.lock();
+            try {
+                output = outputHalf;
+                gathering = gatheringOutput;
+                outputHalf = null;
+                gatheringOutput = null;
+                outputPaused = false;
+                signalOutputChangedLocked();
+            } finally {
+                lock.unlock();
+            }
+            IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(2);
+            IOException error = closeOnce(output, closedObjects, null);
+            error = closeOnce(gathering, closedObjects, error);
+            if (error != null) {
+                throw error;
+            }
+        }
+    }
+}

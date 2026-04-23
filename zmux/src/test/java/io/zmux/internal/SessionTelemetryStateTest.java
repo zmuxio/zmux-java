@@ -1,0 +1,289 @@
+package io.zmux.internal;
+
+import io.zmux.PingTimeoutException;
+import io.zmux.SessionState;
+import io.zmux.ZmuxConfig;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+final class SessionTelemetryStateTest {
+    private static void setLongField(Object target, String name, long value) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        field.setLong(target, value);
+    }
+
+    private static long getLongField(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.getLong(target);
+    }
+
+    @Test
+    void pingQueueFailureClearsActivePing() {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        owner.enqueueError = new IOException("queue failed");
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder().build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+
+        assertThrows(IOException.class, () -> telemetry.ping(new byte[]{1, 2, 3}, Duration.ofSeconds(1)));
+
+        assertFalse(telemetry.hasActivePingLocked(), "failed queue must not leave an active ping");
+        assertEquals(0L, telemetry.outstandingPingBytesLocked(), "failed queue must release retained ping bytes");
+        assertEquals(1, owner.telemetryNotifications, "ping slot waiters should be woken after cleanup");
+        assertEquals(1, owner.writerNotifications, "keepalive writer wake should be refreshed after cleanup");
+    }
+
+    @Test
+    void pingResponseTimeoutClearsOwnActivePingSlot() {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder().build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+
+        assertThrows(
+                PingTimeoutException.class,
+                () -> telemetry.ping(new byte[]{1, 2, 3}, Duration.ofMillis(20))
+        );
+
+        assertFalse(telemetry.hasActivePingLocked(), "timed-out ping must release its active slot");
+        assertEquals(0L, telemetry.outstandingPingBytesLocked(), "timed-out ping must release retained ping bytes");
+        assertEquals(1, owner.telemetryNotifications, "ping slot waiters should be woken after timeout cleanup");
+    }
+
+    @Test
+    void pingResponseTimeoutRefreshesKeepaliveIdleSchedules() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofSeconds(10))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        setLongField(telemetry, "readIdlePingDueAtNanos", 1L);
+        setLongField(telemetry, "writeIdlePingDueAtNanos", 2L);
+
+        assertThrows(
+                PingTimeoutException.class,
+                () -> telemetry.ping(new byte[]{1, 2, 3}, Duration.ofMillis(20))
+        );
+
+        assertEquals(0L, telemetry.outstandingPingBytesLocked(), "timed-out ping must release retained ping bytes");
+        assertFalse(getLongField(telemetry, "readIdlePingDueAtNanos") <= 1L, "clearing an active ping should refresh the read-idle keepalive deadline");
+        assertFalse(getLongField(telemetry, "writeIdlePingDueAtNanos") <= 2L, "clearing an active ping should refresh the write-idle keepalive deadline");
+    }
+
+    @Test
+    void adaptiveRttTimeoutSaturatesBeforeApplyingConfiguredCap() {
+        long capped = SessionRuntime.adaptiveRttTimeout(
+                Long.MAX_VALUE / 2L + 1L,
+                Duration.ofMillis(500).toNanos(),
+                Duration.ofSeconds(5).toNanos(),
+                4,
+                Duration.ofMillis(50).toNanos()
+        );
+
+        assertEquals(Duration.ofSeconds(5).toNanos(), capped);
+    }
+
+    @Test
+    void adaptiveRttTimeoutRequiresPositiveBase() {
+        long capped = SessionRuntime.adaptiveRttTimeout(
+                Long.MAX_VALUE / 2L + 1L,
+                0L,
+                Duration.ofSeconds(5).toNanos(),
+                4,
+                Duration.ofMillis(50).toNanos()
+        );
+
+        assertEquals(0L, capped);
+    }
+
+    @Test
+    void adaptiveRttFloorSaturatesIndependentlyFromTimeoutBase() {
+        long floor = SessionRuntime.adaptiveRttFloor(
+                Long.MAX_VALUE / 2L + 1L,
+                4,
+                Duration.ofMillis(50).toNanos()
+        );
+
+        assertEquals(Long.MAX_VALUE, floor);
+    }
+
+    @Test
+    void defaultKeepaliveTimeoutSaturatesIntervalBeforeApplyingMaxCap() {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofNanos(Long.MAX_VALUE))
+                        .keepaliveTimeout(Duration.ZERO)
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+
+        assertEquals(Duration.ofSeconds(60).toNanos(), telemetry.effectiveKeepaliveTimeoutNanosLocked());
+    }
+
+    @Test
+    void keepaliveWakeUsesEarliestReadWriteOrMaxPingDeadline() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofSeconds(10))
+                        .keepaliveMaxPingInterval(Duration.ofSeconds(30))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long nowNanos = TimeUnit.SECONDS.toNanos(100L);
+
+        setLongField(telemetry, "readIdlePingDueAtNanos", nowNanos + 10L);
+        setLongField(telemetry, "writeIdlePingDueAtNanos", nowNanos + 1_000L);
+        setLongField(telemetry, "maxPingDueAtNanos", nowNanos + 10_000L);
+
+        assertEquals(
+                10L,
+                telemetry.nextKeepaliveWakeNanosLocked(nowNanos),
+                "keepalive scheduling should probe when either read or write side is idle, not wait for both"
+        );
+    }
+
+    @Test
+    void missingIdleSchedulesAreRecoveredFromLastActivityTimes() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofSeconds(10))
+                        .keepaliveMaxPingInterval(Duration.ofSeconds(30))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long lastInboundNanos = TimeUnit.SECONDS.toNanos(100L);
+        long lastWriteNanos = TimeUnit.SECONDS.toNanos(200L);
+        long nowNanos = TimeUnit.SECONDS.toNanos(500L);
+        setLongField(telemetry, "lastInboundFrameAtNanos", lastInboundNanos);
+        setLongField(telemetry, "lastTransportWriteAtNanos", lastWriteNanos);
+
+        telemetry.ensureKeepaliveSchedulesLocked(nowNanos);
+
+        assertTrue(
+                getLongField(telemetry, "readIdlePingDueAtNanos") < nowNanos,
+                "read-idle recovery should preserve the last inbound activity baseline"
+        );
+        assertTrue(
+                getLongField(telemetry, "writeIdlePingDueAtNanos") < nowNanos,
+                "write-idle recovery should preserve the last transport-write baseline"
+        );
+        assertTrue(
+                getLongField(telemetry, "maxPingDueAtNanos") > nowNanos,
+                "max-ping recovery should still start from the current scheduler time"
+        );
+    }
+
+    private static final class TestTelemetryOwner implements SessionTelemetryState.Owner {
+        private final Object lock = new Object();
+        private SessionTelemetryState telemetry;
+        private IOException enqueueError;
+        private int telemetryNotifications;
+        private int writerNotifications;
+
+        @Override
+        public Object lock() {
+            return this.lock;
+        }
+
+        @Override
+        public SessionState state() {
+            return SessionState.READY;
+        }
+
+        @Override
+        public boolean closeFrameQueued() {
+            return false;
+        }
+
+        @Override
+        public IOException sessionErrorLocked() {
+            return new IOException("session failed");
+        }
+
+        @Override
+        public byte[] buildPingPayloadLocked(byte[] payload) {
+            return payload == null ? new byte[0] : Arrays.copyOf(payload, payload.length);
+        }
+
+        @Override
+        public void enqueuePingLocked(byte[] payload) throws IOException {
+            if (this.enqueueError != null) {
+                throw this.enqueueError;
+            }
+        }
+
+        @Override
+        public void notifyTelemetryWaitersLocked() {
+            this.telemetryNotifications++;
+        }
+
+        @Override
+        public void notifyWriterWaitersLocked() {
+            this.writerNotifications++;
+        }
+
+        @Override
+        public void notifyStreamWriteWaitersLocked() {
+        }
+
+        @Override
+        public long trackedSessionMemoryLocked() {
+            return this.telemetry == null ? 0L : this.telemetry.outstandingPingBytesLocked();
+        }
+
+        @Override
+        public boolean sessionMemoryWakeNeededLocked(long previousTracked) {
+            return false;
+        }
+
+        @Override
+        public void waitOnLock() {
+            throw new AssertionError("ping queue failure should not wait for a ping slot");
+        }
+
+        @Override
+        public void waitOnLockNanos(long waitNanos) {
+            throw new AssertionError("ping queue failure should not wait for a ping slot");
+        }
+
+        @Override
+        public boolean allowLocalNonCloseControlLocked() {
+            return true;
+        }
+    }
+}

@@ -1,0 +1,40 @@
+package io.zmux.adapter.quic.netty;
+
+import io.netty.handler.codec.quic.QuicChannel;
+import io.zmux.ZmuxSession;
+
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public final class NettyQuic {
+    public static final Duration DEFAULT_ACCEPTED_PRELUDE_READ_TIMEOUT = Duration.ofSeconds(5);
+
+    private static final int BUILTIN_ACCEPTED_PRELUDE_MAX_CONCURRENT = 8;
+    private static final AtomicInteger DEFAULT_ACCEPTED_PRELUDE_MAX_CONCURRENT =
+            new AtomicInteger(BUILTIN_ACCEPTED_PRELUDE_MAX_CONCURRENT);
+
+    private NettyQuic() {
+    }
+
+    public static int defaultAcceptedPreludeMaxConcurrent() {
+        int current = DEFAULT_ACCEPTED_PRELUDE_MAX_CONCURRENT.get();
+        return current > 0 ? current : 1;
+    }
+
+    public static void setDefaultAcceptedPreludeMaxConcurrent(int maxConcurrent) {
+        DEFAULT_ACCEPTED_PRELUDE_MAX_CONCURRENT.set(
+                maxConcurrent > 0 ? maxConcurrent : BUILTIN_ACCEPTED_PRELUDE_MAX_CONCURRENT
+        );
+    }
+
+    public static ZmuxSession wrapSession(QuicChannel channel) {
+        return wrapSession(channel, NettyQuicSessionOptions.defaults());
+    }
+
+    public static ZmuxSession wrapSession(QuicChannel channel, NettyQuicSessionOptions options) {
+        if (channel == null) {
+            return NettyQuicSession.closedSession();
+        }
+        return new NettyQuicSession(channel, options == null ? NettyQuicSessionOptions.defaults() : options);
+    }
+}

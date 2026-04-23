@@ -1,0 +1,243 @@
+package io.zmux.internal;
+
+import io.zmux.*;
+
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+@SuppressWarnings("resource")
+final class SessionEstablishmentCoordinator {
+    private final Owner owner;
+    private final Duration failureWriteWait;
+    private final Duration successWriteWait;
+    private final Duration closeDrainDelay;
+
+    SessionEstablishmentCoordinator(Owner owner,
+                                    Duration failureWriteWait,
+                                    Duration successWriteWait,
+                                    Duration closeDrainDelay) {
+        this.owner = Objects.requireNonNull(owner, "owner");
+        this.failureWriteWait = failureWriteWait;
+        this.successWriteWait = successWriteWait;
+        this.closeDrainDelay = closeDrainDelay;
+    }
+
+    private static IOException transportFailure(String operation, String message, IOException error) {
+        if (ZmuxErrors.details(error) != null) {
+            return error;
+        }
+        return new ZmuxException(
+                ErrorCode.INTERNAL.code(),
+                operation,
+                message,
+                error,
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.TRANSPORT,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        );
+    }
+
+    private static Thread newDaemonThread(String name, Runnable task) {
+        Thread thread = new Thread(task, name);
+        thread.setDaemon(true);
+        return thread;
+    }
+
+    private static long closeCode(IOException error) {
+        return ZmuxErrors.code(error, ErrorCode.INTERNAL.code());
+    }
+
+    private static String closeReason(IOException error) {
+        return ZmuxErrors.reason(error);
+    }
+
+    private static boolean awaitLatch(CountDownLatch latch, Duration duration) throws InterruptedException {
+        if (latch == null) {
+            return true;
+        }
+        TimeoutBudget budget = TimeoutBudget.fromTimeout(duration);
+        if (!budget.bounded()) {
+            latch.await();
+            return true;
+        }
+        long timeoutNanos = budget.remainingNanos();
+        if (timeoutNanos <= 0L) {
+            return latch.getCount() == 0L;
+        }
+        return latch.await(timeoutNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private static void sleepDuration(Duration duration) throws InterruptedException {
+        long sleepNanos = SessionEstablishmentCoordinator.durationToPositiveNanosSaturated(duration);
+        if (sleepNanos <= 0L) {
+            return;
+        }
+        TimeUnit.NANOSECONDS.sleep(sleepNanos);
+    }
+
+    private static long durationToPositiveNanosSaturated(Duration duration) {
+        return SessionRuntime.durationToPositiveNanosSaturated(duration);
+    }
+
+    void establish() throws IOException {
+        CountDownLatch prefaceWriteDone = new CountDownLatch(1);
+        AtomicReference<IOException> prefaceWriteError = new AtomicReference<>();
+        Thread prefaceWriter = SessionEstablishmentCoordinator.newDaemonThread("zmux-preface-write", () -> {
+            try {
+                FrameCodec.writePreface(this.owner.output(), this.owner.localPreface());
+                this.owner.output().flush();
+            } catch (IOException error) {
+                prefaceWriteError.set(error);
+            } finally {
+                prefaceWriteDone.countDown();
+            }
+        });
+        prefaceWriter.start();
+
+        Preface remotePreface = null;
+        try {
+            remotePreface = this.readPeerPreface();
+            this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.successWriteWait, true);
+            Negotiated negotiated = FrameCodec.negotiate(this.owner.localPreface(), remotePreface);
+            synchronized (this.owner.lock()) {
+                this.owner.markReadyLocked(remotePreface, negotiated, System.nanoTime());
+                this.owner.notifyLockWaiters();
+            }
+        } catch (IOException error) {
+            this.finishEstablishmentFailure(prefaceWriteDone, prefaceWriteError, remotePreface, error);
+            throw error;
+        }
+
+        Thread readerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-reader", this.owner.readerLoopTask());
+        Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", this.owner.writerLoopTask());
+        writerThread.start();
+        readerThread.start();
+    }
+
+    private void finishEstablishmentFailure(CountDownLatch prefaceWriteDone,
+                                            AtomicReference<IOException> prefaceWriteError,
+                                            Preface remotePreface,
+                                            IOException error) {
+        boolean wroteClose = false;
+        try {
+            this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.failureWriteWait, false);
+            this.emitEstablishmentClose(remotePreface, error);
+            wroteClose = true;
+        } catch (IOException ignored) {
+        } finally {
+            if (wroteClose) {
+                this.drainEstablishmentClose();
+            }
+            this.owner.closeTransport();
+        }
+    }
+
+    private void awaitPrefaceWrite(CountDownLatch prefaceWriteDone,
+                                   AtomicReference<IOException> prefaceWriteError,
+                                   Duration duration,
+                                   boolean failOnStall) throws IOException {
+        boolean completed;
+        try {
+            completed = SessionEstablishmentCoordinator.awaitLatch(prefaceWriteDone, duration);
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            throw SessionRuntime.interruptedIo(
+                    "zmux: interrupted while waiting for preface write",
+                    "open",
+                    io.zmux.ZmuxErrorScope.SESSION,
+                    io.zmux.ZmuxErrorDirection.BOTH,
+                    interruptedException
+            );
+        }
+        if (!completed) {
+            if (!failOnStall) {
+                throw this.owner.sessionInternalError(
+                        "write preface",
+                        "local preface write did not finish before establishment failure close"
+                );
+            }
+            throw this.owner.sessionInternalError("write preface", "local preface write stalled during establishment");
+        }
+        IOException writeError = prefaceWriteError.get();
+        if (writeError != null) {
+            throw SessionEstablishmentCoordinator.transportFailure(
+                    "write preface",
+                    "zmux: transport preface write failed",
+                    writeError
+            );
+        }
+    }
+
+    private Preface readPeerPreface() throws IOException {
+        try {
+            return this.owner.input().readPreface();
+        } catch (IOException error) {
+            throw SessionEstablishmentCoordinator.transportFailure(
+                    "read preface",
+                    "zmux: transport preface read failed",
+                    error
+            );
+        }
+    }
+
+    private void emitEstablishmentClose(Preface peerPreface, IOException error) throws IOException {
+        long payloadLimit = peerPreface == null ? 0L : peerPreface.settings().maxControlPayloadBytes();
+        if (payloadLimit <= 0L) {
+            payloadLimit = this.owner.localPreface().settings().maxControlPayloadBytes();
+        }
+        if (payloadLimit <= 0L) {
+            payloadLimit = Settings.defaults().maxControlPayloadBytes();
+        }
+        FrameCodec.Frame frame = new FrameCodec.Frame(
+                io.zmux.FrameType.CLOSE,
+                0,
+                0L,
+                FrameCodec.buildErrorPayload(
+                        SessionEstablishmentCoordinator.closeCode(error),
+                        SessionEstablishmentCoordinator.closeReason(error),
+                        payloadLimit
+                )
+        );
+        Limits outboundLimits = peerPreface == null ? this.owner.localPreface().settings().limits() : peerPreface.settings().limits();
+        FrameCodec.writeFrame(this.owner.output(), frame, outboundLimits);
+        this.owner.output().flush();
+    }
+
+    private void drainEstablishmentClose() {
+        try {
+            SessionEstablishmentCoordinator.sleepDuration(this.closeDrainDelay);
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    interface Owner {
+        FrameCodec.Decoder input();
+
+        BufferedOutputStream output();
+
+        Preface localPreface();
+
+        Object lock();
+
+        void markReadyLocked(Preface remotePreface, Negotiated negotiated, long readyAtNanos);
+
+        void notifyLockWaiters();
+
+        Runnable readerLoopTask();
+
+        Runnable writerLoopTask();
+
+        IOException sessionInternalError(String operation, String message);
+
+        IOException sessionInternalError(String operation, String message, Throwable cause);
+
+        void closeTransport();
+    }
+}

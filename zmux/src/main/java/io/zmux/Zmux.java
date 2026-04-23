@@ -1,0 +1,282 @@
+package io.zmux;
+
+import io.zmux.internal.SessionRuntime;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.nio.channels.ByteChannel;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.WritableByteChannel;
+
+public final class Zmux {
+    private Zmux() {
+    }
+
+    public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
+        return open(connection, null);
+    }
+
+    public static ZmuxNativeSession open(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return SessionRuntime.open(connection, effectiveConfig(config));
+    }
+
+    public static ZmuxNativeSession open(Socket socket) throws IOException {
+        return open(socket, null);
+    }
+
+    public static ZmuxNativeSession open(Socket socket, ZmuxConfig config) throws IOException {
+        return open(ZmuxConnections.of(socket), config);
+    }
+
+    public static ZmuxNativeSession open(InputStream input, OutputStream output) throws IOException {
+        return open(input, output, null);
+    }
+
+    public static ZmuxNativeSession open(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
+        return open(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxNativeSession open(ByteChannel channel) throws IOException {
+        return open(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxNativeSession open(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return open(ZmuxConnections.of(channel), config);
+    }
+
+    public static ZmuxNativeSession open(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return open(input, output, null);
+    }
+
+    public static ZmuxNativeSession open(ReadableByteChannel input,
+                                         WritableByteChannel output,
+                                         ZmuxConfig config) throws IOException {
+        return open(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxSession openSession(DuplexConnection connection) throws IOException {
+        return openSession(connection, null);
+    }
+
+    public static ZmuxSession openSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return open(connection, config);
+    }
+
+    public static ZmuxSession openSession(Socket socket) throws IOException {
+        return openSession(socket, null);
+    }
+
+    public static ZmuxSession openSession(Socket socket, ZmuxConfig config) throws IOException {
+        return open(socket, config);
+    }
+
+    public static ZmuxSession openSession(InputStream input, OutputStream output) throws IOException {
+        return openSession(input, output, null);
+    }
+
+    public static ZmuxSession openSession(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
+        return open(input, output, config);
+    }
+
+    public static ZmuxSession openSession(ByteChannel channel) throws IOException {
+        return openSession(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxSession openSession(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return open(channel, config);
+    }
+
+    public static ZmuxSession openSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return openSession(input, output, null);
+    }
+
+    public static ZmuxSession openSession(ReadableByteChannel input,
+                                          WritableByteChannel output,
+                                          ZmuxConfig config) throws IOException {
+        return open(input, output, config);
+    }
+
+    public static ZmuxNativeSession client(DuplexConnection connection) throws IOException {
+        return client(connection, null);
+    }
+
+    public static ZmuxNativeSession client(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return openWithRole(connection, config, Role.INITIATOR);
+    }
+
+    public static ZmuxNativeSession client(Socket socket) throws IOException {
+        return client(socket, null);
+    }
+
+    public static ZmuxNativeSession client(Socket socket, ZmuxConfig config) throws IOException {
+        return client(ZmuxConnections.of(socket), config);
+    }
+
+    public static ZmuxNativeSession client(InputStream input, OutputStream output) throws IOException {
+        return client(input, output, null);
+    }
+
+    public static ZmuxNativeSession client(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
+        return client(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxNativeSession client(ByteChannel channel) throws IOException {
+        return client(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxNativeSession client(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return client(ZmuxConnections.of(channel), config);
+    }
+
+    public static ZmuxNativeSession client(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return client(input, output, null);
+    }
+
+    public static ZmuxNativeSession client(ReadableByteChannel input,
+                                           WritableByteChannel output,
+                                           ZmuxConfig config) throws IOException {
+        return client(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxSession clientSession(DuplexConnection connection) throws IOException {
+        return clientSession(connection, null);
+    }
+
+    public static ZmuxSession clientSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return client(connection, config);
+    }
+
+    public static ZmuxSession clientSession(Socket socket) throws IOException {
+        return clientSession(socket, null);
+    }
+
+    public static ZmuxSession clientSession(Socket socket, ZmuxConfig config) throws IOException {
+        return client(socket, config);
+    }
+
+    public static ZmuxSession clientSession(InputStream input, OutputStream output) throws IOException {
+        return clientSession(input, output, null);
+    }
+
+    public static ZmuxSession clientSession(InputStream input,
+                                            OutputStream output,
+                                            ZmuxConfig config) throws IOException {
+        return client(input, output, config);
+    }
+
+    public static ZmuxSession clientSession(ByteChannel channel) throws IOException {
+        return clientSession(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxSession clientSession(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return client(channel, config);
+    }
+
+    public static ZmuxSession clientSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return clientSession(input, output, null);
+    }
+
+    public static ZmuxSession clientSession(ReadableByteChannel input,
+                                            WritableByteChannel output,
+                                            ZmuxConfig config) throws IOException {
+        return client(input, output, config);
+    }
+
+    public static ZmuxNativeSession server(DuplexConnection connection) throws IOException {
+        return server(connection, null);
+    }
+
+    public static ZmuxNativeSession server(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return openWithRole(connection, config, Role.RESPONDER);
+    }
+
+    public static ZmuxNativeSession server(Socket socket) throws IOException {
+        return server(socket, null);
+    }
+
+    public static ZmuxNativeSession server(Socket socket, ZmuxConfig config) throws IOException {
+        return server(ZmuxConnections.of(socket), config);
+    }
+
+    public static ZmuxNativeSession server(InputStream input, OutputStream output) throws IOException {
+        return server(input, output, null);
+    }
+
+    public static ZmuxNativeSession server(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
+        return server(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxNativeSession server(ByteChannel channel) throws IOException {
+        return server(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxNativeSession server(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return server(ZmuxConnections.of(channel), config);
+    }
+
+    public static ZmuxNativeSession server(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return server(input, output, null);
+    }
+
+    public static ZmuxNativeSession server(ReadableByteChannel input,
+                                           WritableByteChannel output,
+                                           ZmuxConfig config) throws IOException {
+        return server(ZmuxConnections.of(input, output), config);
+    }
+
+    public static ZmuxSession serverSession(DuplexConnection connection) throws IOException {
+        return serverSession(connection, null);
+    }
+
+    public static ZmuxSession serverSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
+        return server(connection, config);
+    }
+
+    public static ZmuxSession serverSession(Socket socket) throws IOException {
+        return serverSession(socket, null);
+    }
+
+    public static ZmuxSession serverSession(Socket socket, ZmuxConfig config) throws IOException {
+        return server(socket, config);
+    }
+
+    public static ZmuxSession serverSession(InputStream input, OutputStream output) throws IOException {
+        return serverSession(input, output, null);
+    }
+
+    public static ZmuxSession serverSession(InputStream input,
+                                            OutputStream output,
+                                            ZmuxConfig config) throws IOException {
+        return server(input, output, config);
+    }
+
+    public static ZmuxSession serverSession(ByteChannel channel) throws IOException {
+        return serverSession(channel, (ZmuxConfig) null);
+    }
+
+    public static ZmuxSession serverSession(ByteChannel channel, ZmuxConfig config) throws IOException {
+        return server(channel, config);
+    }
+
+    public static ZmuxSession serverSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
+        return serverSession(input, output, null);
+    }
+
+    public static ZmuxSession serverSession(ReadableByteChannel input,
+                                            WritableByteChannel output,
+                                            ZmuxConfig config) throws IOException {
+        return server(input, output, config);
+    }
+
+    private static ZmuxConfig effectiveConfig(ZmuxConfig config) {
+        return config == null ? ZmuxConfig.defaults() : config;
+    }
+
+    private static ZmuxNativeSession openWithRole(DuplexConnection connection,
+                                                  ZmuxConfig config,
+                                                  Role role) throws IOException {
+        return open(connection, effectiveConfig(config).withRole(role));
+    }
+}

@@ -1,0 +1,149 @@
+package io.zmux.internal;
+
+import io.zmux.*;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.GatheringByteChannel;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+final class FrameCodecErrorWrappingTest {
+    @Test
+    void readFrameWrapsInvalidFrameTypeAsProtocolError() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Varint62.write(output, 2L);
+        output.write(0);
+        Varint62.write(output, 0L);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()), Settings.defaults().limits())
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "invalid frame types must surface as PROTOCOL errors");
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void readFrameWrapsTruncatedFramePayloadAsProtocolError() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Varint62.write(output, 3L);
+        output.write(FrameType.PING.code());
+        Varint62.write(output, 0L);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()), Settings.defaults().limits())
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated frames must surface as PROTOCOL errors");
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void readFrameRejectsOversizedFrameLengthBeforeBodyRead() throws Exception {
+        Limits tinyLimits = new Limits(8L, 8L, 8L);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Varint62.write(output, 18L);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()), tinyLimits)
+        );
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "oversized frame length should fail before reading a partial body");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void readPrefaceWrapsInvalidRoleAsProtocolError() throws Exception {
+        byte[] preface = new byte[]{
+                'Z', 'M', 'U', 'X',
+                Protocol.PREFACE_VERSION,
+                (byte) 99
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readPreface(new ByteArrayInputStream(preface))
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "invalid roles must surface as PROTOCOL errors");
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void readPrefaceWrapsTruncationAsProtocolError() {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readPreface(new ByteArrayInputStream(new byte[]{'Z', 'M', 'U'}))
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated prefaces must surface as PROTOCOL errors");
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void buildPriorityUpdateWrapsLocalCapabilityFailureAsStructuredError() {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.buildPriorityUpdatePayload(Protocol.CAPABILITY_PRIORITY_UPDATE, 7L, null, Settings.defaults().maxExtensionPayloadBytes())
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.LOCAL, error.source());
+        assertEquals(ZmuxErrorDirection.WRITE, error.direction());
+    }
+
+    @Test
+    void gatheredFrameWriteStallSurfacesStructuredInternalError() {
+        GatheringByteChannel stalled = new GatheringByteChannel() {
+            @Override
+            public int write(ByteBuffer src) {
+                return 0;
+            }
+
+            @Override
+            public long write(ByteBuffer[] srcs, int offset, int length) {
+                return 0L;
+            }
+
+            @Override
+            public long write(ByteBuffer[] srcs) {
+                return 0L;
+            }
+
+            @Override
+            public boolean isOpen() {
+                return true;
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.writeFrame(
+                        stalled,
+                        new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[8]),
+                        Settings.defaults().limits()
+                )
+        );
+
+        assertEquals(ErrorCode.INTERNAL.code(), error.code());
+        assertEquals(ZmuxErrorScope.SESSION, error.scope());
+        assertEquals(ZmuxErrorSource.LOCAL, error.source());
+        assertEquals(ZmuxErrorDirection.WRITE, error.direction());
+    }
+}

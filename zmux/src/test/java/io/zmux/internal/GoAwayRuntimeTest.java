@@ -1,0 +1,189 @@
+package io.zmux.internal;
+
+import io.zmux.*;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.util.Deque;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+final class GoAwayRuntimeTest {
+    private static SessionRuntime newRuntimeWithNoOpThreshold(int threshold) throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .noOpControlFloodThreshold(threshold)
+                .build();
+        return SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+    }
+
+    private static long maxLocalGoAwayWatermark(boolean bidirectional) {
+        long first = SessionRuntime.firstLocalStreamId(Role.RESPONDER, bidirectional);
+        return first + (Protocol.MAX_VARINT62 - first) / 4L * 4L;
+    }
+
+    private static long peerGoAwayWatermark(boolean bidirectional, int offset) {
+        return SessionRuntime.firstPeerStreamId(Role.RESPONDER, bidirectional) + (long) offset * 4L;
+    }
+
+    private static void handleGoAway(SessionRuntime runtime, long lastAcceptedBidi, long lastAcceptedUni)
+            throws Exception {
+        FrameCodec.Frame frame = new FrameCodec.Frame(
+                FrameType.GOAWAY,
+                0,
+                0L,
+                FrameCodec.buildGoAwayPayload(
+                        lastAcceptedBidi,
+                        lastAcceptedUni,
+                        ErrorCode.NO_ERROR.code(),
+                        "",
+                        Settings.defaults().maxControlPayloadBytes()
+                )
+        );
+        try {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "handleGoAwayFrame",
+                    new Class<?>[]{FrameCodec.Frame.class},
+                    frame
+            );
+        } catch (InvocationTargetException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            throw exception;
+        }
+    }
+
+    @Test
+    void duplicatePeerGoAwayCountsAsNoOpControl() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long maxBidi = maxLocalGoAwayWatermark(true);
+        long maxUni = maxLocalGoAwayWatermark(false);
+
+        handleGoAway(runtime, maxBidi, maxUni);
+        assertEquals(SessionState.DRAINING, runtime.state(), "first restrictive GOAWAY should move READY to DRAINING");
+
+        handleGoAway(runtime, maxBidi, maxUni);
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> handleGoAway(runtime, maxBidi, maxUni),
+                "repeated unchanged GOAWAY should consume the mixed no-op control budget"
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "duplicate GOAWAY flood should be a protocol error");
+    }
+
+    @Test
+    void peerGoAwayChangeClearsMixedNoOpControlBudget() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long maxBidi = maxLocalGoAwayWatermark(true);
+        long maxUni = maxLocalGoAwayWatermark(false);
+        long lowerBidi = maxBidi - 4L;
+
+        handleGoAway(runtime, maxBidi, maxUni);
+        handleGoAway(runtime, maxBidi, maxUni);
+        handleGoAway(runtime, lowerBidi, maxUni);
+
+        handleGoAway(runtime, lowerBidi, maxUni);
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> handleGoAway(runtime, lowerBidi, maxUni),
+                "a changed GOAWAY should clear the prior no-op budget, not permanently poison later no-op accounting"
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "post-change duplicate GOAWAY flood should still be enforced");
+    }
+
+    @Test
+    void invalidLocalGoAwayCodeDoesNotCommitDrainStateOrWatermarks() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long initialBidi = runtime.localGoAwayBidiInternal();
+        long initialUni = runtime.localGoAwayUniInternal();
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> runtime.goAway(0L, 0L, -1L, "invalid"),
+                "invalid GOAWAY code should fail before committing local GOAWAY state"
+        );
+
+        assertTrue(error.getMessage().contains("varint62 value out of range"), "invalid GOAWAY code should fail through the varint encoder");
+        assertEquals(SessionState.READY, runtime.state(), "invalid GOAWAY payload must not move the session to DRAINING");
+        assertEquals(initialBidi, runtime.localGoAwayBidiInternal(), "invalid GOAWAY payload must not commit the bidi watermark");
+        assertEquals(initialUni, runtime.localGoAwayUniInternal(), "invalid GOAWAY payload must not commit the uni watermark");
+        assertEquals(0, SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size(), "invalid GOAWAY payload must not enqueue a control frame");
+    }
+
+    @Test
+    void duplicateLocalGoAwayDoesNotQueueDuplicateControlFrames() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+
+        runtime.goAway(0L, 0L, ErrorCode.NO_ERROR.code(), "first");
+        runtime.goAway(0L, 0L, ErrorCode.INTERNAL.code(), "second");
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        assertEquals(1, urgentQueue.size(), "duplicate local GOAWAY should not grow the urgent queue");
+        FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(
+                SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).payload()
+        );
+        assertEquals("first", payload.reason(), "duplicate local GOAWAY should keep the already queued payload");
+    }
+
+    @Test
+    void stricterLocalGoAwayReplacesQueuedOlderGoAway() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long highBidi = peerGoAwayWatermark(true, 2);
+        long highUni = peerGoAwayWatermark(false, 2);
+        long lowerBidi = highBidi - 4L;
+
+        runtime.goAway(highBidi, highUni, ErrorCode.NO_ERROR.code(), "old");
+        runtime.goAway(lowerBidi, highUni, ErrorCode.INTERNAL.code(), "new");
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        assertEquals(1, urgentQueue.size(), "stricter local GOAWAY should replace an unsent older GOAWAY");
+        FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(
+                SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).payload()
+        );
+        assertEquals(lowerBidi, payload.lastAcceptedBidi(), "queued GOAWAY should carry the stricter bidi watermark");
+        assertEquals(highUni, payload.lastAcceptedUni(), "queued GOAWAY should preserve the unchanged uni watermark");
+        assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "queued GOAWAY should carry the replacement code");
+        assertEquals("new", payload.reason(), "queued GOAWAY should carry the replacement reason");
+    }
+
+    @Test
+    void weakerLocalGoAwayCoveredByExistingStrictWatermarkIsNoOp() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long highBidi = peerGoAwayWatermark(true, 3);
+        long highUni = peerGoAwayWatermark(false, 3);
+        long lowerBidi = highBidi - 4L;
+        long lowerUni = highUni - 4L;
+
+        runtime.goAway(lowerBidi, lowerUni, ErrorCode.NO_ERROR.code(), "strict");
+        runtime.goAway(highBidi, highUni, ErrorCode.INTERNAL.code(), "covered");
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        assertEquals(1, urgentQueue.size(), "covered weaker GOAWAY should not enqueue a second control frame");
+        FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(
+                SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).payload()
+        );
+        assertEquals(lowerBidi, payload.lastAcceptedBidi(), "covered weaker GOAWAY must keep the stricter bidi watermark");
+        assertEquals(lowerUni, payload.lastAcceptedUni(), "covered weaker GOAWAY must keep the stricter uni watermark");
+        assertEquals(ErrorCode.NO_ERROR.code(), payload.code(), "covered weaker GOAWAY must keep the original payload");
+        assertEquals("strict", payload.reason(), "covered weaker GOAWAY must keep the original reason");
+    }
+
+    @Test
+    void goAwayDrainIntervalAdaptsToRecentRtt() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        SessionRuntimeTestSupport.setLongField(runtime, "lastPingRttNanos", TimeUnit.MILLISECONDS.toNanos(800L));
+
+        synchronized (runtime.lock()) {
+            assertEquals(
+                    TimeUnit.MILLISECONDS.toNanos(200L),
+                    runtime.goAwayDrainIntervalNanosLocked(),
+                    "GOAWAY drain interval should follow Go's max(10ms, RTT/4) adaptive rule"
+            );
+        }
+    }
+}

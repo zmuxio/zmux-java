@@ -1,0 +1,193 @@
+package io.zmux;
+
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+final class ZmuxConfigTest {
+    private static ZmuxConfig sampleConfig() {
+        Settings settings = Settings.defaults().toBuilder()
+                .initialMaxData(777_777L)
+                .maxIncomingStreamsBidi(17L)
+                .maxIncomingStreamsUni(19L)
+                .maxFramePayload(32_768L)
+                .idleTimeoutMillis(9_000L)
+                .keepaliveHintMillis(1_500L)
+                .maxControlPayloadBytes(8_192L)
+                .maxExtensionPayloadBytes(8_192L)
+                .schedulerHints(SchedulerHint.LATENCY)
+                .build();
+        ZmuxEventHandler handler = event -> {
+        };
+        return ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .tieBreakerNonce(123_456_789L)
+                .minProto(1L)
+                .maxProto(2L)
+                .capabilities(0x55AAL)
+                .settings(settings)
+                .keepaliveInterval(Duration.ofSeconds(3))
+                .keepaliveMaxPingInterval(Duration.ofSeconds(11))
+                .keepaliveTimeout(Duration.ofSeconds(5))
+                .sessionMemoryCap(9_999L)
+                .perStreamQueuedDataHwm(1_111L)
+                .sessionQueuedDataHwm(2_222L)
+                .urgentQueuedBytesCap(3_333L)
+                .pendingControlBytesBudget(4_444L)
+                .pendingPriorityBytesBudget(5_555L)
+                .abuseWindow(Duration.ofSeconds(7))
+                .gracefulCloseDrainTimeout(Duration.ofMillis(333))
+                .stopSendingGracefulDrainWindow(Duration.ofMillis(444))
+                .stopSendingGracefulTailCap(6_666L)
+                .hiddenAbortChurnWindow(Duration.ofMillis(555))
+                .hiddenAbortChurnThreshold(13)
+                .visibleTerminalChurnWindow(Duration.ofMillis(666))
+                .visibleTerminalChurnThreshold(17)
+                .inboundControlFrameBudget(23)
+                .inboundControlBytesBudget(7_777L)
+                .inboundExtFrameBudget(29)
+                .inboundExtBytesBudget(8_888L)
+                .inboundMixedFrameBudget(31)
+                .inboundMixedBytesBudget(9_999L)
+                .noOpControlFloodThreshold(37)
+                .noOpMaxDataFloodThreshold(41)
+                .noOpBlockedFloodThreshold(43)
+                .noOpZeroDataFloodThreshold(47)
+                .noOpPriorityUpdateFloodThreshold(53)
+                .groupRebucketChurnThreshold(59)
+                .inboundPingFloodThreshold(61)
+                .acceptBacklogLimit(67)
+                .acceptBacklogBytesLimit(10_101L)
+                .tombstoneLimit(71)
+                .markerOnlyUsedStreamLimit(73)
+                .retainedOpenInfoBytesBudget(11_111L)
+                .retainedPeerReasonBytesBudget(12_121L)
+                .aggregateLateDataCap(13_131L)
+                .eventHandler(handler)
+                .build();
+    }
+
+    private static void assertConfigComponentsEqual(
+            ZmuxConfig expected,
+            ZmuxConfig actual,
+            String ignoredComponentA,
+            String ignoredComponentB
+    ) {
+        ZmuxConfig.Builder normalized = expected.toBuilder();
+        if ("role".equals(ignoredComponentA) || "role".equals(ignoredComponentB)) {
+            normalized.role(actual.role());
+        }
+        if ("tieBreakerNonce".equals(ignoredComponentA) || "tieBreakerNonce".equals(ignoredComponentB)) {
+            normalized.tieBreakerNonce(actual.tieBreakerNonce());
+        }
+        assertEquals(normalized.build(), actual);
+    }
+
+    @Test
+    void defaultsEnableRepositoryKeepaliveTemplate() {
+        ZmuxConfig defaults = ZmuxConfig.defaults();
+
+        assertEquals(Duration.ofMinutes(1), defaults.keepaliveInterval());
+        assertEquals(Duration.ofMinutes(5), defaults.keepaliveMaxPingInterval());
+        assertEquals(Duration.ZERO, defaults.gracefulCloseDrainTimeout());
+    }
+
+    @Test
+    void toBuilderRoundTripsAllComponents() {
+        ZmuxConfig config = sampleConfig();
+
+        assertConfigComponentsEqual(config, config.toBuilder().build(), null, null);
+    }
+
+    @Test
+    void withExplicitRoleClearsNonceAndPreservesOtherComponents() {
+        ZmuxConfig original = sampleConfig();
+        ZmuxConfig adjusted = original.withRole(Role.INITIATOR);
+
+        assertEquals(Role.INITIATOR, adjusted.role());
+        assertEquals(0L, adjusted.tieBreakerNonce());
+        assertConfigComponentsEqual(original, adjusted, "role", "tieBreakerNonce");
+    }
+
+    @Test
+    void withAutoRolePreservesNonceAndOtherComponents() {
+        ZmuxConfig original = sampleConfig();
+        ZmuxConfig adjusted = original.withRole(Role.AUTO);
+
+        assertEquals(Role.AUTO, adjusted.role());
+        assertEquals(original.tieBreakerNonce(), adjusted.tieBreakerNonce());
+        assertConfigComponentsEqual(original, adjusted, "role", null);
+    }
+
+    @Test
+    void builderRejectsNegativeBudgetsAndDurations() {
+        IllegalArgumentException negativeBudget = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().sessionMemoryCap(-1L).build()
+        );
+        assertEquals("zmux config sessionMemoryCap must be >= 0", negativeBudget.getMessage());
+
+        IllegalArgumentException negativeDuration = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().keepaliveInterval(Duration.ofMillis(-1)).build()
+        );
+        assertEquals("zmux config keepaliveInterval must be >= 0", negativeDuration.getMessage());
+    }
+
+    @Test
+    void builderRejectsInvalidProtocolRangeAndVarint62Fields() {
+        ZmuxConfig zeroProtocolBounds = ZmuxConfig.builder()
+                .minProto(0L)
+                .maxProto(0L)
+                .build();
+        assertEquals(Protocol.PROTO_VERSION, zeroProtocolBounds.minProto());
+        assertEquals(Protocol.PROTO_VERSION, zeroProtocolBounds.maxProto());
+
+        IllegalArgumentException negativeMinProto = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().minProto(-1L).build()
+        );
+        assertEquals("zmux config minProto must be > 0", negativeMinProto.getMessage());
+
+        IllegalArgumentException invertedRange = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().minProto(2L).maxProto(1L).build()
+        );
+        assertEquals("zmux config minProto must be <= maxProto", invertedRange.getMessage());
+
+        IllegalArgumentException invalidNonce = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().tieBreakerNonce(Protocol.MAX_VARINT62 + 1L).build()
+        );
+        assertEquals("zmux config tieBreakerNonce must be within varint62 range", invalidNonce.getMessage());
+
+        IllegalArgumentException invalidMaxProto = assertThrows(
+                IllegalArgumentException.class,
+                () -> ZmuxConfig.builder().maxProto(Protocol.MAX_VARINT62 + 1L).build()
+        );
+        assertEquals("zmux config maxProto must be within varint62 range", invalidMaxProto.getMessage());
+    }
+
+    @Test
+    void configSettingsNormalizeZeroPayloadLimitsToDefaults() {
+        Settings settings = Settings.defaults().toBuilder()
+                .initialMaxData(123L)
+                .maxFramePayload(0L)
+                .maxControlPayloadBytes(0L)
+                .maxExtensionPayloadBytes(0L)
+                .build();
+
+        ZmuxConfig config = ZmuxConfig.builder()
+                .settings(settings)
+                .build();
+
+        assertEquals(123L, config.settings().initialMaxData());
+        assertEquals(Settings.defaults().maxFramePayload(), config.settings().maxFramePayload());
+        assertEquals(Settings.defaults().maxControlPayloadBytes(), config.settings().maxControlPayloadBytes());
+        assertEquals(Settings.defaults().maxExtensionPayloadBytes(), config.settings().maxExtensionPayloadBytes());
+        assertEquals(config.settings(), config.localPreface().settings());
+    }
+}

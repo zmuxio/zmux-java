@@ -1,0 +1,205 @@
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.github.zmuxio</groupId>
+    <artifactId>zmux-parent</artifactId>
+    <version>0.1.0</version>
+    <packaging>pom</packaging>
+
+    <name>zmux parent</name>
+    <description>Parent build for the ZMux Java modules.</description>
+    <url>https://github.com/zmuxio/zmux-java</url>
+
+    <organization>
+        <name>zmuxio</name>
+        <url>https://github.com/zmuxio</url>
+    </organization>
+
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>zmuxio</id>
+            <name>ZMux maintainers</name>
+            <organization>zmuxio</organization>
+            <organizationUrl>https://github.com/zmuxio</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/zmuxio/zmux-java.git</connection>
+        <developerConnection>scm:git:https://github.com/zmuxio/zmux-java.git</developerConnection>
+        <url>https://github.com/zmuxio/zmux-java</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/zmuxio/zmux-java/issues</url>
+    </issueManagement>
+
+    <modules>
+        <module>zmux</module>
+        <module>zmux-netty-quic</module>
+    </modules>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.compiler.source>${java.specification.version}</maven.compiler.source>
+        <maven.compiler.target>${java.specification.version}</maven.compiler.target>
+        <maven.compiler.testSource>${java.specification.version}</maven.compiler.testSource>
+        <maven.compiler.testTarget>${java.specification.version}</maven.compiler.testTarget>
+        <zmux.compat.java.release>8</zmux.compat.java.release>
+        <junit.version>5.10.2</junit.version>
+        <maven.surefire.version>3.2.5</maven.surefire.version>
+        <maven.source.version>3.4.0</maven.source.version>
+        <maven.javadoc.version>3.12.0</maven.javadoc.version>
+        <maven.gpg.version>3.2.8</maven.gpg.version>
+        <central.publishing.maven.plugin.version>0.10.0</central.publishing.maven.plugin.version>
+        <jmh.version>1.37</jmh.version>
+        <bouncycastle.version>1.84</bouncycastle.version>
+        <surefire.forkCount>1</surefire.forkCount>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.2.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.15.0</version>
+                <configuration>
+                    <!--
+                      Keep the compiler plugin's source-change tracker enabled.
+                      In maven-compiler-plugin 3.x, disabling it means "compile
+                      only sources newer than their class files", which can
+                      leave target/classes as a partial snapshot after single
+                      source edits. The enabled mode recompiles the module when
+                      sources were added, removed, or changed, which is the
+                      stable behavior this reactor needs on Windows.
+                     -->
+                    <useIncrementalCompilation>true</useIncrementalCompilation>
+                    <fork>false</fork>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven.surefire.version}</version>
+                <configuration>
+                    <!--
+                      Keep forked test isolation, but run tests from the fork
+                      process system classloader. The runtime starts reader /
+                      writer worker threads that lazily resolve nested helper
+                      classes; Surefire's isolated loader is not stable enough
+                      for that on this Windows/JDK/Maven combination. Keep the
+                      manifest-only jar disabled so the fork still receives an
+                      explicit classpath.
+                     -->
+                    <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+                    <forkCount>${surefire.forkCount}</forkCount>
+                    <reuseForks>true</reuseForks>
+                    <useSystemClassLoader>true</useSystemClassLoader>
+                    <useManifestOnlyJar>false</useManifestOnlyJar>
+                    <useModulePath>false</useModulePath>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>benchmarks</id>
+            <modules>
+                <module>zmux-benchmarks</module>
+            </modules>
+        </profile>
+        <profile>
+            <id>java8-compat</id>
+            <properties>
+                <maven.compiler.release>${zmux.compat.java.release}</maven.compiler.release>
+                <maven.compiler.testRelease>${zmux.compat.java.release}</maven.compiler.testRelease>
+            </properties>
+        </profile>
+        <profile>
+            <id>release</id>
+            <properties>
+                <maven.compiler.release>${zmux.compat.java.release}</maven.compiler.release>
+                <maven.compiler.testRelease>${zmux.compat.java.release}</maven.compiler.testRelease>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>${maven.source.version}</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>${maven.javadoc.version}</version>
+                        <configuration>
+                            <quiet>true</quiet>
+                            <failOnError>true</failOnError>
+                            <doclint>none</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>${maven.gpg.version}</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>${central.publishing.maven.plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <deploymentName>zmux-java ${project.version}</deploymentName>
+                            <autoPublish>false</autoPublish>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

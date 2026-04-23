@@ -1,0 +1,16 @@
+version: "1.0"
+
+profile:
+  base:
+    name: qodana.recommended
+  inspections:
+    # The public source stays Java 8-compatible. These migration inspections
+    # recommend Java 9+ / 14+ / 16+ syntax and are intentionally not applicable.
+    - inspection: Java9CollectionFactory
+      enabled: false
+    - inspection: EnhancedSwitchMigration
+      enabled: false
+    - inspection: PatternVariableCanBeUsed
+      enabled: false
+    - inspection: ClassCanBeRecord
+      enabled: false
