@@ -203,11 +203,12 @@ Core session and stream APIs:
 - `ZmuxStream`: bidirectional stream interface combining send and receive
   operations.
 - `ZmuxSendStream`: write side interface for `byte[]`, `ByteBuffer`,
-  `OutputStream` adaptation, `writeFinal`, `writevFinal`, metadata updates,
-  write deadlines, graceful write close, and write cancellation.
-- `ZmuxRecvStream`: read side interface for `byte[]`, `ByteBuffer`,
-  `InputStream` adaptation, read deadlines, local read close, and read
+  UTF-8 strings, `OutputStream` adaptation, `writeFinal`, `writevFinal`,
+  metadata updates, write deadlines, graceful write close, and write
   cancellation.
+- `ZmuxRecvStream`: read side interface for `byte[]`, `ByteBuffer`,
+  `readAllBytes`, UTF-8 strings, `InputStream` adaptation, read deadlines,
+  local read close, and read cancellation.
 - `ZmuxStreamInfo`: common stream metadata such as stream id, open info,
   priority/group metadata, and local/remote addresses.
 
@@ -229,8 +230,10 @@ Configuration and metadata APIs:
   budgets, abuse protection, and event handlers.
 - `Settings` and `Limits`: negotiated protocol limits, frame payload limits,
   stream limits, data windows, and control/extension payload budgets.
-- `OpenOptions`: initial stream priority, group, and open metadata.
-- `MetadataUpdate`: runtime priority/group updates.
+- `OpenOptions`: initial stream priority, group, and open metadata, with
+  constructor, factory, and builder APIs.
+- `MetadataUpdate`: runtime priority/group updates, with constructor, factory,
+  and builder APIs.
 - `StreamMetadata`: accepted stream metadata snapshot.
 - `SchedulerHint`: unspecified/balanced, latency, balanced fair, bulk
   throughput, and group-fair scheduling hints.
@@ -272,8 +275,8 @@ Netty QUIC adapter APIs:
 - Client, server, and auto-role native session establishment.
 - Socket, stream, NIO channel, custom duplex connection, and Netty QUIC
   transports.
-- Per-stream read/write APIs with `byte[]`, `ByteBuffer`, `InputStream`, and
-  `OutputStream` adapters.
+- Per-stream read/write APIs with `byte[]`, `ByteBuffer`, `readAllBytes`,
+  UTF-8 convenience helpers, `InputStream`, and `OutputStream` adapters.
 - Final writes through `writeFinal` and multipart final writes through
   `writevFinal`.
 - Open metadata, stream priority hints, stream groups, and runtime priority
@@ -314,13 +317,12 @@ import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 
 try (Socket socket = new Socket("127.0.0.1", 9000);
      ZmuxSession session = Zmux.clientSession(socket);
      ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-    byte[] reply = readAll(stream);
+    stream.writeFinalUtf8("hello");
+    String reply = stream.readUtf8();
 }
 ```
 
@@ -333,37 +335,13 @@ import io.zmux.ZmuxStream;
 
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 
 try (ServerSocket listener = new ServerSocket(9000);
      Socket socket = listener.accept();
      ZmuxSession session = Zmux.serverSession(socket);
      ZmuxStream stream = session.acceptStream()) {
-    byte[] request = readAll(stream);
-    byte[] reply = ("echo:" + new String(request, StandardCharsets.UTF_8))
-            .getBytes(StandardCharsets.UTF_8);
-    stream.writeFinal(reply);
-}
-```
-
-Helper used by the examples:
-
-```java
-import io.zmux.ZmuxRecvStream;
-
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-
-static byte[] readAll(ZmuxRecvStream stream) throws IOException {
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-    byte[] buffer = new byte[8192];
-    int n;
-    while ((n = stream.read(buffer)) >= 0) {
-        if (n > 0) {
-            out.write(buffer, 0, n);
-        }
-    }
-    return out.toByteArray();
+    String request = stream.readUtf8();
+    stream.writeFinalUtf8("echo:" + request);
 }
 ```
 
@@ -373,14 +351,12 @@ static byte[] readAll(ZmuxRecvStream stream) throws IOException {
 import io.zmux.ZmuxRecvStream;
 import io.zmux.ZmuxSendStream;
 
-import java.nio.charset.StandardCharsets;
-
 try (ZmuxSendStream send = session.openUniStream()) {
-    send.writeFinal("event".getBytes(StandardCharsets.UTF_8));
+    send.writeFinalUtf8("event");
 }
 
 try (ZmuxRecvStream recv = session.acceptUniStream()) {
-    byte[] event = readAll(recv);
+    String event = recv.readUtf8();
 }
 ```
 
@@ -398,7 +374,6 @@ import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 
 long capabilities = Protocol.CAPABILITY_OPEN_METADATA
         | Protocol.CAPABILITY_PRIORITY_HINTS
@@ -409,17 +384,17 @@ ZmuxConfig config = ZmuxConfig.builder()
         .capabilities(capabilities)
         .build();
 
-OpenOptions options = new OpenOptions(
-        7L,
-        2L,
-        "ssh".getBytes(StandardCharsets.UTF_8)
-);
+OpenOptions options = OpenOptions.builder()
+        .priority(7L)
+        .group(2L)
+        .openInfo("ssh")
+        .build();
 
 try (Socket socket = new Socket("127.0.0.1", 9000);
      ZmuxSession session = Zmux.clientSession(socket, config);
      ZmuxStream stream = session.openStream(options)) {
-    stream.updateMetadata(new MetadataUpdate(3L, 2L));
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+    stream.updateMetadata(MetadataUpdate.of(3L, 2L));
+    stream.writeFinalUtf8("hello");
 }
 ```
 
@@ -461,13 +436,11 @@ import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 import io.zmux.adapter.quic.netty.NettyQuic;
 
-import java.nio.charset.StandardCharsets;
-
 QuicChannel channel = ...;
 
 try (ZmuxSession session = NettyQuic.wrapSession(channel);
      ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+    stream.writeFinalUtf8("hello");
 }
 ```
 

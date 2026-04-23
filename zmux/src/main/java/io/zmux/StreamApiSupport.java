@@ -43,4 +43,16 @@ final class StreamApiSupport {
                 ZmuxTerminationKind.UNKNOWN
         );
     }
+
+    static ZmuxException readAllBytesTooLarge(int maxBytes) {
+        return new ZmuxException(
+                ErrorCode.FRAME_SIZE.code(),
+                "readAllBytes",
+                "stream payload exceeds readAllBytes limit: " + maxBytes,
+                ZmuxErrorScope.STREAM,
+                ZmuxErrorSource.LOCAL,
+                ZmuxErrorDirection.READ,
+                ZmuxTerminationKind.UNKNOWN
+        );
+    }
 }

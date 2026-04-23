@@ -13,6 +13,22 @@ public final class MetadataUpdate {
         this.group = group;
     }
 
+    public static MetadataUpdate of(Long priority, Long group) {
+        return new MetadataUpdate(priority, group);
+    }
+
+    public static MetadataUpdate priority(long priority) {
+        return new MetadataUpdate(priority, null);
+    }
+
+    public static MetadataUpdate group(long group) {
+        return new MetadataUpdate(null, group);
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
     private static Long requireOptionalVarint62(Long value, String field) {
         if (value == null) {
             return null;
@@ -55,5 +71,27 @@ public final class MetadataUpdate {
     @Override
     public String toString() {
         return "MetadataUpdate[priority=" + priority + ", group=" + group + "]";
+    }
+
+    public static final class Builder {
+        private Long priority;
+        private Long group;
+
+        private Builder() {
+        }
+
+        public Builder priority(long priority) {
+            this.priority = requireOptionalVarint62(priority, "priority");
+            return this;
+        }
+
+        public Builder group(long group) {
+            this.group = requireOptionalVarint62(group, "group");
+            return this;
+        }
+
+        public MetadataUpdate build() {
+            return new MetadataUpdate(priority, group);
+        }
     }
 }

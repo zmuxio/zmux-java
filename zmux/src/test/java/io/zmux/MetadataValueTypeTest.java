@@ -34,6 +34,35 @@ final class MetadataValueTypeTest {
     }
 
     @Test
+    void openOptionsFactoriesAndBuilderMatchConstructorSemantics() {
+        OpenOptions built = OpenOptions.builder()
+                .priority(7L)
+                .group(9L)
+                .openInfo("abc")
+                .build();
+
+        assertEquals(new OpenOptions(7L, 9L, new byte[]{'a', 'b', 'c'}), built);
+        assertEquals(new OpenOptions(null, null, new byte[]{'x'}), OpenOptions.withOpenInfo(new byte[]{'x'}));
+        assertEquals(new OpenOptions(null, null, new byte[]{'y'}), OpenOptions.withOpenInfo("y"));
+        assertSame(OpenOptions.empty(), OpenOptions.of(null, null, null));
+        assertSame(OpenOptions.empty(), OpenOptions.builder().build());
+    }
+
+    @Test
+    void metadataUpdateFactoriesAndBuilderMatchConstructorSemantics() {
+        MetadataUpdate built = MetadataUpdate.builder()
+                .priority(3L)
+                .group(5L)
+                .build();
+
+        assertEquals(new MetadataUpdate(3L, 5L), built);
+        assertEquals(new MetadataUpdate(3L, null), MetadataUpdate.priority(3L));
+        assertEquals(new MetadataUpdate(null, 5L), MetadataUpdate.group(5L));
+        assertEquals(new MetadataUpdate(3L, 5L), MetadataUpdate.of(3L, 5L));
+        assertTrue(MetadataUpdate.of(null, null).empty());
+    }
+
+    @Test
     void streamMetadataRemainsDefensiveWhileReusingEmptySingleton() {
         byte[] openInfo = new byte[]{4, 5, 6};
         StreamMetadata metadata = new StreamMetadata(3L, 11L, openInfo);

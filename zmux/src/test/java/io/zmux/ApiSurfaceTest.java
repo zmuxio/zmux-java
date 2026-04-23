@@ -642,6 +642,42 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultReadAllBytesHelperDrainsStreamAndEnforcesLimit() throws Exception {
+        RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream("payload".getBytes(StandardCharsets.UTF_8));
+
+        assertArrayEquals("payload".getBytes(StandardCharsets.UTF_8), stream.readAllBytes());
+        assertEquals(2, stream.readCalls, "readAllBytes should stop after the first EOF");
+
+        RecordingDefaultRecvStream limited = new RecordingDefaultRecvStream("abc".getBytes(StandardCharsets.UTF_8));
+        ZmuxException tooLarge = assertThrows(ZmuxException.class, () -> limited.readAllBytes(2));
+        assertEquals(ErrorCode.FRAME_SIZE.code(), tooLarge.code());
+        assertEquals("readAllBytes", tooLarge.operation());
+        assertEquals(ZmuxErrorScope.STREAM, tooLarge.scope());
+        assertEquals(ZmuxErrorDirection.READ, tooLarge.direction());
+    }
+
+    @Test
+    void defaultReadUtf8HelperDecodesDrainedStream() throws Exception {
+        RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream("hello".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("hello", stream.readUtf8());
+    }
+
+    @Test
+    void defaultUtf8WriteHelpersEncodeBeforeDelegating() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+
+        stream.writeUtf8("hello");
+        int finalBytes = stream.writeFinalUtf8("bye");
+
+        assertEquals(1, stream.writeCalls);
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), stream.lastWriteBytes);
+        assertEquals(1, stream.writeFinalCalls);
+        assertEquals(3, finalBytes);
+        assertArrayEquals("bye".getBytes(StandardCharsets.UTF_8), stream.lastFinalBytes);
+    }
+
+    @Test
     void defaultByteBufferHelpersAdvancePositionsAndDelegateWithoutExtraCopyForArrayBackedBuffers() throws Exception {
         RecordingDefaultSendStream send = new RecordingDefaultSendStream();
         ByteBuffer writeBuffer = ByteBuffer.wrap("abcd".getBytes(StandardCharsets.UTF_8));

@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -21,6 +22,25 @@ public final class OpenOptions {
 
     public static OpenOptions empty() {
         return EMPTY;
+    }
+
+    public static OpenOptions of(Long initialPriority, Long initialGroup, byte[] openInfo) {
+        if (initialPriority == null && initialGroup == null && (openInfo == null || openInfo.length == 0)) {
+            return EMPTY;
+        }
+        return new OpenOptions(initialPriority, initialGroup, openInfo);
+    }
+
+    public static OpenOptions withOpenInfo(byte[] openInfo) {
+        return of(null, null, openInfo);
+    }
+
+    public static OpenOptions withOpenInfo(String openInfo) {
+        return withOpenInfo(Objects.requireNonNull(openInfo, "openInfo").getBytes(StandardCharsets.UTF_8));
+    }
+
+    public static Builder builder() {
+        return new Builder();
     }
 
     private static byte[] normalizeOpenInfo(byte[] openInfo) {
@@ -86,5 +106,45 @@ public final class OpenOptions {
                 + ", openInfoLength="
                 + openInfo.length
                 + "]";
+    }
+
+    public static final class Builder {
+        private Long initialPriority;
+        private Long initialGroup;
+        private byte[] openInfo = EMPTY_OPEN_INFO;
+
+        private Builder() {
+        }
+
+        public Builder initialPriority(long initialPriority) {
+            this.initialPriority = requireOptionalVarint62(initialPriority, "initialPriority");
+            return this;
+        }
+
+        public Builder priority(long initialPriority) {
+            return initialPriority(initialPriority);
+        }
+
+        public Builder initialGroup(long initialGroup) {
+            this.initialGroup = requireOptionalVarint62(initialGroup, "initialGroup");
+            return this;
+        }
+
+        public Builder group(long initialGroup) {
+            return initialGroup(initialGroup);
+        }
+
+        public Builder openInfo(byte[] openInfo) {
+            this.openInfo = normalizeOpenInfo(openInfo);
+            return this;
+        }
+
+        public Builder openInfo(String openInfo) {
+            return openInfo(Objects.requireNonNull(openInfo, "openInfo").getBytes(StandardCharsets.UTF_8));
+        }
+
+        public OpenOptions build() {
+            return OpenOptions.of(initialPriority, initialGroup, openInfo);
+        }
     }
 }

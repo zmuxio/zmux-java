@@ -1,9 +1,11 @@
 package io.zmux;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -42,6 +44,39 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, AutoCloseable {
             dst.put(buffer, 0, read);
         }
         return read;
+    }
+
+    default byte[] readAllBytes() throws IOException {
+        return readAllBytes(Integer.MAX_VALUE);
+    }
+
+    default byte[] readAllBytes(int maxBytes) throws IOException {
+        if (maxBytes < 0) {
+            throw new IllegalArgumentException("maxBytes must be >= 0");
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
+        byte[] buffer = new byte[Math.min(Math.max(maxBytes, 1), 8192)];
+        while (true) {
+            int read = read(buffer, 0, buffer.length);
+            if (read < 0) {
+                return out.toByteArray();
+            }
+            if (read == 0) {
+                continue;
+            }
+            if (out.size() > maxBytes - read) {
+                throw StreamApiSupport.readAllBytesTooLarge(maxBytes);
+            }
+            out.write(buffer, 0, read);
+        }
+    }
+
+    default String readUtf8() throws IOException {
+        return readUtf8(Integer.MAX_VALUE);
+    }
+
+    default String readUtf8(int maxBytes) throws IOException {
+        return new String(readAllBytes(maxBytes), StandardCharsets.UTF_8);
     }
 
     default InputStream asInputStream() {
