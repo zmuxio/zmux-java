@@ -203,12 +203,11 @@ Core session and stream APIs:
 - `ZmuxStream`: bidirectional stream interface combining send and receive
   operations.
 - `ZmuxSendStream`: write side interface for `byte[]`, `ByteBuffer`,
-  UTF-8 strings, `OutputStream` adaptation, `writeFinal`, `writevFinal`,
-  metadata updates, write deadlines, graceful write close, and write
-  cancellation.
+  `OutputStream` adaptation, `writeFinal`, `writevFinal`, metadata updates,
+  write deadlines, graceful write close, and write cancellation.
 - `ZmuxRecvStream`: read side interface for `byte[]`, `ByteBuffer`,
-  `readAllBytes`, UTF-8 strings, `InputStream` adaptation, read deadlines,
-  local read close, and read cancellation.
+  `readAllBytes`, `InputStream` adaptation, read deadlines, local read close,
+  and read cancellation.
 - `ZmuxStreamInfo`: common stream metadata such as stream id, open info,
   priority/group metadata, and local/remote addresses.
 
@@ -276,7 +275,7 @@ Netty QUIC adapter APIs:
 - Socket, stream, NIO channel, custom duplex connection, and Netty QUIC
   transports.
 - Per-stream read/write APIs with `byte[]`, `ByteBuffer`, `readAllBytes`,
-  UTF-8 convenience helpers, `InputStream`, and `OutputStream` adapters.
+  `InputStream`, and `OutputStream` adapters.
 - Final writes through `writeFinal` and multipart final writes through
   `writevFinal`.
 - Open metadata, stream priority hints, stream groups, and runtime priority
@@ -317,12 +316,13 @@ import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 
 try (Socket socket = new Socket("127.0.0.1", 9000);
      ZmuxSession session = Zmux.clientSession(socket);
      ZmuxStream stream = session.openStream()) {
-    stream.writeFinalUtf8("hello");
-    String reply = stream.readUtf8();
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+    String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -335,13 +335,14 @@ import io.zmux.ZmuxStream;
 
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 
 try (ServerSocket listener = new ServerSocket(9000);
      Socket socket = listener.accept();
      ZmuxSession session = Zmux.serverSession(socket);
      ZmuxStream stream = session.acceptStream()) {
-    String request = stream.readUtf8();
-    stream.writeFinalUtf8("echo:" + request);
+    String request = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+    stream.writeFinal(("echo:" + request).getBytes(StandardCharsets.UTF_8));
 }
 ```
 
@@ -351,12 +352,14 @@ try (ServerSocket listener = new ServerSocket(9000);
 import io.zmux.ZmuxRecvStream;
 import io.zmux.ZmuxSendStream;
 
+import java.nio.charset.StandardCharsets;
+
 try (ZmuxSendStream send = session.openUniStream()) {
-    send.writeFinalUtf8("event");
+    send.writeFinal("event".getBytes(StandardCharsets.UTF_8));
 }
 
 try (ZmuxRecvStream recv = session.acceptUniStream()) {
-    String event = recv.readUtf8();
+    String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -394,7 +397,7 @@ try (Socket socket = new Socket("127.0.0.1", 9000);
      ZmuxSession session = Zmux.clientSession(socket, config);
      ZmuxStream stream = session.openStream(options)) {
     stream.updateMetadata(MetadataUpdate.of(3L, 2L));
-    stream.writeFinalUtf8("hello");
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
 }
 ```
 
@@ -436,11 +439,13 @@ import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 import io.zmux.adapter.quic.netty.NettyQuic;
 
+import java.nio.charset.StandardCharsets;
+
 QuicChannel channel = ...;
 
 try (ZmuxSession session = NettyQuic.wrapSession(channel);
      ZmuxStream stream = session.openStream()) {
-    stream.writeFinalUtf8("hello");
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
 }
 ```
 

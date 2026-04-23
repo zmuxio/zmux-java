@@ -3,7 +3,6 @@ package io.zmux;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -44,10 +43,6 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, AutoCloseable {
             src.position(initialPosition + total);
         }
         return total;
-    }
-
-    default void writeUtf8(String value) throws IOException {
-        write(Objects.requireNonNull(value, "value").getBytes(StandardCharsets.UTF_8));
     }
 
     int writeFinal(byte[] src, int offset, int length) throws IOException;
@@ -91,10 +86,6 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, AutoCloseable {
             src.position(initialPosition + total);
         }
         return total;
-    }
-
-    default int writeFinalUtf8(String value) throws IOException {
-        return writeFinal(Objects.requireNonNull(value, "value").getBytes(StandardCharsets.UTF_8));
     }
 
     default int writevFinal(byte[]... parts) throws IOException {

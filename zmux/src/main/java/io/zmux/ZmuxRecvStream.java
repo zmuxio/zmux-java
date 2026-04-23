@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -69,14 +68,6 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, AutoCloseable {
             }
             out.write(buffer, 0, read);
         }
-    }
-
-    default String readUtf8() throws IOException {
-        return readUtf8(Integer.MAX_VALUE);
-    }
-
-    default String readUtf8(int maxBytes) throws IOException {
-        return new String(readAllBytes(maxBytes), StandardCharsets.UTF_8);
     }
 
     default InputStream asInputStream() {

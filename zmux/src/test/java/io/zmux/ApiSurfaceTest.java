@@ -657,27 +657,6 @@ final class ApiSurfaceTest {
     }
 
     @Test
-    void defaultReadUtf8HelperDecodesDrainedStream() throws Exception {
-        RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream("hello".getBytes(StandardCharsets.UTF_8));
-
-        assertEquals("hello", stream.readUtf8());
-    }
-
-    @Test
-    void defaultUtf8WriteHelpersEncodeBeforeDelegating() throws Exception {
-        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
-
-        stream.writeUtf8("hello");
-        int finalBytes = stream.writeFinalUtf8("bye");
-
-        assertEquals(1, stream.writeCalls);
-        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), stream.lastWriteBytes);
-        assertEquals(1, stream.writeFinalCalls);
-        assertEquals(3, finalBytes);
-        assertArrayEquals("bye".getBytes(StandardCharsets.UTF_8), stream.lastFinalBytes);
-    }
-
-    @Test
     void defaultByteBufferHelpersAdvancePositionsAndDelegateWithoutExtraCopyForArrayBackedBuffers() throws Exception {
         RecordingDefaultSendStream send = new RecordingDefaultSendStream();
         ByteBuffer writeBuffer = ByteBuffer.wrap("abcd".getBytes(StandardCharsets.UTF_8));
