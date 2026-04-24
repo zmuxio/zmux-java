@@ -102,7 +102,17 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, AutoCloseable {
 
     void closeRead() throws IOException;
 
+    default void cancelRead(ErrorCode code) throws IOException {
+        Objects.requireNonNull(code, "code");
+        cancelRead(code.code());
+    }
+
     void cancelRead(long code) throws IOException;
+
+    default void closeWithError(ErrorCode code, String reason) throws IOException {
+        Objects.requireNonNull(code, "code");
+        closeWithError(code.code(), reason);
+    }
 
     void closeWithError(long code, String reason) throws IOException;
 

@@ -172,6 +172,13 @@ public interface ZmuxNativeSession extends ZmuxSession {
         goAway(lastAcceptedBidi, lastAcceptedUni, ErrorCode.NO_ERROR.code(), "");
     }
 
+    default void goAway(long lastAcceptedBidi, long lastAcceptedUni, ErrorCode code, String reason) throws IOException {
+        if (code == null) {
+            throw new NullPointerException("code");
+        }
+        goAway(lastAcceptedBidi, lastAcceptedUni, code.code(), reason);
+    }
+
     void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException;
 
     ApplicationError peerGoAwayError();

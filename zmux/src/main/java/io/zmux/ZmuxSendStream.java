@@ -143,7 +143,17 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, AutoCloseable {
 
     void closeWrite() throws IOException;
 
+    default void cancelWrite(ErrorCode code) throws IOException {
+        Objects.requireNonNull(code, "code");
+        cancelWrite(code.code());
+    }
+
     void cancelWrite(long code) throws IOException;
+
+    default void closeWithError(ErrorCode code, String reason) throws IOException {
+        Objects.requireNonNull(code, "code");
+        closeWithError(code.code(), reason);
+    }
 
     void closeWithError(long code, String reason) throws IOException;
 

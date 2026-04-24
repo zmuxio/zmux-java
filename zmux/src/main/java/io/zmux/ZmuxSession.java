@@ -241,6 +241,11 @@ public interface ZmuxSession extends AutoCloseable {
 
     void closeWithError(long code, String reason) throws IOException;
 
+    default void closeWithError(ErrorCode code, String reason) throws IOException {
+        Objects.requireNonNull(code, "code");
+        closeWithError(code.code(), reason);
+    }
+
     default void closeWithError(Throwable error) throws IOException {
         if (error == null) {
             close();

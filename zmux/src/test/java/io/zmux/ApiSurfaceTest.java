@@ -860,6 +860,41 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void nativeGoAwayEnumHelperDelegatesCodeValue() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+
+        session.goAway(4L, 8L, ErrorCode.PROTOCOL, "bad frame");
+
+        assertEquals(1, session.goAwayCalls);
+        assertEquals(ErrorCode.PROTOCOL.code(), session.lastGoAwayCode);
+        assertEquals("bad frame", session.lastGoAwayReason);
+    }
+
+    @Test
+    void defaultDirectionalEnumHelpersDelegateCodeValues() throws Exception {
+        RecordingDefaultSendStream send = new RecordingDefaultSendStream();
+        RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(send);
+
+        send.cancelWrite(ErrorCode.CANCELLED);
+        send.closeWithError(ErrorCode.STREAM_CLOSED, "done");
+        recv.cancelRead(ErrorCode.CANCELLED);
+        recv.closeWithError(ErrorCode.STREAM_CLOSED, "done");
+        session.closeWithError(ErrorCode.SESSION_CLOSING, "closing");
+
+        assertEquals(ErrorCode.CANCELLED.code(), send.lastCancelWriteCode);
+        assertEquals(ErrorCode.STREAM_CLOSED.code(), send.lastCloseWithErrorCode);
+        assertEquals("done", send.lastCloseWithErrorReason);
+        assertEquals(ErrorCode.CANCELLED.code(), recv.lastCancelReadCode);
+        assertEquals(ErrorCode.STREAM_CLOSED.code(), recv.lastCloseWithErrorCode);
+        assertEquals("done", recv.lastCloseWithErrorReason);
+        assertEquals(1, session.closeWithErrorCalls);
+        assertEquals(ErrorCode.SESSION_CLOSING.code(), session.lastCloseCode);
+        assertEquals("closing", session.lastCloseReason);
+    }
+
+    @Test
     void defaultRecvHelperRejectsNullPayloadBeforeDelegating() {
         RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream();
 
@@ -1078,10 +1113,13 @@ final class ApiSurfaceTest {
         private int closeWriteCalls;
         private int writeDeadlineSetCalls;
         private int writeDeadlineClearCalls;
+        private long lastCancelWriteCode = Long.MIN_VALUE;
+        private long lastCloseWithErrorCode = Long.MIN_VALUE;
         private int lastWriteLength = -1;
         private int lastFinalLength = -1;
         private byte[] lastWriteBytes = new byte[0];
         private byte[] lastFinalBytes = new byte[0];
+        private String lastCloseWithErrorReason;
         private Instant lastWriteDeadline;
 
         @Override
@@ -1110,10 +1148,13 @@ final class ApiSurfaceTest {
 
         @Override
         public void cancelWrite(long code) {
+            this.lastCancelWriteCode = code;
         }
 
         @Override
         public void closeWithError(long code, String reason) {
+            this.lastCloseWithErrorCode = code;
+            this.lastCloseWithErrorReason = reason;
         }
 
         @Override
@@ -1355,6 +1396,9 @@ final class ApiSurfaceTest {
         private int readCalls;
         private int readOffset;
         private int closeReadCalls;
+        private long lastCancelReadCode = Long.MIN_VALUE;
+        private long lastCloseWithErrorCode = Long.MIN_VALUE;
+        private String lastCloseWithErrorReason;
 
         private RecordingDefaultRecvStream() {
             this(new byte[0]);
@@ -1383,10 +1427,13 @@ final class ApiSurfaceTest {
 
         @Override
         public void cancelRead(long code) {
+            this.lastCancelReadCode = code;
         }
 
         @Override
         public void closeWithError(long code, String reason) {
+            this.lastCloseWithErrorCode = code;
+            this.lastCloseWithErrorReason = reason;
         }
 
         @Override
