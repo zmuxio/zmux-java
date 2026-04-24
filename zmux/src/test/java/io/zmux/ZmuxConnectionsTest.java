@@ -193,25 +193,31 @@ final class ZmuxConnectionsTest {
         try (JoinedDuplexConnection connection = new JoinedDuplexConnection(input, output)) {
             assertSame(input, connection.inputHalf());
             assertSame(output, connection.outputHalf());
+            assertSame(input, connection.readHalf());
+            assertSame(output, connection.writeHalf());
 
-            JoinedDuplexConnection.PausedInput pausedInput = connection.pauseInput();
+            JoinedDuplexConnection.PausedInput pausedInput = connection.pauseRead();
             assertNull(connection.inputHalf());
+            assertNull(connection.readHalf());
             pausedInput.resume();
             assertSame(input, connection.inputHalf());
+            assertSame(input, connection.readHalf());
 
-            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseOutput();
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseWrite();
             assertNull(connection.outputHalf());
+            assertNull(connection.writeHalf());
             pausedOutput.resume();
             assertSame(output, connection.outputHalf());
+            assertSame(output, connection.writeHalf());
 
-            connection.closeInput();
+            connection.closeRead();
             assertSame(input, connection.inputHalf());
-            connection.closeInput();
+            connection.closeRead();
             assertEquals(2, input.closeCalls());
 
-            connection.closeOutput();
+            connection.closeWrite();
             assertSame(output, connection.outputHalf());
-            connection.closeOutput();
+            connection.closeWrite();
             assertEquals(2, output.closeCalls());
         }
     }

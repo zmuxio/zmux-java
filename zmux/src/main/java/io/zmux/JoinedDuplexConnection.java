@@ -121,6 +121,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    public InputStream readHalf() {
+        return inputHalf();
+    }
+
     @Override
     public OutputStream output() {
         return outputView;
@@ -133,6 +137,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         } finally {
             lock.unlock();
         }
+    }
+
+    public OutputStream writeHalf() {
+        return outputHalf();
     }
 
     @Override
@@ -216,6 +224,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    public PausedInput pauseRead() throws IOException, InterruptedException {
+        return pauseInput();
+    }
+
+    public PausedInput pauseRead(Duration timeout) throws IOException, InterruptedException {
+        return pauseInput(timeout);
+    }
+
     public PausedOutput pauseOutput() throws IOException, InterruptedException {
         return pauseOutput(null);
     }
@@ -253,12 +269,28 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    public PausedOutput pauseWrite() throws IOException, InterruptedException {
+        return pauseOutput();
+    }
+
+    public PausedOutput pauseWrite(Duration timeout) throws IOException, InterruptedException {
+        return pauseOutput(timeout);
+    }
+
     public void closeInput() throws IOException {
         inputView.close();
     }
 
     public void closeOutput() throws IOException {
         outputView.close();
+    }
+
+    public void closeRead() throws IOException {
+        closeInput();
+    }
+
+    public void closeWrite() throws IOException {
+        closeOutput();
     }
 
     @Override
