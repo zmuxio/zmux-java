@@ -8,11 +8,16 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class EstablishmentFailureTest {
+    private interface EstablishmentOpen {
+        void open(DuplexConnection connection) throws IOException;
+    }
+
     private static FrameCodec.Frame readFrame(BufferedInputStream input, Socket socket, int timeoutMillis) throws Exception {
         socket.setSoTimeout(timeoutMillis);
         try {
@@ -48,6 +53,20 @@ final class EstablishmentFailureTest {
                 throw new IOException(message);
             }
         };
+    }
+
+    private static void assertConstructorClosesTransportOnce(String name, EstablishmentOpen open) {
+        CountingDuplexConnection connection = new CountingDuplexConnection();
+
+        IOException error = assertThrows(
+                IOException.class,
+                () -> open.open(connection),
+                name + " should fail when the peer preface is missing"
+        );
+
+        assertEquals(1, connection.closeCount(), name + " should close the transport exactly once");
+        assertEquals("read preface", ZmuxErrors.operation(error), name + " operation mismatch");
+        assertEquals(ZmuxErrorSource.TRANSPORT, ZmuxErrors.source(error), name + " source mismatch");
     }
 
     @Test
@@ -165,5 +184,48 @@ final class EstablishmentFailureTest {
                 ZmuxErrors.terminationKind(error),
                 "preface read termination mismatch"
         );
+    }
+
+    @Test
+    void nativeConstructorsCloseTransportOnceOnEstablishmentFailure() {
+        assertAll(
+                () -> assertConstructorClosesTransportOnce("Zmux.open", connection -> Zmux.open(connection, ZmuxConfig.builder().build())),
+                () -> assertConstructorClosesTransportOnce("Zmux.client", connection -> Zmux.client(connection, ZmuxConfig.builder().build())),
+                () -> assertConstructorClosesTransportOnce("Zmux.server", connection -> Zmux.server(connection, ZmuxConfig.builder().build()))
+        );
+    }
+
+    @Test
+    void stableConstructorsCloseTransportOnceOnEstablishmentFailure() {
+        assertAll(
+                () -> assertConstructorClosesTransportOnce("Zmux.openSession", connection -> Zmux.openSession(connection, ZmuxConfig.builder().build())),
+                () -> assertConstructorClosesTransportOnce("Zmux.clientSession", connection -> Zmux.clientSession(connection, ZmuxConfig.builder().build())),
+                () -> assertConstructorClosesTransportOnce("Zmux.serverSession", connection -> Zmux.serverSession(connection, ZmuxConfig.builder().build()))
+        );
+    }
+
+    private static final class CountingDuplexConnection implements DuplexConnection {
+        private final AtomicInteger closeCount = new AtomicInteger();
+        private final InputStream input = new ByteArrayInputStream(new byte[0]);
+        private final OutputStream output = new ByteArrayOutputStream();
+
+        @Override
+        public InputStream input() {
+            return input;
+        }
+
+        @Override
+        public OutputStream output() {
+            return output;
+        }
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+        }
+
+        int closeCount() {
+            return closeCount.get();
+        }
     }
 }
