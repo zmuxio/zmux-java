@@ -895,6 +895,23 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void nativePingHelpersUseUnboundedTimeoutAndPreservePayloadShape() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+        session.pingResult = Duration.ofMillis(12);
+
+        assertEquals(Duration.ofMillis(12), session.ping("ok".getBytes(StandardCharsets.UTF_8)));
+        assertArrayEquals("ok".getBytes(StandardCharsets.UTF_8), session.lastPingPayload);
+        assertNull(session.lastPingTimeout, "payload-only ping helper must use an unbounded wait");
+
+        session.lastPingPayload = "sentinel".getBytes(StandardCharsets.UTF_8);
+        session.lastPingTimeout = Duration.ofSeconds(1);
+        assertEquals(Duration.ofMillis(12), session.ping());
+        assertNull(session.lastPingPayload, "no-arg ping helper must preserve nil payload semantics");
+        assertNull(session.lastPingTimeout, "no-arg ping helper must use an unbounded wait");
+    }
+
+    @Test
     void defaultRecvHelperRejectsNullPayloadBeforeDelegating() {
         RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream();
 
@@ -1224,6 +1241,9 @@ final class ApiSurfaceTest {
         private long lastCloseCode;
         private String lastGoAwayReason;
         private String lastCloseReason;
+        private byte[] lastPingPayload;
+        private Duration lastPingTimeout;
+        private Duration pingResult = Duration.ZERO;
         private Duration lastAwaitTerminationTimeout;
         private boolean awaitTerminationResult;
         private java.util.Optional<IOException> terminationCause = java.util.Optional.empty();
@@ -1315,7 +1335,9 @@ final class ApiSurfaceTest {
 
         @Override
         public Duration ping(byte[] echo, Duration timeout) {
-            throw new UnsupportedOperationException();
+            this.lastPingPayload = echo;
+            this.lastPingTimeout = timeout;
+            return pingResult;
         }
 
         @Override

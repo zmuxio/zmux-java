@@ -166,6 +166,14 @@ public interface ZmuxNativeSession extends ZmuxSession {
         return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSendWithTimeout(options, timeout, data);
     }
 
+    default Duration ping() throws IOException, InterruptedException {
+        return ping(null, null);
+    }
+
+    default Duration ping(byte[] echo) throws IOException, InterruptedException {
+        return ping(echo, null);
+    }
+
     Duration ping(byte[] echo, Duration timeout) throws IOException, InterruptedException;
 
     default void goAway(long lastAcceptedBidi, long lastAcceptedUni) throws IOException {
