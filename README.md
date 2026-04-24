@@ -426,7 +426,10 @@ as the transport itself.
 `ZmuxConnections.join(...)` remains available if you prefer the adapter-focused
 namespace.
 If you need Go `JoinedConn`-style inspection and half-close control, use
-`inputHalf()`, `outputHalf()`, `closeInput()`, and `closeOutput()`.
+`inputHalf()`, `outputHalf()`, `readHalf()`, `writeHalf()`, `closeInput()`,
+and `closeOutput()`. When you pause a directional half, the pause handle also
+exposes `currentReadHalf()` / `currentWriteHalf()` plus typed replacement
+helpers before `resume()`.
 
 ### Existing Buffers
 

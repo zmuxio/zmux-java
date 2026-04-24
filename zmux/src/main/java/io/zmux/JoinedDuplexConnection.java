@@ -147,8 +147,13 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    public InputStream readHalf() {
-        return inputHalf();
+    public ReadHalf readHalf() {
+        lock.lock();
+        try {
+            return inputPaused || closed ? null : typedReadHalf(inputHalf);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
@@ -165,8 +170,13 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    public OutputStream writeHalf() {
-        return outputHalf();
+    public WriteHalf writeHalf() {
+        lock.lock();
+        try {
+            return outputPaused || closed ? null : typedWriteHalf(outputHalf);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
@@ -415,7 +425,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             if (paused.resumed) {
                 return;
             }
-            ensureOpenLocked();
+            if (closed) {
+                paused.resumed = true;
+                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+            }
             inputHalf = paused.current;
             inputPaused = false;
             paused.resumed = true;
@@ -431,7 +444,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             if (paused.resumed) {
                 return;
             }
-            ensureOpenLocked();
+            if (closed) {
+                paused.resumed = true;
+                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+            }
             outputHalf = paused.current;
             gatheringOutput = paused.gathering;
             outputPaused = false;
@@ -524,12 +540,20 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return current;
         }
 
+        public ReadHalf currentReadHalf() {
+            return typedReadHalf(current);
+        }
+
         public InputStream set(ZmuxRecvStream next) {
             return set(wrap(next));
         }
 
         public InputStream set(ReadHalf next) {
             return set(wrap(next));
+        }
+
+        public ReadHalf replaceReadHalf(ReadHalf next) {
+            return typedReadHalf(set(next));
         }
 
         public InputStream set(InputStream next) {
@@ -559,6 +583,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return current;
         }
 
+        public WriteHalf currentWriteHalf() {
+            return typedWriteHalf(current);
+        }
+
         public OutputStream set(ZmuxSendStream next) {
             return set(wrap(next));
         }
@@ -568,6 +596,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             OutputStream previous = set(wrap(next));
             gathering = nextGathering;
             return previous;
+        }
+
+        public WriteHalf replaceWriteHalf(WriteHalf next) {
+            return typedWriteHalf(set(next));
         }
 
         public OutputStream set(OutputStream next) {
@@ -641,6 +673,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         SocketAddress remoteAddress();
     }
 
+    private interface TypedInputHalf {
+        ReadHalf readHalf();
+    }
+
+    private interface TypedOutputHalf {
+        WriteHalf writeHalf();
+    }
+
     private static SocketAddress localAddress(Object half) {
         return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).localAddress() : null;
     }
@@ -649,7 +689,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).remoteAddress() : null;
     }
 
-    private static final class StreamInputHalf extends InputStream implements AddressAwareHalf {
+    private static ReadHalf typedReadHalf(InputStream half) {
+        return half instanceof TypedInputHalf ? ((TypedInputHalf) half).readHalf() : null;
+    }
+
+    private static WriteHalf typedWriteHalf(OutputStream half) {
+        return half instanceof TypedOutputHalf ? ((TypedOutputHalf) half).writeHalf() : null;
+    }
+
+    private static final class StreamInputHalf extends InputStream implements AddressAwareHalf, TypedInputHalf {
         private final ZmuxRecvStream stream;
         private final byte[] singleByte = new byte[1];
 
@@ -685,9 +733,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public SocketAddress remoteAddress() {
             return stream.remoteAddress();
         }
+
+        @Override
+        public ReadHalf readHalf() {
+            return stream;
+        }
     }
 
-    private static final class GenericInputHalf extends InputStream implements AddressAwareHalf {
+    private static final class GenericInputHalf extends InputStream implements AddressAwareHalf, TypedInputHalf {
         private final ReadHalf half;
         private final byte[] singleByte = new byte[1];
 
@@ -723,9 +776,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public SocketAddress remoteAddress() {
             return half.remoteAddress();
         }
+
+        @Override
+        public ReadHalf readHalf() {
+            return half;
+        }
     }
 
-    private static final class StreamOutputHalf extends OutputStream implements AddressAwareHalf {
+    private static final class StreamOutputHalf extends OutputStream implements AddressAwareHalf, TypedOutputHalf {
         private final ZmuxSendStream stream;
         private final byte[] singleByte = new byte[1];
 
@@ -765,9 +823,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public SocketAddress remoteAddress() {
             return stream.remoteAddress();
         }
+
+        @Override
+        public WriteHalf writeHalf() {
+            return stream;
+        }
     }
 
-    private static final class GenericOutputHalf extends OutputStream implements AddressAwareHalf {
+    private static final class GenericOutputHalf extends OutputStream implements AddressAwareHalf, TypedOutputHalf {
         private final WriteHalf half;
         private final byte[] singleByte = new byte[1];
 
@@ -806,6 +869,11 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         @Override
         public SocketAddress remoteAddress() {
             return half.remoteAddress();
+        }
+
+        @Override
+        public WriteHalf writeHalf() {
+            return half;
         }
     }
 

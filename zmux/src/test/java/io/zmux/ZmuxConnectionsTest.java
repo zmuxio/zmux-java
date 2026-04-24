@@ -161,6 +161,8 @@ final class ZmuxConnectionsTest {
         try (JoinedDuplexConnection connection = ZmuxConnections.join(input, output)) {
             assertSame(local, connection.localAddress());
             assertSame(remote, connection.remoteAddress());
+            assertSame(input, connection.readHalf());
+            assertSame(output, connection.writeHalf());
             assertNotNull(connection.gatheringOutput());
             assertEquals(3, connection.input().read());
             connection.output().write(new byte[]{1, 2});
@@ -264,22 +266,22 @@ final class ZmuxConnectionsTest {
         try (JoinedDuplexConnection connection = new JoinedDuplexConnection(input, output)) {
             assertSame(input, connection.inputHalf());
             assertSame(output, connection.outputHalf());
-            assertSame(input, connection.readHalf());
-            assertSame(output, connection.writeHalf());
+            assertNull(connection.readHalf());
+            assertNull(connection.writeHalf());
 
             JoinedDuplexConnection.PausedInput pausedInput = connection.pauseRead();
             assertNull(connection.inputHalf());
             assertNull(connection.readHalf());
             pausedInput.resume();
             assertSame(input, connection.inputHalf());
-            assertSame(input, connection.readHalf());
+            assertNull(connection.readHalf());
 
             JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseWrite();
             assertNull(connection.outputHalf());
             assertNull(connection.writeHalf());
             pausedOutput.resume();
             assertSame(output, connection.outputHalf());
-            assertSame(output, connection.writeHalf());
+            assertNull(connection.writeHalf());
 
             connection.closeRead();
             assertSame(input, connection.inputHalf());
@@ -291,6 +293,49 @@ final class ZmuxConnectionsTest {
             connection.closeWrite();
             assertEquals(2, output.closeCalls());
         }
+    }
+
+    @Test
+    void joinedConnectionTypedPauseHandlesMatchGoStyleHalfSwaps() throws Exception {
+        InetSocketAddress firstLocal = InetSocketAddress.createUnresolved("typed.local.a", 7101);
+        InetSocketAddress firstRemote = InetSocketAddress.createUnresolved("typed.remote.a", 7102);
+        InetSocketAddress secondLocal = InetSocketAddress.createUnresolved("typed.local.b", 7201);
+        InetSocketAddress secondRemote = InetSocketAddress.createUnresolved("typed.remote.b", 7202);
+        RecordingReadHalf firstRead = new RecordingReadHalf(new byte[]{1}, firstLocal, firstRemote);
+        RecordingWriteHalf firstWrite = new RecordingWriteHalf(firstLocal, firstRemote, null);
+        RecordingReadHalf secondRead = new RecordingReadHalf(new byte[]{2}, secondLocal, secondRemote);
+        RecordingWriteHalf secondWrite = new RecordingWriteHalf(secondLocal, secondRemote, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(firstRead, firstWrite)) {
+            JoinedDuplexConnection.PausedInput pausedInput = connection.pauseRead();
+            assertSame(firstRead, pausedInput.currentReadHalf());
+            assertSame(firstRead, pausedInput.replaceReadHalf(secondRead));
+            pausedInput.resume();
+            assertSame(secondRead, connection.readHalf());
+
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseWrite();
+            assertSame(firstWrite, pausedOutput.currentWriteHalf());
+            assertSame(firstWrite, pausedOutput.replaceWriteHalf(secondWrite));
+            pausedOutput.resume();
+            assertSame(secondWrite, connection.writeHalf());
+        }
+    }
+
+    @Test
+    void joinedPauseResumeAfterCloseFailsOnceThenBecomesIdempotent() throws Exception {
+        RecordingReadHalf readHalf = new RecordingReadHalf(new byte[]{1}, null, null);
+        RecordingWriteHalf writeHalf = new RecordingWriteHalf(null, null, null);
+        JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, writeHalf);
+
+        JoinedDuplexConnection.PausedInput pausedInput = connection.pauseRead();
+        JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseWrite();
+        connection.close();
+
+        assertThrows(SessionClosedException.class, pausedInput::resume);
+        assertDoesNotThrow(pausedInput::resume);
+
+        assertThrows(SessionClosedException.class, pausedOutput::resume);
+        assertDoesNotThrow(pausedOutput::resume);
     }
 
     @Test
