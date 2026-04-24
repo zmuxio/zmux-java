@@ -519,6 +519,177 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionPausedReadStillHonorsReadDeadline() throws Exception {
+        RecordingReadHalf readHalf = new RecordingReadHalf(new byte[]{1}, null, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            assertEquals(1, connection.input().read());
+
+            JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
+            connection.setReadDeadline(Instant.now().plusMillis(30));
+
+            SocketTimeoutException timeout = assertThrows(SocketTimeoutException.class, () -> connection.input().read());
+            assertTrue(timeout.getMessage().contains("read deadline"));
+
+            pause.resume();
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseReadWaitsForInflightCloseReadToDrain() throws Exception {
+        BlockingCloseReadHalf readHalf = new BlockingCloseReadHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            Throwable[] closeFailure = new Throwable[1];
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.closeRead();
+                } catch (Throwable error) {
+                    closeFailure[0] = error;
+                }
+            });
+            closer.start();
+
+            assertTrue(readHalf.awaitCloseStarted(), "closeRead should reach the underlying read half");
+
+            JoinedDuplexConnection.PausedInput[] pausedHolder = new JoinedDuplexConnection.PausedInput[1];
+            Throwable[] pauseFailure = new Throwable[1];
+            Thread pauser = new Thread(() -> {
+                try {
+                    pausedHolder[0] = connection.pauseRead();
+                } catch (Throwable error) {
+                    pauseFailure[0] = error;
+                }
+            });
+            pauser.start();
+
+            Thread.sleep(50L);
+            assertTrue(pauser.isAlive(), "pauseRead should wait for in-flight closeRead");
+
+            readHalf.releaseClose();
+            closer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(closer.isAlive(), "closeRead should finish after underlying close releases");
+            assertNull(closeFailure[0], "closeRead should not fail");
+
+            pauser.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(pauser.isAlive(), "pauseRead should finish after in-flight closeRead drains");
+            assertNull(pauseFailure[0], "pauseRead should not fail");
+            assertNotNull(pausedHolder[0], "pauseRead should return a pause handle");
+            assertSame(readHalf, pausedHolder[0].currentReadHalf());
+            pausedHolder[0].resume();
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseWriteWaitsForInflightCloseWriteToDrain() throws Exception {
+        BlockingCloseWriteHalf writeHalf = new BlockingCloseWriteHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(null, writeHalf)) {
+            Throwable[] closeFailure = new Throwable[1];
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.closeWrite();
+                } catch (Throwable error) {
+                    closeFailure[0] = error;
+                }
+            });
+            closer.start();
+
+            assertTrue(writeHalf.awaitCloseStarted(), "closeWrite should reach the underlying write half");
+
+            JoinedDuplexConnection.PausedOutput[] pausedHolder = new JoinedDuplexConnection.PausedOutput[1];
+            Throwable[] pauseFailure = new Throwable[1];
+            Thread pauser = new Thread(() -> {
+                try {
+                    pausedHolder[0] = connection.pauseWrite();
+                } catch (Throwable error) {
+                    pauseFailure[0] = error;
+                }
+            });
+            pauser.start();
+
+            Thread.sleep(50L);
+            assertTrue(pauser.isAlive(), "pauseWrite should wait for in-flight closeWrite");
+
+            writeHalf.releaseClose();
+            closer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(closer.isAlive(), "closeWrite should finish after underlying close releases");
+            assertNull(closeFailure[0], "closeWrite should not fail");
+
+            pauser.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(pauser.isAlive(), "pauseWrite should finish after in-flight closeWrite drains");
+            assertNull(pauseFailure[0], "pauseWrite should not fail");
+            assertNotNull(pausedHolder[0], "pauseWrite should return a pause handle");
+            assertSame(writeHalf, pausedHolder[0].currentWriteHalf());
+            pausedHolder[0].resume();
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseReadBlocksCloseReadUntilResume() throws Exception {
+        BlockingCloseReadHalf readHalf = new BlockingCloseReadHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
+            assertSame(readHalf, pause.currentReadHalf());
+
+            Throwable[] closeFailure = new Throwable[1];
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.closeRead();
+                } catch (Throwable error) {
+                    closeFailure[0] = error;
+                }
+            });
+            closer.start();
+
+            Thread.sleep(50L);
+            assertTrue(closer.isAlive(), "closeRead should remain blocked while the read side is paused");
+            assertEquals(0, readHalf.closeStartCount(), "closeRead must not reach the detached read half");
+
+            pause.resume();
+            assertTrue(readHalf.awaitCloseStarted(), "closeRead should reach the underlying read half after resume");
+            readHalf.releaseClose();
+
+            closer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(closer.isAlive(), "closeRead should finish after resume");
+            assertNull(closeFailure[0], "closeRead should not fail");
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseWriteBlocksCloseWriteUntilResume() throws Exception {
+        BlockingCloseWriteHalf writeHalf = new BlockingCloseWriteHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(null, writeHalf)) {
+            JoinedDuplexConnection.PausedOutput pause = connection.pauseWrite();
+            assertSame(writeHalf, pause.currentWriteHalf());
+
+            Throwable[] closeFailure = new Throwable[1];
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.closeWrite();
+                } catch (Throwable error) {
+                    closeFailure[0] = error;
+                }
+            });
+            closer.start();
+
+            Thread.sleep(50L);
+            assertTrue(closer.isAlive(), "closeWrite should remain blocked while the write side is paused");
+            assertEquals(0, writeHalf.closeStartCount(), "closeWrite must not reach the detached write half");
+
+            pause.resume();
+            assertTrue(writeHalf.awaitCloseStarted(), "closeWrite should reach the underlying write half after resume");
+            writeHalf.releaseClose();
+
+            closer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(closer.isAlive(), "closeWrite should finish after resume");
+            assertNull(closeFailure[0], "closeWrite should not fail");
+        }
+    }
+
+    @Test
     void joinedConnectionResumeReadReplaysDeadlineSetWhilePaused() throws Exception {
         JoinedDuplexConnection connection = ZmuxConnections.join(new RecordingReadHalf(new byte[0], null, null), null);
         JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
@@ -676,6 +847,25 @@ final class ZmuxConnectionsTest {
         assertSame(readError, error);
         assertEquals(1, error.getSuppressed().length);
         assertSame(writeError, error.getSuppressed()[0]);
+    }
+
+    @Test
+    void joinedConnectionCloseKeepsDetachedHalvesCallerOwned() throws Exception {
+        RecordingInputStream input = new RecordingInputStream(new byte[0]);
+        RecordingOutputStream output = new RecordingOutputStream();
+        JoinedDuplexConnection connection = new JoinedDuplexConnection(input, output);
+
+        JoinedDuplexConnection.PausedInput pausedInput = connection.pauseRead();
+        JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseWrite();
+        connection.close();
+
+        assertEquals(0, input.closeCalls(), "detached read half should stay caller-owned");
+        assertEquals(0, output.closeCalls(), "detached write half should stay caller-owned");
+
+        pausedInput.current().close();
+        pausedOutput.current().close();
+        assertEquals(1, input.closeCalls());
+        assertEquals(1, output.closeCalls());
     }
 
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
@@ -1375,6 +1565,83 @@ final class ZmuxConnectionsTest {
 
         byte[] writtenBytes() {
             return output.toByteArray();
+        }
+    }
+
+    private static final class BlockingCloseReadHalf implements ReadHalf {
+        private final CountDownLatch closeStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseClose = new CountDownLatch(1);
+        private final AtomicInteger closeStartCount = new AtomicInteger();
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public void closeRead() throws IOException {
+            closeStartCount.incrementAndGet();
+            closeStarted.countDown();
+            try {
+                releaseClose.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException(interrupted);
+            }
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+        }
+
+        boolean awaitCloseStarted() throws InterruptedException {
+            return closeStarted.await(1, TimeUnit.SECONDS);
+        }
+
+        void releaseClose() {
+            releaseClose.countDown();
+        }
+
+        int closeStartCount() {
+            return closeStartCount.get();
+        }
+    }
+
+    private static final class BlockingCloseWriteHalf implements WriteHalf {
+        private final CountDownLatch closeStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseClose = new CountDownLatch(1);
+        private final AtomicInteger closeStartCount = new AtomicInteger();
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+        }
+
+        @Override
+        public void closeWrite() throws IOException {
+            closeStartCount.incrementAndGet();
+            closeStarted.countDown();
+            try {
+                releaseClose.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException(interrupted);
+            }
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+        }
+
+        boolean awaitCloseStarted() throws InterruptedException {
+            return closeStarted.await(1, TimeUnit.SECONDS);
+        }
+
+        void releaseClose() {
+            releaseClose.countDown();
+        }
+
+        int closeStartCount() {
+            return closeStartCount.get();
         }
     }
 }

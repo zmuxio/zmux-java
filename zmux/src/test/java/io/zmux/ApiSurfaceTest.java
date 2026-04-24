@@ -1367,6 +1367,53 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void joinedConnectionBridgesOuterUniStreamsAsDuplexTransport() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            ZmuxSendStream clientSend = pair.client().openUniStream();
+            ZmuxSendStream serverSend = pair.server().openUniStream();
+
+            clientSend.write("hi".getBytes(StandardCharsets.UTF_8));
+            serverSend.write("yo".getBytes(StandardCharsets.UTF_8));
+
+            try (ZmuxRecvStream clientRecv = pair.client().acceptUniStream(Duration.ofSeconds(2));
+                 ZmuxRecvStream serverRecv = pair.server().acceptUniStream(Duration.ofSeconds(2));
+                 JoinedDuplexConnection clientConn = Zmux.join(clientRecv, clientSend);
+                 JoinedDuplexConnection serverConn = Zmux.join(serverRecv, serverSend)) {
+                byte[] buffer = new byte[8];
+
+                int serverRead = serverConn.input().read(buffer);
+                assertEquals("hi", new String(buffer, 0, serverRead, StandardCharsets.UTF_8));
+
+                int clientRead = clientConn.input().read(buffer);
+                assertEquals("yo", new String(buffer, 0, clientRead, StandardCharsets.UTF_8));
+
+                clientConn.output().write("ping".getBytes(StandardCharsets.UTF_8));
+                int serverSecondRead = serverConn.input().read(buffer);
+                assertEquals("ping", new String(buffer, 0, serverSecondRead, StandardCharsets.UTF_8));
+
+                serverConn.output().write("pong".getBytes(StandardCharsets.UTF_8));
+                int clientSecondRead = clientConn.input().read(buffer);
+                assertEquals("pong", new String(buffer, 0, clientSecondRead, StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    @Test
+    void joinedConnectionCloseWriteProducesPeerEofOnUniRead() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            ZmuxSendStream clientSend = pair.client().openUniStream();
+
+            try (JoinedDuplexConnection connection = Zmux.join((ZmuxRecvStream) null, clientSend)) {
+                connection.closeWrite();
+            }
+
+            try (ZmuxRecvStream serverRecv = pair.server().acceptUniStream(Duration.ofSeconds(2))) {
+                assertEquals(-1, serverRecv.read(new byte[1]));
+            }
+        }
+    }
+
+    @Test
     void defaultWritevFinalRejectsNullPartsBeforeClosingWrite() {
         RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
 

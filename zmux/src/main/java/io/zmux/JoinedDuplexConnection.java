@@ -126,10 +126,19 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             closeable.close();
             return current;
         } catch (IOException error) {
+            if (ignorableCloseFailure(error)) {
+                return current;
+            }
             return appendCloseFailure(current, error);
         } catch (Exception error) {
             return appendCloseFailure(current, new IOException("zmux: failed to close joined connection half", error));
         }
+    }
+
+    private static boolean ignorableCloseFailure(IOException error) {
+        return ZmuxErrors.readClosed(error)
+                || ZmuxErrors.writeClosed(error)
+                || ZmuxErrors.sessionClosed(error);
     }
 
     private static IOException appendCloseFailure(IOException current, IOException next) {
@@ -1116,6 +1125,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             try {
                 if (input != null) {
                     input.close();
+                }
+            } catch (IOException error) {
+                if (!ignorableCloseFailure(error)) {
+                    throw error;
                 }
             } finally {
                 leaveInput();
