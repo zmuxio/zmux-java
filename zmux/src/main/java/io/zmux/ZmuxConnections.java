@@ -17,6 +17,25 @@ public final class ZmuxConnections {
         return BasicDuplexConnection.builder(input, output);
     }
 
+    public static JoinedDuplexConnection join(InputStream input, OutputStream output) {
+        return new JoinedDuplexConnection(input, output);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input,
+                                              OutputStream output,
+                                              SocketAddress localAddress,
+                                              SocketAddress remoteAddress) {
+        return new JoinedDuplexConnection(input, output, null, localAddress, remoteAddress);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input,
+                                              OutputStream output,
+                                              GatheringByteChannel gatheringOutput,
+                                              SocketAddress localAddress,
+                                              SocketAddress remoteAddress) {
+        return new JoinedDuplexConnection(input, output, gatheringOutput, localAddress, remoteAddress);
+    }
+
     public static JoinedDuplexConnection join(ZmuxRecvStream input, ZmuxSendStream output) {
         return new JoinedDuplexConnection(input, output);
     }

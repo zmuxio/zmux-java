@@ -383,6 +383,19 @@ JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
 ZmuxSession nested = Zmux.clientSession(connection);
 ```
 
+The same helper also works for arbitrary split `InputStream` / `OutputStream`
+halves when your transport is not already a zmux stream:
+
+```java
+JoinedDuplexConnection connection = ZmuxConnections.join(
+        inboundInput,
+        outboundOutput,
+        gatheringOutput,
+        localAddress,
+        remoteAddress
+);
+```
+
 The joined connection exposes `InputStream` / `OutputStream` and closes the
 attached stream halves directionally.
 Its pause handles can also swap in replacement `ZmuxRecvStream` /

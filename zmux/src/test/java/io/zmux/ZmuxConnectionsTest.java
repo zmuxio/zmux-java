@@ -106,6 +106,29 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinBuildsJoinedDuplexConnectionFromGenericHalves() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("joined.generic.local", 1234);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.generic.remote", 5678);
+        RecordingInputStream input = new RecordingInputStream(new byte[]{7, 8});
+        RecordingOutputStream output = new RecordingOutputStream();
+        RecordingByteChannel gathering = new RecordingByteChannel();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(input, output, gathering, local, remote)) {
+            assertSame(local, connection.localAddress());
+            assertSame(remote, connection.remoteAddress());
+            assertNotNull(connection.gatheringOutput());
+            assertEquals(7, connection.input().read());
+            connection.output().write(new byte[]{1, 2});
+            connection.gatheringOutput().write(ByteBuffer.wrap(new byte[]{3}));
+        }
+
+        assertArrayEquals(new byte[]{1, 2}, output.toByteArray());
+        assertArrayEquals(new byte[]{3}, gathering.writtenBytes());
+        assertEquals(1, input.closeCalls());
+        assertEquals(1, output.closeCalls());
+    }
+
+    @Test
     void joinedConnectionPauseHandlesCanSwapTypedStreamHalvesAndRefreshAddresses() throws Exception {
         InetSocketAddress firstLocal = InetSocketAddress.createUnresolved("joined.local.a", 7777);
         InetSocketAddress firstRemote = InetSocketAddress.createUnresolved("joined.remote.a", 8888);
