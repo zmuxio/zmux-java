@@ -9,10 +9,16 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ByteChannel;
 import java.nio.channels.GatheringByteChannel;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -336,6 +342,110 @@ final class ZmuxConnectionsTest {
 
         assertThrows(SessionClosedException.class, pausedOutput::resume);
         assertDoesNotThrow(pausedOutput::resume);
+    }
+
+    @Test
+    void joinedConnectionResumeReadReplaysDeadlineSetWhilePaused() throws Exception {
+        JoinedDuplexConnection connection = ZmuxConnections.join(new RecordingReadHalf(new byte[0], null, null), null);
+        JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
+
+        BlockingDeadlineReadHalf replacement = new BlockingDeadlineReadHalf();
+        pause.replaceReadHalf(replacement);
+
+        Instant firstDeadline = Instant.now().plusMillis(30);
+        Instant secondDeadline = Instant.now().plusMillis(60);
+        connection.setReadDeadline(firstDeadline);
+
+        Throwable[] resumeFailure = new Throwable[1];
+        Thread resume = new Thread(() -> {
+            try {
+                pause.resume();
+            } catch (Throwable failure) {
+                resumeFailure[0] = failure;
+            }
+        });
+        resume.start();
+
+        assertTrue(replacement.awaitFirstSet(), "resume should apply first read deadline");
+        connection.setReadDeadline(secondDeadline);
+        replacement.releaseSet();
+        resume.join(TimeUnit.SECONDS.toMillis(1));
+        assertFalse(resume.isAlive(), "pause resume should complete after deadline refresh");
+        assertNull(resumeFailure[0], "pause resume should not fail");
+
+        List<Instant> deadlines = replacement.snapshotDeadlines();
+        assertEquals(2, deadlines.size());
+        assertEquals(firstDeadline, deadlines.get(0));
+        assertEquals(secondDeadline, deadlines.get(1));
+        assertSame(replacement, connection.readHalf());
+        connection.close();
+    }
+
+    @Test
+    void joinedConnectionResumeWriteReplaysDeadlineSetWhilePaused() throws Exception {
+        JoinedDuplexConnection connection = ZmuxConnections.join(null, new RecordingWriteHalf(null, null, null));
+        JoinedDuplexConnection.PausedOutput pause = connection.pauseWrite();
+
+        BlockingDeadlineWriteHalf replacement = new BlockingDeadlineWriteHalf();
+        pause.replaceWriteHalf(replacement);
+
+        Instant firstDeadline = Instant.now().plusMillis(30);
+        Instant secondDeadline = Instant.now().plusMillis(60);
+        connection.setWriteDeadline(firstDeadline);
+
+        Throwable[] resumeFailure = new Throwable[1];
+        Thread resume = new Thread(() -> {
+            try {
+                pause.resume();
+            } catch (Throwable failure) {
+                resumeFailure[0] = failure;
+            }
+        });
+        resume.start();
+
+        assertTrue(replacement.awaitFirstSet(), "resume should apply first write deadline");
+        connection.setWriteDeadline(secondDeadline);
+        replacement.releaseSet();
+        resume.join(TimeUnit.SECONDS.toMillis(1));
+        assertFalse(resume.isAlive(), "pause resume should complete after deadline refresh");
+        assertNull(resumeFailure[0], "pause resume should not fail");
+
+        List<Instant> deadlines = replacement.snapshotDeadlines();
+        assertEquals(2, deadlines.size());
+        assertEquals(firstDeadline, deadlines.get(0));
+        assertEquals(secondDeadline, deadlines.get(1));
+        assertSame(replacement, connection.writeHalf());
+        connection.close();
+    }
+
+    @Test
+    void joinedConnectionPauseReadDeadlineTimesOutBlockedCloseRead() throws Exception {
+        RecordingReadHalf readHalf = new RecordingReadHalf(new byte[0], null, null);
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
+            connection.setReadDeadline(Instant.now().plusMillis(30));
+
+            SocketTimeoutException timeout = assertThrows(SocketTimeoutException.class, connection::closeRead);
+            assertTrue(timeout.getMessage().contains("read deadline"));
+            assertEquals(0, readHalf.closeReadCalls());
+
+            pause.resume();
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseWriteDeadlineTimesOutBlockedCloseWrite() throws Exception {
+        RecordingWriteHalf writeHalf = new RecordingWriteHalf(null, null, null);
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(null, writeHalf)) {
+            JoinedDuplexConnection.PausedOutput pause = connection.pauseWrite();
+            connection.setWriteDeadline(Instant.now().plusMillis(30));
+
+            SocketTimeoutException timeout = assertThrows(SocketTimeoutException.class, connection::closeWrite);
+            assertTrue(timeout.getMessage().contains("write deadline"));
+            assertEquals(0, writeHalf.closeWriteCalls());
+
+            pause.resume();
+        }
     }
 
     @Test
@@ -875,6 +985,91 @@ final class ZmuxConnectionsTest {
 
         int writeDeadlineClearCalls() {
             return writeDeadlineClearCalls;
+        }
+    }
+
+    private static final class BlockingDeadlineReadHalf implements ReadHalf {
+        private final CountDownLatch setStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseSet = new CountDownLatch(1);
+        private final List<Instant> deadlines = new ArrayList<>();
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public void closeRead() {
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+            synchronized (deadlines) {
+                deadlines.add(deadline);
+            }
+            setStarted.countDown();
+            try {
+                releaseSet.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(interrupted);
+            }
+        }
+
+        boolean awaitFirstSet() throws InterruptedException {
+            return setStarted.await(1, TimeUnit.SECONDS);
+        }
+
+        void releaseSet() {
+            releaseSet.countDown();
+        }
+
+        List<Instant> snapshotDeadlines() {
+            synchronized (deadlines) {
+                return new ArrayList<>(deadlines);
+            }
+        }
+    }
+
+    private static final class BlockingDeadlineWriteHalf implements WriteHalf {
+        private final CountDownLatch setStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseSet = new CountDownLatch(1);
+        private final List<Instant> deadlines = new ArrayList<>();
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+        }
+
+        @Override
+        public void closeWrite() {
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+            synchronized (deadlines) {
+                deadlines.add(deadline);
+            }
+            setStarted.countDown();
+            try {
+                releaseSet.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(interrupted);
+            }
+        }
+
+        boolean awaitFirstSet() throws InterruptedException {
+            return setStarted.await(1, TimeUnit.SECONDS);
+        }
+
+        void releaseSet() {
+            releaseSet.countDown();
+        }
+
+        List<Instant> snapshotDeadlines() {
+            synchronized (deadlines) {
+                return new ArrayList<>(deadlines);
+            }
         }
     }
 }

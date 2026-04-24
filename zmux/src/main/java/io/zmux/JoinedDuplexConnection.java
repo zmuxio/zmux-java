@@ -8,6 +8,7 @@ import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.channels.GatheringByteChannel;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.IdentityHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
@@ -31,8 +32,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private boolean outputPaused;
     private int activeInputOperations;
     private int activeOutputOperations;
+    private int activeInputDeadlineOperations;
+    private int activeOutputDeadlineOperations;
     private int inputWaiters;
     private int outputWaiters;
+    private Instant readDeadline;
+    private Instant writeDeadline;
+    private long readDeadlineGeneration;
+    private long writeDeadlineGeneration;
     private boolean closed;
 
     public JoinedDuplexConnection(InputStream inputHalf, OutputStream outputHalf) {
@@ -241,7 +248,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             inputPaused = true;
             ownsPause = true;
             signalInputChangedLocked();
-            while (activeInputOperations > 0 && !closed) {
+            while ((activeInputOperations > 0 || activeInputDeadlineOperations > 0) && !closed) {
                 awaitInput(deadline);
             }
             ensureOpenLocked();
@@ -284,7 +291,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             outputPaused = true;
             ownsPause = true;
             signalOutputChangedLocked();
-            while (activeOutputOperations > 0 && !closed) {
+            while ((activeOutputOperations > 0 || activeOutputDeadlineOperations > 0) && !closed) {
                 awaitOutput(deadline);
             }
             ensureOpenLocked();
@@ -327,6 +334,105 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     public void closeWrite() throws IOException {
         closeOutput();
+    }
+
+    public void setDeadline(Instant deadline) throws IOException {
+        setReadDeadline(deadline);
+        setWriteDeadline(deadline);
+    }
+
+    public void setReadDeadline(Instant deadline) throws IOException {
+        ReadHalf half;
+        lock.lock();
+        try {
+            ensureOpenLocked();
+            readDeadline = deadline;
+            readDeadlineGeneration++;
+            half = inputPaused ? null : typedReadHalf(inputHalf);
+            if (half != null) {
+                activeInputDeadlineOperations++;
+            }
+            signalInputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+
+        if (half == null) {
+            return;
+        }
+
+        try {
+            half.setReadDeadline(deadline);
+        } finally {
+            lock.lock();
+            try {
+                if (activeInputDeadlineOperations > 0) {
+                    activeInputDeadlineOperations--;
+                }
+                signalInputChangedLocked();
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    public void setWriteDeadline(Instant deadline) throws IOException {
+        WriteHalf half;
+        lock.lock();
+        try {
+            ensureOpenLocked();
+            writeDeadline = deadline;
+            writeDeadlineGeneration++;
+            half = outputPaused ? null : typedWriteHalf(outputHalf);
+            if (half != null) {
+                activeOutputDeadlineOperations++;
+            }
+            signalOutputChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+
+        if (half == null) {
+            return;
+        }
+
+        try {
+            half.setWriteDeadline(deadline);
+        } finally {
+            lock.lock();
+            try {
+                if (activeOutputDeadlineOperations > 0) {
+                    activeOutputDeadlineOperations--;
+                }
+                signalOutputChangedLocked();
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    public void setReadTimeout(Duration timeout) throws IOException {
+        setReadDeadline(DeadlineSupport.after(timeout));
+    }
+
+    public void setWriteTimeout(Duration timeout) throws IOException {
+        setWriteDeadline(DeadlineSupport.after(timeout));
+    }
+
+    public void setTimeout(Duration timeout) throws IOException {
+        setDeadline(DeadlineSupport.after(timeout));
+    }
+
+    public void clearReadDeadline() throws IOException {
+        setReadDeadline(null);
+    }
+
+    public void clearWriteDeadline() throws IOException {
+        setWriteDeadline(null);
+    }
+
+    public void clearDeadline() throws IOException {
+        setDeadline(null);
     }
 
     @Override
@@ -420,41 +526,97 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     }
 
     private void resumeInput(PausedInput paused) throws IOException {
-        lock.lock();
-        try {
-            if (paused.resumed) {
-                return;
+        while (true) {
+            ReadHalf currentHalf = typedReadHalf(paused.current);
+            Instant deadline;
+            long generation;
+            lock.lock();
+            try {
+                if (paused.resumed) {
+                    return;
+                }
+                if (closed) {
+                    paused.resumed = true;
+                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                }
+                deadline = readDeadline;
+                generation = readDeadlineGeneration;
+            } finally {
+                lock.unlock();
             }
-            if (closed) {
+
+            if (currentHalf != null) {
+                currentHalf.setReadDeadline(deadline);
+            }
+
+            lock.lock();
+            try {
+                if (paused.resumed) {
+                    return;
+                }
+                if (closed) {
+                    paused.resumed = true;
+                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                }
+                if (currentHalf != null && readDeadlineGeneration != generation) {
+                    continue;
+                }
+                inputHalf = paused.current;
+                inputPaused = false;
                 paused.resumed = true;
-                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                signalInputChangedLocked();
+                return;
+            } finally {
+                lock.unlock();
             }
-            inputHalf = paused.current;
-            inputPaused = false;
-            paused.resumed = true;
-            signalInputChangedLocked();
-        } finally {
-            lock.unlock();
         }
     }
 
     private void resumeOutput(PausedOutput paused) throws IOException {
-        lock.lock();
-        try {
-            if (paused.resumed) {
-                return;
+        while (true) {
+            WriteHalf currentHalf = typedWriteHalf(paused.current);
+            Instant deadline;
+            long generation;
+            lock.lock();
+            try {
+                if (paused.resumed) {
+                    return;
+                }
+                if (closed) {
+                    paused.resumed = true;
+                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                }
+                deadline = writeDeadline;
+                generation = writeDeadlineGeneration;
+            } finally {
+                lock.unlock();
             }
-            if (closed) {
+
+            if (currentHalf != null) {
+                currentHalf.setWriteDeadline(deadline);
+            }
+
+            lock.lock();
+            try {
+                if (paused.resumed) {
+                    return;
+                }
+                if (closed) {
+                    paused.resumed = true;
+                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                }
+                if (currentHalf != null && writeDeadlineGeneration != generation) {
+                    continue;
+                }
+                outputHalf = paused.current;
+                gatheringOutput = paused.gathering;
+                outputPaused = false;
                 paused.resumed = true;
-                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+                signalOutputChangedLocked();
+                return;
+            } finally {
+                lock.unlock();
             }
-            outputHalf = paused.current;
-            gatheringOutput = paused.gathering;
-            outputPaused = false;
-            paused.resumed = true;
-            signalOutputChangedLocked();
-        } finally {
-            lock.unlock();
         }
     }
 
@@ -489,7 +651,9 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private void awaitInputUninterruptiblyAsIo() throws IOException {
         inputWaiters++;
         try {
-            inputChanged.await();
+            if (!awaitUntilDeadline(inputChanged, readDeadline)) {
+                throw readDeadlineTimeout();
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             InterruptedIOException io = new InterruptedIOException("zmux: interrupted while waiting for input half resume");
@@ -503,7 +667,9 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private void awaitOutputUninterruptiblyAsIo() throws IOException {
         outputWaiters++;
         try {
-            outputChanged.await();
+            if (!awaitUntilDeadline(outputChanged, writeDeadline)) {
+                throw writeDeadlineTimeout();
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             InterruptedIOException io = new InterruptedIOException("zmux: interrupted while waiting for output half resume");
@@ -524,6 +690,37 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         if (outputWaiters > 0) {
             outputChanged.signalAll();
         }
+    }
+
+    private static boolean awaitUntilDeadline(Condition condition, Instant deadline) throws InterruptedException {
+        if (deadline == null) {
+            condition.await();
+            return true;
+        }
+        while (true) {
+            Instant now = Instant.now();
+            if (!deadline.isAfter(now)) {
+                return false;
+            }
+            long remainingNanos;
+            try {
+                remainingNanos = Duration.between(now, deadline).toNanos();
+            } catch (ArithmeticException overflow) {
+                remainingNanos = Long.MAX_VALUE;
+            }
+            if (remainingNanos <= 0L) {
+                return false;
+            }
+            return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private static SocketTimeoutException readDeadlineTimeout() {
+        return new SocketTimeoutException("zmux: joined connection read deadline exceeded");
+    }
+
+    private static SocketTimeoutException writeDeadlineTimeout() {
+        return new SocketTimeoutException("zmux: joined connection write deadline exceeded");
     }
 
     public static final class PausedInput {

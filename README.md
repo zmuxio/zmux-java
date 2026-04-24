@@ -429,7 +429,9 @@ If you need Go `JoinedConn`-style inspection and half-close control, use
 `inputHalf()`, `outputHalf()`, `readHalf()`, `writeHalf()`, `closeInput()`,
 and `closeOutput()`. When you pause a directional half, the pause handle also
 exposes `currentReadHalf()` / `currentWriteHalf()` plus typed replacement
-helpers before `resume()`.
+helpers before `resume()`. `JoinedDuplexConnection` also exposes joined-level
+`setReadDeadline(...)`, `setWriteDeadline(...)`, and `setDeadline(...)` so
+paused reads, writes, and directional closes can still be bounded.
 
 ### Existing Buffers
 
