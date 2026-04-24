@@ -46,6 +46,45 @@ final class ZmuxConnectionsTest {
         assertFalse(channel.isOpen());
     }
 
+    @Test
+    void builderAndExtendedFactorySupportCustomConnectionMetadata() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("builder.local", 3333);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("builder.remote", 4444);
+        RecordingByteChannel gathering = new RecordingByteChannel();
+        AtomicInteger closerCalls = new AtomicInteger();
+
+        DuplexConnection built = ZmuxConnections.builder(
+                        new ByteArrayInputStream(new byte[0]),
+                        new ByteArrayOutputStream()
+                )
+                .closer(() -> closerCalls.incrementAndGet())
+                .addresses(local, remote)
+                .gatheringOutput(gathering)
+                .build();
+
+        assertSame(local, built.localAddress());
+        assertSame(remote, built.remoteAddress());
+        assertSame(gathering, built.gatheringOutput());
+        built.close();
+        assertEquals(1, closerCalls.get());
+
+        RecordingByteChannel gatheringFromFactory = new RecordingByteChannel();
+        DuplexConnection viaFactory = ZmuxConnections.of(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                () -> {
+                },
+                local,
+                remote,
+                gatheringFromFactory
+        );
+
+        assertSame(local, viaFactory.localAddress());
+        assertSame(remote, viaFactory.remoteAddress());
+        assertSame(gatheringFromFactory, viaFactory.gatheringOutput());
+        viaFactory.close();
+    }
+
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
         private final ByteArrayOutputStream written = new ByteArrayOutputStream();
         private final AtomicInteger closeCount = new AtomicInteger();

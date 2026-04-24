@@ -421,6 +421,24 @@ try (Socket socket = new Socket("127.0.0.1", 9000);
 The peer can read `stream.openInfo()` and `stream.metadata()` after accepting
 the stream.
 
+### Custom Transport Adapters
+
+If your underlying transport is not a `Socket` or NIO channel, wrap it as a
+generic `DuplexConnection`:
+
+```java
+import io.zmux.DuplexConnection;
+import io.zmux.ZmuxConnections;
+
+DuplexConnection connection = ZmuxConnections.builder(input, output)
+        .closer(transport)
+        .gatheringOutput(gatheringOutput)
+        .addresses(localAddress, remoteAddress)
+        .build();
+```
+
+This is the most generic integration path for custom transports and wrappers.
+
 ### Timeouts And Deadlines
 
 ```java

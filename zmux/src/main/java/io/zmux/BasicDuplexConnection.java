@@ -43,6 +43,10 @@ public final class BasicDuplexConnection implements DuplexConnection {
         this.remoteAddress = remoteAddress;
     }
 
+    public static Builder builder(InputStream input, OutputStream output) {
+        return new Builder(input, output);
+    }
+
     private static ZmuxException closeFailure(String target, Exception cause) {
         return new ZmuxException(
                 ErrorCode.INTERNAL.code(),
@@ -133,6 +137,57 @@ public final class BasicDuplexConnection implements DuplexConnection {
                 return;
             }
             error.addSuppressed(next);
+        }
+    }
+
+    public static final class Builder {
+        private final InputStream input;
+        private final OutputStream output;
+        private AutoCloseable closer;
+        private SocketAddress localAddress;
+        private SocketAddress remoteAddress;
+        private GatheringByteChannel gatheringOutput;
+
+        private Builder(InputStream input, OutputStream output) {
+            this.input = Objects.requireNonNull(input, "input");
+            this.output = Objects.requireNonNull(output, "output");
+        }
+
+        public Builder closer(AutoCloseable closer) {
+            this.closer = closer;
+            return this;
+        }
+
+        public Builder localAddress(SocketAddress localAddress) {
+            this.localAddress = localAddress;
+            return this;
+        }
+
+        public Builder remoteAddress(SocketAddress remoteAddress) {
+            this.remoteAddress = remoteAddress;
+            return this;
+        }
+
+        public Builder addresses(SocketAddress localAddress, SocketAddress remoteAddress) {
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+            return this;
+        }
+
+        public Builder gatheringOutput(GatheringByteChannel gatheringOutput) {
+            this.gatheringOutput = gatheringOutput;
+            return this;
+        }
+
+        public BasicDuplexConnection build() {
+            return new BasicDuplexConnection(
+                    input,
+                    output,
+                    closer,
+                    localAddress,
+                    remoteAddress,
+                    gatheringOutput
+            );
         }
     }
 }

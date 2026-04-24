@@ -13,6 +13,10 @@ public final class ZmuxConnections {
     private ZmuxConnections() {
     }
 
+    public static BasicDuplexConnection.Builder builder(InputStream input, OutputStream output) {
+        return BasicDuplexConnection.builder(input, output);
+    }
+
     public static DuplexConnection of(Socket socket) throws IOException {
         return new SocketDuplexConnection(socket);
     }
@@ -26,6 +30,19 @@ public final class ZmuxConnections {
                                       SocketAddress localAddress,
                                       SocketAddress remoteAddress) {
         return new BasicDuplexConnection(input, output, null, localAddress, remoteAddress);
+    }
+
+    public static DuplexConnection of(InputStream input,
+                                      OutputStream output,
+                                      AutoCloseable closer,
+                                      SocketAddress localAddress,
+                                      SocketAddress remoteAddress,
+                                      GatheringByteChannel gatheringOutput) {
+        return builder(input, output)
+                .closer(closer)
+                .addresses(localAddress, remoteAddress)
+                .gatheringOutput(gatheringOutput)
+                .build();
     }
 
     public static DuplexConnection of(ByteChannel channel) {

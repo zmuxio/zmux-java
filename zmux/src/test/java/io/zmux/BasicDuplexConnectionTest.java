@@ -215,6 +215,24 @@ final class BasicDuplexConnectionTest {
         assertTrue(outputClosed.get(), "output should still be closed");
     }
 
+    @Test
+    void builderCarriesOptionalComponents() {
+        AtomicBoolean inputClosed = new AtomicBoolean();
+        AtomicBoolean outputClosed = new AtomicBoolean();
+        RecordingGatheringChannel gatheringOutput = new RecordingGatheringChannel(null);
+
+        BasicDuplexConnection connection = BasicDuplexConnection.builder(
+                        trackingInput(inputClosed),
+                        trackingOutput(outputClosed)
+                )
+                .closer(gatheringOutput)
+                .addresses(null, null)
+                .gatheringOutput(gatheringOutput)
+                .build();
+
+        assertSame(gatheringOutput, connection.gatheringOutput());
+    }
+
     private static final class RecordingGatheringChannel implements GatheringByteChannel {
         private final IOException closeFailure;
         private final AtomicInteger closeCount = new AtomicInteger();
