@@ -604,6 +604,27 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void structuredErrorLookupFindsSuppressedTypedErrors() {
+        IOException wrapped = new IOException("outer");
+        ApplicationError suppressed = new ApplicationError(
+                ErrorCode.PROTOCOL,
+                "peer",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        );
+        wrapped.addSuppressed(suppressed);
+
+        assertSame(suppressed, ZmuxErrors.applicationError(wrapped));
+        assertSame(suppressed, ZmuxErrors.find(wrapped, ApplicationError.class));
+        assertSame(suppressed, ZmuxErrors.details(wrapped));
+        assertEquals("peer", ZmuxErrors.reason(wrapped));
+        assertEquals(ErrorCode.PROTOCOL, ZmuxErrors.code(wrapped));
+        assertTrue(ZmuxErrors.isCode(wrapped, ErrorCode.PROTOCOL));
+    }
+
+    @Test
     void typedErrorCodeHelpersRecognizeKnownStandardCodes() {
         IOException wrapped = new IOException("outer", new ApplicationError(
                 ErrorCode.PROTOCOL.code(),
@@ -646,6 +667,17 @@ final class ApiSurfaceTest {
         assertTrue(ZmuxErrors.writeClosed(writeClosed));
         assertFalse(ZmuxErrors.sessionClosed(writeClosed));
         assertFalse(ZmuxErrors.readClosed(writeClosed));
+    }
+
+    @Test
+    void closedStateHelpersRecognizeSuppressedDirectionalClosure() {
+        IOException aggregate = new IOException("aggregate");
+        aggregate.addSuppressed(new ReadClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+        aggregate.addSuppressed(new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+
+        assertTrue(ZmuxErrors.readClosed(aggregate));
+        assertTrue(ZmuxErrors.writeClosed(aggregate));
+        assertFalse(ZmuxErrors.sessionClosed(aggregate));
     }
 
     @Test

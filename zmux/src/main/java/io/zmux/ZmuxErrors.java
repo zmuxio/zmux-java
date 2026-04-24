@@ -2,21 +2,36 @@ package io.zmux;
 
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
+import java.util.ArrayDeque;
+import java.util.IdentityHashMap;
 
 public final class ZmuxErrors {
     private ZmuxErrors() {
     }
 
     public static <T> T find(Throwable error, Class<T> type) {
-        if (type == null) {
+        if (error == null || type == null) {
             return null;
         }
-        Throwable current = error;
-        while (current != null) {
+        ArrayDeque<Throwable> pending = new ArrayDeque<>();
+        IdentityHashMap<Throwable, Boolean> seen = new IdentityHashMap<>();
+        pending.push(error);
+        while (!pending.isEmpty()) {
+            Throwable current = pending.pop();
+            if (current == null || seen.put(current, Boolean.TRUE) != null) {
+                continue;
+            }
             if (type.isInstance(current)) {
                 return type.cast(current);
             }
-            current = current.getCause();
+            Throwable[] suppressed = current.getSuppressed();
+            for (int i = suppressed.length - 1; i >= 0; i--) {
+                pending.push(suppressed[i]);
+            }
+            Throwable cause = current.getCause();
+            if (cause != null) {
+                pending.push(cause);
+            }
         }
         return null;
     }
