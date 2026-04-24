@@ -381,7 +381,7 @@ import io.zmux.ZmuxSendStream;
 ZmuxRecvStream inbound = session.acceptUniStream();
 ZmuxSendStream outbound = session.openUniStream();
 
-JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
+JoinedDuplexConnection connection = Zmux.join(inbound, outbound);
 ZmuxSession nested = Zmux.clientSession(connection);
 ```
 
@@ -398,7 +398,7 @@ The same helper also works for arbitrary split `InputStream` / `OutputStream`
 halves when your transport is not already a zmux stream:
 
 ```java
-JoinedDuplexConnection connection = ZmuxConnections.join(
+JoinedDuplexConnection connection = Zmux.join(
         inboundInput,
         outboundOutput,
         gatheringOutput,
@@ -413,7 +413,7 @@ those semantics instead of first collapsing everything into raw streams:
 ```java
 ReadHalf inbound = ...;
 WriteHalf outbound = ...;
-JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
+JoinedDuplexConnection connection = Zmux.join(inbound, outbound);
 ```
 
 The joined connection exposes `InputStream` / `OutputStream` and closes the
@@ -423,6 +423,8 @@ Its pause handles can also swap in replacement `ZmuxRecvStream` /
 Because it implements `DuplexConnection`, you can pass it straight into
 `Zmux.openSession(...)`, `Zmux.clientSession(...)`, or `Zmux.serverSession(...)`
 as the transport itself.
+`ZmuxConnections.join(...)` remains available if you prefer the adapter-focused
+namespace.
 If you need Go `JoinedConn`-style inspection and half-close control, use
 `inputHalf()`, `outputHalf()`, `closeInput()`, and `closeOutput()`.
 

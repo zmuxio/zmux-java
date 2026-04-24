@@ -3,6 +3,7 @@ package io.zmux;
 import org.junit.jupiter.api.Test;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
@@ -141,6 +142,73 @@ final class ApiSurfaceTest {
         try (SessionPair pair = SessionPair.open()) {
             assertSame(pair.client(), Zmux.asSession(pair.client()));
             assertSame(pair.server(), Zmux.asSession(pair.server()));
+        }
+    }
+
+    @Test
+    void zmuxJoinHelpersDelegateToConnectionJoinAdapters() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("join.local", 3131);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("join.remote", 4141);
+        ReadHalf recv = new ReadHalf() {
+            @Override
+            public int read(byte[] dst, int offset, int length) {
+                return -1;
+            }
+
+            @Override
+            public void closeRead() {
+            }
+
+            @Override
+            public void setReadDeadline(Instant deadline) {
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return local;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return remote;
+            }
+        };
+        WriteHalf send = new WriteHalf() {
+            @Override
+            public void write(byte[] src, int offset, int length) {
+            }
+
+            @Override
+            public void closeWrite() {
+            }
+
+            @Override
+            public void setWriteDeadline(Instant deadline) {
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return local;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return remote;
+            }
+        };
+        ByteArrayInputStream input = new ByteArrayInputStream(new byte[]{1});
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        try (JoinedDuplexConnection fromHalves = Zmux.join((ReadHalf) recv, (WriteHalf) send);
+             JoinedDuplexConnection fromIo = Zmux.join(input, output, local, remote)) {
+            assertSame(local, fromHalves.localAddress());
+            assertSame(remote, fromHalves.remoteAddress());
+            assertSame(local, fromIo.localAddress());
+            assertSame(remote, fromIo.remoteAddress());
+        }
+
+        try (JoinedDuplexConnection fromStreams = Zmux.join(new RecordingDefaultRecvStream(), new RecordingDefaultSendStream())) {
+            assertNotNull(fromStreams);
         }
     }
 

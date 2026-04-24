@@ -6,7 +6,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.nio.channels.ByteChannel;
+import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.time.Duration;
@@ -61,6 +63,33 @@ public final class Zmux {
 
     public static ZmuxNativeSession asNativeSession(ZmuxNativeSession session) {
         return session == null ? closedNativeSession() : session;
+    }
+
+    public static JoinedDuplexConnection join(ReadHalf input, WriteHalf output) {
+        return ZmuxConnections.join(input, output);
+    }
+
+    public static JoinedDuplexConnection join(ZmuxRecvStream input, ZmuxSendStream output) {
+        return ZmuxConnections.join(input, output);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input, OutputStream output) {
+        return ZmuxConnections.join(input, output);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input,
+                                              OutputStream output,
+                                              SocketAddress localAddress,
+                                              SocketAddress remoteAddress) {
+        return ZmuxConnections.join(input, output, localAddress, remoteAddress);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input,
+                                              OutputStream output,
+                                              GatheringByteChannel gatheringOutput,
+                                              SocketAddress localAddress,
+                                              SocketAddress remoteAddress) {
+        return ZmuxConnections.join(input, output, gatheringOutput, localAddress, remoteAddress);
     }
 
     public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
