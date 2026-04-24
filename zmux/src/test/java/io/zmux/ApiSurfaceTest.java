@@ -547,6 +547,16 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void capabilityErrorHelpersRecognizeAdapterUnsupportedVariants() {
+        IOException wrapped = new IOException("outer", new PriorityUpdateUnavailableException());
+
+        assertTrue(ZmuxErrors.adapterUnsupported(wrapped));
+        assertTrue(ZmuxErrors.priorityUpdateUnavailable(wrapped));
+        assertFalse(ZmuxErrors.adapterUnsupported(new IOException("plain")));
+        assertFalse(ZmuxErrors.priorityUpdateUnavailable(new AdapterUnsupportedException("generic adapter limit")));
+    }
+
+    @Test
     void structuredErrorReasonFallsBackToTypedSentinelMessage() {
         SessionClosedException closed = new SessionClosedException(ZmuxErrorSource.REMOTE);
 

@@ -97,6 +97,14 @@ public final class ZmuxErrors {
         return details != null ? details.timeout() : error instanceof SocketTimeoutException;
     }
 
+    public static boolean adapterUnsupported(Throwable error) {
+        return details(error) instanceof AdapterUnsupportedException;
+    }
+
+    public static boolean priorityUpdateUnavailable(Throwable error) {
+        return details(error) instanceof PriorityUpdateUnavailableException;
+    }
+
     public static boolean interrupted(Throwable error) {
         ZmuxErrorDetails details = details(error);
         return details != null
