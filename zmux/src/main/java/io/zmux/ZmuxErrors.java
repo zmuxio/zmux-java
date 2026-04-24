@@ -7,15 +7,26 @@ public final class ZmuxErrors {
     private ZmuxErrors() {
     }
 
-    public static ZmuxErrorDetails details(Throwable error) {
+    public static <T> T find(Throwable error, Class<T> type) {
+        if (type == null) {
+            return null;
+        }
         Throwable current = error;
         while (current != null) {
-            if (current instanceof ZmuxErrorDetails) {
-                return (ZmuxErrorDetails) current;
+            if (type.isInstance(current)) {
+                return type.cast(current);
             }
             current = current.getCause();
         }
         return null;
+    }
+
+    public static ZmuxErrorDetails details(Throwable error) {
+        return find(error, ZmuxErrorDetails.class);
+    }
+
+    public static ApplicationError applicationError(Throwable error) {
+        return find(error, ApplicationError.class);
     }
 
     public static boolean hasCode(Throwable error) {
@@ -98,23 +109,23 @@ public final class ZmuxErrors {
     }
 
     public static boolean adapterUnsupported(Throwable error) {
-        return details(error) instanceof AdapterUnsupportedException;
+        return find(error, AdapterUnsupportedException.class) != null;
     }
 
     public static boolean priorityUpdateUnavailable(Throwable error) {
-        return details(error) instanceof PriorityUpdateUnavailableException;
+        return find(error, PriorityUpdateUnavailableException.class) != null;
     }
 
     public static boolean sessionClosed(Throwable error) {
-        return details(error) instanceof SessionClosedException;
+        return find(error, SessionClosedException.class) != null;
     }
 
     public static boolean readClosed(Throwable error) {
-        return details(error) instanceof ReadClosedException;
+        return find(error, ReadClosedException.class) != null;
     }
 
     public static boolean writeClosed(Throwable error) {
-        return details(error) instanceof WriteClosedException;
+        return find(error, WriteClosedException.class) != null;
     }
 
     public static boolean interrupted(Throwable error) {

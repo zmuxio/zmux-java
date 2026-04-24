@@ -512,15 +512,20 @@ final class ApiSurfaceTest {
         ));
 
         ZmuxErrorDetails details = ZmuxErrors.details(wrapped);
+        ApplicationError applicationError = ZmuxErrors.applicationError(wrapped);
 
         assertNotNull(details);
+        assertNotNull(applicationError);
         assertEquals(41L, details.code());
+        assertEquals(41L, applicationError.code());
         assertEquals("peer", details.reason());
         assertEquals(ZmuxErrorDirection.BOTH, details.direction());
         assertTrue(ZmuxErrors.hasCode(wrapped));
         assertEquals(41L, ZmuxErrors.code(wrapped, -1L));
         assertNull(ZmuxErrors.code(wrapped), "unknown application codes should stay available through raw long helpers only");
         assertFalse(ZmuxErrors.isCode(wrapped, ErrorCode.PROTOCOL));
+        assertSame(applicationError, ZmuxErrors.find(wrapped, ApplicationError.class));
+        assertSame(details, ZmuxErrors.find(wrapped, ZmuxErrorDetails.class));
         assertEquals("", ZmuxErrors.operation(wrapped));
         assertEquals("peer", ZmuxErrors.reason(wrapped));
         assertEquals(ZmuxErrorScope.SESSION, ZmuxErrors.scope(wrapped));
@@ -573,6 +578,14 @@ final class ApiSurfaceTest {
         assertTrue(ZmuxErrors.writeClosed(writeClosed));
         assertFalse(ZmuxErrors.sessionClosed(writeClosed));
         assertFalse(ZmuxErrors.readClosed(writeClosed));
+    }
+
+    @Test
+    void genericErrorLookupReturnsNullWhenTypeIsAbsent() {
+        IOException plain = new IOException("plain");
+
+        assertNull(ZmuxErrors.find(plain, ApplicationError.class));
+        assertNull(ZmuxErrors.applicationError(plain));
     }
 
     @Test
