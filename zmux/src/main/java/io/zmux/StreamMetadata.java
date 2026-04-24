@@ -23,6 +23,17 @@ public final class StreamMetadata {
         return EMPTY;
     }
 
+    public static StreamMetadata of(long priority, Long group, byte[] openInfo) {
+        if (priority == 0L && group == null && (openInfo == null || openInfo.length == 0)) {
+            return EMPTY;
+        }
+        return new StreamMetadata(priority, group, openInfo);
+    }
+
+    public static StreamMetadata withOpenInfo(byte[] openInfo) {
+        return of(0L, null, openInfo);
+    }
+
     private static byte[] normalizeOpenInfo(byte[] openInfo) {
         if (openInfo == null || openInfo.length == 0) {
             return EMPTY_OPEN_INFO;
@@ -51,12 +62,24 @@ public final class StreamMetadata {
         return group;
     }
 
+    public boolean hasGroup() {
+        return group != null;
+    }
+
     public byte[] openInfo() {
         return openInfo.length == 0 ? EMPTY_OPEN_INFO : Arrays.copyOf(openInfo, openInfo.length);
     }
 
     public int openInfoLength() {
         return openInfo.length;
+    }
+
+    public boolean hasOpenInfo() {
+        return openInfo.length != 0;
+    }
+
+    public boolean isEmpty() {
+        return priority == 0L && group == null && openInfo.length == 0;
     }
 
     @Override

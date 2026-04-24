@@ -31,6 +31,14 @@ public final class OpenOptions {
         return new OpenOptions(initialPriority, initialGroup, openInfo);
     }
 
+    public static OpenOptions priority(long initialPriority) {
+        return of(initialPriority, null, null);
+    }
+
+    public static OpenOptions group(long initialGroup) {
+        return of(null, initialGroup, null);
+    }
+
     public static OpenOptions withOpenInfo(byte[] openInfo) {
         return of(null, null, openInfo);
     }
@@ -64,8 +72,16 @@ public final class OpenOptions {
         return initialPriority;
     }
 
+    public boolean hasInitialPriority() {
+        return initialPriority != null;
+    }
+
     public Long initialGroup() {
         return initialGroup;
+    }
+
+    public boolean hasInitialGroup() {
+        return initialGroup != null;
     }
 
     public byte[] openInfo() {
@@ -74,6 +90,14 @@ public final class OpenOptions {
 
     public int openInfoLength() {
         return openInfo.length;
+    }
+
+    public boolean hasOpenInfo() {
+        return openInfo.length != 0;
+    }
+
+    public boolean isEmpty() {
+        return initialPriority == null && initialGroup == null && openInfo.length == 0;
     }
 
     @Override

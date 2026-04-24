@@ -43,12 +43,24 @@ public final class MetadataUpdate {
         return priority == null && group == null;
     }
 
+    public boolean isEmpty() {
+        return empty();
+    }
+
     public Long priority() {
         return priority;
     }
 
+    public boolean hasPriority() {
+        return priority != null;
+    }
+
     public Long group() {
         return group;
+    }
+
+    public boolean hasGroup() {
+        return group != null;
     }
 
     @Override

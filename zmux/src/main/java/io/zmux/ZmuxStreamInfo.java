@@ -7,6 +7,14 @@ public interface ZmuxStreamInfo {
 
     byte[] openInfo();
 
+    default int openInfoLength() {
+        return metadata().openInfoLength();
+    }
+
+    default boolean hasOpenInfo() {
+        return openInfoLength() != 0;
+    }
+
     StreamMetadata metadata();
 
     SocketAddress localAddress();

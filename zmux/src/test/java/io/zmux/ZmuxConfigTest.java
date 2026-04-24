@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class ZmuxConfigTest {
@@ -189,5 +191,50 @@ final class ZmuxConfigTest {
         assertEquals(Settings.defaults().maxControlPayloadBytes(), config.settings().maxControlPayloadBytes());
         assertEquals(Settings.defaults().maxExtensionPayloadBytes(), config.settings().maxExtensionPayloadBytes());
         assertEquals(config.settings(), config.localPreface().settings());
+    }
+
+    @Test
+    void prefaceAndNegotiatedExposeCapabilityHelpers() {
+        long capabilities = Protocol.CAPABILITY_OPEN_METADATA
+                | Protocol.CAPABILITY_PRIORITY_UPDATE
+                | Protocol.CAPABILITY_PRIORITY_HINTS;
+        Preface preface = new Preface(
+                Protocol.PREFACE_VERSION,
+                Role.INITIATOR,
+                0L,
+                Protocol.PROTO_VERSION,
+                Protocol.PROTO_VERSION,
+                capabilities,
+                Settings.defaults()
+        );
+        Negotiated negotiated = new Negotiated(
+                Protocol.PROTO_VERSION,
+                capabilities,
+                Role.INITIATOR,
+                Role.RESPONDER,
+                Settings.defaults()
+        );
+
+        assertTrue(preface.hasCapability(Protocol.CAPABILITY_OPEN_METADATA));
+        assertTrue(preface.supportsOpenMetadata());
+        assertTrue(preface.supportsPriorityUpdate());
+        assertTrue(preface.canCarryOpenInfo());
+        assertTrue(preface.canCarryPriorityOnOpen());
+        assertFalse(preface.canCarryGroupOnOpen());
+        assertTrue(preface.canCarryPriorityInUpdate());
+        assertFalse(preface.canCarryGroupInUpdate());
+        assertTrue(preface.hasPeerVisiblePrioritySemantics());
+        assertFalse(preface.hasPeerVisibleGroupSemantics());
+
+        assertTrue(negotiated.hasCapability(Protocol.CAPABILITY_OPEN_METADATA));
+        assertTrue(negotiated.supportsOpenMetadata());
+        assertTrue(negotiated.supportsPriorityUpdate());
+        assertTrue(negotiated.canCarryOpenInfo());
+        assertTrue(negotiated.canCarryPriorityOnOpen());
+        assertFalse(negotiated.canCarryGroupOnOpen());
+        assertTrue(negotiated.canCarryPriorityInUpdate());
+        assertFalse(negotiated.canCarryGroupInUpdate());
+        assertTrue(negotiated.hasPeerVisiblePrioritySemantics());
+        assertFalse(negotiated.hasPeerVisibleGroupSemantics());
     }
 }

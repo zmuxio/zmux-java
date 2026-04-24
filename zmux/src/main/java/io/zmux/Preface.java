@@ -51,6 +51,46 @@ public final class Preface {
         return capabilities;
     }
 
+    public boolean hasCapability(long bit) {
+        return Protocol.hasCapability(capabilities, bit);
+    }
+
+    public boolean supportsOpenMetadata() {
+        return Protocol.supportsOpenMetadata(capabilities);
+    }
+
+    public boolean supportsPriorityUpdate() {
+        return Protocol.supportsPriorityUpdate(capabilities);
+    }
+
+    public boolean canCarryOpenInfo() {
+        return Protocol.canCarryOpenInfo(capabilities);
+    }
+
+    public boolean canCarryPriorityOnOpen() {
+        return Protocol.canCarryPriorityOnOpen(capabilities);
+    }
+
+    public boolean canCarryGroupOnOpen() {
+        return Protocol.canCarryGroupOnOpen(capabilities);
+    }
+
+    public boolean canCarryPriorityInUpdate() {
+        return Protocol.canCarryPriorityInUpdate(capabilities);
+    }
+
+    public boolean canCarryGroupInUpdate() {
+        return Protocol.canCarryGroupInUpdate(capabilities);
+    }
+
+    public boolean hasPeerVisiblePrioritySemantics() {
+        return Protocol.hasPeerVisiblePrioritySemantics(capabilities);
+    }
+
+    public boolean hasPeerVisibleGroupSemantics() {
+        return Protocol.hasPeerVisibleGroupSemantics(capabilities);
+    }
+
     public Settings settings() {
         return settings;
     }
