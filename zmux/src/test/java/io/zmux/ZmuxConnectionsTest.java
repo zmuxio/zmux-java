@@ -5,11 +5,14 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ByteChannel;
 import java.nio.channels.GatheringByteChannel;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -168,6 +171,51 @@ final class ZmuxConnectionsTest {
         assertEquals(1, output.closeWriteCalls());
         assertArrayEquals(new byte[]{1, 2}, output.writtenBytes());
         assertArrayEquals(new byte[]{9}, gathering.writtenBytes());
+    }
+
+    @Test
+    void directionalHalfDefaultsExposeJavaIoConvenienceHelpers() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("half.local", 3010);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("half.remote", 4010);
+        RecordingReadHalf readHalf = new RecordingReadHalf(new byte[]{1, 2, 3}, local, remote);
+        RecordingWriteHalf writeHalf = new RecordingWriteHalf(local, remote, null);
+
+        byte[] first = new byte[2];
+        assertEquals(2, readHalf.read(first));
+        assertArrayEquals(new byte[]{1, 2}, first);
+
+        ByteBuffer dst = ByteBuffer.allocate(2);
+        assertEquals(1, readHalf.read(dst));
+        assertEquals(1, dst.position());
+        assertEquals((byte) 3, dst.get(0));
+
+        InputStream input = readHalf.asInputStream();
+        assertEquals(-1, input.read());
+        input.close();
+        assertEquals(1, readHalf.closeReadCalls());
+
+        readHalf.setReadTimeout(Duration.ofMillis(5));
+        assertNotNull(readHalf.lastReadDeadline());
+        readHalf.clearReadDeadline();
+        assertEquals(1, readHalf.readDeadlineSetCalls());
+        assertEquals(1, readHalf.readDeadlineClearCalls());
+
+        writeHalf.write(new byte[]{4, 5});
+        ByteBuffer src = ByteBuffer.wrap(new byte[]{6, 7});
+        assertEquals(2, writeHalf.write(src));
+        assertEquals(2, src.position());
+
+        OutputStream output = writeHalf.asOutputStream();
+        output.write(new byte[]{8, 9});
+        output.close();
+        assertEquals(1, writeHalf.closeWriteCalls());
+        assertArrayEquals(new byte[]{4, 5, 6, 7, 8, 9}, writeHalf.writtenBytes());
+
+        writeHalf.setWriteTimeout(Duration.ofMillis(5));
+        assertNotNull(writeHalf.lastWriteDeadline());
+        writeHalf.clearWriteDeadline();
+        assertEquals(1, writeHalf.writeDeadlineSetCalls());
+        assertEquals(1, writeHalf.writeDeadlineClearCalls());
     }
 
     @Test
@@ -412,6 +460,9 @@ final class ZmuxConnectionsTest {
         private final SocketAddress localAddress;
         private final SocketAddress remoteAddress;
         private int closeReadCalls;
+        private java.time.Instant lastReadDeadline;
+        private int readDeadlineSetCalls;
+        private int readDeadlineClearCalls;
 
         private RecordingReadHalf(byte[] data, SocketAddress localAddress, SocketAddress remoteAddress) {
             this.input = new ByteArrayInputStream(data);
@@ -431,6 +482,12 @@ final class ZmuxConnectionsTest {
 
         @Override
         public void setReadDeadline(java.time.Instant deadline) {
+            lastReadDeadline = deadline;
+            if (deadline == null) {
+                readDeadlineClearCalls++;
+            } else {
+                readDeadlineSetCalls++;
+            }
         }
 
         @Override
@@ -445,6 +502,18 @@ final class ZmuxConnectionsTest {
 
         int closeReadCalls() {
             return closeReadCalls;
+        }
+
+        java.time.Instant lastReadDeadline() {
+            return lastReadDeadline;
+        }
+
+        int readDeadlineSetCalls() {
+            return readDeadlineSetCalls;
+        }
+
+        int readDeadlineClearCalls() {
+            return readDeadlineClearCalls;
         }
     }
 
@@ -696,6 +765,9 @@ final class ZmuxConnectionsTest {
         private final SocketAddress remoteAddress;
         private final GatheringByteChannel gatheringOutput;
         private int closeWriteCalls;
+        private java.time.Instant lastWriteDeadline;
+        private int writeDeadlineSetCalls;
+        private int writeDeadlineClearCalls;
 
         private RecordingWriteHalf(SocketAddress localAddress,
                                    SocketAddress remoteAddress,
@@ -717,6 +789,12 @@ final class ZmuxConnectionsTest {
 
         @Override
         public void setWriteDeadline(java.time.Instant deadline) {
+            lastWriteDeadline = deadline;
+            if (deadline == null) {
+                writeDeadlineClearCalls++;
+            } else {
+                writeDeadlineSetCalls++;
+            }
         }
 
         @Override
@@ -740,6 +818,18 @@ final class ZmuxConnectionsTest {
 
         int closeWriteCalls() {
             return closeWriteCalls;
+        }
+
+        java.time.Instant lastWriteDeadline() {
+            return lastWriteDeadline;
+        }
+
+        int writeDeadlineSetCalls() {
+            return writeDeadlineSetCalls;
+        }
+
+        int writeDeadlineClearCalls() {
+            return writeDeadlineClearCalls;
         }
     }
 }

@@ -90,6 +90,41 @@ public interface ZmuxNativeSession extends ZmuxSession {
     }
 
     @Override
+    default ZmuxNativeStream openAndSend(Duration timeout, byte[] data) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSend(OpenOptions options, Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(options, timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSend(Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(timeout, data, offset, length);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(options, timeout, data, offset, length);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSend(Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSend(OpenOptions options, Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSend(options, timeout, data);
+    }
+
+    @Override
     default ZmuxNativeStream openAndSendWithTimeout(Duration timeout, byte[] data) throws IOException, InterruptedException {
         return openAndSendWithTimeout(OpenOptions.empty(), timeout, data);
     }
@@ -149,6 +184,42 @@ public interface ZmuxNativeSession extends ZmuxSession {
     @Override
     default ZmuxNativeSendStream openUniAndSend(OpenOptions options, ByteBuffer data) throws IOException, InterruptedException {
         return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(options, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(options, timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(timeout, data, offset, length);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(options, timeout, data, offset, length);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSend(OpenOptions options, Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(options, timeout, data);
     }
 
     @Override

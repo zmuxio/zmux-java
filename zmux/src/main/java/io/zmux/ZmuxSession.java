@@ -83,6 +83,34 @@ public interface ZmuxSession extends Closeable {
         return stream;
     }
 
+    default ZmuxStream openAndSend(Duration timeout, byte[] data) throws IOException, InterruptedException {
+        return openAndSendWithTimeout(timeout, data);
+    }
+
+    default ZmuxStream openAndSend(OpenOptions options, Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return openAndSendWithTimeout(options, timeout, data);
+    }
+
+    default ZmuxStream openAndSend(Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return openAndSendWithTimeout(timeout, data, offset, length);
+    }
+
+    default ZmuxStream openAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return openAndSendWithTimeout(options, timeout, data, offset, length);
+    }
+
+    default ZmuxStream openAndSend(Duration timeout, ByteBuffer data) throws IOException, InterruptedException {
+        return openAndSendWithTimeout(timeout, data);
+    }
+
+    default ZmuxStream openAndSend(OpenOptions options, Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return openAndSendWithTimeout(options, timeout, data);
+    }
+
     default ZmuxStream openAndSendWithTimeout(Duration timeout, byte[] data) throws IOException, InterruptedException {
         return openAndSendWithTimeout(OpenOptions.empty(), timeout, data);
     }
@@ -185,6 +213,36 @@ public interface ZmuxSession extends Closeable {
         ZmuxSendStream stream = openUniStream(options);
         stream.writeFinal(data);
         return stream;
+    }
+
+    default ZmuxSendStream openUniAndSend(Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(timeout, data);
+    }
+
+    default ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(options, timeout, data);
+    }
+
+    default ZmuxSendStream openUniAndSend(Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(timeout, data, offset, length);
+    }
+
+    default ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(options, timeout, data, offset, length);
+    }
+
+    default ZmuxSendStream openUniAndSend(Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(timeout, data);
+    }
+
+    default ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, ByteBuffer data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(options, timeout, data);
     }
 
     default ZmuxSendStream openUniAndSendWithTimeout(Duration timeout, byte[] data)

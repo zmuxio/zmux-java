@@ -94,6 +94,34 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void javaStyleTimeoutSendAliasesDelegateToExistingTimedHelpers() throws Exception {
+        RecordingDefaultSendStream send = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(send);
+        OpenOptions options = OpenOptions.priority(11L);
+        Duration timeout = Duration.ofMillis(40);
+
+        assertSame(session.bidiStream, session.openAndSend(timeout, new byte[]{1}));
+        assertEquals(1, session.openStreamWithTimeoutCalls);
+        assertSame(OpenOptions.empty(), session.lastOpenStreamOptions);
+        assertEquals(timeout, session.lastOpenStreamTimeout);
+
+        assertSame(session.bidiStream, session.openAndSend(options, timeout, new byte[]{2}));
+        assertEquals(2, session.openStreamWithTimeoutCalls);
+        assertSame(options, session.lastOpenStreamOptions);
+        assertEquals(timeout, session.lastOpenStreamTimeout);
+
+        assertSame(send, session.openUniAndSend(timeout, new byte[]{3}));
+        assertEquals(1, session.openUniStreamWithTimeoutCalls);
+        assertSame(OpenOptions.empty(), session.lastOpenUniStreamOptions);
+        assertEquals(timeout, session.lastOpenUniStreamTimeout);
+
+        assertSame(send, session.openUniAndSend(options, timeout, new byte[]{4}));
+        assertEquals(2, session.openUniStreamWithTimeoutCalls);
+        assertSame(options, session.lastOpenUniStreamOptions);
+        assertEquals(timeout, session.lastOpenUniStreamTimeout);
+    }
+
+    @Test
     void acceptUniStreamExposesRecvOnlySurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxSendStream outbound = pair.client().openUniStream();
