@@ -206,6 +206,32 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionFallsBackToOtherHalfAddressesWhenPrimaryHalfHasNone() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("joined.write.local", 4567);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.write.remote", 4568);
+        RecordingReadHalf input = new RecordingReadHalf(new byte[0], null, null);
+        RecordingWriteHalf output = new RecordingWriteHalf(local, remote, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(input, output)) {
+            assertSame(local, connection.localAddress());
+            assertSame(remote, connection.remoteAddress());
+        }
+    }
+
+    @Test
+    void joinedConnectionTypedHalvesFallbackToSyntheticAddressesWhenBothSidesHaveNone() throws Exception {
+        RecordingReadHalf input = new RecordingReadHalf(new byte[0], null, null);
+        RecordingWriteHalf output = new RecordingWriteHalf(null, null, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(input, output)) {
+            assertEquals(ZmuxSocketAddress.localPending(), connection.localAddress());
+            assertEquals(ZmuxSocketAddress.remotePending(), connection.remoteAddress());
+            assertEquals("local/stream/pending", connection.localAddress().toString());
+            assertEquals("remote/stream/pending", connection.remoteAddress().toString());
+        }
+    }
+
+    @Test
     void directionalHalfDefaultsExposeJavaIoConvenienceHelpers() throws Exception {
         InetSocketAddress local = InetSocketAddress.createUnresolved("half.local", 3010);
         InetSocketAddress remote = InetSocketAddress.createUnresolved("half.remote", 4010);
@@ -551,6 +577,49 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionPauseReadInterruptDoesNotDisturbInflightRead() throws Exception {
+        BlockingReadHalf readHalf = new BlockingReadHalf((byte) 10);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            int[] result = {-1};
+            Throwable[] readFailure = new Throwable[1];
+            Thread reader = new Thread(() -> {
+                try {
+                    result[0] = connection.input().read();
+                } catch (Throwable error) {
+                    readFailure[0] = error;
+                }
+            });
+            reader.start();
+
+            assertTrue(readHalf.awaitReadStarted(), "in-flight read should start");
+
+            Throwable[] pauseFailure = new Throwable[1];
+            Thread pauser = new Thread(() -> {
+                try {
+                    connection.pauseRead();
+                } catch (Throwable error) {
+                    pauseFailure[0] = error;
+                }
+            });
+            pauser.start();
+
+            Thread.sleep(50L);
+            assertTrue(pauser.isAlive(), "pauseRead should be waiting for the in-flight read");
+            pauser.interrupt();
+            pauser.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(pauser.isAlive(), "pauseRead should exit after interruption");
+            assertInstanceOf(InterruptedException.class, pauseFailure[0]);
+
+            readHalf.releaseRead();
+            reader.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(reader.isAlive(), "in-flight read should still finish after pause interruption");
+            assertNull(readFailure[0], "pause interruption must not poison the in-flight read");
+            assertEquals(10, result[0]);
+        }
+    }
+
+    @Test
     void joinedConnectionPauseWriteTimeoutDoesNotDisturbInflightWrite() throws Exception {
         BlockingWriteHalf writeHalf = new BlockingWriteHalf();
 
@@ -578,6 +647,48 @@ final class ZmuxConnectionsTest {
             assertFalse(writer.isAlive(), "in-flight write should still finish after pause timeout");
             assertNull(writeFailure[0], "pause timeout must not poison the in-flight write");
             assertArrayEquals(new byte[]{8}, writeHalf.writtenBytes());
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseWriteInterruptDoesNotDisturbInflightWrite() throws Exception {
+        BlockingWriteHalf writeHalf = new BlockingWriteHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(null, writeHalf)) {
+            Throwable[] writeFailure = new Throwable[1];
+            Thread writer = new Thread(() -> {
+                try {
+                    connection.output().write(new byte[]{11});
+                } catch (Throwable error) {
+                    writeFailure[0] = error;
+                }
+            });
+            writer.start();
+
+            assertTrue(writeHalf.awaitWriteStarted(), "in-flight write should start");
+
+            Throwable[] pauseFailure = new Throwable[1];
+            Thread pauser = new Thread(() -> {
+                try {
+                    connection.pauseWrite();
+                } catch (Throwable error) {
+                    pauseFailure[0] = error;
+                }
+            });
+            pauser.start();
+
+            Thread.sleep(50L);
+            assertTrue(pauser.isAlive(), "pauseWrite should be waiting for the in-flight write");
+            pauser.interrupt();
+            pauser.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(pauser.isAlive(), "pauseWrite should exit after interruption");
+            assertInstanceOf(InterruptedException.class, pauseFailure[0]);
+
+            writeHalf.releaseWrite();
+            writer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(writer.isAlive(), "in-flight write should still finish after pause interruption");
+            assertNull(writeFailure[0], "pause interruption must not poison the in-flight write");
+            assertArrayEquals(new byte[]{11}, writeHalf.writtenBytes());
         }
     }
 

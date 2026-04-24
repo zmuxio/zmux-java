@@ -7,6 +7,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -1409,6 +1410,31 @@ final class ApiSurfaceTest {
 
             try (ZmuxRecvStream serverRecv = pair.server().acceptUniStream(Duration.ofSeconds(2))) {
                 assertEquals(-1, serverRecv.read(new byte[1]));
+            }
+        }
+    }
+
+    @Test
+    void joinedConnectionDeadlineViaOuterUniStreams() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            ZmuxSendStream clientSend = pair.client().openUniStream();
+            ZmuxSendStream serverSend = pair.server().openUniStream();
+
+            clientSend.write("a".getBytes(StandardCharsets.UTF_8));
+            serverSend.write("b".getBytes(StandardCharsets.UTF_8));
+
+            try (ZmuxRecvStream clientRecv = pair.client().acceptUniStream(Duration.ofSeconds(2));
+                 JoinedDuplexConnection connection = Zmux.join(clientRecv, clientSend)) {
+                byte[] buffer = new byte[1];
+                assertEquals(1, connection.input().read(buffer));
+                assertEquals("b", new String(buffer, StandardCharsets.UTF_8));
+
+                connection.setReadDeadline(Instant.now().plusMillis(30));
+                SocketTimeoutException timeout = assertThrows(
+                        SocketTimeoutException.class,
+                        () -> connection.input().read(new byte[1])
+                );
+                assertTrue(ZmuxErrors.timeout(timeout));
             }
         }
     }
