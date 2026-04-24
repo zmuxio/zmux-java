@@ -39,14 +39,18 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         this(inputHalf, outputHalf, null, null, null);
     }
 
-    public JoinedDuplexConnection(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
+    public JoinedDuplexConnection(ReadHalf inputHalf, WriteHalf outputHalf) {
         this(
                 wrap(inputHalf),
                 wrap(outputHalf),
-                null,
+                gatheringOutput(outputHalf),
                 localAddress(inputHalf, outputHalf),
                 remoteAddress(inputHalf, outputHalf)
         );
+    }
+
+    public JoinedDuplexConnection(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
+        this((ReadHalf) inputHalf, (WriteHalf) outputHalf);
     }
 
     public JoinedDuplexConnection(InputStream inputHalf,
@@ -65,13 +69,35 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return inputHalf == null ? null : new StreamInputHalf(inputHalf);
     }
 
+    private static InputStream wrap(ReadHalf inputHalf) {
+        return inputHalf == null ? null : new GenericInputHalf(inputHalf);
+    }
+
     private static OutputStream wrap(ZmuxSendStream outputHalf) {
         return outputHalf == null ? null : new StreamOutputHalf(outputHalf);
+    }
+
+    private static OutputStream wrap(WriteHalf outputHalf) {
+        return outputHalf == null ? null : new GenericOutputHalf(outputHalf);
+    }
+
+    private static GatheringByteChannel gatheringOutput(WriteHalf outputHalf) {
+        return outputHalf == null ? null : outputHalf.gatheringOutput();
+    }
+
+    private static SocketAddress localAddress(ReadHalf inputHalf, WriteHalf outputHalf) {
+        SocketAddress address = inputHalf == null ? null : inputHalf.localAddress();
+        return address != null ? address : (outputHalf == null ? null : outputHalf.localAddress());
     }
 
     private static SocketAddress localAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
         SocketAddress address = inputHalf == null ? null : inputHalf.localAddress();
         return address != null ? address : (outputHalf == null ? null : outputHalf.localAddress());
+    }
+
+    private static SocketAddress remoteAddress(ReadHalf inputHalf, WriteHalf outputHalf) {
+        SocketAddress address = inputHalf == null ? null : inputHalf.remoteAddress();
+        return address != null ? address : (outputHalf == null ? null : outputHalf.remoteAddress());
     }
 
     private static SocketAddress remoteAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
@@ -502,6 +528,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return set(wrap(next));
         }
 
+        public InputStream set(ReadHalf next) {
+            return set(wrap(next));
+        }
+
         public InputStream set(InputStream next) {
             InputStream previous = current;
             current = next;
@@ -531,6 +561,13 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         public OutputStream set(ZmuxSendStream next) {
             return set(wrap(next));
+        }
+
+        public OutputStream set(WriteHalf next) {
+            GatheringByteChannel nextGathering = JoinedDuplexConnection.gatheringOutput(next);
+            OutputStream previous = set(wrap(next));
+            gathering = nextGathering;
+            return previous;
         }
 
         public OutputStream set(OutputStream next) {
@@ -650,6 +687,44 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    private static final class GenericInputHalf extends InputStream implements AddressAwareHalf {
+        private final ReadHalf half;
+        private final byte[] singleByte = new byte[1];
+
+        private GenericInputHalf(ReadHalf half) {
+            this.half = half;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int read;
+            do {
+                read = half.read(singleByte, 0, 1);
+            } while (read == 0);
+            return read < 0 ? -1 : singleByte[0] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            return half.read(buffer, offset, length);
+        }
+
+        @Override
+        public void close() throws IOException {
+            half.closeRead();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return half.localAddress();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return half.remoteAddress();
+        }
+    }
+
     private static final class StreamOutputHalf extends OutputStream implements AddressAwareHalf {
         private final ZmuxSendStream stream;
         private final byte[] singleByte = new byte[1];
@@ -689,6 +764,48 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         @Override
         public SocketAddress remoteAddress() {
             return stream.remoteAddress();
+        }
+    }
+
+    private static final class GenericOutputHalf extends OutputStream implements AddressAwareHalf {
+        private final WriteHalf half;
+        private final byte[] singleByte = new byte[1];
+
+        private GenericOutputHalf(WriteHalf half) {
+            this.half = half;
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            singleByte[0] = (byte) value;
+            half.write(singleByte, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return;
+            }
+            half.write(buffer, offset, length);
+        }
+
+        @Override
+        public void flush() throws IOException {
+        }
+
+        @Override
+        public void close() throws IOException {
+            half.closeWrite();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return half.localAddress();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return half.remoteAddress();
         }
     }
 

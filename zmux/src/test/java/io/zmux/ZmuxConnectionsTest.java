@@ -148,6 +148,29 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinBuildsJoinedDuplexConnectionFromDirectionalHalves() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("joined.half.local", 4321);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.half.remote", 8765);
+        RecordingByteChannel gathering = new RecordingByteChannel();
+        RecordingReadHalf input = new RecordingReadHalf(new byte[]{3, 4}, local, remote);
+        RecordingWriteHalf output = new RecordingWriteHalf(local, remote, gathering);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(input, output)) {
+            assertSame(local, connection.localAddress());
+            assertSame(remote, connection.remoteAddress());
+            assertNotNull(connection.gatheringOutput());
+            assertEquals(3, connection.input().read());
+            connection.output().write(new byte[]{1, 2});
+            connection.gatheringOutput().write(ByteBuffer.wrap(new byte[]{9}));
+        }
+
+        assertEquals(1, input.closeReadCalls());
+        assertEquals(1, output.closeWriteCalls());
+        assertArrayEquals(new byte[]{1, 2}, output.writtenBytes());
+        assertArrayEquals(new byte[]{9}, gathering.writtenBytes());
+    }
+
+    @Test
     void joinedConnectionPauseHandlesCanSwapTypedStreamHalvesAndRefreshAddresses() throws Exception {
         InetSocketAddress firstLocal = InetSocketAddress.createUnresolved("joined.local.a", 7777);
         InetSocketAddress firstRemote = InetSocketAddress.createUnresolved("joined.remote.a", 8888);
@@ -367,6 +390,47 @@ final class ZmuxConnectionsTest {
         @Override
         public StreamMetadata metadata() {
             return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return localAddress;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return remoteAddress;
+        }
+
+        int closeReadCalls() {
+            return closeReadCalls;
+        }
+    }
+
+    private static final class RecordingReadHalf implements ReadHalf {
+        private final ByteArrayInputStream input;
+        private final SocketAddress localAddress;
+        private final SocketAddress remoteAddress;
+        private int closeReadCalls;
+
+        private RecordingReadHalf(byte[] data, SocketAddress localAddress, SocketAddress remoteAddress) {
+            this.input = new ByteArrayInputStream(data);
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+        }
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return input.read(dst, offset, length);
+        }
+
+        @Override
+        public void closeRead() {
+            closeReadCalls++;
+        }
+
+        @Override
+        public void setReadDeadline(java.time.Instant deadline) {
         }
 
         @Override
@@ -605,6 +669,59 @@ final class ZmuxConnectionsTest {
         @Override
         public StreamMetadata metadata() {
             return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return localAddress;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return remoteAddress;
+        }
+
+        byte[] writtenBytes() {
+            return output.toByteArray();
+        }
+
+        int closeWriteCalls() {
+            return closeWriteCalls;
+        }
+    }
+
+    private static final class RecordingWriteHalf implements WriteHalf {
+        private final ByteArrayOutputStream output = new ByteArrayOutputStream();
+        private final SocketAddress localAddress;
+        private final SocketAddress remoteAddress;
+        private final GatheringByteChannel gatheringOutput;
+        private int closeWriteCalls;
+
+        private RecordingWriteHalf(SocketAddress localAddress,
+                                   SocketAddress remoteAddress,
+                                   GatheringByteChannel gatheringOutput) {
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+            this.gatheringOutput = gatheringOutput;
+        }
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+            output.write(src, offset, length);
+        }
+
+        @Override
+        public void closeWrite() {
+            closeWriteCalls++;
+        }
+
+        @Override
+        public void setWriteDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public GatheringByteChannel gatheringOutput() {
+            return gatheringOutput;
         }
 
         @Override

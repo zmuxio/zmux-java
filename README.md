@@ -407,6 +407,15 @@ JoinedDuplexConnection connection = ZmuxConnections.join(
 );
 ```
 
+If your transport already exposes directional read/write halves, you can keep
+those semantics instead of first collapsing everything into raw streams:
+
+```java
+ReadHalf inbound = ...;
+WriteHalf outbound = ...;
+JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
+```
+
 The joined connection exposes `InputStream` / `OutputStream` and closes the
 attached stream halves directionally.
 Its pause handles can also swap in replacement `ZmuxRecvStream` /

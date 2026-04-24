@@ -28,6 +28,10 @@ public final class ZmuxConnections {
         return new JoinedDuplexConnection(input, output);
     }
 
+    public static JoinedDuplexConnection join(ReadHalf input, WriteHalf output) {
+        return new JoinedDuplexConnection(input, output);
+    }
+
     public static JoinedDuplexConnection join(InputStream input,
                                               OutputStream output,
                                               SocketAddress localAddress,

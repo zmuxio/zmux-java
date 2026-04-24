@@ -2,12 +2,14 @@ package io.zmux;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.GatheringByteChannel;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 
-public interface ZmuxSendStream extends ZmuxStreamInfo, AutoCloseable {
+public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
     void write(byte[] src, int offset, int length) throws IOException;
 
     default void write(byte[] src) throws IOException {
@@ -170,6 +172,17 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, AutoCloseable {
     default void clearWriteDeadline() throws IOException {
         setWriteDeadline(null);
     }
+
+    @Override
+    default GatheringByteChannel gatheringOutput() {
+        return null;
+    }
+
+    @Override
+    SocketAddress localAddress();
+
+    @Override
+    SocketAddress remoteAddress();
 
     @Override
     void close() throws IOException;

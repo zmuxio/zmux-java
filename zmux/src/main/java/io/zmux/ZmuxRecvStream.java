@@ -3,13 +3,14 @@ package io.zmux;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 
-public interface ZmuxRecvStream extends ZmuxStreamInfo, AutoCloseable {
+public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
     int read(byte[] dst, int offset, int length) throws IOException;
 
     default int read(byte[] dst) throws IOException {
@@ -129,6 +130,12 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, AutoCloseable {
     default void clearReadDeadline() throws IOException {
         setReadDeadline(null);
     }
+
+    @Override
+    SocketAddress localAddress();
+
+    @Override
+    SocketAddress remoteAddress();
 
     @Override
     void close() throws IOException;
