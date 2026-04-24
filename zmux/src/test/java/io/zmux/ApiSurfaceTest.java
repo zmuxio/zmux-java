@@ -632,6 +632,72 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void joinedDuplexConnectionCanServeAsSessionTransport() throws Exception {
+        ServerSocket listener = new ServerSocket(0);
+        Socket clientSocket = new Socket("127.0.0.1", listener.getLocalPort());
+        Socket serverSocket = listener.accept();
+        listener.close();
+
+        JoinedDuplexConnection clientTransport = new JoinedDuplexConnection(
+                clientSocket.getInputStream(),
+                clientSocket.getOutputStream(),
+                clientSocket.getChannel(),
+                clientSocket.getLocalSocketAddress(),
+                clientSocket.getRemoteSocketAddress()
+        );
+        JoinedDuplexConnection serverTransport = new JoinedDuplexConnection(
+                serverSocket.getInputStream(),
+                serverSocket.getOutputStream(),
+                serverSocket.getChannel(),
+                serverSocket.getLocalSocketAddress(),
+                serverSocket.getRemoteSocketAddress()
+        );
+
+        AtomicReference<ZmuxNativeSession> clientRef = new AtomicReference<>();
+        AtomicReference<ZmuxNativeSession> serverRef = new AtomicReference<>();
+        AtomicReference<Throwable> errorRef = new AtomicReference<>();
+        CountDownLatch established = new CountDownLatch(2);
+
+        Thread clientThread = new Thread(() -> {
+            try {
+                clientRef.set(Zmux.client(clientTransport));
+            } catch (Throwable error) {
+                errorRef.compareAndSet(null, error);
+            } finally {
+                established.countDown();
+            }
+        }, "api-surface-joined-transport-client");
+        clientThread.start();
+
+        Thread serverThread = new Thread(() -> {
+            try {
+                serverRef.set(Zmux.server(serverTransport));
+            } catch (Throwable error) {
+                errorRef.compareAndSet(null, error);
+            } finally {
+                established.countDown();
+            }
+        }, "api-surface-joined-transport-server");
+        serverThread.start();
+
+        established.await();
+        rethrow(errorRef.get());
+
+        try (ZmuxNativeSession client = clientRef.get();
+             ZmuxNativeSession server = serverRef.get();
+             ZmuxNativeStream outbound = client.openStream()) {
+            outbound.writeFinal("ping".getBytes(StandardCharsets.UTF_8));
+
+            try (ZmuxNativeStream inbound = server.acceptStream(Duration.ofSeconds(2))) {
+                assertEquals("ping", new String(inbound.readAllBytes(), StandardCharsets.UTF_8));
+                inbound.writeFinal("pong".getBytes(StandardCharsets.UTF_8));
+            }
+
+            assertEquals("pong", new String(outbound.readAllBytes(), StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
     void defaultWritevFinalRejectsNullPartsBeforeClosingWrite() {
         RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
 

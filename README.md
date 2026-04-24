@@ -380,12 +380,16 @@ ZmuxRecvStream inbound = session.acceptUniStream();
 ZmuxSendStream outbound = session.openUniStream();
 
 JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
+ZmuxSession nested = Zmux.clientSession(connection);
 ```
 
 The joined connection exposes `InputStream` / `OutputStream` and closes the
 attached stream halves directionally.
 Its pause handles can also swap in replacement `ZmuxRecvStream` /
 `ZmuxSendStream` halves directly before resuming.
+Because it implements `DuplexConnection`, you can pass it straight into
+`Zmux.openSession(...)`, `Zmux.clientSession(...)`, or `Zmux.serverSession(...)`
+as the transport itself.
 
 ### Existing Buffers
 
