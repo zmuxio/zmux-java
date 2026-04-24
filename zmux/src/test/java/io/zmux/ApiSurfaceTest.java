@@ -240,15 +240,21 @@ final class ApiSurfaceTest {
             byte[] bidiSource = "xhelloz".getBytes(StandardCharsets.UTF_8);
             ZmuxNativeStream bidi = pair.client().openAndSend(bidiSource, 1, 5);
             bidi.closeWrite();
+            ZmuxStream inboundBidi = pair.server().acceptStream(Duration.ofSeconds(1));
+            assertEquals("hello", new String(inboundBidi.readAllBytes(), StandardCharsets.UTF_8));
 
             ByteBuffer uniSource = ByteBuffer.wrap("!event?".getBytes(StandardCharsets.UTF_8));
             uniSource.position(1);
             uniSource.limit(6);
             ZmuxNativeSendStream uni = pair.client().openUniAndSend(uniSource);
+            ZmuxRecvStream inboundUni = pair.server().acceptUniStream(Duration.ofSeconds(1));
+            assertEquals("event", new String(inboundUni.readAllBytes(), StandardCharsets.UTF_8));
 
             ByteBuffer timedBidiSource = ByteBuffer.wrap("ab".getBytes(StandardCharsets.UTF_8));
             ZmuxNativeStream timedBidi = pair.client().openAndSendWithTimeout(Duration.ofSeconds(1), timedBidiSource);
             timedBidi.closeWrite();
+            ZmuxStream inboundTimedBidi = pair.server().acceptStream(Duration.ofSeconds(1));
+            assertEquals("ab", new String(inboundTimedBidi.readAllBytes(), StandardCharsets.UTF_8));
 
             byte[] timedUniSource = "pqrs".getBytes(StandardCharsets.UTF_8);
             ZmuxNativeSendStream timedUni = pair.client().openUniAndSendWithTimeout(
@@ -257,15 +263,7 @@ final class ApiSurfaceTest {
                     1,
                     2
             );
-
-            ZmuxStream inboundBidi = pair.server().acceptStream(Duration.ofSeconds(1));
-            ZmuxRecvStream inboundUni = pair.server().acceptUniStream(Duration.ofSeconds(1));
-            ZmuxStream inboundTimedBidi = pair.server().acceptStream(Duration.ofSeconds(1));
             ZmuxRecvStream inboundTimedUni = pair.server().acceptUniStream(Duration.ofSeconds(1));
-
-            assertEquals("hello", new String(inboundBidi.readAllBytes(), StandardCharsets.UTF_8));
-            assertEquals("event", new String(inboundUni.readAllBytes(), StandardCharsets.UTF_8));
-            assertEquals("ab", new String(inboundTimedBidi.readAllBytes(), StandardCharsets.UTF_8));
             assertEquals("qr", new String(inboundTimedUni.readAllBytes(), StandardCharsets.UTF_8));
             assertEquals(6, uniSource.position(), "openUniAndSend(ByteBuffer) should advance the source position");
             assertEquals(2, timedBidiSource.position(), "openAndSendWithTimeout(ByteBuffer) should advance the source position");

@@ -28,21 +28,21 @@ public final class NettyQuic {
     }
 
     public static ZmuxSession wrapSession(QuicChannel channel) {
-        return wrapSession(channel, NettyQuicSessionOptions.defaults());
+        return wrapSessionWithOptions(channel, NettyQuicSessionOptions.defaults());
     }
 
     public static ZmuxSession wrapSession(QuicChannel channel, Duration acceptedPreludeReadTimeout) {
-        return wrapSession(channel, NettyQuicSessionOptions.ofAcceptedPreludeReadTimeout(acceptedPreludeReadTimeout));
+        return wrapSessionWithOptions(channel, NettyQuicSessionOptions.ofAcceptedPreludeReadTimeout(acceptedPreludeReadTimeout));
     }
 
     public static ZmuxSession wrapSession(QuicChannel channel, int acceptedPreludeMaxConcurrent) {
-        return wrapSession(channel, NettyQuicSessionOptions.ofAcceptedPreludeMaxConcurrent(acceptedPreludeMaxConcurrent));
+        return wrapSessionWithOptions(channel, NettyQuicSessionOptions.ofAcceptedPreludeMaxConcurrent(acceptedPreludeMaxConcurrent));
     }
 
     public static ZmuxSession wrapSession(QuicChannel channel,
                                           Duration acceptedPreludeReadTimeout,
                                           int acceptedPreludeMaxConcurrent) {
-        return wrapSession(
+        return wrapSessionWithOptions(
                 channel,
                 NettyQuicSessionOptions.defaults()
                         .withAcceptedPreludeReadTimeout(acceptedPreludeReadTimeout)
@@ -51,6 +51,10 @@ public final class NettyQuic {
     }
 
     public static ZmuxSession wrapSession(QuicChannel channel, NettyQuicSessionOptions options) {
+        return wrapSessionWithOptions(channel, options);
+    }
+
+    public static ZmuxSession wrapSessionWithOptions(QuicChannel channel, NettyQuicSessionOptions options) {
         if (channel == null) {
             return NettyQuicSession.closedSession();
         }

@@ -264,6 +264,8 @@ Netty QUIC adapter APIs:
 
 - `NettyQuic.wrapSession(QuicChannel)`: wraps a Netty `QuicChannel` as a
   `ZmuxSession`.
+- `NettyQuic.wrapSessionWithOptions(QuicChannel, NettyQuicSessionOptions)`:
+  Go-style explicit options entry point for adapter-local tuning.
 - `NettyQuicSessionOptions`: adapter options for accepted-stream prelude
   handling.
 - `NettyQuicConformance`: conformance metadata for the QUIC adapter module.
@@ -521,8 +523,10 @@ import io.netty.handler.codec.quic.QuicChannel;
 import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
 import io.zmux.adapter.quic.netty.NettyQuic;
+import io.zmux.adapter.quic.netty.NettyQuicSessionOptions;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 QuicChannel channel = ...;
 
@@ -530,6 +534,11 @@ try (ZmuxSession session = NettyQuic.wrapSession(channel);
      ZmuxStream stream = session.openStream()) {
     stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
 }
+
+NettyQuicSessionOptions options = NettyQuicSessionOptions.defaults()
+        .withAcceptedPreludeReadTimeout(Duration.ofSeconds(2))
+        .withAcceptedPreludeMaxConcurrent(16);
+ZmuxSession tuned = NettyQuic.wrapSessionWithOptions(channel, options);
 ```
 
 The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
