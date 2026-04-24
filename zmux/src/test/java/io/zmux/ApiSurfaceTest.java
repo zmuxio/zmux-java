@@ -564,6 +564,25 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void awaitTerminationOrThrowWithoutTimeoutSurfacesPeerCloseCause() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            pair.server().closeWithError(24L, "peer close");
+
+            ApplicationError error = assertThrows(
+                    ApplicationError.class,
+                    () -> pair.client().awaitTerminationOrThrow()
+            );
+
+            assertEquals(24L, error.code());
+            assertEquals("peer close", error.reason());
+            assertEquals(ZmuxErrorScope.SESSION, error.scope());
+            assertEquals(ZmuxErrorSource.REMOTE, error.source());
+            assertTrue(pair.client().terminationCause().isPresent());
+            assertEquals(24L, ZmuxErrors.code(pair.client().terminationCause().get(), -1L));
+        }
+    }
+
+    @Test
     void awaitTerminationCauseUsesTypedTimeout() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             SessionWaitTimeoutException timeout = assertThrows(
@@ -575,6 +594,23 @@ final class ApiSurfaceTest {
             assertEquals(ZmuxErrorScope.SESSION, timeout.scope());
             assertTrue(ZmuxErrors.timeout(timeout));
         }
+    }
+
+    @Test
+    void defaultAwaitTerminationHelpersUseUnboundedWaitWhenTimeoutOmitted() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+        ApplicationError cause = new ApplicationError(9L, "peer close");
+        session.awaitTerminationResult = true;
+        session.terminationCause = java.util.Optional.of(cause);
+
+        assertSame(cause, session.awaitTerminationCause().orElseThrow(AssertionError::new));
+        assertNull(session.lastAwaitTerminationTimeout, "no-arg cause helper must use an unbounded wait");
+
+        session.lastAwaitTerminationTimeout = Duration.ofSeconds(1);
+        ApplicationError thrown = assertThrows(ApplicationError.class, session::awaitTerminationOrThrow);
+        assertSame(cause, thrown);
+        assertNull(session.lastAwaitTerminationTimeout, "no-arg throw helper must use an unbounded wait");
     }
 
     @Test
@@ -1108,6 +1144,9 @@ final class ApiSurfaceTest {
         private long lastGoAwayUni;
         private long lastGoAwayCode;
         private String lastGoAwayReason;
+        private Duration lastAwaitTerminationTimeout;
+        private boolean awaitTerminationResult;
+        private java.util.Optional<IOException> terminationCause = java.util.Optional.empty();
 
         private DefaultRecordingNativeSession(RecordingDefaultSendStream stream) {
             this.stream = stream;
@@ -1240,7 +1279,13 @@ final class ApiSurfaceTest {
 
         @Override
         public boolean awaitTermination(Duration timeout) {
-            throw new UnsupportedOperationException();
+            this.lastAwaitTerminationTimeout = timeout;
+            return awaitTerminationResult;
+        }
+
+        @Override
+        public java.util.Optional<IOException> terminationCause() {
+            return terminationCause;
         }
 
         @Override

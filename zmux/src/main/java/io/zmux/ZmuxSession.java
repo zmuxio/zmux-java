@@ -243,11 +243,19 @@ public interface ZmuxSession extends AutoCloseable {
 
     boolean awaitTermination(Duration timeout) throws InterruptedException;
 
+    default Optional<IOException> awaitTerminationCause() throws IOException, InterruptedException {
+        return awaitTerminationCause(null);
+    }
+
     default Optional<IOException> awaitTerminationCause(Duration timeout) throws IOException, InterruptedException {
         if (!awaitTermination(timeout)) {
             throw new SessionWaitTimeoutException();
         }
         return terminationCause();
+    }
+
+    default void awaitTerminationOrThrow() throws IOException, InterruptedException {
+        awaitTerminationOrThrow(null);
     }
 
     default void awaitTerminationOrThrow(Duration timeout) throws IOException, InterruptedException {
