@@ -245,9 +245,37 @@ final class NettyQuicStreamState {
         return bidirectional;
     }
 
+    boolean openedLocally() {
+        return locallyCreated;
+    }
+
     long streamId() {
         QuicStreamChannel current = channel;
         return current == null ? 0L : current.streamId();
+    }
+
+    boolean readClosed() {
+        lock.lock();
+        try {
+            return !readAllowed
+                    || readHalf.localClosed()
+                    || readHalf.remoteTerminated()
+                    || readHalf.remoteError() != null
+                    || currentSessionError() != null;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean writeClosed() {
+        lock.lock();
+        try {
+            return !writeAllowed
+                    || writeHalf.localClosed()
+                    || currentSessionError() != null;
+        } finally {
+            lock.unlock();
+        }
     }
 
     byte[] openInfo() {

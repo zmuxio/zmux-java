@@ -267,6 +267,9 @@ Netty QUIC adapter APIs:
 - `NettyQuicSessionOptions`: adapter options for accepted-stream prelude
   handling.
 - `NettyQuicConformance`: conformance metadata for the QUIC adapter module.
+- Adapter stream objects also expose `ZmuxNativeStream`,
+  `ZmuxNativeSendStream`, or `ZmuxNativeRecvStream` state queries such as
+  `openedLocally()`, `bidirectional()`, `readClosed()`, and `writeClosed()`.
 
 ## Supported Features
 
@@ -464,6 +467,7 @@ try (ZmuxSession session = NettyQuic.wrapSession(channel);
 ```
 
 The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
-`ZmuxSendStream`, and `ZmuxRecvStream` interfaces as the native transport. Use
-`zmux-netty-quic` only when the underlying transport is already a Netty
-`QuicChannel`.
+`ZmuxSendStream`, and `ZmuxRecvStream` interfaces as the native transport, and
+its concrete stream objects also implement the native stream state-query
+interfaces. Use `zmux-netty-quic` only when the underlying transport is
+already a Netty `QuicChannel`.

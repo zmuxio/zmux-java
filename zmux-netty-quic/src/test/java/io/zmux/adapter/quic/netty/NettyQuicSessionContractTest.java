@@ -172,6 +172,42 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void adapterStreamsExposeNativeStateQueries() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            ZmuxStream bidi = pair.client.openStream();
+            assertTrue(bidi instanceof ZmuxNativeStream, "adapter bidi stream should expose native state queries");
+            ZmuxNativeStream nativeBidi = (ZmuxNativeStream) bidi;
+            assertTrue(nativeBidi.openedLocally());
+            assertTrue(nativeBidi.bidirectional());
+            assertFalse(nativeBidi.readClosed());
+            assertFalse(nativeBidi.writeClosed());
+
+            ZmuxSendStream outboundUni = pair.client.openUniAndSend(utf8("x"));
+            assertTrue(outboundUni instanceof ZmuxNativeSendStream, "adapter send-only stream should expose native send state");
+            assertFalse(outboundUni instanceof ZmuxNativeRecvStream, "adapter send-only stream must stay send-only");
+            ZmuxNativeSendStream nativeSend = (ZmuxNativeSendStream) outboundUni;
+            assertTrue(nativeSend.openedLocally());
+            assertFalse(nativeSend.bidirectional());
+            assertTrue(nativeSend.writeClosed(), "openUniAndSend should leave the adapter send side closed");
+
+            ZmuxRecvStream acceptedUni = pair.server.acceptUniStream(Duration.ofSeconds(5));
+            assertTrue(acceptedUni instanceof ZmuxNativeRecvStream, "accepted adapter recv stream should expose native recv state");
+            assertFalse(acceptedUni instanceof ZmuxNativeSendStream, "accepted adapter recv stream must stay recv-only");
+            ZmuxNativeRecvStream nativeRecv = (ZmuxNativeRecvStream) acceptedUni;
+            assertFalse(nativeRecv.openedLocally());
+            assertFalse(nativeRecv.bidirectional());
+            assertFalse(nativeRecv.readClosed(), "accepted recv stream should remain readable before inbound FIN is observed");
+            assertEquals(1, acceptedUni.read(new byte[1]));
+            assertEquals(-1, acceptedUni.read(new byte[1]));
+            assertTrue(nativeRecv.readClosed(), "adapter recv stream should report closed after peer finish");
+
+            acceptedUni.close();
+            outboundUni.close();
+            bidi.close();
+        }
+    }
+
+    @Test
     void bidiOpenAcceptRoundTripsPayload() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));

@@ -25,6 +25,14 @@ abstract class AbstractNettyQuicStream {
         return state.metadata();
     }
 
+    public boolean openedLocally() {
+        return state.openedLocally();
+    }
+
+    public boolean bidirectional() {
+        return state.bidirectional();
+    }
+
     public SocketAddress localAddress() {
         return state.localAddress();
     }
@@ -50,7 +58,7 @@ abstract class AbstractNettyQuicStream {
     }
 }
 
-final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxStream {
+final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxNativeStream {
     NettyQuicBidiStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -116,6 +124,16 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxS
     }
 
     @Override
+    public boolean readClosed() {
+        return state.readClosed();
+    }
+
+    @Override
+    public boolean writeClosed() {
+        return state.writeClosed();
+    }
+
+    @Override
     public void closeWithError(long code, String reason) throws IOException {
         state.closeWithError(code, reason);
     }
@@ -143,7 +161,7 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxS
     }
 }
 
-final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxSendStream {
+final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxNativeSendStream {
     NettyQuicSendStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -184,6 +202,11 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxS
     }
 
     @Override
+    public boolean writeClosed() {
+        return state.writeClosed();
+    }
+
+    @Override
     public void closeWithError(long code, String reason) throws IOException {
         state.closeWriteWithError(code, reason);
     }
@@ -200,7 +223,7 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxS
     }
 }
 
-final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxRecvStream {
+final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxNativeRecvStream {
     NettyQuicRecvStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -223,6 +246,11 @@ final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxR
     @Override
     public void cancelRead(long code) throws IOException {
         state.cancelRead(code);
+    }
+
+    @Override
+    public boolean readClosed() {
+        return state.readClosed();
     }
 
     @Override
