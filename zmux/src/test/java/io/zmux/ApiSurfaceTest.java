@@ -79,6 +79,31 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void asSessionNullReturnsClosedSafeStableSession() throws Exception {
+        ZmuxSession session = Zmux.asSession(null);
+
+        assertNotNull(session);
+        assertTrue(session.isClosed());
+        assertEquals(SessionState.INVALID, session.state());
+        assertEquals(SessionState.INVALID, session.stats().state());
+        assertTrue(session.awaitTermination());
+        assertTrue(session.awaitTermination(Duration.ofMillis(1)));
+        assertFalse(session.awaitTerminationCause().isPresent());
+        assertThrows(SessionClosedException.class, session::openStream);
+        session.closeWithError(7L, "ignored");
+        session.closeWithError((Throwable) null);
+        session.close();
+    }
+
+    @Test
+    void asSessionReturnsSameNonNullReference() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            assertSame(pair.client(), Zmux.asSession(pair.client()));
+            assertSame(pair.server(), Zmux.asSession(pair.server()));
+        }
+    }
+
+    @Test
     void openStreamExposesNativeBidiSurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxStream stream = pair.client().openStream();

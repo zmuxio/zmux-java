@@ -9,9 +9,16 @@ import java.net.Socket;
 import java.nio.channels.ByteChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.time.Duration;
 
 public final class Zmux {
+    private static final ZmuxSession CLOSED_SESSION = new ClosedSession();
+
     private Zmux() {
+    }
+
+    public static ZmuxSession asSession(ZmuxSession session) {
+        return session == null ? CLOSED_SESSION : session;
     }
 
     public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
@@ -278,5 +285,119 @@ public final class Zmux {
                                                   ZmuxConfig config,
                                                   Role role) throws IOException {
         return open(connection, effectiveConfig(config).withRole(role));
+    }
+
+    private static final class ClosedSession implements ZmuxSession {
+        @Override
+        public ZmuxStream acceptStream() throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream acceptStream(Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxRecvStream acceptUniStream() throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxRecvStream acceptUniStream(Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openStream() throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openStream(OpenOptions options) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openStreamWithTimeout(Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStream() throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStream(OpenOptions options) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStreamWithTimeout(Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openAndSend(byte[] data) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxStream openAndSend(OpenOptions options, byte[] data) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniAndSend(byte[] data) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+        }
+
+        @Override
+        public boolean awaitTermination(Duration timeout) {
+            return true;
+        }
+
+        @Override
+        public boolean isClosed() {
+            return true;
+        }
+
+        @Override
+        public SessionState state() {
+            return SessionState.INVALID;
+        }
+
+        @Override
+        public SessionStats stats() {
+            return SessionStats.empty(SessionState.INVALID);
+        }
+
+        @Override
+        public void close() {
+        }
+
+        private static SessionClosedException sessionClosed() {
+            return new SessionClosedException(ZmuxErrorSource.LOCAL);
+        }
     }
 }
