@@ -12,7 +12,37 @@ import java.nio.channels.WritableByteChannel;
 import java.time.Duration;
 
 public final class Zmux {
-    private static final ZmuxSession CLOSED_SESSION = new ClosedSession();
+    private static final Settings ZERO_SETTINGS = new Settings(
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            SchedulerHint.UNSPECIFIED_OR_BALANCED
+    );
+    private static final Preface ZERO_PREFACE = new Preface(
+            (byte) 0,
+            Role.INITIATOR,
+            0L,
+            0L,
+            0L,
+            0L,
+            ZERO_SETTINGS
+    );
+    private static final Negotiated ZERO_NEGOTIATED = new Negotiated(
+            0L,
+            0L,
+            Role.INITIATOR,
+            Role.INITIATOR,
+            ZERO_SETTINGS
+    );
+    private static final ZmuxNativeSession CLOSED_SESSION = new ClosedSession();
 
     private Zmux() {
     }
@@ -21,8 +51,16 @@ public final class Zmux {
         return CLOSED_SESSION;
     }
 
+    public static ZmuxNativeSession closedNativeSession() {
+        return CLOSED_SESSION;
+    }
+
     public static ZmuxSession asSession(ZmuxSession session) {
         return session == null ? closedSession() : session;
+    }
+
+    public static ZmuxNativeSession asNativeSession(ZmuxNativeSession session) {
+        return session == null ? closedNativeSession() : session;
     }
 
     public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
@@ -291,85 +329,120 @@ public final class Zmux {
         return open(connection, effectiveConfig(config).withRole(role));
     }
 
-    private static final class ClosedSession implements ZmuxSession {
+    private static final class ClosedSession implements ZmuxNativeSession {
         @Override
-        public ZmuxStream acceptStream() throws IOException {
+        public ZmuxNativeStream acceptStream() throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream acceptStream(Duration timeout) throws IOException {
+        public ZmuxNativeStream acceptStream(Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxRecvStream acceptUniStream() throws IOException {
+        public ZmuxNativeRecvStream acceptUniStream() throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxRecvStream acceptUniStream(Duration timeout) throws IOException {
+        public ZmuxNativeRecvStream acceptUniStream(Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openStream() throws IOException {
+        public ZmuxNativeStream openStream() throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openStream(OpenOptions options) throws IOException {
+        public ZmuxNativeStream openStream(OpenOptions options) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openStreamWithTimeout(Duration timeout) throws IOException {
+        public ZmuxNativeStream openStreamWithTimeout(Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
+        public ZmuxNativeStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniStream() throws IOException {
+        public ZmuxNativeSendStream openUniStream() throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniStream(OpenOptions options) throws IOException {
+        public ZmuxNativeSendStream openUniStream(OpenOptions options) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniStreamWithTimeout(Duration timeout) throws IOException {
+        public ZmuxNativeSendStream openUniStreamWithTimeout(Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
+        public ZmuxNativeSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openAndSend(byte[] data) throws IOException {
+        public ZmuxNativeStream openAndSend(byte[] data) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxStream openAndSend(OpenOptions options, byte[] data) throws IOException {
+        public ZmuxNativeStream openAndSend(OpenOptions options, byte[] data) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniAndSend(byte[] data) throws IOException {
+        public ZmuxNativeSendStream openUniAndSend(byte[] data) throws IOException {
             throw sessionClosed();
         }
 
         @Override
-        public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException {
+        public ZmuxNativeSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException {
             throw sessionClosed();
+        }
+
+        @Override
+        public Duration ping(byte[] echo, Duration timeout) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException {
+            throw sessionClosed();
+        }
+
+        @Override
+        public ApplicationError peerGoAwayError() {
+            return null;
+        }
+
+        @Override
+        public ApplicationError peerCloseError() {
+            return null;
+        }
+
+        @Override
+        public Preface localPreface() {
+            return ZERO_PREFACE;
+        }
+
+        @Override
+        public Preface peerPreface() {
+            return ZERO_PREFACE;
+        }
+
+        @Override
+        public Negotiated negotiated() {
+            return ZERO_NEGOTIATED;
         }
 
         @Override

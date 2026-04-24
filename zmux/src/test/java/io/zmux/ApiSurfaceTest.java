@@ -97,10 +97,58 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void asNativeSessionNullReturnsClosedSafeNativeSession() throws Exception {
+        ZmuxNativeSession session = Zmux.closedNativeSession();
+        Settings zeroSettings = new Settings(
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                SchedulerHint.UNSPECIFIED_OR_BALANCED
+        );
+
+        assertNotNull(session);
+        assertSame(Zmux.closedSession(), session, "closed native session should reuse the canonical closed-safe session");
+        assertTrue(session.isClosed());
+        assertEquals(SessionState.INVALID, session.state());
+        assertEquals(SessionState.INVALID, session.stats().state());
+        assertTrue(session.awaitTermination());
+        assertTrue(session.awaitTermination(Duration.ofMillis(1)));
+        assertFalse(session.awaitTerminationCause().isPresent());
+        assertNull(session.peerGoAwayError());
+        assertNull(session.peerCloseError());
+        assertEquals(new Preface((byte) 0, Role.INITIATOR, 0L, 0L, 0L, 0L, zeroSettings), session.localPreface());
+        assertEquals(new Preface((byte) 0, Role.INITIATOR, 0L, 0L, 0L, 0L, zeroSettings), session.peerPreface());
+        assertEquals(new Negotiated(0L, 0L, Role.INITIATOR, Role.INITIATOR, zeroSettings), session.negotiated());
+        assertThrows(SessionClosedException.class, session::openStream);
+        assertThrows(SessionClosedException.class, session::ping);
+        assertThrows(SessionClosedException.class, () -> session.goAway(0L, 0L));
+        session.closeWithError(7L, "ignored");
+        session.closeWithError((Throwable) null);
+        session.close();
+        assertSame(session, Zmux.asNativeSession(null), "asNativeSession(null) should reuse the canonical closed-safe native session");
+    }
+
+    @Test
     void asSessionReturnsSameNonNullReference() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             assertSame(pair.client(), Zmux.asSession(pair.client()));
             assertSame(pair.server(), Zmux.asSession(pair.server()));
+        }
+    }
+
+    @Test
+    void asNativeSessionReturnsSameNonNullReference() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            assertSame(pair.client(), Zmux.asNativeSession(pair.client()));
+            assertSame(pair.server(), Zmux.asNativeSession(pair.server()));
         }
     }
 
