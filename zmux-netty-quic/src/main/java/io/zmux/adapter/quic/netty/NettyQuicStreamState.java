@@ -298,12 +298,20 @@ final class NettyQuicStreamState {
 
     SocketAddress localAddress() {
         QuicStreamChannel current = channel;
-        return current == null ? null : current.parent().localSocketAddress();
+        SocketAddress address = current == null ? null : current.parent().localSocketAddress();
+        if (address != null) {
+            return address;
+        }
+        return current == null ? ZmuxSocketAddress.localPending() : ZmuxSocketAddress.localStream(current.streamId());
     }
 
     SocketAddress remoteAddress() {
         QuicStreamChannel current = channel;
-        return current == null ? null : current.parent().remoteSocketAddress();
+        SocketAddress address = current == null ? null : current.parent().remoteSocketAddress();
+        if (address != null) {
+            return address;
+        }
+        return current == null ? ZmuxSocketAddress.remotePending() : ZmuxSocketAddress.remoteStream(current.streamId());
     }
 
     int read(byte[] dst, int offset, int length) throws IOException {

@@ -154,7 +154,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 return address;
             }
             address = localAddress(outputHalf);
-            return address != null ? address : fallbackLocalAddress;
+            if (address != null) {
+                return address;
+            }
+            return fallbackLocalAddress != null ? fallbackLocalAddress : ZmuxSocketAddress.localPending();
         } finally {
             lock.unlock();
         }
@@ -169,7 +172,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 return address;
             }
             address = remoteAddress(outputHalf);
-            return address != null ? address : fallbackRemoteAddress;
+            if (address != null) {
+                return address;
+            }
+            return fallbackRemoteAddress != null ? fallbackRemoteAddress : ZmuxSocketAddress.remotePending();
         } finally {
             lock.unlock();
         }

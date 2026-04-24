@@ -201,6 +201,19 @@ final class ZmuxConnectionsTest {
         assertArrayEquals(new byte[]{9, 8, 7}, secondGathering.writtenBytes());
     }
 
+    @Test
+    void joinedConnectionFallsBackToSyntheticAddresses() throws Exception {
+        try (JoinedDuplexConnection connection = new JoinedDuplexConnection(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream()
+        )) {
+            assertEquals(ZmuxSocketAddress.localPending(), connection.localAddress());
+            assertEquals(ZmuxSocketAddress.remotePending(), connection.remoteAddress());
+            assertEquals("local/stream/pending", connection.localAddress().toString());
+            assertEquals("remote/stream/pending", connection.remoteAddress().toString());
+        }
+    }
+
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
         private final ByteArrayOutputStream written = new ByteArrayOutputStream();
         private final AtomicInteger closeCount = new AtomicInteger();

@@ -368,12 +368,24 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     @Override
     public SocketAddress localAddress() {
-        return session.connection().localAddress();
+        SocketAddress address = session.connection().localAddress();
+        if (address != null) {
+            return address;
+        }
+        return lifecycleState.idAssigned()
+                ? ZmuxSocketAddress.localStream(lifecycleState.streamIdInternal())
+                : ZmuxSocketAddress.localPending();
     }
 
     @Override
     public SocketAddress remoteAddress() {
-        return session.connection().remoteAddress();
+        SocketAddress address = session.connection().remoteAddress();
+        if (address != null) {
+            return address;
+        }
+        return lifecycleState.idAssigned()
+                ? ZmuxSocketAddress.remoteStream(lifecycleState.streamIdInternal())
+                : ZmuxSocketAddress.remotePending();
     }
 
     @Override

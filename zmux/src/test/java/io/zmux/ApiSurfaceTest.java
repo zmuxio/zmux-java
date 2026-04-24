@@ -88,6 +88,28 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void streamAddressesFallBackWhenTransportDoesNotExposeSocketAddresses() throws Exception {
+        try (SessionPair pair = SessionPair.openWithoutAddresses()) {
+            ZmuxNativeStream outbound = pair.client().openStream();
+            outbound.write("x".getBytes(StandardCharsets.UTF_8));
+            ZmuxNativeStream inbound = pair.server().acceptStream(Duration.ofSeconds(1));
+
+            SocketAddress outboundLocal = outbound.localAddress();
+            SocketAddress outboundRemote = outbound.remoteAddress();
+            SocketAddress inboundLocal = inbound.localAddress();
+            SocketAddress inboundRemote = inbound.remoteAddress();
+
+            assertEquals(ZmuxSocketAddress.localStream(outbound.streamId()), outboundLocal);
+            assertEquals(ZmuxSocketAddress.remoteStream(outbound.streamId()), outboundRemote);
+            assertEquals(ZmuxSocketAddress.localStream(inbound.streamId()), inboundLocal);
+            assertEquals(ZmuxSocketAddress.remoteStream(inbound.streamId()), inboundRemote);
+
+            outbound.close();
+            inbound.close();
+        }
+    }
+
+    @Test
     void openWithExpiredTimeoutFailsBeforeCoreProvisionalOpen() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             assertThrows(OpenTimeoutException.class, () -> pair.client().openStreamWithTimeout(Duration.ZERO));
@@ -865,6 +887,14 @@ final class ApiSurfaceTest {
         }
 
         static SessionPair open(ZmuxConfig config) throws Exception {
+            return open(config, false);
+        }
+
+        static SessionPair openWithoutAddresses() throws Exception {
+            return open(ZmuxConfig.defaults(), true);
+        }
+
+        private static SessionPair open(ZmuxConfig config, boolean omitAddresses) throws Exception {
             ServerSocket listener = new ServerSocket(0);
             Socket clientSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket serverSocket = listener.accept();
@@ -877,7 +907,11 @@ final class ApiSurfaceTest {
 
             Thread clientThread = new Thread(() -> {
                 try {
-                    clientRef.set(Zmux.client(clientSocket, config));
+                    clientRef.set(
+                            omitAddresses
+                                    ? Zmux.client(clientSocket.getInputStream(), clientSocket.getOutputStream(), config)
+                                    : Zmux.client(clientSocket, config)
+                    );
                 } catch (Throwable t) {
                     errorRef.compareAndSet(null, t);
                 } finally {
@@ -888,7 +922,11 @@ final class ApiSurfaceTest {
 
             Thread serverThread = new Thread(() -> {
                 try {
-                    serverRef.set(Zmux.server(serverSocket, config));
+                    serverRef.set(
+                            omitAddresses
+                                    ? Zmux.server(serverSocket.getInputStream(), serverSocket.getOutputStream(), config)
+                                    : Zmux.server(serverSocket, config)
+                    );
                 } catch (Throwable t) {
                     errorRef.compareAndSet(null, t);
                 } finally {
