@@ -42,7 +42,7 @@ final class NettyQuicSupport {
     static final long STREAM_INBOUND_AUTO_READ_LOW_WATERMARK =
             STREAM_INBOUND_AUTO_READ_HIGH_WATERMARK >>> 1;
     static final byte[] EMPTY_STREAM_PRELUDE = new byte[]{0};
-    static final ZmuxSession CLOSED_SESSION = new ClosedSession();
+    static final ZmuxSession CLOSED_SESSION = Zmux.closedSession();
     private static final AtomicLong PRELUDE_WORKER_SEQUENCE = new AtomicLong();
     private static final int ACCEPTED_PRELUDE_WORKER_MAX = positiveIntegerProperty(
             "io.zmux.netty.acceptedPreludeWorkers",
@@ -896,113 +896,4 @@ final class NettyQuicSupport {
         }
     }
 
-    private static final class ClosedSession implements ZmuxSession {
-        @Override
-        public ZmuxStream acceptStream() throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream acceptStream(Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxRecvStream acceptUniStream() throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxRecvStream acceptUniStream(Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openStream() throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openStream(OpenOptions options) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openStreamWithTimeout(Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniStream() throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniStream(OpenOptions options) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniStreamWithTimeout(Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openAndSend(byte[] data) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxStream openAndSend(OpenOptions options, byte[] data) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniAndSend(byte[] data) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException {
-            throw sessionClosedError();
-        }
-
-        @Override
-        public void closeWithError(long code, String reason) {
-        }
-
-        @Override
-        public boolean awaitTermination(Duration timeout) {
-            return true;
-        }
-
-        @Override
-        public boolean isClosed() {
-            return true;
-        }
-
-        @Override
-        public SessionState state() {
-            return SessionState.INVALID;
-        }
-
-        @Override
-        public SessionStats stats() {
-            return SessionStats.empty(SessionState.INVALID);
-        }
-
-        @Override
-        public void close() {
-        }
-    }
 }

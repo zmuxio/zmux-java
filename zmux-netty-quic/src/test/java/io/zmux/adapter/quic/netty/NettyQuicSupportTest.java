@@ -91,17 +91,20 @@ class NettyQuicSupportTest {
         ZmuxSession concurrencySession = NettyQuic.wrapSession(null, 3);
         ZmuxSession combinedSession = NettyQuic.wrapSession(null, Duration.ofMillis(25), 3);
 
+        assertSame(Zmux.closedSession(), timeoutSession);
         assertTrue(timeoutSession.isClosed());
         assertEquals(SessionState.INVALID, timeoutSession.state());
         assertEquals(SessionState.INVALID, timeoutSession.stats().state());
         assertTrue(timeoutSession.awaitTermination(Duration.ofMillis(1)));
         timeoutSession.close();
 
+        assertSame(Zmux.closedSession(), concurrencySession);
         assertTrue(concurrencySession.isClosed());
         assertEquals(SessionState.INVALID, concurrencySession.state());
         assertTrue(concurrencySession.awaitTermination(Duration.ofMillis(1)));
         concurrencySession.close();
 
+        assertSame(Zmux.closedSession(), combinedSession);
         assertTrue(combinedSession.isClosed());
         assertEquals(SessionState.INVALID, combinedSession.state());
         assertTrue(combinedSession.awaitTermination(Duration.ofMillis(1)));

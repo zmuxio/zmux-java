@@ -80,7 +80,7 @@ final class ApiSurfaceTest {
 
     @Test
     void asSessionNullReturnsClosedSafeStableSession() throws Exception {
-        ZmuxSession session = Zmux.asSession(null);
+        ZmuxSession session = Zmux.closedSession();
 
         assertNotNull(session);
         assertTrue(session.isClosed());
@@ -93,6 +93,7 @@ final class ApiSurfaceTest {
         session.closeWithError(7L, "ignored");
         session.closeWithError((Throwable) null);
         session.close();
+        assertSame(session, Zmux.asSession(null), "asSession(null) should reuse the canonical closed-safe session");
     }
 
     @Test

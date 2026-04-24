@@ -17,8 +17,12 @@ public final class Zmux {
     private Zmux() {
     }
 
+    public static ZmuxSession closedSession() {
+        return CLOSED_SESSION;
+    }
+
     public static ZmuxSession asSession(ZmuxSession session) {
-        return session == null ? CLOSED_SESSION : session;
+        return session == null ? closedSession() : session;
     }
 
     public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
