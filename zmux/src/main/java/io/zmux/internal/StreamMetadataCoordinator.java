@@ -16,7 +16,7 @@ final class StreamMetadataCoordinator {
     }
 
     void updateMetadata(MetadataUpdate update) throws IOException {
-        if (update == null || update.empty()) {
+        if (update == null || update.isEmpty()) {
             throw new EmptyMetadataUpdateException();
         }
         synchronized (this.owner.lockInternal()) {

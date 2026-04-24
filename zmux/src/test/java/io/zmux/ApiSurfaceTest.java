@@ -66,6 +66,34 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void javaStyleTimeoutOpenAliasesDelegateToWithTimeoutVariants() throws Exception {
+        RecordingDefaultSendStream send = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(send);
+        OpenOptions options = OpenOptions.priority(7L);
+        Duration timeout = Duration.ofMillis(25);
+
+        assertSame(session.bidiStream, session.openStream(timeout));
+        assertEquals(1, session.openStreamWithTimeoutCalls);
+        assertSame(OpenOptions.empty(), session.lastOpenStreamOptions);
+        assertEquals(timeout, session.lastOpenStreamTimeout);
+
+        assertSame(session.bidiStream, session.openStream(options, timeout));
+        assertEquals(2, session.openStreamWithTimeoutCalls);
+        assertSame(options, session.lastOpenStreamOptions);
+        assertEquals(timeout, session.lastOpenStreamTimeout);
+
+        assertSame(send, session.openUniStream(timeout));
+        assertEquals(1, session.openUniStreamWithTimeoutCalls);
+        assertSame(OpenOptions.empty(), session.lastOpenUniStreamOptions);
+        assertEquals(timeout, session.lastOpenUniStreamTimeout);
+
+        assertSame(send, session.openUniStream(options, timeout));
+        assertEquals(2, session.openUniStreamWithTimeoutCalls);
+        assertSame(options, session.lastOpenUniStreamOptions);
+        assertEquals(timeout, session.lastOpenUniStreamTimeout);
+    }
+
+    @Test
     void acceptUniStreamExposesRecvOnlySurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxSendStream outbound = pair.client().openUniStream();
@@ -1897,6 +1925,8 @@ final class ApiSurfaceTest {
 
     private static final class DefaultRecordingNativeSession implements ZmuxNativeSession {
         private final RecordingDefaultSendStream stream;
+        private final RecordingDefaultBidiStream bidiStream = new RecordingDefaultBidiStream();
+        private int openStreamWithTimeoutCalls;
         private int openUniStreamWithTimeoutCalls;
         private int goAwayCalls;
         private int closeCalls;
@@ -1910,6 +1940,10 @@ final class ApiSurfaceTest {
         private byte[] lastPingPayload;
         private Duration lastPingTimeout;
         private Duration pingResult = Duration.ZERO;
+        private OpenOptions lastOpenStreamOptions;
+        private Duration lastOpenStreamTimeout;
+        private OpenOptions lastOpenUniStreamOptions;
+        private Duration lastOpenUniStreamTimeout;
         private Duration lastAwaitTerminationTimeout;
         private boolean awaitTerminationResult;
         private java.util.Optional<IOException> terminationCause = java.util.Optional.empty();
@@ -1921,6 +1955,8 @@ final class ApiSurfaceTest {
         @Override
         public ZmuxNativeSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) {
             this.openUniStreamWithTimeoutCalls++;
+            this.lastOpenUniStreamOptions = options;
+            this.lastOpenUniStreamTimeout = timeout;
             return stream;
         }
 
@@ -1956,12 +1992,15 @@ final class ApiSurfaceTest {
 
         @Override
         public ZmuxNativeStream openStreamWithTimeout(Duration timeout) {
-            throw new UnsupportedOperationException();
+            return openStreamWithTimeout(OpenOptions.empty(), timeout);
         }
 
         @Override
         public ZmuxNativeStream openStreamWithTimeout(OpenOptions options, Duration timeout) {
-            throw new UnsupportedOperationException();
+            this.openStreamWithTimeoutCalls++;
+            this.lastOpenStreamOptions = options;
+            this.lastOpenStreamTimeout = timeout;
+            return bidiStream;
         }
 
         @Override
@@ -1976,7 +2015,7 @@ final class ApiSurfaceTest {
 
         @Override
         public ZmuxNativeSendStream openUniStreamWithTimeout(Duration timeout) {
-            throw new UnsupportedOperationException();
+            return openUniStreamWithTimeout(OpenOptions.empty(), timeout);
         }
 
         @Override

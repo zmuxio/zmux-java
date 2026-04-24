@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -7,7 +8,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 
-public interface ZmuxSession extends AutoCloseable {
+public interface ZmuxSession extends Closeable {
     ZmuxStream acceptStream() throws IOException, InterruptedException;
 
     ZmuxStream acceptStream(Duration timeout) throws IOException, InterruptedException;
@@ -20,6 +21,14 @@ public interface ZmuxSession extends AutoCloseable {
 
     ZmuxStream openStream(OpenOptions options) throws IOException, InterruptedException;
 
+    default ZmuxStream openStream(Duration timeout) throws IOException, InterruptedException {
+        return openStreamWithTimeout(timeout);
+    }
+
+    default ZmuxStream openStream(OpenOptions options, Duration timeout) throws IOException, InterruptedException {
+        return openStreamWithTimeout(options, timeout);
+    }
+
     ZmuxStream openStreamWithTimeout(Duration timeout) throws IOException, InterruptedException;
 
     ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException, InterruptedException;
@@ -27,6 +36,14 @@ public interface ZmuxSession extends AutoCloseable {
     ZmuxSendStream openUniStream() throws IOException, InterruptedException;
 
     ZmuxSendStream openUniStream(OpenOptions options) throws IOException, InterruptedException;
+
+    default ZmuxSendStream openUniStream(Duration timeout) throws IOException, InterruptedException {
+        return openUniStreamWithTimeout(timeout);
+    }
+
+    default ZmuxSendStream openUniStream(OpenOptions options, Duration timeout) throws IOException, InterruptedException {
+        return openUniStreamWithTimeout(options, timeout);
+    }
 
     ZmuxSendStream openUniStreamWithTimeout(Duration timeout) throws IOException, InterruptedException;
 

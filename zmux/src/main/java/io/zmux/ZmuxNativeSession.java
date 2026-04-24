@@ -25,6 +25,16 @@ public interface ZmuxNativeSession extends ZmuxSession {
     ZmuxNativeStream openStream(OpenOptions options) throws IOException, InterruptedException;
 
     @Override
+    default ZmuxNativeStream openStream(Duration timeout) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openStream(timeout);
+    }
+
+    @Override
+    default ZmuxNativeStream openStream(OpenOptions options, Duration timeout) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openStream(options, timeout);
+    }
+
+    @Override
     ZmuxNativeStream openStreamWithTimeout(Duration timeout) throws IOException, InterruptedException;
 
     @Override
@@ -35,6 +45,16 @@ public interface ZmuxNativeSession extends ZmuxSession {
 
     @Override
     ZmuxNativeSendStream openUniStream(OpenOptions options) throws IOException, InterruptedException;
+
+    @Override
+    default ZmuxNativeSendStream openUniStream(Duration timeout) throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniStream(timeout);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniStream(OpenOptions options, Duration timeout) throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniStream(options, timeout);
+    }
 
     @Override
     ZmuxNativeSendStream openUniStreamWithTimeout(Duration timeout) throws IOException, InterruptedException;

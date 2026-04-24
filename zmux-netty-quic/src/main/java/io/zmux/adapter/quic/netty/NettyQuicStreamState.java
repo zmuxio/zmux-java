@@ -593,7 +593,7 @@ final class NettyQuicStreamState {
     }
 
     void updateMetadata(MetadataUpdate update) throws IOException {
-        if (update == null || update.empty()) {
+        if (update == null || update.isEmpty()) {
             throw NettyQuicSupport.emptyMetadataUpdateError();
         }
         PendingMetadataSnapshot snapshot;

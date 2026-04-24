@@ -74,7 +74,7 @@ final class MetadataValueTypeTest {
         assertTrue(built.hasPriority());
         assertTrue(built.hasGroup());
         assertFalse(built.isEmpty());
-        assertTrue(MetadataUpdate.of(null, null).empty());
+        assertTrue(MetadataUpdate.of(null, null).isEmpty());
         assertTrue(MetadataUpdate.of(null, null).isEmpty());
         assertFalse(MetadataUpdate.of(null, null).hasPriority());
         assertFalse(MetadataUpdate.of(null, null).hasGroup());

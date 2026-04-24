@@ -1,12 +1,13 @@
 package io.zmux;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.SocketAddress;
 import java.nio.channels.GatheringByteChannel;
 
-public interface DuplexConnection extends AutoCloseable {
+public interface DuplexConnection extends Closeable {
     InputStream input();
 
     OutputStream output();

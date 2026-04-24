@@ -39,12 +39,8 @@ public final class MetadataUpdate {
         return value;
     }
 
-    public boolean empty() {
-        return priority == null && group == null;
-    }
-
     public boolean isEmpty() {
-        return empty();
+        return priority == null && group == null;
     }
 
     public Long priority() {
