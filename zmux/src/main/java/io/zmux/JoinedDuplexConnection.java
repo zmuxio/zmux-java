@@ -20,6 +20,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private final Condition outputChanged = lock.newCondition();
     private final InputStream inputView = new JoinedInputStream();
     private final OutputStream outputView = new JoinedOutputStream();
+    private final GatheringByteChannel gatheringOutputView = new JoinedGatheringOutput();
     private final SocketAddress fallbackLocalAddress;
     private final SocketAddress fallbackRemoteAddress;
 
@@ -138,7 +139,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     public GatheringByteChannel gatheringOutput() {
         lock.lock();
         try {
-            return outputPaused || closed ? null : gatheringOutput;
+            return outputPaused || closed || gatheringOutput == null ? null : gatheringOutputView;
         } finally {
             lock.unlock();
         }
@@ -326,6 +327,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         } finally {
             lock.unlock();
         }
+    }
+
+    private GatheringByteChannel currentGatheringOutputLocked() {
+        return gatheringOutput;
     }
 
     private void leaveOutput() {
@@ -683,18 +688,81 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         @Override
         public void close() throws IOException {
             InputStream input;
+            try {
+                input = enterInput();
+            } catch (SessionClosedException closed) {
+                return;
+            }
+            try {
+                if (input != null) {
+                    input.close();
+                }
+            } finally {
+                leaveInput();
+            }
+        }
+    }
+
+    private final class JoinedGatheringOutput implements GatheringByteChannel {
+        @Override
+        public int write(java.nio.ByteBuffer src) throws IOException {
+            enterOutput();
+            try {
+                GatheringByteChannel gathering;
+                lock.lock();
+                try {
+                    gathering = currentGatheringOutputLocked();
+                } finally {
+                    lock.unlock();
+                }
+                if (gathering == null) {
+                    throw new StreamNotWritableException();
+                }
+                return gathering.write(src);
+            } finally {
+                leaveOutput();
+            }
+        }
+
+        @Override
+        public long write(java.nio.ByteBuffer[] srcs, int offset, int length) throws IOException {
+            RangeChecks.checkFromIndexSize(offset, length, srcs.length);
+            enterOutput();
+            try {
+                GatheringByteChannel gathering;
+                lock.lock();
+                try {
+                    gathering = currentGatheringOutputLocked();
+                } finally {
+                    lock.unlock();
+                }
+                if (gathering == null) {
+                    throw new StreamNotWritableException();
+                }
+                return gathering.write(srcs, offset, length);
+            } finally {
+                leaveOutput();
+            }
+        }
+
+        @Override
+        public long write(java.nio.ByteBuffer[] srcs) throws IOException {
+            return write(srcs, 0, srcs.length);
+        }
+
+        @Override
+        public boolean isOpen() {
             lock.lock();
             try {
-                input = inputHalf;
-                inputHalf = null;
-                inputPaused = false;
-                signalInputChangedLocked();
+                return !closed && !outputPaused && gatheringOutput != null && gatheringOutput.isOpen();
             } finally {
                 lock.unlock();
             }
-            if (input != null) {
-                input.close();
-            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            outputView.close();
         }
     }
 
@@ -745,22 +813,26 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public void close() throws IOException {
             OutputStream output;
             GatheringByteChannel gathering;
+            try {
+                output = enterOutput();
+            } catch (SessionClosedException closed) {
+                return;
+            }
             lock.lock();
             try {
-                output = outputHalf;
-                gathering = gatheringOutput;
-                outputHalf = null;
-                gatheringOutput = null;
-                outputPaused = false;
-                signalOutputChangedLocked();
+                gathering = currentGatheringOutputLocked();
             } finally {
                 lock.unlock();
             }
             IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(2);
-            IOException error = closeOnce(output, closedObjects, null);
-            error = closeOnce(gathering, closedObjects, error);
-            if (error != null) {
-                throw error;
+            try {
+                IOException error = closeOnce(output, closedObjects, null);
+                error = closeOnce(gathering, closedObjects, error);
+                if (error != null) {
+                    throw error;
+                }
+            } finally {
+                leaveOutput();
             }
         }
     }

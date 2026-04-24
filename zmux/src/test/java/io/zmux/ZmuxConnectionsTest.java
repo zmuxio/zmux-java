@@ -145,8 +145,8 @@ final class ZmuxConnectionsTest {
 
     @Test
     void joinedConnectionExposesCurrentHalvesAndDirectionalClose() throws Exception {
-        ByteArrayInputStream input = new ByteArrayInputStream(new byte[]{7});
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        RecordingInputStream input = new RecordingInputStream(new byte[]{7});
+        RecordingOutputStream output = new RecordingOutputStream();
 
         try (JoinedDuplexConnection connection = new JoinedDuplexConnection(input, output)) {
             assertSame(input, connection.inputHalf());
@@ -163,13 +163,42 @@ final class ZmuxConnectionsTest {
             assertSame(output, connection.outputHalf());
 
             connection.closeInput();
-            assertNull(connection.inputHalf());
+            assertSame(input, connection.inputHalf());
             connection.closeInput();
+            assertEquals(2, input.closeCalls());
 
             connection.closeOutput();
-            assertNull(connection.outputHalf());
+            assertSame(output, connection.outputHalf());
             connection.closeOutput();
+            assertEquals(2, output.closeCalls());
         }
+    }
+
+    @Test
+    void joinedGatheringOutputViewFollowsReplacedWriteHalf() throws Exception {
+        RecordingByteChannel firstGathering = new RecordingByteChannel();
+        RecordingByteChannel secondGathering = new RecordingByteChannel();
+
+        try (JoinedDuplexConnection connection = new JoinedDuplexConnection(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                firstGathering,
+                null,
+                null
+        )) {
+            GatheringByteChannel gatheringView = connection.gatheringOutput();
+            assertNotNull(gatheringView);
+
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseOutput();
+            pausedOutput.set(new ByteArrayOutputStream());
+            pausedOutput.setGatheringOutput(secondGathering);
+            pausedOutput.resume();
+
+            gatheringView.write(ByteBuffer.wrap(new byte[]{9, 8, 7}));
+        }
+
+        assertArrayEquals(new byte[0], firstGathering.writtenBytes());
+        assertArrayEquals(new byte[]{9, 8, 7}, secondGathering.writtenBytes());
     }
 
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
@@ -291,6 +320,37 @@ final class ZmuxConnectionsTest {
 
         int closeReadCalls() {
             return closeReadCalls;
+        }
+    }
+
+    private static final class RecordingInputStream extends ByteArrayInputStream {
+        private int closeCalls;
+
+        private RecordingInputStream(byte[] buf) {
+            super(buf);
+        }
+
+        @Override
+        public void close() {
+            closeCalls++;
+        }
+
+        int closeCalls() {
+            return closeCalls;
+        }
+    }
+
+    private static final class RecordingOutputStream extends ByteArrayOutputStream {
+        private int closeCalls;
+
+        @Override
+        public void close() throws IOException {
+            closeCalls++;
+            super.close();
+        }
+
+        int closeCalls() {
+            return closeCalls;
         }
     }
 
