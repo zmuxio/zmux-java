@@ -157,6 +157,30 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionNilReadHalfStillSupportsDeadlineAndClose() throws Exception {
+        RecordingWriteHalf writeHalf = new RecordingWriteHalf(null, null, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join((ReadHalf) null, writeHalf)) {
+            assertThrows(StreamNotReadableException.class, connection.input()::read);
+            assertDoesNotThrow(() -> connection.setReadDeadline(Instant.now().plusSeconds(1)));
+            assertDoesNotThrow(connection::closeRead);
+            assertEquals(0, writeHalf.closeWriteCalls(), "closeRead should not touch the write half");
+        }
+    }
+
+    @Test
+    void joinedConnectionNilWriteHalfStillSupportsDeadlineAndClose() throws Exception {
+        RecordingReadHalf readHalf = new RecordingReadHalf(new byte[0], null, null);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, (WriteHalf) null)) {
+            assertThrows(StreamNotWritableException.class, () -> connection.output().write(1));
+            assertDoesNotThrow(() -> connection.setWriteDeadline(Instant.now().plusSeconds(1)));
+            assertDoesNotThrow(connection::closeWrite);
+            assertEquals(0, readHalf.closeReadCalls(), "closeWrite should not touch the read half");
+        }
+    }
+
+    @Test
     void joinBuildsJoinedDuplexConnectionFromDirectionalHalves() throws Exception {
         InetSocketAddress local = InetSocketAddress.createUnresolved("joined.half.local", 4321);
         InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.half.remote", 8765);
@@ -486,6 +510,22 @@ final class ZmuxConnectionsTest {
             assertEquals("local/stream/pending", connection.localAddress().toString());
             assertEquals("remote/stream/pending", connection.remoteAddress().toString());
         }
+    }
+
+    @Test
+    void joinedConnectionCloseAggregatesHalfCloseErrors() {
+        IOException readError = new IOException("read-close-failure");
+        IOException writeError = new IOException("write-close-failure");
+        JoinedDuplexConnection connection = new JoinedDuplexConnection(
+                new ThrowingInputStream(readError),
+                new ThrowingOutputStream(writeError)
+        );
+
+        IOException error = assertThrows(IOException.class, connection::close);
+
+        assertSame(readError, error);
+        assertEquals(1, error.getSuppressed().length);
+        assertSame(writeError, error.getSuppressed()[0]);
     }
 
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
@@ -830,6 +870,41 @@ final class ZmuxConnectionsTest {
 
         int closeCalls() {
             return closeCalls;
+        }
+    }
+
+    private static final class ThrowingInputStream extends InputStream {
+        private final IOException closeError;
+
+        private ThrowingInputStream(IOException closeError) {
+            this.closeError = closeError;
+        }
+
+        @Override
+        public int read() {
+            return -1;
+        }
+
+        @Override
+        public void close() throws IOException {
+            throw closeError;
+        }
+    }
+
+    private static final class ThrowingOutputStream extends OutputStream {
+        private final IOException closeError;
+
+        private ThrowingOutputStream(IOException closeError) {
+            this.closeError = closeError;
+        }
+
+        @Override
+        public void write(int b) {
+        }
+
+        @Override
+        public void close() throws IOException {
+            throw closeError;
         }
     }
 
