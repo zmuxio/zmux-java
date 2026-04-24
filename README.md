@@ -384,6 +384,8 @@ JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
 
 The joined connection exposes `InputStream` / `OutputStream` and closes the
 attached stream halves directionally.
+Its pause handles can also swap in replacement `ZmuxRecvStream` /
+`ZmuxSendStream` halves directly before resuming.
 
 ### Existing Buffers
 

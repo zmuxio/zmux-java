@@ -20,8 +20,8 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private final Condition outputChanged = lock.newCondition();
     private final InputStream inputView = new JoinedInputStream();
     private final OutputStream outputView = new JoinedOutputStream();
-    private final SocketAddress localAddress;
-    private final SocketAddress remoteAddress;
+    private final SocketAddress fallbackLocalAddress;
+    private final SocketAddress fallbackRemoteAddress;
 
     private InputStream inputHalf;
     private OutputStream outputHalf;
@@ -40,8 +40,8 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     public JoinedDuplexConnection(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
         this(
-                inputHalf == null ? null : inputHalf.asInputStream(),
-                outputHalf == null ? null : outputHalf.asOutputStream(),
+                wrap(inputHalf),
+                wrap(outputHalf),
                 null,
                 localAddress(inputHalf, outputHalf),
                 remoteAddress(inputHalf, outputHalf)
@@ -56,8 +56,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         this.inputHalf = inputHalf;
         this.outputHalf = outputHalf;
         this.gatheringOutput = gatheringOutput;
-        this.localAddress = localAddress;
-        this.remoteAddress = remoteAddress;
+        this.fallbackLocalAddress = localAddress;
+        this.fallbackRemoteAddress = remoteAddress;
+    }
+
+    private static InputStream wrap(ZmuxRecvStream inputHalf) {
+        return inputHalf == null ? null : new StreamInputHalf(inputHalf);
+    }
+
+    private static OutputStream wrap(ZmuxSendStream outputHalf) {
+        return outputHalf == null ? null : new StreamOutputHalf(outputHalf);
     }
 
     private static SocketAddress localAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
@@ -120,12 +128,32 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     @Override
     public SocketAddress localAddress() {
-        return localAddress;
+        lock.lock();
+        try {
+            SocketAddress address = localAddress(inputHalf);
+            if (address != null) {
+                return address;
+            }
+            address = localAddress(outputHalf);
+            return address != null ? address : fallbackLocalAddress;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
     public SocketAddress remoteAddress() {
-        return remoteAddress;
+        lock.lock();
+        try {
+            SocketAddress address = remoteAddress(inputHalf);
+            if (address != null) {
+                return address;
+            }
+            address = remoteAddress(outputHalf);
+            return address != null ? address : fallbackRemoteAddress;
+        } finally {
+            lock.unlock();
+        }
     }
 
     public PausedInput pauseInput() throws IOException, InterruptedException {
@@ -401,6 +429,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return current;
         }
 
+        public InputStream set(ZmuxRecvStream next) {
+            return set(wrap(next));
+        }
+
         public InputStream set(InputStream next) {
             InputStream previous = current;
             current = next;
@@ -426,6 +458,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         public OutputStream current() {
             return current;
+        }
+
+        public OutputStream set(ZmuxSendStream next) {
+            return set(wrap(next));
         }
 
         public OutputStream set(OutputStream next) {
@@ -490,6 +526,100 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 return false;
             }
             return condition.await(remaining, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private interface AddressAwareHalf {
+        SocketAddress localAddress();
+
+        SocketAddress remoteAddress();
+    }
+
+    private static SocketAddress localAddress(Object half) {
+        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).localAddress() : null;
+    }
+
+    private static SocketAddress remoteAddress(Object half) {
+        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).remoteAddress() : null;
+    }
+
+    private static final class StreamInputHalf extends InputStream implements AddressAwareHalf {
+        private final ZmuxRecvStream stream;
+        private final byte[] singleByte = new byte[1];
+
+        private StreamInputHalf(ZmuxRecvStream stream) {
+            this.stream = stream;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int read;
+            do {
+                read = stream.read(singleByte, 0, 1);
+            } while (read == 0);
+            return read < 0 ? -1 : singleByte[0] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            return stream.read(buffer, offset, length);
+        }
+
+        @Override
+        public void close() throws IOException {
+            stream.closeRead();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return stream.localAddress();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return stream.remoteAddress();
+        }
+    }
+
+    private static final class StreamOutputHalf extends OutputStream implements AddressAwareHalf {
+        private final ZmuxSendStream stream;
+        private final byte[] singleByte = new byte[1];
+
+        private StreamOutputHalf(ZmuxSendStream stream) {
+            this.stream = stream;
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            singleByte[0] = (byte) value;
+            stream.write(singleByte, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return;
+            }
+            stream.write(buffer, offset, length);
+        }
+
+        @Override
+        public void flush() throws IOException {
+        }
+
+        @Override
+        public void close() throws IOException {
+            stream.closeWrite();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return stream.localAddress();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return stream.remoteAddress();
         }
     }
 

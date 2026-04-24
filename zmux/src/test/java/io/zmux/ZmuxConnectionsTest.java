@@ -105,6 +105,44 @@ final class ZmuxConnectionsTest {
         assertEquals(1, send.closeWriteCalls());
     }
 
+    @Test
+    void joinedConnectionPauseHandlesCanSwapTypedStreamHalvesAndRefreshAddresses() throws Exception {
+        InetSocketAddress firstLocal = InetSocketAddress.createUnresolved("joined.local.a", 7777);
+        InetSocketAddress firstRemote = InetSocketAddress.createUnresolved("joined.remote.a", 8888);
+        InetSocketAddress secondLocal = InetSocketAddress.createUnresolved("joined.local.b", 9999);
+        InetSocketAddress secondRemote = InetSocketAddress.createUnresolved("joined.remote.b", 10_000);
+
+        RecordingRecvStream firstRecv = new RecordingRecvStream(new byte[]{1}, firstLocal, firstRemote);
+        RecordingSendStream firstSend = new RecordingSendStream(firstLocal, firstRemote);
+        RecordingRecvStream secondRecv = new RecordingRecvStream(new byte[]{2}, secondLocal, secondRemote);
+        RecordingSendStream secondSend = new RecordingSendStream(secondLocal, secondRemote);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(firstRecv, firstSend)) {
+            assertSame(firstLocal, connection.localAddress());
+            assertSame(firstRemote, connection.remoteAddress());
+
+            JoinedDuplexConnection.PausedInput pausedInput = connection.pauseInput();
+            pausedInput.set(secondRecv);
+            pausedInput.resume();
+            assertSame(secondLocal, connection.localAddress());
+            assertSame(secondRemote, connection.remoteAddress());
+            assertEquals(2, connection.input().read());
+
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseOutput();
+            pausedOutput.set(secondSend);
+            pausedOutput.resume();
+            assertSame(secondLocal, connection.localAddress());
+            assertSame(secondRemote, connection.remoteAddress());
+            connection.output().write(new byte[]{9});
+        }
+
+        assertEquals(0, firstRecv.closeReadCalls());
+        assertEquals(0, firstSend.closeWriteCalls());
+        assertEquals(1, secondRecv.closeReadCalls());
+        assertEquals(1, secondSend.closeWriteCalls());
+        assertArrayEquals(new byte[]{9}, secondSend.writtenBytes());
+    }
+
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
         private final ByteArrayOutputStream written = new ByteArrayOutputStream();
         private final AtomicInteger closeCount = new AtomicInteger();
