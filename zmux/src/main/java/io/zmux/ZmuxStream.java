@@ -16,4 +16,8 @@ public interface ZmuxStream extends ZmuxSendStream, ZmuxRecvStream {
     default void setTimeout(Duration timeout) throws IOException {
         setDeadline(DeadlineSupport.after(timeout));
     }
+
+    default void clearDeadline() throws IOException {
+        setDeadline(null);
+    }
 }

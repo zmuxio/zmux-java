@@ -1017,6 +1017,19 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultBidiDeadlineHelpersHideNullClearing() throws Exception {
+        RecordingDefaultBidiStream stream = new RecordingDefaultBidiStream();
+
+        stream.setTimeout(Duration.ofMillis(25));
+        assertNotNull(stream.lastDeadline);
+
+        stream.clearDeadline();
+        assertEquals(1, stream.deadlineSetCalls);
+        assertEquals(1, stream.deadlineClearCalls);
+        assertNull(stream.lastDeadline);
+    }
+
+    @Test
     void defaultWritevFinalRejectsNullPartBeforePartialWrite() {
         RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
 
@@ -1252,6 +1265,119 @@ final class ApiSurfaceTest {
         @Override
         public boolean writeClosed() {
             return closeWriteCalls > 0 || writeFinalCalls > 0;
+        }
+    }
+
+    private static final class RecordingDefaultBidiStream implements ZmuxNativeStream {
+        private Instant lastDeadline;
+        private int deadlineSetCalls;
+        private int deadlineClearCalls;
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+        }
+
+        @Override
+        public int writeFinal(byte[] src, int offset, int length) {
+            return length;
+        }
+
+        @Override
+        public void updateMetadata(MetadataUpdate update) {
+        }
+
+        @Override
+        public void closeRead() {
+        }
+
+        @Override
+        public void cancelRead(long code) {
+        }
+
+        @Override
+        public void closeWrite() {
+        }
+
+        @Override
+        public void cancelWrite(long code) {
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+        }
+
+        @Override
+        public void setDeadline(Instant deadline) {
+            lastDeadline = deadline;
+            if (deadline == null) {
+                deadlineClearCalls++;
+            } else {
+                deadlineSetCalls++;
+            }
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+            setDeadline(deadline);
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+            setDeadline(deadline);
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long streamId() {
+            return 0L;
+        }
+
+        @Override
+        public byte[] openInfo() {
+            return new byte[0];
+        }
+
+        @Override
+        public StreamMetadata metadata() {
+            return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return null;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return null;
+        }
+
+        @Override
+        public boolean openedLocally() {
+            return true;
+        }
+
+        @Override
+        public boolean bidirectional() {
+            return true;
+        }
+
+        @Override
+        public boolean readClosed() {
+            return false;
+        }
+
+        @Override
+        public boolean writeClosed() {
+            return false;
         }
     }
 
