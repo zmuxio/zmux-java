@@ -175,4 +175,21 @@ final class MetadataValueTypeTest {
         assertThrows(IllegalArgumentException.class, () -> new ApplicationError(-1L, ""));
         assertThrows(IllegalArgumentException.class, () -> new ApplicationError(tooLarge, ""));
     }
+
+    @Test
+    void applicationErrorTypedHelpersMatchRawCodeSemantics() {
+        ApplicationError error = new ApplicationError(
+                ErrorCode.PROTOCOL,
+                "peer",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.applicationCode());
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertTrue(error.isCode(ErrorCode.PROTOCOL));
+        assertFalse(error.isCode(ErrorCode.INTERNAL));
+    }
 }

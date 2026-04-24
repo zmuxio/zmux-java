@@ -516,6 +516,32 @@ session.closeWithError(0x100L, "bye");
 session.awaitTerminationOrThrow(Duration.ofSeconds(5));
 ```
 
+### Errors
+
+```java
+import io.zmux.ApplicationError;
+import io.zmux.ErrorCode;
+import io.zmux.ZmuxErrors;
+
+try {
+    stream.write(payload);
+} catch (IOException error) {
+    if (ZmuxErrors.sessionClosed(error)) {
+        // session is already gone
+    }
+
+    if (ZmuxErrors.writeClosed(error)) {
+        // write side is no longer available
+    }
+
+    ApplicationError app = ZmuxErrors.applicationError(error);
+    if (app != null && app.isCode(ErrorCode.PROTOCOL)) {
+        long wireCode = app.applicationCode();
+        String reason = app.reason();
+    }
+}
+```
+
 ### Netty QUIC Adapter
 
 ```java
