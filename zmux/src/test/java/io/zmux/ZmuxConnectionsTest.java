@@ -87,6 +87,25 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void bidiStreamAdapterExposesDuplexConnectionSurface() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("bidi.local", 2121);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("bidi.remote", 3434);
+        RecordingBidiStream stream = new RecordingBidiStream(new byte[]{6, 7}, local, remote);
+
+        DuplexConnection connection = ZmuxConnections.of(stream);
+
+        assertSame(local, connection.localAddress());
+        assertSame(remote, connection.remoteAddress());
+        assertEquals(6, connection.input().read());
+        connection.output().write(new byte[]{1, 2, 3});
+        connection.close();
+
+        assertArrayEquals(new byte[]{1, 2, 3}, stream.writtenBytes());
+        assertEquals(1, stream.closeReadCalls());
+        assertEquals(1, stream.closeWriteCalls());
+    }
+
+    @Test
     void joinBuildsJoinedDuplexConnectionFromUniStreams() throws Exception {
         InetSocketAddress local = InetSocketAddress.createUnresolved("joined.local", 5555);
         InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.remote", 6666);
@@ -373,6 +392,136 @@ final class ZmuxConnectionsTest {
 
         int closeCalls() {
             return closeCalls;
+        }
+    }
+
+    private static final class RecordingBidiStream implements ZmuxNativeStream {
+        private final ByteArrayInputStream input;
+        private final ByteArrayOutputStream output = new ByteArrayOutputStream();
+        private final SocketAddress localAddress;
+        private final SocketAddress remoteAddress;
+        private int closeReadCalls;
+        private int closeWriteCalls;
+
+        private RecordingBidiStream(byte[] inputBytes, SocketAddress localAddress, SocketAddress remoteAddress) {
+            this.input = new ByteArrayInputStream(inputBytes);
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+        }
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return input.read(dst, offset, length);
+        }
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+            output.write(src, offset, length);
+        }
+
+        @Override
+        public int writeFinal(byte[] src, int offset, int length) {
+            output.write(src, offset, length);
+            return length;
+        }
+
+        @Override
+        public void updateMetadata(MetadataUpdate update) {
+        }
+
+        @Override
+        public void closeRead() {
+            closeReadCalls++;
+        }
+
+        @Override
+        public void cancelRead(long code) {
+        }
+
+        @Override
+        public void closeWrite() {
+            closeWriteCalls++;
+        }
+
+        @Override
+        public void cancelWrite(long code) {
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+        }
+
+        @Override
+        public void setDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public void setReadDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public void setWriteDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long streamId() {
+            return 0L;
+        }
+
+        @Override
+        public byte[] openInfo() {
+            return new byte[0];
+        }
+
+        @Override
+        public StreamMetadata metadata() {
+            return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return localAddress;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return remoteAddress;
+        }
+
+        @Override
+        public boolean openedLocally() {
+            return true;
+        }
+
+        @Override
+        public boolean bidirectional() {
+            return true;
+        }
+
+        @Override
+        public boolean readClosed() {
+            return closeReadCalls > 0;
+        }
+
+        @Override
+        public boolean writeClosed() {
+            return closeWriteCalls > 0;
+        }
+
+        byte[] writtenBytes() {
+            return output.toByteArray();
+        }
+
+        int closeReadCalls() {
+            return closeReadCalls;
+        }
+
+        int closeWriteCalls() {
+            return closeWriteCalls;
         }
     }
 

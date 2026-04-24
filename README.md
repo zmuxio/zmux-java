@@ -383,6 +383,15 @@ JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
 ZmuxSession nested = Zmux.clientSession(connection);
 ```
 
+If you already have a bidirectional zmux stream, you can adapt it directly as a
+`DuplexConnection` and stack another protocol or nested session on top:
+
+```java
+ZmuxStream stream = session.openStream();
+DuplexConnection nestedTransport = ZmuxConnections.of(stream);
+ZmuxSession nested = Zmux.clientSession(nestedTransport);
+```
+
 The same helper also works for arbitrary split `InputStream` / `OutputStream`
 halves when your transport is not already a zmux stream:
 
