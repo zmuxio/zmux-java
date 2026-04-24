@@ -614,6 +614,41 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultAwaitTerminationUsesUnboundedWaitWhenTimeoutOmitted() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+        session.awaitTerminationResult = true;
+
+        assertTrue(session.awaitTermination());
+        assertNull(session.lastAwaitTerminationTimeout, "no-arg await helper must use an unbounded wait");
+    }
+
+    @Test
+    void defaultSessionCloseWithStructuredThrowableUsesMappedCodeAndReason() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+        IOException error = new IOException("outer", new ApplicationError(24L, "peer close"));
+
+        session.closeWithError(error);
+
+        assertEquals(1, session.closeWithErrorCalls);
+        assertEquals(24L, session.lastCloseCode);
+        assertEquals("peer close", session.lastCloseReason);
+        assertEquals(0, session.closeCalls, "structured close helper must not degrade into graceful close");
+    }
+
+    @Test
+    void defaultSessionCloseWithNullThrowableFallsBackToGracefulClose() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+
+        session.closeWithError((Throwable) null);
+
+        assertEquals(1, session.closeCalls);
+        assertEquals(0, session.closeWithErrorCalls, "null helper must preserve graceful close semantics");
+    }
+
+    @Test
     void protocolPeerVisibleSemanticHelpersMatchCapabilityCarriageRules() {
         long openPriority = Protocol.CAPABILITY_OPEN_METADATA | Protocol.CAPABILITY_PRIORITY_HINTS;
         long updatePriority = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
@@ -1140,10 +1175,14 @@ final class ApiSurfaceTest {
         private final RecordingDefaultSendStream stream;
         private int openUniStreamWithTimeoutCalls;
         private int goAwayCalls;
+        private int closeCalls;
+        private int closeWithErrorCalls;
         private long lastGoAwayBidi;
         private long lastGoAwayUni;
         private long lastGoAwayCode;
+        private long lastCloseCode;
         private String lastGoAwayReason;
+        private String lastCloseReason;
         private Duration lastAwaitTerminationTimeout;
         private boolean awaitTerminationResult;
         private java.util.Optional<IOException> terminationCause = java.util.Optional.empty();
@@ -1274,7 +1313,9 @@ final class ApiSurfaceTest {
 
         @Override
         public void closeWithError(long code, String reason) {
-            throw new UnsupportedOperationException();
+            this.closeWithErrorCalls++;
+            this.lastCloseCode = code;
+            this.lastCloseReason = reason;
         }
 
         @Override
@@ -1305,6 +1346,7 @@ final class ApiSurfaceTest {
 
         @Override
         public void close() {
+            this.closeCalls++;
         }
     }
 

@@ -241,6 +241,18 @@ public interface ZmuxSession extends AutoCloseable {
 
     void closeWithError(long code, String reason) throws IOException;
 
+    default void closeWithError(Throwable error) throws IOException {
+        if (error == null) {
+            close();
+            return;
+        }
+        closeWithError(ZmuxErrors.code(error, ErrorCode.INTERNAL.code()), ZmuxErrors.reason(error));
+    }
+
+    default boolean awaitTermination() throws InterruptedException {
+        return awaitTermination(null);
+    }
+
     boolean awaitTermination(Duration timeout) throws InterruptedException;
 
     default Optional<IOException> awaitTerminationCause() throws IOException, InterruptedException {
