@@ -185,6 +185,8 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
     SocketAddress remoteAddress();
 
     @Override
-    void close() throws IOException;
+    default void close() throws IOException {
+        closeWrite();
+    }
 
 }

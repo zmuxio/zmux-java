@@ -521,6 +521,7 @@ import java.time.Duration;
 
 stream.closeWrite();                  // graceful write-half close
 stream.closeRead();                   // local read cancellation
+stream.close();                       // local helper that closes both sides
 stream.closeWithError(0x100L, "bye"); // stream application error
 session.close();                      // graceful session close
 session.closeWithError(0x100L, "bye");

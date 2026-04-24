@@ -138,6 +138,8 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
     SocketAddress remoteAddress();
 
     @Override
-    void close() throws IOException;
+    default void close() throws IOException {
+        closeRead();
+    }
 
 }

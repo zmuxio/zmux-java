@@ -668,6 +668,294 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultCloseHelpersMatchDirectionalAndBidiSemantics() throws Exception {
+        AtomicReference<String> order = new AtomicReference<>("");
+        ZmuxSendStream send = new ZmuxSendStream() {
+            @Override
+            public void write(byte[] src, int offset, int length) {
+            }
+
+            @Override
+            public int writeFinal(byte[] src, int offset, int length) {
+                return length;
+            }
+
+            @Override
+            public void updateMetadata(MetadataUpdate update) {
+            }
+
+            @Override
+            public void closeWrite() {
+                order.set(order.get() + "send");
+            }
+
+            @Override
+            public void cancelWrite(long code) {
+            }
+
+            @Override
+            public void closeWithError(long code, String reason) {
+            }
+
+            @Override
+            public void setWriteDeadline(Instant deadline) {
+            }
+
+            @Override
+            public long streamId() {
+                return 0L;
+            }
+
+            @Override
+            public byte[] openInfo() {
+                return new byte[0];
+            }
+
+            @Override
+            public StreamMetadata metadata() {
+                return StreamMetadata.empty();
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return null;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return null;
+            }
+        };
+        ZmuxRecvStream recv = new ZmuxRecvStream() {
+            @Override
+            public int read(byte[] dst, int offset, int length) {
+                return -1;
+            }
+
+            @Override
+            public void closeRead() {
+                order.set(order.get() + "recv");
+            }
+
+            @Override
+            public void cancelRead(long code) {
+            }
+
+            @Override
+            public void closeWithError(long code, String reason) {
+            }
+
+            @Override
+            public void setReadDeadline(Instant deadline) {
+            }
+
+            @Override
+            public long streamId() {
+                return 0L;
+            }
+
+            @Override
+            public byte[] openInfo() {
+                return new byte[0];
+            }
+
+            @Override
+            public StreamMetadata metadata() {
+                return StreamMetadata.empty();
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return null;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return null;
+            }
+        };
+
+        send.close();
+        assertEquals("send", order.get());
+        order.set("");
+
+        recv.close();
+        assertEquals("recv", order.get());
+        order.set("");
+
+        ZmuxStream bidi = new ZmuxStream() {
+            @Override
+            public int read(byte[] dst, int offset, int length) {
+                return -1;
+            }
+
+            @Override
+            public void write(byte[] src, int offset, int length) {
+            }
+
+            @Override
+            public int writeFinal(byte[] src, int offset, int length) {
+                return length;
+            }
+
+            @Override
+            public void updateMetadata(MetadataUpdate update) {
+            }
+
+            @Override
+            public void closeWrite() {
+                order.set(order.get() + "send");
+            }
+
+            @Override
+            public void cancelWrite(long code) {
+            }
+
+            @Override
+            public void closeRead() {
+                order.set(order.get() + "recv");
+            }
+
+            @Override
+            public void cancelRead(long code) {
+            }
+
+            @Override
+            public void closeWithError(long code, String reason) {
+            }
+
+            @Override
+            public void setDeadline(Instant deadline) {
+            }
+
+            @Override
+            public void setReadDeadline(Instant deadline) {
+            }
+
+            @Override
+            public void setWriteDeadline(Instant deadline) {
+            }
+
+            @Override
+            public long streamId() {
+                return 0L;
+            }
+
+            @Override
+            public byte[] openInfo() {
+                return new byte[0];
+            }
+
+            @Override
+            public StreamMetadata metadata() {
+                return StreamMetadata.empty();
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return null;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return null;
+            }
+        };
+
+        bidi.close();
+        assertEquals("sendrecv", order.get());
+    }
+
+    @Test
+    void defaultBidiCloseAggregatesDirectionalCloseFailures() {
+        IOException sendFailure = new IOException("send");
+        IOException recvFailure = new IOException("recv");
+        ZmuxStream bidi = new ZmuxStream() {
+            @Override
+            public int read(byte[] dst, int offset, int length) {
+                return -1;
+            }
+
+            @Override
+            public void write(byte[] src, int offset, int length) {
+            }
+
+            @Override
+            public int writeFinal(byte[] src, int offset, int length) {
+                return length;
+            }
+
+            @Override
+            public void updateMetadata(MetadataUpdate update) {
+            }
+
+            @Override
+            public void closeWrite() throws IOException {
+                throw sendFailure;
+            }
+
+            @Override
+            public void cancelWrite(long code) {
+            }
+
+            @Override
+            public void closeRead() throws IOException {
+                throw recvFailure;
+            }
+
+            @Override
+            public void cancelRead(long code) {
+            }
+
+            @Override
+            public void closeWithError(long code, String reason) {
+            }
+
+            @Override
+            public void setDeadline(Instant deadline) {
+            }
+
+            @Override
+            public void setReadDeadline(Instant deadline) {
+            }
+
+            @Override
+            public void setWriteDeadline(Instant deadline) {
+            }
+
+            @Override
+            public long streamId() {
+                return 0L;
+            }
+
+            @Override
+            public byte[] openInfo() {
+                return new byte[0];
+            }
+
+            @Override
+            public StreamMetadata metadata() {
+                return StreamMetadata.empty();
+            }
+
+            @Override
+            public SocketAddress localAddress() {
+                return null;
+            }
+
+            @Override
+            public SocketAddress remoteAddress() {
+                return null;
+            }
+        };
+
+        IOException error = assertThrows(IOException.class, bidi::close);
+        assertSame(sendFailure, error);
+        assertEquals(1, error.getSuppressed().length);
+        assertSame(recvFailure, error.getSuppressed()[0]);
+    }
+
+    @Test
     void openTimeoutExceptionExposesStructuredTimeoutMetadata() {
         OpenTimeoutException timeout = new OpenTimeoutException();
 

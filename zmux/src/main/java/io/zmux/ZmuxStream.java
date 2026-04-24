@@ -20,4 +20,26 @@ public interface ZmuxStream extends ZmuxSendStream, ZmuxRecvStream {
     default void clearDeadline() throws IOException {
         setDeadline(null);
     }
+
+    @Override
+    default void close() throws IOException {
+        IOException error = null;
+        try {
+            ZmuxSendStream.super.close();
+        } catch (IOException closeError) {
+            error = closeError;
+        }
+        try {
+            ZmuxRecvStream.super.close();
+        } catch (IOException closeError) {
+            if (error == null) {
+                error = closeError;
+            } else {
+                error.addSuppressed(closeError);
+            }
+        }
+        if (error != null) {
+            throw error;
+        }
+    }
 }
