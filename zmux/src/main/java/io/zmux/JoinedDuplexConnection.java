@@ -38,6 +38,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         this(inputHalf, outputHalf, null, null, null);
     }
 
+    public JoinedDuplexConnection(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
+        this(
+                inputHalf == null ? null : inputHalf.asInputStream(),
+                outputHalf == null ? null : outputHalf.asOutputStream(),
+                null,
+                localAddress(inputHalf, outputHalf),
+                remoteAddress(inputHalf, outputHalf)
+        );
+    }
+
     public JoinedDuplexConnection(InputStream inputHalf,
                                   OutputStream outputHalf,
                                   GatheringByteChannel gatheringOutput,
@@ -48,6 +58,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         this.gatheringOutput = gatheringOutput;
         this.localAddress = localAddress;
         this.remoteAddress = remoteAddress;
+    }
+
+    private static SocketAddress localAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
+        SocketAddress address = inputHalf == null ? null : inputHalf.localAddress();
+        return address != null ? address : (outputHalf == null ? null : outputHalf.localAddress());
+    }
+
+    private static SocketAddress remoteAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
+        SocketAddress address = inputHalf == null ? null : inputHalf.remoteAddress();
+        return address != null ? address : (outputHalf == null ? null : outputHalf.remoteAddress());
     }
 
     private static SocketTimeoutException pauseTimeout() {

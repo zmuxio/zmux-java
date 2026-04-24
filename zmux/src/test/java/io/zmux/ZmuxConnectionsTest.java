@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ByteChannel;
 import java.nio.channels.GatheringByteChannel;
@@ -85,6 +86,25 @@ final class ZmuxConnectionsTest {
         viaFactory.close();
     }
 
+    @Test
+    void joinBuildsJoinedDuplexConnectionFromUniStreams() throws Exception {
+        InetSocketAddress local = InetSocketAddress.createUnresolved("joined.local", 5555);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.remote", 6666);
+        RecordingRecvStream recv = new RecordingRecvStream(new byte[]{1, 2, 3}, local, remote);
+        RecordingSendStream send = new RecordingSendStream(local, remote);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(recv, send)) {
+            assertSame(local, connection.localAddress());
+            assertSame(remote, connection.remoteAddress());
+            assertEquals(1, connection.input().read());
+            connection.output().write(new byte[]{4, 5});
+        }
+
+        assertArrayEquals(new byte[]{4, 5}, send.writtenBytes());
+        assertEquals(1, recv.closeReadCalls());
+        assertEquals(1, send.closeWriteCalls());
+    }
+
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
         private final ByteArrayOutputStream written = new ByteArrayOutputStream();
         private final AtomicInteger closeCount = new AtomicInteger();
@@ -136,6 +156,155 @@ final class ZmuxConnectionsTest {
 
         int closeCount() {
             return closeCount.get();
+        }
+    }
+
+    private static final class RecordingRecvStream implements ZmuxRecvStream {
+        private final ByteArrayInputStream input;
+        private final SocketAddress localAddress;
+        private final SocketAddress remoteAddress;
+        private int closeReadCalls;
+
+        private RecordingRecvStream(byte[] data, SocketAddress localAddress, SocketAddress remoteAddress) {
+            this.input = new ByteArrayInputStream(data);
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+        }
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return input.read(dst, offset, length);
+        }
+
+        @Override
+        public void closeRead() {
+            closeReadCalls++;
+        }
+
+        @Override
+        public void cancelRead(long code) {
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+        }
+
+        @Override
+        public void setReadDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long streamId() {
+            return 0L;
+        }
+
+        @Override
+        public byte[] openInfo() {
+            return new byte[0];
+        }
+
+        @Override
+        public StreamMetadata metadata() {
+            return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return localAddress;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return remoteAddress;
+        }
+
+        int closeReadCalls() {
+            return closeReadCalls;
+        }
+    }
+
+    private static final class RecordingSendStream implements ZmuxSendStream {
+        private final ByteArrayOutputStream output = new ByteArrayOutputStream();
+        private final SocketAddress localAddress;
+        private final SocketAddress remoteAddress;
+        private int closeWriteCalls;
+
+        private RecordingSendStream(SocketAddress localAddress, SocketAddress remoteAddress) {
+            this.localAddress = localAddress;
+            this.remoteAddress = remoteAddress;
+        }
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+            output.write(src, offset, length);
+        }
+
+        @Override
+        public int writeFinal(byte[] src, int offset, int length) {
+            output.write(src, offset, length);
+            return length;
+        }
+
+        @Override
+        public void updateMetadata(MetadataUpdate update) {
+        }
+
+        @Override
+        public void closeWrite() {
+            closeWriteCalls++;
+        }
+
+        @Override
+        public void cancelWrite(long code) {
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+        }
+
+        @Override
+        public void setWriteDeadline(java.time.Instant deadline) {
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long streamId() {
+            return 0L;
+        }
+
+        @Override
+        public byte[] openInfo() {
+            return new byte[0];
+        }
+
+        @Override
+        public StreamMetadata metadata() {
+            return StreamMetadata.empty();
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return localAddress;
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return remoteAddress;
+        }
+
+        byte[] writtenBytes() {
+            return output.toByteArray();
+        }
+
+        int closeWriteCalls() {
+            return closeWriteCalls;
         }
     }
 }

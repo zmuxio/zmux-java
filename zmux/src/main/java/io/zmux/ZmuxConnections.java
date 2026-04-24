@@ -17,6 +17,10 @@ public final class ZmuxConnections {
         return BasicDuplexConnection.builder(input, output);
     }
 
+    public static JoinedDuplexConnection join(ZmuxRecvStream input, ZmuxSendStream output) {
+        return new JoinedDuplexConnection(input, output);
+    }
+
     public static DuplexConnection of(Socket socket) throws IOException {
         return new SocketDuplexConnection(socket);
     }

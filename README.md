@@ -367,6 +367,24 @@ try (ZmuxRecvStream recv = session.acceptUniStream()) {
 }
 ```
 
+If you open two opposite unidirectional streams and want to hand them to code
+that expects one full-duplex connection, join them directly:
+
+```java
+import io.zmux.JoinedDuplexConnection;
+import io.zmux.ZmuxConnections;
+import io.zmux.ZmuxRecvStream;
+import io.zmux.ZmuxSendStream;
+
+ZmuxRecvStream inbound = session.acceptUniStream();
+ZmuxSendStream outbound = session.openUniStream();
+
+JoinedDuplexConnection connection = ZmuxConnections.join(inbound, outbound);
+```
+
+The joined connection exposes `InputStream` / `OutputStream` and closes the
+attached stream halves directionally.
+
 ### Existing Buffers
 
 If your payload already lives in a slice or `ByteBuffer`, you can send it
