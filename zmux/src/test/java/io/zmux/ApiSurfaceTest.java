@@ -1414,6 +1414,53 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void outerBidiStreamAdapterCanServeAsNestedSessionTransport() throws Exception {
+        try (SessionPair outer = SessionPair.open()) {
+            ZmuxNativeStream clientOuterStream = outer.client().openStream();
+            AtomicReference<ZmuxNativeSession> clientRef = new AtomicReference<>();
+            AtomicReference<Throwable> errorRef = new AtomicReference<>();
+            CountDownLatch clientEstablished = new CountDownLatch(1);
+            DuplexConnection clientTransport = ZmuxConnections.of(clientOuterStream);
+
+            Thread clientThread = new Thread(() -> {
+                try {
+                    clientRef.set(Zmux.client(clientTransport));
+                } catch (Throwable error) {
+                    errorRef.compareAndSet(null, error);
+                } finally {
+                    clientEstablished.countDown();
+                }
+            }, "api-surface-nested-bidi-client");
+            clientThread.start();
+
+            ZmuxNativeStream serverOuterStream = outer.server().acceptStream(Duration.ofSeconds(2));
+            DuplexConnection serverTransport = ZmuxConnections.of(serverOuterStream);
+            ZmuxNativeSession server = null;
+            try {
+                server = Zmux.server(serverTransport);
+            } catch (Throwable error) {
+                errorRef.compareAndSet(null, error);
+            }
+
+            clientEstablished.await();
+            rethrow(errorRef.get());
+
+            try (ZmuxNativeSession client = clientRef.get();
+                 ZmuxNativeSession serverSession = server;
+                 ZmuxNativeStream outbound = client.openStream()) {
+                outbound.writeFinal("inner-ping".getBytes(StandardCharsets.UTF_8));
+
+                try (ZmuxNativeStream inbound = serverSession.acceptStream(Duration.ofSeconds(2))) {
+                    assertEquals("inner-ping", new String(inbound.readAllBytes(), StandardCharsets.UTF_8));
+                    inbound.writeFinal("inner-pong".getBytes(StandardCharsets.UTF_8));
+                }
+
+                assertEquals("inner-pong", new String(outbound.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    @Test
     void defaultWritevFinalRejectsNullPartsBeforeClosingWrite() {
         RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
 
