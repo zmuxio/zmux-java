@@ -16,6 +16,14 @@ public final class NettyQuicSessionOptions {
         return new NettyQuicSessionOptions(Duration.ZERO, 0);
     }
 
+    public static NettyQuicSessionOptions ofAcceptedPreludeReadTimeout(Duration acceptedPreludeReadTimeout) {
+        return defaults().withAcceptedPreludeReadTimeoutValue(acceptedPreludeReadTimeout);
+    }
+
+    public static NettyQuicSessionOptions ofAcceptedPreludeMaxConcurrent(int acceptedPreludeMaxConcurrent) {
+        return defaults().withAcceptedPreludeMaxConcurrentValue(acceptedPreludeMaxConcurrent);
+    }
+
     static Duration normalizeAcceptedPreludeReadTimeout(Duration timeout) {
         if (timeout == null || timeout.isZero()) {
             return NettyQuic.DEFAULT_ACCEPTED_PRELUDE_READ_TIMEOUT;
@@ -46,6 +54,22 @@ public final class NettyQuicSessionOptions {
 
     public int acceptedPreludeMaxConcurrent() {
         return acceptedPreludeMaxConcurrent;
+    }
+
+    public NettyQuicSessionOptions withAcceptedPreludeReadTimeout(Duration acceptedPreludeReadTimeout) {
+        return withAcceptedPreludeReadTimeoutValue(acceptedPreludeReadTimeout);
+    }
+
+    public NettyQuicSessionOptions withAcceptedPreludeMaxConcurrent(int acceptedPreludeMaxConcurrent) {
+        return withAcceptedPreludeMaxConcurrentValue(acceptedPreludeMaxConcurrent);
+    }
+
+    private NettyQuicSessionOptions withAcceptedPreludeReadTimeoutValue(Duration acceptedPreludeReadTimeout) {
+        return new NettyQuicSessionOptions(acceptedPreludeReadTimeout, this.acceptedPreludeMaxConcurrent);
+    }
+
+    private NettyQuicSessionOptions withAcceptedPreludeMaxConcurrentValue(int acceptedPreludeMaxConcurrent) {
+        return new NettyQuicSessionOptions(this.acceptedPreludeReadTimeout, acceptedPreludeMaxConcurrent);
     }
 
     @Override

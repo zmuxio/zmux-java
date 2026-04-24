@@ -70,6 +70,45 @@ class NettyQuicSupportTest {
     }
 
     @Test
+    void sessionOptionsFactoriesAndWithersPreserveOtherFields() {
+        NettyQuicSessionOptions timeoutOnly = NettyQuicSessionOptions.ofAcceptedPreludeReadTimeout(Duration.ofMillis(25));
+        assertEquals(Duration.ofMillis(25), timeoutOnly.acceptedPreludeReadTimeout());
+        assertEquals(0, timeoutOnly.acceptedPreludeMaxConcurrent());
+
+        NettyQuicSessionOptions concurrencyOnly = NettyQuicSessionOptions.ofAcceptedPreludeMaxConcurrent(7);
+        assertEquals(Duration.ZERO, concurrencyOnly.acceptedPreludeReadTimeout());
+        assertEquals(7, concurrencyOnly.acceptedPreludeMaxConcurrent());
+
+        NettyQuicSessionOptions updated = timeoutOnly.withAcceptedPreludeMaxConcurrent(3);
+        assertEquals(Duration.ofMillis(25), updated.acceptedPreludeReadTimeout());
+        assertEquals(3, updated.acceptedPreludeMaxConcurrent());
+        assertEquals(0, timeoutOnly.acceptedPreludeMaxConcurrent(), "withers must keep the original options immutable");
+    }
+
+    @Test
+    void wrapSessionConvenienceOverloadsPreserveClosedSafeNullWrapper() throws Exception {
+        ZmuxSession timeoutSession = NettyQuic.wrapSession(null, Duration.ofMillis(25));
+        ZmuxSession concurrencySession = NettyQuic.wrapSession(null, 3);
+        ZmuxSession combinedSession = NettyQuic.wrapSession(null, Duration.ofMillis(25), 3);
+
+        assertTrue(timeoutSession.isClosed());
+        assertEquals(SessionState.INVALID, timeoutSession.state());
+        assertEquals(SessionState.INVALID, timeoutSession.stats().state());
+        assertTrue(timeoutSession.awaitTermination(Duration.ofMillis(1)));
+        timeoutSession.close();
+
+        assertTrue(concurrencySession.isClosed());
+        assertEquals(SessionState.INVALID, concurrencySession.state());
+        assertTrue(concurrencySession.awaitTermination(Duration.ofMillis(1)));
+        concurrencySession.close();
+
+        assertTrue(combinedSession.isClosed());
+        assertEquals(SessionState.INVALID, combinedSession.state());
+        assertTrue(combinedSession.awaitTermination(Duration.ofMillis(1)));
+        combinedSession.close();
+    }
+
+    @Test
     void acceptedPreludePendingCapacityIsBounded() {
         assertEquals(
                 NettyQuicSupport.ACCEPT_PRELUDE_PENDING_MIN_CAPACITY,
