@@ -111,9 +111,27 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return inputView;
     }
 
+    public InputStream inputHalf() {
+        lock.lock();
+        try {
+            return inputPaused || closed ? null : inputHalf;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     @Override
     public OutputStream output() {
         return outputView;
+    }
+
+    public OutputStream outputHalf() {
+        lock.lock();
+        try {
+            return outputPaused || closed ? null : outputHalf;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
@@ -226,6 +244,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         } finally {
             lock.unlock();
         }
+    }
+
+    public void closeInput() throws IOException {
+        inputView.close();
+    }
+
+    public void closeOutput() throws IOException {
+        outputView.close();
     }
 
     @Override

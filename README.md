@@ -390,6 +390,8 @@ Its pause handles can also swap in replacement `ZmuxRecvStream` /
 Because it implements `DuplexConnection`, you can pass it straight into
 `Zmux.openSession(...)`, `Zmux.clientSession(...)`, or `Zmux.serverSession(...)`
 as the transport itself.
+If you need Go `JoinedConn`-style inspection and half-close control, use
+`inputHalf()`, `outputHalf()`, `closeInput()`, and `closeOutput()`.
 
 ### Existing Buffers
 

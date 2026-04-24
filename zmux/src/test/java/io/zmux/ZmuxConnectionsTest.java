@@ -143,6 +143,35 @@ final class ZmuxConnectionsTest {
         assertArrayEquals(new byte[]{9}, secondSend.writtenBytes());
     }
 
+    @Test
+    void joinedConnectionExposesCurrentHalvesAndDirectionalClose() throws Exception {
+        ByteArrayInputStream input = new ByteArrayInputStream(new byte[]{7});
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        try (JoinedDuplexConnection connection = new JoinedDuplexConnection(input, output)) {
+            assertSame(input, connection.inputHalf());
+            assertSame(output, connection.outputHalf());
+
+            JoinedDuplexConnection.PausedInput pausedInput = connection.pauseInput();
+            assertNull(connection.inputHalf());
+            pausedInput.resume();
+            assertSame(input, connection.inputHalf());
+
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseOutput();
+            assertNull(connection.outputHalf());
+            pausedOutput.resume();
+            assertSame(output, connection.outputHalf());
+
+            connection.closeInput();
+            assertNull(connection.inputHalf());
+            connection.closeInput();
+
+            connection.closeOutput();
+            assertNull(connection.outputHalf());
+            connection.closeOutput();
+        }
+    }
+
     private static final class RecordingByteChannel implements ByteChannel, GatheringByteChannel {
         private final ByteArrayOutputStream written = new ByteArrayOutputStream();
         private final AtomicInteger closeCount = new AtomicInteger();
