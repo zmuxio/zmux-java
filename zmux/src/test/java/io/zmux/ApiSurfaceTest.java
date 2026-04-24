@@ -557,6 +557,25 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void closedStateHelpersRecognizeSessionAndDirectionalClosure() {
+        IOException sessionClosed = new IOException("outer", new SessionClosedException(ZmuxErrorSource.REMOTE));
+        IOException readClosed = new IOException("outer", new ReadClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+        IOException writeClosed = new IOException("outer", new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+
+        assertTrue(ZmuxErrors.sessionClosed(sessionClosed));
+        assertFalse(ZmuxErrors.readClosed(sessionClosed));
+        assertFalse(ZmuxErrors.writeClosed(sessionClosed));
+
+        assertTrue(ZmuxErrors.readClosed(readClosed));
+        assertFalse(ZmuxErrors.sessionClosed(readClosed));
+        assertFalse(ZmuxErrors.writeClosed(readClosed));
+
+        assertTrue(ZmuxErrors.writeClosed(writeClosed));
+        assertFalse(ZmuxErrors.sessionClosed(writeClosed));
+        assertFalse(ZmuxErrors.readClosed(writeClosed));
+    }
+
+    @Test
     void structuredErrorReasonFallsBackToTypedSentinelMessage() {
         SessionClosedException closed = new SessionClosedException(ZmuxErrorSource.REMOTE);
 

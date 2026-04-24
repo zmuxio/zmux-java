@@ -105,6 +105,18 @@ public final class ZmuxErrors {
         return details(error) instanceof PriorityUpdateUnavailableException;
     }
 
+    public static boolean sessionClosed(Throwable error) {
+        return details(error) instanceof SessionClosedException;
+    }
+
+    public static boolean readClosed(Throwable error) {
+        return details(error) instanceof ReadClosedException;
+    }
+
+    public static boolean writeClosed(Throwable error) {
+        return details(error) instanceof WriteClosedException;
+    }
+
     public static boolean interrupted(Throwable error) {
         ZmuxErrorDetails details = details(error);
         return details != null
