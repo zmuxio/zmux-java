@@ -3,6 +3,7 @@ package io.zmux;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.Objects;
 
 public interface ZmuxNativeSession extends ZmuxSession {
     @Override
@@ -180,11 +181,18 @@ public interface ZmuxNativeSession extends ZmuxSession {
         goAway(lastAcceptedBidi, lastAcceptedUni, ErrorCode.NO_ERROR.code(), "");
     }
 
+    default void goAwayWithError(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException {
+        goAway(lastAcceptedBidi, lastAcceptedUni, code, reason);
+    }
+
+    default void goAwayWithError(long lastAcceptedBidi, long lastAcceptedUni, ErrorCode code, String reason)
+            throws IOException {
+        Objects.requireNonNull(code, "code");
+        goAwayWithError(lastAcceptedBidi, lastAcceptedUni, code.code(), reason);
+    }
+
     default void goAway(long lastAcceptedBidi, long lastAcceptedUni, ErrorCode code, String reason) throws IOException {
-        if (code == null) {
-            throw new NullPointerException("code");
-        }
-        goAway(lastAcceptedBidi, lastAcceptedUni, code.code(), reason);
+        goAwayWithError(lastAcceptedBidi, lastAcceptedUni, code, reason);
     }
 
     void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException;

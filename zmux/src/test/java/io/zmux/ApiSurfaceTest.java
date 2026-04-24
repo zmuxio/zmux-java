@@ -898,6 +898,26 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void nativeGoAwayWithErrorHelpersDelegateCodeAndReason() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+
+        session.goAwayWithError(5L, 9L, 77L, "custom");
+        assertEquals(1, session.goAwayCalls);
+        assertEquals(5L, session.lastGoAwayBidi);
+        assertEquals(9L, session.lastGoAwayUni);
+        assertEquals(77L, session.lastGoAwayCode);
+        assertEquals("custom", session.lastGoAwayReason);
+
+        session.goAwayWithError(6L, 10L, ErrorCode.PROTOCOL, "bad frame");
+        assertEquals(2, session.goAwayCalls);
+        assertEquals(6L, session.lastGoAwayBidi);
+        assertEquals(10L, session.lastGoAwayUni);
+        assertEquals(ErrorCode.PROTOCOL.code(), session.lastGoAwayCode);
+        assertEquals("bad frame", session.lastGoAwayReason);
+    }
+
+    @Test
     void defaultDirectionalEnumHelpersDelegateCodeValues() throws Exception {
         RecordingDefaultSendStream send = new RecordingDefaultSendStream();
         RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream();
