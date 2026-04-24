@@ -28,6 +28,22 @@ public final class ZmuxErrors {
         return details != null && details.hasCode() ? details.code() : fallbackCode;
     }
 
+    public static ErrorCode code(Throwable error) {
+        ZmuxErrorDetails details = details(error);
+        if (details == null || !details.hasCode()) {
+            return null;
+        }
+        try {
+            return ErrorCode.fromCode(details.code());
+        } catch (IllegalArgumentException unknown) {
+            return null;
+        }
+    }
+
+    public static boolean isCode(Throwable error, ErrorCode code) {
+        return code != null && code.equals(code(error));
+    }
+
     public static String operation(Throwable error) {
         ZmuxErrorDetails details = details(error);
         if (details == null) {

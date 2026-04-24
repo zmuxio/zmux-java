@@ -113,6 +113,8 @@ final class BasicDuplexConnectionTest {
         assertSame(closerFailure, error.getCause());
         assertInstanceOf(ZmuxException.class, error);
         assertEquals(ErrorCode.INTERNAL.code(), ZmuxErrors.code(error, -1));
+        assertEquals(ErrorCode.INTERNAL, ZmuxErrors.code(error));
+        assertTrue(ZmuxErrors.isCode(error, ErrorCode.INTERNAL));
         assertEquals("close", ZmuxErrors.operation(error));
         assertEquals(ZmuxErrorScope.SESSION, ZmuxErrors.scope(error));
         assertEquals(ZmuxErrorSource.LOCAL, ZmuxErrors.source(error));

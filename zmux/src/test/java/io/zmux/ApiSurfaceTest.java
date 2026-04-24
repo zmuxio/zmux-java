@@ -519,6 +519,8 @@ final class ApiSurfaceTest {
         assertEquals(ZmuxErrorDirection.BOTH, details.direction());
         assertTrue(ZmuxErrors.hasCode(wrapped));
         assertEquals(41L, ZmuxErrors.code(wrapped, -1L));
+        assertNull(ZmuxErrors.code(wrapped), "unknown application codes should stay available through raw long helpers only");
+        assertFalse(ZmuxErrors.isCode(wrapped, ErrorCode.PROTOCOL));
         assertEquals("", ZmuxErrors.operation(wrapped));
         assertEquals("peer", ZmuxErrors.reason(wrapped));
         assertEquals(ZmuxErrorScope.SESSION, ZmuxErrors.scope(wrapped));
@@ -526,6 +528,22 @@ final class ApiSurfaceTest {
         assertEquals(ZmuxTerminationKind.SESSION_TERMINATION, ZmuxErrors.terminationKind(wrapped));
         assertFalse(ZmuxErrors.timeout(wrapped));
         assertFalse(ZmuxErrors.interrupted(wrapped));
+    }
+
+    @Test
+    void typedErrorCodeHelpersRecognizeKnownStandardCodes() {
+        IOException wrapped = new IOException("outer", new ApplicationError(
+                ErrorCode.PROTOCOL.code(),
+                "peer",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        ));
+
+        assertEquals(ErrorCode.PROTOCOL, ZmuxErrors.code(wrapped));
+        assertTrue(ZmuxErrors.isCode(wrapped, ErrorCode.PROTOCOL));
+        assertFalse(ZmuxErrors.isCode(wrapped, ErrorCode.INTERNAL));
     }
 
     @Test
