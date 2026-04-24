@@ -759,7 +759,7 @@ final class ApiSurfaceTest {
     @Test
     void defaultOpenUniAndSendWithTimeoutTreatsEmptyPayloadAsEmptyFinalWrite() throws Exception {
         RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
-        DefaultRecordingSession session = new DefaultRecordingSession(stream);
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
 
         ZmuxSendStream result = session.openUniAndSendWithTimeout(OpenOptions.empty(), Duration.ofMillis(50), new byte[0]);
 
@@ -772,6 +772,20 @@ final class ApiSurfaceTest {
         assertEquals(1, stream.writeDeadlineSetCalls, "bounded timeout must set a write deadline around the final write");
         assertEquals(1, stream.writeDeadlineClearCalls, "bounded timeout must clear the temporary write deadline");
         assertNotNull(stream.lastWriteDeadline);
+    }
+
+    @Test
+    void nativeGoAwayHelperDefaultsToNoErrorPayload() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(stream);
+
+        session.goAway(4L, 8L);
+
+        assertEquals(1, session.goAwayCalls);
+        assertEquals(4L, session.lastGoAwayBidi);
+        assertEquals(8L, session.lastGoAwayUni);
+        assertEquals(ErrorCode.NO_ERROR.code(), session.lastGoAwayCode);
+        assertEquals("", session.lastGoAwayReason);
     }
 
     @Test
@@ -987,7 +1001,7 @@ final class ApiSurfaceTest {
         }
     }
 
-    private static final class RecordingDefaultSendStream implements ZmuxSendStream {
+    private static final class RecordingDefaultSendStream implements ZmuxNativeSendStream {
         private int writeCalls;
         private int writeFinalCalls;
         private int closeWriteCalls;
@@ -1069,94 +1083,153 @@ final class ApiSurfaceTest {
         public SocketAddress remoteAddress() {
             return null;
         }
+
+        @Override
+        public boolean openedLocally() {
+            return true;
+        }
+
+        @Override
+        public boolean bidirectional() {
+            return false;
+        }
+
+        @Override
+        public boolean writeClosed() {
+            return closeWriteCalls > 0 || writeFinalCalls > 0;
+        }
     }
 
-    private static final class DefaultRecordingSession implements ZmuxSession {
+    private static final class DefaultRecordingNativeSession implements ZmuxNativeSession {
         private final RecordingDefaultSendStream stream;
         private int openUniStreamWithTimeoutCalls;
+        private int goAwayCalls;
+        private long lastGoAwayBidi;
+        private long lastGoAwayUni;
+        private long lastGoAwayCode;
+        private String lastGoAwayReason;
 
-        private DefaultRecordingSession(RecordingDefaultSendStream stream) {
+        private DefaultRecordingNativeSession(RecordingDefaultSendStream stream) {
             this.stream = stream;
         }
 
         @Override
-        public ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) {
+        public ZmuxNativeSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) {
             this.openUniStreamWithTimeoutCalls++;
             return stream;
         }
 
         @Override
-        public ZmuxStream acceptStream() {
+        public ZmuxNativeStream acceptStream() {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream acceptStream(Duration timeout) {
+        public ZmuxNativeStream acceptStream(Duration timeout) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxRecvStream acceptUniStream() {
+        public ZmuxNativeRecvStream acceptUniStream() {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxRecvStream acceptUniStream(Duration timeout) {
+        public ZmuxNativeRecvStream acceptUniStream(Duration timeout) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openStream() {
+        public ZmuxNativeStream openStream() {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openStream(OpenOptions options) {
+        public ZmuxNativeStream openStream(OpenOptions options) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openStreamWithTimeout(Duration timeout) {
+        public ZmuxNativeStream openStreamWithTimeout(Duration timeout) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) {
+        public ZmuxNativeStream openStreamWithTimeout(OpenOptions options, Duration timeout) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxSendStream openUniStream() {
+        public ZmuxNativeSendStream openUniStream() {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxSendStream openUniStream(OpenOptions options) {
+        public ZmuxNativeSendStream openUniStream(OpenOptions options) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxSendStream openUniStreamWithTimeout(Duration timeout) {
+        public ZmuxNativeSendStream openUniStreamWithTimeout(Duration timeout) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openAndSend(byte[] data) {
+        public ZmuxNativeStream openAndSend(byte[] data) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxStream openAndSend(OpenOptions options, byte[] data) {
+        public ZmuxNativeStream openAndSend(OpenOptions options, byte[] data) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxSendStream openUniAndSend(byte[] data) {
+        public ZmuxNativeSendStream openUniAndSend(byte[] data) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) {
+        public ZmuxNativeSendStream openUniAndSend(OpenOptions options, byte[] data) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Duration ping(byte[] echo, Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) {
+            this.goAwayCalls++;
+            this.lastGoAwayBidi = lastAcceptedBidi;
+            this.lastGoAwayUni = lastAcceptedUni;
+            this.lastGoAwayCode = code;
+            this.lastGoAwayReason = reason;
+        }
+
+        @Override
+        public ApplicationError peerGoAwayError() {
+            return null;
+        }
+
+        @Override
+        public ApplicationError peerCloseError() {
+            return null;
+        }
+
+        @Override
+        public Preface localPreface() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Preface peerPreface() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Negotiated negotiated() {
             throw new UnsupportedOperationException();
         }
 

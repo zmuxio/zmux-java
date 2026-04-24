@@ -168,6 +168,10 @@ public interface ZmuxNativeSession extends ZmuxSession {
 
     Duration ping(byte[] echo, Duration timeout) throws IOException, InterruptedException;
 
+    default void goAway(long lastAcceptedBidi, long lastAcceptedUni) throws IOException {
+        goAway(lastAcceptedBidi, lastAcceptedUni, ErrorCode.NO_ERROR.code(), "");
+    }
+
     void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException;
 
     ApplicationError peerGoAwayError();
