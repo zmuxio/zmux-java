@@ -757,6 +757,24 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultOpenUniAndSendWithTimeoutTreatsEmptyPayloadAsEmptyFinalWrite() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream();
+        DefaultRecordingSession session = new DefaultRecordingSession(stream);
+
+        ZmuxSendStream result = session.openUniAndSendWithTimeout(OpenOptions.empty(), Duration.ofMillis(50), new byte[0]);
+
+        assertSame(stream, result);
+        assertEquals(1, session.openUniStreamWithTimeoutCalls, "default helper must delegate through openUniStreamWithTimeout");
+        assertEquals(0, stream.writeCalls, "empty final helper must not issue ordinary writes");
+        assertEquals(1, stream.writeFinalCalls, "empty payload must still use writeFinal semantics");
+        assertEquals(0, stream.closeWriteCalls, "empty payload must not degrade into closeWrite");
+        assertEquals(0, stream.lastFinalLength);
+        assertEquals(1, stream.writeDeadlineSetCalls, "bounded timeout must set a write deadline around the final write");
+        assertEquals(1, stream.writeDeadlineClearCalls, "bounded timeout must clear the temporary write deadline");
+        assertNotNull(stream.lastWriteDeadline);
+    }
+
+    @Test
     void defaultRecvHelperRejectsNullPayloadBeforeDelegating() {
         RecordingDefaultRecvStream stream = new RecordingDefaultRecvStream();
 
@@ -973,10 +991,13 @@ final class ApiSurfaceTest {
         private int writeCalls;
         private int writeFinalCalls;
         private int closeWriteCalls;
+        private int writeDeadlineSetCalls;
+        private int writeDeadlineClearCalls;
         private int lastWriteLength = -1;
         private int lastFinalLength = -1;
         private byte[] lastWriteBytes = new byte[0];
         private byte[] lastFinalBytes = new byte[0];
+        private Instant lastWriteDeadline;
 
         @Override
         public void write(byte[] src, int offset, int length) {
@@ -1012,6 +1033,12 @@ final class ApiSurfaceTest {
 
         @Override
         public void setWriteDeadline(Instant deadline) {
+            if (deadline == null) {
+                this.writeDeadlineClearCalls++;
+            } else {
+                this.writeDeadlineSetCalls++;
+                this.lastWriteDeadline = deadline;
+            }
         }
 
         @Override
@@ -1041,6 +1068,125 @@ final class ApiSurfaceTest {
         @Override
         public SocketAddress remoteAddress() {
             return null;
+        }
+    }
+
+    private static final class DefaultRecordingSession implements ZmuxSession {
+        private final RecordingDefaultSendStream stream;
+        private int openUniStreamWithTimeoutCalls;
+
+        private DefaultRecordingSession(RecordingDefaultSendStream stream) {
+            this.stream = stream;
+        }
+
+        @Override
+        public ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) {
+            this.openUniStreamWithTimeoutCalls++;
+            return stream;
+        }
+
+        @Override
+        public ZmuxStream acceptStream() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream acceptStream(Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxRecvStream acceptUniStream() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxRecvStream acceptUniStream(Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openStream() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openStream(OpenOptions options) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openStreamWithTimeout(Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStream() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStream(OpenOptions options) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxSendStream openUniStreamWithTimeout(Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openAndSend(byte[] data) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxStream openAndSend(OpenOptions options, byte[] data) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxSendStream openUniAndSend(byte[] data) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void closeWithError(long code, String reason) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean awaitTermination(Duration timeout) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean isClosed() {
+            return false;
+        }
+
+        @Override
+        public SessionState state() {
+            return SessionState.READY;
+        }
+
+        @Override
+        public SessionStats stats() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
         }
     }
 

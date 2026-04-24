@@ -230,11 +230,7 @@ public interface ZmuxSession extends AutoCloseable {
             stream.setWriteDeadline(deadline);
         }
         try {
-            if (data == null || data.length == 0) {
-                stream.closeWrite();
-            } else {
-                stream.writeFinal(data);
-            }
+            stream.writeFinal(data == null ? DeadlineSupport.EMPTY_BYTES : data);
             return stream;
         } finally {
             if (deadline != null) {
