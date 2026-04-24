@@ -519,6 +519,69 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionPauseReadTimeoutDoesNotDisturbInflightRead() throws Exception {
+        BlockingReadHalf readHalf = new BlockingReadHalf((byte) 6);
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(readHalf, null)) {
+            int[] result = {-1};
+            Throwable[] readFailure = new Throwable[1];
+            Thread reader = new Thread(() -> {
+                try {
+                    result[0] = connection.input().read();
+                } catch (Throwable error) {
+                    readFailure[0] = error;
+                }
+            });
+            reader.start();
+
+            assertTrue(readHalf.awaitReadStarted(), "in-flight read should start");
+
+            SocketTimeoutException timeout = assertThrows(
+                    SocketTimeoutException.class,
+                    () -> connection.pauseRead(Duration.ofMillis(30))
+            );
+            assertTrue(timeout.getMessage().contains("pause timed out"));
+
+            readHalf.releaseRead();
+            reader.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(reader.isAlive(), "in-flight read should still finish after pause timeout");
+            assertNull(readFailure[0], "pause timeout must not poison the in-flight read");
+            assertEquals(6, result[0]);
+        }
+    }
+
+    @Test
+    void joinedConnectionPauseWriteTimeoutDoesNotDisturbInflightWrite() throws Exception {
+        BlockingWriteHalf writeHalf = new BlockingWriteHalf();
+
+        try (JoinedDuplexConnection connection = ZmuxConnections.join(null, writeHalf)) {
+            Throwable[] writeFailure = new Throwable[1];
+            Thread writer = new Thread(() -> {
+                try {
+                    connection.output().write(new byte[]{8});
+                } catch (Throwable error) {
+                    writeFailure[0] = error;
+                }
+            });
+            writer.start();
+
+            assertTrue(writeHalf.awaitWriteStarted(), "in-flight write should start");
+
+            SocketTimeoutException timeout = assertThrows(
+                    SocketTimeoutException.class,
+                    () -> connection.pauseWrite(Duration.ofMillis(30))
+            );
+            assertTrue(timeout.getMessage().contains("pause timed out"));
+
+            writeHalf.releaseWrite();
+            writer.join(TimeUnit.SECONDS.toMillis(1));
+            assertFalse(writer.isAlive(), "in-flight write should still finish after pause timeout");
+            assertNull(writeFailure[0], "pause timeout must not poison the in-flight write");
+            assertArrayEquals(new byte[]{8}, writeHalf.writtenBytes());
+        }
+    }
+
+    @Test
     void joinedConnectionPausedReadStillHonorsReadDeadline() throws Exception {
         RecordingReadHalf readHalf = new RecordingReadHalf(new byte[]{1}, null, null);
 
