@@ -194,6 +194,30 @@ final class ProtocolCloseTest {
         }
     }
 
+    @Test
+    void goAwayWithUnencodableReasonOmitsDebugTextOnWire() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            assertInstanceOf(ZmuxNativeSession.class, peer.session()).goAway(0L, 0L, ErrorCode.INTERNAL.code(), "\uD800");
+
+            FrameCodec.Frame goAway = peer.awaitFrameType(FrameType.GOAWAY, Duration.ofSeconds(1));
+            FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(goAway.payload());
+            assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "GOAWAY code mismatch");
+            assertEquals("", payload.reason(), "unencodable GOAWAY reason should be omitted on the wire");
+        }
+    }
+
+    @Test
+    void closeWithUnencodableReasonOmitsDebugTextOnWire() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            peer.session().closeWithError(ErrorCode.INTERNAL.code(), "\uD800");
+
+            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
+            assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "CLOSE code mismatch");
+            assertEquals("", payload.reason(), "unencodable CLOSE reason should be omitted on the wire");
+        }
+    }
+
     private static final class RawPeerSession implements AutoCloseable {
         private final ZmuxSession session;
         private final Socket socket;
