@@ -92,6 +92,87 @@ final class SessionTelemetryStateTest {
     }
 
     @Test
+    void resetReadIdlePingDueAppliesBoundedLeadJitter() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofMillis(80L))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long baseNanos = TimeUnit.SECONDS.toNanos(456L);
+        setLongField(telemetry, "keepaliveJitterState", 1L);
+
+        telemetry.resetReadIdlePingDueLocked(baseNanos);
+        long dueNanos = getLongField(telemetry, "readIdlePingDueAtNanos");
+
+        assertTrue(
+                dueNanos >= baseNanos + Duration.ofMillis(70L).toNanos()
+                        && dueNanos <= baseNanos + Duration.ofMillis(80L).toNanos(),
+                "read-idle keepalive deadline should stay within the bounded lead-jitter window"
+        );
+    }
+
+    @Test
+    void resetReadIdlePingDueUsesFreshJitterPerDeadline() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofMillis(64L))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long baseNanos = TimeUnit.SECONDS.toNanos(789L);
+        setLongField(telemetry, "keepaliveJitterState", 1L);
+
+        telemetry.resetReadIdlePingDueLocked(baseNanos);
+        long first = getLongField(telemetry, "readIdlePingDueAtNanos");
+        telemetry.resetReadIdlePingDueLocked(baseNanos);
+        long second = getLongField(telemetry, "readIdlePingDueAtNanos");
+
+        assertNotEquals(first, second, "read-idle keepalive deadlines should resample jitter on each reset");
+    }
+
+    @Test
+    void resetReadIdlePingDueDesynchronizesDistinctSessions() throws Exception {
+        long baseNanos = TimeUnit.SECONDS.toNanos(900L);
+        SessionTelemetryState first = new SessionTelemetryState(
+                new TestTelemetryOwner(),
+                ZmuxConfig.builder().keepaliveInterval(Duration.ofSeconds(1L)).build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        SessionTelemetryState second = new SessionTelemetryState(
+                new TestTelemetryOwner(),
+                ZmuxConfig.builder().keepaliveInterval(Duration.ofSeconds(1L)).build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        setLongField(first, "keepaliveJitterState", 1L);
+        setLongField(second, "keepaliveJitterState", 2L);
+
+        boolean stayedAligned = true;
+        for (int i = 0; i < 4; i++) {
+            first.resetReadIdlePingDueLocked(baseNanos);
+            long firstDue = getLongField(first, "readIdlePingDueAtNanos");
+            second.resetReadIdlePingDueLocked(baseNanos);
+            long secondDue = getLongField(second, "readIdlePingDueAtNanos");
+            if (firstDue != secondDue) {
+                stayedAligned = false;
+                break;
+            }
+        }
+
+        assertFalse(stayedAligned, "distinct telemetry sessions should not keep identical keepalive deadlines across repeated resets");
+    }
+
+    @Test
     void pingQueueFailureClearsActivePing() {
         TestTelemetryOwner owner = new TestTelemetryOwner();
         owner.enqueueError = new IOException("queue failed");
