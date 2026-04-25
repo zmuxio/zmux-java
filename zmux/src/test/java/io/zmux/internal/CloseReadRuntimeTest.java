@@ -28,8 +28,8 @@ final class CloseReadRuntimeTest {
             stream.applyOpenMetadataLocked(0L, null, "oversized-open-info".getBytes(StandardCharsets.UTF_8));
         }
 
-        ZmuxException error = assertInstanceOf(
-                ZmuxException.class,
+        OpenMetadataTooLargeException error = assertInstanceOf(
+                OpenMetadataTooLargeException.class,
                 assertThrows(IOException.class, stream::closeRead, "oversized opener metadata should fail local CloseRead"),
                 "CloseRead open-metadata validation failure should surface a protocol-coded error"
         );

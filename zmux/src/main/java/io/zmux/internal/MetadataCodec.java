@@ -1,6 +1,9 @@
 package io.zmux.internal;
 
 import io.zmux.ErrorCode;
+import io.zmux.OpenInfoUnavailableException;
+import io.zmux.OpenMetadataTooLargeException;
+import io.zmux.PriorityUpdateTooLargeException;
 import io.zmux.Protocol;
 
 import java.io.IOException;
@@ -25,7 +28,7 @@ final class MetadataCodec {
 
     static byte[] buildOpenMetadataPrefix(long capabilities, Long priority, Long group, byte[] openInfo, long maxFramePayload) throws IOException {
         if (openInfo != null && openInfo.length > 0 && !Protocol.canCarryOpenInfo(capabilities)) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "build open metadata", "open_info requires negotiated open_metadata");
+            throw new OpenInfoUnavailableException();
         }
         if (!Protocol.supportsOpenMetadata(capabilities)) {
             return EMPTY_BYTES;
@@ -49,7 +52,7 @@ final class MetadataCodec {
         }
         long payloadLength = Varint62.length(metadataLength) + metadataLength;
         if (payloadLength > maxFramePayload || payloadLength > Integer.MAX_VALUE) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "build open metadata", "opening metadata exceeds peer max_frame_payload");
+            throw new OpenMetadataTooLargeException();
         }
 
         byte[] payload = new byte[(int) payloadLength];
@@ -85,7 +88,7 @@ final class MetadataCodec {
             payloadLength += tlvEncodedSize(Protocol.METADATA_STREAM_GROUP, Varint62.length(group));
         }
         if (payloadLength > maxPayload || payloadLength > Integer.MAX_VALUE) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "build priority update", "priority update exceeds peer max_extension_payload_bytes");
+            throw new PriorityUpdateTooLargeException();
         }
 
         byte[] output = new byte[(int) payloadLength];

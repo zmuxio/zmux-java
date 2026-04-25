@@ -119,8 +119,8 @@ final class OpenInfoBudgetTest {
     @Test
     void localOpenRejectsOpenInfoWithoutNegotiatedOpenMetadata() throws Exception {
         try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
-            ZmuxException error = assertInstanceOf(
-                    ZmuxException.class,
+            OpenInfoUnavailableException error = assertInstanceOf(
+                    OpenInfoUnavailableException.class,
                     assertThrows(
                             IOException.class,
                             () -> peer.session().openStream(new OpenOptions(null, null, "need-metadata".getBytes(StandardCharsets.UTF_8))),
@@ -129,6 +129,10 @@ final class OpenInfoBudgetTest {
                     "open_info capability failure should surface a protocol-coded error"
             );
             assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "missing open_metadata should use PROTOCOL");
+            assertEquals("open", error.operation(), "open_info capability failure should surface the open operation");
+            assertEquals(ZmuxErrorScope.STREAM, error.scope(), "open_info capability failure scope mismatch");
+            assertEquals(ZmuxErrorSource.LOCAL, error.source(), "open_info capability failure source mismatch");
+            assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "open_info capability failure direction mismatch");
             assertEquals("open_info requires negotiated open_metadata", error.getMessage(), "open_info capability error mismatch");
             assertEquals(0L, peer.session().stats().retainedOpenInfoBytes(), "failed local open must not retain open_info bytes");
             assertNull(peer.pollFrame(Duration.ofMillis(100)), "failed local open must not emit frames");
@@ -142,8 +146,8 @@ final class OpenInfoBudgetTest {
                 .build();
         try (RawPeerSession peer = RawPeerSession.open(config, OPEN_METADATA)) {
             byte[] openInfo = new byte[(int) Settings.defaults().maxFramePayload() + 1];
-            ZmuxException error = assertInstanceOf(
-                    ZmuxException.class,
+            OpenMetadataTooLargeException error = assertInstanceOf(
+                    OpenMetadataTooLargeException.class,
                     assertThrows(
                             IOException.class,
                             () -> peer.session().openStream(new OpenOptions(null, null, openInfo)),
@@ -152,6 +156,10 @@ final class OpenInfoBudgetTest {
                     "oversized opening metadata should surface a protocol-coded error"
             );
             assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "oversized opening metadata should use PROTOCOL");
+            assertEquals("open", error.operation(), "oversized opening metadata should surface the open operation");
+            assertEquals(ZmuxErrorScope.STREAM, error.scope(), "oversized opening metadata scope mismatch");
+            assertEquals(ZmuxErrorSource.LOCAL, error.source(), "oversized opening metadata source mismatch");
+            assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "oversized opening metadata direction mismatch");
             assertEquals("opening metadata exceeds peer max_frame_payload", error.getMessage(), "oversized opening metadata error mismatch");
             assertEquals(0L, peer.session().stats().retainedOpenInfoBytes(), "failed oversized open must not retain open_info bytes");
             assertNull(peer.pollFrame(Duration.ofMillis(100)), "failed oversized open must not emit frames");

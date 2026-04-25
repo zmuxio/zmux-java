@@ -49,13 +49,31 @@ final class SessionOpeningCoordinator {
             throw new OpenTimeoutException();
         }
         byte[] openInfo = effectiveOptions.openInfoLength() == 0 ? StreamRuntime.EMPTY_BYTES : effectiveOptions.openInfo();
-        FrameCodec.buildOpenMetadataPrefix(
-                this.owner.capabilities(),
-                effectiveOptions.initialPriority(),
-                effectiveOptions.initialGroup(),
-                openInfo,
-                this.owner.peerSettings().maxFramePayload()
-        );
+        try {
+            FrameCodec.buildOpenMetadataPrefix(
+                    this.owner.capabilities(),
+                    effectiveOptions.initialPriority(),
+                    effectiveOptions.initialGroup(),
+                    openInfo,
+                    this.owner.peerSettings().maxFramePayload()
+            );
+        } catch (OpenInfoUnavailableException error) {
+            throw new OpenInfoUnavailableException(
+                    "open",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
+        } catch (OpenMetadataTooLargeException error) {
+            throw new OpenMetadataTooLargeException(
+                    "open",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
+        }
         this.checkLocalOpenCapacityLocked(bidirectional, effectiveOptions.openInfoLength());
         StreamRuntime streamRuntime = new StreamRuntime(this.owner, true, bidirectional, effectiveOptions);
         this.owner.localOpenTrackerInternal().appendProvisionalLocked(streamRuntime);

@@ -214,6 +214,14 @@ final class SessionPriorityUpdateCoordinator {
                     group,
                     this.owner.extensionPayloadLimitLocked()
             );
+        } catch (PriorityUpdateTooLargeException error) {
+            throw new PriorityUpdateTooLargeException(
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
         } catch (ZmuxException error) {
             throw priorityUpdateWriteError(ErrorCode.PROTOCOL, error.getMessage(), error);
         }

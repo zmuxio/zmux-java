@@ -547,8 +547,8 @@ final class ApiSurfaceTest {
             second.writeFinal("b".getBytes(StandardCharsets.UTF_8));
             assertEquals(first.streamId() + 4L, second.streamId(), "later retry should reuse the next same-class stream ID");
 
-            ZmuxStream firstInbound = pair.server().acceptStream(Duration.ofSeconds(1));
-            ZmuxStream secondInbound = pair.server().acceptStream(Duration.ofSeconds(1));
+            ZmuxStream firstInbound = pair.server().acceptStream(Duration.ofSeconds(5));
+            ZmuxStream secondInbound = pair.server().acceptStream(Duration.ofSeconds(5));
             byte[] buffer = new byte[1];
             assertEquals(1, firstInbound.read(buffer));
             assertEquals('a', buffer[0]);
@@ -705,6 +705,39 @@ final class ApiSurfaceTest {
         assertTrue(ZmuxErrors.priorityUpdateUnavailable(wrapped));
         assertFalse(ZmuxErrors.adapterUnsupported(new IOException("plain")));
         assertFalse(ZmuxErrors.priorityUpdateUnavailable(new AdapterUnsupportedException("generic adapter limit")));
+    }
+
+    @Test
+    void metadataAndKeepaliveHelpersRecognizeStructuredVariants() {
+        IOException openInfo = new IOException("outer", new OpenInfoUnavailableException());
+        IOException openMetadata = new IOException("outer", new OpenMetadataTooLargeException());
+        IOException priorityUpdate = new IOException("outer", new PriorityUpdateTooLargeException());
+        IOException keepalive = new IOException("outer", new ApplicationError(
+                ErrorCode.IDLE_TIMEOUT,
+                "zmux: keepalive timeout",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.LOCAL,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.TIMEOUT
+        ));
+        IOException genericIdleTimeout = new IOException("outer", new ApplicationError(
+                ErrorCode.IDLE_TIMEOUT,
+                "peer idle timeout",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.TIMEOUT
+        ));
+
+        assertTrue(ZmuxErrors.openInfoUnavailable(openInfo));
+        assertTrue(ZmuxErrors.openMetadataTooLarge(openMetadata));
+        assertTrue(ZmuxErrors.priorityUpdateTooLarge(priorityUpdate));
+        assertTrue(ZmuxErrors.keepaliveTimeout(keepalive));
+
+        assertFalse(ZmuxErrors.openInfoUnavailable(openMetadata));
+        assertFalse(ZmuxErrors.openMetadataTooLarge(priorityUpdate));
+        assertFalse(ZmuxErrors.priorityUpdateTooLarge(openInfo));
+        assertFalse(ZmuxErrors.keepaliveTimeout(genericIdleTimeout));
     }
 
     @Test

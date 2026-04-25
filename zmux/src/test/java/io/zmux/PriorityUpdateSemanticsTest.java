@@ -62,7 +62,7 @@ final class PriorityUpdateSemanticsTest {
             try {
                 FrameCodec.buildOpenMetadataPrefix(capabilities, priority, group, candidate, maxFramePayload);
             } catch (IOException error) {
-                if ("opening metadata exceeds peer max_frame_payload".equals(error.getMessage())) {
+                if (error instanceof OpenMetadataTooLargeException) {
                     return candidate;
                 }
                 throw error;
@@ -163,8 +163,8 @@ final class PriorityUpdateSemanticsTest {
             byte[] openInfo = findPreOpenOverflowOpenInfo(capabilities, peerSettings.maxFramePayload(), 7L, 11L);
             ZmuxStream stream = peer.session().openStream(new OpenOptions(null, null, openInfo));
 
-            ZmuxException error = assertInstanceOf(
-                    ZmuxException.class,
+            OpenMetadataTooLargeException error = assertInstanceOf(
+                    OpenMetadataTooLargeException.class,
                     assertThrows(IOException.class, () -> stream.updateMetadata(new MetadataUpdate(7L, 11L))),
                     "pre-open metadata overflow should fail before mutating local metadata"
             );

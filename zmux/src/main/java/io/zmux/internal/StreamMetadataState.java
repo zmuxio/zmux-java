@@ -143,13 +143,31 @@ final class StreamMetadataState {
     }
 
     byte[] buildOpeningPrefixLocked(SessionRuntime session) throws IOException {
-        return FrameCodec.buildOpenMetadataPrefix(
-                session.capabilities(),
-                metadata.priority() == 0L ? null : metadata.priority(),
-                metadata.group(),
-                metadata.openInfo(),
-                session.peerSettings().maxFramePayload()
-        );
+        try {
+            return FrameCodec.buildOpenMetadataPrefix(
+                    session.capabilities(),
+                    metadata.priority() == 0L ? null : metadata.priority(),
+                    metadata.group(),
+                    metadata.openInfo(),
+                    session.peerSettings().maxFramePayload()
+            );
+        } catch (OpenInfoUnavailableException error) {
+            throw new OpenInfoUnavailableException(
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
+        } catch (OpenMetadataTooLargeException error) {
+            throw new OpenMetadataTooLargeException(
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
+        }
     }
 
     void stagePriorityUpdate(Long priority, Long group, byte[] payload) {
@@ -229,6 +247,22 @@ final class StreamMetadataState {
                     nextMetadata.group(),
                     nextMetadata.openInfo(),
                     session.peerSettings().maxFramePayload()
+            );
+        } catch (OpenInfoUnavailableException error) {
+            throw new OpenInfoUnavailableException(
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
+            );
+        } catch (OpenMetadataTooLargeException error) {
+            throw new OpenMetadataTooLargeException(
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    error
             );
         } catch (ZmuxException error) {
             throw new ZmuxException(

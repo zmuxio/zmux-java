@@ -250,8 +250,8 @@ final class PriorityUpdateQueueTest {
 
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
-            ZmuxException error = assertInstanceOf(
-                    ZmuxException.class,
+            PriorityUpdateTooLargeException error = assertInstanceOf(
+                    PriorityUpdateTooLargeException.class,
                     assertThrows(IOException.class, () -> stream.updateMetadata(new MetadataUpdate(7L, null))),
                     "oversized priority-update payload should fail before local metadata is mutated"
             );

@@ -131,6 +131,25 @@ public final class ZmuxErrors {
         return find(error, PriorityUpdateUnavailableException.class) != null;
     }
 
+    public static boolean openInfoUnavailable(Throwable error) {
+        return find(error, OpenInfoUnavailableException.class) != null;
+    }
+
+    public static boolean openMetadataTooLarge(Throwable error) {
+        return find(error, OpenMetadataTooLargeException.class) != null;
+    }
+
+    public static boolean priorityUpdateTooLarge(Throwable error) {
+        return find(error, PriorityUpdateTooLargeException.class) != null;
+    }
+
+    public static boolean keepaliveTimeout(Throwable error) {
+        ApplicationError applicationError = applicationError(error);
+        return applicationError != null
+                && applicationError.isCode(ErrorCode.IDLE_TIMEOUT)
+                && "zmux: keepalive timeout".equals(applicationError.reason());
+    }
+
     public static boolean sessionClosed(Throwable error) {
         return find(error, SessionClosedException.class) != null;
     }
