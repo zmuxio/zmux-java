@@ -33,7 +33,7 @@ final class NettyQuicSession implements ZmuxSession {
     private final ReentrantLock prepareLock = new ReentrantLock();
     private final ReentrantLock lifecycleLock = new ReentrantLock();
     private final Condition lifecycleChanged = lifecycleLock.newCondition();
-    private final ArrayDeque<NettyQuicStreamState> pendingPrepare = new ArrayDeque<>();
+    private ArrayDeque<NettyQuicStreamState> pendingPrepare = new ArrayDeque<>();
     private final NettyQuicSupport.AcceptQueue<NettyQuicBidiStream> bidiAcceptQueue =
             new NettyQuicSupport.AcceptQueue<>(NettyQuicSupport.ACCEPT_RESULT_QUEUE_CAPACITY);
     private final NettyQuicSupport.AcceptQueue<NettyQuicRecvStream> uniAcceptQueue =
@@ -1032,8 +1032,10 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private void drainPendingPreparationsLocked() {
+        boolean drainedAny = false;
         while (!pendingPrepare.isEmpty() && prepareSlots.tryAcquire()) {
             NettyQuicStreamState state = pendingPrepare.removeFirst();
+            drainedAny = true;
             preparingStreams.add(state);
             try {
                 NettyQuicSupport.executeAcceptedPreludeTask(() -> prepareAcceptedStream(state));
@@ -1042,6 +1044,9 @@ final class NettyQuicSession implements ZmuxSession {
                 prepareSlots.release();
                 cleanupRejectedAcceptedPreparation(state);
             }
+        }
+        if (drainedAny && pendingPrepare.isEmpty()) {
+            pendingPrepare = new ArrayDeque<>();
         }
     }
 
@@ -1273,6 +1278,7 @@ final class NettyQuicSession implements ZmuxSession {
                 state.onSessionClosed(closingError);
                 state.closeRaw();
             }
+            pendingPrepare = new ArrayDeque<>();
         } finally {
             prepareLock.unlock();
         }

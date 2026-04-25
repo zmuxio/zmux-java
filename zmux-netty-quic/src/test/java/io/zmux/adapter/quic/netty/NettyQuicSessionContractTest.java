@@ -614,6 +614,39 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void closeStartDropsRetainedPendingPreludeQueueBacking() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            NettyQuicSession server = (NettyQuicSession) pair.server;
+            int capacity = (Integer) getField(server, "pendingPrepareCapacity");
+            @SuppressWarnings("unchecked")
+            ArrayDeque<NettyQuicStreamState> firstPendingPrepare =
+                    (ArrayDeque<NettyQuicStreamState>) getField(server, "pendingPrepare");
+            ReentrantLock prepareLock = (ReentrantLock) getField(server, "prepareLock");
+
+            prepareLock.lock();
+            try {
+                for (int i = 0; i < capacity; i++) {
+                    firstPendingPrepare.addLast(NettyQuicStreamState.localBidi(server, OpenOptions.empty()));
+                }
+            } finally {
+                prepareLock.unlock();
+            }
+
+            invokePrivate(
+                    server,
+                    "beginClosing",
+                    new Class<?>[]{IOException.class},
+                    new SessionClosedException(ZmuxErrorSource.LOCAL)
+            );
+
+            assertNotSame(firstPendingPrepare, getField(server, "pendingPrepare"),
+                    "close-start cleanup should replace the retained pending-prelude queue backing");
+            assertTrue(((ArrayDeque<?>) getField(server, "pendingPrepare")).isEmpty(),
+                    "close-start cleanup should leave the replacement pending-prelude queue empty");
+        }
+    }
+
+    @Test
     void acceptedStreamScheduledAfterCloseIsHiddenReaped() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             NettyQuicSession server = (NettyQuicSession) pair.server;
