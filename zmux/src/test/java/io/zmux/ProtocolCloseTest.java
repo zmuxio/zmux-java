@@ -1,8 +1,10 @@
 package io.zmux;
 
 import io.zmux.internal.FrameCodec;
+import io.zmux.internal.Varint62;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -15,6 +17,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ProtocolCloseTest {
@@ -26,6 +31,23 @@ final class ProtocolCloseTest {
             throw (Exception) error;
         }
         throw new RuntimeException(error);
+    }
+
+    private static void appendTlv(ByteArrayOutputStream output, long type, byte[] value) throws IOException {
+        Varint62.write(output, type);
+        Varint62.write(output, value.length);
+        output.write(value);
+    }
+
+    private static byte[] duplicateStandardDiagPayload(byte[] basePayload, String reason) throws IOException {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(1L));
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(2L));
+        if (!reason.isEmpty()) {
+            appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, reason.getBytes(StandardCharsets.UTF_8));
+        }
+        return payload.toByteArray();
     }
 
     @Test
@@ -80,6 +102,36 @@ final class ProtocolCloseTest {
 
             assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate after repeated unexpected PONG");
             assertEquals(SessionState.FAILED, peer.session().state(), "unexpected PONG flood should fail the session");
+        }
+    }
+
+    @Test
+    void peerCloseDuplicateStandardDiagDropsReasonButKeepsPrimarySemantics() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            byte[] payload = duplicateStandardDiagPayload(
+                    Varint62.encode(ErrorCode.PROTOCOL.code()),
+                    "peer close"
+            );
+            peer.send(new FrameCodec.Frame(FrameType.CLOSE, 0, 0L, payload));
+
+            ApplicationError error = assertThrows(
+                    ApplicationError.class,
+                    () -> peer.session().awaitTerminationOrThrow(Duration.ofSeconds(1)),
+                    "peer CLOSE with duplicate singleton DIAG should still terminate with the structured peer-close error"
+            );
+            assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "returned peer close code mismatch");
+            assertEquals("", error.reason(), "duplicate singleton DIAG should clear the returned peer close reason");
+            assertEquals(SessionState.FAILED, peer.session().state(), "non-zero peer CLOSE should still fail the session");
+
+            ZmuxNativeSession session = assertInstanceOf(
+                    ZmuxNativeSession.class,
+                    peer.session(),
+                    "raw session should expose the native session surface for peer-close diagnostics"
+            );
+            ApplicationError peerCloseError = session.peerCloseError();
+            assertNotNull(peerCloseError, "peer close should still be retained on the session surface");
+            assertEquals(ErrorCode.PROTOCOL.code(), peerCloseError.code(), "retained peer close code mismatch");
+            assertEquals("", peerCloseError.reason(), "duplicate singleton DIAG should clear the retained peer close reason");
         }
     }
 

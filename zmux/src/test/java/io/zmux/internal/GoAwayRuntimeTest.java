@@ -3,8 +3,10 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.charset.StandardCharsets;
 import java.util.Deque;
 import java.util.concurrent.TimeUnit;
 
@@ -28,6 +30,23 @@ final class GoAwayRuntimeTest {
         return SessionRuntime.firstPeerStreamId(Role.RESPONDER, bidirectional) + (long) offset * 4L;
     }
 
+    private static void appendTlv(ByteArrayOutputStream output, long type, byte[] value) throws Exception {
+        Varint62.write(output, type);
+        Varint62.write(output, value.length);
+        output.write(value);
+    }
+
+    private static byte[] duplicateStandardDiagPayload(byte[] basePayload, String reason) throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(1L));
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(2L));
+        if (!reason.isEmpty()) {
+            appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, reason.getBytes(StandardCharsets.UTF_8));
+        }
+        return payload.toByteArray();
+    }
+
     private static void handleGoAway(SessionRuntime runtime, long lastAcceptedBidi, long lastAcceptedUni)
             throws Exception {
         FrameCodec.Frame frame = new FrameCodec.Frame(
@@ -42,6 +61,24 @@ final class GoAwayRuntimeTest {
                         Settings.defaults().maxControlPayloadBytes()
                 )
         );
+        try {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "handleGoAwayFrame",
+                    new Class<?>[]{FrameCodec.Frame.class},
+                    frame
+            );
+        } catch (InvocationTargetException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            throw exception;
+        }
+    }
+
+    private static void handleGoAway(SessionRuntime runtime, byte[] payload) throws Exception {
+        FrameCodec.Frame frame = new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, payload);
         try {
             SessionRuntimeTestSupport.invokePrivate(
                     runtime,
@@ -185,5 +222,24 @@ final class GoAwayRuntimeTest {
                     "GOAWAY drain interval should follow Go's max(10ms, RTT/4) adaptive rule"
             );
         }
+    }
+
+    @Test
+    void peerGoAwayDuplicateStandardDiagDropsReasonButKeepsPrimarySemantics() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long acceptedBidi = maxLocalGoAwayWatermark(true) - 4L;
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, acceptedBidi);
+        Varint62.write(payload, 0L);
+        Varint62.write(payload, ErrorCode.PROTOCOL.code());
+
+        handleGoAway(runtime, duplicateStandardDiagPayload(payload.toByteArray(), "maintenance"));
+
+        assertEquals(SessionState.DRAINING, runtime.state(), "peer GOAWAY should still move the session to DRAINING");
+        assertNotNull(runtime.peerGoAwayError(), "peer GOAWAY should still be recorded");
+        assertEquals(ErrorCode.PROTOCOL.code(), runtime.peerGoAwayError().code(), "peer GOAWAY code mismatch");
+        assertEquals("", runtime.peerGoAwayError().reason(), "duplicate singleton DIAG should clear the retained GOAWAY reason");
+        assertEquals(acceptedBidi, runtime.peerGoAwayBidiInternal(), "peer GOAWAY bidi watermark mismatch");
+        assertEquals(0L, runtime.peerGoAwayUniInternal(), "peer GOAWAY uni watermark mismatch");
     }
 }

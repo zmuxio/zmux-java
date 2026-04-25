@@ -16,6 +16,18 @@ final class FrameCodecDiagTest {
     }
 
     @Test
+    void parseErrorPayloadDuplicateDebugTextDropsReason() throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, ErrorCode.PROTOCOL.code());
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, "first".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, "second".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload.toByteArray());
+        assertEquals(ErrorCode.PROTOCOL.code(), parsed.code(), "error code mismatch");
+        assertEquals("", parsed.reason(), "duplicate singleton DIAG should invalidate the reason text");
+    }
+
+    @Test
     void parseGoAwayPayloadDuplicateRetryAfterDropsReason() throws Exception {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         Varint62.write(payload, 8L);

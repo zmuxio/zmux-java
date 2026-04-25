@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
@@ -57,6 +58,36 @@ final class SessionDiagnosticsRuntimeTest {
                 0,
                 streamId,
                 FrameCodec.buildErrorPayload(code, "", Settings.defaults().maxControlPayloadBytes())
+        );
+    }
+
+    private static void appendTlv(ByteArrayOutputStream output, long type, byte[] value) throws Exception {
+        Varint62.write(output, type);
+        Varint62.write(output, value.length);
+        output.write(value);
+    }
+
+    private static byte[] duplicateStandardDiagPayload(byte[] basePayload, String reason) throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(1L));
+        appendTlv(payload, Protocol.DIAG_RETRY_AFTER_MILLIS, Varint62.encode(2L));
+        if (!reason.isEmpty()) {
+            appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, reason.getBytes(StandardCharsets.UTF_8));
+        }
+        return payload.toByteArray();
+    }
+
+    private static FrameCodec.Frame controlFrameWithDuplicateStandardDiag(FrameType type, long streamId, long code, String reason)
+            throws Exception {
+        return new FrameCodec.Frame(
+                type,
+                0,
+                streamId,
+                duplicateStandardDiagPayload(
+                        FrameCodec.buildErrorPayload(code, "", Settings.defaults().maxControlPayloadBytes()),
+                        reason
+                )
         );
     }
 
@@ -155,6 +186,33 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void peerResetDuplicateStandardDiagDropsReasonButKeepsResetSemantics() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = createPeerOpenedBidi(runtime);
+
+        handleReaderFrame(runtime, "handleDataFrame", dataFrame(stream.streamIdInternal(), "abc"));
+        handleReaderFrame(runtime, "handleResetFrame", controlFrameWithDuplicateStandardDiag(
+                FrameType.RESET,
+                stream.streamIdInternal(),
+                ErrorCode.CANCELLED.code(),
+                "peer reset"
+        ));
+
+        synchronized (runtime.lock()) {
+            ApplicationError error = assertInstanceOf(
+                    ApplicationError.class,
+                    stream.operationErrorLocked(),
+                    "peer RESET should still surface the structured reset error"
+            );
+            assertEquals(ErrorCode.CANCELLED.code(), error.code(), "peer RESET code mismatch");
+            assertEquals("", error.reason(), "duplicate singleton DIAG should clear the retained RESET reason");
+            assertEquals(ZmuxTerminationKind.RESET, error.terminationKind(), "peer RESET termination mismatch");
+            assertTrue(stream.readBufferEmptyLocked(), "peer RESET should still discard buffered receive data");
+            assertEquals(0L, runtime.bufferedReceiveBytesInternal(), "peer RESET should still release session buffered bytes");
+        }
+    }
+
+    @Test
     void closeReadLateDataTracksCloseReadBytes() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = createPeerOpenedBidi(runtime);
@@ -214,6 +272,33 @@ final class SessionDiagnosticsRuntimeTest {
         assertEquals(22L, FrameCodec.parseErrorPayload(queued.payload()).code(), "queued ABORT should carry the replacement code");
         assertEquals(0L, runtime.stats().diagnostics().coalescedTerminalSignals(), "STOP_SENDING -> ABORT should not be counted as coalesced");
         assertEquals(1L, runtime.stats().diagnostics().supersededTerminalSignals(), "STOP_SENDING -> ABORT should be counted as superseded");
+    }
+
+    @Test
+    void peerAbortDuplicateStandardDiagDropsReasonButKeepsAbortSemantics() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = createPeerOpenedBidi(runtime);
+
+        handleReaderFrame(runtime, "handleDataFrame", dataFrame(stream.streamIdInternal(), "ab"));
+        handleReaderFrame(runtime, "handleAbortFrame", controlFrameWithDuplicateStandardDiag(
+                FrameType.ABORT,
+                stream.streamIdInternal(),
+                ErrorCode.REFUSED_STREAM.code(),
+                "peer abort"
+        ));
+
+        synchronized (runtime.lock()) {
+            ApplicationError error = assertInstanceOf(
+                    ApplicationError.class,
+                    stream.operationErrorLocked(),
+                    "peer ABORT should still surface the structured abort error"
+            );
+            assertEquals(ErrorCode.REFUSED_STREAM.code(), error.code(), "peer ABORT code mismatch");
+            assertEquals("", error.reason(), "duplicate singleton DIAG should clear the retained ABORT reason");
+            assertEquals(ZmuxTerminationKind.ABORT, error.terminationKind(), "peer ABORT termination mismatch");
+            assertTrue(stream.readBufferEmptyLocked(), "peer ABORT should still discard buffered receive data");
+            assertEquals(0L, runtime.bufferedReceiveBytesInternal(), "peer ABORT should still release session buffered bytes");
+        }
     }
 
     @Test
