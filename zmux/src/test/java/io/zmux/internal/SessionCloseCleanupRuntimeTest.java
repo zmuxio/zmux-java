@@ -106,6 +106,10 @@ final class SessionCloseCleanupRuntimeTest {
             assertTrue(SessionRuntimeTestSupport.getLongField(runtime, "sessionQueuedDataBytes") > 0L,
                     "queued ordinary data should contribute to tracked session queue bytes before close cleanup");
 
+            Deque<?> firstUrgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+            Deque<?> firstAdvisoryQueue = SessionRuntimeTestSupport.advisoryQueue(runtime);
+            Deque<?> firstDataQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue");
+
             runtime.finishSessionLocked(new SessionClosedException(ZmuxErrorSource.LOCAL), SessionState.CLOSED);
 
             assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue").isEmpty(),
@@ -122,6 +126,12 @@ final class SessionCloseCleanupRuntimeTest {
                     "pending priority bytes must reset after session close cleanup");
             assertEquals(0L, SessionRuntimeTestSupport.getLongField(runtime, "sessionQueuedDataBytes"),
                     "queued data accounting must reset after session close cleanup");
+            assertNotSame(firstUrgentQueue, SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue"),
+                    "session close cleanup should drop retained urgent queue backing");
+            assertNotSame(firstAdvisoryQueue, SessionRuntimeTestSupport.advisoryQueue(runtime),
+                    "session close cleanup should drop retained advisory queue backing");
+            assertNotSame(firstDataQueue, SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue"),
+                    "session close cleanup should drop retained ordinary queue backing");
         }
     }
 

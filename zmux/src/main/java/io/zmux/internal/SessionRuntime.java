@@ -75,9 +75,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private final SessionEventDispatcher eventDispatcher;
     private final SessionTelemetryState telemetry;
     private final CountDownLatch terminated = new CountDownLatch(1);
-    private final Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
-    private final Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
-    private final Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
+    private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
+    private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
+    private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
     private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private final Map<Long, StreamRuntime> streams = new HashMap<>();
@@ -3553,6 +3553,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.localOpenTracker.clear();
         this.flowControlUpdateRegistry.clear();
         this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
+        this.urgentQueue = new ArrayDeque<>();
+        this.advisoryQueue = new ArrayDeque<>();
+        this.dataQueue = new ArrayDeque<>();
         this.sessionQueuedDataBytes = 0L;
         this.bufferedReceiveBytes = 0L;
         this.bufferedReceiveStorageBytes = 0L;
