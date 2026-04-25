@@ -112,10 +112,11 @@ final class SessionTelemetryState {
     }
 
     SessionStats.KeepaliveStats keepaliveStatsLocked() {
-        long keepaliveIntervalNanos = this.keepaliveIntervalNanosLocked();
-        long keepaliveMaxPingIntervalNanos = this.keepaliveMaxPingIntervalNanosLocked();
+        boolean terminal = this.owner.state().terminal();
+        long keepaliveIntervalNanos = terminal ? 0L : this.keepaliveIntervalNanosLocked();
+        long keepaliveMaxPingIntervalNanos = terminal ? 0L : this.keepaliveMaxPingIntervalNanosLocked();
         long keepaliveTimeoutNanos = this.effectiveKeepaliveTimeoutNanosLocked();
-        boolean pingOutstanding = this.activePing != null;
+        boolean pingOutstanding = !terminal && this.activePing != null;
         boolean pingStalled = pingOutstanding
                 && keepaliveTimeoutNanos > 0L
                 && RuntimeFlow.elapsedExceeds(
@@ -136,14 +137,15 @@ final class SessionTelemetryState {
     }
 
     SessionStats.ProgressStats progressStatsLocked() {
+        boolean terminal = this.owner.state().terminal();
         return new SessionStats.ProgressStats(
                 this.instantForNanosLocked(this.lastInboundFrameAtNanos),
                 this.instantForNanosLocked(this.lastControlProgressAtNanos),
                 this.instantForNanosLocked(this.lastTransportWriteAtNanos),
                 this.instantForNanosLocked(this.lastStreamProgressAtNanos),
                 this.instantForNanosLocked(this.lastApplicationProgressAtNanos),
-                this.instantForNanosLocked(this.effectiveLastPingSentAtNanosLocked()),
-                this.instantForNanosLocked(this.lastPongAtNanos)
+                terminal ? null : this.instantForNanosLocked(this.effectiveLastPingSentAtNanosLocked()),
+                terminal ? null : this.instantForNanosLocked(this.lastPongAtNanos)
         );
     }
 
@@ -572,6 +574,13 @@ final class SessionTelemetryState {
         this.readIdlePingDueAtNanos = 0L;
         this.writeIdlePingDueAtNanos = 0L;
         this.maxPingDueAtNanos = 0L;
+    }
+
+    void clearTerminalKeepaliveStateLocked() {
+        this.clearKeepaliveSchedulesLocked();
+        this.lastPingSentAtNanos = 0L;
+        this.lastPongAtNanos = 0L;
+        this.lastPingRttNanos = 0L;
     }
 
     void resetKeepaliveSchedulesLocked(long nowNanos) {

@@ -554,6 +554,49 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void terminalStatsClearKeepaliveLivenessSurface() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(io.zmux.Role.RESPONDER)
+                .keepaliveInterval(Duration.ofSeconds(2))
+                .keepaliveMaxPingInterval(Duration.ofSeconds(9))
+                .keepaliveTimeout(Duration.ofSeconds(6))
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+
+        synchronized (runtime.lock()) {
+            long nowNanos = System.nanoTime();
+            SessionRuntimeTestSupport.setLongField(runtime, "lastPingSentAtNanos", nowNanos - Duration.ofSeconds(4).toNanos());
+            SessionRuntimeTestSupport.setLongField(runtime, "lastPongAtNanos", nowNanos - Duration.ofSeconds(1).toNanos());
+            SessionRuntimeTestSupport.setLongField(runtime, "lastPingRttNanos", Duration.ofSeconds(2).toNanos());
+            SessionRuntimeTestSupport.setLongField(runtime, "sendRateEstimateBytesPerSecond", 2_000L);
+            SessionRuntimeTestSupport.setField(
+                    runtime,
+                    "activePing",
+                    SessionRuntimeTestSupport.newPendingPing(
+                            nowNanos - Duration.ofSeconds(4).toNanos(),
+                            new byte[]{1, 2, 3}
+                    )
+            );
+            runtime.finishSessionLocked(null, SessionState.CLOSED);
+        }
+
+        SessionStats stats = runtime.stats();
+
+        assertEquals(SessionState.CLOSED, stats.state(), "terminal stats should report the closed public state");
+        assertFalse(stats.keepalive().enabled(), "terminal stats should not report keepalive as enabled");
+        assertEquals(0L, stats.keepalive().intervalNanos(), "terminal stats should clear the keepalive interval");
+        assertEquals(0L, stats.keepalive().maxPingIntervalNanos(), "terminal stats should clear the max ping interval");
+        assertEquals(Duration.ofSeconds(6).toNanos(), stats.keepalive().timeoutNanos(), "configured keepalive timeout should remain surfaced");
+        assertFalse(stats.keepalive().pingOutstanding(), "terminal stats should not report an active ping");
+        assertFalse(stats.keepalive().pingStalled(), "terminal stats should not report a stalled ping");
+        assertEquals(0L, stats.keepalive().lastPingRttNanos(), "terminal stats should clear retained ping RTT");
+        assertEquals(2_000L, stats.keepalive().sendRateEstimateBytesPerSecond(), "terminal stats should keep the transport send-rate estimate");
+        assertNull(stats.progress().pingSentAt(), "terminal stats should clear the last ping timestamp");
+        assertNull(stats.progress().pongAt(), "terminal stats should clear the last pong timestamp");
+        assertEquals(0L, stats.pressure().outstandingPingBytes(), "terminal stats should not retain outstanding ping bytes");
+    }
+
+    @Test
     void provisionalStatsTrackVisibleAcceptBacklogLimitAndObservedRtt() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .role(io.zmux.Role.RESPONDER)

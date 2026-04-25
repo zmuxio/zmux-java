@@ -3563,6 +3563,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.outboundQueueBookkeeping.clear();
         this.writerHeldRetainedBytes = 0L;
         this.streamBookkeeping.clear();
+        this.telemetry.clearTerminalKeepaliveStateLocked();
         this.notifyLockWaitersLocked();
     }
 
