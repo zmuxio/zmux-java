@@ -973,6 +973,128 @@ final class WriterQueuePolicyTest {
         }
     }
 
+    @Test
+    void gatheringWriterBatchPreservesMixedEncodedFrameBytes() throws Exception {
+        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        SessionRuntimeTestSupport.emptyInput(),
+                        SessionRuntimeTestSupport.discardingOutput(),
+                        null,
+                        null,
+                        null,
+                        gathering
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+
+        List<SessionRuntime.OutboundFrame> batch = new ArrayList<>();
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[]{0, 1, 2, 3, 4, 5, 6, 7}),
+                null,
+                0,
+                false,
+                false
+        ));
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 4L, "hello".getBytes()),
+                null,
+                0,
+                false,
+                false
+        ));
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.PONG, 0, 0L, new byte[]{7, 6, 5, 4, 3, 2, 1, 0}),
+                null,
+                0,
+                false,
+                false
+        ));
+
+        ByteArrayOutputStream want = new ByteArrayOutputStream();
+        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            FrameEnvelopeCodec.writeFrame(want, outboundFrame.frame(), Settings.defaults().limits());
+        }
+
+        java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+        writerRuntimeField.setAccessible(true);
+        Object writerRuntime = writerRuntimeField.get(runtime);
+
+        long batchBytes = (Long) SessionRuntimeTestSupport.invokePrivate(
+                writerRuntime,
+                "writeBatch",
+                new Class<?>[]{List.class},
+                batch
+        );
+
+        assertEquals(want.size(), batchBytes, "writeBatch should report the full mixed-frame encoded size");
+        assertArrayEquals(want.toByteArray(), gathering.bytes(),
+                "gathering writer path should preserve the exact mixed-frame wire encoding");
+    }
+
+    @Test
+    void gatheringWriterBatchClearsRetainedScatterGatherRefsAfterWriteCompletion() throws Exception {
+        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        SessionRuntimeTestSupport.emptyInput(),
+                        SessionRuntimeTestSupport.discardingOutput(),
+                        null,
+                        null,
+                        null,
+                        gathering
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        StreamRuntime first = (StreamRuntime) runtime.openStream();
+        StreamRuntime second = (StreamRuntime) runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            makePeerVisible(runtime, first);
+            makePeerVisible(runtime, second);
+            first.write("payload-one".getBytes());
+            second.write("payload-two".getBytes());
+
+            @SuppressWarnings("unchecked")
+            List<Object> batch = (List<Object>) SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "collectReadyBatchLocked",
+                    new Class<?>[0]
+            );
+            assertEquals(2, batch.size(), "test requires a two-frame batch");
+
+            java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+            writerRuntimeField.setAccessible(true);
+            Object writerRuntime = writerRuntimeField.get(runtime);
+
+            SessionRuntimeTestSupport.invokePrivate(
+                    writerRuntime,
+                    "writeBatch",
+                    new Class<?>[]{List.class},
+                    batch
+            );
+
+            java.lang.reflect.Field writerTransportField = writerRuntime.getClass().getDeclaredField("writerTransport");
+            writerTransportField.setAccessible(true);
+            Object writerTransport = writerTransportField.get(writerRuntime);
+
+            java.lang.reflect.Field gatherScratchField = writerTransport.getClass().getDeclaredField("gatherScratch");
+            gatherScratchField.setAccessible(true);
+            FrameEnvelopeCodec.GatherScratch gatherScratch =
+                    (FrameEnvelopeCodec.GatherScratch) gatherScratchField.get(writerTransport);
+
+            assertEquals(0, gatherScratch.bufferCount(), "gather scratch should be reset to an empty active view after write completion");
+            for (int i = 0; i < gatherScratch.buffers().length; ++i) {
+                assertNull(gatherScratch.buffers()[i],
+                        "gather scratch slot " + i + " should not retain payload buffers after write completion");
+            }
+        }
+    }
+
     private static final class RecordingGatheringChannel implements GatheringByteChannel {
         private final ByteArrayOutputStream output = new ByteArrayOutputStream();
         private final int[] arrayWriteChunks;
