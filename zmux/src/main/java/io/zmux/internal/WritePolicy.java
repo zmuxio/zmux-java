@@ -20,18 +20,7 @@ final class WritePolicy {
     }
 
     static int writeBurstLimit(long priority, SchedulerHint hint) {
-        switch (priorityBand(priority)) {
-            case 3:
-                return SATURATED_WRITE_BURST_FRAMES;
-            case 2:
-                return STRONG_WRITE_BURST_FRAMES;
-            case 1:
-                return MILD_WRITE_BURST_FRAMES;
-            default:
-                return hint == SchedulerHint.LATENCY
-                        ? MILD_WRITE_BURST_FRAMES
-                        : DEFAULT_WRITE_BURST_FRAMES;
-        }
+        return writeBurstLimitForBand(priorityBand(priority), hint);
     }
 
     static long fragmentCap(long maxPayload, long prefixLen, long priority, SchedulerHint hint) {
@@ -72,18 +61,7 @@ final class WritePolicy {
     }
 
     static long fragmentTimeBudgetNanos(long priority, SchedulerHint hint) {
-        switch (priorityBand(priority)) {
-            case 3:
-                return SATURATED_FRAGMENT_TIME_BUDGET_NANOS;
-            case 2:
-                return STRONG_FRAGMENT_TIME_BUDGET_NANOS;
-            case 1:
-                return MILD_FRAGMENT_TIME_BUDGET_NANOS;
-            default:
-                return hint == SchedulerHint.LATENCY
-                        ? STRONG_FRAGMENT_TIME_BUDGET_NANOS
-                        : DEFAULT_FRAGMENT_TIME_BUDGET_NANOS;
-        }
+        return fragmentTimeBudgetForBand(priorityBand(priority), hint);
     }
 
     static long scaledFragmentCap(long max, long numerator, long denominator) {
@@ -112,5 +90,35 @@ final class WritePolicy {
             return 2;
         }
         return priority >= 1L ? 1 : 0;
+    }
+
+    private static int writeBurstLimitForBand(int band, SchedulerHint hint) {
+        switch (band) {
+            case 3:
+                return SATURATED_WRITE_BURST_FRAMES;
+            case 2:
+                return STRONG_WRITE_BURST_FRAMES;
+            case 1:
+                return MILD_WRITE_BURST_FRAMES;
+            default:
+                return hint == SchedulerHint.LATENCY
+                        ? MILD_WRITE_BURST_FRAMES
+                        : DEFAULT_WRITE_BURST_FRAMES;
+        }
+    }
+
+    private static long fragmentTimeBudgetForBand(int band, SchedulerHint hint) {
+        switch (band) {
+            case 3:
+                return SATURATED_FRAGMENT_TIME_BUDGET_NANOS;
+            case 2:
+                return STRONG_FRAGMENT_TIME_BUDGET_NANOS;
+            case 1:
+                return MILD_FRAGMENT_TIME_BUDGET_NANOS;
+            default:
+                return hint == SchedulerHint.LATENCY
+                        ? STRONG_FRAGMENT_TIME_BUDGET_NANOS
+                        : DEFAULT_FRAGMENT_TIME_BUDGET_NANOS;
+        }
     }
 }

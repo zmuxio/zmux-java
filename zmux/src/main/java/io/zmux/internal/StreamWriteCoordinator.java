@@ -274,12 +274,7 @@ final class StreamWriteCoordinator {
     void ensureCloseWritableLocked() throws IOException {
         this.ensureLocalWriteSurfaceLocked("close");
         this.throwIfResetOrAbortedLocked();
-        if (this.owner.halfStateInternal().sendFin() || this.owner.halfStateInternal().sendFinQueued()) {
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
-        if (!this.owner.halfStateInternal().sendOpen()) {
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
+        this.throwIfGracefullyClosedOrNotOpenLocked();
     }
 
     void ensureResettableLocked() throws IOException {
@@ -294,12 +289,7 @@ final class StreamWriteCoordinator {
             return;
         }
         this.throwIfResetOrAbortedLocked();
-        if (this.owner.halfStateInternal().sendFin() || this.owner.halfStateInternal().sendFinQueued()) {
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
-        if (!this.owner.halfStateInternal().sendOpen()) {
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
+        this.throwIfGracefullyClosedOrNotOpenLocked();
     }
 
     private void ensureLocalWriteSurfaceLocked(String operation) throws IOException {
@@ -326,6 +316,15 @@ final class StreamWriteCoordinator {
             throw this.owner.terminalStateInternal().recvResetError();
         }
         throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
+    }
+
+    private void throwIfGracefullyClosedOrNotOpenLocked() throws IOException {
+        if (this.owner.halfStateInternal().sendFin() || this.owner.halfStateInternal().sendFinQueued()) {
+            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
+        }
+        if (!this.owner.halfStateInternal().sendOpen()) {
+            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
+        }
     }
 
     private void queueEmptyFinalFrameLocked(boolean openingPending, byte[] openingPrefix) throws IOException {
