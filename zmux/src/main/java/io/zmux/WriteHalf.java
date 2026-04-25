@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.internal.StreamIoSupport;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -22,30 +24,7 @@ public interface WriteHalf extends Closeable {
     }
 
     default int write(ByteBuffer src) throws IOException {
-        Objects.requireNonNull(src, "src");
-        if (!src.hasRemaining()) {
-            return 0;
-        }
-        if (src.hasArray()) {
-            int position = src.position();
-            int length = src.remaining();
-            write(src.array(), src.arrayOffset() + position, length);
-            src.position(position + length);
-            return length;
-        }
-
-        int initialPosition = src.position();
-        int total = 0;
-        ByteBuffer duplicate = src.duplicate();
-        byte[] buffer = new byte[StreamApiSupport.transientBufferSize(duplicate.remaining())];
-        while (duplicate.hasRemaining()) {
-            int length = Math.min(duplicate.remaining(), buffer.length);
-            duplicate.get(buffer, 0, length);
-            write(buffer, 0, length);
-            total += length;
-            src.position(initialPosition + total);
-        }
-        return total;
+        return StreamIoSupport.writeFromByteBuffer(src, (buffer, offset, length) -> write(buffer, offset, length));
     }
 
     default OutputStream asOutputStream() {

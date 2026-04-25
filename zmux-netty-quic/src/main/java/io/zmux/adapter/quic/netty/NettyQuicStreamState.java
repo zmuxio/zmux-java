@@ -11,6 +11,7 @@ import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.zmux.*;
 import io.zmux.internal.TimeoutBudget;
 import io.zmux.internal.Varint62;
+import io.zmux.internal.StreamIoSupport;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -23,6 +24,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+@SuppressWarnings("resource")
 final class NettyQuicStreamState {
     private static final byte[] EMPTY_BYTES = new byte[0];
 
@@ -125,10 +127,10 @@ final class NettyQuicStreamState {
             }
         };
         try {
-            if (target.eventLoop().inEventLoop()) {
+            if (NettyQuicSupport.inEventLoop(target)) {
                 update.run();
             } else {
-                target.eventLoop().execute(update);
+                NettyQuicSupport.executeOnEventLoop(target, update);
             }
         } catch (RuntimeException ignored) {
             // Auto-read is best-effort backpressure; stream/session close paths must not fail on it.
@@ -137,26 +139,6 @@ final class NettyQuicStreamState {
 
     private static long remainingDeadlineNanosLocked(long deadlineNanos) {
         return TimeoutBudget.remainingNanosUntil(deadlineNanos);
-    }
-
-    private static int checkedWritevTotalLength(byte[][] parts) throws IOException {
-        int totalLength = 0;
-        for (int i = 0; i < parts.length; ++i) {
-            byte[] part = Objects.requireNonNull(parts[i], "parts[" + i + "]");
-            if (part.length > Integer.MAX_VALUE - totalLength) {
-                throw new ZmuxException(
-                        ErrorCode.FRAME_SIZE.code(),
-                        "writevFinal",
-                        "multipart write exceeds maximum supported size",
-                        ZmuxErrorScope.STREAM,
-                        ZmuxErrorSource.LOCAL,
-                        ZmuxErrorDirection.WRITE,
-                        ZmuxTerminationKind.UNKNOWN
-                );
-            }
-            totalLength += part.length;
-        }
-        return totalLength;
     }
 
     ChannelDuplexHandler newHandler() {
@@ -393,7 +375,7 @@ final class NettyQuicStreamState {
     int writevFinal(byte[]... parts) throws IOException {
         Objects.requireNonNull(parts, "parts");
 
-        int totalLength = checkedWritevTotalLength(parts);
+        int totalLength = StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
         if (totalLength == 0) {
             closeWrite();
             return 0;
@@ -446,21 +428,7 @@ final class NettyQuicStreamState {
             }
             throw failure;
         }
-        ChannelFuture future;
-        long startedAtNanos = System.nanoTime();
-        try {
-            future = submitWrite(buffer);
-        } catch (IOException | RuntimeException failure) {
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
-            }
-            throw failure;
-        }
-        if (commitsLocalOpen) {
-            completeOpenPreludeSubmission();
-            session.noteControlProgress();
-        }
-        awaitWriteFuture(future, pendingPrelude.length + length, startedAtNanos);
+        submitBufferedWrite(buffer, commitsLocalOpen, pendingPrelude.length + length);
     }
 
     private void writeFinalParts(byte[][] parts, int totalLength) throws IOException {
@@ -507,21 +475,7 @@ final class NettyQuicStreamState {
             }
             throw failure;
         }
-        ChannelFuture future;
-        long startedAtNanos = System.nanoTime();
-        try {
-            future = submitWrite(buffer);
-        } catch (IOException | RuntimeException failure) {
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
-            }
-            throw failure;
-        }
-        if (commitsLocalOpen) {
-            completeOpenPreludeSubmission();
-            session.noteControlProgress();
-        }
-        awaitWriteFuture(future, pendingPrelude.length + totalLength, startedAtNanos);
+        submitBufferedWrite(buffer, commitsLocalOpen, pendingPrelude.length + totalLength);
     }
 
     void setDeadline(Instant deadline) throws IOException {
@@ -632,7 +586,14 @@ final class NettyQuicStreamState {
     }
 
     void closeRead() throws IOException {
-        cancelRead(ErrorCode.CANCELLED.code());
+        NettyQuicSupport.ensureOffEventLoop(channel, "closeRead");
+        if (!readAllowed) {
+            throw NettyQuicSupport.readClosedError();
+        }
+        int quicCode = requireReadControlCode(ErrorCode.CANCELLED.code());
+        ensureOpenPreludeForReadStop();
+        closeLocalRead(NettyQuicSupport.readClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.STOPPED), true);
+        dispatchControlFuture(channel.shutdownInput(quicCode));
     }
 
     void cancelRead(long code) throws IOException {
@@ -640,36 +601,7 @@ final class NettyQuicStreamState {
         if (!readAllowed) {
             throw NettyQuicSupport.readClosedError();
         }
-        int quicCode;
-        lock.lock();
-        try {
-            if (readHalf.localClosed()) {
-                throw localReadErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            quicCode = NettyQuicSupport.requireQuicApplicationCode(
-                    code,
-                    "read",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.READ
-            );
-        } finally {
-            lock.unlock();
-        }
-        ensureOpenPreludeForReadStop();
-        lock.lock();
-        try {
-            if (readHalf.localClosed()) {
-                throw localReadErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            readHalf.closeLocal(NettyQuicSupport.readClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.STOPPED));
-            releaseInboundLocked();
-            signalReadChangedLocked();
-        } finally {
-            lock.unlock();
-        }
-        dispatchControlFuture(channel.shutdownInput(quicCode));
+        closeReadWithStop(code, "");
     }
 
     void closeWrite() throws IOException {
@@ -706,43 +638,7 @@ final class NettyQuicStreamState {
         if (!writeAllowed) {
             throw NettyQuicSupport.writeClosedError();
         }
-        int quicCode;
-        lock.lock();
-        try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            quicCode = NettyQuicSupport.requireQuicApplicationCode(
-                    code,
-                    "write",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.WRITE
-            );
-        } finally {
-            lock.unlock();
-        }
-        ensureOpenPrelude();
-        ApplicationError error = NettyQuicSupport.streamApplicationError(
-                code,
-                "",
-                ZmuxErrorSource.LOCAL,
-                ZmuxErrorDirection.WRITE,
-                ZmuxTerminationKind.RESET
-        );
-        lock.lock();
-        try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            writeHalf.closeLocal(error);
-            signalWriteChangedLocked();
-        } finally {
-            lock.unlock();
-        }
-        handleWriteSideControlFuture(channel.shutdownOutput(quicCode), System.nanoTime());
-        session.noteResetReason(code);
+        closeWriteWithReset(code, "");
     }
 
     void closeWithError(long code, String reason) throws IOException {
@@ -803,84 +699,12 @@ final class NettyQuicStreamState {
 
     void closeWriteWithError(long code, String reason) throws IOException {
         NettyQuicSupport.ensureOffEventLoop(channel, "closeWriteWithError");
-        int quicCode;
-        lock.lock();
-        try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            quicCode = NettyQuicSupport.requireQuicApplicationCode(
-                    code,
-                    "write",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.WRITE
-            );
-        } finally {
-            lock.unlock();
-        }
-        ensureOpenPrelude();
-        ApplicationError error = NettyQuicSupport.streamApplicationError(
-                code,
-                reason,
-                ZmuxErrorSource.LOCAL,
-                ZmuxErrorDirection.WRITE,
-                ZmuxTerminationKind.RESET
-        );
-        lock.lock();
-        try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            writeHalf.closeLocal(error);
-            signalWriteChangedLocked();
-        } finally {
-            lock.unlock();
-        }
-        handleWriteSideControlFuture(channel.shutdownOutput(quicCode), System.nanoTime());
-        session.noteResetReason(code);
+        closeWriteWithReset(code, reason);
     }
 
     void closeReadWithError(long code, String reason) throws IOException {
         NettyQuicSupport.ensureOffEventLoop(channel, "closeReadWithError");
-        int quicCode;
-        lock.lock();
-        try {
-            if (readHalf.localClosed()) {
-                throw localReadErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            quicCode = NettyQuicSupport.requireQuicApplicationCode(
-                    code,
-                    "read",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.READ
-            );
-        } finally {
-            lock.unlock();
-        }
-        ApplicationError error = NettyQuicSupport.streamApplicationError(
-                code,
-                reason,
-                ZmuxErrorSource.LOCAL,
-                ZmuxErrorDirection.READ,
-                ZmuxTerminationKind.STOPPED
-        );
-        ensureOpenPreludeForReadStop();
-        lock.lock();
-        try {
-            if (readHalf.localClosed()) {
-                throw localReadErrorOrDefault();
-            }
-            ensureSessionOpenForControlLocked();
-            readHalf.closeLocal(error);
-            releaseInboundLocked();
-            signalReadChangedLocked();
-        } finally {
-            lock.unlock();
-        }
-        dispatchControlFuture(channel.shutdownInput(quicCode));
+        closeReadWithStop(code, reason);
     }
 
     void onSessionClosed(IOException error) {
@@ -1073,6 +897,24 @@ final class NettyQuicStreamState {
         awaitWriteFuture(future, bytes, startedAtNanos);
     }
 
+    private void submitBufferedWrite(ByteBuf buffer, boolean commitsLocalOpen, int bytes) throws IOException {
+        ChannelFuture future;
+        long startedAtNanos = System.nanoTime();
+        try {
+            future = submitWrite(buffer);
+        } catch (IOException | RuntimeException failure) {
+            if (commitsLocalOpen) {
+                abortOpenPreludeSubmission();
+            }
+            throw failure;
+        }
+        if (commitsLocalOpen) {
+            completeOpenPreludeSubmission();
+            session.noteControlProgress();
+        }
+        awaitWriteFuture(future, bytes, startedAtNanos);
+    }
+
     private ChannelFuture submitWrite(ByteBuf buffer) throws IOException {
         try {
             return channel.writeAndFlush(buffer);
@@ -1173,17 +1015,7 @@ final class NettyQuicStreamState {
             lock.unlock();
         }
         IOException translated = NettyQuicSupport.translateWriteThrowable(future.cause());
-        lock.lock();
-        try {
-            if (translated instanceof ApplicationError
-                    || translated instanceof WriteClosedException
-                    || future.cause() instanceof io.netty.channel.socket.ChannelOutputShutdownException) {
-                writeHalf.closeLocal(translated);
-            }
-            signalWriteChangedLocked();
-        } finally {
-            lock.unlock();
-        }
+        markLocalWriteFailure(translated, future.cause());
         throw translated;
     }
 
@@ -1200,19 +1032,23 @@ final class NettyQuicStreamState {
             } else {
                 IOException translated = NettyQuicSupport.translateWriteThrowable(future.cause());
                 session.noteObservedStreamReason(translated);
-                lock.lock();
-                try {
-                    if (translated instanceof ApplicationError
-                            || translated instanceof WriteClosedException
-                            || future.cause() instanceof io.netty.channel.socket.ChannelOutputShutdownException) {
-                        writeHalf.closeLocal(translated);
-                    }
-                    signalWriteChangedLocked();
-                } finally {
-                    lock.unlock();
-                }
+                markLocalWriteFailure(translated, future.cause());
             }
         });
+    }
+
+    private void markLocalWriteFailure(IOException translated, Throwable cause) {
+        lock.lock();
+        try {
+            if (translated instanceof ApplicationError
+                    || translated instanceof WriteClosedException
+                    || cause instanceof io.netty.channel.socket.ChannelOutputShutdownException) {
+                writeHalf.closeLocal(translated);
+            }
+            signalWriteChangedLocked();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void awaitWriteSideFuture(ChannelFuture future, long startedAtNanos) throws IOException {
@@ -1410,6 +1246,97 @@ final class NettyQuicStreamState {
         IOException currentSessionError = currentSessionError();
         if (currentSessionError != null) {
             throw currentSessionError;
+        }
+    }
+
+    private void closeReadWithStop(long code, String reason) throws IOException {
+        int quicCode = requireReadControlCode(code);
+        ApplicationError error = NettyQuicSupport.streamApplicationError(
+                code,
+                reason,
+                ZmuxErrorSource.LOCAL,
+                ZmuxErrorDirection.READ,
+                ZmuxTerminationKind.STOPPED
+        );
+        ensureOpenPreludeForReadStop();
+        closeLocalRead(error, true);
+        dispatchControlFuture(channel.shutdownInput(quicCode));
+    }
+
+    private void closeWriteWithReset(long code, String reason) throws IOException {
+        int quicCode = requireWriteControlCode(code, "write", ZmuxErrorDirection.WRITE);
+        ensureOpenPrelude();
+        ApplicationError error = NettyQuicSupport.streamApplicationError(
+                code,
+                reason,
+                ZmuxErrorSource.LOCAL,
+                ZmuxErrorDirection.WRITE,
+                ZmuxTerminationKind.RESET
+        );
+        closeLocalWrite(error);
+        handleWriteSideControlFuture(channel.shutdownOutput(quicCode), System.nanoTime());
+        session.noteResetReason(code);
+    }
+
+    private int requireReadControlCode(long code) throws IOException {
+        lock.lock();
+        try {
+            if (readHalf.localClosed()) {
+                throw localReadErrorOrDefault();
+            }
+            ensureSessionOpenForControlLocked();
+            return NettyQuicSupport.requireQuicApplicationCode(
+                    code,
+                    "read",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorDirection.READ
+            );
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private int requireWriteControlCode(long code, String operation, ZmuxErrorDirection direction) throws IOException {
+        lock.lock();
+        try {
+            if (writeHalf.localClosed()) {
+                throw localWriteErrorOrDefault();
+            }
+            ensureSessionOpenForControlLocked();
+            return NettyQuicSupport.requireQuicApplicationCode(code, operation, ZmuxErrorScope.STREAM, direction);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void closeLocalRead(IOException error, boolean releaseInbound) throws IOException {
+        lock.lock();
+        try {
+            if (readHalf.localClosed()) {
+                throw localReadErrorOrDefault();
+            }
+            ensureSessionOpenForControlLocked();
+            readHalf.closeLocal(error);
+            if (releaseInbound) {
+                releaseInboundLocked();
+            }
+            signalReadChangedLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void closeLocalWrite(IOException error) throws IOException {
+        lock.lock();
+        try {
+            if (writeHalf.localClosed()) {
+                throw localWriteErrorOrDefault();
+            }
+            ensureSessionOpenForControlLocked();
+            writeHalf.closeLocal(error);
+            signalWriteChangedLocked();
+        } finally {
+            lock.unlock();
         }
     }
 

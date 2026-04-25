@@ -119,16 +119,7 @@ final class SessionExplicitGroupTracker {
         if (!schedulerTracksExplicitGroups(schedulerHint) || group == null || group == 0L) {
             return;
         }
-        Integer refs = ordinaryBatchExplicitGroupRefs.get(group);
-        if (refs == null) {
-            return;
-        }
-        if (refs > 1) {
-            ordinaryBatchExplicitGroupRefs.put(group, refs - 1);
-            return;
-        }
-        ordinaryBatchExplicitGroupRefs.remove(group);
-        ordinaryBatchBias.dropExplicitGroup(group);
+        decrementExplicitGroupRefLocked(ordinaryBatchExplicitGroupRefs, group);
     }
 
     private int trackedExplicitGroupCountLocked() {
@@ -215,15 +206,19 @@ final class SessionExplicitGroupTracker {
         if (groupBucket == 0L) {
             return;
         }
-        Integer refs = activeExplicitGroupRefs.get(groupBucket);
-        if (refs == null) {
+        decrementExplicitGroupRefLocked(activeExplicitGroupRefs, groupBucket);
+    }
+
+    private void decrementExplicitGroupRefLocked(Map<Long, Integer> refs, long group) {
+        Integer current = refs.get(group);
+        if (current == null) {
             return;
         }
-        if (refs > 1) {
-            activeExplicitGroupRefs.put(groupBucket, refs - 1);
+        if (current > 1) {
+            refs.put(group, current - 1);
             return;
         }
-        activeExplicitGroupRefs.remove(groupBucket);
-        ordinaryBatchBias.dropExplicitGroup(groupBucket);
+        refs.remove(group);
+        ordinaryBatchBias.dropExplicitGroup(group);
     }
 }

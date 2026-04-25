@@ -43,26 +43,20 @@ final class StreamTerminalCoordinator {
     void abortFromPeerLocked(long code, String reason, long reasonBytes) {
         this.owner.terminalStateInternal().recordPeerAbort(code, reason);
         this.owner.advisoryStateInternal().recordRecvAbortReasonBytes(reasonBytes);
-        this.owner.clearWriteAdvisoryLocked();
-        StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().abortBoth();
-        this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, false);
-        this.owner.notifySendTerminalTransitionLocked(previousSendState);
-        this.owner.discardReadBufferLocked();
-        this.owner.refreshGracefulCloseBlockingLocked();
+        this.abortBothAndDiscardLocked();
     }
 
     void abortFromLocalLocked(long code, String reason) {
         this.owner.terminalStateInternal().recordLocalAbort(code, reason);
-        this.owner.clearWriteAdvisoryLocked();
-        StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().abortBoth();
-        this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, false);
-        this.owner.notifySendTerminalTransitionLocked(previousSendState);
-        this.owner.discardReadBufferLocked();
-        this.owner.refreshGracefulCloseBlockingLocked();
+        this.abortBothAndDiscardLocked();
     }
 
     void failLocallyLocked(IOException error) {
         this.owner.terminalStateInternal().recordLocalFailure(error);
+        this.abortBothAndDiscardLocked();
+    }
+
+    private void abortBothAndDiscardLocked() {
         this.owner.clearWriteAdvisoryLocked();
         StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().abortBoth();
         this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, false);

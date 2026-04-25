@@ -215,15 +215,7 @@ final class OrdinaryBatchRetainedState {
         streamClass.remove(streamId);
         streamLastSeenBatch.remove(streamId);
         smallBurstDisarmed.remove(streamId);
-        OrdinaryBatchOrderer.GroupKey implicitGroup = new OrdinaryBatchOrderer.GroupKey(0, streamId);
-        groupVirtualTime.remove(implicitGroup);
-        groupFinishTag.remove(implicitGroup);
-        groupLastServed.remove(implicitGroup);
-        groupLag.remove(implicitGroup);
-        preferredStreamHeads.remove(implicitGroup);
-        if (implicitGroup.equals(preferredGroupHead)) {
-            preferredGroupHead = null;
-        }
+        dropGroupState(new OrdinaryBatchOrderer.GroupKey(0, streamId));
         scrubIdleState();
     }
 
@@ -231,16 +223,19 @@ final class OrdinaryBatchRetainedState {
         if (group == 0L) {
             return;
         }
-        OrdinaryBatchOrderer.GroupKey explicitGroup = new OrdinaryBatchOrderer.GroupKey(1, group);
-        groupVirtualTime.remove(explicitGroup);
-        groupFinishTag.remove(explicitGroup);
-        groupLastServed.remove(explicitGroup);
-        groupLag.remove(explicitGroup);
-        preferredStreamHeads.remove(explicitGroup);
-        if (explicitGroup.equals(preferredGroupHead)) {
+        dropGroupState(new OrdinaryBatchOrderer.GroupKey(1, group));
+        scrubIdleState();
+    }
+
+    private void dropGroupState(OrdinaryBatchOrderer.GroupKey groupKey) {
+        groupVirtualTime.remove(groupKey);
+        groupFinishTag.remove(groupKey);
+        groupLastServed.remove(groupKey);
+        groupLag.remove(groupKey);
+        preferredStreamHeads.remove(groupKey);
+        if (groupKey.equals(preferredGroupHead)) {
             preferredGroupHead = null;
         }
-        scrubIdleState();
     }
 
     private void scrubIdleState() {

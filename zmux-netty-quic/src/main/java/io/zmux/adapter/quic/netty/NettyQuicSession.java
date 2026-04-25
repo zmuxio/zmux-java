@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+@SuppressWarnings("resource")
 final class NettyQuicSession implements ZmuxSession {
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final AtomicLong HANDLER_SEQUENCE = new AtomicLong();
@@ -286,23 +287,7 @@ final class NettyQuicSession implements ZmuxSession {
     @Override
     public ZmuxStream acceptStream(Duration timeout) throws IOException, InterruptedException {
         NettyQuicSupport.ensureOffEventLoop(channel, "acceptStream");
-        NettyQuicBidiStream stream;
-        try {
-            stream = bidiAcceptQueue.take(timeout, this::sessionUnavailableError);
-        } catch (InterruptedException interrupted) {
-            throw NettyQuicSupport.interrupted(
-                    "zmux-netty-quic: interrupted while accepting stream",
-                    "accept",
-                    ZmuxErrorScope.SESSION,
-                    ZmuxErrorDirection.BOTH,
-                    interrupted
-            );
-        }
-        if (stream == null) {
-            throw NettyQuicSupport.acceptTimedOut();
-        }
-        saturatingIncrement(acceptedStreams);
-        return stream;
+        return acceptQueuedStream(bidiAcceptQueue, timeout);
     }
 
     @Override
@@ -313,23 +298,7 @@ final class NettyQuicSession implements ZmuxSession {
     @Override
     public ZmuxRecvStream acceptUniStream(Duration timeout) throws IOException, InterruptedException {
         NettyQuicSupport.ensureOffEventLoop(channel, "acceptUniStream");
-        NettyQuicRecvStream stream;
-        try {
-            stream = uniAcceptQueue.take(timeout, this::sessionUnavailableError);
-        } catch (InterruptedException interrupted) {
-            throw NettyQuicSupport.interrupted(
-                    "zmux-netty-quic: interrupted while accepting stream",
-                    "accept",
-                    ZmuxErrorScope.SESSION,
-                    ZmuxErrorDirection.BOTH,
-                    interrupted
-            );
-        }
-        if (stream == null) {
-            throw NettyQuicSupport.acceptTimedOut();
-        }
-        saturatingIncrement(acceptedStreams);
-        return stream;
+        return acceptQueuedStream(uniAcceptQueue, timeout);
     }
 
     @Override
@@ -847,18 +816,7 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private List<NettyQuicStreamState> snapshotPendingPrepareStates() {
-        prepareLock.lock();
-        try {
-            if (pendingPrepare.isEmpty()) {
-                return Collections.emptyList();
-            }
-            if (pendingPrepare.size() == 1) {
-                return Collections.singletonList(pendingPrepare.getFirst());
-            }
-            return new ArrayList<>(pendingPrepare);
-        } finally {
-            prepareLock.unlock();
-        }
+        return NettyQuicSupport.snapshotDeque(prepareLock, pendingPrepare);
     }
 
     private SessionStats.KeepaliveStats reducedTransportKeepaliveStats() {
@@ -897,12 +855,15 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private void installParentHandler() {
-        if (channel.eventLoop().inEventLoop()) {
+        if (NettyQuicSupport.inEventLoop(channel)) {
             channel.pipeline().addFirst(handlerName, parentHandler);
             return;
         }
         NettyQuicSupport.awaitFutureUninterruptibly(
-                channel.eventLoop().submit(() -> channel.pipeline().addFirst(handlerName, parentHandler))
+                NettyQuicSupport.submitOnEventLoop(channel, () -> {
+                    channel.pipeline().addFirst(handlerName, parentHandler);
+                    return null;
+                })
         );
     }
 
@@ -925,7 +886,7 @@ final class NettyQuicSession implements ZmuxSession {
         for (NettyQuicStreamState state : activeStreams) {
             state.onSessionClosed(closeError);
         }
-        channel.eventLoop().execute(() -> {
+        NettyQuicSupport.executeOnEventLoop(channel, () -> {
             if (channel.pipeline().context(handlerName) != null) {
                 channel.pipeline().remove(handlerName);
             }
@@ -1525,7 +1486,7 @@ final class NettyQuicSession implements ZmuxSession {
                         : NettyQuicStreamState.acceptedRecv(NettyQuicSession.this, stream);
                 stream.pipeline().addLast(state.newHandler());
                 state.attachChannel(stream);
-                ctx.channel().eventLoop().register(stream).addListener((ChannelFutureListener) future -> {
+                NettyQuicSupport.registerOnEventLoop(ctx.channel(), stream).addListener((ChannelFutureListener) future -> {
                     if (future.isSuccess()) {
                         scheduleAccepted(state);
                     } else {
@@ -1553,5 +1514,26 @@ final class NettyQuicSession implements ZmuxSession {
             beginClosing(NettyQuicSupport.translateThrowable(cause));
             ctx.close();
         }
+    }
+
+    private <T> T acceptQueuedStream(NettyQuicSupport.AcceptQueue<T> queue, Duration timeout)
+            throws IOException, InterruptedException {
+        T stream;
+        try {
+            stream = queue.take(timeout, this::sessionUnavailableError);
+        } catch (InterruptedException interrupted) {
+            throw NettyQuicSupport.interrupted(
+                    "zmux-netty-quic: interrupted while accepting stream",
+                    "accept",
+                    ZmuxErrorScope.SESSION,
+                    ZmuxErrorDirection.BOTH,
+                    interrupted
+            );
+        }
+        if (stream == null) {
+            throw NettyQuicSupport.acceptTimedOut();
+        }
+        saturatingIncrement(acceptedStreams);
+        return stream;
     }
 }

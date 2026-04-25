@@ -21,81 +21,36 @@ final class PrefaceCodec {
         if (fixed.length != 6) {
             throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "truncated preface");
         }
-        if (!hasMagic(fixed)) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "invalid magic");
-        }
-        if (fixed[4] != Protocol.PREFACE_VERSION) {
-            throw FrameCodec.error(ErrorCode.UNSUPPORTED_VERSION, "parse preface", "unsupported preface version");
-        }
-        Role role = parseRole(fixed[5] & 0xff);
-        long tieBreakerNonce = Varint62.read(input).value();
-        long minProto = Varint62.read(input).value();
-        long maxProto = Varint62.read(input).value();
-        long capabilities = Varint62.read(input).value();
-        long settingsLength = Varint62.read(input).value();
-        if (settingsLength > Protocol.MAX_PREFACE_SETTINGS_BYTES) {
-            throw FrameCodec.error(
-                    ErrorCode.FRAME_SIZE,
-                    "parse preface",
-                    "settings_tlv exceeds " + Protocol.MAX_PREFACE_SETTINGS_BYTES + " bytes"
-            );
-        }
-        byte[] settingsBytes = FrameCodec.readInputBytes(input, FrameCodec.checkedLength(
-                settingsLength,
-                ErrorCode.FRAME_SIZE,
-                "parse preface",
-                "settings_tlv exceeds Java implementation limit"
-        ));
-        if (settingsBytes.length != settingsLength) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "truncated settings_tlv");
-        }
-        return new Preface(
-                fixed[4],
-                role,
-                tieBreakerNonce,
-                minProto,
-                maxProto,
-                capabilities,
-                parseSettings(settingsBytes)
-        );
+        return readPreface(fixed, new PrefaceReader() {
+            @Override
+            public long readVarint() throws IOException {
+                return Varint62.read(input).value();
+            }
+
+            @Override
+            public byte[] readSettingsBytes(int length) throws IOException {
+                byte[] settingsBytes = FrameCodec.readInputBytes(input, length);
+                if (settingsBytes.length != length) {
+                    throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "truncated settings_tlv");
+                }
+                return settingsBytes;
+            }
+        });
     }
 
     static Preface readPreface(FrameCodec.Decoder input) throws IOException {
         byte[] fixed = input.readBytesExact(6);
-        if (!hasMagic(fixed)) {
-            throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "invalid magic");
-        }
-        if (fixed[4] != Protocol.PREFACE_VERSION) {
-            throw FrameCodec.error(ErrorCode.UNSUPPORTED_VERSION, "parse preface", "unsupported preface version");
-        }
-        Role role = parseRole(fixed[5] & 0xff);
-        long tieBreakerNonce = Varint62.read(input).value();
-        long minProto = Varint62.read(input).value();
-        long maxProto = Varint62.read(input).value();
-        long capabilities = Varint62.read(input).value();
-        long settingsLength = Varint62.read(input).value();
-        if (settingsLength > Protocol.MAX_PREFACE_SETTINGS_BYTES) {
-            throw FrameCodec.error(
-                    ErrorCode.FRAME_SIZE,
-                    "parse preface",
-                    "settings_tlv exceeds " + Protocol.MAX_PREFACE_SETTINGS_BYTES + " bytes"
-            );
-        }
-        byte[] settingsBytes = input.readBytesExact(FrameCodec.checkedLength(
-                settingsLength,
-                ErrorCode.FRAME_SIZE,
-                "parse preface",
-                "settings_tlv exceeds Java implementation limit"
-        ));
-        return new Preface(
-                fixed[4],
-                role,
-                tieBreakerNonce,
-                minProto,
-                maxProto,
-                capabilities,
-                parseSettings(settingsBytes)
-        );
+        return readPreface(fixed, new PrefaceReader() {
+            @Override
+            public long readVarint() throws IOException {
+                return Varint62.read(input).value();
+            }
+
+            @Override
+            public byte[] readSettingsBytes(int length) throws IOException {
+                return input.readBytesExact(length);
+            }
+        });
     }
 
     static void writePreface(OutputStream output, Preface preface) throws IOException {
@@ -336,6 +291,51 @@ final class PrefaceCodec {
         return true;
     }
 
+    private static Preface readPreface(byte[] fixed, PrefaceReader reader) throws IOException {
+        ParsedPrefaceHeader header = parseFixedHeader(fixed);
+        long tieBreakerNonce = reader.readVarint();
+        long minProto = reader.readVarint();
+        long maxProto = reader.readVarint();
+        long capabilities = reader.readVarint();
+        int settingsLength = checkedSettingsLength(reader.readVarint());
+        byte[] settingsBytes = reader.readSettingsBytes(settingsLength);
+        return new Preface(
+                header.prefaceVersion,
+                header.role,
+                tieBreakerNonce,
+                minProto,
+                maxProto,
+                capabilities,
+                parseSettings(settingsBytes)
+        );
+    }
+
+    private static ParsedPrefaceHeader parseFixedHeader(byte[] fixed) throws IOException {
+        if (!hasMagic(fixed)) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "parse preface", "invalid magic");
+        }
+        if (fixed[4] != Protocol.PREFACE_VERSION) {
+            throw FrameCodec.error(ErrorCode.UNSUPPORTED_VERSION, "parse preface", "unsupported preface version");
+        }
+        return new ParsedPrefaceHeader(fixed[4], parseRole(fixed[5] & 0xff));
+    }
+
+    private static int checkedSettingsLength(long settingsLength) throws IOException {
+        if (settingsLength > Protocol.MAX_PREFACE_SETTINGS_BYTES) {
+            throw FrameCodec.error(
+                    ErrorCode.FRAME_SIZE,
+                    "parse preface",
+                    "settings_tlv exceeds " + Protocol.MAX_PREFACE_SETTINGS_BYTES + " bytes"
+            );
+        }
+        return FrameCodec.checkedLength(
+                settingsLength,
+                ErrorCode.FRAME_SIZE,
+                "parse preface",
+                "settings_tlv exceeds Java implementation limit"
+        );
+    }
+
     private static void validatePrefaceForMarshal(Preface preface) throws IOException {
         if (preface == null) {
             throw FrameCodec.error(ErrorCode.PROTOCOL, "marshal preface", "preface is required");
@@ -404,5 +404,21 @@ final class PrefaceCodec {
         Varint62.write(output, type);
         Varint62.write(output, Varint62.length(value));
         Varint62.write(output, value);
+    }
+
+    private interface PrefaceReader {
+        long readVarint() throws IOException;
+
+        byte[] readSettingsBytes(int length) throws IOException;
+    }
+
+    private static final class ParsedPrefaceHeader {
+        private final byte prefaceVersion;
+        private final Role role;
+
+        private ParsedPrefaceHeader(byte prefaceVersion, Role role) {
+            this.prefaceVersion = prefaceVersion;
+            this.role = role;
+        }
     }
 }

@@ -1,7 +1,8 @@
 package io.zmux;
 
+import io.zmux.internal.StreamIoSupport;
+
 import java.io.IOException;
-import java.util.Objects;
 
 final class StreamApiSupport {
     private StreamApiSupport() {
@@ -12,15 +13,7 @@ final class StreamApiSupport {
     }
 
     static int checkedWritevTotalLength(byte[][] parts) throws IOException {
-        int total = 0;
-        for (int i = 0; i < parts.length; i++) {
-            byte[] part = Objects.requireNonNull(parts[i], "parts[" + i + "]");
-            if (part.length > Integer.MAX_VALUE - total) {
-                throw multipartWriteTooLarge();
-            }
-            total += part.length;
-        }
-        return total;
+        return StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
     }
 
     static int lastNonEmptyPart(byte[][] parts) {
@@ -30,18 +23,6 @@ final class StreamApiSupport {
             }
         }
         return -1;
-    }
-
-    private static ZmuxException multipartWriteTooLarge() {
-        return new ZmuxException(
-                ErrorCode.FRAME_SIZE.code(),
-                "writevFinal",
-                "multipart write exceeds maximum supported size",
-                ZmuxErrorScope.STREAM,
-                ZmuxErrorSource.LOCAL,
-                ZmuxErrorDirection.WRITE,
-                ZmuxTerminationKind.UNKNOWN
-        );
     }
 
     static ZmuxException readAllBytesTooLarge(int maxBytes) {

@@ -49,12 +49,12 @@ final class SessionWriterBatchCollector {
         while (batch.size() < this.maxBatchFrames && batchCost < effectiveCostLimit) {
             boolean progressed = false;
 
-            SessionRuntime.OutboundFrame advisoryBefore = this.pollAdvisoryOutboundLocked();
-            if (advisoryBefore != null) {
-                this.owner.addBatchFrameLocked(batch, advisoryBefore, trackWriterHeld);
-                batchCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisoryBefore));
+            AdvisoryBatchResult advisoryBefore =
+                    this.addAdvisoryOutboundLocked(batch, batchCost, effectiveCostLimit, trackWriterHeld);
+            if (advisoryBefore.added) {
+                batchCost = advisoryBefore.batchCost;
                 progressed = true;
-                if (advisoryBefore.frame().type() == FrameType.CLOSE
+                if (advisoryBefore.terminal
                         || batch.size() >= this.maxBatchFrames
                         || batchCost >= effectiveCostLimit) {
                     return batchCost;
@@ -73,12 +73,12 @@ final class SessionWriterBatchCollector {
                 }
             }
 
-            SessionRuntime.OutboundFrame advisoryAfter = this.pollAdvisoryOutboundLocked();
-            if (advisoryAfter != null) {
-                this.owner.addBatchFrameLocked(batch, advisoryAfter, trackWriterHeld);
-                batchCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisoryAfter));
+            AdvisoryBatchResult advisoryAfter =
+                    this.addAdvisoryOutboundLocked(batch, batchCost, effectiveCostLimit, trackWriterHeld);
+            if (advisoryAfter.added) {
+                batchCost = advisoryAfter.batchCost;
                 progressed = true;
-                if (advisoryAfter.frame().type() == FrameType.CLOSE
+                if (advisoryAfter.terminal
                         || batch.size() >= this.maxBatchFrames
                         || batchCost >= effectiveCostLimit) {
                     return batchCost;
@@ -116,6 +116,22 @@ final class SessionWriterBatchCollector {
         );
     }
 
+    private AdvisoryBatchResult addAdvisoryOutboundLocked(List<SessionRuntime.OutboundFrame> batch,
+                                                          long batchCost,
+                                                          long effectiveCostLimit,
+                                                          boolean trackWriterHeld) throws IOException {
+        SessionRuntime.OutboundFrame advisory = this.pollAdvisoryOutboundLocked();
+        if (advisory == null) {
+            return AdvisoryBatchResult.EMPTY;
+        }
+        this.owner.addBatchFrameLocked(batch, advisory, trackWriterHeld);
+        long updatedCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisory));
+        boolean terminal = advisory.frame().type() == FrameType.CLOSE
+                || batch.size() >= this.maxBatchFrames
+                || updatedCost >= effectiveCostLimit;
+        return new AdvisoryBatchResult(true, terminal, updatedCost);
+    }
+
     private SessionRuntime.OutboundFrame pollAdvisoryOutboundLocked() throws IOException {
         while (true) {
             StreamRuntime streamRuntime = this.owner.advisoryQueue().pollFirst();
@@ -131,6 +147,20 @@ final class SessionWriterBatchCollector {
             if (outboundFrame != null) {
                 return outboundFrame;
             }
+        }
+    }
+
+    private static final class AdvisoryBatchResult {
+        private static final AdvisoryBatchResult EMPTY = new AdvisoryBatchResult(false, false, 0L);
+
+        private final boolean added;
+        private final boolean terminal;
+        private final long batchCost;
+
+        private AdvisoryBatchResult(boolean added, boolean terminal, long batchCost) {
+            this.added = added;
+            this.terminal = terminal;
+            this.batchCost = batchCost;
         }
     }
 }

@@ -18,7 +18,7 @@ public final class ZmuxErrors {
         pending.push(error);
         while (!pending.isEmpty()) {
             Throwable current = pending.pop();
-            if (current == null || seen.put(current, Boolean.TRUE) != null) {
+            if (seen.put(current, Boolean.TRUE) != null) {
                 continue;
             }
             if (type.isInstance(current)) {

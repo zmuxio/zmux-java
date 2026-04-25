@@ -19,9 +19,9 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition inputChanged = lock.newCondition();
     private final Condition outputChanged = lock.newCondition();
-    private final InputStream inputView = new JoinedInputStream();
-    private final OutputStream outputView = new JoinedOutputStream();
-    private final GatheringByteChannel gatheringOutputView = new JoinedGatheringOutput();
+    private final JoinedInputStream inputView = new JoinedInputStream();
+    private final JoinedOutputStream outputView = new JoinedOutputStream();
+    private final JoinedGatheringOutput gatheringOutputView = new JoinedGatheringOutput();
     private final SocketAddress fallbackLocalAddress;
     private final SocketAddress fallbackRemoteAddress;
 
@@ -57,7 +57,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     }
 
     public JoinedDuplexConnection(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
-        this((ReadHalf) inputHalf, (WriteHalf) outputHalf);
+        this(inputHalf, (WriteHalf) outputHalf);
     }
 
     public JoinedDuplexConnection(InputStream inputHalf,
@@ -334,7 +334,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     }
 
     public void closeOutput() throws IOException {
-        outputView.close();
+        closeJoinedOutput();
     }
 
     public void closeRead() throws IOException {
@@ -537,46 +537,21 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private void resumeInput(PausedInput paused) throws IOException {
         while (true) {
             ReadHalf currentHalf = typedReadHalf(paused.current);
-            Instant deadline;
-            long generation;
-            lock.lock();
-            try {
-                if (paused.resumed) {
-                    return;
-                }
-                if (closed) {
-                    paused.resumed = true;
-                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
-                }
-                deadline = readDeadline;
-                generation = readDeadlineGeneration;
-            } finally {
-                lock.unlock();
-            }
-
-            if (currentHalf != null) {
-                currentHalf.setReadDeadline(deadline);
-            }
-
-            lock.lock();
-            try {
-                if (paused.resumed) {
-                    return;
-                }
-                if (closed) {
-                    paused.resumed = true;
-                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
-                }
-                if (currentHalf != null && readDeadlineGeneration != generation) {
-                    continue;
-                }
-                inputHalf = paused.current;
-                inputPaused = false;
-                paused.resumed = true;
-                signalInputChangedLocked();
+            ResumeSnapshot snapshot = snapshotResumeState(paused, true);
+            if (snapshot == null) {
                 return;
-            } finally {
-                lock.unlock();
+            }
+            if (currentHalf != null) {
+                currentHalf.setReadDeadline(snapshot.deadline);
+            }
+            if (completeResume(paused, true, currentHalf != null, snapshot.generation, new ResumeCommit() {
+                @Override
+                public void commit() {
+                    inputHalf = paused.current;
+                    inputPaused = false;
+                }
+            })) {
+                return;
             }
         }
     }
@@ -584,48 +559,72 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private void resumeOutput(PausedOutput paused) throws IOException {
         while (true) {
             WriteHalf currentHalf = typedWriteHalf(paused.current);
-            Instant deadline;
-            long generation;
-            lock.lock();
-            try {
-                if (paused.resumed) {
-                    return;
-                }
-                if (closed) {
-                    paused.resumed = true;
-                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
-                }
-                deadline = writeDeadline;
-                generation = writeDeadlineGeneration;
-            } finally {
-                lock.unlock();
-            }
-
-            if (currentHalf != null) {
-                currentHalf.setWriteDeadline(deadline);
-            }
-
-            lock.lock();
-            try {
-                if (paused.resumed) {
-                    return;
-                }
-                if (closed) {
-                    paused.resumed = true;
-                    throw new SessionClosedException(ZmuxErrorSource.LOCAL);
-                }
-                if (currentHalf != null && writeDeadlineGeneration != generation) {
-                    continue;
-                }
-                outputHalf = paused.current;
-                gatheringOutput = paused.gathering;
-                outputPaused = false;
-                paused.resumed = true;
-                signalOutputChangedLocked();
+            ResumeSnapshot snapshot = snapshotResumeState(paused, false);
+            if (snapshot == null) {
                 return;
-            } finally {
-                lock.unlock();
             }
+            if (currentHalf != null) {
+                currentHalf.setWriteDeadline(snapshot.deadline);
+            }
+            if (completeResume(paused, false, currentHalf != null, snapshot.generation, new ResumeCommit() {
+                @Override
+                public void commit() {
+                    outputHalf = paused.current;
+                    gatheringOutput = paused.gathering;
+                    outputPaused = false;
+                }
+            })) {
+                return;
+            }
+        }
+    }
+
+    private ResumeSnapshot snapshotResumeState(ResumablePause paused, boolean readSide) throws IOException {
+        lock.lock();
+        try {
+            if (paused.resumed()) {
+                return null;
+            }
+            if (closed) {
+                paused.markResumed();
+                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+            }
+            return readSide
+                    ? new ResumeSnapshot(readDeadline, readDeadlineGeneration)
+                    : new ResumeSnapshot(writeDeadline, writeDeadlineGeneration);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private boolean completeResume(ResumablePause paused,
+                                   boolean readSide,
+                                   boolean hasCurrentHalf,
+                                   long generation,
+                                   ResumeCommit commit) throws IOException {
+        lock.lock();
+        try {
+            if (paused.resumed()) {
+                return true;
+            }
+            if (closed) {
+                paused.markResumed();
+                throw new SessionClosedException(ZmuxErrorSource.LOCAL);
+            }
+            long currentGeneration = readSide ? readDeadlineGeneration : writeDeadlineGeneration;
+            if (hasCurrentHalf && currentGeneration != generation) {
+                return false;
+            }
+            commit.commit();
+            paused.markResumed();
+            if (readSide) {
+                signalInputChangedLocked();
+            } else {
+                signalOutputChangedLocked();
+            }
+            return true;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -706,21 +705,65 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             condition.await();
             return true;
         }
-        while (true) {
-            Instant now = Instant.now();
-            if (!deadline.isAfter(now)) {
-                return false;
+        Instant now = Instant.now();
+        if (!deadline.isAfter(now)) {
+            return false;
+        }
+        long remainingNanos;
+        try {
+            remainingNanos = Duration.between(now, deadline).toNanos();
+        } catch (ArithmeticException overflow) {
+            remainingNanos = Long.MAX_VALUE;
+        }
+        if (remainingNanos <= 0L) {
+            return false;
+        }
+        return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private void closeJoinedOutput() throws IOException {
+        OutputStream output;
+        GatheringByteChannel gathering;
+        try {
+            output = enterOutput();
+        } catch (SessionClosedException closedException) {
+            return;
+        }
+        lock.lock();
+        try {
+            gathering = currentGatheringOutputLocked();
+        } finally {
+            lock.unlock();
+        }
+        IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(2);
+        try {
+            IOException error = closeOnce(output, closedObjects, null);
+            error = closeOnce(gathering, closedObjects, error);
+            if (error != null) {
+                throw error;
             }
-            long remainingNanos;
-            try {
-                remainingNanos = Duration.between(now, deadline).toNanos();
-            } catch (ArithmeticException overflow) {
-                remainingNanos = Long.MAX_VALUE;
-            }
-            if (remainingNanos <= 0L) {
-                return false;
-            }
-            return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
+        } finally {
+            leaveOutput();
+        }
+    }
+
+    private interface ResumablePause {
+        boolean resumed();
+
+        void markResumed();
+    }
+
+    private interface ResumeCommit {
+        void commit();
+    }
+
+    private static final class ResumeSnapshot {
+        private final Instant deadline;
+        private final long generation;
+
+        private ResumeSnapshot(Instant deadline, long generation) {
+            this.deadline = deadline;
+            this.generation = generation;
         }
     }
 
@@ -732,7 +775,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return new SocketTimeoutException("zmux: joined connection write deadline exceeded");
     }
 
-    public static final class PausedInput {
+    public static final class PausedInput implements ResumablePause {
         private final JoinedDuplexConnection owner;
         private InputStream current;
         private boolean resumed;
@@ -771,9 +814,19 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public void resume() throws IOException {
             owner.resumeInput(this);
         }
+
+        @Override
+        public boolean resumed() {
+            return resumed;
+        }
+
+        @Override
+        public void markResumed() {
+            resumed = true;
+        }
     }
 
-    public static final class PausedOutput {
+    public static final class PausedOutput implements ResumablePause {
         private final JoinedDuplexConnection owner;
         private OutputStream current;
         private GatheringByteChannel gathering;
@@ -826,6 +879,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         public void resume() throws IOException {
             owner.resumeOutput(this);
+        }
+
+        @Override
+        public boolean resumed() {
+            return resumed;
+        }
+
+        @Override
+        public void markResumed() {
+            resumed = true;
         }
     }
 
@@ -1195,7 +1258,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         @Override
         public void close() throws IOException {
-            outputView.close();
+            closeJoinedOutput();
         }
     }
 
@@ -1244,29 +1307,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         @Override
         public void close() throws IOException {
-            OutputStream output;
-            GatheringByteChannel gathering;
-            try {
-                output = enterOutput();
-            } catch (SessionClosedException closed) {
-                return;
-            }
-            lock.lock();
-            try {
-                gathering = currentGatheringOutputLocked();
-            } finally {
-                lock.unlock();
-            }
-            IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(2);
-            try {
-                IOException error = closeOnce(output, closedObjects, null);
-                error = closeOnce(gathering, closedObjects, error);
-                if (error != null) {
-                    throw error;
-                }
-            } finally {
-                leaveOutput();
-            }
+            closeJoinedOutput();
         }
     }
 }

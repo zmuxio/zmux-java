@@ -274,14 +274,7 @@ final class SessionOpeningCoordinator {
                                 int payloadLength,
                                 boolean fin,
                                 SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
-        if (!streamRuntime.idAssigned()) {
-            this.owner.beginLocalOpenForWriteLocked(streamRuntime);
-        }
-        int frameFlags = openingPrefix.length == 0 ? 0 : 0x20;
-        if (fin) {
-            frameFlags |= 0x40;
-        }
-        this.owner.reserveSendLocked(streamRuntime, payloadLength);
+        int frameFlags = this.prepareOpeningWriteFrameLocked(streamRuntime, openingPrefix, payloadLength, fin);
         byte[] retainedPayload = this.owner.retainPayload(payload, payloadOffset, payloadLength, payloadOwnership);
         streamRuntime.markLocalSendStartedLocked();
         if (fin) {
@@ -345,14 +338,7 @@ final class SessionOpeningCoordinator {
                                 int length,
                                 boolean fin,
                                 SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
-        if (!streamRuntime.idAssigned()) {
-            this.owner.beginLocalOpenForWriteLocked(streamRuntime);
-        }
-        int flags = prefix.length == 0 ? 0 : 0x20;
-        if (fin) {
-            flags |= 0x40;
-        }
-        this.owner.reserveSendLocked(streamRuntime, length);
+        int flags = this.prepareOpeningWriteFrameLocked(streamRuntime, prefix, length, fin);
         byte[][] payloadParts = this.owner.retainPayloadParts(parts, partIndex, partOffset, length, payloadOwnership);
         streamRuntime.markLocalSendStartedLocked();
         if (fin) {
@@ -483,6 +469,21 @@ final class SessionOpeningCoordinator {
                 0,
                 0
         );
+    }
+
+    private int prepareOpeningWriteFrameLocked(StreamRuntime streamRuntime,
+                                               byte[] openingPrefix,
+                                               int payloadLength,
+                                               boolean fin) throws IOException {
+        if (!streamRuntime.idAssigned()) {
+            this.owner.beginLocalOpenForWriteLocked(streamRuntime);
+        }
+        this.owner.reserveSendLocked(streamRuntime, payloadLength);
+        int frameFlags = openingPrefix.length == 0 ? 0 : 0x20;
+        if (fin) {
+            frameFlags |= 0x40;
+        }
+        return frameFlags;
     }
 
     private void checkLocalOpenPossibleLocked(boolean bidirectional, int openInfoBytes) throws IOException {

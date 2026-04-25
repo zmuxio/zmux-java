@@ -1,11 +1,12 @@
 package io.zmux;
 
+import io.zmux.internal.StreamIoSupport;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.ReadOnlyBufferException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -22,28 +23,7 @@ public interface ReadHalf extends Closeable {
     }
 
     default int read(ByteBuffer dst) throws IOException {
-        Objects.requireNonNull(dst, "dst");
-        if (!dst.hasRemaining()) {
-            return 0;
-        }
-        if (dst.isReadOnly()) {
-            throw new ReadOnlyBufferException();
-        }
-        if (dst.hasArray()) {
-            int position = dst.position();
-            int read = read(dst.array(), dst.arrayOffset() + position, dst.remaining());
-            if (read > 0) {
-                dst.position(position + read);
-            }
-            return read;
-        }
-
-        byte[] buffer = new byte[StreamApiSupport.transientBufferSize(dst.remaining())];
-        int read = read(buffer, 0, buffer.length);
-        if (read > 0) {
-            dst.put(buffer, 0, read);
-        }
-        return read;
+        return StreamIoSupport.readIntoByteBuffer(dst, (buffer, offset, length) -> read(buffer, offset, length));
     }
 
     default InputStream asInputStream() {

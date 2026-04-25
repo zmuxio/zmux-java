@@ -4,7 +4,7 @@ import io.zmux.Settings;
 
 import java.math.BigInteger;
 
-final class RuntimeFlow {
+public final class RuntimeFlow {
     private static final long REPO_DEFAULT_PER_STREAM_DATA_HWM_MIN = 256L << 10;
     private static final long REPO_DEFAULT_SESSION_DATA_HWM_MIN = 4L << 20;
     private static final long REPO_DEFAULT_URGENT_LANE_CAP_MIN = 64L << 10;
@@ -55,7 +55,7 @@ final class RuntimeFlow {
         return left * right;
     }
 
-    static long saturatingMulDivFloor(long value, long multiplier, long divisor) {
+    public static long saturatingMulDivFloor(long value, long multiplier, long divisor) {
         if (value <= 0L || multiplier <= 0L) {
             return 0L;
         }

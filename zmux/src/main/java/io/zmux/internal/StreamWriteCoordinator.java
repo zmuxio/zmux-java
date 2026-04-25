@@ -12,26 +12,6 @@ final class StreamWriteCoordinator {
         this.owner = Objects.requireNonNull(owner, "owner");
     }
 
-    private static int checkedWritevTotalLength(byte[][] parts) throws IOException {
-        int totalLength = 0;
-        for (int i = 0; i < parts.length; i++) {
-            byte[] part = Objects.requireNonNull(parts[i], "parts[" + i + "]");
-            if (part.length > Integer.MAX_VALUE - totalLength) {
-                throw new ZmuxException(
-                        ErrorCode.FRAME_SIZE.code(),
-                        "writevFinal",
-                        "multipart write exceeds maximum supported size",
-                        ZmuxErrorScope.STREAM,
-                        ZmuxErrorSource.LOCAL,
-                        ZmuxErrorDirection.WRITE,
-                        ZmuxTerminationKind.UNKNOWN
-                );
-            }
-            totalLength += part.length;
-        }
-        return totalLength;
-    }
-
     void closeWrite() throws IOException {
         try {
             synchronized (this.owner.lockInternal()) {
@@ -162,11 +142,7 @@ final class StreamWriteCoordinator {
                 }
 
                 if (fin && length == 0) {
-                    if (openingPending) {
-                        this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true);
-                    } else {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, StreamRuntime.EMPTY_BYTES, true);
-                    }
+                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix);
                 }
                 this.owner.noteWritePayloadProgressLocked(length);
                 this.owner.notifyLockWaitersLocked();
@@ -178,7 +154,7 @@ final class StreamWriteCoordinator {
 
     int writev(byte[][] parts, boolean fin) throws IOException {
         Objects.requireNonNull(parts, "parts");
-        int totalLength = checkedWritevTotalLength(parts);
+        int totalLength = StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
         if (totalLength == 0 && !fin) {
             return 0;
         }
@@ -273,11 +249,7 @@ final class StreamWriteCoordinator {
                 }
 
                 if (fin && totalLength == 0) {
-                    if (openingPending) {
-                        this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true);
-                    } else {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, StreamRuntime.EMPTY_BYTES, true);
-                    }
+                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix);
                 }
                 this.owner.noteWritePayloadProgressLocked(totalLength);
                 this.owner.notifyLockWaitersLocked();
@@ -289,53 +261,19 @@ final class StreamWriteCoordinator {
     }
 
     void ensureWritableLocked() throws IOException {
-        if (!this.owner.localSend()) {
-            throw new StreamNotWritableException();
-        }
-        this.throwIfSessionTerminalLocked("write");
-        if (this.owner.terminalStateInternal().localError() != null) {
-            throw this.owner.terminalStateInternal().localError();
-        }
-        if (this.owner.terminalStateInternal().sendCloseError() != null) {
-            throw this.owner.terminalStateInternal().sendCloseError();
-        }
+        this.ensureLocalWriteSurfaceLocked("write");
         if (this.owner.halfStateInternal().sendStopSeen()) {
             throw this.owner.terminalStateInternal().peerStopWriteClosed();
         }
-        if (this.owner.halfStateInternal().sendResetOrAborted()) {
-            if (this.owner.terminalStateInternal().recvAbortError() != null) {
-                throw this.owner.terminalStateInternal().recvAbortError();
-            }
-            if (this.owner.terminalStateInternal().recvResetError() != null) {
-                throw this.owner.terminalStateInternal().recvResetError();
-            }
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
+        this.throwIfResetOrAbortedLocked();
         if (!this.owner.halfStateInternal().sendOpen()) {
             throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
         }
     }
 
     void ensureCloseWritableLocked() throws IOException {
-        if (!this.owner.localSend()) {
-            throw new StreamNotWritableException();
-        }
-        this.throwIfSessionTerminalLocked("close");
-        if (this.owner.terminalStateInternal().localError() != null) {
-            throw this.owner.terminalStateInternal().localError();
-        }
-        if (this.owner.terminalStateInternal().sendCloseError() != null) {
-            throw this.owner.terminalStateInternal().sendCloseError();
-        }
-        if (this.owner.halfStateInternal().sendResetOrAborted()) {
-            if (this.owner.terminalStateInternal().recvAbortError() != null) {
-                throw this.owner.terminalStateInternal().recvAbortError();
-            }
-            if (this.owner.terminalStateInternal().recvResetError() != null) {
-                throw this.owner.terminalStateInternal().recvResetError();
-            }
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
+        this.ensureLocalWriteSurfaceLocked("close");
+        this.throwIfResetOrAbortedLocked();
         if (this.owner.halfStateInternal().sendFin() || this.owner.halfStateInternal().sendFinQueued()) {
             throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
         }
@@ -345,16 +283,7 @@ final class StreamWriteCoordinator {
     }
 
     void ensureResettableLocked() throws IOException {
-        if (!this.owner.localSend()) {
-            throw new StreamNotWritableException();
-        }
-        this.throwIfSessionTerminalLocked("close");
-        if (this.owner.terminalStateInternal().localError() != null) {
-            throw this.owner.terminalStateInternal().localError();
-        }
-        if (this.owner.terminalStateInternal().sendCloseError() != null) {
-            throw this.owner.terminalStateInternal().sendCloseError();
-        }
+        this.ensureLocalWriteSurfaceLocked("close");
         if (this.owner.halfStateInternal().sendStopSeen()) {
             if (this.owner.halfStateInternal().sendResetOrAborted() || this.owner.halfStateInternal().sendFin()) {
                 throw this.owner.terminalStateInternal().peerStopWriteClosed();
@@ -364,20 +293,46 @@ final class StreamWriteCoordinator {
             }
             return;
         }
-        if (this.owner.halfStateInternal().sendResetOrAborted()) {
-            if (this.owner.terminalStateInternal().recvAbortError() != null) {
-                throw this.owner.terminalStateInternal().recvAbortError();
-            }
-            if (this.owner.terminalStateInternal().recvResetError() != null) {
-                throw this.owner.terminalStateInternal().recvResetError();
-            }
-            throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
-        }
+        this.throwIfResetOrAbortedLocked();
         if (this.owner.halfStateInternal().sendFin() || this.owner.halfStateInternal().sendFinQueued()) {
             throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
         }
         if (!this.owner.halfStateInternal().sendOpen()) {
             throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
+        }
+    }
+
+    private void ensureLocalWriteSurfaceLocked(String operation) throws IOException {
+        if (!this.owner.localSend()) {
+            throw new StreamNotWritableException();
+        }
+        this.throwIfSessionTerminalLocked(operation);
+        if (this.owner.terminalStateInternal().localError() != null) {
+            throw this.owner.terminalStateInternal().localError();
+        }
+        if (this.owner.terminalStateInternal().sendCloseError() != null) {
+            throw this.owner.terminalStateInternal().sendCloseError();
+        }
+    }
+
+    private void throwIfResetOrAbortedLocked() throws IOException {
+        if (!this.owner.halfStateInternal().sendResetOrAborted()) {
+            return;
+        }
+        if (this.owner.terminalStateInternal().recvAbortError() != null) {
+            throw this.owner.terminalStateInternal().recvAbortError();
+        }
+        if (this.owner.terminalStateInternal().recvResetError() != null) {
+            throw this.owner.terminalStateInternal().recvResetError();
+        }
+        throw new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL);
+    }
+
+    private void queueEmptyFinalFrameLocked(boolean openingPending, byte[] openingPrefix) throws IOException {
+        if (openingPending) {
+            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true);
+        } else {
+            this.owner.sessionInternal().queueDataLocked(this.owner, StreamRuntime.EMPTY_BYTES, true);
         }
     }
 

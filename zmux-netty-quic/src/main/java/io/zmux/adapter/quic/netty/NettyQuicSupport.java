@@ -9,7 +9,6 @@ import io.zmux.internal.TimeoutBudget;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.math.BigInteger;
 import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -28,6 +27,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
+@SuppressWarnings("resource")
 final class NettyQuicSupport {
     static final byte[] EMPTY_BYTES = new byte[0];
     static final long OPEN_CAPABILITIES =
@@ -207,32 +207,7 @@ final class NettyQuicSupport {
     }
 
     static long saturatingMulDivFloor(long value, long multiplier, long divisor) {
-        if (value <= 0L || multiplier <= 0L) {
-            return 0L;
-        }
-        if (divisor <= 0L) {
-            return Long.MAX_VALUE;
-        }
-        long quotient = value / divisor;
-        long remainder = value - quotient * divisor;
-        if (quotient > 0L && multiplier > Long.MAX_VALUE / quotient) {
-            return Long.MAX_VALUE;
-        }
-        long high = quotient * multiplier;
-        long low = multiplyRemainderDivFloor(remainder, multiplier, divisor);
-        return high > Long.MAX_VALUE - low ? Long.MAX_VALUE : high + low;
-    }
-
-    private static long multiplyRemainderDivFloor(long value, long multiplier, long divisor) {
-        try {
-            return Math.multiplyExact(value, multiplier) / divisor;
-        } catch (ArithmeticException overflow) {
-            return BigInteger.valueOf(value)
-                    .multiply(BigInteger.valueOf(multiplier))
-                    .divide(BigInteger.valueOf(divisor))
-                    .min(BigInteger.valueOf(Long.MAX_VALUE))
-                    .longValue();
-        }
+        return io.zmux.internal.RuntimeFlow.saturatingMulDivFloor(value, multiplier, divisor);
     }
 
     static ApplicationError sessionApplicationError(long code,
@@ -525,17 +500,7 @@ final class NettyQuicSupport {
     }
 
     static ChannelFuture awaitFutureUninterruptibly(ChannelFuture future) {
-        boolean interrupted = false;
-        while (!future.isDone()) {
-            try {
-                future.await();
-            } catch (InterruptedException ignored) {
-                interrupted = true;
-            }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
+        awaitFutureCompletionUninterruptibly(future);
         if (!future.isSuccess()) {
             throw uncheckedNettyFailure(future.cause());
         }
@@ -565,17 +530,7 @@ final class NettyQuicSupport {
     }
 
     static <T> T awaitFutureUninterruptibly(Future<T> future) {
-        boolean interrupted = false;
-        while (!future.isDone()) {
-            try {
-                future.await();
-            } catch (InterruptedException ignored) {
-                interrupted = true;
-            }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
+        awaitFutureCompletionUninterruptibly(future);
         if (!future.isSuccess()) {
             throw uncheckedNettyFailure(future.cause());
         }
@@ -596,8 +551,26 @@ final class NettyQuicSupport {
         return future.getNow();
     }
 
+    static boolean inEventLoop(Channel channel) {
+        return channel != null && channel.eventLoop().inEventLoop();
+    }
+
+    static void executeOnEventLoop(Channel channel, Runnable action) {
+        if (channel != null) {
+            channel.eventLoop().execute(action);
+        }
+    }
+
+    static <T> Future<T> submitOnEventLoop(Channel channel, java.util.concurrent.Callable<T> action) {
+        return channel.eventLoop().submit(action);
+    }
+
+    static ChannelFuture registerOnEventLoop(Channel parent, Channel child) {
+        return parent.eventLoop().register(child);
+    }
+
     static void ensureOffEventLoop(Channel channel, String operation) {
-        if (channel != null && channel.eventLoop().inEventLoop()) {
+        if (inEventLoop(channel)) {
             throw new IllegalStateException("zmux-netty-quic: " + operation + " must not block the Netty event loop");
         }
     }
@@ -691,6 +664,25 @@ final class NettyQuicSupport {
                 || details instanceof ReadClosedException
                 || details instanceof WriteClosedException
                 || details instanceof SessionClosedException;
+    }
+
+    static <T> List<T> snapshotDeque(ReentrantLock lock, ArrayDeque<T> queue) {
+        lock.lock();
+        try {
+            return snapshotDequeLocked(queue);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    static <T> List<T> snapshotDequeLocked(ArrayDeque<T> queue) {
+        if (queue.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (queue.size() == 1) {
+            return Collections.singletonList(queue.getFirst());
+        }
+        return new ArrayList<>(queue);
     }
 
     static void executeAcceptedPreludeTask(Runnable task) {
@@ -817,18 +809,7 @@ final class NettyQuicSupport {
         }
 
         List<T> snapshot() {
-            lock.lock();
-            try {
-                if (queue.isEmpty()) {
-                    return Collections.emptyList();
-                }
-                if (queue.size() == 1) {
-                    return Collections.singletonList(queue.getFirst());
-                }
-                return new ArrayList<>(queue);
-            } finally {
-                lock.unlock();
-            }
+            return snapshotDeque(lock, queue);
         }
 
         long sumLong(java.util.function.ToLongFunction<T> extractor) {
@@ -893,6 +874,20 @@ final class NettyQuicSupport {
             if (notFullWaiters > 0) {
                 notFull.signalAll();
             }
+        }
+    }
+
+    private static void awaitFutureCompletionUninterruptibly(Future<?> future) {
+        boolean interrupted = false;
+        while (!future.isDone()) {
+            try {
+                future.await();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 

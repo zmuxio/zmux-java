@@ -4,6 +4,7 @@ import java.net.SocketAddress;
 import java.util.Objects;
 
 public final class ZmuxSocketAddress extends SocketAddress {
+    //noinspection Serial
     private static final long serialVersionUID = 1L;
 
     private final String endpoint;
