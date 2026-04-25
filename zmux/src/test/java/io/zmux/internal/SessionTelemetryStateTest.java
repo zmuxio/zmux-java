@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -15,6 +16,12 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionTelemetryStateTest {
+    private static long invokeInitKeepaliveJitterState(long seed) throws Exception {
+        Method method = SessionTelemetryState.class.getDeclaredMethod("initKeepaliveJitterState", long.class);
+        method.setAccessible(true);
+        return ((Long) method.invoke(null, seed)).longValue();
+    }
+
     private static void setLongField(Object target, String name, long value) throws Exception {
         Field field = target.getClass().getDeclaredField(name);
         field.setAccessible(true);
@@ -25,6 +32,63 @@ final class SessionTelemetryStateTest {
         Field field = target.getClass().getDeclaredField(name);
         field.setAccessible(true);
         return field.getLong(target);
+    }
+
+    @Test
+    void initKeepaliveJitterStateReturnsNonZeroState() throws Exception {
+        assertNotEquals(0L, invokeInitKeepaliveJitterState(0L), "default jitter seed must allocate a non-zero state");
+        assertEquals(123L, invokeInitKeepaliveJitterState(123L), "explicit jitter seed should be preserved");
+    }
+
+    @Test
+    void initKeepaliveJitterStateAllocatesDistinctDefaultSeeds() throws Exception {
+        long first = invokeInitKeepaliveJitterState(0L);
+        long second = invokeInitKeepaliveJitterState(0L);
+
+        assertNotEquals(0L, first, "first default jitter seed must be non-zero");
+        assertNotEquals(0L, second, "second default jitter seed must be non-zero");
+        assertNotEquals(first, second, "default jitter seeds should be distinct per telemetry instance");
+    }
+
+    @Test
+    void nextKeepaliveJitterStaysWithinConfiguredWindow() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder().build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long baseIntervalNanos = Duration.ofMillis(80L).toNanos();
+        long windowNanos = baseIntervalNanos / 8L;
+        setLongField(telemetry, "keepaliveJitterState", 1L);
+
+        for (int i = 0; i < 16; i++) {
+            long jitterNanos = telemetry.nextKeepaliveJitterNanos(baseIntervalNanos);
+            assertTrue(
+                    jitterNanos >= 0L && jitterNanos <= windowNanos,
+                    "keepalive jitter must stay within the configured lead window"
+            );
+        }
+    }
+
+    @Test
+    void nextKeepaliveJitterAdvancesState() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder().build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        setLongField(telemetry, "keepaliveJitterState", 1L);
+
+        long first = telemetry.nextKeepaliveJitterNanos(Duration.ofSeconds(64L).toNanos());
+        long second = telemetry.nextKeepaliveJitterNanos(Duration.ofSeconds(64L).toNanos());
+
+        assertNotEquals(first, second, "consecutive keepalive jitter samples should advance deterministic state");
     }
 
     @Test
