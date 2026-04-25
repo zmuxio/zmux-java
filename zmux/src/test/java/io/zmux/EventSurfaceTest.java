@@ -235,6 +235,59 @@ final class EventSurfaceTest {
         }
     }
 
+    @Test
+    void eventHandlersMayReenterSessionAndStreamQueryApis() throws Exception {
+        CountDownLatch streamOpenedDone = new CountDownLatch(1);
+        CountDownLatch sessionClosedDone = new CountDownLatch(1);
+        AtomicReference<ZmuxNativeSession> clientRef = new AtomicReference<>();
+        AtomicReference<Throwable> handlerError = new AtomicReference<>();
+
+        ZmuxConfig clientConfig = ZmuxConfig.builder()
+                .eventHandler(event -> {
+                    try {
+                        ZmuxNativeSession session = clientRef.get();
+                        switch (event.type()) {
+                            case STREAM_OPENED:
+                                if (session != null) {
+                                    session.stats();
+                                }
+                                assertNotNull(event.stream(), "stream_opened should expose a stream");
+                                event.stream().metadata();
+                                event.stream().streamId();
+                                streamOpenedDone.countDown();
+                                break;
+                            case SESSION_CLOSED:
+                                if (session != null) {
+                                    session.stats();
+                                    session.peerCloseError();
+                                }
+                                sessionClosedDone.countDown();
+                                break;
+                            default:
+                                return;
+                        }
+                    } catch (Throwable error) {
+                        handlerError.compareAndSet(null, error);
+                    }
+                })
+                .build();
+
+        try (SessionPair pair = SessionPair.open(clientConfig, defaultConfig())) {
+            clientRef.set(pair.client());
+
+            ZmuxStream stream = pair.client().openStream();
+            stream.write("x".getBytes(StandardCharsets.UTF_8));
+
+            assertTrue(streamOpenedDone.await(2, TimeUnit.SECONDS), "stream_opened handler should finish");
+            assertNull(handlerError.get(), "reentrant event-surface queries should not fail");
+
+            pair.client().closeWithError(ErrorCode.INTERNAL.code(), "reenter");
+
+            assertTrue(sessionClosedDone.await(2, TimeUnit.SECONDS), "session_closed handler should finish after local closeWithError");
+            assertNull(handlerError.get(), "reentrant session_closed queries should not fail");
+        }
+    }
+
     private static final class SessionPair implements AutoCloseable {
         private final ZmuxNativeSession client;
         private final ZmuxNativeSession server;
