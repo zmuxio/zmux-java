@@ -168,6 +168,32 @@ final class ProtocolCloseTest {
         }
     }
 
+    @Test
+    void closeWithWrappedStructuredErrorPreservesWireCodeAndReason() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            peer.session().closeWithError(new IOException(
+                    "wrapped close failure",
+                    new ApplicationError(
+                            ErrorCode.FRAME_SIZE,
+                            "bad frame",
+                            ZmuxErrorScope.SESSION,
+                            ZmuxErrorSource.LOCAL,
+                            ZmuxErrorDirection.BOTH,
+                            ZmuxTerminationKind.SESSION_TERMINATION,
+                            "close"
+                    )
+            ));
+
+            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
+            assertEquals(ErrorCode.FRAME_SIZE.code(), payload.code(), "wrapped structured closeWithError should preserve the wire error code");
+            assertEquals("bad frame", payload.reason(), "wrapped structured closeWithError should preserve the structured reason");
+
+            assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate after emitting the local CLOSE");
+            assertEquals(SessionState.FAILED, peer.session().state(), "non-zero local CLOSE should leave the session in FAILED");
+        }
+    }
+
     private static final class RawPeerSession implements AutoCloseable {
         private final ZmuxSession session;
         private final Socket socket;

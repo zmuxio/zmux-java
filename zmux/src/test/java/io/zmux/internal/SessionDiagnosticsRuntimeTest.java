@@ -652,6 +652,23 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void repeatedCloseWithErrorDoesNotQueueDuplicateCloseFrames() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+
+        runtime.closeWithError(ErrorCode.INTERNAL.code(), "fatal");
+        runtime.closeWithError(ErrorCode.PROTOCOL.code(), "duplicate");
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        assertEquals(1, urgentQueue.size(), "repeated closeWithError should not queue a duplicate CLOSE frame once one is pending");
+
+        FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(
+                SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).payload()
+        );
+        assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "first queued CLOSE code should win");
+        assertEquals("fatal", payload.reason(), "first queued CLOSE reason should remain unchanged");
+    }
+
+    @Test
     void writerDeadIoWithoutCloseTracksSkippedCloseDiagnostic() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 failingOutputConnection("synthetic data write failure"),
