@@ -74,6 +74,22 @@ final class OrdinaryBatchOrdererTest {
     }
 
     @Test
+    void retainedStateSnapshotCopiesPreferredStreamHeads() {
+        OrdinaryBatchOrderer.GroupKey groupKey = new OrdinaryBatchOrderer.GroupKey(1, 7L);
+        OrdinaryBatchRetainedState source = new OrdinaryBatchRetainedState();
+        OrdinaryBatchRetainedState snapshot = new OrdinaryBatchRetainedState();
+
+        source.preferredGroupHead = groupKey;
+        source.preferredStreamHeads.put(groupKey, 4L);
+
+        snapshot.loadFrom(source);
+        source.preferredStreamHeads.put(groupKey, 8L);
+
+        assertEquals(groupKey, snapshot.preferredGroupHead, "snapshot should preserve the preferred group head");
+        assertEquals(4L, snapshot.preferredStreamHeads.get(groupKey), "snapshot should copy preferred stream heads instead of aliasing source state");
+    }
+
+    @Test
     void orderViewReusesWorkspaceOrderedScratch() throws Exception {
         OrdinaryBatchOrderer.Workspace workspace = new OrdinaryBatchOrderer.Workspace();
 
