@@ -215,6 +215,18 @@ final class SessionCloseCleanupRuntimeTest {
             firstUnseenLocalUni.addLast(new Object());
         }
 
+        SessionAcceptRegistry acceptRegistry = getField(runtime, "acceptRegistry", SessionAcceptRegistry.class);
+        @SuppressWarnings("unchecked")
+        Deque<StreamRuntime> firstAcceptBidi = getField(acceptRegistry, "acceptBidi", Deque.class);
+        @SuppressWarnings("unchecked")
+        Deque<StreamRuntime> firstAcceptUni = getField(acceptRegistry, "acceptUni", Deque.class);
+        StreamRuntime acceptBidiSentinel = new StreamRuntime(runtime, false, true, null);
+        StreamRuntime acceptUniSentinel = new StreamRuntime(runtime, false, false, null);
+        for (int i = 0; i < 1_025; ++i) {
+            firstAcceptBidi.addLast(acceptBidiSentinel);
+            firstAcceptUni.addLast(acceptUniSentinel);
+        }
+
         SessionStopSendingGracefulCoordinator gracefulCoordinator =
                 getField(runtime, "stopSendingGracefulCoordinator", SessionStopSendingGracefulCoordinator.class);
         @SuppressWarnings("unchecked")
@@ -270,6 +282,10 @@ final class SessionCloseCleanupRuntimeTest {
                 "session close cleanup should drop retained provisional queue backing");
         assertNotSame(firstUnseenLocalUni, getField(localOpenTracker, "unseenLocalUni"),
                 "session close cleanup should drop retained unseen-local queue backing");
+        assertNotSame(firstAcceptBidi, getField(acceptRegistry, "acceptBidi"),
+                "session close cleanup should drop retained accept-bidi queue backing");
+        assertNotSame(firstAcceptUni, getField(acceptRegistry, "acceptUni"),
+                "session close cleanup should drop retained accept-uni queue backing");
         assertNotSame(firstDeadlines, getField(gracefulCoordinator, "deadlines"),
                 "session close cleanup should drop retained stop-sending deadline backing");
         assertNotSame(firstDeadlineHeap, getField(gracefulCoordinator, "deadlineHeap"),

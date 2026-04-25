@@ -11,8 +11,8 @@ import java.util.Objects;
 @SuppressWarnings("resource")
 final class SessionAcceptRegistry {
     private final Owner owner;
-    private final Deque<StreamRuntime> acceptBidi = new ArrayDeque<>();
-    private final Deque<StreamRuntime> acceptUni = new ArrayDeque<>();
+    private Deque<StreamRuntime> acceptBidi = new ArrayDeque<>();
+    private Deque<StreamRuntime> acceptUni = new ArrayDeque<>();
     private long acceptBidiBytes;
     private long acceptUniBytes;
     private long nextVisibilitySequence;
@@ -146,6 +146,8 @@ final class SessionAcceptRegistry {
         while ((streamRuntime = this.acceptUni.pollFirst()) != null) {
             streamRuntime.setAcceptQueuedLocked(false);
         }
+        this.acceptBidi = new ArrayDeque<>();
+        this.acceptUni = new ArrayDeque<>();
         this.acceptBidiBytes = 0L;
         this.acceptUniBytes = 0L;
     }
