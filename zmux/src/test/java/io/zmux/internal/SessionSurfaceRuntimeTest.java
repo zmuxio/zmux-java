@@ -597,6 +597,46 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void terminalStatsClearOpenAndAcceptSurfaceCounts() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder().role(io.zmux.Role.RESPONDER).build(),
+                0L,
+                Settings.defaults()
+        );
+        runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            runtime.enqueueAcceptedLocked(createPeerOpenedBidi(
+                    runtime,
+                    SessionRuntime.firstPeerStreamId(io.zmux.Role.RESPONDER, true)
+            ));
+            runtime.enqueueAcceptedLocked(createPeerOpenedBidi(
+                    runtime,
+                    SessionRuntime.firstPeerStreamId(io.zmux.Role.RESPONDER, true) + 4L
+            ));
+        }
+
+        runtime.acceptStream();
+        SessionStats before = runtime.stats();
+
+        assertEquals(2L, before.openStreams(), "pre-close stats should report peer-visible live streams");
+        assertEquals(1L, before.acceptedStreams(), "pre-close stats should retain accepted stream count");
+        assertEquals(1L, before.acceptBacklog().count(), "pre-close stats should retain the remaining accept backlog");
+
+        synchronized (runtime.lock()) {
+            runtime.finishSessionLocked(null, SessionState.CLOSED);
+        }
+
+        SessionStats after = runtime.stats();
+
+        assertEquals(SessionState.CLOSED, after.state(), "terminal stats should report the closed public state");
+        assertEquals(0L, after.openStreams(), "terminal stats should clear live stream counts");
+        assertEquals(0L, after.acceptedStreams(), "terminal stats should clear accepted stream counts");
+        assertEquals(0L, after.acceptBacklog().count(), "terminal stats should clear accept backlog counts");
+        assertEquals(0L, after.acceptBacklog().bytes(), "terminal stats should clear accept backlog bytes");
+    }
+
+    @Test
     void provisionalStatsTrackVisibleAcceptBacklogLimitAndObservedRtt() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .role(io.zmux.Role.RESPONDER)
