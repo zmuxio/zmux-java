@@ -80,7 +80,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
     private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
-    private final Map<Long, StreamRuntime> streams = new HashMap<>();
+    private Map<Long, StreamRuntime> streams = new HashMap<>();
     private final SessionAcceptRegistry acceptRegistry;
     private final SessionOutboundQueueBookkeeping outboundQueueBookkeeping;
     private final SessionPriorityUpdateCoordinator priorityUpdateCoordinator;
@@ -3547,7 +3547,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.ordinaryBatchBias.release();
         this.explicitGroupTracker.clear();
         this.stopSendingGracefulCoordinator.clear();
-        this.streams.clear();
+        this.streams = new HashMap<>();
         this.terminalBookkeeping.clear();
         this.clearAcceptQueuesLocked();
         this.localOpenTracker.clear();

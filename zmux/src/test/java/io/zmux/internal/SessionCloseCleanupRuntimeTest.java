@@ -109,6 +109,7 @@ final class SessionCloseCleanupRuntimeTest {
             Deque<?> firstUrgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
             Deque<?> firstAdvisoryQueue = SessionRuntimeTestSupport.advisoryQueue(runtime);
             Deque<?> firstDataQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue");
+            Map<?, ?> firstStreams = getField(runtime, "streams", Map.class);
 
             runtime.finishSessionLocked(new SessionClosedException(ZmuxErrorSource.LOCAL), SessionState.CLOSED);
 
@@ -132,6 +133,8 @@ final class SessionCloseCleanupRuntimeTest {
                     "session close cleanup should drop retained advisory queue backing");
             assertNotSame(firstDataQueue, SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue"),
                     "session close cleanup should drop retained ordinary queue backing");
+            assertNotSame(firstStreams, getField(runtime, "streams", Map.class),
+                    "session close cleanup should drop retained live-stream map backing");
         }
     }
 
