@@ -7,17 +7,17 @@ import java.util.Set;
 
 final class OrdinaryBatchRetainedState {
     private static final long REBASE_THRESHOLD = 1L << 48;
-    final HashMap<OrdinaryBatchOrderer.GroupKey, Long> preferredStreamHeads = new HashMap<>();
-    final HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupVirtualTime = new HashMap<>();
-    final HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupFinishTag = new HashMap<>();
-    final HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupLastServed = new HashMap<>();
-    final HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupLag = new HashMap<>();
-    final HashMap<Long, Long> streamFinishTag = new HashMap<>();
-    final HashMap<Long, Long> streamLastServed = new HashMap<>();
-    final HashMap<Long, Long> streamLag = new HashMap<>();
-    final HashMap<Long, OrdinaryBatchOrderer.TrafficClass> streamClass = new HashMap<>();
-    final HashMap<Long, Long> streamLastSeenBatch = new HashMap<>();
-    final HashSet<Long> smallBurstDisarmed = new HashSet<>();
+    HashMap<OrdinaryBatchOrderer.GroupKey, Long> preferredStreamHeads = new HashMap<>();
+    HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupVirtualTime = new HashMap<>();
+    HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupFinishTag = new HashMap<>();
+    HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupLastServed = new HashMap<>();
+    HashMap<OrdinaryBatchOrderer.GroupKey, Long> groupLag = new HashMap<>();
+    HashMap<Long, Long> streamFinishTag = new HashMap<>();
+    HashMap<Long, Long> streamLastServed = new HashMap<>();
+    HashMap<Long, Long> streamLag = new HashMap<>();
+    HashMap<Long, OrdinaryBatchOrderer.TrafficClass> streamClass = new HashMap<>();
+    HashMap<Long, Long> streamLastSeenBatch = new HashMap<>();
+    HashSet<Long> smallBurstDisarmed = new HashSet<>();
     OrdinaryBatchOrderer.GroupKey preferredGroupHead;
     long rootVirtualTime;
     long serviceSeq;
@@ -180,6 +180,26 @@ final class OrdinaryBatchRetainedState {
         streamClass.clear();
         streamLastSeenBatch.clear();
         smallBurstDisarmed.clear();
+        batchSeq = 0L;
+        interactiveStreak = 0;
+        classSelectionsSinceBulk = 0;
+    }
+
+    void release() {
+        preferredGroupHead = null;
+        preferredStreamHeads = new HashMap<>();
+        groupVirtualTime = new HashMap<>();
+        groupFinishTag = new HashMap<>();
+        groupLastServed = new HashMap<>();
+        groupLag = new HashMap<>();
+        streamFinishTag = new HashMap<>();
+        streamLastServed = new HashMap<>();
+        streamLag = new HashMap<>();
+        streamClass = new HashMap<>();
+        streamLastSeenBatch = new HashMap<>();
+        smallBurstDisarmed = new HashSet<>();
+        rootVirtualTime = 0L;
+        serviceSeq = 0L;
         batchSeq = 0L;
         interactiveStreak = 0;
         classSelectionsSinceBulk = 0;

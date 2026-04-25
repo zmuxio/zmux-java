@@ -6,8 +6,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 final class SessionExplicitGroupTracker {
-    private final Map<Long, Integer> activeExplicitGroupRefs = new HashMap<>();
-    private final Map<Long, Integer> ordinaryBatchExplicitGroupRefs = new HashMap<>();
+    private Map<Long, Integer> activeExplicitGroupRefs = new HashMap<>();
+    private Map<Long, Integer> ordinaryBatchExplicitGroupRefs = new HashMap<>();
     private final OrdinaryBatchOrderer.RetainedBias ordinaryBatchBias;
     private final int maxExplicitGroups;
     private final long fallbackGroupBucket;
@@ -98,8 +98,8 @@ final class SessionExplicitGroupTracker {
     }
 
     void clear() {
-        activeExplicitGroupRefs.clear();
-        ordinaryBatchExplicitGroupRefs.clear();
+        activeExplicitGroupRefs = new HashMap<>();
+        ordinaryBatchExplicitGroupRefs = new HashMap<>();
     }
 
     private void trackOrdinaryBatchExplicitGroupLocked(StreamRuntime streamRuntime,

@@ -7,11 +7,11 @@ final class SessionTerminalBookkeeping {
     private final Owner owner;
     private final long compactTerminalStateUnit;
     private final long hiddenControlRetainedMaxAgeNanos;
-    private final Map<Long, Tombstone> tombstones = new HashMap<>();
-    private final Deque<Long> tombstoneOrder = new ArrayDeque<>();
-    private final Map<Long, TerminalDataDisposition> markerOnlyUsedStreams = new HashMap<>();
-    private final ArrayList<MarkerRange> markerOnlyRanges = new ArrayList<>();
-    private final Deque<Long> hiddenTombstones = new ArrayDeque<>();
+    private Map<Long, Tombstone> tombstones = new HashMap<>();
+    private Deque<Long> tombstoneOrder = new ArrayDeque<>();
+    private Map<Long, TerminalDataDisposition> markerOnlyUsedStreams = new HashMap<>();
+    private ArrayList<MarkerRange> markerOnlyRanges = new ArrayList<>();
+    private Deque<Long> hiddenTombstones = new ArrayDeque<>();
     private boolean markerOnlyRangeMode;
     private boolean asyncFailureScheduled;
 
@@ -126,11 +126,11 @@ final class SessionTerminalBookkeeping {
     }
 
     void clear() {
-        this.tombstones.clear();
-        this.tombstoneOrder.clear();
-        this.markerOnlyUsedStreams.clear();
-        this.markerOnlyRanges.clear();
-        this.hiddenTombstones.clear();
+        this.tombstones = new HashMap<>();
+        this.tombstoneOrder = new ArrayDeque<>();
+        this.markerOnlyUsedStreams = new HashMap<>();
+        this.markerOnlyRanges = new ArrayList<>();
+        this.hiddenTombstones = new ArrayDeque<>();
         this.markerOnlyRangeMode = false;
         this.asyncFailureScheduled = false;
     }

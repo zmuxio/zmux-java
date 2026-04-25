@@ -3544,7 +3544,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void clearSessionCloseStateLocked() {
-        this.ordinaryBatchBias.clear();
+        this.ordinaryBatchBias.release();
         this.explicitGroupTracker.clear();
         this.stopSendingGracefulCoordinator.clear();
         this.streams.clear();

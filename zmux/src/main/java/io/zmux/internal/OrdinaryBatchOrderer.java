@@ -447,6 +447,10 @@ final class OrdinaryBatchOrderer {
             state.clear();
         }
 
+        void release() {
+            state.release();
+        }
+
         void dropStream(long streamId) {
             state.dropStream(streamId);
         }

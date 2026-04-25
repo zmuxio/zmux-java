@@ -7,8 +7,8 @@ import java.util.*;
 
 final class SessionStopSendingGracefulCoordinator {
     private final SessionRuntime owner;
-    private final Map<StreamRuntime, Long> deadlines = new HashMap<>();
-    private final PriorityQueue<GracefulDrainDeadline> deadlineHeap =
+    private Map<StreamRuntime, Long> deadlines = new HashMap<>();
+    private PriorityQueue<GracefulDrainDeadline> deadlineHeap =
             new PriorityQueue<>(Comparator.comparingLong(GracefulDrainDeadline::deadlineNanos));
 
     SessionStopSendingGracefulCoordinator(SessionRuntime owner) {
@@ -101,8 +101,8 @@ final class SessionStopSendingGracefulCoordinator {
     }
 
     void clear() {
-        this.deadlines.clear();
-        this.deadlineHeap.clear();
+        this.deadlines = new HashMap<>();
+        this.deadlineHeap = new PriorityQueue<>(Comparator.comparingLong(GracefulDrainDeadline::deadlineNanos));
     }
 
     private StreamRuntime pollExpiredStopSendingGracefulDrainLocked(long nowNanos) {

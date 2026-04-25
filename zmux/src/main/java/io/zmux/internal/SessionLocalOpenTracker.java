@@ -12,10 +12,10 @@ import java.util.function.Consumer;
 @SuppressWarnings("resource")
 final class SessionLocalOpenTracker {
     private final Owner owner;
-    private final Deque<StreamRuntime> provisionalBidi = new ArrayDeque<>();
-    private final Deque<StreamRuntime> provisionalUni = new ArrayDeque<>();
-    private final Deque<StreamRuntime> unseenLocalBidi = new ArrayDeque<>();
-    private final Deque<StreamRuntime> unseenLocalUni = new ArrayDeque<>();
+    private Deque<StreamRuntime> provisionalBidi = new ArrayDeque<>();
+    private Deque<StreamRuntime> provisionalUni = new ArrayDeque<>();
+    private Deque<StreamRuntime> unseenLocalBidi = new ArrayDeque<>();
+    private Deque<StreamRuntime> unseenLocalUni = new ArrayDeque<>();
 
     SessionLocalOpenTracker(Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
@@ -253,10 +253,10 @@ final class SessionLocalOpenTracker {
     }
 
     void clear() {
-        this.provisionalBidi.clear();
-        this.provisionalUni.clear();
-        this.unseenLocalBidi.clear();
-        this.unseenLocalUni.clear();
+        this.provisionalBidi = new ArrayDeque<>();
+        this.provisionalUni = new ArrayDeque<>();
+        this.unseenLocalBidi = new ArrayDeque<>();
+        this.unseenLocalUni = new ArrayDeque<>();
     }
 
     private boolean provisionalExpired(StreamRuntime streamRuntime, long nowNanos, long provisionalOpenMaxAgeNanos) {
