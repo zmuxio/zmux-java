@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -912,29 +913,102 @@ final class WriterQueuePolicyTest {
         }
     }
 
+    @Test
+    void gatheringWriterBatchRetriesPartialArrayWritesUntilBatchCompletes() throws Exception {
+        RecordingGatheringChannel gathering = new RecordingGatheringChannel(3, 2, 1, 4, 8);
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        SessionRuntimeTestSupport.emptyInput(),
+                        SessionRuntimeTestSupport.discardingOutput(),
+                        null,
+                        null,
+                        null,
+                        gathering
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        StreamRuntime first = (StreamRuntime) runtime.openStream();
+        StreamRuntime second = (StreamRuntime) runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            makePeerVisible(runtime, first);
+            makePeerVisible(runtime, second);
+            first.write("hello".getBytes());
+            second.write("world".getBytes());
+
+            @SuppressWarnings("unchecked")
+            List<Object> batch = (List<Object>) SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "collectReadyBatchLocked",
+                    new Class<?>[0]
+            );
+            assertEquals(2, batch.size(), "test requires a two-frame batch");
+
+            java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+            writerRuntimeField.setAccessible(true);
+            Object writerRuntime = writerRuntimeField.get(runtime);
+
+            long batchBytes = (Long) SessionRuntimeTestSupport.invokePrivate(
+                    writerRuntime,
+                    "writeBatch",
+                    new Class<?>[]{List.class},
+                    batch
+            );
+
+            assertTrue(batchBytes > 0L, "writeBatch should report encoded bytes");
+            assertTrue(gathering.arrayWriteCalls() > 1, "gathering writer path should retry partial array writes until the batch completes");
+            assertEquals(0, gathering.singleWriteCalls(), "partial gather retries should not fall back to single-buffer writes");
+            assertEquals(batchBytes, gathering.bytes().length, "partial gather retries should emit the full encoded batch");
+
+            ByteArrayInputStream input = new ByteArrayInputStream(gathering.bytes());
+            FrameCodec.Frame firstFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+            FrameCodec.Frame secondFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+            assertEquals(first.streamIdInternal(), firstFrame.streamId(), "first gathered frame stream id mismatch after partial writes");
+            assertArrayEquals("hello".getBytes(), firstFrame.payload(), "first gathered frame payload mismatch after partial writes");
+            assertEquals(second.streamIdInternal(), secondFrame.streamId(), "second gathered frame stream id mismatch after partial writes");
+            assertArrayEquals("world".getBytes(), secondFrame.payload(), "second gathered frame payload mismatch after partial writes");
+            assertEquals(0, input.available(), "partial gather retries should leave no trailing encoded bytes");
+        }
+    }
+
     private static final class RecordingGatheringChannel implements GatheringByteChannel {
         private final ByteArrayOutputStream output = new ByteArrayOutputStream();
+        private final int[] arrayWriteChunks;
         private boolean open = true;
         private int lastBufferCount;
         private int arrayWriteCalls;
         private int singleWriteCalls;
 
+        private RecordingGatheringChannel(int... arrayWriteChunks) {
+            this.arrayWriteChunks = arrayWriteChunks == null ? new int[0] : arrayWriteChunks.clone();
+        }
+
         @Override
         public long write(ByteBuffer[] srcs, int offset, int length) {
+            int budget = Integer.MAX_VALUE;
+            if (arrayWriteCalls < arrayWriteChunks.length) {
+                budget = Math.max(0, arrayWriteChunks[arrayWriteCalls]);
+            }
             long written = 0L;
             int count = 0;
             arrayWriteCalls++;
             for (int i = 0; i < length; ++i) {
                 ByteBuffer src = srcs[offset + i];
-                if (src == null || !src.hasRemaining()) {
+                if (src == null || !src.hasRemaining() || budget <= 0) {
                     continue;
                 }
                 count++;
-                int remaining = src.remaining();
+                int remaining = Math.min(src.remaining(), budget);
                 byte[] bytes = new byte[remaining];
                 src.get(bytes);
                 output.write(bytes, 0, bytes.length);
                 written += remaining;
+                budget -= remaining;
+                if (budget <= 0) {
+                    break;
+                }
             }
             lastBufferCount = count;
             return written;
@@ -977,6 +1051,10 @@ final class WriterQueuePolicyTest {
 
         int singleWriteCalls() {
             return singleWriteCalls;
+        }
+
+        byte[] bytes() {
+            return output.toByteArray();
         }
     }
 }
