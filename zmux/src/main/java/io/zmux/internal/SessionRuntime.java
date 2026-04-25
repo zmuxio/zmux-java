@@ -78,7 +78,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private final Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
     private final Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
     private final Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
-    private final Deque<ReadLoopProtocolTask> readLoopProtocolTasks = new ArrayDeque<>();
+    private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
+            new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private final Map<Long, StreamRuntime> streams = new HashMap<>();
     private final SessionAcceptRegistry acceptRegistry;
     private final SessionOutboundQueueBookkeeping outboundQueueBookkeeping;
@@ -2656,6 +2657,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
                     while (!this.readLoopProtocolTasks.isEmpty()) {
                         tasks.add(this.readLoopProtocolTasks.pollFirst());
                     }
+                    if (tasks.size() >= MAX_PENDING_READ_LOOP_PROTOCOL_TASKS) {
+                        this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
+                    }
                 }
                 for (ReadLoopProtocolTask task : tasks) {
                     try {
@@ -3548,7 +3552,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.clearAcceptQueuesLocked();
         this.localOpenTracker.clear();
         this.flowControlUpdateRegistry.clear();
-        this.readLoopProtocolTasks.clear();
+        this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
         this.sessionQueuedDataBytes = 0L;
         this.bufferedReceiveBytes = 0L;
         this.bufferedReceiveStorageBytes = 0L;

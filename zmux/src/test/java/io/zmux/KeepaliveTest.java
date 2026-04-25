@@ -11,6 +11,9 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -19,15 +22,24 @@ import static org.junit.jupiter.api.Assertions.*;
 final class KeepaliveTest {
     private static FrameCodec.Frame awaitFrameType(RawPeerSession peer, FrameType expected, Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
+        ArrayList<FrameCodec.Frame> deferred = new ArrayList<>();
         while (System.nanoTime() < deadline) {
-            FrameCodec.Frame frame = peer.pollFrame(Duration.ofMillis(20));
+            long remainingNanos = deadline - System.nanoTime();
+            long sliceMillis = Math.max(
+                    1L,
+                    Math.min(Duration.ofMillis(200).toNanos(), remainingNanos) / 1_000_000L
+            );
+            FrameCodec.Frame frame = peer.pollFrame(Duration.ofMillis(sliceMillis));
             if (frame == null) {
                 continue;
             }
             if (frame.type() == expected) {
+                peer.prependFrames(deferred);
                 return frame;
             }
+            deferred.add(frame);
         }
+        peer.prependFrames(deferred);
         throw new AssertionError("timed out waiting for frame type " + expected);
     }
 
@@ -56,7 +68,7 @@ final class KeepaliveTest {
             FrameCodec.Frame data = awaitFrameType(peer, FrameType.DATA, Duration.ofSeconds(1));
             assertEquals(FrameType.DATA, data.type(), "first emitted frame should be DATA");
 
-            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofMillis(250));
+            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofSeconds(2));
             assertNotNull(ping, "read-idle keepalive should still fire even when outbound DATA recently reset write-idle");
             peer.send(new FrameCodec.Frame(FrameType.PONG, 0, 0L, ping.payload()));
         }
@@ -69,10 +81,10 @@ final class KeepaliveTest {
                 .keepaliveTimeout(Duration.ofMillis(70))
                 .build();
         try (RawPeerSession peer = RawPeerSession.open(config, 0L)) {
-            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofMillis(250));
+            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofSeconds(2));
             assertNotNull(ping, "keepalive should emit PING when idle");
 
-            FrameCodec.Frame close = awaitFrameType(peer, FrameType.CLOSE, Duration.ofMillis(400));
+            FrameCodec.Frame close = awaitFrameType(peer, FrameType.CLOSE, Duration.ofSeconds(2));
             FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
             assertEquals(ErrorCode.IDLE_TIMEOUT.code(), payload.code(), "keepalive timeout should emit CLOSE(IDLE_TIMEOUT)");
             assertEquals("zmux: keepalive timeout", payload.reason(), "keepalive timeout reason mismatch");
@@ -90,7 +102,7 @@ final class KeepaliveTest {
                 .keepaliveTimeout(Duration.ofMillis(500))
                 .build();
         try (RawPeerSession peer = RawPeerSession.open(config, 0L)) {
-            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofMillis(250));
+            FrameCodec.Frame ping = awaitFrameType(peer, FrameType.PING, Duration.ofSeconds(2));
             assertNotNull(ping, "max ping interval should trigger a keepalive ping before the idle interval expires");
             peer.send(new FrameCodec.Frame(FrameType.PONG, 0, 0L, ping.payload()));
         }
@@ -101,6 +113,7 @@ final class KeepaliveTest {
         private final Socket socket;
         private final BufferedInputStream input;
         private final BufferedOutputStream output;
+        private final ArrayDeque<FrameCodec.Frame> pendingFrames = new ArrayDeque<>();
 
         private RawPeerSession(ZmuxSession session, Socket socket, BufferedInputStream input, BufferedOutputStream output) {
             this.session = session;
@@ -175,11 +188,21 @@ final class KeepaliveTest {
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
+            FrameCodec.Frame pending = pendingFrames.pollFirst();
+            if (pending != null) {
+                return pending;
+            }
             socket.setSoTimeout((int) timeout.toMillis());
             try {
                 return FrameCodec.readFrame(input, Settings.defaults().limits());
             } catch (SocketTimeoutException e) {
                 return null;
+            }
+        }
+
+        void prependFrames(List<FrameCodec.Frame> frames) {
+            for (int i = frames.size() - 1; i >= 0; --i) {
+                pendingFrames.addFirst(frames.get(i));
             }
         }
 

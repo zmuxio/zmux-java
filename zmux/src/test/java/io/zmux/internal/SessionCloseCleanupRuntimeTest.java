@@ -3,13 +3,20 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionCloseCleanupRuntimeTest {
+    private static final int MAX_PENDING_READ_LOOP_PROTOCOL_TASKS = 256;
+
     private static void makePeerVisible(SessionRuntime runtime, StreamRuntime stream) throws Exception {
         SessionRuntimeTestSupport.invokePrivate(
                 runtime,
@@ -31,6 +38,14 @@ final class SessionCloseCleanupRuntimeTest {
         Field field = SessionRuntime.class.getDeclaredField("readLoopProtocolTasks");
         field.setAccessible(true);
         return (Deque<Object>) field.get(runtime);
+    }
+
+    private static Object newReadLoopProtocolTask() throws Exception {
+        Class<?> outboundFrameType = Class.forName("io.zmux.internal.SessionRuntime$OutboundFrame");
+        Class<?> taskType = Class.forName("io.zmux.internal.SessionRuntime$ReadLoopProtocolTask");
+        Constructor<?> constructor = taskType.getDeclaredConstructor(outboundFrameType);
+        constructor.setAccessible(true);
+        return constructor.newInstance(new Object[]{null});
     }
 
     @Test
@@ -94,5 +109,51 @@ final class SessionCloseCleanupRuntimeTest {
             assertEquals(0L, SessionRuntimeTestSupport.getLongField(runtime, "sessionQueuedDataBytes"),
                     "queued data accounting must reset after session close cleanup");
         }
+    }
+
+    @Test
+    void readLoopProtocolDrainReleasesFullBacklogDeque() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        ArrayDeque<Object> oversizedBacklog = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS * 2);
+        for (int i = 0; i < MAX_PENDING_READ_LOOP_PROTOCOL_TASKS; i++) {
+            oversizedBacklog.addLast(newReadLoopProtocolTask());
+        }
+
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.setField(runtime, "readLoopProtocolTasks", oversizedBacklog);
+        }
+
+        CountDownLatch drained = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                SessionRuntimeTestSupport.invokePrivate(runtime, "readLoopProtocolLoop", new Class<?>[0]);
+            } catch (Throwable error) {
+                workerFailure.set(error);
+            } finally {
+                finished.countDown();
+            }
+        }, "test-protocol-drain");
+        worker.start();
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+        while (System.nanoTime() < deadlineNanos) {
+            synchronized (runtime.lock()) {
+                if (readLoopProtocolTasks(runtime).isEmpty()
+                        && readLoopProtocolTasks(runtime) != oversizedBacklog) {
+                    drained.countDown();
+                    SessionRuntimeTestSupport.setField(runtime, "state", SessionState.CLOSED);
+                    runtime.lock().notifyAll();
+                    break;
+                }
+            }
+            Thread.sleep(10L);
+        }
+
+        assertTrue(drained.await(1L, TimeUnit.SECONDS),
+                "protocol worker should drain a full backlog and replace the retained deque backing");
+        assertTrue(finished.await(1L, TimeUnit.SECONDS), "protocol worker should stop once the session is closed");
+        assertNull(workerFailure.get(), "protocol worker should drain synthetic close-write tasks without failing");
     }
 }
