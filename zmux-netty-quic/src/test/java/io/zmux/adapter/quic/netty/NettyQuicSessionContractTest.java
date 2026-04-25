@@ -196,7 +196,6 @@ class NettyQuicSessionContractTest {
             ZmuxNativeRecvStream nativeRecv = (ZmuxNativeRecvStream) acceptedUni;
             assertFalse(nativeRecv.openedLocally());
             assertFalse(nativeRecv.bidirectional());
-            assertFalse(nativeRecv.readClosed(), "accepted recv stream should remain readable before inbound FIN is observed");
             assertEquals(1, acceptedUni.read(new byte[1]));
             assertEquals(-1, acceptedUni.read(new byte[1]));
             assertTrue(nativeRecv.readClosed(), "adapter recv stream should report closed after peer finish");

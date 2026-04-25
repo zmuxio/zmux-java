@@ -78,6 +78,13 @@ final class SessionDiagnosticsRuntimeTest {
         return payload.toByteArray();
     }
 
+    private static byte[] invalidUtf8DiagPayload(byte[] basePayload) throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xe2, (byte) 0x82});
+        return payload.toByteArray();
+    }
+
     private static FrameCodec.Frame controlFrameWithDuplicateStandardDiag(FrameType type, long streamId, long code, String reason)
             throws Exception {
         return new FrameCodec.Frame(
@@ -88,6 +95,16 @@ final class SessionDiagnosticsRuntimeTest {
                         FrameCodec.buildErrorPayload(code, "", Settings.defaults().maxControlPayloadBytes()),
                         reason
                 )
+        );
+    }
+
+    private static FrameCodec.Frame controlFrameWithInvalidUtf8Diag(FrameType type, long streamId, long code)
+            throws Exception {
+        return new FrameCodec.Frame(
+                type,
+                0,
+                streamId,
+                invalidUtf8DiagPayload(FrameCodec.buildErrorPayload(code, "", Settings.defaults().maxControlPayloadBytes()))
         );
     }
 
@@ -295,6 +312,50 @@ final class SessionDiagnosticsRuntimeTest {
             );
             assertEquals(ErrorCode.REFUSED_STREAM.code(), error.code(), "peer ABORT code mismatch");
             assertEquals("", error.reason(), "duplicate singleton DIAG should clear the retained ABORT reason");
+            assertEquals(ZmuxTerminationKind.ABORT, error.terminationKind(), "peer ABORT termination mismatch");
+            assertTrue(stream.readBufferEmptyLocked(), "peer ABORT should still discard buffered receive data");
+            assertEquals(0L, runtime.bufferedReceiveBytesInternal(), "peer ABORT should still release session buffered bytes");
+        }
+    }
+
+    @Test
+    void peerResetInvalidUtf8DiagDropsReasonButKeepsResetSemantics() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = createPeerOpenedBidi(runtime);
+
+        handleReaderFrame(runtime, "handleDataFrame", dataFrame(stream.streamIdInternal(), "abc"));
+        handleReaderFrame(runtime, "handleResetFrame", controlFrameWithInvalidUtf8Diag(
+                FrameType.RESET,
+                stream.streamIdInternal(),
+                ErrorCode.CANCELLED.code()
+        ));
+
+        synchronized (runtime.lock()) {
+            ApplicationError error = assertInstanceOf(ApplicationError.class, stream.operationErrorLocked());
+            assertEquals(ErrorCode.CANCELLED.code(), error.code(), "peer RESET code mismatch");
+            assertEquals("", error.reason(), "invalid UTF-8 DIAG should clear the retained RESET reason");
+            assertEquals(ZmuxTerminationKind.RESET, error.terminationKind(), "peer RESET termination mismatch");
+            assertTrue(stream.readBufferEmptyLocked(), "peer RESET should still discard buffered receive data");
+            assertEquals(0L, runtime.bufferedReceiveBytesInternal(), "peer RESET should still release session buffered bytes");
+        }
+    }
+
+    @Test
+    void peerAbortInvalidUtf8DiagDropsReasonButKeepsAbortSemantics() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = createPeerOpenedBidi(runtime);
+
+        handleReaderFrame(runtime, "handleDataFrame", dataFrame(stream.streamIdInternal(), "ab"));
+        handleReaderFrame(runtime, "handleAbortFrame", controlFrameWithInvalidUtf8Diag(
+                FrameType.ABORT,
+                stream.streamIdInternal(),
+                ErrorCode.REFUSED_STREAM.code()
+        ));
+
+        synchronized (runtime.lock()) {
+            ApplicationError error = assertInstanceOf(ApplicationError.class, stream.operationErrorLocked());
+            assertEquals(ErrorCode.REFUSED_STREAM.code(), error.code(), "peer ABORT code mismatch");
+            assertEquals("", error.reason(), "invalid UTF-8 DIAG should clear the retained ABORT reason");
             assertEquals(ZmuxTerminationKind.ABORT, error.terminationKind(), "peer ABORT termination mismatch");
             assertTrue(stream.readBufferEmptyLocked(), "peer ABORT should still discard buffered receive data");
             assertEquals(0L, runtime.bufferedReceiveBytesInternal(), "peer ABORT should still release session buffered bytes");

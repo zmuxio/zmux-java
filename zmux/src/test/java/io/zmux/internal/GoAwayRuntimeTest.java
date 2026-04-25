@@ -47,6 +47,13 @@ final class GoAwayRuntimeTest {
         return payload.toByteArray();
     }
 
+    private static byte[] invalidUtf8DiagPayload(byte[] basePayload) throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xe2, (byte) 0x82});
+        return payload.toByteArray();
+    }
+
     private static void handleGoAway(SessionRuntime runtime, long lastAcceptedBidi, long lastAcceptedUni)
             throws Exception {
         FrameCodec.Frame frame = new FrameCodec.Frame(
@@ -239,6 +246,25 @@ final class GoAwayRuntimeTest {
         assertNotNull(runtime.peerGoAwayError(), "peer GOAWAY should still be recorded");
         assertEquals(ErrorCode.PROTOCOL.code(), runtime.peerGoAwayError().code(), "peer GOAWAY code mismatch");
         assertEquals("", runtime.peerGoAwayError().reason(), "duplicate singleton DIAG should clear the retained GOAWAY reason");
+        assertEquals(acceptedBidi, runtime.peerGoAwayBidiInternal(), "peer GOAWAY bidi watermark mismatch");
+        assertEquals(0L, runtime.peerGoAwayUniInternal(), "peer GOAWAY uni watermark mismatch");
+    }
+
+    @Test
+    void peerGoAwayInvalidUtf8DiagDropsReasonButKeepsPrimarySemantics() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long acceptedBidi = maxLocalGoAwayWatermark(true) - 8L;
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, acceptedBidi);
+        Varint62.write(payload, 0L);
+        Varint62.write(payload, ErrorCode.INTERNAL.code());
+
+        handleGoAway(runtime, invalidUtf8DiagPayload(payload.toByteArray()));
+
+        assertEquals(SessionState.DRAINING, runtime.state(), "peer GOAWAY should still move the session to DRAINING");
+        assertNotNull(runtime.peerGoAwayError(), "peer GOAWAY should still be recorded");
+        assertEquals(ErrorCode.INTERNAL.code(), runtime.peerGoAwayError().code(), "peer GOAWAY code mismatch");
+        assertEquals("", runtime.peerGoAwayError().reason(), "invalid UTF-8 DIAG should clear the retained GOAWAY reason");
         assertEquals(acceptedBidi, runtime.peerGoAwayBidiInternal(), "peer GOAWAY bidi watermark mismatch");
         assertEquals(0L, runtime.peerGoAwayUniInternal(), "peer GOAWAY uni watermark mismatch");
     }

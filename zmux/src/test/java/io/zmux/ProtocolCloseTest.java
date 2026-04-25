@@ -50,6 +50,13 @@ final class ProtocolCloseTest {
         return payload.toByteArray();
     }
 
+    private static byte[] invalidUtf8DiagPayload(byte[] basePayload) throws IOException {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(basePayload);
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xe2, (byte) 0x82});
+        return payload.toByteArray();
+    }
+
     @Test
     void fatalReadProtocolErrorEmitsClose() throws Exception {
         try (RawPeerSession peer = RawPeerSession.open(
@@ -132,6 +139,32 @@ final class ProtocolCloseTest {
             assertNotNull(peerCloseError, "peer close should still be retained on the session surface");
             assertEquals(ErrorCode.PROTOCOL.code(), peerCloseError.code(), "retained peer close code mismatch");
             assertEquals("", peerCloseError.reason(), "duplicate singleton DIAG should clear the retained peer close reason");
+        }
+    }
+
+    @Test
+    void peerCloseInvalidUtf8DiagDropsReasonButKeepsPrimarySemantics() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            peer.send(new FrameCodec.Frame(
+                    FrameType.CLOSE,
+                    0,
+                    0L,
+                    invalidUtf8DiagPayload(Varint62.encode(ErrorCode.PROTOCOL.code()))
+            ));
+
+            ApplicationError error = assertThrows(
+                    ApplicationError.class,
+                    () -> peer.session().awaitTerminationOrThrow(Duration.ofSeconds(1))
+            );
+            assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "returned peer close code mismatch");
+            assertEquals("", error.reason(), "invalid UTF-8 DIAG should clear the returned peer close reason");
+            assertEquals(SessionState.FAILED, peer.session().state(), "non-zero peer CLOSE should still fail the session");
+
+            ZmuxNativeSession session = (ZmuxNativeSession) peer.session();
+            ApplicationError peerCloseError = session.peerCloseError();
+            assertNotNull(peerCloseError, "peer close should still be retained on the session surface");
+            assertEquals(ErrorCode.PROTOCOL.code(), peerCloseError.code(), "retained peer close code mismatch");
+            assertEquals("", peerCloseError.reason(), "invalid UTF-8 DIAG should clear the retained peer close reason");
         }
     }
 

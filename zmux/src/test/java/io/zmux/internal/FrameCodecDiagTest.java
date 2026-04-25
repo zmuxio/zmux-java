@@ -56,6 +56,21 @@ final class FrameCodecDiagTest {
     }
 
     @Test
+    void parseGoAwayPayloadInvalidUtf8DropsReason() throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, 8L);
+        Varint62.write(payload, 12L);
+        Varint62.write(payload, ErrorCode.INTERNAL.code());
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xe2, (byte) 0x82});
+
+        FrameCodec.GoAwayPayload parsed = FrameCodec.parseGoAwayPayload(payload.toByteArray());
+        assertEquals(8L, parsed.lastAcceptedBidi(), "bidi watermark mismatch");
+        assertEquals(12L, parsed.lastAcceptedUni(), "uni watermark mismatch");
+        assertEquals(ErrorCode.INTERNAL.code(), parsed.code(), "goaway code mismatch");
+        assertEquals("", parsed.reason(), "invalid UTF-8 should not surface a replacement-character GOAWAY reason");
+    }
+
+    @Test
     void buildGoAwayPayloadOmitsUnencodableReason() throws Exception {
         String invalidReason = new String(new char[]{'\uD83D'});
 
