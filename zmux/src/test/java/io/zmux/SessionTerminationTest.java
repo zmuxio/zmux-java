@@ -162,6 +162,62 @@ final class SessionTerminationTest {
         }
     }
 
+    @Test
+    void closeWithNullThrowablePreservesGracefulClosePathWhileUnblockingBlockedWrite() throws Exception {
+        Settings limitedServerSettings = Settings.builder()
+                .initialMaxData(1L)
+                .initialMaxStreamDataBidiPeerOpened(1L)
+                .initialMaxStreamDataBidiLocallyOpened(1L)
+                .build();
+        ZmuxConfig serverConfig = ZmuxConfig.builder()
+                .settings(limitedServerSettings)
+                .build();
+
+        try (SessionPair pair = SessionPair.open(defaultConfig(), serverConfig)) {
+            ZmuxStream stream = pair.client().openStream();
+            stream.write("x".getBytes(StandardCharsets.UTF_8));
+
+            CountDownLatch started = new CountDownLatch(1);
+            AtomicReference<Throwable> writeError = new AtomicReference<>();
+            AtomicReference<Boolean> writeReturned = new AtomicReference<>(false);
+            Thread blockedWrite = new Thread(() -> {
+                started.countDown();
+                try {
+                    stream.write("y".getBytes(StandardCharsets.UTF_8));
+                    writeReturned.set(true);
+                } catch (Throwable t) {
+                    writeError.set(t);
+                }
+            }, "session-graceful-close-blocked-write");
+            blockedWrite.start();
+
+            assertTrue(started.await(Duration.ofSeconds(1).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS), "blocked write did not start");
+            Thread.sleep(50L);
+            assertFalse(writeReturned.get(), "second write should still be flow-control blocked before graceful close starts");
+
+            GracefulCloseTimeoutException closeError = assertThrows(
+                    GracefulCloseTimeoutException.class,
+                    () -> pair.client().closeWithError((Throwable) null),
+                    "graceful close helper should preserve the graceful-close timeout path when active local send work never drains"
+            );
+            assertEquals(
+                    GracefulCloseTimeoutException.MESSAGE,
+                    closeError.getMessage(),
+                    "null closeWithError helper should surface the typed graceful-close timeout when draining stalls"
+            );
+
+            blockedWrite.join(Duration.ofSeconds(1).toMillis());
+            assertFalse(blockedWrite.isAlive(), "blocked write should wake when graceful session close starts");
+            assertFalse(writeReturned.get(), "blocked write must not succeed after graceful close starts");
+
+            Throwable error = writeError.get();
+            assertNotNull(error, "blocked write should fail after graceful close starts");
+            SessionClosedException closed = assertInstanceOf(SessionClosedException.class, error);
+            assertEquals(ZmuxErrorSource.LOCAL, closed.source(), "blocked write should surface a local session-closed error");
+            assertEquals(SessionState.CLOSED, pair.client().state(), "null closeWithError helper should still finish via a no-error graceful close");
+        }
+    }
+
     private static final class SessionPair implements AutoCloseable {
         private final ZmuxSession client;
         private final ZmuxSession server;
