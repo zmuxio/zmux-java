@@ -138,6 +138,40 @@ final class PingSemanticsTest {
         }
     }
 
+    @Test
+    void pingCopiesCallerPayloadBeforeQueueingFrame() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(defaultConfig(), 0L)) {
+            byte[] echo = "ping-echo".getBytes(StandardCharsets.UTF_8);
+            byte[] expectedSuffix = echo.clone();
+            AtomicReference<Duration> pingRtt = new AtomicReference<>();
+            AtomicReference<Throwable> pingError = new AtomicReference<>();
+
+            Thread ping = new Thread(() -> {
+                try {
+                    pingRtt.set(peer.session().ping(echo, Duration.ofSeconds(2)));
+                } catch (Throwable t) {
+                    pingError.set(t);
+                }
+            }, "ping-copy-payload");
+            ping.start();
+
+            FrameCodec.Frame pingFrame = peer.readFrame(Duration.ofSeconds(1));
+            assertEquals(FrameType.PING, pingFrame.type(), "expected a PING frame");
+
+            echo[0] = (byte) 'X';
+            byte[] queuedPayload = pingFrame.payload();
+            assertEquals(8 + expectedSuffix.length, queuedPayload.length, "PING frame should include nonce plus caller echo");
+            byte[] queuedSuffix = java.util.Arrays.copyOfRange(queuedPayload, 8, queuedPayload.length);
+            assertArrayEquals(expectedSuffix, queuedSuffix, "queued PING should preserve the caller payload snapshot");
+
+            peer.send(new FrameCodec.Frame(FrameType.PONG, 0, 0L, pingFrame.payload()));
+            ping.join(Duration.ofSeconds(2).toMillis());
+            assertFalse(ping.isAlive(), "ping should finish after matching PONG");
+            rethrow(pingError.get());
+            assertNotNull(pingRtt.get(), "ping should still complete successfully");
+        }
+    }
+
     private static final class RawPeerSession implements AutoCloseable {
         private final ZmuxNativeSession session;
         private final Socket socket;
