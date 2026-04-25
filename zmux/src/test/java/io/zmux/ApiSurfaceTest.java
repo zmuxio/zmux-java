@@ -741,6 +741,31 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void streamSurfaceAndOpenHelpersRecognizeStructuredVariants() {
+        IOException emptyMetadata = new IOException("outer", new EmptyMetadataUpdateException());
+        IOException openLimited = new IOException("outer", new OpenLimitedException());
+        IOException openExpired = new IOException("outer", new OpenExpiredException());
+        IOException notReadable = new IOException("outer", new StreamNotReadableException());
+        IOException notWritable = new IOException("outer", new StreamNotWritableException());
+        IOException gracefulCloseTimeout = new IOException("outer", new GracefulCloseTimeoutException());
+        IOException plain = new IOException("plain");
+
+        assertTrue(ZmuxErrors.emptyMetadataUpdate(emptyMetadata));
+        assertTrue(ZmuxErrors.openLimited(openLimited));
+        assertTrue(ZmuxErrors.openExpired(openExpired));
+        assertTrue(ZmuxErrors.streamNotReadable(notReadable));
+        assertTrue(ZmuxErrors.streamNotWritable(notWritable));
+        assertTrue(ZmuxErrors.gracefulCloseTimeout(gracefulCloseTimeout));
+
+        assertFalse(ZmuxErrors.emptyMetadataUpdate(plain));
+        assertFalse(ZmuxErrors.openLimited(openExpired));
+        assertFalse(ZmuxErrors.openExpired(openLimited));
+        assertFalse(ZmuxErrors.streamNotReadable(notWritable));
+        assertFalse(ZmuxErrors.streamNotWritable(notReadable));
+        assertFalse(ZmuxErrors.gracefulCloseTimeout(emptyMetadata));
+    }
+
+    @Test
     void closedStateHelpersRecognizeSessionAndDirectionalClosure() {
         IOException sessionClosed = new IOException("outer", new SessionClosedException(ZmuxErrorSource.REMOTE));
         IOException readClosed = new IOException("outer", new ReadClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));

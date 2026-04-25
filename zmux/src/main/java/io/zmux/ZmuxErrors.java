@@ -131,12 +131,24 @@ public final class ZmuxErrors {
         return find(error, PriorityUpdateUnavailableException.class) != null;
     }
 
+    public static boolean emptyMetadataUpdate(Throwable error) {
+        return find(error, EmptyMetadataUpdateException.class) != null;
+    }
+
     public static boolean openInfoUnavailable(Throwable error) {
         return find(error, OpenInfoUnavailableException.class) != null;
     }
 
     public static boolean openMetadataTooLarge(Throwable error) {
         return find(error, OpenMetadataTooLargeException.class) != null;
+    }
+
+    public static boolean openLimited(Throwable error) {
+        return find(error, OpenLimitedException.class) != null;
+    }
+
+    public static boolean openExpired(Throwable error) {
+        return find(error, OpenExpiredException.class) != null;
     }
 
     public static boolean priorityUpdateTooLarge(Throwable error) {
@@ -158,8 +170,20 @@ public final class ZmuxErrors {
         return find(error, ReadClosedException.class) != null;
     }
 
+    public static boolean streamNotReadable(Throwable error) {
+        return find(error, StreamNotReadableException.class) != null;
+    }
+
+    public static boolean streamNotWritable(Throwable error) {
+        return find(error, StreamNotWritableException.class) != null;
+    }
+
     public static boolean writeClosed(Throwable error) {
         return find(error, WriteClosedException.class) != null;
+    }
+
+    public static boolean gracefulCloseTimeout(Throwable error) {
+        return find(error, GracefulCloseTimeoutException.class) != null;
     }
 
     public static boolean interrupted(Throwable error) {
