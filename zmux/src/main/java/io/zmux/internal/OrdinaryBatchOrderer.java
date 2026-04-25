@@ -186,14 +186,14 @@ final class OrdinaryBatchOrderer {
     }
 
     static final class Workspace {
-        private final LinkedHashMap<GroupKey, BatchGroup> groups = new LinkedHashMap<>();
+        private LinkedHashMap<GroupKey, BatchGroup> groups = new LinkedHashMap<>();
         private final ArrayList<BatchGroup> groupsInOrder = new ArrayList<>();
-        private final HashMap<Long, GroupKey> explicitGroups = new HashMap<>();
+        private HashMap<Long, GroupKey> explicitGroups = new HashMap<>();
         private final OrdinaryBatchRetainedState retainedState = new OrdinaryBatchRetainedState();
-        private final LongIntCounterMap bypassSelections = new LongIntCounterMap();
+        private LongIntCounterMap bypassSelections = new LongIntCounterMap();
         private final int[] activeSelectionCounts = new int[2];
-        private final HashMap<GroupKey, Long> nextPreferredStreamHeads = new HashMap<>();
-        private final HashSet<GroupKey> recordedGroupHeads = new HashSet<>();
+        private HashMap<GroupKey, Long> nextPreferredStreamHeads = new HashMap<>();
+        private HashSet<GroupKey> recordedGroupHeads = new HashSet<>();
         private final ArrayList<GroupCandidate> interactiveCandidates = new ArrayList<>();
         private final ArrayList<GroupCandidate> bulkCandidates = new ArrayList<>();
         private final ArrayList<BatchGroup> batchGroupPool = new ArrayList<>();
@@ -273,7 +273,12 @@ final class OrdinaryBatchOrderer {
             if (batchScratchOversized(lastBuildCapHint, capHint)) {
                 ordered = new int[0];
                 selected = new boolean[0];
+                groups = new LinkedHashMap<>();
                 trimScratchList(groupsInOrder);
+                explicitGroups = new HashMap<>();
+                bypassSelections = new LongIntCounterMap();
+                nextPreferredStreamHeads = new HashMap<>();
+                recordedGroupHeads = new HashSet<>();
                 trimScratchList(interactiveCandidates);
                 trimScratchList(bulkCandidates);
                 trimPooledScratch(batchGroupPool, capHint);

@@ -138,6 +138,82 @@ final class OrdinaryBatchOrdererTest {
     }
 
     @Test
+    void oversizedWorkspaceHashScratchDropsAfterSmallerBatch() throws Exception {
+        OrdinaryBatchOrderer.Workspace workspace = new OrdinaryBatchOrderer.Workspace();
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+        int oversizedHint = 1_025;
+
+        Field groupsField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("groups");
+        groupsField.setAccessible(true);
+        Map<?, ?> firstGroups = (Map<?, ?>) groupsField.get(workspace);
+
+        Field explicitGroupsField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("explicitGroups");
+        explicitGroupsField.setAccessible(true);
+        Map<?, ?> firstExplicitGroups = (Map<?, ?>) explicitGroupsField.get(workspace);
+
+        Field bypassSelectionsField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("bypassSelections");
+        bypassSelectionsField.setAccessible(true);
+        Object firstBypassSelections = bypassSelectionsField.get(workspace);
+
+        Field counterSizeField = LongIntCounterMap.class.getDeclaredField("size");
+        counterSizeField.setAccessible(true);
+
+        Field nextPreferredStreamHeadsField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("nextPreferredStreamHeads");
+        nextPreferredStreamHeadsField.setAccessible(true);
+        Map<?, ?> firstNextPreferredStreamHeads = (Map<?, ?>) nextPreferredStreamHeadsField.get(workspace);
+
+        Field recordedGroupHeadsField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("recordedGroupHeads");
+        recordedGroupHeadsField.setAccessible(true);
+        java.util.Set<?> firstRecordedGroupHeads = (java.util.Set<?>) recordedGroupHeadsField.get(workspace);
+
+        @SuppressWarnings("unchecked")
+        Map<OrdinaryBatchOrderer.GroupKey, Object> oversizedGroups = (Map<OrdinaryBatchOrderer.GroupKey, Object>) firstGroups;
+        @SuppressWarnings("unchecked")
+        Map<Long, OrdinaryBatchOrderer.GroupKey> oversizedExplicitGroups =
+                (Map<Long, OrdinaryBatchOrderer.GroupKey>) firstExplicitGroups;
+        @SuppressWarnings("unchecked")
+        Map<OrdinaryBatchOrderer.GroupKey, Long> oversizedNextPreferredStreamHeads =
+                (Map<OrdinaryBatchOrderer.GroupKey, Long>) firstNextPreferredStreamHeads;
+        @SuppressWarnings("unchecked")
+        java.util.Set<OrdinaryBatchOrderer.GroupKey> oversizedRecordedGroupHeads =
+                (java.util.Set<OrdinaryBatchOrderer.GroupKey>) firstRecordedGroupHeads;
+        LongIntCounterMap oversizedBypassSelections = (LongIntCounterMap) firstBypassSelections;
+
+        for (int i = 0; i < oversizedHint; ++i) {
+            OrdinaryBatchOrderer.GroupKey key = new OrdinaryBatchOrderer.GroupKey(0, 4L + (long) i * 4L);
+            oversizedGroups.put(key, null);
+            oversizedExplicitGroups.put((long) i + 1L, key);
+            oversizedNextPreferredStreamHeads.put(key, 4L + (long) i * 4L);
+            oversizedRecordedGroupHeads.add(key);
+            oversizedBypassSelections.incrementSaturating(4L + (long) i * 4L);
+        }
+
+        Field lastBuildCapHintField = OrdinaryBatchOrderer.Workspace.class.getDeclaredField("lastBuildCapHint");
+        lastBuildCapHintField.setAccessible(true);
+        lastBuildCapHintField.setInt(workspace, oversizedHint);
+
+        OrdinaryBatchOrderer.order(
+                listOf(dataFrame(4L, 1L, 0L), dataFrame(8L, 1L, 20L)),
+                SchedulerHint.UNSPECIFIED_OR_BALANCED,
+                16_384L,
+                retainedBias,
+                workspace
+        );
+
+        Map<?, ?> secondGroups = (Map<?, ?>) groupsField.get(workspace);
+        Map<?, ?> secondExplicitGroups = (Map<?, ?>) explicitGroupsField.get(workspace);
+        Object secondBypassSelections = bypassSelectionsField.get(workspace);
+        Map<?, ?> secondNextPreferredStreamHeads = (Map<?, ?>) nextPreferredStreamHeadsField.get(workspace);
+        java.util.Set<?> secondRecordedGroupHeads = (java.util.Set<?>) recordedGroupHeadsField.get(workspace);
+
+        assertNotSame(firstGroups, secondGroups, "smaller rebuild should replace oversized group scratch maps");
+        assertNotSame(firstExplicitGroups, secondExplicitGroups, "smaller rebuild should replace oversized explicit-group scratch maps");
+        assertNotSame(firstBypassSelections, secondBypassSelections, "smaller rebuild should replace oversized bypass-selection scratch");
+        assertNotSame(firstNextPreferredStreamHeads, secondNextPreferredStreamHeads, "smaller rebuild should replace oversized next-head scratch");
+        assertNotSame(firstRecordedGroupHeads, secondRecordedGroupHeads, "smaller rebuild should replace oversized recorded-head scratch");
+    }
+
+    @Test
     void reusableWorkspaceDoesNotLeakBatchTopologyAcrossBuilds() {
         OrdinaryBatchOrderer.Workspace workspace = new OrdinaryBatchOrderer.Workspace();
 
