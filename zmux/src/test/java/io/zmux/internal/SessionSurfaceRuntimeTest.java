@@ -215,6 +215,7 @@ class SessionSurfaceRuntimeTest {
                 "GOAWAY should fail immediately once local close has started"
         );
         assertEquals(ZmuxErrorSource.LOCAL, goAwayError.source(), "GOAWAY close source mismatch");
+        assertEquals("goAway", goAwayError.operation(), "GOAWAY close operation mismatch");
 
         SessionClosedException readDeadlineError = assertInstanceOf(
                 SessionClosedException.class,

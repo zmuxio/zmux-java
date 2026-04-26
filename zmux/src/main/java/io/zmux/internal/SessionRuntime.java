@@ -1022,7 +1022,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     public void goAway(long bidiWatermark, long uniWatermark, long errorCode, String reason) throws IOException {
         synchronized (this.lock) {
             if (this.shouldFailSessionOperationsLocked()) {
-                throw this.sessionOperationErrorLocked("close", this.currentErrorLocked());
+                throw this.sessionOperationErrorLocked("goAway", this.currentErrorLocked());
             }
             this.validateOutgoingGoAwayWatermarkLocked(bidiWatermark, true);
             this.validateOutgoingGoAwayWatermarkLocked(uniWatermark, false);
