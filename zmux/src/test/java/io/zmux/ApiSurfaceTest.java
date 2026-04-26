@@ -3,11 +3,7 @@ package io.zmux;
 import org.junit.jupiter.api.Test;
 
 import java.io.*;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.SocketAddress;
-import java.net.SocketTimeoutException;
+import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -19,17 +15,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ApiSurfaceTest {
-    private static final class SelfCauseIOException extends IOException {
-        private SelfCauseIOException(String message) {
-            super(message);
-        }
-
-        @Override
-        public synchronized Throwable getCause() {
-            return this;
-        }
-    }
-
     private static void rethrow(Throwable error) throws Exception {
         if (error == null) {
             return;
@@ -1907,6 +1892,17 @@ final class ApiSurfaceTest {
         assertEquals(0, stream.writeCalls);
         assertEquals(1, stream.writeFinalCalls);
         assertEquals(1, stream.lastFinalLength);
+    }
+
+    private static final class SelfCauseIOException extends IOException {
+        private SelfCauseIOException(String message) {
+            super(message);
+        }
+
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
     }
 
     private static final class SessionPair implements AutoCloseable {

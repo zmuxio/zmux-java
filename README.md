@@ -53,6 +53,7 @@ Typical classifiers are `windows-x86_64`, `linux-x86_64`, `linux-aarch_64`,
 Use this after a release is published:
 
 ```xml
+
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux</artifactId>
@@ -63,6 +64,7 @@ Use this after a release is published:
 Optional Netty QUIC adapter:
 
 ```xml
+
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux-netty-quic</artifactId>
@@ -74,6 +76,7 @@ If your application does not already provide Netty QUIC native runtime
 artifacts, add the platform native dependency as well:
 
 ```xml
+
 <dependency>
     <groupId>io.netty</groupId>
     <artifactId>netty-codec-native-quic</artifactId>
@@ -127,6 +130,7 @@ Use a release tag or commit hash for repeatable builds.
 ### Maven From GitHub
 
 ```xml
+
 <repositories>
     <repository>
         <id>jitpack.io</id>
@@ -135,15 +139,16 @@ Use a release tag or commit hash for repeatable builds.
 </repositories>
 
 <dependency>
-    <groupId>com.github.zmuxio.zmux-java</groupId>
-    <artifactId>zmux</artifactId>
-    <version>TAG_OR_COMMIT</version>
+<groupId>com.github.zmuxio.zmux-java</groupId>
+<artifactId>zmux</artifactId>
+<version>TAG_OR_COMMIT</version>
 </dependency>
 ```
 
 Optional Netty QUIC adapter:
 
 ```xml
+
 <dependency>
     <groupId>com.github.zmuxio.zmux-java</groupId>
     <artifactId>zmux-netty-quic</artifactId>
@@ -328,11 +333,13 @@ import io.zmux.ZmuxStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-try (Socket socket = new Socket("127.0.0.1", 9000);
-     ZmuxSession session = Zmux.clientSession(socket);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-    String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+try(Socket socket = new Socket("127.0.0.1", 9000);
+ZmuxSession session = Zmux.clientSession(socket);
+ZmuxStream stream = session.openStream()){
+        stream.
+
+writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -347,13 +354,17 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-try (ServerSocket listener = new ServerSocket(9000);
-     Socket socket = listener.accept();
-     ZmuxSession session = Zmux.serverSession(socket);
-     ZmuxStream stream = session.acceptStream()) {
-    String request = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-    stream.writeFinal(("echo:" + request).getBytes(StandardCharsets.UTF_8));
-}
+try(ServerSocket listener = new ServerSocket(9000);
+Socket socket = listener.accept();
+ZmuxSession session = Zmux.serverSession(socket);
+ZmuxStream stream = session.acceptStream()){
+String request = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+    stream.
+
+writeFinal(("echo:"+request).
+
+getBytes(StandardCharsets.UTF_8));
+        }
 ```
 
 ### Unidirectional Streams
@@ -364,12 +375,15 @@ import io.zmux.ZmuxSendStream;
 
 import java.nio.charset.StandardCharsets;
 
-try (ZmuxSendStream send = session.openUniStream()) {
-    send.writeFinal("event".getBytes(StandardCharsets.UTF_8));
-}
+try(ZmuxSendStream send = session.openUniStream()){
+        send.
 
-try (ZmuxRecvStream recv = session.acceptUniStream()) {
-    String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
+writeFinal("event".getBytes(StandardCharsets.UTF_8));
+        }
+
+        try(
+ZmuxRecvStream recv = session.acceptUniStream()){
+String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -483,12 +497,17 @@ OpenOptions options = OpenOptions.builder()
         .openInfo("ssh")
         .build();
 
-try (Socket socket = new Socket("127.0.0.1", 9000);
-     ZmuxSession session = Zmux.clientSession(socket, config);
-     ZmuxStream stream = session.openStream(options)) {
-    stream.updateMetadata(MetadataUpdate.of(3L, 2L));
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-}
+try(
+Socket socket = new Socket("127.0.0.1", 9000);
+ZmuxSession session = Zmux.clientSession(socket, config);
+ZmuxStream stream = session.openStream(options)){
+        stream.
+
+updateMetadata(MetadataUpdate.of(3L, 2L));
+        stream.
+
+writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+        }
 ```
 
 The peer can read `stream.openInfo()` and `stream.metadata()` after accepting
@@ -520,10 +539,18 @@ import io.zmux.ZmuxStream;
 import java.time.Duration;
 
 ZmuxStream stream = session.openStreamWithTimeout(Duration.ofSeconds(2));
-stream.setReadTimeout(Duration.ofSeconds(5));
-stream.setWriteTimeout(Duration.ofSeconds(5));
-stream.clearReadDeadline();
-stream.clearWriteDeadline();
+stream.
+
+setReadTimeout(Duration.ofSeconds(5));
+        stream.
+
+setWriteTimeout(Duration.ofSeconds(5));
+        stream.
+
+clearReadDeadline();
+stream.
+
+clearWriteDeadline();
 ```
 
 ### Closing
@@ -532,12 +559,24 @@ stream.clearWriteDeadline();
 import java.time.Duration;
 
 stream.closeWrite();                  // graceful write-half close
-stream.closeRead();                   // local read cancellation
-stream.close();                       // local helper that closes both sides
-stream.closeWithError(0x100L, "bye"); // stream application error
-session.close();                      // graceful session close
-session.closeWithError(0x100L, "bye");
-session.awaitTerminationOrThrow(Duration.ofSeconds(5));
+stream.
+
+closeRead();                   // local read cancellation
+stream.
+
+close();                       // local helper that closes both sides
+stream.
+
+closeWithError(0x100L,"bye"); // stream application error
+session.
+
+close();                      // graceful session close
+session.
+
+closeWithError(0x100L,"bye");
+session.
+
+awaitTerminationOrThrow(Duration.ofSeconds(5));
 ```
 
 ### Errors
@@ -547,23 +586,30 @@ import io.zmux.ApplicationError;
 import io.zmux.ErrorCode;
 import io.zmux.ZmuxErrors;
 
-try {
-    stream.write(payload);
-} catch (IOException error) {
-    if (ZmuxErrors.sessionClosed(error)) {
+try{
+        stream.write(payload);
+}catch(
+IOException error){
+        if(ZmuxErrors.
+
+sessionClosed(error)){
         // session is already gone
-    }
+        }
 
-    if (ZmuxErrors.writeClosed(error)) {
+        if(ZmuxErrors.
+
+writeClosed(error)){
         // write side is no longer available
-    }
+        }
 
-    ApplicationError app = ZmuxErrors.applicationError(error);
-    if (app != null && app.isCode(ErrorCode.PROTOCOL)) {
-        long wireCode = app.applicationCode();
-        String reason = app.reason();
+ApplicationError app = ZmuxErrors.applicationError(error);
+    if(app !=null&&app.
+
+isCode(ErrorCode.PROTOCOL)){
+long wireCode = app.applicationCode();
+String reason = app.reason();
     }
-}
+            }
 ```
 
 ### Netty QUIC Adapter
@@ -585,10 +631,13 @@ NettyQuicSessionOptions options = NettyQuicSessionOptions.defaults()
 
 // Call the blocking zmux APIs from an application / worker thread, not from
 // the Netty event loop.
-try (ZmuxSession session = NettyQuic.wrapSessionWithOptions(channel, options);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-}
+try(
+ZmuxSession session = NettyQuic.wrapSessionWithOptions(channel, options);
+ZmuxStream stream = session.openStream()){
+        stream.
+
+writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+        }
 ```
 
 The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,

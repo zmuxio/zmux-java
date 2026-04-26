@@ -149,6 +149,51 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return current;
     }
 
+    private static boolean awaitUntilDeadline(Condition condition, Instant deadline) throws InterruptedException {
+        if (deadline == null) {
+            condition.await();
+            return true;
+        }
+        Instant now = Instant.now();
+        if (!deadline.isAfter(now)) {
+            return false;
+        }
+        long remainingNanos;
+        try {
+            remainingNanos = Duration.between(now, deadline).toNanos();
+        } catch (ArithmeticException overflow) {
+            remainingNanos = Long.MAX_VALUE;
+        }
+        if (remainingNanos <= 0L) {
+            return false;
+        }
+        return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private static SocketTimeoutException readDeadlineTimeout() {
+        return new SocketTimeoutException("zmux: joined connection read deadline exceeded");
+    }
+
+    private static SocketTimeoutException writeDeadlineTimeout() {
+        return new SocketTimeoutException("zmux: joined connection write deadline exceeded");
+    }
+
+    private static SocketAddress localAddress(Object half) {
+        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).localAddress() : null;
+    }
+
+    private static SocketAddress remoteAddress(Object half) {
+        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).remoteAddress() : null;
+    }
+
+    private static ReadHalf typedReadHalf(InputStream half) {
+        return half instanceof TypedInputHalf ? ((TypedInputHalf) half).readHalf() : null;
+    }
+
+    private static WriteHalf typedWriteHalf(OutputStream half) {
+        return half instanceof TypedOutputHalf ? ((TypedOutputHalf) half).writeHalf() : null;
+    }
+
     @Override
     public InputStream input() {
         return inputView;
@@ -700,27 +745,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    private static boolean awaitUntilDeadline(Condition condition, Instant deadline) throws InterruptedException {
-        if (deadline == null) {
-            condition.await();
-            return true;
-        }
-        Instant now = Instant.now();
-        if (!deadline.isAfter(now)) {
-            return false;
-        }
-        long remainingNanos;
-        try {
-            remainingNanos = Duration.between(now, deadline).toNanos();
-        } catch (ArithmeticException overflow) {
-            remainingNanos = Long.MAX_VALUE;
-        }
-        if (remainingNanos <= 0L) {
-            return false;
-        }
-        return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
-    }
-
     private void closeJoinedOutput() throws IOException {
         OutputStream output;
         GatheringByteChannel gathering;
@@ -757,6 +781,20 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         void commit();
     }
 
+    private interface AddressAwareHalf {
+        SocketAddress localAddress();
+
+        SocketAddress remoteAddress();
+    }
+
+    private interface TypedInputHalf {
+        ReadHalf readHalf();
+    }
+
+    private interface TypedOutputHalf {
+        WriteHalf writeHalf();
+    }
+
     private static final class ResumeSnapshot {
         private final Instant deadline;
         private final long generation;
@@ -765,14 +803,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             this.deadline = deadline;
             this.generation = generation;
         }
-    }
-
-    private static SocketTimeoutException readDeadlineTimeout() {
-        return new SocketTimeoutException("zmux: joined connection read deadline exceeded");
-    }
-
-    private static SocketTimeoutException writeDeadlineTimeout() {
-        return new SocketTimeoutException("zmux: joined connection write deadline exceeded");
     }
 
     public static final class PausedInput implements ResumablePause {
@@ -934,36 +964,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             }
             return condition.await(remaining, TimeUnit.NANOSECONDS);
         }
-    }
-
-    private interface AddressAwareHalf {
-        SocketAddress localAddress();
-
-        SocketAddress remoteAddress();
-    }
-
-    private interface TypedInputHalf {
-        ReadHalf readHalf();
-    }
-
-    private interface TypedOutputHalf {
-        WriteHalf writeHalf();
-    }
-
-    private static SocketAddress localAddress(Object half) {
-        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).localAddress() : null;
-    }
-
-    private static SocketAddress remoteAddress(Object half) {
-        return half instanceof AddressAwareHalf ? ((AddressAwareHalf) half).remoteAddress() : null;
-    }
-
-    private static ReadHalf typedReadHalf(InputStream half) {
-        return half instanceof TypedInputHalf ? ((TypedInputHalf) half).readHalf() : null;
-    }
-
-    private static WriteHalf typedWriteHalf(OutputStream half) {
-        return half instanceof TypedOutputHalf ? ((TypedOutputHalf) half).writeHalf() : null;
     }
 
     private static final class StreamInputHalf extends InputStream implements AddressAwareHalf, TypedInputHalf {

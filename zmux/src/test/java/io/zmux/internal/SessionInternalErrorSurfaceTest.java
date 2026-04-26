@@ -1,14 +1,6 @@
 package io.zmux.internal;
 
-import io.zmux.ErrorCode;
-import io.zmux.Settings;
-import io.zmux.SessionState;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorScope;
-import io.zmux.ZmuxErrorSource;
-import io.zmux.ZmuxException;
-import io.zmux.ZmuxErrors;
-import io.zmux.ZmuxTerminationKind;
+import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -19,6 +11,17 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionInternalErrorSurfaceTest {
+    private static void awaitState(SessionRuntime runtime, SessionState expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadline) {
+            if (runtime.state() == expected) {
+                return;
+            }
+            Thread.sleep(10L);
+        }
+        assertEquals(expected, runtime.state());
+    }
+
     @Test
     void encodeVarintPreservesStructuredCauseInsideUncheckedWrapper() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -88,16 +91,5 @@ final class SessionInternalErrorSurfaceTest {
         assertEquals(ErrorCode.INTERNAL.code(), ZmuxErrors.code(cause, -1L));
         assertEquals("late data", ZmuxErrors.operation(cause));
         assertEquals(ZmuxTerminationKind.SESSION_TERMINATION, ZmuxErrors.terminationKind(cause));
-    }
-
-    private static void awaitState(SessionRuntime runtime, SessionState expected) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-        while (System.nanoTime() < deadline) {
-            if (runtime.state() == expected) {
-                return;
-            }
-            Thread.sleep(10L);
-        }
-        assertEquals(expected, runtime.state());
     }
 }

@@ -359,6 +359,10 @@ public final class Zmux {
     }
 
     private static final class ClosedSession implements ZmuxNativeSession {
+        private static SessionClosedException sessionClosed() {
+            return new SessionClosedException(ZmuxErrorSource.LOCAL);
+        }
+
         @Override
         public ZmuxNativeStream acceptStream() throws IOException {
             throw sessionClosed();
@@ -500,10 +504,6 @@ public final class Zmux {
 
         @Override
         public void close() {
-        }
-
-        private static SessionClosedException sessionClosed() {
-            return new SessionClosedException(ZmuxErrorSource.LOCAL);
         }
     }
 }

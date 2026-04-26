@@ -74,12 +74,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private final SessionEventDispatcher eventDispatcher;
     private final SessionTelemetryState telemetry;
     private final CountDownLatch terminated = new CountDownLatch(1);
-    private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
-    private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
-    private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
-    private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
-            new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
-    private Map<Long, StreamRuntime> streams = new HashMap<>();
     private final SessionAcceptRegistry acceptRegistry;
     private final SessionOutboundQueueBookkeeping outboundQueueBookkeeping;
     private final SessionPriorityUpdateCoordinator priorityUpdateCoordinator;
@@ -102,6 +96,12 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private final SessionReaderCoordinator readerRuntime;
     private final SessionWriterCoordinator writerRuntime;
     private final SessionStatsCollector statsCollector;
+    private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
+    private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
+    private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
+    private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
+            new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
+    private Map<Long, StreamRuntime> streams = new HashMap<>();
     private long pingNonceState;
     private long resetReasonOverflowCount;
     private long abortReasonOverflowCount;

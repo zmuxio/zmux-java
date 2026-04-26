@@ -13,11 +13,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -715,6 +711,20 @@ final class NettyQuicSupport {
         return value != null && value > 0 ? value : fallback;
     }
 
+    private static void awaitFutureCompletionUninterruptibly(Future<?> future) {
+        boolean interrupted = false;
+        while (!future.isDone()) {
+            try {
+                future.await();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     static final class AcceptQueue<T> {
         private final int capacity;
         private final ReentrantLock lock = new ReentrantLock();
@@ -890,20 +900,6 @@ final class NettyQuicSupport {
             if (notFullWaiters > 0) {
                 notFull.signalAll();
             }
-        }
-    }
-
-    private static void awaitFutureCompletionUninterruptibly(Future<?> future) {
-        boolean interrupted = false;
-        while (!future.isDone()) {
-            try {
-                future.await();
-            } catch (InterruptedException ignored) {
-                interrupted = true;
-            }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
         }
     }
 

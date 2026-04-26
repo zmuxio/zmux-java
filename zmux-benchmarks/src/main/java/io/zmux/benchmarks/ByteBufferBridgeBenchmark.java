@@ -30,42 +30,6 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5, time = 1)
 @Fork(1)
 public class ByteBufferBridgeBenchmark {
-    @Benchmark
-    public int writeDirectByteBufferBaseline(BridgeState state) throws Exception {
-        state.resetWrite();
-        return baselineWriteFromByteBuffer(state.directWriteSource, state.writeHalf) + state.writeHalf.checksum;
-    }
-
-    @Benchmark
-    public int writeDirectByteBuffer(BridgeState state) throws Exception {
-        state.resetWrite();
-        return state.writeHalf.write(state.directWriteSource) + state.writeHalf.checksum;
-    }
-
-    @Benchmark
-    public int writeFinalDirectByteBufferBaseline(BridgeState state) throws Exception {
-        state.resetWriteFinal();
-        return baselineWriteFinalFromByteBuffer(state.directWriteSource, state.sendStream) + state.sendStream.checksum;
-    }
-
-    @Benchmark
-    public int writeFinalDirectByteBuffer(BridgeState state) throws Exception {
-        state.resetWriteFinal();
-        return state.sendStream.writeFinal(state.directWriteSource) + state.sendStream.checksum;
-    }
-
-    @Benchmark
-    public int readDirectByteBufferBaseline(BridgeState state) throws Exception {
-        state.resetRead();
-        return baselineReadFullyIntoByteBuffer(state.directReadTarget, state.readHalf) + state.readHalf.checksum;
-    }
-
-    @Benchmark
-    public int readDirectByteBuffer(BridgeState state) throws Exception {
-        state.resetRead();
-        return readFullyIntoByteBuffer(state.directReadTarget, state.readHalf) + state.readHalf.checksum;
-    }
-
     private static int baselineReadFullyIntoByteBuffer(ByteBuffer dst, SourceReadHalf reader) throws IOException {
         int total = 0;
         while (dst.hasRemaining()) {
@@ -166,6 +130,42 @@ public class ByteBufferBridgeBenchmark {
             src.position(initialPosition + total);
         }
         return total;
+    }
+
+    @Benchmark
+    public int writeDirectByteBufferBaseline(BridgeState state) throws Exception {
+        state.resetWrite();
+        return baselineWriteFromByteBuffer(state.directWriteSource, state.writeHalf) + state.writeHalf.checksum;
+    }
+
+    @Benchmark
+    public int writeDirectByteBuffer(BridgeState state) throws Exception {
+        state.resetWrite();
+        return state.writeHalf.write(state.directWriteSource) + state.writeHalf.checksum;
+    }
+
+    @Benchmark
+    public int writeFinalDirectByteBufferBaseline(BridgeState state) throws Exception {
+        state.resetWriteFinal();
+        return baselineWriteFinalFromByteBuffer(state.directWriteSource, state.sendStream) + state.sendStream.checksum;
+    }
+
+    @Benchmark
+    public int writeFinalDirectByteBuffer(BridgeState state) throws Exception {
+        state.resetWriteFinal();
+        return state.sendStream.writeFinal(state.directWriteSource) + state.sendStream.checksum;
+    }
+
+    @Benchmark
+    public int readDirectByteBufferBaseline(BridgeState state) throws Exception {
+        state.resetRead();
+        return baselineReadFullyIntoByteBuffer(state.directReadTarget, state.readHalf) + state.readHalf.checksum;
+    }
+
+    @Benchmark
+    public int readDirectByteBuffer(BridgeState state) throws Exception {
+        state.resetRead();
+        return readFullyIntoByteBuffer(state.directReadTarget, state.readHalf) + state.readHalf.checksum;
     }
 
     @State(Scope.Thread)

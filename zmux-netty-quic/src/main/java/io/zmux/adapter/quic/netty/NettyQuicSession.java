@@ -34,7 +34,6 @@ final class NettyQuicSession implements ZmuxSession {
     private final ReentrantLock prepareLock = new ReentrantLock();
     private final ReentrantLock lifecycleLock = new ReentrantLock();
     private final Condition lifecycleChanged = lifecycleLock.newCondition();
-    private ArrayDeque<NettyQuicStreamState> pendingPrepare = new ArrayDeque<>();
     private final NettyQuicSupport.AcceptQueue<NettyQuicBidiStream> bidiAcceptQueue =
             new NettyQuicSupport.AcceptQueue<>(NettyQuicSupport.ACCEPT_RESULT_QUEUE_CAPACITY);
     private final NettyQuicSupport.AcceptQueue<NettyQuicRecvStream> uniAcceptQueue =
@@ -65,7 +64,7 @@ final class NettyQuicSession implements ZmuxSession {
     private final String handlerName = "zmux-netty-quic-" + saturatingIncrement(HANDLER_SEQUENCE);
     private final long timeOriginNanos;
     private final Instant timeOriginInstant;
-
+    private ArrayDeque<NettyQuicStreamState> pendingPrepare = new ArrayDeque<>();
     private volatile IOException closeError;
     private volatile QuicConnectionCloseEvent closeEvent;
     private volatile long lastInboundFrameAtNanos;
@@ -1289,6 +1288,27 @@ final class NettyQuicSession implements ZmuxSession {
         state.closeRaw();
     }
 
+    private <T> T acceptQueuedStream(NettyQuicSupport.AcceptQueue<T> queue, Duration timeout)
+            throws IOException, InterruptedException {
+        T stream;
+        try {
+            stream = queue.take(timeout, this::sessionUnavailableError);
+        } catch (InterruptedException interrupted) {
+            throw NettyQuicSupport.interrupted(
+                    "zmux-netty-quic: interrupted while accepting stream",
+                    "accept",
+                    ZmuxErrorScope.SESSION,
+                    ZmuxErrorDirection.BOTH,
+                    interrupted
+            );
+        }
+        if (stream == null) {
+            throw NettyQuicSupport.acceptTimedOut();
+        }
+        saturatingIncrement(acceptedStreams);
+        return stream;
+    }
+
     private static final class AcceptBacklogSnapshot {
         private static final AcceptBacklogSnapshot EMPTY = new AcceptBacklogSnapshot(StateMembership.EMPTY, 0L);
 
@@ -1514,26 +1534,5 @@ final class NettyQuicSession implements ZmuxSession {
             beginClosing(NettyQuicSupport.translateThrowable(cause));
             ctx.close();
         }
-    }
-
-    private <T> T acceptQueuedStream(NettyQuicSupport.AcceptQueue<T> queue, Duration timeout)
-            throws IOException, InterruptedException {
-        T stream;
-        try {
-            stream = queue.take(timeout, this::sessionUnavailableError);
-        } catch (InterruptedException interrupted) {
-            throw NettyQuicSupport.interrupted(
-                    "zmux-netty-quic: interrupted while accepting stream",
-                    "accept",
-                    ZmuxErrorScope.SESSION,
-                    ZmuxErrorDirection.BOTH,
-                    interrupted
-            );
-        }
-        if (stream == null) {
-            throw NettyQuicSupport.acceptTimedOut();
-        }
-        saturatingIncrement(acceptedStreams);
-        return stream;
     }
 }

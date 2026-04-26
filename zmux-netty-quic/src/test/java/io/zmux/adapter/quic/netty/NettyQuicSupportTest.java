@@ -23,17 +23,6 @@ import static io.zmux.adapter.quic.netty.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NettyQuicSupportTest {
-    private static final class SelfCauseRuntimeException extends RuntimeException {
-        private SelfCauseRuntimeException(String message) {
-            super(message);
-        }
-
-        @Override
-        public synchronized Throwable getCause() {
-            return this;
-        }
-    }
-
     private static ZmuxErrorDetails requireDetails(Throwable error) {
         ZmuxErrorDetails details = ZmuxErrors.details(error);
         assertNotNull(details);
@@ -430,5 +419,16 @@ class NettyQuicSupportTest {
         assertEquals(ZmuxErrorScope.SESSION, cause.scope());
         assertEquals(ZmuxErrorSource.TRANSPORT, cause.source());
         assertEquals(ZmuxErrorDirection.BOTH, cause.direction());
+    }
+
+    private static final class SelfCauseRuntimeException extends RuntimeException {
+        private SelfCauseRuntimeException(String message) {
+            super(message);
+        }
+
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
     }
 }

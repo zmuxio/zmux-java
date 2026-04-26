@@ -14,10 +14,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class EstablishmentFailureTest {
-    private interface EstablishmentOpen {
-        void open(DuplexConnection connection) throws IOException;
-    }
-
     private static FrameCodec.Frame readFrame(BufferedInputStream input, Socket socket, int timeoutMillis) throws Exception {
         socket.setSoTimeout(timeoutMillis);
         try {
@@ -202,6 +198,10 @@ final class EstablishmentFailureTest {
                 () -> assertConstructorClosesTransportOnce("Zmux.clientSession", connection -> Zmux.clientSession(connection, ZmuxConfig.builder().build())),
                 () -> assertConstructorClosesTransportOnce("Zmux.serverSession", connection -> Zmux.serverSession(connection, ZmuxConfig.builder().build()))
         );
+    }
+
+    private interface EstablishmentOpen {
+        void open(DuplexConnection connection) throws IOException;
     }
 
     private static final class CountingDuplexConnection implements DuplexConnection {

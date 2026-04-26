@@ -186,20 +186,20 @@ final class OrdinaryBatchOrderer {
     }
 
     static final class Workspace {
-        private LinkedHashMap<GroupKey, BatchGroup> groups = new LinkedHashMap<>();
         private final ArrayList<BatchGroup> groupsInOrder = new ArrayList<>();
-        private HashMap<Long, GroupKey> explicitGroups = new HashMap<>();
         private final OrdinaryBatchRetainedState retainedState = new OrdinaryBatchRetainedState();
-        private LongIntCounterMap bypassSelections = new LongIntCounterMap();
         private final int[] activeSelectionCounts = new int[2];
-        private HashMap<GroupKey, Long> nextPreferredStreamHeads = new HashMap<>();
-        private HashSet<GroupKey> recordedGroupHeads = new HashSet<>();
         private final ArrayList<GroupCandidate> interactiveCandidates = new ArrayList<>();
         private final ArrayList<GroupCandidate> bulkCandidates = new ArrayList<>();
         private final ArrayList<BatchGroup> batchGroupPool = new ArrayList<>();
         private final ArrayList<BatchStreamState> batchStreamPool = new ArrayList<>();
         private final ArrayList<BatchEntry> batchEntryPool = new ArrayList<>();
         private final BatchBuild batchBuild = new BatchBuild(groupsInOrder);
+        private LinkedHashMap<GroupKey, BatchGroup> groups = new LinkedHashMap<>();
+        private HashMap<Long, GroupKey> explicitGroups = new HashMap<>();
+        private LongIntCounterMap bypassSelections = new LongIntCounterMap();
+        private HashMap<GroupKey, Long> nextPreferredStreamHeads = new HashMap<>();
+        private HashSet<GroupKey> recordedGroupHeads = new HashSet<>();
         private int[] ordered = new int[0];
         private boolean[] selected = new boolean[0];
         private int orderedSize;

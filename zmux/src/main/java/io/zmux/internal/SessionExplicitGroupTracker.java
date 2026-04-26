@@ -6,11 +6,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 final class SessionExplicitGroupTracker {
-    private Map<Long, Integer> activeExplicitGroupRefs = new HashMap<>();
-    private Map<Long, Integer> ordinaryBatchExplicitGroupRefs = new HashMap<>();
     private final OrdinaryBatchOrderer.RetainedBias ordinaryBatchBias;
     private final int maxExplicitGroups;
     private final long fallbackGroupBucket;
+    private Map<Long, Integer> activeExplicitGroupRefs = new HashMap<>();
+    private Map<Long, Integer> ordinaryBatchExplicitGroupRefs = new HashMap<>();
 
     SessionExplicitGroupTracker(OrdinaryBatchOrderer.RetainedBias ordinaryBatchBias,
                                 int maxExplicitGroups,

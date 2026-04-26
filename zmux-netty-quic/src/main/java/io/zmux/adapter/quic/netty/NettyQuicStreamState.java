@@ -9,9 +9,9 @@ import io.netty.channel.socket.DuplexChannelConfig;
 import io.netty.handler.codec.quic.QuicChannelOption;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.zmux.*;
+import io.zmux.internal.StreamIoSupport;
 import io.zmux.internal.TimeoutBudget;
 import io.zmux.internal.Varint62;
-import io.zmux.internal.StreamIoSupport;
 
 import java.io.EOFException;
 import java.io.IOException;

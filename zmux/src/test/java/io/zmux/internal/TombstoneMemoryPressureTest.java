@@ -1,7 +1,7 @@
 package io.zmux.internal;
 
-import io.zmux.Settings;
 import io.zmux.SessionStats;
+import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
 import org.junit.jupiter.api.Test;
 
