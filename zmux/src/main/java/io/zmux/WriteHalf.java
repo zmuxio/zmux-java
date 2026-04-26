@@ -24,7 +24,7 @@ public interface WriteHalf extends Closeable {
     }
 
     default int write(ByteBuffer src) throws IOException {
-        return StreamIoSupport.writeFromByteBuffer(src, (buffer, offset, length) -> write(buffer, offset, length));
+        return StreamIoSupport.writeFromByteBuffer(src, this);
     }
 
     default OutputStream asOutputStream() {

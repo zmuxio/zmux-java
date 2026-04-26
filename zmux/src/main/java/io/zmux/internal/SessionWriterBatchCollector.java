@@ -49,16 +49,13 @@ final class SessionWriterBatchCollector {
         while (batch.size() < this.maxBatchFrames && batchCost < effectiveCostLimit) {
             boolean progressed = false;
 
-            BatchAdvance advisoryBefore = this.drainAdvisoryOutboundLocked(
-                    batch,
-                    batchCost,
-                    effectiveCostLimit,
-                    trackWriterHeld
-            );
-            batchCost = advisoryBefore.batchCost;
-            progressed |= advisoryBefore.progressed;
-            if (advisoryBefore.terminal) {
-                return batchCost;
+            int advisoryBeforeSize = batch.size();
+            batchCost = this.drainAdvisoryOutboundLocked(batch, batchCost, trackWriterHeld);
+            if (batch.size() != advisoryBeforeSize) {
+                progressed = true;
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit)) {
+                    return batchCost;
+                }
             }
 
             SessionRuntime.OutboundFrame data = this.owner.pollQueuedOutboundLocked(this.owner.dataQueue());
@@ -66,23 +63,18 @@ final class SessionWriterBatchCollector {
                 this.owner.addBatchFrameLocked(batch, data, trackWriterHeld);
                 batchCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(data));
                 progressed = true;
-                if (data.frame().type() == FrameType.CLOSE
-                        || batch.size() >= this.maxBatchFrames
-                        || batchCost >= effectiveCostLimit) {
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit, data)) {
                     return batchCost;
                 }
             }
 
-            BatchAdvance advisoryAfter = this.drainAdvisoryOutboundLocked(
-                    batch,
-                    batchCost,
-                    effectiveCostLimit,
-                    trackWriterHeld
-            );
-            batchCost = advisoryAfter.batchCost;
-            progressed |= advisoryAfter.progressed;
-            if (advisoryAfter.terminal) {
-                return batchCost;
+            int advisoryAfterSize = batch.size();
+            batchCost = this.drainAdvisoryOutboundLocked(batch, batchCost, trackWriterHeld);
+            if (batch.size() != advisoryAfterSize) {
+                progressed = true;
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit)) {
+                    return batchCost;
+                }
             }
 
             if (!progressed) {
@@ -116,31 +108,29 @@ final class SessionWriterBatchCollector {
         );
     }
 
-    private AdvisoryBatchResult addAdvisoryOutboundLocked(List<SessionRuntime.OutboundFrame> batch,
-                                                          long batchCost,
-                                                          long effectiveCostLimit,
-                                                          boolean trackWriterHeld) throws IOException {
+    private long drainAdvisoryOutboundLocked(List<SessionRuntime.OutboundFrame> batch,
+                                             long batchCost,
+                                             boolean trackWriterHeld) throws IOException {
         SessionRuntime.OutboundFrame advisory = this.pollAdvisoryOutboundLocked();
         if (advisory == null) {
-            return AdvisoryBatchResult.EMPTY;
+            return batchCost;
         }
         this.owner.addBatchFrameLocked(batch, advisory, trackWriterHeld);
-        long updatedCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisory));
-        boolean terminal = advisory.frame().type() == FrameType.CLOSE
-                || batch.size() >= this.maxBatchFrames
-                || updatedCost >= effectiveCostLimit;
-        return new AdvisoryBatchResult(true, terminal, updatedCost);
+        return SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisory));
     }
 
-    private BatchAdvance drainAdvisoryOutboundLocked(List<SessionRuntime.OutboundFrame> batch,
-                                                     long batchCost,
-                                                     long effectiveCostLimit,
-                                                     boolean trackWriterHeld) throws IOException {
-        AdvisoryBatchResult advisory = this.addAdvisoryOutboundLocked(batch, batchCost, effectiveCostLimit, trackWriterHeld);
-        if (!advisory.added) {
-            return new BatchAdvance(false, false, batchCost);
-        }
-        return new BatchAdvance(true, advisory.terminal, advisory.batchCost);
+    private boolean batchTerminalLocked(List<SessionRuntime.OutboundFrame> batch,
+                                        long batchCost,
+                                        long effectiveCostLimit) {
+        return batch.size() >= this.maxBatchFrames || batchCost >= effectiveCostLimit;
+    }
+
+    private boolean batchTerminalLocked(List<SessionRuntime.OutboundFrame> batch,
+                                        long batchCost,
+                                        long effectiveCostLimit,
+                                        SessionRuntime.OutboundFrame outboundFrame) {
+        return outboundFrame.frame().type() == FrameType.CLOSE
+                || this.batchTerminalLocked(batch, batchCost, effectiveCostLimit);
     }
 
     private SessionRuntime.OutboundFrame pollAdvisoryOutboundLocked() throws IOException {
@@ -161,29 +151,4 @@ final class SessionWriterBatchCollector {
         }
     }
 
-    private static final class AdvisoryBatchResult {
-        private static final AdvisoryBatchResult EMPTY = new AdvisoryBatchResult(false, false, 0L);
-
-        private final boolean added;
-        private final boolean terminal;
-        private final long batchCost;
-
-        private AdvisoryBatchResult(boolean added, boolean terminal, long batchCost) {
-            this.added = added;
-            this.terminal = terminal;
-            this.batchCost = batchCost;
-        }
-    }
-
-    private static final class BatchAdvance {
-        private final boolean progressed;
-        private final boolean terminal;
-        private final long batchCost;
-
-        private BatchAdvance(boolean progressed, boolean terminal, long batchCost) {
-            this.progressed = progressed;
-            this.terminal = terminal;
-            this.batchCost = batchCost;
-        }
-    }
 }

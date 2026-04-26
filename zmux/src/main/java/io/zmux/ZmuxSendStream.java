@@ -22,7 +22,7 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
     }
 
     default int write(ByteBuffer src) throws IOException {
-        return StreamIoSupport.writeFromByteBuffer(src, (buffer, offset, length) -> write(buffer, offset, length));
+        return StreamIoSupport.writeFromByteBuffer(src, this);
     }
 
     int writeFinal(byte[] src, int offset, int length) throws IOException;

@@ -1,6 +1,8 @@
 package io.zmux.internal;
 
 import io.zmux.ErrorCode;
+import io.zmux.ReadHalf;
+import io.zmux.WriteHalf;
 import io.zmux.ZmuxErrorDirection;
 import io.zmux.ZmuxErrorScope;
 import io.zmux.ZmuxErrorSource;
@@ -16,17 +18,7 @@ public final class StreamIoSupport {
     private StreamIoSupport() {
     }
 
-    @FunctionalInterface
-    public interface ByteReader {
-        int read(byte[] dst, int offset, int length) throws IOException;
-    }
-
-    @FunctionalInterface
-    public interface ByteWriter {
-        void write(byte[] src, int offset, int length) throws IOException;
-    }
-
-    public static int readIntoByteBuffer(ByteBuffer dst, ByteReader reader) throws IOException {
+    public static int readIntoByteBuffer(ByteBuffer dst, ReadHalf reader) throws IOException {
         Objects.requireNonNull(dst, "dst");
         Objects.requireNonNull(reader, "reader");
         if (!dst.hasRemaining()) {
@@ -51,7 +43,7 @@ public final class StreamIoSupport {
         return read;
     }
 
-    public static int writeFromByteBuffer(ByteBuffer src, ByteWriter writer) throws IOException {
+    public static int writeFromByteBuffer(ByteBuffer src, WriteHalf writer) throws IOException {
         Objects.requireNonNull(src, "src");
         Objects.requireNonNull(writer, "writer");
         if (!src.hasRemaining()) {

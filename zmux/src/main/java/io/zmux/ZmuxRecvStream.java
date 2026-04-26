@@ -23,7 +23,7 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
     }
 
     default int read(ByteBuffer dst) throws IOException {
-        return StreamIoSupport.readIntoByteBuffer(dst, (buffer, offset, length) -> read(buffer, offset, length));
+        return StreamIoSupport.readIntoByteBuffer(dst, this);
     }
 
     default byte[] readAllBytes() throws IOException {

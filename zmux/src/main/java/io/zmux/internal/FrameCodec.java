@@ -336,14 +336,24 @@ public final class FrameCodec {
             this.metadataValid = metadataValid;
             this.priority = priority;
             this.group = group;
-            ByteSlice openInfoSlice = normalizeSlice(openInfoBytes, openInfoOffset, openInfoLength);
-            this.openInfoBytes = openInfoSlice.bytes;
-            this.openInfoOffset = openInfoSlice.offset;
-            this.openInfoLength = openInfoSlice.length;
-            ByteSlice appDataSlice = normalizeSlice(appData, appDataOffset, appDataLength);
-            this.appData = appDataSlice.bytes;
-            this.appDataOffset = appDataSlice.offset;
-            this.appDataLength = appDataSlice.length;
+            this.openInfoBytes = openInfoBytes == null ? EMPTY_BYTES : openInfoBytes;
+            if (openInfoLength <= 0) {
+                this.openInfoOffset = 0;
+                this.openInfoLength = 0;
+            } else {
+                RangeChecks.checkFromIndexSize(openInfoOffset, openInfoLength, this.openInfoBytes.length);
+                this.openInfoOffset = openInfoOffset;
+                this.openInfoLength = openInfoLength;
+            }
+            this.appData = appData == null ? EMPTY_BYTES : appData;
+            if (appDataLength <= 0) {
+                this.appDataOffset = 0;
+                this.appDataLength = 0;
+            } else {
+                RangeChecks.checkFromIndexSize(appDataOffset, appDataLength, this.appData.length);
+                this.appDataOffset = appDataOffset;
+                this.appDataLength = appDataLength;
+            }
         }
 
         public boolean hasMetadata() {
@@ -411,10 +421,15 @@ public final class FrameCodec {
             this.valid = valid;
             this.priority = priority;
             this.group = group;
-            ByteSlice openInfoSlice = normalizeSlice(openInfoBytes, openInfoOffset, openInfoLength);
-            this.openInfoBytes = openInfoSlice.bytes;
-            this.openInfoOffset = openInfoSlice.offset;
-            this.openInfoLength = openInfoSlice.length;
+            this.openInfoBytes = openInfoBytes == null ? EMPTY_BYTES : openInfoBytes;
+            if (openInfoLength <= 0) {
+                this.openInfoOffset = 0;
+                this.openInfoLength = 0;
+            } else {
+                RangeChecks.checkFromIndexSize(openInfoOffset, openInfoLength, this.openInfoBytes.length);
+                this.openInfoOffset = openInfoOffset;
+                this.openInfoLength = openInfoLength;
+            }
         }
 
         public boolean valid() {
@@ -530,27 +545,6 @@ public final class FrameCodec {
 
         public String reason() {
             return reason;
-        }
-    }
-
-    private static ByteSlice normalizeSlice(byte[] bytes, int offset, int length) {
-        byte[] normalizedBytes = bytes == null ? EMPTY_BYTES : bytes;
-        if (length <= 0) {
-            return new ByteSlice(normalizedBytes, 0, 0);
-        }
-        RangeChecks.checkFromIndexSize(offset, length, normalizedBytes.length);
-        return new ByteSlice(normalizedBytes, offset, length);
-    }
-
-    private static final class ByteSlice {
-        private final byte[] bytes;
-        private final int offset;
-        private final int length;
-
-        private ByteSlice(byte[] bytes, int offset, int length) {
-            this.bytes = bytes;
-            this.offset = offset;
-            this.length = length;
         }
     }
 

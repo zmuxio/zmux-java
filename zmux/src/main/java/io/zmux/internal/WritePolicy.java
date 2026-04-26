@@ -15,20 +15,28 @@ final class WritePolicy {
     static final long STRONG_FRAGMENT_TIME_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(100L);
     static final long SATURATED_FRAGMENT_TIME_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(50L);
     private static final long NANOS_PER_SECOND = TimeUnit.SECONDS.toNanos(1L);
+    private static final int[] WRITE_BURST_LIMITS = {
+            DEFAULT_WRITE_BURST_FRAMES,
+            MILD_WRITE_BURST_FRAMES,
+            STRONG_WRITE_BURST_FRAMES,
+            SATURATED_WRITE_BURST_FRAMES
+    };
+    private static final long[] FRAGMENT_TIME_BUDGETS = {
+            DEFAULT_FRAGMENT_TIME_BUDGET_NANOS,
+            MILD_FRAGMENT_TIME_BUDGET_NANOS,
+            STRONG_FRAGMENT_TIME_BUDGET_NANOS,
+            SATURATED_FRAGMENT_TIME_BUDGET_NANOS
+    };
 
     private WritePolicy() {
     }
 
     static int writeBurstLimit(long priority, SchedulerHint hint) {
-        return (int) selectBandValue(
-                priorityBand(priority),
-                hint,
-                MILD_WRITE_BURST_FRAMES,
-                STRONG_WRITE_BURST_FRAMES,
-                SATURATED_WRITE_BURST_FRAMES,
-                MILD_WRITE_BURST_FRAMES,
-                DEFAULT_WRITE_BURST_FRAMES
-        );
+        int band = priorityBand(priority);
+        if (band == 0 && hint == SchedulerHint.LATENCY) {
+            return MILD_WRITE_BURST_FRAMES;
+        }
+        return WRITE_BURST_LIMITS[band];
     }
 
     static long fragmentCap(long maxPayload, long prefixLen, long priority, SchedulerHint hint) {
@@ -69,15 +77,11 @@ final class WritePolicy {
     }
 
     static long fragmentTimeBudgetNanos(long priority, SchedulerHint hint) {
-        return selectBandValue(
-                priorityBand(priority),
-                hint,
-                MILD_FRAGMENT_TIME_BUDGET_NANOS,
-                STRONG_FRAGMENT_TIME_BUDGET_NANOS,
-                SATURATED_FRAGMENT_TIME_BUDGET_NANOS,
-                STRONG_FRAGMENT_TIME_BUDGET_NANOS,
-                DEFAULT_FRAGMENT_TIME_BUDGET_NANOS
-        );
+        int band = priorityBand(priority);
+        if (band == 0 && hint == SchedulerHint.LATENCY) {
+            return STRONG_FRAGMENT_TIME_BUDGET_NANOS;
+        }
+        return FRAGMENT_TIME_BUDGETS[band];
     }
 
     static long scaledFragmentCap(long max, long numerator, long denominator) {
@@ -106,26 +110,5 @@ final class WritePolicy {
             return 2;
         }
         return priority >= 1L ? 1 : 0;
-    }
-
-    private static long selectBandValue(int band,
-                                        SchedulerHint hint,
-                                        long mildValue,
-                                        long strongValue,
-                                        long saturatedValue,
-                                        long latencyDefaultValue,
-                                        long defaultValue) {
-        switch (band) {
-            case 3:
-                return saturatedValue;
-            case 2:
-                return strongValue;
-            case 1:
-                return mildValue;
-            default:
-                return hint == SchedulerHint.LATENCY
-                        ? latencyDefaultValue
-                        : defaultValue;
-        }
     }
 }

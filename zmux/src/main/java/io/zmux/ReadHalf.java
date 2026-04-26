@@ -23,7 +23,7 @@ public interface ReadHalf extends Closeable {
     }
 
     default int read(ByteBuffer dst) throws IOException {
-        return StreamIoSupport.readIntoByteBuffer(dst, (buffer, offset, length) -> read(buffer, offset, length));
+        return StreamIoSupport.readIntoByteBuffer(dst, this);
     }
 
     default InputStream asInputStream() {
