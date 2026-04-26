@@ -71,6 +71,28 @@ final class FrameCodecDiagTest {
     }
 
     @Test
+    void parseErrorPayloadOverlongUtf8DropsReason() throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, ErrorCode.PROTOCOL.code());
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xc0, (byte) 0xaf});
+
+        FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload.toByteArray());
+        assertEquals(ErrorCode.PROTOCOL.code(), parsed.code(), "error code mismatch");
+        assertEquals("", parsed.reason(), "overlong UTF-8 should not surface a replacement-character reason");
+    }
+
+    @Test
+    void parseErrorPayloadSurrogateUtf8DropsReason() throws Exception {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        Varint62.write(payload, ErrorCode.PROTOCOL.code());
+        appendTlv(payload, Protocol.DIAG_DEBUG_TEXT, new byte[]{(byte) 0xed, (byte) 0xa0, (byte) 0x80});
+
+        FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload.toByteArray());
+        assertEquals(ErrorCode.PROTOCOL.code(), parsed.code(), "error code mismatch");
+        assertEquals("", parsed.reason(), "surrogate UTF-8 should not surface a replacement-character reason");
+    }
+
+    @Test
     void buildGoAwayPayloadOmitsUnencodableReason() throws Exception {
         String invalidReason = new String(new char[]{'\uD83D'});
 

@@ -299,6 +299,34 @@ final class SessionEstablishmentCoordinator {
         }
     }
 
+    interface Owner {
+        FrameCodec.Decoder input();
+
+        BufferedOutputStream output();
+
+        Preface localPreface();
+
+        Object lock();
+
+        void markReadyLocked(Preface remotePreface, Negotiated negotiated, long readyAtNanos);
+
+        void notifyLockWaiters();
+
+        boolean supportsWriteDeadline();
+
+        void setWriteDeadline(Instant deadline) throws IOException;
+
+        Runnable readerLoopTask();
+
+        Runnable writerLoopTask();
+
+        IOException sessionInternalError(String operation, String message);
+
+        IOException sessionInternalError(String operation, String message, Throwable cause);
+
+        void closeTransport();
+    }
+
     private static final class EstablishmentWriteDeadline {
         private static final EstablishmentWriteDeadline DISABLED = new EstablishmentWriteDeadline(null);
         private final Owner owner;
@@ -350,33 +378,5 @@ final class SessionEstablishmentCoordinator {
             } catch (IOException ignored) {
             }
         }
-    }
-
-    interface Owner {
-        FrameCodec.Decoder input();
-
-        BufferedOutputStream output();
-
-        Preface localPreface();
-
-        Object lock();
-
-        void markReadyLocked(Preface remotePreface, Negotiated negotiated, long readyAtNanos);
-
-        void notifyLockWaiters();
-
-        boolean supportsWriteDeadline();
-
-        void setWriteDeadline(Instant deadline) throws IOException;
-
-        Runnable readerLoopTask();
-
-        Runnable writerLoopTask();
-
-        IOException sessionInternalError(String operation, String message);
-
-        IOException sessionInternalError(String operation, String message, Throwable cause);
-
-        void closeTransport();
     }
 }

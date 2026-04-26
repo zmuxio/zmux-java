@@ -3,10 +3,6 @@ package io.zmux.internal;
 import io.zmux.*;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CharsetDecoder;
-import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -184,11 +180,15 @@ final class MetadataCodec {
         if (!state.valid() || state.debugTextLength() == 0) {
             return "";
         }
-        try {
-            return decodeUtf8Strict(state.debugTextSource(), state.debugTextOffset(), state.debugTextLength());
-        } catch (CharacterCodingException ignored) {
+        if (!isValidUtf8(state.debugTextSource(), state.debugTextOffset(), state.debugTextLength())) {
             return "";
         }
+        return new String(
+                state.debugTextSource(),
+                state.debugTextOffset(),
+                state.debugTextLength(),
+                StandardCharsets.UTF_8
+        );
     }
 
     private static FrameCodec.DataPayload parseDataPayload(byte[] payload, int flags, boolean copyOpenInfo) throws IOException {
@@ -335,15 +335,61 @@ final class MetadataCodec {
         return true;
     }
 
-    private static String decodeUtf8Strict(byte[] value) throws CharacterCodingException {
-        return decodeUtf8Strict(value, 0, value.length);
+    private static boolean isValidUtf8(byte[] value, int offset, int length) {
+        int cursor = offset;
+        int limit = offset + length;
+        while (cursor < limit) {
+            int b1 = value[cursor++] & 0xff;
+            if (b1 < 0x80) {
+                continue;
+            }
+            if (b1 < 0xc2) {
+                return false;
+            }
+            if (b1 < 0xe0) {
+                if (cursor >= limit || !isUtf8Continuation(value[cursor++] & 0xff)) {
+                    return false;
+                }
+                continue;
+            }
+            if (b1 < 0xf0) {
+                if (cursor + 1 >= limit) {
+                    return false;
+                }
+                int b2 = value[cursor++] & 0xff;
+                int b3 = value[cursor++] & 0xff;
+                if (!isUtf8Continuation(b2) || !isUtf8Continuation(b3)) {
+                    return false;
+                }
+                if (b1 == 0xe0 && b2 < 0xa0) {
+                    return false;
+                }
+                if (b1 == 0xed && b2 >= 0xa0) {
+                    return false;
+                }
+                continue;
+            }
+            if (b1 >= 0xf5 || cursor + 2 >= limit) {
+                return false;
+            }
+            int b2 = value[cursor++] & 0xff;
+            int b3 = value[cursor++] & 0xff;
+            int b4 = value[cursor++] & 0xff;
+            if (!isUtf8Continuation(b2) || !isUtf8Continuation(b3) || !isUtf8Continuation(b4)) {
+                return false;
+            }
+            if (b1 == 0xf0 && b2 < 0x90) {
+                return false;
+            }
+            if (b1 == 0xf4 && b2 >= 0x90) {
+                return false;
+            }
+        }
+        return true;
     }
 
-    private static String decodeUtf8Strict(byte[] value, int offset, int length) throws CharacterCodingException {
-        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT);
-        return decoder.decode(ByteBuffer.wrap(value, offset, length)).toString();
+    private static boolean isUtf8Continuation(int value) {
+        return (value & 0xc0) == 0x80;
     }
 
     private static int writeVarintMetadata(byte[] output, int offset, long type, long value) throws IOException {

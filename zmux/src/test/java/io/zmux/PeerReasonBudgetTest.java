@@ -40,6 +40,16 @@ final class PeerReasonBudgetTest {
         throw new RuntimeException(error);
     }
 
+    private static ApplicationError readUntilApplicationError(ZmuxRecvStream stream) throws IOException {
+        byte[] buffer = new byte[32];
+        try {
+            stream.read(buffer);
+            return assertThrows(ApplicationError.class, () -> stream.read(buffer), "peer RESET should surface an ApplicationError");
+        } catch (ApplicationError error) {
+            return error;
+        }
+    }
+
     @Test
     void peerGoAwayReasonIsTrimmedAndReplacingItReleasesOldBytes() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
@@ -103,16 +113,6 @@ final class PeerReasonBudgetTest {
             ApplicationError error = readUntilApplicationError(accepted);
             assertEquals("ab", error.reason(), "RESET reason should be trimmed to the retained peer-reason budget");
             assertEquals(0L, peer.session().stats().retainedPeerReasonBytes(), "terminal compaction should release retained RESET reason bytes");
-        }
-    }
-
-    private static ApplicationError readUntilApplicationError(ZmuxRecvStream stream) throws IOException {
-        byte[] buffer = new byte[32];
-        try {
-            stream.read(buffer);
-            return assertThrows(ApplicationError.class, () -> stream.read(buffer), "peer RESET should surface an ApplicationError");
-        } catch (ApplicationError error) {
-            return error;
         }
     }
 
