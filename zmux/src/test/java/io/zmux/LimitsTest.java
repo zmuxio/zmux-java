@@ -3,6 +3,7 @@ package io.zmux;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class LimitsTest {
@@ -13,6 +14,21 @@ final class LimitsTest {
         assertEquals(Settings.defaults().maxFramePayload(), normalized.maxFramePayload());
         assertEquals(128L, normalized.maxControlPayloadBytes());
         assertEquals(Settings.defaults().maxExtensionPayloadBytes(), normalized.maxExtensionPayloadBytes());
+    }
+
+    @Test
+    void normalizeReusesExplicitNonZeroInstanceAndCachesResolvedZeroSentinel() {
+        Limits explicit = new Limits(128L, 256L, 512L);
+        assertSame(explicit, explicit.normalize());
+
+        Limits partial = new Limits(0L, 128L, 0L);
+        Limits first = partial.normalize();
+        Limits second = partial.normalize();
+
+        assertSame(first, second);
+        assertEquals(Settings.defaults().maxFramePayload(), first.maxFramePayload());
+        assertEquals(128L, first.maxControlPayloadBytes());
+        assertEquals(Settings.defaults().maxExtensionPayloadBytes(), first.maxExtensionPayloadBytes());
     }
 
     @Test

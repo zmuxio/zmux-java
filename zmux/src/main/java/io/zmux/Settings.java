@@ -30,6 +30,7 @@ public final class Settings {
     private final long maxControlPayloadBytes;
     private final long maxExtensionPayloadBytes;
     private final SchedulerHint schedulerHints;
+    private final Limits limits;
 
     public Settings(long initialMaxStreamDataBidiLocallyOpened,
                     long initialMaxStreamDataBidiPeerOpened,
@@ -66,6 +67,7 @@ public final class Settings {
         this.maxControlPayloadBytes = maxControlPayloadBytes;
         this.maxExtensionPayloadBytes = maxExtensionPayloadBytes;
         this.schedulerHints = schedulerHints == null ? SchedulerHint.UNSPECIFIED_OR_BALANCED : schedulerHints;
+        this.limits = new Limits(maxFramePayload, maxControlPayloadBytes, maxExtensionPayloadBytes);
     }
 
     public static Settings defaults() {
@@ -102,7 +104,7 @@ public final class Settings {
     }
 
     public Limits limits() {
-        return new Limits(maxFramePayload, maxControlPayloadBytes, maxExtensionPayloadBytes);
+        return limits;
     }
 
     public long initialMaxStreamDataBidiLocallyOpened() {

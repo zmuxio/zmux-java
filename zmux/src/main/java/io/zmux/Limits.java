@@ -6,6 +6,7 @@ public final class Limits {
     private final long maxFramePayload;
     private final long maxControlPayloadBytes;
     private final long maxExtensionPayloadBytes;
+    private transient volatile Limits normalized;
 
     public Limits(long maxFramePayload, long maxControlPayloadBytes, long maxExtensionPayloadBytes) {
         requireVarint62(maxFramePayload, "maxFramePayload");
@@ -14,6 +15,9 @@ public final class Limits {
         this.maxFramePayload = maxFramePayload;
         this.maxControlPayloadBytes = maxControlPayloadBytes;
         this.maxExtensionPayloadBytes = maxExtensionPayloadBytes;
+        if (maxFramePayload != 0L && maxControlPayloadBytes != 0L && maxExtensionPayloadBytes != 0L) {
+            this.normalized = this;
+        }
     }
 
     private static void requireVarint62(long value, String field) {
@@ -26,12 +30,18 @@ public final class Limits {
     }
 
     public Limits normalize() {
+        Limits cached = normalized;
+        if (cached != null) {
+            return cached;
+        }
         Settings defaults = Settings.defaults();
-        return new Limits(
+        Limits resolved = new Limits(
                 maxFramePayload == 0 ? defaults.maxFramePayload() : maxFramePayload,
                 maxControlPayloadBytes == 0 ? defaults.maxControlPayloadBytes() : maxControlPayloadBytes,
                 maxExtensionPayloadBytes == 0 ? defaults.maxExtensionPayloadBytes() : maxExtensionPayloadBytes
         );
+        normalized = resolved;
+        return resolved;
     }
 
     public long maxFramePayload() {

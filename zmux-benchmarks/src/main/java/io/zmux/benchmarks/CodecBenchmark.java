@@ -33,6 +33,15 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5, time = 1)
 @Fork(1)
 public class CodecBenchmark {
+    private static Limits baselineNormalize(Limits limits) {
+        Settings defaults = Settings.defaults();
+        return new Limits(
+                limits.maxFramePayload() == 0L ? defaults.maxFramePayload() : limits.maxFramePayload(),
+                limits.maxControlPayloadBytes() == 0L ? defaults.maxControlPayloadBytes() : limits.maxControlPayloadBytes(),
+                limits.maxExtensionPayloadBytes() == 0L ? defaults.maxExtensionPayloadBytes() : limits.maxExtensionPayloadBytes()
+        );
+    }
+
     @Benchmark
     public byte[] encodeVarint(CodecState state) throws Exception {
         return ZmuxCodec.encodeVarint(state.varintValue);
@@ -59,9 +68,57 @@ public class CodecBenchmark {
     }
 
     @Benchmark
+    public Frame parseFrameZeroSentinelLimits(CodecState state) throws Exception {
+        return ZmuxCodec.parseFrame(state.encodedFrame, state.zeroSentinelLimits).frame();
+    }
+
+    @Benchmark
+    public Frame parseFrameZeroSentinelLimitsBaseline(CodecState state) throws Exception {
+        return ZmuxCodec.parseFrame(state.encodedFrame, baselineNormalize(state.zeroSentinelLimits)).frame();
+    }
+
+    @Benchmark
+    public Limits normalizeZeroSentinelLimits(CodecState state) {
+        return state.zeroSentinelLimits.normalize();
+    }
+
+    @Benchmark
+    public Limits normalizeZeroSentinelLimitsBaseline(CodecState state) {
+        return baselineNormalize(state.zeroSentinelLimits);
+    }
+
+    @Benchmark
+    public Limits settingsLimits(CodecState state) {
+        return state.settings.limits();
+    }
+
+    @Benchmark
+    public Limits settingsLimitsBaseline(CodecState state) {
+        return new Limits(
+                state.settings.maxFramePayload(),
+                state.settings.maxControlPayloadBytes(),
+                state.settings.maxExtensionPayloadBytes()
+        );
+    }
+
+    @Benchmark
     public void writeFrame(CodecState state, Blackhole blackhole) throws Exception {
         state.output.reset();
         ZmuxCodec.writeFrame(state.output, state.dataFrame, state.limits);
+        blackhole.consume(state.output.size());
+    }
+
+    @Benchmark
+    public void writeFrameZeroSentinelLimits(CodecState state, Blackhole blackhole) throws Exception {
+        state.output.reset();
+        ZmuxCodec.writeFrame(state.output, state.dataFrame, state.zeroSentinelLimits);
+        blackhole.consume(state.output.size());
+    }
+
+    @Benchmark
+    public void writeFrameZeroSentinelLimitsBaseline(CodecState state, Blackhole blackhole) throws Exception {
+        state.output.reset();
+        ZmuxCodec.writeFrame(state.output, state.dataFrame, baselineNormalize(state.zeroSentinelLimits));
         blackhole.consume(state.output.size());
     }
 
@@ -85,7 +142,9 @@ public class CodecBenchmark {
         byte[] tlvValue;
         Frame dataFrame;
         byte[] encodedFrame;
+        Settings settings;
         Limits limits;
+        Limits zeroSentinelLimits;
         Preface preface;
         ByteArrayOutputStream output;
 
@@ -97,7 +156,9 @@ public class CodecBenchmark {
             tlvValue = "benchmark-metadata".getBytes(StandardCharsets.UTF_8);
             dataFrame = new Frame(FrameType.DATA, 0, 4L, "benchmark-payload".getBytes(StandardCharsets.UTF_8));
             output = new ByteArrayOutputStream(256);
-            limits = Settings.defaults().limits();
+            settings = Settings.defaults();
+            limits = settings.limits();
+            zeroSentinelLimits = new Limits(0L, 0L, 0L);
             ZmuxCodec.writeFrame(output, dataFrame, limits);
             encodedFrame = output.toByteArray();
             preface = new Preface(
@@ -107,7 +168,7 @@ public class CodecBenchmark {
                     Protocol.PROTO_VERSION,
                     Protocol.PROTO_VERSION,
                     CAPABILITIES,
-                    Settings.defaults()
+                    settings
             );
         }
     }

@@ -3,6 +3,7 @@ package io.zmux;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class SettingsTest {
@@ -34,5 +35,12 @@ final class SettingsTest {
                 .build();
 
         assertEquals(SchedulerHint.UNSPECIFIED_OR_BALANCED, settings.schedulerHints());
+    }
+
+    @Test
+    void limitsViewIsCached() {
+        Settings settings = Settings.defaults();
+
+        assertSame(settings.limits(), settings.limits());
     }
 }
