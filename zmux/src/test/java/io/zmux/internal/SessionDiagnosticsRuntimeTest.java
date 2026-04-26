@@ -887,6 +887,34 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void readerProtocolFailureReturnsPooledInboundPayloadOnHandlerError() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        new java.io.ByteArrayInputStream(encodeFrame(FrameType.PING, 0, 0L, new byte[]{1})),
+                        SessionRuntimeTestSupport.discardingOutput()
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        Field poolField = SessionRuntime.class.getDeclaredField("inboundPayloadPool");
+        poolField.setAccessible(true);
+        InboundPayloadPool pool = (InboundPayloadPool) poolField.get(runtime);
+        InboundPayloadPool.Handle seeded = pool.acquire(1);
+        assertNotNull(seeded, "test requires payload pooling for 1-byte frames");
+        seeded.release();
+        assertEquals(1L, pool.retainedBytes(), "seeded pool should retain one 1-byte payload buffer before the read loop runs");
+
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread reader = startReaderLoop(runtime, failure, "session-reader-protocol-pool-release");
+        reader.join(1_000L);
+
+        assertFalse(reader.isAlive(), "reader loop should terminate after protocol failure");
+        assertNull(failure.get(), "reader loop should retain the protocol failure in runtime state");
+        assertEquals(1L, pool.retainedBytes(), "handler failure should return the borrowed pooled payload buffer to the inbound pool");
+    }
+
+    @Test
     void gracefulCloseTimeoutTracksDiagnostic() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 io.zmux.ZmuxConfig.builder()
