@@ -6,7 +6,9 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,26 +27,33 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 final class GoInteropSmokeTest {
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(20);
 
-    private static void runJavaClient(String address) throws Exception {
-        String[] hostPort = address.split(":");
-        String host = hostPort[0];
-        int port = Integer.parseInt(hostPort[1]);
+    private static ZmuxConfig interopConfig() {
         long capabilities = Protocol.CAPABILITY_OPEN_METADATA
                 | Protocol.CAPABILITY_PRIORITY_UPDATE
                 | Protocol.CAPABILITY_PRIORITY_HINTS
                 | Protocol.CAPABILITY_STREAM_GROUPS;
-        ZmuxConfig config = ZmuxConfig.defaults()
+        return ZmuxConfig.defaults()
                 .toBuilder()
                 .capabilities(capabilities)
                 .build();
+    }
+
+    private static BasicDuplexConnection socketConnection(Socket socket) throws IOException {
+        return new BasicDuplexConnection(
+                socket.getInputStream(),
+                socket.getOutputStream(),
+                socket,
+                socket.getLocalSocketAddress(),
+                socket.getRemoteSocketAddress()
+        );
+    }
+
+    private static void runJavaClient(String address) throws Exception {
+        String[] hostPort = address.split(":");
+        String host = hostPort[0];
+        int port = Integer.parseInt(hostPort[1]);
         try (Socket socket = new Socket(host, port);
-             ZmuxNativeSession session = Zmux.client(new BasicDuplexConnection(
-                     socket.getInputStream(),
-                     socket.getOutputStream(),
-                     socket,
-                     socket.getLocalSocketAddress(),
-                     socket.getRemoteSocketAddress()
-             ), config)) {
+             ZmuxNativeSession session = Zmux.client(socketConnection(socket), interopConfig())) {
             OpenOptions options = new OpenOptions(
                     7L,
                     9L,
@@ -60,6 +69,30 @@ final class GoInteropSmokeTest {
                 response.write(buffer, 0, read);
             }
             assertEquals("go:java->go", response.toString(StandardCharsets.UTF_8.name()));
+            session.close();
+            session.awaitTerminationOrThrow(Duration.ofSeconds(5));
+        }
+    }
+
+    private static void runJavaServer(Socket socket) throws Exception {
+        try (Socket acceptedSocket = socket;
+             ZmuxNativeSession session = Zmux.server(socketConnection(acceptedSocket), interopConfig())) {
+            ZmuxNativeStream stream = session.acceptStream(Duration.ofSeconds(5));
+            assertEquals("go-open", new String(stream.openInfo(), StandardCharsets.UTF_8.name()));
+            StreamMetadata metadata = stream.metadata();
+            assertEquals(7L, metadata.priority());
+            assertEquals(Long.valueOf(9L), metadata.group());
+
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
+            byte[] buffer = new byte[64];
+            int read;
+            while ((read = stream.read(buffer)) >= 0) {
+                payload.write(buffer, 0, read);
+            }
+            assertEquals("go->java", payload.toString(StandardCharsets.UTF_8.name()));
+            stream.writeFinal("java:go->java".getBytes(StandardCharsets.UTF_8));
+            stream.close();
+
             session.close();
             session.awaitTerminationOrThrow(Duration.ofSeconds(5));
         }
@@ -244,6 +277,75 @@ final class GoInteropSmokeTest {
                 "");
     }
 
+    private static String goClientMain() {
+        return String.join("\n",
+                "package main",
+                "",
+                "import (",
+                "    \"context\"",
+                "    \"fmt\"",
+                "    \"io\"",
+                "    \"net\"",
+                "    \"os\"",
+                "    \"time\"",
+                "",
+                "    zmux \"github.com/zmuxio/zmux-go\"",
+                ")",
+                "",
+                "func fatal(format string, args ...any) {",
+                "    fmt.Fprintf(os.Stdout, \"ERR \"+format+\"\\n\", args...)",
+                "    os.Exit(1)",
+                "}",
+                "",
+                "func main() {",
+                "    if len(os.Args) != 2 {",
+                "        fatal(\"usage: main <addr>\")",
+                "    }",
+                "    raw, err := net.Dial(\"tcp\", os.Args[1])",
+                "    if err != nil {",
+                "        fatal(\"dial: %v\", err)",
+                "    }",
+                "    caps := zmux.CapabilityOpenMetadata | zmux.CapabilityPriorityUpdate | zmux.CapabilityPriorityHints | zmux.CapabilityStreamGroups",
+                "    session, err := zmux.Client(raw, &zmux.Config{Capabilities: caps})",
+                "    if err != nil {",
+                "        fatal(\"client: %v\", err)",
+                "    }",
+                "    defer session.Close()",
+                "",
+                "    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)",
+                "    defer cancel()",
+                "    priority := uint64(7)",
+                "    group := uint64(9)",
+                "    stream, err := session.OpenStreamWithOptions(ctx, zmux.OpenOptions{",
+                "        InitialPriority: &priority,",
+                "        InitialGroup:    &group,",
+                "        OpenInfo:        []byte(\"go-open\"),",
+                "    })",
+                "    if err != nil {",
+                "        fatal(\"open stream: %v\", err)",
+                "    }",
+                "    if _, err := stream.WriteFinal([]byte(\"go->java\")); err != nil {",
+                "        fatal(\"write final: %v\", err)",
+                "    }",
+                "    response, err := io.ReadAll(stream)",
+                "    if err != nil {",
+                "        fatal(\"read response: %v\", err)",
+                "    }",
+                "    if got := string(response); got != \"java:go->java\" {",
+                "        fatal(\"response = %q\", got)",
+                "    }",
+                "    if err := session.Close(); err != nil {",
+                "        fatal(\"close session: %v\", err)",
+                "    }",
+                "    waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)",
+                "    defer waitCancel()",
+                "    if err := session.Wait(waitCtx); err != nil {",
+                "        fatal(\"wait: %v\", err)",
+                "    }",
+                "}",
+                "");
+    }
+
     @Test
     void javaClientTalksToGoServerWithOpenMetadata() throws Exception {
         assumeTrue("1".equals(System.getenv("ZMUX_INTEROP")), "set ZMUX_INTEROP=1 to run Java/Go interop smoke");
@@ -270,6 +372,47 @@ final class GoInteropSmokeTest {
             assertEquals(0, process.exitValue(), rest);
         } finally {
             terminateProcess(process);
+            deleteTree(work);
+        }
+    }
+
+    @Test
+    void goClientTalksToJavaServerWithOpenMetadata() throws Exception {
+        assumeTrue("1".equals(System.getenv("ZMUX_INTEROP")), "set ZMUX_INTEROP=1 to run Java/Go interop smoke");
+        String goRootEnv = System.getenv("ZMUX_GO_ROOT");
+        assumeTrue(goRootEnv != null && !goRootEnv.trim().isEmpty(), "set ZMUX_GO_ROOT to the Go implementation root");
+        Path goRoot = Paths.get(goRootEnv);
+        assumeTrue(Files.isDirectory(goRoot), "Go implementation root not found: " + goRoot);
+        assumeTrue(commandExists("go"), "go executable not found");
+
+        Path work = Files.createTempDirectory("zmux-go-java-interop-");
+        Files.write(work.resolve("go.mod"), goMod(goRoot).getBytes(StandardCharsets.UTF_8));
+        Files.write(work.resolve("main.go"), goClientMain().getBytes(StandardCharsets.UTF_8));
+
+        try (ServerSocket listener = new ServerSocket()) {
+            listener.bind(new InetSocketAddress("127.0.0.1", 0));
+            CompletableFuture<Void> serverFuture = CompletableFuture.runAsync(() -> {
+                try {
+                    runJavaServer(listener.accept());
+                } catch (Exception error) {
+                    throw new RuntimeException(error);
+                }
+            });
+
+            String address = "127.0.0.1:" + listener.getLocalPort();
+            Process process = new ProcessBuilder("go", "run", ".", address)
+                    .directory(work.toFile())
+                    .redirectErrorStream(true)
+                    .start();
+            try (BufferedReader output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                assertTrue(process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS), "go helper did not exit");
+                String rest = output.lines().collect(Collectors.joining("\n"));
+                assertEquals(0, process.exitValue(), rest);
+                serverFuture.get(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } finally {
+                terminateProcess(process);
+            }
+        } finally {
             deleteTree(work);
         }
     }
