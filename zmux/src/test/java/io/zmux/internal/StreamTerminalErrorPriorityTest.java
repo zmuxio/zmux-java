@@ -7,6 +7,33 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 final class StreamTerminalErrorPriorityTest {
+    private static void commitLocalStream(SessionRuntime runtime, StreamRuntime stream) throws Exception {
+        synchronized (runtime.lock()) {
+            runtime.beginLocalOpenLocked(stream);
+            runtime.markLocalStreamOpeningCommittedLocked(stream);
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "markPeerVisibleLocked",
+                    new Class<?>[]{StreamRuntime.class},
+                    stream
+            );
+        }
+    }
+
+    private static void assertSessionCloseHalfError(
+            ApplicationError error,
+            long expectedCode,
+            String expectedReason,
+            ZmuxErrorDirection expectedDirection
+    ) {
+        assertEquals(expectedCode, error.code(), "session-close stream error code mismatch");
+        assertEquals(expectedReason, error.reason(), "session-close stream error reason mismatch");
+        assertEquals(ZmuxErrorScope.STREAM, error.scope(), "session-close stream error scope mismatch");
+        assertEquals(ZmuxErrorSource.LOCAL, error.source(), "session-close stream error source mismatch");
+        assertEquals(expectedDirection, error.direction(), "session-close stream error direction mismatch");
+        assertEquals(ZmuxTerminationKind.SESSION_TERMINATION, error.terminationKind(), "session-close stream termination mismatch");
+    }
+
     @Test
     void peerResetPreservesStructuredRemoteResetErrorInOperationError() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -128,6 +155,96 @@ final class StreamTerminalErrorPriorityTest {
             assertEquals(ZmuxErrorSource.REMOTE, error.source(), "peer FIN source mismatch");
             assertEquals(ZmuxErrorDirection.READ, error.direction(), "peer FIN direction mismatch");
             assertEquals(ZmuxTerminationKind.GRACEFUL, error.terminationKind(), "peer FIN termination mismatch");
+        }
+    }
+
+    @Test
+    void fatalSessionClosePreservesErrorCodeOnLiveAndProvisionalStreams() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime live = (StreamRuntime) runtime.openStream();
+        commitLocalStream(runtime, live);
+        StreamRuntime provisional = (StreamRuntime) runtime.openStream();
+
+        runtime.closeWithError(ErrorCode.FRAME_SIZE.code(), "payload too large");
+
+        synchronized (runtime.lock()) {
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, live.terminalStateInternal().sendCloseError()),
+                    ErrorCode.FRAME_SIZE.code(),
+                    "payload too large",
+                    ZmuxErrorDirection.WRITE
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, live.terminalStateInternal().recvCloseError()),
+                    ErrorCode.FRAME_SIZE.code(),
+                    "payload too large",
+                    ZmuxErrorDirection.READ
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, provisional.terminalStateInternal().sendCloseError()),
+                    ErrorCode.FRAME_SIZE.code(),
+                    "payload too large",
+                    ZmuxErrorDirection.WRITE
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, provisional.terminalStateInternal().recvCloseError()),
+                    ErrorCode.FRAME_SIZE.code(),
+                    "payload too large",
+                    ZmuxErrorDirection.READ
+            );
+        }
+    }
+
+    @Test
+    void keepaliveTimeoutPreservesErrorCodeAndReasonOnLiveAndProvisionalStreams() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .keepaliveInterval(java.time.Duration.ofMillis(10))
+                .keepaliveTimeout(java.time.Duration.ofMillis(1))
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+        StreamRuntime live = (StreamRuntime) runtime.openStream();
+        commitLocalStream(runtime, live);
+        StreamRuntime provisional = (StreamRuntime) runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.setField(
+                    runtime,
+                    "activePing",
+                    SessionRuntimeTestSupport.newPendingPing(
+                            System.nanoTime() - java.time.Duration.ofSeconds(1).toNanos(),
+                            new byte[]{1}
+                    )
+            );
+        }
+
+        runtime.closeForKeepaliveTimeout();
+
+        synchronized (runtime.lock()) {
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, live.terminalStateInternal().sendCloseError()),
+                    SessionTelemetryState.keepaliveTimeoutCode(),
+                    SessionTelemetryState.keepaliveTimeoutReason(),
+                    ZmuxErrorDirection.WRITE
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, live.terminalStateInternal().recvCloseError()),
+                    SessionTelemetryState.keepaliveTimeoutCode(),
+                    SessionTelemetryState.keepaliveTimeoutReason(),
+                    ZmuxErrorDirection.READ
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, provisional.terminalStateInternal().sendCloseError()),
+                    SessionTelemetryState.keepaliveTimeoutCode(),
+                    SessionTelemetryState.keepaliveTimeoutReason(),
+                    ZmuxErrorDirection.WRITE
+            );
+            assertSessionCloseHalfError(
+                    assertInstanceOf(ApplicationError.class, provisional.terminalStateInternal().recvCloseError()),
+                    SessionTelemetryState.keepaliveTimeoutCode(),
+                    SessionTelemetryState.keepaliveTimeoutReason(),
+                    ZmuxErrorDirection.READ
+            );
         }
     }
 }
