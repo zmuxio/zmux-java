@@ -5,6 +5,9 @@ Java implementation of the ZMux stream multiplexing protocol.
 Released artifacts are Java 8+ compatible. If you import the source modules
 directly into your application build, they follow your application's Java
 configuration.
+Supported public APIs live under `io.zmux` and
+`io.zmux.adapter.quic.netty`; `io.zmux.internal` remains an implementation
+detail and is not covered by compatibility guarantees.
 
 ## Installation
 
@@ -150,10 +153,11 @@ Optional Netty QUIC adapter:
 
 ### Gradle From A Local Maven Install
 
-Install once:
+If you want locally installed artifacts to match the Java 8-compatible release
+build, install with the compatibility profile once:
 
 ```bash
-mvn -DskipTests install
+mvn -Pjava8-compat -DskipTests install
 ```
 
 Then use `mavenLocal()`:
@@ -172,10 +176,10 @@ dependencies {
 ### Maven From A Local Maven Install
 
 If you already have the source checkout and want to install it into your local
-Maven cache:
+Maven cache with the same Java 8-compatible bytecode as the published release:
 
 ```bash
-mvn -DskipTests install
+mvn -Pjava8-compat -DskipTests install
 ```
 
 Then use the Maven Central coordinates shown above. Maven checks the local
@@ -436,13 +440,16 @@ paused reads, writes, and directional closes can still be bounded.
 ### Existing Buffers
 
 If your payload already lives in a slice or `ByteBuffer`, you can send it
-directly without opening the stream and writing in two separate steps:
+directly without opening the stream and writing in two separate steps.
+`openAndSend(...)` seeds a bidirectional stream and leaves it open for later
+writes; `openUniAndSend(...)` writes the payload as the final contents of the
+unidirectional stream:
 
 ```java
 import java.nio.ByteBuffer;
 
 byte[] frame = ...;
-ZmuxStream bidi = session.openAndSend(frame, 4, 128);
+ZmuxStream bidi = session.openAndSend(frame, 4, 128); // stream stays open
 ZmuxSendStream uni = session.openUniAndSend(ByteBuffer.wrap(frame, 132, 64));
 ```
 
@@ -572,20 +579,21 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 QuicChannel channel = ...;
-
-try (ZmuxSession session = NettyQuic.wrapSession(channel);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-}
-
 NettyQuicSessionOptions options = NettyQuicSessionOptions.defaults()
         .withAcceptedPreludeReadTimeout(Duration.ofSeconds(2))
         .withAcceptedPreludeMaxConcurrent(16);
-ZmuxSession tuned = NettyQuic.wrapSessionWithOptions(channel, options);
+
+// Call the blocking zmux APIs from an application / worker thread, not from
+// the Netty event loop.
+try (ZmuxSession session = NettyQuic.wrapSessionWithOptions(channel, options);
+     ZmuxStream stream = session.openStream()) {
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+}
 ```
 
 The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
 `ZmuxSendStream`, and `ZmuxRecvStream` interfaces as the native transport, and
 its concrete stream objects also implement the native stream state-query
 interfaces. Use `zmux-netty-quic` only when the underlying transport is
-already a Netty `QuicChannel`.
+already a Netty `QuicChannel`. The adapter methods are intentionally blocking,
+so do not call them from the Netty event loop.
