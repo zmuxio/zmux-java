@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
@@ -43,6 +44,7 @@ final class NettyQuicSupport {
             STREAM_INBOUND_AUTO_READ_HIGH_WATERMARK >>> 1;
     static final byte[] EMPTY_STREAM_PRELUDE = new byte[]{0};
     static final ZmuxSession CLOSED_SESSION = Zmux.closedSession();
+    private static final int MAX_ERROR_UNWRAP_DEPTH = 64;
     private static final AtomicLong PRELUDE_WORKER_SEQUENCE = new AtomicLong();
     private static final int ACCEPTED_PRELUDE_WORKER_MAX = positiveIntegerProperty(
             "io.zmux.netty.acceptedPreludeWorkers",
@@ -268,8 +270,17 @@ final class NettyQuicSupport {
     }
 
     static IOException translateThrowable(Throwable cause) {
+        return translateThrowable(cause, new IdentityHashMap<>(), 0);
+    }
+
+    private static IOException translateThrowable(Throwable cause,
+                                                  IdentityHashMap<Throwable, Boolean> seen,
+                                                  int depth) {
         if (cause == null) {
             return sessionClosedError(ZmuxErrorSource.TRANSPORT);
+        }
+        if (depth > MAX_ERROR_UNWRAP_DEPTH || seen.put(cause, Boolean.TRUE) != null) {
+            return transportRuntimeFailure(cause);
         }
         if (cause instanceof io.netty.channel.socket.ChannelOutputShutdownException) {
             io.netty.channel.socket.ChannelOutputShutdownException shutdown =
@@ -318,13 +329,15 @@ final class NettyQuicSupport {
         if (cause instanceof CancellationException) {
             CancellationException cancelled = (CancellationException) cause;
             IOException nested = nestedIOException(cancelled.getCause());
-            return nested == null ? sessionClosedError(ZmuxErrorSource.TRANSPORT, cancelled) : translateThrowable(nested);
+            return nested == null
+                    ? sessionClosedError(ZmuxErrorSource.TRANSPORT, cancelled)
+                    : translateThrowable(nested, seen, depth + 1);
         }
         if (cause instanceof IOException) {
             IOException ioException = (IOException) cause;
             IOException nested = nestedIOException(ioException.getCause());
             if (nested != null) {
-                return translateThrowable(nested);
+                return translateThrowable(nested, seen, depth + 1);
             }
             if (ZmuxErrors.details(ioException) != null) {
                 return ioException;
@@ -333,7 +346,7 @@ final class NettyQuicSupport {
         }
         IOException nested = nestedIOException(cause.getCause());
         if (nested != null) {
-            return translateThrowable(nested);
+            return translateThrowable(nested, seen, depth + 1);
         }
         return transportRuntimeFailure(cause);
     }
@@ -643,11 +656,14 @@ final class NettyQuicSupport {
 
     private static IOException nestedIOException(Throwable cause) {
         Throwable current = cause;
-        while (current != null) {
+        IdentityHashMap<Throwable, Boolean> seen = new IdentityHashMap<>();
+        int depth = 0;
+        while (current != null && depth <= MAX_ERROR_UNWRAP_DEPTH && seen.put(current, Boolean.TRUE) == null) {
             if (current instanceof IOException) {
                 return (IOException) current;
             }
             current = current.getCause();
+            depth++;
         }
         return null;
     }

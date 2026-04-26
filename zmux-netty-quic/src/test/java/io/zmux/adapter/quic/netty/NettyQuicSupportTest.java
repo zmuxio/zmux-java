@@ -9,6 +9,7 @@ import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Constructor;
 import java.nio.channels.ClosedChannelException;
@@ -22,6 +23,17 @@ import static io.zmux.adapter.quic.netty.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NettyQuicSupportTest {
+    private static final class SelfCauseRuntimeException extends RuntimeException {
+        private SelfCauseRuntimeException(String message) {
+            super(message);
+        }
+
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
+    }
+
     private static ZmuxErrorDetails requireDetails(Throwable error) {
         ZmuxErrorDetails details = ZmuxErrors.details(error);
         assertNotNull(details);
@@ -371,6 +383,36 @@ class NettyQuicSupportTest {
         assertEquals(ZmuxErrorDirection.BOTH, details.direction());
         assertEquals(ZmuxTerminationKind.SESSION_TERMINATION, details.terminationKind());
         assertEquals("adapter-runtime-failure", error.getMessage());
+    }
+
+    @Test
+    void cyclicRuntimeCauseTranslatesAsBoundedTransportFailure() {
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                NettyQuicSupport.translateThrowable(new SelfCauseRuntimeException("cyclic-runtime"))
+        );
+
+        ZmuxErrorDetails details = requireDetails(error);
+        assertEquals(io.zmux.ErrorCode.INTERNAL.code(), details.code());
+        assertEquals(ZmuxErrorSource.TRANSPORT, details.source());
+        assertEquals("cyclic-runtime", error.getMessage());
+    }
+
+    @Test
+    void cyclicNestedIoCauseTranslatesAsBoundedTransportFailure() {
+        IOException first = new IOException("first-io");
+        IOException second = new IOException("second-io");
+        first.initCause(second);
+        second.initCause(first);
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                NettyQuicSupport.translateThrowable(first)
+        );
+
+        ZmuxErrorDetails details = requireDetails(error);
+        assertEquals(io.zmux.ErrorCode.INTERNAL.code(), details.code());
+        assertEquals(ZmuxErrorSource.TRANSPORT, details.source());
     }
 
     @Test

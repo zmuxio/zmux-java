@@ -19,6 +19,17 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ApiSurfaceTest {
+    private static final class SelfCauseIOException extends IOException {
+        private SelfCauseIOException(String message) {
+            super(message);
+        }
+
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
+    }
+
     private static void rethrow(Throwable error) throws Exception {
         if (error == null) {
             return;
@@ -801,6 +812,49 @@ final class ApiSurfaceTest {
 
         assertNull(ZmuxErrors.find(plain, ApplicationError.class));
         assertNull(ZmuxErrors.applicationError(plain));
+    }
+
+    @Test
+    void structuredErrorLookupHandlesCyclicCauseChain() {
+        IOException first = new IOException("first");
+        IOException second = new IOException("second");
+        first.initCause(second);
+        second.initCause(first);
+
+        assertNull(ZmuxErrors.find(first, ApplicationError.class));
+        assertNull(ZmuxErrors.details(first));
+        assertEquals("first", ZmuxErrors.reason(first));
+    }
+
+    @Test
+    void structuredErrorLookupStopsAtBoundedDepth() {
+        Throwable wrapped = new ApplicationError(
+                ErrorCode.CANCELLED,
+                "too-deep",
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        );
+        for (int index = 0; index < 70; index++) {
+            wrapped = new IOException("wrapper-" + index, wrapped);
+        }
+
+        assertNull(ZmuxErrors.applicationError(wrapped));
+        assertFalse(ZmuxErrors.hasCode(wrapped));
+        assertEquals("wrapper-69", ZmuxErrors.reason(wrapped));
+    }
+
+    @Test
+    void writeClosedNestedDetailsHandlesCyclicCause() {
+        WriteClosedException writeClosed = new WriteClosedException(
+                ZmuxErrorSource.REMOTE,
+                ZmuxTerminationKind.STOPPED,
+                new SelfCauseIOException("cyclic")
+        );
+
+        assertEquals(-1L, writeClosed.code());
+        assertEquals("", writeClosed.reason());
     }
 
     @Test

@@ -2,10 +2,11 @@ package io.zmux;
 
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
-import java.util.ArrayDeque;
 import java.util.IdentityHashMap;
 
 public final class ZmuxErrors {
+    private static final int MAX_ERROR_UNWRAP_DEPTH = 64;
+
     private ZmuxErrors() {
     }
 
@@ -13,24 +14,28 @@ public final class ZmuxErrors {
         if (error == null || type == null) {
             return null;
         }
-        ArrayDeque<Throwable> pending = new ArrayDeque<>();
-        IdentityHashMap<Throwable, Boolean> seen = new IdentityHashMap<>();
-        pending.push(error);
-        while (!pending.isEmpty()) {
-            Throwable current = pending.pop();
-            if (seen.put(current, Boolean.TRUE) != null) {
-                continue;
-            }
-            if (type.isInstance(current)) {
-                return type.cast(current);
-            }
-            Throwable[] suppressed = current.getSuppressed();
-            for (int i = suppressed.length - 1; i >= 0; i--) {
-                pending.push(suppressed[i]);
-            }
-            Throwable cause = current.getCause();
-            if (cause != null) {
-                pending.push(cause);
+        return find(error, type, new IdentityHashMap<>(), 0);
+    }
+
+    private static <T> T find(Throwable error,
+                              Class<T> type,
+                              IdentityHashMap<Throwable, Boolean> seen,
+                              int depth) {
+        if (error == null || depth > MAX_ERROR_UNWRAP_DEPTH || seen.put(error, Boolean.TRUE) != null) {
+            return null;
+        }
+        if (type.isInstance(error)) {
+            return type.cast(error);
+        }
+        T found = find(error.getCause(), type, seen, depth + 1);
+        if (found != null) {
+            return found;
+        }
+        Throwable[] suppressed = error.getSuppressed();
+        for (Throwable child : suppressed) {
+            found = find(child, type, seen, depth + 1);
+            if (found != null) {
+                return found;
             }
         }
         return null;

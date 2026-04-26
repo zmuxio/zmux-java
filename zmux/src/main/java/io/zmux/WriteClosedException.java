@@ -1,9 +1,12 @@
 package io.zmux;
 
 import java.io.IOException;
+import java.util.IdentityHashMap;
 
 public final class WriteClosedException extends IOException implements ZmuxErrorDetails {
     public static final String MESSAGE = "zmux: write side closed";
+    private static final int MAX_ERROR_UNWRAP_DEPTH = 64;
+
     private final ZmuxErrorSource source;
     private final ZmuxTerminationKind terminationKind;
 
@@ -64,11 +67,14 @@ public final class WriteClosedException extends IOException implements ZmuxError
 
     private ZmuxErrorDetails nestedDetails() {
         Throwable current = getCause();
-        while (current != null) {
-            if (current instanceof ZmuxErrorDetails) {
+        IdentityHashMap<Throwable, Boolean> seen = new IdentityHashMap<>();
+        int depth = 0;
+        while (current != null && depth <= MAX_ERROR_UNWRAP_DEPTH && seen.put(current, Boolean.TRUE) == null) {
+            if (current instanceof ZmuxErrorDetails && !(current instanceof WriteClosedException)) {
                 return (ZmuxErrorDetails) current;
             }
             current = current.getCause();
+            depth++;
         }
         return null;
     }
