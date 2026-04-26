@@ -35,6 +35,9 @@ final class OrdinaryBatchOrderer {
                                Workspace workspace) {
         int size = batch == null ? 0 : batch.size();
         if (size < 2 || sameStreamBurstKeepsOrder(batch)) {
+            if (workspace != null) {
+                workspace.clearRetainedBatchRefs();
+            }
             return OrderView.identity(size);
         }
 
@@ -42,8 +45,12 @@ final class OrdinaryBatchOrderer {
         long quantum = schedulerQuantum(maxFramePayload);
         long feedbackWindow = feedbackWindow(schedulerHint, quantum);
         Workspace state = workspace == null ? new Workspace() : workspace;
-        BatchBuild build = build(batch, schedulerHint, state);
-        return OrdinaryBatchDriver.order(state, build, schedulerHint, quantum, feedbackWindow, retainedBias, size);
+        try {
+            BatchBuild build = build(batch, schedulerHint, state);
+            return OrdinaryBatchDriver.order(state, build, schedulerHint, quantum, feedbackWindow, retainedBias, size);
+        } finally {
+            state.clearRetainedBatchRefs();
+        }
     }
 
     private static BatchBuild build(List<BatchFrame> batch, SchedulerHint hint, Workspace workspace) {
@@ -289,6 +296,26 @@ final class OrdinaryBatchOrderer {
             batchGroupCursor = 0;
             batchStreamCursor = 0;
             batchEntryCursor = 0;
+        }
+
+        void clearRetainedBatchRefs() {
+            groups.clear();
+            groupsInOrder.clear();
+            explicitGroups.clear();
+            nextPreferredStreamHeads.clear();
+            recordedGroupHeads.clear();
+            interactiveCandidates.clear();
+            bulkCandidates.clear();
+            Arrays.fill(activeSelectionCounts, 0);
+            for (BatchGroup group : batchGroupPool) {
+                group.clearRetainedRefs();
+            }
+            for (BatchStreamState stream : batchStreamPool) {
+                stream.clearRetainedRefs();
+            }
+            for (BatchEntry entry : batchEntryPool) {
+                entry.clearRetainedRefs();
+            }
         }
 
         BatchGroup nextBatchGroup(GroupKey key, int order) {
@@ -542,6 +569,12 @@ final class OrdinaryBatchOrderer {
             return this;
         }
 
+        private void clearRetainedRefs() {
+            this.key = null;
+            this.order = 0;
+            streams.clear();
+        }
+
         GroupKey key() {
             return key;
         }
@@ -585,6 +618,18 @@ final class OrdinaryBatchOrderer {
             smallBurstBonusArmed = false;
             clearSelection();
             return this;
+        }
+
+        private void clearRetainedRefs() {
+            this.streamKey = 0L;
+            this.streamScoped = false;
+            this.priority = 0L;
+            this.order = 0;
+            this.remainingCost = 0L;
+            this.trafficClass = TrafficClass.INTERACTIVE;
+            this.smallBurstBonusArmed = false;
+            clearSelection();
+            entries.clear();
         }
 
         void addRemainingCost(long cost) {
@@ -683,6 +728,12 @@ final class OrdinaryBatchOrderer {
             this.frame = frame;
             this.cost = cost;
             return this;
+        }
+
+        private void clearRetainedRefs() {
+            this.index = 0;
+            this.frame = null;
+            this.cost = 0L;
         }
 
         int index() {

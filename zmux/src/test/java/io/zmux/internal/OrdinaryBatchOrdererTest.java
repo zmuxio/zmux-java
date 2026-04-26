@@ -29,6 +29,14 @@ final class OrdinaryBatchOrdererTest {
         return streamIds;
     }
 
+    @SuppressWarnings("unchecked")
+    private static <T> ArrayList<T> workspacePool(OrdinaryBatchOrderer.Workspace workspace, String fieldName)
+            throws Exception {
+        Field field = OrdinaryBatchOrderer.Workspace.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return (ArrayList<T>) field.get(workspace);
+    }
+
     @Test
     void rotatesFlatBatchHeadAcrossBatches() {
         OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
@@ -299,6 +307,40 @@ final class OrdinaryBatchOrdererTest {
         );
 
         assertArrayEquals(new int[]{0, 1}, second, "reused workspace should not leak old groups, streams, or entries into the next batch");
+    }
+
+    @Test
+    void reusableWorkspaceClearsPooledBatchReferencesAfterOrder() throws Exception {
+        OrdinaryBatchOrderer.Workspace workspace = new OrdinaryBatchOrderer.Workspace();
+
+        int[] order = OrdinaryBatchOrderer.order(
+                listOf(
+                        new OrdinaryBatchOrderer.BatchFrame(4L, true, false, false, 64L, 0L, 11L),
+                        new OrdinaryBatchOrderer.BatchFrame(8L, true, false, false, 256L, 0L, 22L),
+                        new OrdinaryBatchOrderer.BatchFrame(8L, true, true, false, 1L, 0L, 22L)
+                ),
+                SchedulerHint.GROUP_FAIR,
+                1_024L,
+                null,
+                workspace
+        );
+
+        assertEquals(3, order.length, "test batch should exercise the reusable scheduler workspace");
+
+        ArrayList<OrdinaryBatchOrderer.BatchGroup> groupPool = workspacePool(workspace, "batchGroupPool");
+        for (OrdinaryBatchOrderer.BatchGroup group : groupPool) {
+            assertNull(group.key(), "pooled group should not retain the last batch group key");
+            assertTrue(group.streams().isEmpty(), "pooled group should not retain old stream topology");
+        }
+        ArrayList<OrdinaryBatchOrderer.BatchStreamState> streamPool = workspacePool(workspace, "batchStreamPool");
+        for (OrdinaryBatchOrderer.BatchStreamState stream : streamPool) {
+            assertTrue(stream.entries().isEmpty(), "pooled stream should not retain old batch entries");
+            assertFalse(stream.hasSelection(), "pooled stream should not retain old selected entries");
+        }
+        ArrayList<OrdinaryBatchOrderer.BatchEntry> entryPool = workspacePool(workspace, "batchEntryPool");
+        for (OrdinaryBatchOrderer.BatchEntry entry : entryPool) {
+            assertNull(entry.frame(), "pooled entry should not retain old batch frames");
+        }
     }
 
     @Test
