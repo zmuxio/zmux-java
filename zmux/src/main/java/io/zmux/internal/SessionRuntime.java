@@ -933,6 +933,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 try {
                     this.enqueueControlLocked(new FrameCodec.Frame(FrameType.CLOSE, 0, 0L, closePayload));
                 } catch (IOException queueError) {
+                    this.setTerminalErrorInternal(queueError);
                     this.finishSessionLocked(queueError, this.terminalStateForSessionError(queueError));
                     throw queueError;
                 }

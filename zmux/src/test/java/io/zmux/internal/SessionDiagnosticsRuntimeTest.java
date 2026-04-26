@@ -658,6 +658,47 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void closeQueueFailureOverridesRequestedSessionCloseError() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .urgentQueuedBytesCap(1L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, () -> runtime.closeWithError(ErrorCode.PROTOCOL.code(), "requested-close")),
+                "closeWithError should surface the urgent queue admission failure"
+        );
+
+        assertEquals("queue urgent control", error.operation(), "close queue failure operation mismatch");
+        assertTrue(error.getMessage().contains("urgent control queue cap exceeded"), "close queue failure message mismatch");
+        assertEquals(SessionState.FAILED, runtime.state(), "queue failure should fail the session");
+        assertTrue(runtime.awaitTermination(Duration.ofSeconds(1)), "queue failure should terminate the session");
+
+        IOException terminationCause = runtime.terminationCause().orElseThrow(() ->
+                new AssertionError("queue failure should remain as the runtime termination cause")
+        );
+        ZmuxException terminal = assertInstanceOf(
+                ZmuxException.class,
+                terminationCause,
+                "termination cause should be the queue admission failure rather than the requested close error"
+        );
+        assertEquals("queue urgent control", terminal.operation(), "termination cause operation mismatch");
+        assertTrue(terminal.getMessage().contains("urgent control queue cap exceeded"), "termination cause message mismatch");
+        assertFalse(terminationCause instanceof ApplicationError, "termination cause should not retain the requested close ApplicationError");
+
+        IOException openError = assertThrows(IOException.class, runtime::openStream, "follow-up open should surface the queue failure");
+        assertEquals("open", ZmuxErrors.operation(openError), "follow-up open operation mismatch");
+        assertNotNull(openError.getCause(), "follow-up open should retain the queue failure as its cause");
+        assertEquals("queue urgent control", ZmuxErrors.operation(openError.getCause()), "follow-up open cause operation mismatch");
+        assertTrue(
+                openError.getCause().getMessage().contains("urgent control queue cap exceeded"),
+                "follow-up open should retain the queue failure message"
+        );
+    }
+
+    @Test
     void repeatedCloseWithErrorDoesNotQueueDuplicateCloseFrames() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
 
