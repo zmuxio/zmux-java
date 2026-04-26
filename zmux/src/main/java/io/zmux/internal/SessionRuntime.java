@@ -9,7 +9,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -190,6 +189,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private boolean gracefulCloseActive;
     private boolean terminalCleanupApplied;
     private boolean readLoopProtocolWorkerStarted;
+    private IOException pendingAsyncSessionFailure;
     private int lockWaiters;
 
     private SessionRuntime(DuplexConnection connection, ZmuxConfig config) {
@@ -2628,7 +2628,14 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (error == null) {
             return;
         }
-        CompletableFuture.runAsync(() -> this.failSession(error));
+        synchronized (this.lock) {
+            if (this.pendingAsyncSessionFailure != null) {
+                return;
+            }
+            this.pendingAsyncSessionFailure = error;
+            this.startReadLoopProtocolWorkerLocked();
+            this.notifyLockWaitersLocked();
+        }
     }
 
     void finishSessionLocked(IOException error, SessionState sessionState) {
@@ -2681,8 +2688,11 @@ public final class SessionRuntime implements ZmuxNativeSession {
         try {
             while (true) {
                 tasks.clear();
+                IOException asyncFailure = null;
                 synchronized (this.lock) {
-                    while (this.readLoopProtocolTasks.isEmpty() && !this.state.terminal()) {
+                    while (this.readLoopProtocolTasks.isEmpty()
+                            && this.pendingAsyncSessionFailure == null
+                            && !this.state.terminal()) {
                         try {
                             this.waitOnLock(LockWaitKind.GENERAL);
                         } catch (InterruptedException interrupted) {
@@ -2696,15 +2706,26 @@ public final class SessionRuntime implements ZmuxNativeSession {
                             );
                         }
                     }
-                    if (this.readLoopProtocolTasks.isEmpty() && this.state.terminal()) {
+                    if (this.readLoopProtocolTasks.isEmpty()
+                            && this.pendingAsyncSessionFailure == null
+                            && this.state.terminal()) {
                         return;
                     }
-                    while (!this.readLoopProtocolTasks.isEmpty()) {
-                        tasks.add(this.readLoopProtocolTasks.pollFirst());
+                    asyncFailure = this.pendingAsyncSessionFailure;
+                    if (asyncFailure != null) {
+                        this.pendingAsyncSessionFailure = null;
+                    } else {
+                        while (!this.readLoopProtocolTasks.isEmpty()) {
+                            tasks.add(this.readLoopProtocolTasks.pollFirst());
+                        }
+                        if (tasks.size() >= MAX_PENDING_READ_LOOP_PROTOCOL_TASKS) {
+                            this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
+                        }
                     }
-                    if (tasks.size() >= MAX_PENDING_READ_LOOP_PROTOCOL_TASKS) {
-                        this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
-                    }
+                }
+                if (asyncFailure != null) {
+                    this.failSession(asyncFailure);
+                    continue;
                 }
                 for (ReadLoopProtocolTask task : tasks) {
                     try {
@@ -3625,6 +3646,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.localOpenTracker.clear();
         this.flowControlUpdateRegistry.clear();
         this.readLoopProtocolTasks = new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
+        this.pendingAsyncSessionFailure = null;
         this.urgentQueue = new ArrayDeque<>();
         this.advisoryQueue = new ArrayDeque<>();
         this.dataQueue = new ArrayDeque<>();

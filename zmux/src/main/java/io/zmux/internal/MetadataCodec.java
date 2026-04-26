@@ -8,7 +8,6 @@ import io.zmux.Protocol;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
 import java.nio.charset.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -233,6 +232,9 @@ final class MetadataCodec {
         if (availableBytes <= 0L) {
             return 0;
         }
+        if (tlvEncodedSize(Protocol.DIAG_DEBUG_TEXT, bytes.length) <= availableBytes) {
+            return bytes.length;
+        }
         int maxPrefixLength = longestPrefixThatFits(bytes.length, availableBytes);
         if (maxPrefixLength <= 0) {
             return 0;
@@ -309,25 +311,29 @@ final class MetadataCodec {
         return -1;
     }
 
-    private static byte[] encodeUtf8Strict(String value) throws CharacterCodingException {
-        CharsetEncoder encoder = StandardCharsets.UTF_8.newEncoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT);
-        ByteBuffer encoded = encoder.encode(CharBuffer.wrap(value));
-        byte[] bytes = new byte[encoded.remaining()];
-        encoded.get(bytes);
-        return bytes;
-    }
-
     private static byte[] encodeUtf8StrictOrEmpty(String value) {
         if (value == null || value.isEmpty()) {
             return EMPTY_BYTES;
         }
-        try {
-            return encodeUtf8Strict(value);
-        } catch (CharacterCodingException ignored) {
+        if (!isWellFormedUtf16(value)) {
             return EMPTY_BYTES;
         }
+        return value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static boolean isWellFormedUtf16(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char ch = value.charAt(index);
+            if (Character.isHighSurrogate(ch)) {
+                if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                    return false;
+                }
+                index++;
+            } else if (Character.isLowSurrogate(ch)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String decodeUtf8Strict(byte[] value) throws CharacterCodingException {
