@@ -43,6 +43,12 @@ final class SessionDiagnosticsRuntimeTest {
         );
     }
 
+    private static int getIntField(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.getInt(target);
+    }
+
     private static FrameCodec.Frame dataFrame(long streamId, String payload) {
         return new FrameCodec.Frame(
                 FrameType.DATA,
@@ -765,6 +771,59 @@ final class SessionDiagnosticsRuntimeTest {
         );
         assertNotNull(error.getCause(), "transport read cause should be retained");
         assertEquals("read", ZmuxErrors.operation(error.getCause()), "transport read cause operation mismatch");
+    }
+
+    @Test
+    void readerLoopStillParsesPeerCloseDiagnosticsAfterTransportFailure() throws Exception {
+        byte[] closePayload = FrameCodec.buildErrorPayload(
+                ErrorCode.FLOW_CONTROL.code(),
+                "peer-diagnostics",
+                Settings.defaults().maxControlPayloadBytes()
+        );
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        new java.io.ByteArrayInputStream(encodeFrame(FrameType.CLOSE, 0, 0L, closePayload)),
+                        SessionRuntimeTestSupport.discardingOutput()
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        runtime.failSession(new ZmuxException(
+                ErrorCode.INTERNAL.code(),
+                "read",
+                "zmux: transport read failed",
+                new IOException("synthetic transport failure"),
+                ZmuxErrorScope.SESSION,
+                ZmuxErrorSource.TRANSPORT,
+                ZmuxErrorDirection.BOTH,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        ));
+        synchronized (runtime.lock()) {
+            long nowNanos = System.nanoTime();
+            SessionRuntimeTestSupport.setIntField(runtime, "inboundControlFrameCount", 4);
+            SessionRuntimeTestSupport.setIntField(runtime, "inboundMixedFrameCount", 6);
+            SessionRuntimeTestSupport.setIntField(runtime, "noOpControlCount", 8);
+            SessionRuntimeTestSupport.setLongField(runtime, "inboundControlBudgetWindowStartedAtNanos", nowNanos);
+            SessionRuntimeTestSupport.setLongField(runtime, "inboundMixedBudgetWindowStartedAtNanos", nowNanos);
+        }
+
+        Thread reader = startReaderLoop(runtime, failure, "session-transport-failure-peer-close");
+        reader.join(1_000L);
+
+        assertFalse(reader.isAlive(), "reader loop should still terminate after parsing the buffered peer CLOSE");
+        assertNull(failure.get(), "reader loop should retain peer CLOSE diagnostics in runtime state, not fail the test thread");
+        assertTrue(runtime.awaitTermination(Duration.ofSeconds(1)), "reader loop should finish the failed session after transport-failure peer CLOSE");
+        assertNotNull(runtime.peerCloseError(), "peer CLOSE diagnostics should still be retained after transport failure");
+        assertEquals(ErrorCode.FLOW_CONTROL.code(), runtime.peerCloseError().code(), "peer CLOSE code mismatch after transport failure");
+        assertEquals("peer-diagnostics", runtime.peerCloseError().reason(), "peer CLOSE reason mismatch after transport failure");
+        synchronized (runtime.lock()) {
+            assertEquals(5, getIntField(runtime, "inboundControlFrameCount"), "transport-failure peer CLOSE should still count toward control budget");
+            assertEquals(7, getIntField(runtime, "inboundMixedFrameCount"), "transport-failure peer CLOSE should still count toward mixed budget");
+            assertEquals(8, getIntField(runtime, "noOpControlCount"), "parsed peer CLOSE should not perturb the no-op control budget");
+        }
     }
 
     @Test

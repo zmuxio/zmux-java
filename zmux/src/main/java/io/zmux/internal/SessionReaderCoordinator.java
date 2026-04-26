@@ -45,6 +45,12 @@ final class SessionReaderCoordinator {
         }
     }
 
+    private boolean shouldIgnoreInboundFrameLocked(FrameType frameType) {
+        return frameType == FrameType.CLOSE
+                ? this.owner.ignorePeerCloseFrameLocked()
+                : this.owner.ignorePeerNonCloseFrameLocked(frameType);
+    }
+
     private FrameCodec.ErrorPayload parseErrorPayloadForPeerNonCloseFrame(FrameCodec.Frame frame) throws IOException {
         if (this.ignorePeerNonCloseFrame(frame.type())) {
             return null;
@@ -82,18 +88,19 @@ final class SessionReaderCoordinator {
                         this.owner.inboundPayloadPool()
                 );
                 try {
+                    boolean ignored;
                     synchronized (this.owner.lock()) {
-                        if (this.owner.state().terminal()) {
-                            return;
+                        ignored = this.shouldIgnoreInboundFrameLocked(frame.type());
+                        if (!ignored) {
+                            this.owner.incrementReceivedFramesLocked();
+                            long nowNanos = System.nanoTime();
+                            this.owner.recordInboundBudgetsLocked(frame);
+                            this.owner.noteInboundFrameLocked(nowNanos);
+                            this.owner.reapExpiredHiddenControlStateLocked(nowNanos);
                         }
-                        this.owner.incrementReceivedFramesLocked();
-                        long nowNanos = System.nanoTime();
-                        this.owner.recordInboundBudgetsLocked(frame);
-                        this.owner.noteInboundFrameLocked(nowNanos);
-                        this.owner.reapExpiredHiddenControlStateLocked(nowNanos);
-                        if (this.owner.state().terminal()) {
-                            return;
-                        }
+                    }
+                    if (ignored) {
+                        continue;
                     }
                     this.handleFrame(frame);
                     this.owner.emitPendingEvents();

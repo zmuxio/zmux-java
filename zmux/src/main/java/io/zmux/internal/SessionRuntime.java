@@ -3859,8 +3859,13 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     boolean ignorePeerCloseFrameLocked() {
-        return this.peerCloseError != null
-                || this.closeFrameQueued
+        if (this.peerCloseError != null) {
+            return true;
+        }
+        if (this.terminalError != null) {
+            return ZmuxErrors.source(this.terminalError) != ZmuxErrorSource.TRANSPORT;
+        }
+        return this.closeFrameQueued
                 || this.state == SessionState.CLOSING
                 || this.state.terminal();
     }
