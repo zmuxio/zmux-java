@@ -224,7 +224,7 @@ public final class FrameCodec {
     }
 
     private static int normalizedSliceLength(int length) {
-        return length <= 0 ? 0 : length;
+        return Math.max(0, length);
     }
 
     static long parseMetadataVarint(byte[] source, int offset, int length, String operation) throws IOException {
