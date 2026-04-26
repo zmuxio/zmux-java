@@ -34,6 +34,7 @@ final class NettyQuicStreamState {
     private final boolean writeAllowed;
     private final boolean bidirectional;
     private final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock writeIoLock = new ReentrantLock();
     private final Condition readChanged = lock.newCondition();
     private final Condition writeChanged = lock.newCondition();
     private final ChannelDuplexHandler handler = new StreamHandler();
@@ -347,14 +348,19 @@ final class NettyQuicStreamState {
             return;
         }
         NettyQuicSupport.ensureOffEventLoop(channel, "write");
-        ensureOpenPrelude();
-        lock.lock();
+        writeIoLock.lock();
         try {
-            ensureWritableLocked();
+            ensureOpenPrelude(true);
+            lock.lock();
+            try {
+                ensureWritableLocked();
+            } finally {
+                lock.unlock();
+            }
+            writeBytes(src, offset, length);
         } finally {
-            lock.unlock();
+            writeIoLock.unlock();
         }
-        writeBytes(src, offset, length);
         session.noteDataWrite(length);
     }
 
@@ -366,9 +372,14 @@ final class NettyQuicStreamState {
             return 0;
         }
         NettyQuicSupport.ensureOffEventLoop(channel, "writeFinal");
-        writeFinalBytes(src, offset, length);
-        session.noteDataWrite(length);
-        closeWrite();
+        writeIoLock.lock();
+        try {
+            writeFinalBytes(src, offset, length);
+            session.noteDataWrite(length);
+            closeWrite();
+        } finally {
+            writeIoLock.unlock();
+        }
         return length;
     }
 
@@ -382,9 +393,14 @@ final class NettyQuicStreamState {
         }
         NettyQuicSupport.ensureOffEventLoop(channel, "writevFinal");
 
-        writeFinalParts(parts, totalLength);
-        session.noteDataWrite(totalLength);
-        closeWrite();
+        writeIoLock.lock();
+        try {
+            writeFinalParts(parts, totalLength);
+            session.noteDataWrite(totalLength);
+            closeWrite();
+        } finally {
+            writeIoLock.unlock();
+        }
         return totalLength;
     }
 
@@ -609,28 +625,33 @@ final class NettyQuicStreamState {
         if (!writeAllowed) {
             throw NettyQuicSupport.writeClosedError();
         }
-        lock.lock();
+        writeIoLock.lock();
         try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
+            lock.lock();
+            try {
+                if (writeHalf.localClosed()) {
+                    throw localWriteErrorOrDefault();
+                }
+                ensureSessionOpenForControlLocked();
+            } finally {
+                lock.unlock();
             }
-            ensureSessionOpenForControlLocked();
-        } finally {
-            lock.unlock();
-        }
-        ensureOpenPrelude();
-        lock.lock();
-        try {
-            if (writeHalf.localClosed()) {
-                throw localWriteErrorOrDefault();
+            ensureOpenPrelude(true);
+            lock.lock();
+            try {
+                if (writeHalf.localClosed()) {
+                    throw localWriteErrorOrDefault();
+                }
+                ensureSessionOpenForControlLocked();
+                writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+                signalWriteChangedLocked();
+            } finally {
+                lock.unlock();
             }
-            ensureSessionOpenForControlLocked();
-            writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
-            signalWriteChangedLocked();
+            handleWriteSideControlFuture(channel.shutdownOutput(), System.nanoTime());
         } finally {
-            lock.unlock();
+            writeIoLock.unlock();
         }
-        handleWriteSideControlFuture(channel.shutdownOutput(), System.nanoTime());
     }
 
     void cancelWrite(long code) throws IOException {

@@ -1941,6 +1941,64 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void closeWriteWaitsForInFlightDataWrite() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            ZmuxStream clientStream = pair.client.openStream();
+            clientStream.write(utf8("x"));
+            ZmuxStream accepted = pair.server.acceptStream(Duration.ofSeconds(5));
+            assertArrayEquals(utf8("x"), readExactly(accepted, 1));
+
+            CountDownLatch eventLoopBlocked = new CountDownLatch(1);
+            CountDownLatch releaseEventLoop = new CountDownLatch(1);
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
+            assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
+
+            AtomicReference<Throwable> writeError = new AtomicReference<>();
+            CountDownLatch writeDone = new CountDownLatch(1);
+            Thread writer = new Thread(() -> {
+                try {
+                    clientStream.write(utf8("y"));
+                } catch (Throwable failure) {
+                    writeError.set(failure);
+                } finally {
+                    writeDone.countDown();
+                }
+            }, "adapter-serialized-write");
+            writer.start();
+            assertFalse(writeDone.await(100L, TimeUnit.MILLISECONDS), "write should be waiting on the stalled Netty future");
+
+            AtomicReference<Throwable> closeError = new AtomicReference<>();
+            CountDownLatch closeDone = new CountDownLatch(1);
+            Thread closer = new Thread(() -> {
+                try {
+                    clientStream.closeWrite();
+                } catch (Throwable failure) {
+                    closeError.set(failure);
+                } finally {
+                    closeDone.countDown();
+                }
+            }, "adapter-serialized-closeWrite");
+            closer.start();
+            assertFalse(closeDone.await(100L, TimeUnit.MILLISECONDS), "closeWrite must not overtake an in-flight write");
+
+            releaseEventLoop.countDown();
+
+            writer.join(Duration.ofSeconds(2).toMillis());
+            closer.join(Duration.ofSeconds(2).toMillis());
+            assertFalse(writer.isAlive(), "write should finish after the event loop is released");
+            assertFalse(closer.isAlive(), "closeWrite should finish after the in-flight write completes");
+            assertNull(writeError.get(), "in-flight write should not be converted into a local write-close error");
+            assertNull(closeError.get(), "closeWrite should succeed after serialized write completion");
+            assertArrayEquals(utf8("y"), readExactly(accepted, 1));
+
+            try {
+                accepted.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    @Test
     void hugeWriteDeadlineDoesNotOverflowWhileTransportWriteWaits() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             ZmuxStream clientStream = pair.client.openStream();
