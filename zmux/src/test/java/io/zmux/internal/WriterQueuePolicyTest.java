@@ -1095,6 +1095,71 @@ final class WriterQueuePolicyTest {
         }
     }
 
+    @Test
+    void gatheringWriterBatchClearsRetainedScatterGatherRefsAfterAppendFailure() throws Exception {
+        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        SessionRuntimeTestSupport.emptyInput(),
+                        SessionRuntimeTestSupport.discardingOutput(),
+                        null,
+                        null,
+                        null,
+                        gathering
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        List<SessionRuntime.OutboundFrame> batch = new ArrayList<>();
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 4L, new byte[]{1, 2, 3, 4}),
+                null,
+                0,
+                false,
+                false
+        ));
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[]{1}),
+                null,
+                0,
+                false,
+                false
+        ));
+
+        java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+        writerRuntimeField.setAccessible(true);
+        Object writerRuntime = writerRuntimeField.get(runtime);
+
+        java.lang.reflect.InvocationTargetException error = assertThrows(
+                java.lang.reflect.InvocationTargetException.class,
+                () -> SessionRuntimeTestSupport.invokePrivate(
+                        writerRuntime,
+                        "writeBatch",
+                        new Class<?>[]{List.class},
+                        batch
+                )
+        );
+        ZmuxException frameSize = assertInstanceOf(ZmuxException.class, error.getCause());
+        assertEquals(ErrorCode.FRAME_SIZE.code(), frameSize.code(), "invalid trailing frame should fail with FRAME_SIZE");
+
+        java.lang.reflect.Field writerTransportField = writerRuntime.getClass().getDeclaredField("writerTransport");
+        writerTransportField.setAccessible(true);
+        Object writerTransport = writerTransportField.get(writerRuntime);
+
+        java.lang.reflect.Field gatherScratchField = writerTransport.getClass().getDeclaredField("gatherScratch");
+        gatherScratchField.setAccessible(true);
+        FrameEnvelopeCodec.GatherScratch gatherScratch =
+                (FrameEnvelopeCodec.GatherScratch) gatherScratchField.get(writerTransport);
+
+        assertEquals(0, gatherScratch.bufferCount(), "append failure should clear the active gather scratch view");
+        for (int i = 0; i < gatherScratch.buffers().length; ++i) {
+            assertNull(gatherScratch.buffers()[i],
+                    "gather scratch slot " + i + " should not retain payload buffers after append failure");
+        }
+        assertEquals(0, gathering.bytes().length, "writer should not emit a partial batch after append failure");
+    }
+
     private static final class RecordingGatheringChannel implements GatheringByteChannel {
         private final ByteArrayOutputStream output = new ByteArrayOutputStream();
         private final int[] arrayWriteChunks;

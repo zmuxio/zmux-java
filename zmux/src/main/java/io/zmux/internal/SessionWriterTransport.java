@@ -135,31 +135,35 @@ final class SessionWriterTransport {
                 }
             }
             this.gatherScratch.reset(headerBytesHint, bufferCountHint);
-            for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-                if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
-                    batchBytes = SessionRuntime.saturatingAdd(batchBytes, FrameEnvelopeCodec.appendFrame(
-                            this.gatherScratch,
-                            outboundFrame.frame(),
-                            outboundFrame.payloadPrefix(),
-                            outboundFrame.payloadParts(),
-                            outboundFrame.payloadPartIndex(),
-                            outboundFrame.payloadPartOffset(),
-                            outboundFrame.payloadLength(),
-                            limits
-                    ));
-                } else {
-                    batchBytes = SessionRuntime.saturatingAdd(batchBytes, FrameEnvelopeCodec.appendFrame(
-                            this.gatherScratch,
-                            outboundFrame.frame(),
-                            outboundFrame.payloadPrefix(),
-                            outboundFrame.payloadBytes(),
-                            outboundFrame.payloadOffset(),
-                            outboundFrame.payloadLength(),
-                            limits
-                    ));
+            try {
+                for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+                    if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
+                        batchBytes = SessionRuntime.saturatingAdd(batchBytes, FrameEnvelopeCodec.appendFrame(
+                                this.gatherScratch,
+                                outboundFrame.frame(),
+                                outboundFrame.payloadPrefix(),
+                                outboundFrame.payloadParts(),
+                                outboundFrame.payloadPartIndex(),
+                                outboundFrame.payloadPartOffset(),
+                                outboundFrame.payloadLength(),
+                                limits
+                        ));
+                    } else {
+                        batchBytes = SessionRuntime.saturatingAdd(batchBytes, FrameEnvelopeCodec.appendFrame(
+                                this.gatherScratch,
+                                outboundFrame.frame(),
+                                outboundFrame.payloadPrefix(),
+                                outboundFrame.payloadBytes(),
+                                outboundFrame.payloadOffset(),
+                                outboundFrame.payloadLength(),
+                                limits
+                        ));
+                    }
                 }
+                FrameEnvelopeCodec.writeGatheredBuffers(gatheringOutput, this.gatherScratch);
+            } finally {
+                this.gatherScratch.clear();
             }
-            FrameEnvelopeCodec.writeGatheredBuffers(gatheringOutput, this.gatherScratch);
         } else {
             for (SessionRuntime.OutboundFrame outboundFrame : batch) {
                 if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
