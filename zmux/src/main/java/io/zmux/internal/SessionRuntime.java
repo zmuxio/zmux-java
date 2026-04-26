@@ -2688,7 +2688,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         try {
             while (true) {
                 tasks.clear();
-                IOException asyncFailure = null;
+                IOException asyncFailure;
                 synchronized (this.lock) {
                     while (this.readLoopProtocolTasks.isEmpty()
                             && this.pendingAsyncSessionFailure == null
