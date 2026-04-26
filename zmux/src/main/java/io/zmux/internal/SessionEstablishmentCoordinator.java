@@ -331,7 +331,14 @@ final class SessionEstablishmentCoordinator {
         }
 
         void clearIgnoringFailure() {
-            clear();
+            if (!armed || owner == null) {
+                return;
+            }
+            try {
+                owner.setWriteDeadline(null);
+                armed = false;
+            } catch (IOException ignored) {
+            }
         }
 
         void expedite() {
