@@ -56,7 +56,7 @@ public final class TimeoutBudget {
     }
 
     public static long positiveRemainingNanosUntil(long deadlineNanos, long nowNanos) {
-        if (deadlineNanos <= 0L) {
+        if (deadlineNanos == 0L) {
             return 0L;
         }
         long remainingNanos = remainingNanosUntil(deadlineNanos, nowNanos);
