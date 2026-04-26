@@ -60,6 +60,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private static final String SESSION_CLOSED_REASON = SessionClosedException.MESSAGE;
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final byte[][] EMPTY_PARTS = new byte[0][];
+    private static final int PING_NONCE_BYTES = Long.BYTES;
     private static final int INBOUND_PAYLOAD_POOL_DEPTH_PER_LENGTH = 4;
     private static final int MAX_INBOUND_POOLED_PAYLOAD_BYTES = 64 * 1024;
     private static final int MAX_PENDING_READ_LOOP_PROTOCOL_TASKS = 256;
@@ -3764,7 +3765,16 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     byte[] buildPingPayloadLocked(byte[] payloadSuffix) throws IOException {
         int suffixLength = payloadSuffix == null ? 0 : payloadSuffix.length;
-        long payloadLength = 8L + (long) suffixLength;
+        long payloadLength = PING_NONCE_BYTES + (long) suffixLength;
+        if (payloadLength > Integer.MAX_VALUE) {
+            throw sessionError(
+                    ErrorCode.FRAME_SIZE,
+                    "ping",
+                    "PING payload " + payloadLength + " exceeds Java array limit " + Integer.MAX_VALUE,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE
+            );
+        }
         long payloadLimit = this.pingPayloadLimitLocked();
         if (payloadLength > payloadLimit) {
             throw sessionError(
@@ -3777,11 +3787,11 @@ public final class SessionRuntime implements ZmuxNativeSession {
         }
         byte[] payload = new byte[(int) payloadLength];
         long token = this.nextPingNonceLocked();
-        for (int i = 0; i < 8; ++i) {
-            payload[7 - i] = (byte) (token >>> i * 8);
+        for (int i = 0; i < PING_NONCE_BYTES; ++i) {
+            payload[PING_NONCE_BYTES - 1 - i] = (byte) (token >>> i * 8);
         }
         if (suffixLength > 0) {
-            System.arraycopy(payloadSuffix, 0, payload, 8, suffixLength);
+            System.arraycopy(payloadSuffix, 0, payload, PING_NONCE_BYTES, suffixLength);
         }
         return payload;
     }

@@ -812,6 +812,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     public static final class PausedInput implements ResumablePause {
         private final JoinedDuplexConnection owner;
+        private final Object lock = new Object();
         private InputStream current;
         private boolean resumed;
 
@@ -821,11 +822,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
 
         public InputStream current() {
-            return current;
+            synchronized (lock) {
+                return current;
+            }
         }
 
         public ReadHalf currentReadHalf() {
-            return typedReadHalf(current);
+            synchronized (lock) {
+                return typedReadHalf(current);
+            }
         }
 
         public InputStream set(ZmuxRecvStream next) {
@@ -841,28 +846,37 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
 
         public InputStream set(InputStream next) {
-            InputStream previous = current;
-            current = next;
-            return previous;
+            synchronized (lock) {
+                InputStream previous = current;
+                current = next;
+                return previous;
+            }
         }
 
         public void resume() throws IOException {
-            owner.resumeInput(this);
+            synchronized (lock) {
+                owner.resumeInput(this);
+            }
         }
 
         @Override
         public boolean resumed() {
-            return resumed;
+            synchronized (lock) {
+                return resumed;
+            }
         }
 
         @Override
         public void markResumed() {
-            resumed = true;
+            synchronized (lock) {
+                resumed = true;
+            }
         }
     }
 
     public static final class PausedOutput implements ResumablePause {
         private final JoinedDuplexConnection owner;
+        private final Object lock = new Object();
         private OutputStream current;
         private GatheringByteChannel gathering;
         private boolean resumed;
@@ -874,11 +888,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
 
         public OutputStream current() {
-            return current;
+            synchronized (lock) {
+                return current;
+            }
         }
 
         public WriteHalf currentWriteHalf() {
-            return typedWriteHalf(current);
+            synchronized (lock) {
+                return typedWriteHalf(current);
+            }
         }
 
         public OutputStream set(ZmuxSendStream next) {
@@ -887,9 +905,12 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         public OutputStream set(WriteHalf next) {
             GatheringByteChannel nextGathering = JoinedDuplexConnection.gatheringOutput(next);
-            OutputStream previous = set(wrap(next));
-            gathering = nextGathering;
-            return previous;
+            synchronized (lock) {
+                OutputStream previous = current;
+                current = wrap(next);
+                gathering = nextGathering;
+                return previous;
+            }
         }
 
         public WriteHalf replaceWriteHalf(WriteHalf next) {
@@ -897,33 +918,45 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
 
         public OutputStream set(OutputStream next) {
-            OutputStream previous = current;
-            current = next;
-            return previous;
+            synchronized (lock) {
+                OutputStream previous = current;
+                current = next;
+                return previous;
+            }
         }
 
         public GatheringByteChannel gatheringOutput() {
-            return gathering;
+            synchronized (lock) {
+                return gathering;
+            }
         }
 
         public GatheringByteChannel setGatheringOutput(GatheringByteChannel next) {
-            GatheringByteChannel previous = gathering;
-            gathering = next;
-            return previous;
+            synchronized (lock) {
+                GatheringByteChannel previous = gathering;
+                gathering = next;
+                return previous;
+            }
         }
 
         public void resume() throws IOException {
-            owner.resumeOutput(this);
+            synchronized (lock) {
+                owner.resumeOutput(this);
+            }
         }
 
         @Override
         public boolean resumed() {
-            return resumed;
+            synchronized (lock) {
+                return resumed;
+            }
         }
 
         @Override
         public void markResumed() {
-            resumed = true;
+            synchronized (lock) {
+                resumed = true;
+            }
         }
     }
 

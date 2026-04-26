@@ -205,13 +205,13 @@ final class SessionCloseCleanupRuntimeTest {
         SessionExplicitGroupTracker explicitGroupTracker =
                 getField(runtime, "explicitGroupTracker", SessionExplicitGroupTracker.class);
         @SuppressWarnings("unchecked")
-        Map<Long, Integer> firstActiveExplicitGroups = getField(explicitGroupTracker, "activeExplicitGroupRefs", Map.class);
+        Map<Long, Long> firstActiveExplicitGroups = getField(explicitGroupTracker, "activeExplicitGroupRefs", Map.class);
         @SuppressWarnings("unchecked")
-        Map<Long, Integer> firstOrdinaryExplicitGroups =
+        Map<Long, Long> firstOrdinaryExplicitGroups =
                 getField(explicitGroupTracker, "ordinaryBatchExplicitGroupRefs", Map.class);
         for (int i = 0; i < 1_025; ++i) {
-            firstActiveExplicitGroups.put((long) i + 1L, 1);
-            firstOrdinaryExplicitGroups.put((long) i + 10_000L, 1);
+            firstActiveExplicitGroups.put((long) i + 1L, 1L);
+            firstOrdinaryExplicitGroups.put((long) i + 10_000L, 1L);
         }
 
         SessionLocalOpenTracker localOpenTracker = getField(runtime, "localOpenTracker", SessionLocalOpenTracker.class);

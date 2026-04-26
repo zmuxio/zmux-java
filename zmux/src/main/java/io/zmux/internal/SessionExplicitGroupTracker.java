@@ -9,8 +9,8 @@ final class SessionExplicitGroupTracker {
     private final OrdinaryBatchOrderer.RetainedBias ordinaryBatchBias;
     private final int maxExplicitGroups;
     private final long fallbackGroupBucket;
-    private Map<Long, Integer> activeExplicitGroupRefs = new HashMap<>();
-    private Map<Long, Integer> ordinaryBatchExplicitGroupRefs = new HashMap<>();
+    private Map<Long, Long> activeExplicitGroupRefs = new HashMap<>();
+    private Map<Long, Long> ordinaryBatchExplicitGroupRefs = new HashMap<>();
 
     SessionExplicitGroupTracker(OrdinaryBatchOrderer.RetainedBias ordinaryBatchBias,
                                 int maxExplicitGroups,
@@ -24,12 +24,12 @@ final class SessionExplicitGroupTracker {
         return schedulerHint == SchedulerHint.GROUP_FAIR;
     }
 
-    private static int saturatingIncrement(int value) {
-        return value == Integer.MAX_VALUE ? Integer.MAX_VALUE : value + 1;
+    private static long saturatingIncrement(long value) {
+        return value == Long.MAX_VALUE ? Long.MAX_VALUE : value + 1L;
     }
 
-    private static void incrementRefLocked(Map<Long, Integer> refs, long group) {
-        refs.merge(group, 1, (current, ignored) -> saturatingIncrement(current));
+    private static void incrementRefLocked(Map<Long, Long> refs, long group) {
+        refs.merge(group, 1L, (current, ignored) -> saturatingIncrement(current));
     }
 
     private static boolean countsOrdinaryBatchExplicitGroupLocked(StreamRuntime streamRuntime,
@@ -93,7 +93,7 @@ final class SessionExplicitGroupTracker {
         return streamRuntime.groupLocked();
     }
 
-    Map<Long, Integer> activeExplicitGroupRefsView() {
+    Map<Long, Long> activeExplicitGroupRefsView() {
         return activeExplicitGroupRefs;
     }
 
@@ -163,7 +163,7 @@ final class SessionExplicitGroupTracker {
         if (group == null || group == 0L) {
             return 0L;
         }
-        if (activeExplicitGroupRefs.getOrDefault(group, 0) > 0) {
+        if (activeExplicitGroupRefs.getOrDefault(group, 0L) > 0L) {
             return group;
         }
         if (trackedExplicitGroupCountLocked() < maxExplicitGroups) {
@@ -209,13 +209,13 @@ final class SessionExplicitGroupTracker {
         decrementExplicitGroupRefLocked(activeExplicitGroupRefs, groupBucket);
     }
 
-    private void decrementExplicitGroupRefLocked(Map<Long, Integer> refs, long group) {
-        Integer current = refs.get(group);
+    private void decrementExplicitGroupRefLocked(Map<Long, Long> refs, long group) {
+        Long current = refs.get(group);
         if (current == null) {
             return;
         }
-        if (current > 1) {
-            refs.put(group, current - 1);
+        if (current > 1L) {
+            refs.put(group, current - 1L);
             return;
         }
         refs.remove(group);

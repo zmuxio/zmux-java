@@ -26,13 +26,13 @@ final class SchedulingGroupTrackingTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<Long, Integer> activeExplicitGroupRefs(SessionRuntime runtime) throws Exception {
+    private static Map<Long, Long> activeExplicitGroupRefs(SessionRuntime runtime) throws Exception {
         Field trackerField = SessionRuntime.class.getDeclaredField("explicitGroupTracker");
         trackerField.setAccessible(true);
         Object tracker = trackerField.get(runtime);
         Field refsField = tracker.getClass().getDeclaredField("activeExplicitGroupRefs");
         refsField.setAccessible(true);
-        return (Map<Long, Integer>) refsField.get(tracker);
+        return (Map<Long, Long>) refsField.get(tracker);
     }
 
     private static OrdinaryBatchOrderer.RetainedBias retainedBias(SessionRuntime runtime) throws Exception {
@@ -66,11 +66,11 @@ final class SchedulingGroupTrackingTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, overflow);
 
-            Map<Long, Integer> refs = activeExplicitGroupRefs(runtime);
+            Map<Long, Long> refs = activeExplicitGroupRefs(runtime);
             assertTrue(overflow.schedulingGroupTrackedLocked(), "overflow explicit group should still be tracked");
             assertEquals(Long.MAX_VALUE, overflow.trackedSchedulingGroupLocked(), "overflow explicit group should be assigned to the fallback bucket");
             assertFalse(refs.containsKey(99L), "raw overflow group id should not be tracked directly once explicit group capacity is full");
-            assertEquals(Integer.valueOf(1), refs.get(Long.MAX_VALUE), "fallback bucket refcount should be incremented");
+            assertEquals(Long.valueOf(1L), refs.get(Long.MAX_VALUE), "fallback bucket refcount should be incremented");
         }
     }
 
@@ -87,7 +87,7 @@ final class SchedulingGroupTrackingTest {
 
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
-            assertEquals(Integer.valueOf(1), activeExplicitGroupRefs(runtime).get(7L), "explicit group ref should be tracked once the stream is assigned");
+            assertEquals(Long.valueOf(1L), activeExplicitGroupRefs(runtime).get(7L), "explicit group ref should be tracked once the stream is assigned");
         }
 
         stream.cancelWrite(41L);
@@ -113,22 +113,22 @@ final class SchedulingGroupTrackingTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, first);
             makePeerVisible(runtime, second);
-            assertEquals(Integer.valueOf(2), activeExplicitGroupRefs(runtime).get(7L), "two streams in the same explicit group should share the tracked refcount");
+            assertEquals(Long.valueOf(2L), activeExplicitGroupRefs(runtime).get(7L), "two streams in the same explicit group should share the tracked refcount");
         }
 
         first.updateMetadata(new MetadataUpdate(null, 9L));
 
         synchronized (runtime.lock()) {
-            Map<Long, Integer> refs = activeExplicitGroupRefs(runtime);
-            assertEquals(Integer.valueOf(1), refs.get(7L), "shared old explicit group should keep one remaining ref");
-            assertEquals(Integer.valueOf(1), refs.get(9L), "new explicit group should be tracked immediately");
+            Map<Long, Long> refs = activeExplicitGroupRefs(runtime);
+            assertEquals(Long.valueOf(1L), refs.get(7L), "shared old explicit group should keep one remaining ref");
+            assertEquals(Long.valueOf(1L), refs.get(9L), "new explicit group should be tracked immediately");
             assertEquals(9L, first.trackedSchedulingGroupLocked(), "rebucketed stream should track its new explicit group");
             assertEquals(7L, second.trackedSchedulingGroupLocked(), "sibling stream should retain the old explicit group bucket");
         }
     }
 
     @Test
-    void explicitGroupRefcountSaturatesAtIntMax() throws Exception {
+    void explicitGroupRefcountDoesNotSaturateAtIntMax() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 Protocol.CAPABILITY_STREAM_GROUPS,
                 Settings.builder()
@@ -136,14 +136,15 @@ final class SchedulingGroupTrackingTest {
                         .maxFramePayload(16_384L)
                         .build()
         );
-        Map<Long, Integer> refs = activeExplicitGroupRefs(runtime);
-        refs.put(7L, Integer.MAX_VALUE - 1);
+        Map<Long, Long> refs = activeExplicitGroupRefs(runtime);
+        refs.put(7L, (long) Integer.MAX_VALUE);
         StreamRuntime stream = (StreamRuntime) runtime.openStream(new OpenOptions(0L, 7L, new byte[0]));
 
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
 
-            assertEquals(Integer.MAX_VALUE, refs.get(7L), "explicit group refs must saturate instead of wrapping negative");
+            assertEquals(Integer.MAX_VALUE + 1L, refs.get(7L),
+                    "explicit group refs must keep counting beyond the int boundary");
         }
     }
 

@@ -899,6 +899,52 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionPausedReadHandleSerializesResumeAndReplace() throws Exception {
+        JoinedDuplexConnection connection = ZmuxConnections.join(new RecordingReadHalf(new byte[0], null, null), null);
+        JoinedDuplexConnection.PausedInput pause = connection.pauseRead();
+        BlockingDeadlineReadHalf replacement = new BlockingDeadlineReadHalf();
+        RecordingReadHalf next = new RecordingReadHalf(new byte[0], null, null);
+        pause.replaceReadHalf(replacement);
+        connection.setReadDeadline(Instant.now().plusMillis(30));
+
+        Throwable[] resumeFailure = new Throwable[1];
+        Thread resume = new Thread(() -> {
+            try {
+                pause.resume();
+            } catch (Throwable failure) {
+                resumeFailure[0] = failure;
+            }
+        });
+        resume.start();
+
+        assertTrue(replacement.awaitFirstSet(), "resume should begin applying the paused read half deadline");
+        Throwable[] replaceFailure = new Throwable[1];
+        ReadHalf[] previous = new ReadHalf[1];
+        Thread replacer = new Thread(() -> {
+            try {
+                previous[0] = pause.replaceReadHalf(next);
+            } catch (Throwable failure) {
+                replaceFailure[0] = failure;
+            }
+        });
+        replacer.start();
+
+        Thread.sleep(50L);
+        assertTrue(replacer.isAlive(), "replaceReadHalf should wait while resume is replaying the deadline");
+        replacement.releaseSet();
+        resume.join(TimeUnit.SECONDS.toMillis(1));
+        replacer.join(TimeUnit.SECONDS.toMillis(1));
+
+        assertFalse(resume.isAlive(), "resume should complete after deadline replay is released");
+        assertFalse(replacer.isAlive(), "replaceReadHalf should complete after resume releases the pause handle");
+        assertNull(resumeFailure[0], "resume should not fail");
+        assertNull(replaceFailure[0], "replaceReadHalf should not fail");
+        assertSame(replacement, previous[0], "replacement should observe the half that resume attached");
+        assertSame(replacement, connection.readHalf(), "resume should attach the deadline-replayed half");
+        connection.close();
+    }
+
+    @Test
     void joinedConnectionResumeWriteReplaysDeadlineSetWhilePaused() throws Exception {
         JoinedDuplexConnection connection = ZmuxConnections.join(null, new RecordingWriteHalf(null, null, null));
         JoinedDuplexConnection.PausedOutput pause = connection.pauseWrite();
@@ -932,6 +978,52 @@ final class ZmuxConnectionsTest {
         assertEquals(firstDeadline, deadlines.get(0));
         assertEquals(secondDeadline, deadlines.get(1));
         assertSame(replacement, connection.writeHalf());
+        connection.close();
+    }
+
+    @Test
+    void joinedConnectionPausedWriteHandleSerializesResumeAndReplace() throws Exception {
+        JoinedDuplexConnection connection = ZmuxConnections.join(null, new RecordingWriteHalf(null, null, null));
+        JoinedDuplexConnection.PausedOutput pause = connection.pauseWrite();
+        BlockingDeadlineWriteHalf replacement = new BlockingDeadlineWriteHalf();
+        RecordingWriteHalf next = new RecordingWriteHalf(null, null, null);
+        pause.replaceWriteHalf(replacement);
+        connection.setWriteDeadline(Instant.now().plusMillis(30));
+
+        Throwable[] resumeFailure = new Throwable[1];
+        Thread resume = new Thread(() -> {
+            try {
+                pause.resume();
+            } catch (Throwable failure) {
+                resumeFailure[0] = failure;
+            }
+        });
+        resume.start();
+
+        assertTrue(replacement.awaitFirstSet(), "resume should begin applying the paused write half deadline");
+        Throwable[] replaceFailure = new Throwable[1];
+        WriteHalf[] previous = new WriteHalf[1];
+        Thread replacer = new Thread(() -> {
+            try {
+                previous[0] = pause.replaceWriteHalf(next);
+            } catch (Throwable failure) {
+                replaceFailure[0] = failure;
+            }
+        });
+        replacer.start();
+
+        Thread.sleep(50L);
+        assertTrue(replacer.isAlive(), "replaceWriteHalf should wait while resume is replaying the deadline");
+        replacement.releaseSet();
+        resume.join(TimeUnit.SECONDS.toMillis(1));
+        replacer.join(TimeUnit.SECONDS.toMillis(1));
+
+        assertFalse(resume.isAlive(), "resume should complete after deadline replay is released");
+        assertFalse(replacer.isAlive(), "replaceWriteHalf should complete after resume releases the pause handle");
+        assertNull(resumeFailure[0], "resume should not fail");
+        assertNull(replaceFailure[0], "replaceWriteHalf should not fail");
+        assertSame(replacement, previous[0], "replacement should observe the half that resume attached");
+        assertSame(replacement, connection.writeHalf(), "resume should attach the deadline-replayed half");
         connection.close();
     }
 
