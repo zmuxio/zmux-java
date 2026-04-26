@@ -55,15 +55,20 @@ final class FrameEnvelopeCodec {
         int code = input.readByte();
         FrameType type = parseFrameType(code & 0x1f);
         int flags = code & 0xe0;
-        long streamId = Varint62.read(input).value();
-        long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), Varint62.length(streamId));
+        Varint62.Decoded streamIdDecoded = Varint62.read(input);
+        long payloadLength = validatedPayloadLength(
+                normalized,
+                type,
+                frameLength.value(),
+                streamIdDecoded.length()
+        );
         byte[] payload = input.readBytesExact(FrameCodec.checkedLength(
                 payloadLength,
                 ErrorCode.FRAME_SIZE,
                 "read frame",
                 "payload exceeds Java implementation limit"
         ));
-        FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamId, payload);
+        FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
         validateFrame(frame, normalized, true);
         return frame;
     }

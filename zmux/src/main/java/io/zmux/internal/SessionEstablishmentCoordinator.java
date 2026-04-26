@@ -8,10 +8,17 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressWarnings("resource")
 final class SessionEstablishmentCoordinator {
+    private static final int WRITER_CARRIER_WAITING = 0;
+    private static final int WRITER_CARRIER_SELECTED = 1;
+    private static final int WRITER_CARRIER_EXPIRED = 2;
+    private static final int WRITER_CARRIER_ABORTED = 3;
+
     private final Owner owner;
     private final Duration failureWriteWait;
     private final Duration successWriteWait;
@@ -87,8 +94,11 @@ final class SessionEstablishmentCoordinator {
 
     void establish() throws IOException {
         CountDownLatch prefaceWriteDone = new CountDownLatch(1);
+        CountDownLatch writerLoopDecision = new CountDownLatch(1);
+        AtomicBoolean runWriterLoop = new AtomicBoolean();
+        AtomicInteger writerCarrierState = new AtomicInteger(WRITER_CARRIER_WAITING);
         AtomicReference<IOException> prefaceWriteError = new AtomicReference<>();
-        Thread prefaceWriter = SessionEstablishmentCoordinator.newDaemonThread("zmux-preface-write", () -> {
+        Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", () -> {
             try {
                 FrameCodec.writePreface(this.owner.output(), this.owner.localPreface());
                 this.owner.output().flush();
@@ -97,10 +107,24 @@ final class SessionEstablishmentCoordinator {
             } finally {
                 prefaceWriteDone.countDown();
             }
+            try {
+                if (!SessionEstablishmentCoordinator.awaitLatch(writerLoopDecision, this.successWriteWait)) {
+                    if (writerCarrierState.compareAndSet(WRITER_CARRIER_WAITING, WRITER_CARRIER_EXPIRED)) {
+                        return;
+                    }
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (runWriterLoop.get()) {
+                this.owner.writerLoopTask().run();
+            }
         });
-        prefaceWriter.start();
+        writerThread.start();
 
         Preface remotePreface = null;
+        boolean established = false;
         try {
             remotePreface = this.readPeerPreface();
             this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.successWriteWait, true);
@@ -109,14 +133,25 @@ final class SessionEstablishmentCoordinator {
                 this.owner.markReadyLocked(remotePreface, negotiated, System.nanoTime());
                 this.owner.notifyLockWaiters();
             }
+            established = true;
+            runWriterLoop.set(true);
+            if (writerCarrierState.compareAndSet(WRITER_CARRIER_WAITING, WRITER_CARRIER_SELECTED)) {
+                writerLoopDecision.countDown();
+            } else {
+                writerLoopDecision.countDown();
+                SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", this.owner.writerLoopTask()).start();
+            }
         } catch (IOException error) {
             this.finishEstablishmentFailure(prefaceWriteDone, prefaceWriteError, remotePreface, error);
             throw error;
+        } finally {
+            if (!established) {
+                writerCarrierState.compareAndSet(WRITER_CARRIER_WAITING, WRITER_CARRIER_ABORTED);
+                writerLoopDecision.countDown();
+            }
         }
 
         Thread readerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-reader", this.owner.readerLoopTask());
-        Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", this.owner.writerLoopTask());
-        writerThread.start();
         readerThread.start();
     }
 
