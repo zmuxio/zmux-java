@@ -7,6 +7,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.zmux.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.*;
@@ -87,6 +88,49 @@ final class OrdinaryBatchOrdererTest {
 
         assertEquals(groupKey, snapshot.preferredGroupHead, "snapshot should preserve the preferred group head");
         assertEquals(4L, snapshot.preferredStreamHeads.get(groupKey), "snapshot should copy preferred stream heads instead of aliasing source state");
+    }
+
+    @Test
+    void retainedBiasReleasesMapStorageAfterLastStreamDrop() {
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+        OrdinaryBatchRetainedState state = retainedBias.state();
+        OrdinaryBatchOrderer.GroupKey groupKey = new OrdinaryBatchOrderer.GroupKey(0, 4L);
+
+        state.preferredGroupHead = groupKey;
+        state.preferredStreamHeads.put(groupKey, 4L);
+        state.groupVirtualTime.put(groupKey, 1L);
+        state.groupFinishTag.put(groupKey, 2L);
+        state.groupLastServed.put(groupKey, 3L);
+        state.groupLag.put(groupKey, 4L);
+        state.streamFinishTag.put(4L, 5L);
+        state.streamLastServed.put(4L, 6L);
+        state.streamLag.put(4L, 7L);
+        state.streamClass.put(4L, OrdinaryBatchOrderer.TrafficClass.INTERACTIVE);
+        state.streamLastSeenBatch.put(4L, 8L);
+        state.smallBurstDisarmed.add(4L);
+        state.rootVirtualTime = 9L;
+        state.serviceSeq = 10L;
+        state.batchSeq = 11L;
+        state.interactiveStreak = 12;
+        state.classSelectionsSinceBulk = 13;
+
+        Map<?, ?> previousGroupVirtualTime = state.groupVirtualTime;
+        Map<?, ?> previousStreamFinishTag = state.streamFinishTag;
+        Set<?> previousSmallBurstDisarmed = state.smallBurstDisarmed;
+
+        retainedBias.dropStream(4L);
+
+        assertNotSame(previousGroupVirtualTime, state.groupVirtualTime,
+                "idle retained group state should release old HashMap backing");
+        assertNotSame(previousStreamFinishTag, state.streamFinishTag,
+                "idle retained stream state should release old HashMap backing");
+        assertNotSame(previousSmallBurstDisarmed, state.smallBurstDisarmed,
+                "idle retained small-burst state should release old HashSet backing");
+        assertTrue(state.groupVirtualTime.isEmpty(), "released retained group state should be empty");
+        assertTrue(state.streamFinishTag.isEmpty(), "released retained stream state should be empty");
+        assertNull(state.preferredGroupHead, "released retained state should clear preferred group head");
+        assertEquals(0L, state.rootVirtualTime, "released retained state should reset root virtual time");
+        assertEquals(0L, state.batchSeq, "released retained state should reset batch sequence");
     }
 
     @Test

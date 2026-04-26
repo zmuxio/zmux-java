@@ -253,11 +253,7 @@ final class OrdinaryBatchRetainedState {
                 || preferredGroupHead != null) {
             return;
         }
-        rootVirtualTime = 0L;
-        serviceSeq = 0L;
-        batchSeq = 0L;
-        interactiveStreak = 0;
-        classSelectionsSinceBulk = 0;
+        release();
     }
 
     private void maybeRebase() {

@@ -94,7 +94,8 @@ final class SessionTerminalBookkeeping {
                 this.hiddenTombstones.addLast(streamId);
             }
         } else if (previous != null && previous.hidden()) {
-            this.hiddenTombstones.removeFirstOccurrence(streamId);
+            boolean hiddenChanged = this.hiddenTombstones.removeFirstOccurrence(streamId);
+            this.releaseEmptyQueueStorageLocked(false, hiddenChanged);
         }
         this.reapExcessTombstonesLocked();
         this.enforceHiddenControlStateBudgetLocked(tombstone.createdAtNanos());
@@ -133,6 +134,15 @@ final class SessionTerminalBookkeeping {
         this.hiddenTombstones = new ArrayDeque<>();
         this.markerOnlyRangeMode = false;
         this.asyncFailureScheduled = false;
+    }
+
+    private void releaseEmptyQueueStorageLocked(boolean tombstoneOrderChanged, boolean hiddenTombstonesChanged) {
+        if (tombstoneOrderChanged && this.tombstones.isEmpty()) {
+            this.tombstoneOrder = new ArrayDeque<>();
+        }
+        if (hiddenTombstonesChanged && this.hiddenTombstones.isEmpty()) {
+            this.hiddenTombstones = new ArrayDeque<>();
+        }
     }
 
     private void retainMarkerOnlyUsedStreamLocked(long streamId, Tombstone tombstone) {
@@ -319,15 +329,20 @@ final class SessionTerminalBookkeeping {
     }
 
     private Long oldestTombstoneIdLocked() {
+        boolean cleanedStaleEntry = false;
         while (true) {
             Long streamId = this.tombstoneOrder.peekFirst();
             if (streamId == null) {
+                if (cleanedStaleEntry) {
+                    this.releaseEmptyQueueStorageLocked(true, false);
+                }
                 return null;
             }
             if (this.tombstones.containsKey(streamId)) {
                 return streamId;
             }
             this.tombstoneOrder.pollFirst();
+            cleanedStaleEntry = true;
         }
     }
 
@@ -336,6 +351,9 @@ final class SessionTerminalBookkeeping {
         while (true) {
             Long streamId = this.hiddenTombstones.peekLast();
             if (streamId == null) {
+                if (cleanedStaleEntry) {
+                    this.releaseEmptyQueueStorageLocked(false, true);
+                }
                 return null;
             }
             Tombstone tombstone = this.tombstones.get(streamId);
@@ -350,13 +368,15 @@ final class SessionTerminalBookkeeping {
     private boolean reapTombstoneLocked(long streamId) {
         Tombstone removed = this.tombstones.remove(streamId);
         if (removed == null) {
-            this.tombstoneOrder.removeFirstOccurrence(streamId);
-            this.hiddenTombstones.removeFirstOccurrence(streamId);
+            boolean orderChanged = this.tombstoneOrder.removeFirstOccurrence(streamId);
+            boolean hiddenChanged = this.hiddenTombstones.removeFirstOccurrence(streamId);
+            this.releaseEmptyQueueStorageLocked(orderChanged, hiddenChanged);
             return false;
         }
-        this.tombstoneOrder.removeFirstOccurrence(streamId);
-        this.hiddenTombstones.removeFirstOccurrence(streamId);
+        boolean orderChanged = this.tombstoneOrder.removeFirstOccurrence(streamId);
+        boolean hiddenChanged = this.hiddenTombstones.removeFirstOccurrence(streamId);
         this.retainMarkerOnlyUsedStreamLocked(streamId, removed);
+        this.releaseEmptyQueueStorageLocked(orderChanged, hiddenChanged);
         return true;
     }
 
@@ -370,6 +390,7 @@ final class SessionTerminalBookkeeping {
             Tombstone tombstone = this.tombstones.get(streamId);
             if (tombstone == null || !tombstone.hidden()) {
                 this.hiddenTombstones.removeFirst();
+                this.releaseEmptyQueueStorageLocked(false, true);
                 continue;
             }
             if (tombstone.createdAtNanos() == 0L

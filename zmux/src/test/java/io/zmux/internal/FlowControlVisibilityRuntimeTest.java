@@ -503,6 +503,41 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     @Test
+    void lateDataOnTerminalTombstoneCountsSessionFlowControl() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "putTombstoneLocked",
+                    new Class<?>[]{long.class, SessionTerminalBookkeeping.Tombstone.class},
+                    streamId,
+                    new SessionTerminalBookkeeping.Tombstone(
+                            true,
+                            true,
+                            0L,
+                            "",
+                            LateDataCause.NONE
+                    )
+            );
+            runtime.setRecvSessionAdvertisedInternal(10L);
+            runtime.setRecvSessionReceivedBytesInternal(10L);
+        }
+
+        IOException error = assertThrows(
+                IOException.class,
+                () -> handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1}))
+        );
+
+        assertEquals(ErrorCode.FLOW_CONTROL.code(), ZmuxErrors.code(error, -1L),
+                "late DATA on terminal tombstone should still consume session flow-control credit");
+        synchronized (runtime.lock()) {
+            assertEquals(10L, runtime.recvSessionReceivedBytesInternal(),
+                    "flow-control rejected late tombstone DATA must not advance received bytes");
+        }
+    }
+
+    @Test
     void releasingQueuedDataWakesWriterBlockedOnReturnedSendCredit() throws Exception {
         Settings peerSettings = Settings.defaults().toBuilder()
                 .initialMaxData(1L)

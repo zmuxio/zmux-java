@@ -31,6 +31,9 @@ final class SessionLateDataHandler {
                     ZmuxErrorDirection.READ
             );
         }
+        if (appDataLength > 0) {
+            this.discardLatePeerDataLocked(null, appDataLength, disposition.cause());
+        }
         switch (disposition.action()) {
             case ABORT_CLOSED:
                 this.owner.enqueueControlLocked(new FrameCodec.Frame(
@@ -59,9 +62,6 @@ final class SessionLateDataHandler {
                 this.owner.notifyWriterWaiters();
                 break;
             case IGNORE:
-                if (appDataLength > 0) {
-                    this.discardLatePeerDataLocked(null, appDataLength, disposition.cause());
-                }
                 break;
             default:
                 throw new IllegalStateException("unexpected late-data action: " + disposition.action());

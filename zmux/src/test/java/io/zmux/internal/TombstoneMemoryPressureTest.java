@@ -233,12 +233,16 @@ final class TombstoneMemoryPressureTest {
             long nowNanos = System.nanoTime();
             long oldCreatedAtNanos = nowNanos - java.util.concurrent.TimeUnit.SECONDS.toNanos(2L);
             putTombstone(runtime, 4L, newTombstone(false, false, 9L, "", true, oldCreatedAtNanos));
+            Deque<Long> retainedOrder = tombstoneOrder(runtime);
+            Deque<Long> retainedHidden = hiddenTombstones(runtime);
 
             assertEquals(1, hiddenTombstones(runtime).size(), "hidden tombstone should be retained before TTL reap");
             runtime.reapExpiredHiddenControlStateLocked(nowNanos);
 
             assertTrue(tombstones(runtime).isEmpty(), "expired hidden tombstone should be removed");
             assertTrue(hiddenTombstones(runtime).isEmpty(), "expired hidden tombstone should leave no hidden queue entry");
+            assertNotSame(retainedOrder, tombstoneOrder(runtime), "empty tombstone order should release retained backing");
+            assertNotSame(retainedHidden, hiddenTombstones(runtime), "empty hidden tombstone queue should release retained backing");
             assertTrue(markerOnly(runtime).containsKey(4L), "expired hidden tombstone should retain marker-only state");
         }
     }

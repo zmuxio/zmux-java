@@ -142,6 +142,34 @@ final class TombstoneMarkerTest {
     }
 
     @Test
+    void lateDataOnReapedGracefulTombstoneCountsAggregateCap() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .tombstoneLimit(1)
+                .aggregateLateDataCap(1)
+                .build();
+        try (RawPeerSession peer = RawPeerSession.open(config, 0L)) {
+            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 2L, new byte[0]));
+            acceptEmptyUni(peer.session());
+            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 6L, new byte[0]));
+            acceptEmptyUni(peer.session());
+
+            await(Duration.ofSeconds(1), () -> tombstoneReaped(peer.session(), 2L, 1), "graceful tombstone reap");
+
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{1}));
+            FrameCodec.Frame abort = peer.awaitFrameType(FrameType.ABORT, Duration.ofSeconds(1));
+            assertEquals(2L, abort.streamId(), "first late DATA should still emit STREAM_CLOSED abort");
+
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{2}));
+            await(Duration.ofSeconds(1), () -> peer.session().state().terminal(), "session failure after tombstone late-data cap breach");
+            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
+            assertEquals(ErrorCode.PROTOCOL.code(), payload.code(), "late tombstone DATA cap breach should fail with PROTOCOL");
+            assertTrue(payload.reason().contains("late-data cap exceeded"),
+                    "close reason should expose the late-data cap breach");
+        }
+    }
+
+    @Test
     void lateResetOnMarkerOnlyUsedStreamIsIgnored() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .tombstoneLimit(1)

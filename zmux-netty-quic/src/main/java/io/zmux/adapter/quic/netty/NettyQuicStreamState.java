@@ -956,6 +956,7 @@ final class NettyQuicStreamState {
         try {
             preludeSubmitting = false;
             preludeSent = true;
+            prelude = null;
             peerVisible = true;
             signalWriteChangedLocked();
         } finally {

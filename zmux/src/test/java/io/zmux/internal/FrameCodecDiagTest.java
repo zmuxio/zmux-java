@@ -90,4 +90,26 @@ final class FrameCodecDiagTest {
         assertEquals(ErrorCode.INTERNAL.code(), parsed.code(), "error code mismatch");
         assertEquals("€", parsed.reason(), "reason should be truncated to the longest UTF-8-safe prefix");
     }
+
+    @Test
+    void buildErrorPayloadAccountsForDebugTextLengthVarintGrowth() throws Exception {
+        String reason = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()";
+        byte[] payload = FrameCodec.buildErrorPayload(ErrorCode.INTERNAL.code(), reason, 66L);
+        FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload);
+
+        assertEquals(ErrorCode.INTERNAL.code(), parsed.code(), "error code mismatch");
+        assertEquals(reason.substring(0, 63), parsed.reason(),
+                "reason cap should reserve room for the enlarged DIAG length varint");
+        assertEquals(66, payload.length, "payload should fit exactly within the advertised cap");
+    }
+
+    @Test
+    void buildErrorPayloadSkipsReasonWhenNoDebugTextTlvRoom() throws Exception {
+        byte[] payload = FrameCodec.buildErrorPayload(ErrorCode.INTERNAL.code(), "x", 2L);
+        FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload);
+
+        assertEquals(ErrorCode.INTERNAL.code(), parsed.code(), "error code mismatch");
+        assertEquals("", parsed.reason(), "reason should be omitted when the cap cannot fit a DIAG TLV");
+        assertEquals(1, payload.length, "payload should contain only the error code");
+    }
 }

@@ -1052,6 +1052,23 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void successfulLocalOpenPreludeSubmissionReleasesRetainedBuffer() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            byte[] openInfo = utf8("prelude-retention");
+            NettyQuicBidiStream stream = (NettyQuicBidiStream) pair.client.openStream(
+                    new OpenOptions(7L, 3L, openInfo)
+            );
+
+            assertTrue((Boolean) getField(stream.state, "preludeSent"), "open prelude should be submitted");
+            assertNull(getField(stream.state, "prelude"), "submitted open prelude buffer should be released");
+            assertArrayEquals(openInfo, stream.metadata().openInfo(),
+                    "metadata snapshot must remain available after releasing prelude storage");
+
+            stream.close();
+        }
+    }
+
+    @Test
     void emptyMetadataUpdateFailsWithTypedLocalError() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             ZmuxStream stream = pair.client.openStream();
