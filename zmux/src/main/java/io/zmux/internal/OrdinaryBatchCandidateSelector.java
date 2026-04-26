@@ -263,8 +263,10 @@ final class OrdinaryBatchCandidateSelector {
             }
             long expected = fairShare(cost, candidate.baseGroupWeight(), effectiveTotalGroupWeight);
             long actual = candidate.group().key().equals(chosen.group().key()) ? cost : 0L;
-            long nextLag = clampLag(
-                    groupLag.getOrDefault(candidate.group().key(), 0L) + expected - actual,
+            long nextLag = applyLagFeedback(
+                    groupLag.getOrDefault(candidate.group().key(), 0L),
+                    expected,
+                    actual,
                     feedbackWindow
             );
             groupLag.put(candidate.group().key(), nextLag);
@@ -280,8 +282,10 @@ final class OrdinaryBatchCandidateSelector {
             }
             long expected = fairShare(cost, stream.selectedBaseWeight(), effectiveTotalBaseStreamWeight);
             long actual = stream.streamKey() == chosen.streamState().streamKey() ? cost : 0L;
-            long nextLag = clampLag(
-                    streamLag.getOrDefault(stream.streamKey(), 0L) + expected - actual,
+            long nextLag = applyLagFeedback(
+                    streamLag.getOrDefault(stream.streamKey(), 0L),
+                    expected,
+                    actual,
                     feedbackWindow
             );
             streamLag.put(stream.streamKey(), nextLag);
@@ -432,6 +436,25 @@ final class OrdinaryBatchCandidateSelector {
         }
         long limit = window <= Long.MAX_VALUE / 2L ? window * 2L : Long.MAX_VALUE;
         return Math.max(-limit, Math.min(value, limit));
+    }
+
+    static long applyLagFeedback(long current, long expected, long actual, long window) {
+        if (window <= 0L) {
+            return 0L;
+        }
+        if (expected >= actual) {
+            long delta = expected - actual;
+            if (current > Long.MAX_VALUE - delta) {
+                return clampLag(Long.MAX_VALUE, window);
+            }
+            return clampLag(current + delta, window);
+        }
+        long delta = actual - expected;
+        long floor = -Long.MAX_VALUE;
+        if (current < floor + delta) {
+            return clampLag(floor, window);
+        }
+        return clampLag(current - delta, window);
     }
 
     private static boolean isFreshStream(long streamKey,

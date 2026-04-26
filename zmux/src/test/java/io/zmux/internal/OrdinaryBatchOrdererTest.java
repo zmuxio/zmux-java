@@ -378,6 +378,27 @@ final class OrdinaryBatchOrdererTest {
     }
 
     @Test
+    void applyLagFeedbackClampsBeforeSignedOverflow() {
+        long window = 10L;
+
+        long positive = OrdinaryBatchCandidateSelector.applyLagFeedback(
+                Long.MAX_VALUE - 1L,
+                Long.MAX_VALUE,
+                0L,
+                window
+        );
+        long negative = OrdinaryBatchCandidateSelector.applyLagFeedback(
+                -Long.MAX_VALUE + 1L,
+                0L,
+                Long.MAX_VALUE,
+                window
+        );
+
+        assertEquals(2L * window, positive, "positive feedback overflow should clamp to the lag window");
+        assertEquals(-2L * window, negative, "negative feedback overflow should clamp to the lag window");
+    }
+
+    @Test
     void adjustWeightForLagPenalizesOverServedFlows() {
         long base = 24L;
         long window = OrdinaryBatchOrderer.feedbackWindow(SchedulerHint.BALANCED_FAIR, 16_384L);
