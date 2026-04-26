@@ -925,6 +925,18 @@ final class SessionDiagnosticsRuntimeTest {
         assertEquals("validate frame scope", ZmuxErrors.operation(error.getCause()), "protocol failure cause operation mismatch");
         assertEquals(ZmuxErrorSource.REMOTE, ZmuxErrors.source(error.getCause()), "protocol failure cause source mismatch");
         assertEquals(ZmuxErrorDirection.READ, ZmuxErrors.direction(error.getCause()), "protocol failure cause direction mismatch");
+
+        IOException terminationCause = runtime.terminationCause().orElseThrow(() ->
+                new AssertionError("protocol failure should remain as the runtime termination cause")
+        );
+        assertEquals("validate frame scope", ZmuxErrors.operation(terminationCause), "termination cause operation mismatch");
+        assertEquals(ZmuxErrorSource.REMOTE, ZmuxErrors.source(terminationCause), "termination cause source mismatch");
+        assertEquals(ZmuxErrorDirection.READ, ZmuxErrors.direction(terminationCause), "termination cause direction mismatch");
+        assertEquals(
+                ZmuxTerminationKind.SESSION_TERMINATION,
+                ZmuxErrors.terminationKind(terminationCause),
+                "termination cause termination mismatch"
+        );
     }
 
     @Test
