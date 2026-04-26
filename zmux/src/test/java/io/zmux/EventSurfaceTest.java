@@ -259,7 +259,7 @@ final class EventSurfaceTest {
                             case SESSION_CLOSED:
                                 if (session != null) {
                                     session.stats();
-                                    session.peerCloseError();
+                                    assertNull(session.peerCloseError(), "local close should not expose a peer close error");
                                 }
                                 sessionClosedDone.countDown();
                                 break;

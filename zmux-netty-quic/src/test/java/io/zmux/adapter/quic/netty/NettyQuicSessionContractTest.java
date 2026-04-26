@@ -73,6 +73,17 @@ class NettyQuicSessionContractTest {
         throw new AssertionError("timed out waiting for session stats predicate");
     }
 
+    private static void stallEventLoopUntilReleased(CountDownLatch blocked, CountDownLatch release) {
+        blocked.countDown();
+        try {
+            if (!release.await(5L, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to release stalled Netty event loop");
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static List<NettyQuicBidiStream> bidiAcceptSnapshot(NettyQuicSession session) throws Exception {
         NettyQuicSupport.AcceptQueue<NettyQuicBidiStream> queue =
@@ -932,14 +943,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             try {
@@ -1523,14 +1527,7 @@ class NettyQuicSessionContractTest {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall Netty event loop");
 
             AtomicReference<Throwable> openError = new AtomicReference<>();
@@ -1563,14 +1560,7 @@ class NettyQuicSessionContractTest {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall Netty event loop");
 
             OpenTimeoutException timeout = assertThrows(
@@ -1612,14 +1602,7 @@ class NettyQuicSessionContractTest {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall Netty event loop");
 
             OpenTimeoutException timeout = assertThrows(
@@ -1644,14 +1627,7 @@ class NettyQuicSessionContractTest {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             AtomicReference<Throwable> openError = new AtomicReference<>();
@@ -1715,14 +1691,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawServer.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawServer.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall server Netty event loop");
 
             AtomicReference<Throwable> closeError = new AtomicReference<>();
@@ -1767,14 +1736,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             AtomicReference<Throwable> writeError = new AtomicReference<>();
@@ -1826,14 +1788,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             clientStream.setWriteDeadline(Instant.now().plusMillis(100));
@@ -1862,14 +1817,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             AtomicReference<Throwable> closeError = new AtomicReference<>();
@@ -1909,14 +1857,7 @@ class NettyQuicSessionContractTest {
 
             CountDownLatch eventLoopBlocked = new CountDownLatch(1);
             CountDownLatch releaseEventLoop = new CountDownLatch(1);
-            pair.rawClient.eventLoop().execute(() -> {
-                eventLoopBlocked.countDown();
-                try {
-                    releaseEventLoop.await(5L, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(eventLoopBlocked, releaseEventLoop));
             assertTrue(eventLoopBlocked.await(1L, TimeUnit.SECONDS), "failed to stall client Netty event loop");
 
             clientStream.setWriteTimeout(Duration.ofSeconds(Long.MAX_VALUE));

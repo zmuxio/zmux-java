@@ -1232,8 +1232,9 @@ final class ApiSurfaceTest {
             assertEquals("peer close", error.reason());
             assertEquals(ZmuxErrorScope.SESSION, error.scope());
             assertEquals(ZmuxErrorSource.REMOTE, error.source());
-            assertTrue(pair.client().terminationCause().isPresent());
-            assertEquals(42L, ZmuxErrors.code(pair.client().terminationCause().get(), -1L));
+            IOException cause = pair.client().terminationCause()
+                    .orElseThrow(() -> new AssertionError("peer close should set the client termination cause"));
+            assertEquals(42L, ZmuxErrors.code(cause, -1L));
         }
     }
 
@@ -1251,8 +1252,9 @@ final class ApiSurfaceTest {
             assertEquals("peer close", error.reason());
             assertEquals(ZmuxErrorScope.SESSION, error.scope());
             assertEquals(ZmuxErrorSource.REMOTE, error.source());
-            assertTrue(pair.client().terminationCause().isPresent());
-            assertEquals(24L, ZmuxErrors.code(pair.client().terminationCause().get(), -1L));
+            IOException cause = pair.client().terminationCause()
+                    .orElseThrow(() -> new AssertionError("peer close should set the client termination cause"));
+            assertEquals(24L, ZmuxErrors.code(cause, -1L));
         }
     }
 

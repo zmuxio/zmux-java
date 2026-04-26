@@ -332,7 +332,7 @@ final class GoAwayRuntimeTest {
         }, "close-after-prior-goaway");
         closeThread.start();
 
-        Thread writer = null;
+        Thread writer;
         try {
             awaitCondition(() -> {
                 synchronized (runtime.lock()) {

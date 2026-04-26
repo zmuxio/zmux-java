@@ -78,7 +78,7 @@ final class GoInteropSmokeTest {
         try (Socket acceptedSocket = socket;
              ZmuxNativeSession session = Zmux.server(socketConnection(acceptedSocket), interopConfig())) {
             ZmuxNativeStream stream = session.acceptStream(Duration.ofSeconds(5));
-            assertEquals("go-open", new String(stream.openInfo(), StandardCharsets.UTF_8.name()));
+            assertEquals("go-open", new String(stream.openInfo(), StandardCharsets.UTF_8));
             StreamMetadata metadata = stream.metadata();
             assertEquals(7L, metadata.priority());
             assertEquals(Long.valueOf(9L), metadata.group());

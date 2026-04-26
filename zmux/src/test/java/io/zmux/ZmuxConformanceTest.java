@@ -110,19 +110,23 @@ final class ZmuxConformanceTest {
     void conformanceNamesRoundTripThroughLookupApis() {
         assertEquals(
                 ZmuxClaim.PRIORITY_UPDATE,
-                ZmuxClaim.fromClaimName("zmux-priority_update").get()
+                ZmuxClaim.fromClaimName("zmux-priority_update")
+                        .orElseThrow(() -> new AssertionError("priority update claim lookup failed"))
         );
         assertEquals(
                 ZmuxImplementationProfile.V1,
-                ZmuxImplementationProfile.fromProfileName("zmux-v1").get()
+                ZmuxImplementationProfile.fromProfileName("zmux-v1")
+                        .orElseThrow(() -> new AssertionError("v1 profile lookup failed"))
         );
         assertEquals(
                 ZmuxImplementationProfile.REFERENCE_PROFILE_V1,
-                ZmuxImplementationProfile.fromProfileName("zmux-reference-profile-v1").get()
+                ZmuxImplementationProfile.fromProfileName("zmux-reference-profile-v1")
+                        .orElseThrow(() -> new AssertionError("reference profile lookup failed"))
         );
         assertEquals(
                 ZmuxConformanceSuite.V1_PROFILE_COMPATIBILITY,
-                ZmuxConformanceSuite.fromSuiteName("v1-profile-compatibility").get()
+                ZmuxConformanceSuite.fromSuiteName("v1-profile-compatibility")
+                        .orElseThrow(() -> new AssertionError("v1 compatibility suite lookup failed"))
         );
         assertTrue(
                 ZmuxConformance.referenceProfileClaimGate().contains("Close acts as a full local close helper"),

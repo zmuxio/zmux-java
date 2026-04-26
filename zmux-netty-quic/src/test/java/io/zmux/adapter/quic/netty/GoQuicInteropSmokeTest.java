@@ -554,7 +554,7 @@ final class GoQuicInteropSmokeTest {
                     StreamMetadata metadata = stream.metadata();
                     assertEquals(7L, metadata.priority());
                     assertEquals(Long.valueOf(11L), metadata.group());
-                    assertEquals("go->java", new String(NettyQuicTestSupport.readAll(stream), StandardCharsets.UTF_8.name()));
+                    assertEquals("go->java", new String(NettyQuicTestSupport.readAll(stream), StandardCharsets.UTF_8));
                     stream.writeFinal("java:go->java".getBytes(StandardCharsets.UTF_8));
                     stream.close();
                     session.close();

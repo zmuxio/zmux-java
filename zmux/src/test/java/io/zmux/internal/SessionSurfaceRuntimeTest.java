@@ -1106,7 +1106,8 @@ class SessionSurfaceRuntimeTest {
             runtime.finishSessionLocked(lateTransportError, SessionState.FAILED);
         }
 
-        IOException cause = runtime.terminationCause().get();
+        IOException cause = runtime.terminationCause()
+                .orElseThrow(() -> new AssertionError("failed session should expose its terminal cause"));
         assertSame(original, cause, "late finish error must not overwrite the first terminal cause");
         assertEquals(SessionState.FAILED, runtime.state(), "late finish error must not change failed terminal state");
     }
