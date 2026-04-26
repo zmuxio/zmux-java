@@ -191,10 +191,17 @@ final class SessionLifecycleCoordinator {
         this.owner.clearKeepaliveSchedulesLocked();
         this.owner.setInflightBatch(Collections.emptyList());
         if (!this.owner.terminalCleanupApplied()) {
+            List<SessionRuntime.OutboundFrame> retainedQueuedGoAwayFrames =
+                    sessionState == SessionState.CLOSING
+                            ? this.owner.takeQueuedGoAwayFramesLocked()
+                            : Collections.emptyList();
             this.owner.discardPendingOutboundLocked();
             this.owner.failActivePingLocked(this.sessionErrorLocked());
             this.owner.releaseAllStreamsForSessionCloseLocked(this.owner.sessionCloseStreamErrorLocked(sessionState));
             this.owner.clearSessionCloseStateLocked();
+            if (!retainedQueuedGoAwayFrames.isEmpty()) {
+                this.owner.restoreQueuedGoAwayFramesLocked(retainedQueuedGoAwayFrames);
+            }
             this.owner.setTerminalCleanupApplied(true);
         } else if (this.owner.hasActivePingLocked()) {
             this.owner.failActivePingLocked(this.sessionErrorLocked());
@@ -323,6 +330,8 @@ final class SessionLifecycleCoordinator {
 
         void discardPendingOutboundLocked();
 
+        List<SessionRuntime.OutboundFrame> takeQueuedGoAwayFramesLocked();
+
         void failActivePingLocked(IOException error);
 
         ApplicationError sessionCloseStreamErrorLocked(SessionState sessionState);
@@ -330,6 +339,8 @@ final class SessionLifecycleCoordinator {
         void releaseAllStreamsForSessionCloseLocked(ApplicationError error);
 
         void clearSessionCloseStateLocked();
+
+        void restoreQueuedGoAwayFramesLocked(List<SessionRuntime.OutboundFrame> frames);
 
         boolean hasActivePingLocked();
 

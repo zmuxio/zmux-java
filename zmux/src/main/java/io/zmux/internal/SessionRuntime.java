@@ -1189,7 +1189,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     private boolean trySendGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
         try {
-            this.goAway(bidiWatermark, uniWatermark, ErrorCode.NO_ERROR.code(), "");
+            this.enqueueGracefulGoAway(bidiWatermark, uniWatermark);
             return true;
         } catch (IOException error) {
             synchronized (this.lock) {
@@ -1198,6 +1198,50 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 }
             }
             throw error;
+        }
+    }
+
+    private void enqueueGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
+        synchronized (this.lock) {
+            if (this.shouldFailSessionOperationsLocked()) {
+                throw this.sessionOperationErrorLocked("goAway", this.currentErrorLocked());
+            }
+            this.validateOutgoingGoAwayWatermarkLocked(bidiWatermark, true);
+            this.validateOutgoingGoAwayWatermarkLocked(uniWatermark, false);
+            if (bidiWatermark > this.localGoAwayBidi || uniWatermark > this.localGoAwayUni) {
+                if (this.localGoAwayIssued
+                        && this.localGoAwayBidi <= bidiWatermark
+                        && this.localGoAwayUni <= uniWatermark) {
+                    return;
+                }
+                throw sessionError(
+                        ErrorCode.PROTOCOL,
+                        "goAway",
+                        "GOAWAY watermarks must be non-increasing",
+                        ZmuxErrorSource.LOCAL,
+                        ZmuxErrorDirection.WRITE
+                );
+            }
+            if (this.localGoAwayIssued
+                    && bidiWatermark == this.localGoAwayBidi
+                    && uniWatermark == this.localGoAwayUni) {
+                return;
+            }
+            byte[] payload = FrameCodec.buildGoAwayPayload(
+                    bidiWatermark,
+                    uniWatermark,
+                    ErrorCode.NO_ERROR.code(),
+                    "",
+                    this.controlPayloadLimitLocked()
+            );
+            this.enqueueControlLocked(new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, payload));
+            this.localGoAwayBidi = bidiWatermark;
+            this.localGoAwayUni = uniWatermark;
+            this.localGoAwayIssued = true;
+            if (this.state == SessionState.READY) {
+                this.state = SessionState.DRAINING;
+            }
+            this.notifyLockWaitersLocked();
         }
     }
 
@@ -3165,6 +3209,33 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 iterator.remove();
                 this.onUrgentFrameDequeuedLocked(outboundFrame);
             }
+        }
+    }
+
+    List<OutboundFrame> takeQueuedGoAwayFramesLocked() {
+        ArrayList<OutboundFrame> retained = null;
+        Iterator<OutboundFrame> iterator = this.urgentQueue.iterator();
+        while (iterator.hasNext()) {
+            OutboundFrame outboundFrame = iterator.next();
+            if (outboundFrame == null || outboundFrame.frame().type() != FrameType.GOAWAY) {
+                continue;
+            }
+            iterator.remove();
+            this.onUrgentFrameDequeuedLocked(outboundFrame);
+            if (retained == null) {
+                retained = new ArrayList<>(2);
+            }
+            retained.add(outboundFrame);
+        }
+        return retained == null ? Collections.emptyList() : retained;
+    }
+
+    void restoreQueuedGoAwayFramesLocked(List<OutboundFrame> frames) {
+        if (frames == null || frames.isEmpty()) {
+            return;
+        }
+        for (OutboundFrame outboundFrame : frames) {
+            this.enqueueAdmittedExistingUrgentOutboundLocked(outboundFrame);
         }
     }
 

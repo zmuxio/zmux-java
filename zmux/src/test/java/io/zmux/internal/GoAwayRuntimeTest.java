@@ -8,7 +8,9 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.util.Deque;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -100,6 +102,29 @@ final class GoAwayRuntimeTest {
             }
             throw exception;
         }
+    }
+
+    private static void awaitCondition(BooleanSupplier condition, String message) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError(message);
+    }
+
+    private static Thread startWriterLoop(SessionRuntime runtime, AtomicReference<Throwable> failure, String name) {
+        Thread writer = new Thread(() -> {
+            try {
+                SessionRuntimeTestSupport.invokePrivate(runtime, "writerLoop", new Class<?>[0]);
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, name);
+        writer.start();
+        return writer;
     }
 
     @Test
@@ -267,5 +292,89 @@ final class GoAwayRuntimeTest {
         assertEquals("", runtime.peerGoAwayError().reason(), "invalid UTF-8 DIAG should clear the retained GOAWAY reason");
         assertEquals(acceptedBidi, runtime.peerGoAwayBidiInternal(), "peer GOAWAY bidi watermark mismatch");
         assertEquals(0L, runtime.peerGoAwayUniInternal(), "peer GOAWAY uni watermark mismatch");
+    }
+
+    @Test
+    void closeAfterQueuedLocalGoAwayPreservesPriorGoAwayBeforeRefinedReplacement() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .role(Role.RESPONDER)
+                        .gracefulCloseDrainTimeout(java.time.Duration.ofMillis(200L))
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+        long initialBidi = peerGoAwayWatermark(true, 2);
+        long initialUni = peerGoAwayWatermark(false, 1);
+        long refinedBidi = peerGoAwayWatermark(true, 1);
+        long refinedUni = 0L;
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "beginLocalOpenLocked",
+                    new Class<?>[]{StreamRuntime.class},
+                    stream
+            );
+            SessionRuntimeTestSupport.setLongField(runtime, "lastAcceptedPeerBidi", refinedBidi);
+            SessionRuntimeTestSupport.setLongField(runtime, "lastAcceptedPeerUni", refinedUni);
+        }
+        runtime.goAway(initialBidi, initialUni, ErrorCode.NO_ERROR.code(), "prior");
+
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread closeThread = new Thread(() -> {
+            try {
+                runtime.close();
+            } catch (Throwable throwable) {
+                closeFailure.set(throwable);
+            }
+        }, "close-after-prior-goaway");
+        closeThread.start();
+
+        Thread writer = null;
+        try {
+            awaitCondition(() -> {
+                synchronized (runtime.lock()) {
+                    try {
+                        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+                        Object last = urgentQueue.peekLast();
+                        return last != null
+                                && SessionRuntimeTestSupport.outboundFrame(last).type() == FrameType.CLOSE;
+                    } catch (Exception exception) {
+                        throw new RuntimeException(exception);
+                    }
+                }
+            }, "close should queue CLOSE after graceful drain");
+
+            synchronized (runtime.lock()) {
+                Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+                assertEquals(3, urgentQueue.size(), "close after a queued prior GOAWAY should retain both GOAWAY frames before CLOSE");
+                Object[] frames = urgentQueue.toArray();
+                assertEquals(FrameType.GOAWAY, SessionRuntimeTestSupport.outboundFrame(frames[0]).type(), "first queued control frame mismatch");
+                assertEquals(FrameType.GOAWAY, SessionRuntimeTestSupport.outboundFrame(frames[1]).type(), "second queued control frame mismatch");
+                assertEquals(FrameType.CLOSE, SessionRuntimeTestSupport.outboundFrame(frames[2]).type(), "third queued control frame mismatch");
+
+                FrameCodec.GoAwayPayload initial = FrameCodec.parseGoAwayPayload(
+                        SessionRuntimeTestSupport.outboundFrame(frames[0]).payload()
+                );
+                FrameCodec.GoAwayPayload refined = FrameCodec.parseGoAwayPayload(
+                        SessionRuntimeTestSupport.outboundFrame(frames[1]).payload()
+                );
+                assertEquals(initialBidi, initial.lastAcceptedBidi(), "prior GOAWAY bidi watermark mismatch");
+                assertEquals(initialUni, initial.lastAcceptedUni(), "prior GOAWAY uni watermark mismatch");
+                assertEquals(refinedBidi, refined.lastAcceptedBidi(), "refined GOAWAY bidi watermark mismatch");
+                assertEquals(refinedUni, refined.lastAcceptedUni(), "refined GOAWAY uni watermark mismatch");
+            }
+        } finally {
+            writer = startWriterLoop(runtime, writerFailure, "close-after-prior-goaway-writer");
+            writer.join(1_000L);
+            closeThread.join(1_000L);
+        }
+
+        assertFalse(writer.isAlive(), "writer loop should terminate after flushing queued close frames");
+        assertFalse(closeThread.isAlive(), "close should finish once the writer flushes the queued frames");
+        assertNull(writerFailure.get(), "writer loop failure mismatch");
+        assertNull(closeFailure.get(), "close failure mismatch");
     }
 }

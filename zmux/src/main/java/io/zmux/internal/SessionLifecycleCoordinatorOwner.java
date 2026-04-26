@@ -87,6 +87,11 @@ final class SessionLifecycleCoordinatorOwner implements SessionLifecycleCoordina
     }
 
     @Override
+    public List<SessionRuntime.OutboundFrame> takeQueuedGoAwayFramesLocked() {
+        return this.owner.takeQueuedGoAwayFramesLocked();
+    }
+
+    @Override
     public void failActivePingLocked(IOException error) {
         this.owner.failActivePingLocked(error);
     }
@@ -104,6 +109,11 @@ final class SessionLifecycleCoordinatorOwner implements SessionLifecycleCoordina
     @Override
     public void clearSessionCloseStateLocked() {
         this.owner.clearSessionCloseStateLocked();
+    }
+
+    @Override
+    public void restoreQueuedGoAwayFramesLocked(List<SessionRuntime.OutboundFrame> frames) {
+        this.owner.restoreQueuedGoAwayFramesLocked(frames);
     }
 
     @Override
