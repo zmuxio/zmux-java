@@ -1250,7 +1250,9 @@ final class NettyQuicSession implements ZmuxSession {
             state.onSessionClosed(closingError);
             state.closeRaw();
         }
-        for (NettyQuicStreamState state : activeStreams) {
+        ArrayList<NettyQuicStreamState> activeSnapshot = new ArrayList<>(activeStreams);
+        activeStreams.clear();
+        for (NettyQuicStreamState state : activeSnapshot) {
             state.onSessionClosed(closingError);
         }
     }

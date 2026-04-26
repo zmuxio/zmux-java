@@ -711,6 +711,25 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void closeStartReleasesActiveStreamRegistryReferences() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            NettyQuicSession server = (NettyQuicSession) pair.server;
+            Set<NettyQuicStreamState> activeStreams =
+                    (Set<NettyQuicStreamState>) getField(server, "activeStreams");
+            NettyQuicStreamState active = NettyQuicStreamState.localBidi(server, OpenOptions.empty());
+            IOException closeError = new SessionClosedException(ZmuxErrorSource.LOCAL);
+            activeStreams.add(active);
+
+            invokePrivate(server, "beginClosing", new Class<?>[]{IOException.class}, closeError);
+
+            assertTrue(activeStreams.isEmpty(), "close-start should not retain active stream state references");
+            assertSame(closeError, getField(active, "sessionError"),
+                    "active stream state should still observe the session close");
+        }
+    }
+
+    @Test
     void acceptedStreamScheduledAfterCloseIsHiddenReaped() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             NettyQuicSession server = (NettyQuicSession) pair.server;
