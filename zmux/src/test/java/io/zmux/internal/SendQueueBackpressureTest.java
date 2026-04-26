@@ -124,6 +124,44 @@ final class SendQueueBackpressureTest {
         }
     }
 
+    @Test
+    void releasingBelowThresholdMemoryWakesProjectedWriteWaiters() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .sessionMemoryCap(10L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, largeSendWindowSettings());
+        StreamRuntime blocked;
+
+        synchronized (runtime.lock()) {
+            blocked = runtime.createPeerOpenedStreamLocked(SessionRuntime.firstPeerStreamId(Role.RESPONDER, true));
+            assertTrue(runtime.replacePendingControlBytesLocked(0L, 7L), "test setup should retain pending control bytes below the wake threshold");
+            assertEquals(8L, runtime.sessionMemoryHighThresholdLocked(), "test requires an 8-byte session memory wake threshold");
+            assertEquals(7L, runtime.trackedSessionMemoryLocked(), "tracked session memory should stay just below the wake threshold");
+        }
+
+        WriteAttempt blockedWrite = WriteAttempt.start(() -> reserveSend(runtime, blocked, 2));
+        try {
+            assertFalse(
+                    blockedWrite.await(Duration.ofMillis(150)),
+                    "projected session memory should block writes even before tracked memory crosses the wake threshold"
+            );
+
+            synchronized (runtime.lock()) {
+                runtime.releasePendingControlBytesLocked(1L);
+                assertEquals(6L, runtime.trackedSessionMemoryLocked(), "tracked session memory should remain below the wake threshold after release");
+            }
+
+            assertTrue(
+                    blockedWrite.await(Duration.ofSeconds(1)),
+                    "releasing memory below the wake threshold should still wake projected-memory write waiters"
+            );
+            assertNull(blockedWrite.error(), "projected-memory write waiter should resume cleanly after memory relief");
+        } finally {
+            blockedWrite.join();
+        }
+    }
+
     @FunctionalInterface
     private interface CheckedRunnable {
         void run() throws Exception;
