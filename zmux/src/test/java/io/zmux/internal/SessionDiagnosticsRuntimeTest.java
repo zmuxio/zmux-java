@@ -827,6 +827,30 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void readerLoopExitsOnceAllInboundFramesAreIgnored() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        SessionRuntimeTestSupport.emptyInput(),
+                        SessionRuntimeTestSupport.discardingOutput()
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        runtime.closeWithError(ErrorCode.NO_ERROR.code(), "");
+
+        Thread reader = startReaderLoop(runtime, failure, "session-reader-close-start-noop-exit");
+        reader.join(1_000L);
+
+        assertFalse(reader.isAlive(), "reader loop should exit once local close makes every inbound frame ignorable");
+        assertNull(failure.get(), "reader loop should not treat ignored inbound state as a transport failure");
+        assertFalse(runtime.awaitTermination(Duration.ofMillis(20)), "reader loop exit should not finalize the session before the queued CLOSE flushes");
+        assertEquals(SessionState.CLOSING, runtime.state(), "local close start should remain in CLOSING until the close frame flushes");
+    }
+
+    @Test
     void readerProtocolFailurePromotesSessionTerminationKind() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 new BasicDuplexConnection(

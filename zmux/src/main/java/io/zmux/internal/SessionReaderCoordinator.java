@@ -51,6 +51,13 @@ final class SessionReaderCoordinator {
                 : this.owner.ignorePeerNonCloseFrameLocked(frameType);
     }
 
+    private boolean shouldContinueReadLoop() {
+        synchronized (this.owner.lock()) {
+            return !this.owner.ignorePeerCloseFrameLocked()
+                    || !this.owner.ignorePeerNonCloseFrameLocked(FrameType.DATA);
+        }
+    }
+
     private FrameCodec.ErrorPayload parseErrorPayloadForPeerNonCloseFrame(FrameCodec.Frame frame) throws IOException {
         if (this.ignorePeerNonCloseFrame(frame.type())) {
             return null;
@@ -81,7 +88,7 @@ final class SessionReaderCoordinator {
 
     void run() {
         try {
-            while (true) {
+            while (this.shouldContinueReadLoop()) {
                 FrameEnvelopeCodec.InboundFrame frame = FrameEnvelopeCodec.readInboundFrame(
                         this.owner.input(),
                         this.owner.limits(),
