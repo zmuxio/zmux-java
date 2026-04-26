@@ -10,6 +10,8 @@ import java.util.Objects;
 
 @SuppressWarnings("resource")
 final class SessionAcceptRegistry {
+    private static final int RELEASE_EMPTY_ACCEPT_QUEUE_MIN_SIZE = 1024;
+
     private final Owner owner;
     private Deque<StreamRuntime> acceptBidi = new ArrayDeque<>();
     private Deque<StreamRuntime> acceptUni = new ArrayDeque<>();
@@ -17,6 +19,8 @@ final class SessionAcceptRegistry {
     private long acceptUniBytes;
     private long nextVisibilitySequence;
     private long visibleAcceptRefused;
+    private int acceptBidiPeakSize;
+    private int acceptUniPeakSize;
 
     SessionAcceptRegistry(Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
@@ -40,7 +44,9 @@ final class SessionAcceptRegistry {
         streamRuntime.setApplicationVisibleLocked(true);
         streamRuntime.setVisibilitySequenceLocked(++this.nextVisibilitySequence);
         streamRuntime.setAcceptQueuedLocked(true);
-        this.acceptQueueLocked(streamRuntime.bidirectional()).addLast(streamRuntime);
+        Deque<StreamRuntime> queue = this.acceptQueueLocked(streamRuntime.bidirectional());
+        queue.addLast(streamRuntime);
+        this.recordAcceptQueuePeakLocked(streamRuntime.bidirectional(), queue.size());
         this.addQueuedBytesLocked(streamRuntime, streamRuntime.readBufferSizeLocked());
     }
 
@@ -52,11 +58,13 @@ final class SessionAcceptRegistry {
         if (deque.peekFirst() == streamRuntime) {
             deque.pollFirst();
             this.finishAcceptedRemovalLocked(streamRuntime);
+            this.releaseAcceptQueueStorageIfEmptyLocked(streamRuntime.bidirectional());
             return true;
         }
         if (deque.peekLast() == streamRuntime) {
             deque.pollLast();
             this.finishAcceptedRemovalLocked(streamRuntime);
+            this.releaseAcceptQueueStorageIfEmptyLocked(streamRuntime.bidirectional());
             return true;
         }
         Iterator<StreamRuntime> iterator = deque.iterator();
@@ -66,6 +74,7 @@ final class SessionAcceptRegistry {
             }
             iterator.remove();
             this.finishAcceptedRemovalLocked(streamRuntime);
+            this.releaseAcceptQueueStorageIfEmptyLocked(streamRuntime.bidirectional());
             return true;
         }
         this.finishAcceptedRemovalLocked(streamRuntime);
@@ -73,11 +82,13 @@ final class SessionAcceptRegistry {
     }
 
     StreamRuntime pollAcceptedHeadLocked(boolean bidirectional) {
-        StreamRuntime streamRuntime = this.acceptQueueLocked(bidirectional).pollFirst();
+        Deque<StreamRuntime> deque = this.acceptQueueLocked(bidirectional);
+        StreamRuntime streamRuntime = deque.pollFirst();
         if (streamRuntime != null) {
             streamRuntime.markAcceptedLocked();
         }
         this.finishAcceptedRemovalLocked(streamRuntime);
+        this.releaseAcceptQueueStorageIfEmptyLocked(bidirectional);
         return streamRuntime;
     }
 
@@ -150,6 +161,8 @@ final class SessionAcceptRegistry {
         this.acceptUni = new ArrayDeque<>();
         this.acceptBidiBytes = 0L;
         this.acceptUniBytes = 0L;
+        this.acceptBidiPeakSize = 0;
+        this.acceptUniPeakSize = 0;
     }
 
     private void finishAcceptedRemovalLocked(StreamRuntime streamRuntime) {
@@ -166,9 +179,38 @@ final class SessionAcceptRegistry {
     }
 
     private StreamRuntime pollAcceptedTailLocked(boolean bidirectional) {
-        StreamRuntime streamRuntime = this.acceptQueueLocked(bidirectional).pollLast();
+        Deque<StreamRuntime> deque = this.acceptQueueLocked(bidirectional);
+        StreamRuntime streamRuntime = deque.pollLast();
         this.finishAcceptedRemovalLocked(streamRuntime);
+        this.releaseAcceptQueueStorageIfEmptyLocked(bidirectional);
         return streamRuntime;
+    }
+
+    private void recordAcceptQueuePeakLocked(boolean bidirectional, int size) {
+        if (bidirectional) {
+            this.acceptBidiPeakSize = Math.max(this.acceptBidiPeakSize, size);
+        } else {
+            this.acceptUniPeakSize = Math.max(this.acceptUniPeakSize, size);
+        }
+    }
+
+    private void releaseAcceptQueueStorageIfEmptyLocked(boolean bidirectional) {
+        Deque<StreamRuntime> deque = this.acceptQueueLocked(bidirectional);
+        if (!deque.isEmpty()) {
+            return;
+        }
+        int peakSize = bidirectional ? this.acceptBidiPeakSize : this.acceptUniPeakSize;
+        if (bidirectional) {
+            if (peakSize >= RELEASE_EMPTY_ACCEPT_QUEUE_MIN_SIZE) {
+                this.acceptBidi = new ArrayDeque<>();
+            }
+            this.acceptBidiPeakSize = 0;
+        } else {
+            if (peakSize >= RELEASE_EMPTY_ACCEPT_QUEUE_MIN_SIZE) {
+                this.acceptUni = new ArrayDeque<>();
+            }
+            this.acceptUniPeakSize = 0;
+        }
     }
 
     private StreamRuntime pollNewestAcceptedLocked() {

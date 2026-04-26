@@ -6,8 +6,9 @@ import java.util.Objects;
 final class ByteArrayQueue {
     private static final int SHRINK_MIN_STORAGE_BYTES = 256 << 10;
     private static final int SHRINK_MAX_TAIL_BYTES = 64 << 10;
+    private static final int RELEASE_EMPTY_CHUNK_DEQUE_MIN_CHUNKS = 1024;
 
-    private final ArrayDeque<Chunk> chunks = new ArrayDeque<>();
+    private ArrayDeque<Chunk> chunks = new ArrayDeque<>();
     private long size;
     private long storageBytes;
 
@@ -91,6 +92,7 @@ final class ByteArrayQueue {
         }
         int remaining = (int) Math.min(length, size);
         int written = 0;
+        int removedChunks = 0;
         long releasedStorageBytes = 0L;
         while (remaining > 0 && !chunks.isEmpty()) {
             Chunk head = chunks.peekFirst();
@@ -103,6 +105,7 @@ final class ByteArrayQueue {
             head.length -= copy;
             if (head.length == 0) {
                 chunks.removeFirst();
+                removedChunks++;
                 this.storageBytes = Math.max(0L, this.storageBytes - head.storageBytes);
                 releasedStorageBytes = saturatingAdd(releasedStorageBytes, head.storageBytes);
                 releaseChunk(head.storageBytes, head.releaseAction);
@@ -110,6 +113,7 @@ final class ByteArrayQueue {
                 releasedStorageBytes = saturatingAdd(releasedStorageBytes, this.tightenHeadStorage(head));
             }
         }
+        this.releaseEmptyChunkDequeStorage(removedChunks);
         return new ReadResult(written, releasedStorageBytes);
     }
 
@@ -137,13 +141,21 @@ final class ByteArrayQueue {
     DiscardResult discardAllDetailed() {
         long discarded = size;
         long releasedStorageBytes = storageBytes;
+        int removedChunks = chunks.size();
         while (!chunks.isEmpty()) {
             Chunk head = chunks.removeFirst();
             releaseChunk(head.storageBytes, head.releaseAction);
         }
         storageBytes = 0;
         size = 0;
+        this.releaseEmptyChunkDequeStorage(removedChunks);
         return new DiscardResult(discarded, releasedStorageBytes);
+    }
+
+    private void releaseEmptyChunkDequeStorage(int removedChunks) {
+        if (removedChunks >= RELEASE_EMPTY_CHUNK_DEQUE_MIN_CHUNKS && chunks.isEmpty()) {
+            chunks = new ArrayDeque<>();
+        }
     }
 
     static final class ReadResult {

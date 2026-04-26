@@ -15,6 +15,12 @@ final class SessionAcceptRegistryTest {
         return (SessionAcceptRegistry) field.get(runtime);
     }
 
+    private static Object acceptBidiQueue(SessionAcceptRegistry registry) throws Exception {
+        Field field = SessionAcceptRegistry.class.getDeclaredField("acceptBidi");
+        field.setAccessible(true);
+        return field.get(registry);
+    }
+
     @Test
     void visibilitySequenceUsesUnsignedOrderingAcrossSignedWrap() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -71,6 +77,29 @@ final class SessionAcceptRegistryTest {
         synchronized (runtime.lock()) {
             assertEquals(0, runtime.pendingAcceptedCountLocked(), "accept queue should be empty after accept");
             assertEquals(0L, runtime.retainedOpenInfoBytesLocked(), "accepted terminal stream should release session open_info budget");
+        }
+    }
+
+    @Test
+    void drainedLargeAcceptQueueReleasesDequeStorage() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+
+        synchronized (runtime.lock()) {
+            SessionAcceptRegistry registry = acceptRegistry(runtime);
+            long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+            for (int i = 0; i < 1100; i++) {
+                StreamRuntime stream = runtime.createPeerOpenedStreamLocked(streamId + i * 4L);
+                registry.enqueueAcceptedLocked(stream);
+            }
+            Object retainedQueue = acceptBidiQueue(registry);
+
+            for (int i = 0; i < 1100; i++) {
+                assertNotNull(registry.pollAcceptedHeadLocked(true), "accept queue should contain the seeded stream");
+            }
+
+            assertEquals(0, registry.pendingAcceptedCountLocked(), "accept queue should be empty after draining");
+            assertNotSame(retainedQueue, acceptBidiQueue(registry),
+                    "drained oversized accept queue should release ArrayDeque backing");
         }
     }
 }

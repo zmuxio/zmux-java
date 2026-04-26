@@ -11,11 +11,17 @@ import java.util.function.Consumer;
 
 @SuppressWarnings("resource")
 final class SessionLocalOpenTracker {
+    private static final int RELEASE_EMPTY_LOCAL_QUEUE_MIN_SIZE = 1024;
+
     private final Owner owner;
     private Deque<StreamRuntime> provisionalBidi = new ArrayDeque<>();
     private Deque<StreamRuntime> provisionalUni = new ArrayDeque<>();
     private Deque<StreamRuntime> unseenLocalBidi = new ArrayDeque<>();
     private Deque<StreamRuntime> unseenLocalUni = new ArrayDeque<>();
+    private int provisionalBidiPeakSize;
+    private int provisionalUniPeakSize;
+    private int unseenLocalBidiPeakSize;
+    private int unseenLocalUniPeakSize;
 
     SessionLocalOpenTracker(Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
@@ -90,7 +96,9 @@ final class SessionLocalOpenTracker {
         }
         streamRuntime.setProvisionalCreatedAtNanosLocked(System.nanoTime());
         streamRuntime.setProvisionalTrackedLocked(true);
-        this.provisionalQueueLocked(streamRuntime.bidirectional()).addLast(streamRuntime);
+        Deque<StreamRuntime> queue = this.provisionalQueueLocked(streamRuntime.bidirectional());
+        queue.addLast(streamRuntime);
+        this.recordProvisionalQueuePeakLocked(streamRuntime.bidirectional(), queue.size());
         this.owner.notifyLockWaiters();
     }
 
@@ -98,8 +106,10 @@ final class SessionLocalOpenTracker {
         if (streamRuntime == null || !streamRuntime.provisionalTracked()) {
             return;
         }
-        this.provisionalQueueLocked(streamRuntime.bidirectional()).remove(streamRuntime);
+        boolean bidirectional = streamRuntime.bidirectional();
+        this.provisionalQueueLocked(bidirectional).remove(streamRuntime);
         streamRuntime.setProvisionalTrackedLocked(false);
+        this.releaseProvisionalQueueStorageIfEmptyLocked(bidirectional);
     }
 
     void appendUnseenLocalLocked(StreamRuntime streamRuntime) {
@@ -108,7 +118,9 @@ final class SessionLocalOpenTracker {
                 || streamRuntime.unseenLocalTracked()) {
             return;
         }
-        this.unseenLocalQueueLocked(streamRuntime.bidirectional()).addLast(streamRuntime);
+        Deque<StreamRuntime> queue = this.unseenLocalQueueLocked(streamRuntime.bidirectional());
+        queue.addLast(streamRuntime);
+        this.recordUnseenLocalQueuePeakLocked(streamRuntime.bidirectional(), queue.size());
         streamRuntime.setUnseenLocalTrackedLocked(true);
     }
 
@@ -116,8 +128,10 @@ final class SessionLocalOpenTracker {
         if (streamRuntime == null || !streamRuntime.unseenLocalTracked()) {
             return;
         }
-        this.unseenLocalQueueLocked(streamRuntime.bidirectional()).remove(streamRuntime);
+        boolean bidirectional = streamRuntime.bidirectional();
+        this.unseenLocalQueueLocked(bidirectional).remove(streamRuntime);
         streamRuntime.setUnseenLocalTrackedLocked(false);
+        this.releaseUnseenLocalQueueStorageIfEmptyLocked(bidirectional);
     }
 
     void reapExpiredProvisionalsLocked(boolean bidirectional, long nowNanos, long provisionalOpenMaxAgeNanos) {
@@ -159,6 +173,8 @@ final class SessionLocalOpenTracker {
                                            boolean peerRefused) {
         if (!removeKnownEndpointLocked(deque, streamRuntime, true)) {
             this.removeProvisionalLocked(streamRuntime);
+        } else {
+            this.releaseProvisionalQueueStorageIfEmptyLocked(streamRuntime.bidirectional());
         }
         this.finishProvisionalFailureLocked(streamRuntime, error, peerRefused);
     }
@@ -169,6 +185,8 @@ final class SessionLocalOpenTracker {
                                            boolean peerRefused) {
         if (!removeKnownEndpointLocked(deque, streamRuntime, false)) {
             this.removeProvisionalLocked(streamRuntime);
+        } else {
+            this.releaseProvisionalQueueStorageIfEmptyLocked(streamRuntime.bidirectional());
         }
         this.finishProvisionalFailureLocked(streamRuntime, error, peerRefused);
     }
@@ -214,8 +232,8 @@ final class SessionLocalOpenTracker {
     }
 
     void reclaimUnseenLocalStreamsLocked(long peerGoAwayBidi, long peerGoAwayUni) {
-        this.reclaimUnseenLocalStreamsLocked(this.unseenLocalBidi, peerGoAwayBidi, peerGoAwayBidi, peerGoAwayUni);
-        this.reclaimUnseenLocalStreamsLocked(this.unseenLocalUni, peerGoAwayUni, peerGoAwayBidi, peerGoAwayUni);
+        this.reclaimUnseenLocalStreamsLocked(this.unseenLocalBidi, true, peerGoAwayBidi, peerGoAwayBidi, peerGoAwayUni);
+        this.reclaimUnseenLocalStreamsLocked(this.unseenLocalUni, false, peerGoAwayUni, peerGoAwayBidi, peerGoAwayUni);
     }
 
     void reclaimProvisionalsLocked(long nextLocalBidi,
@@ -230,8 +248,8 @@ final class SessionLocalOpenTracker {
     }
 
     void reclaimGracefulCloseLocalStreamsLocked() {
-        this.reclaimGracefulCloseLocalStreamsLocked(this.unseenLocalBidi);
-        this.reclaimGracefulCloseLocalStreamsLocked(this.unseenLocalUni);
+        this.reclaimGracefulCloseLocalStreamsLocked(this.unseenLocalBidi, true);
+        this.reclaimGracefulCloseLocalStreamsLocked(this.unseenLocalUni, false);
         this.rejectAllProvisionalsLocked(this.provisionalBidi);
         this.rejectAllProvisionalsLocked(this.provisionalUni);
         this.owner.notifyLockWaiters();
@@ -257,6 +275,10 @@ final class SessionLocalOpenTracker {
         this.provisionalUni = new ArrayDeque<>();
         this.unseenLocalBidi = new ArrayDeque<>();
         this.unseenLocalUni = new ArrayDeque<>();
+        this.provisionalBidiPeakSize = 0;
+        this.provisionalUniPeakSize = 0;
+        this.unseenLocalBidiPeakSize = 0;
+        this.unseenLocalUniPeakSize = 0;
     }
 
     private boolean provisionalExpired(StreamRuntime streamRuntime, long nowNanos, long provisionalOpenMaxAgeNanos) {
@@ -267,18 +289,24 @@ final class SessionLocalOpenTracker {
     }
 
     private void reclaimUnseenLocalStreamsLocked(Deque<StreamRuntime> deque,
+                                                 boolean bidirectional,
                                                  long watermark,
                                                  long peerGoAwayBidi,
                                                  long peerGoAwayUni) {
         StreamRuntime streamRuntime;
+        boolean changed = false;
         while ((streamRuntime = deque.peekLast()) != null && streamRuntime.streamIdInternal() > watermark) {
             deque.removeLast();
+            changed = true;
             streamRuntime.setUnseenLocalTrackedLocked(false);
             if (!streamRuntime.shouldReclaimUnseenLocalLocked(peerGoAwayBidi, peerGoAwayUni)) {
                 continue;
             }
             streamRuntime.abortFromPeerLocked(ErrorCode.REFUSED_STREAM.code(), "", 0L);
             this.owner.maybeCompactStreamLocked(streamRuntime);
+        }
+        if (changed) {
+            this.releaseUnseenLocalQueueStorageIfEmptyLocked(bidirectional);
         }
     }
 
@@ -309,17 +337,22 @@ final class SessionLocalOpenTracker {
         return changed;
     }
 
-    private void reclaimGracefulCloseLocalStreamsLocked(Deque<StreamRuntime> deque) {
+    private void reclaimGracefulCloseLocalStreamsLocked(Deque<StreamRuntime> deque, boolean bidirectional) {
         Iterator<StreamRuntime> iterator = deque.iterator();
+        boolean changed = false;
         while (iterator.hasNext()) {
             StreamRuntime streamRuntime = iterator.next();
             if (streamRuntime == null || streamRuntime.openedOnWire()) {
                 continue;
             }
             iterator.remove();
+            changed = true;
             streamRuntime.setUnseenLocalTrackedLocked(false);
             streamRuntime.abortFromLocalLocked(ErrorCode.REFUSED_STREAM.code(), "");
             this.owner.maybeCompactStreamLocked(streamRuntime);
+        }
+        if (changed) {
+            this.releaseUnseenLocalQueueStorageIfEmptyLocked(bidirectional);
         }
     }
 
@@ -348,6 +381,60 @@ final class SessionLocalOpenTracker {
 
     private Deque<StreamRuntime> unseenLocalQueueLocked(boolean bidirectional) {
         return bidirectional ? this.unseenLocalBidi : this.unseenLocalUni;
+    }
+
+    private void recordProvisionalQueuePeakLocked(boolean bidirectional, int size) {
+        if (bidirectional) {
+            this.provisionalBidiPeakSize = Math.max(this.provisionalBidiPeakSize, size);
+        } else {
+            this.provisionalUniPeakSize = Math.max(this.provisionalUniPeakSize, size);
+        }
+    }
+
+    private void recordUnseenLocalQueuePeakLocked(boolean bidirectional, int size) {
+        if (bidirectional) {
+            this.unseenLocalBidiPeakSize = Math.max(this.unseenLocalBidiPeakSize, size);
+        } else {
+            this.unseenLocalUniPeakSize = Math.max(this.unseenLocalUniPeakSize, size);
+        }
+    }
+
+    private void releaseProvisionalQueueStorageIfEmptyLocked(boolean bidirectional) {
+        Deque<StreamRuntime> deque = this.provisionalQueueLocked(bidirectional);
+        if (!deque.isEmpty()) {
+            return;
+        }
+        int peakSize = bidirectional ? this.provisionalBidiPeakSize : this.provisionalUniPeakSize;
+        if (bidirectional) {
+            if (peakSize >= RELEASE_EMPTY_LOCAL_QUEUE_MIN_SIZE) {
+                this.provisionalBidi = new ArrayDeque<>();
+            }
+            this.provisionalBidiPeakSize = 0;
+        } else {
+            if (peakSize >= RELEASE_EMPTY_LOCAL_QUEUE_MIN_SIZE) {
+                this.provisionalUni = new ArrayDeque<>();
+            }
+            this.provisionalUniPeakSize = 0;
+        }
+    }
+
+    private void releaseUnseenLocalQueueStorageIfEmptyLocked(boolean bidirectional) {
+        Deque<StreamRuntime> deque = this.unseenLocalQueueLocked(bidirectional);
+        if (!deque.isEmpty()) {
+            return;
+        }
+        int peakSize = bidirectional ? this.unseenLocalBidiPeakSize : this.unseenLocalUniPeakSize;
+        if (bidirectional) {
+            if (peakSize >= RELEASE_EMPTY_LOCAL_QUEUE_MIN_SIZE) {
+                this.unseenLocalBidi = new ArrayDeque<>();
+            }
+            this.unseenLocalBidiPeakSize = 0;
+        } else {
+            if (peakSize >= RELEASE_EMPTY_LOCAL_QUEUE_MIN_SIZE) {
+                this.unseenLocalUni = new ArrayDeque<>();
+            }
+            this.unseenLocalUniPeakSize = 0;
+        }
     }
 
     interface Owner {

@@ -9,6 +9,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ByteArrayQueueTest {
+    private static Object chunks(ByteArrayQueue queue) throws Exception {
+        Field field = ByteArrayQueue.class.getDeclaredField("chunks");
+        field.setAccessible(true);
+        return field.get(queue);
+    }
+
     private static void setLongField(ByteArrayQueue queue, String name, long value) throws Exception {
         Field field = ByteArrayQueue.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -43,6 +49,35 @@ final class ByteArrayQueueTest {
 
         assertEquals(5, queue.discardAll(), "discardAll should report queued slice bytes");
         assertEquals(0, queue.size(), "discardAll should empty the queue");
+    }
+
+    @Test
+    void readAllReleasesOversizedChunkDequeStorage() throws Exception {
+        ByteArrayQueue queue = new ByteArrayQueue();
+        for (int i = 0; i < 1100; i++) {
+            queue.add(new byte[]{(byte) i});
+        }
+        Object retainedChunks = chunks(queue);
+
+        byte[] dst = new byte[1100];
+        assertEquals(dst.length, queue.read(dst, 0, dst.length), "read should drain every queued byte");
+
+        assertTrue(queue.isEmpty(), "queue should be empty after draining every chunk");
+        assertNotSame(retainedChunks, chunks(queue), "empty queue should release oversized ArrayDeque backing");
+    }
+
+    @Test
+    void discardAllReleasesOversizedChunkDequeStorage() throws Exception {
+        ByteArrayQueue queue = new ByteArrayQueue();
+        for (int i = 0; i < 1100; i++) {
+            queue.add(new byte[]{(byte) i});
+        }
+        Object retainedChunks = chunks(queue);
+
+        assertEquals(1100, queue.discardAll(), "discardAll should report all queued bytes");
+
+        assertTrue(queue.isEmpty(), "queue should be empty after discardAll");
+        assertNotSame(retainedChunks, chunks(queue), "discardAll should release oversized ArrayDeque backing");
     }
 
     @Test
