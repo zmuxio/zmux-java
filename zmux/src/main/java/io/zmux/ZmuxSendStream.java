@@ -1,7 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.StreamIoSupport;
-
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.SocketAddress;
@@ -19,10 +17,6 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
             return;
         }
         write(src, 0, src.length);
-    }
-
-    default int write(ByteBuffer src) throws IOException {
-        return StreamIoSupport.writeFromByteBuffer(src, this);
     }
 
     int writeFinal(byte[] src, int offset, int length) throws IOException;

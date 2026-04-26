@@ -211,6 +211,22 @@ public final class FrameCodec {
         return Arrays.copyOfRange(source, offset, offset + length);
     }
 
+    private static byte[] normalizeSliceBytes(byte[] bytes) {
+        return bytes == null ? EMPTY_BYTES : bytes;
+    }
+
+    private static int normalizedSliceOffset(byte[] bytes, int offset, int length) {
+        if (length <= 0) {
+            return 0;
+        }
+        RangeChecks.checkFromIndexSize(offset, length, bytes.length);
+        return offset;
+    }
+
+    private static int normalizedSliceLength(int length) {
+        return length <= 0 ? 0 : length;
+    }
+
     static long parseMetadataVarint(byte[] source, int offset, int length, String operation) throws IOException {
         Varint62.Decoded decoded = Varint62.decode(source, offset);
         if (decoded.length() != length) {
@@ -336,24 +352,12 @@ public final class FrameCodec {
             this.metadataValid = metadataValid;
             this.priority = priority;
             this.group = group;
-            this.openInfoBytes = openInfoBytes == null ? EMPTY_BYTES : openInfoBytes;
-            if (openInfoLength <= 0) {
-                this.openInfoOffset = 0;
-                this.openInfoLength = 0;
-            } else {
-                RangeChecks.checkFromIndexSize(openInfoOffset, openInfoLength, this.openInfoBytes.length);
-                this.openInfoOffset = openInfoOffset;
-                this.openInfoLength = openInfoLength;
-            }
-            this.appData = appData == null ? EMPTY_BYTES : appData;
-            if (appDataLength <= 0) {
-                this.appDataOffset = 0;
-                this.appDataLength = 0;
-            } else {
-                RangeChecks.checkFromIndexSize(appDataOffset, appDataLength, this.appData.length);
-                this.appDataOffset = appDataOffset;
-                this.appDataLength = appDataLength;
-            }
+            this.openInfoBytes = normalizeSliceBytes(openInfoBytes);
+            this.openInfoOffset = normalizedSliceOffset(this.openInfoBytes, openInfoOffset, openInfoLength);
+            this.openInfoLength = normalizedSliceLength(openInfoLength);
+            this.appData = normalizeSliceBytes(appData);
+            this.appDataOffset = normalizedSliceOffset(this.appData, appDataOffset, appDataLength);
+            this.appDataLength = normalizedSliceLength(appDataLength);
         }
 
         public boolean hasMetadata() {
@@ -421,15 +425,9 @@ public final class FrameCodec {
             this.valid = valid;
             this.priority = priority;
             this.group = group;
-            this.openInfoBytes = openInfoBytes == null ? EMPTY_BYTES : openInfoBytes;
-            if (openInfoLength <= 0) {
-                this.openInfoOffset = 0;
-                this.openInfoLength = 0;
-            } else {
-                RangeChecks.checkFromIndexSize(openInfoOffset, openInfoLength, this.openInfoBytes.length);
-                this.openInfoOffset = openInfoOffset;
-                this.openInfoLength = openInfoLength;
-            }
+            this.openInfoBytes = normalizeSliceBytes(openInfoBytes);
+            this.openInfoOffset = normalizedSliceOffset(this.openInfoBytes, openInfoOffset, openInfoLength);
+            this.openInfoLength = normalizedSliceLength(openInfoLength);
         }
 
         public boolean valid() {

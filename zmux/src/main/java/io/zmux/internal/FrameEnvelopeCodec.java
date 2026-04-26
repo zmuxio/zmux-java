@@ -55,15 +55,15 @@ final class FrameEnvelopeCodec {
         int code = input.readByte();
         FrameType type = parseFrameType(code & 0x1f);
         int flags = code & 0xe0;
-        Varint62.Decoded streamIdDecoded = Varint62.read(input);
-        long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), streamIdDecoded.length());
+        long streamId = Varint62.read(input).value();
+        long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), Varint62.length(streamId));
         byte[] payload = input.readBytesExact(FrameCodec.checkedLength(
                 payloadLength,
                 ErrorCode.FRAME_SIZE,
                 "read frame",
                 "payload exceeds Java implementation limit"
         ));
-        FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
+        FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamId, payload);
         validateFrame(frame, normalized, true);
         return frame;
     }
@@ -115,13 +115,16 @@ final class FrameEnvelopeCodec {
                            int payloadOffset,
                            int payloadLength,
                            Limits limits) throws IOException {
-        Limits normalized = limits.normalize();
-        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
-        byte[] payload = payloadBytes == null ? EMPTY_BYTES : payloadBytes;
-        RangeChecks.checkFromIndexSize(payloadOffset, payloadLength, payload.length);
-        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
-        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0);
-        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
         Varint62.write(output, frameLength);
         output.write(frame.type().code() | frame.flags());
         Varint62.write(output, frame.streamId());
@@ -223,13 +226,16 @@ final class FrameEnvelopeCodec {
                             int payloadOffset,
                             int payloadLength,
                             Limits limits) throws IOException {
-        Limits normalized = limits.normalize();
-        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
-        byte[] payload = payloadBytes == null ? EMPTY_BYTES : payloadBytes;
-        RangeChecks.checkFromIndexSize(payloadOffset, payloadLength, payload.length);
-        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
-        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0);
-        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
         int headerBytes = gatherHeaderBytes(frameLength, frame.streamId());
         int inlinePrefixLength = inlinePrefixLength(prefix);
         int inlinePayloadLength = inlinePayloadLength(frame, prefix.length, inlinePrefixLength, payloadLength);
@@ -612,6 +618,27 @@ final class FrameEnvelopeCodec {
             throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "payload exceeds configured limit");
         }
         return payloadLength;
+    }
+
+    private static byte[] normalizePrefix(byte[] payloadPrefix) {
+        return payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
+    }
+
+    private static byte[] normalizePayload(byte[] payloadBytes) {
+        return payloadBytes == null ? EMPTY_BYTES : payloadBytes;
+    }
+
+    private static long validatedBytePayloadFrameLength(FrameCodec.Frame frame,
+                                                        Limits limits,
+                                                        byte[] prefix,
+                                                        byte[] payload,
+                                                        int payloadOffset,
+                                                        int payloadLength) throws IOException {
+        Limits normalized = limits.normalize();
+        RangeChecks.checkFromIndexSize(payloadOffset, payloadLength, payload.length);
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0);
+        return frameLength(frame.streamId(), encodedPayloadLength);
     }
 
     private static void validateNonDataFrame(FrameCodec.Frame frame,

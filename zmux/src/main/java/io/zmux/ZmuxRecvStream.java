@@ -1,12 +1,9 @@
 package io.zmux;
 
-import io.zmux.internal.StreamIoSupport;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.SocketAddress;
-import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -20,10 +17,6 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
             return 0;
         }
         return read(dst, 0, dst.length);
-    }
-
-    default int read(ByteBuffer dst) throws IOException {
-        return StreamIoSupport.readIntoByteBuffer(dst, this);
     }
 
     default byte[] readAllBytes() throws IOException {
