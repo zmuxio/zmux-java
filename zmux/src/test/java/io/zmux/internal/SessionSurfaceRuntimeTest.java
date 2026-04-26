@@ -148,6 +148,40 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void pingInterruptionClearsOutstandingSlotAndSurfacesTypedError() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        Thread waiter = new Thread(() -> {
+            try {
+                runtime.ping("interrupt".getBytes(StandardCharsets.UTF_8), Duration.ofSeconds(5));
+            } catch (Throwable throwable) {
+                error.set(throwable);
+            }
+        }, "session-ping-interrupt");
+
+        waiter.start();
+        awaitBlockedThread(waiter, "ping should block while waiting for a response");
+        waiter.interrupt();
+        waiter.join(Duration.ofSeconds(1).toMillis());
+
+        assertFalse(waiter.isAlive(), "interrupted ping waiter should exit promptly");
+        ZmuxInterruptedException interrupted = assertInstanceOf(
+                ZmuxInterruptedException.class,
+                error.get(),
+                "ping interruption should surface the typed local interrupted error"
+        );
+        assertEquals("ping", interrupted.operation(), "ping interruption operation mismatch");
+        assertEquals(ZmuxErrorScope.SESSION, interrupted.scope(), "ping interruption scope mismatch");
+        assertEquals(ZmuxErrorSource.LOCAL, interrupted.source(), "ping interruption source mismatch");
+        assertEquals(ZmuxErrorDirection.BOTH, interrupted.direction(), "ping interruption direction mismatch");
+        assertEquals(ZmuxTerminationKind.INTERRUPTED, interrupted.terminationKind(), "ping interruption termination mismatch");
+
+        SessionStats stats = runtime.stats();
+        assertFalse(stats.keepalive().pingOutstanding(), "interrupted ping must release its outstanding slot");
+        assertEquals(0L, stats.pressure().outstandingPingBytes(), "interrupted ping must release retained ping bytes");
+    }
+
+    @Test
     void pingNonceUsesSplitMixStateAndKeepsEchoSuffix() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
 
