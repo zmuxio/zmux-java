@@ -3,7 +3,6 @@ package io.zmux.internal;
 import io.zmux.*;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 final class SessionReaderCoordinator {
@@ -171,7 +170,7 @@ final class SessionReaderCoordinator {
             boolean sendWasOpen = streamRuntime.stopSendingFromPeerLocked(
                     errorPayload.code(),
                     retainedReason,
-                    retainedReason.getBytes(StandardCharsets.UTF_8).length
+                    SessionRuntime.utf8EncodedLength(retainedReason)
             );
             this.owner.clearNoOpControlLocked();
             if (sendWasOpen && !this.owner.tryGracefulStopSendingLocked(streamRuntime)) {
@@ -218,7 +217,7 @@ final class SessionReaderCoordinator {
 
             long oldBytes = this.owner.peerGoAwayError() == null
                     ? 0L
-                    : this.owner.peerGoAwayError().reason().getBytes(StandardCharsets.UTF_8).length;
+                    : SessionRuntime.utf8EncodedLength(this.owner.peerGoAwayError().reason());
             String retainedReason = this.owner.retainPeerReasonLocked(oldBytes, goAwayPayload.reason());
             this.owner.setPeerGoAwayError(new ApplicationError(
                     goAwayPayload.code(),
@@ -335,7 +334,7 @@ final class SessionReaderCoordinator {
             streamRuntime.resetFromPeerLocked(
                     errorPayload.code(),
                     retainedReason,
-                    retainedReason.getBytes(StandardCharsets.UTF_8).length
+                    SessionRuntime.utf8EncodedLength(retainedReason)
             );
             this.owner.clearNoOpControlLocked();
             this.owner.recordVisibleTerminalChurnLocked(streamRuntime);
@@ -380,7 +379,7 @@ final class SessionReaderCoordinator {
                         retainedReason,
                         nowNanos
                 );
-                this.owner.releasePeerReasonBytesLocked(retainedReason.getBytes(StandardCharsets.UTF_8).length);
+                this.owner.releasePeerReasonBytesLocked(SessionRuntime.utf8EncodedLength(retainedReason));
                 return;
             }
 
@@ -398,7 +397,7 @@ final class SessionReaderCoordinator {
             streamRuntime.abortFromPeerLocked(
                     errorPayload.code(),
                     retainedReason,
-                    retainedReason.getBytes(StandardCharsets.UTF_8).length
+                    SessionRuntime.utf8EncodedLength(retainedReason)
             );
             this.owner.clearNoOpControlLocked();
             this.owner.recordVisibleTerminalChurnLocked(streamRuntime);
@@ -918,7 +917,7 @@ final class SessionReaderCoordinator {
             }
             long oldBytes = this.owner.peerCloseError() == null
                     ? 0L
-                    : this.owner.peerCloseError().reason().getBytes(StandardCharsets.UTF_8).length;
+                    : SessionRuntime.utf8EncodedLength(this.owner.peerCloseError().reason());
             String retainedReason = this.owner.retainPeerReasonLocked(oldBytes, errorPayload.reason());
             ApplicationError peerCloseError = new ApplicationError(
                     errorPayload.code(),

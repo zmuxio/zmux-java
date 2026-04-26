@@ -1450,7 +1450,14 @@ final class NettyQuicStreamState {
     }
 
     private ByteBuf pollInboundOverflowLocked() {
-        return inboundOverflow == null || inboundOverflow.isEmpty() ? null : inboundOverflow.removeFirst();
+        if (inboundOverflow == null) {
+            return null;
+        }
+        ByteBuf next = inboundOverflow.pollFirst();
+        if (inboundOverflow.isEmpty()) {
+            inboundOverflow = null;
+        }
+        return next;
     }
 
     private void awaitReadChangeInterruptibly() throws InterruptedIOException {

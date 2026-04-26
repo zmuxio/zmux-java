@@ -5,7 +5,6 @@ import io.zmux.*;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -492,6 +491,47 @@ public final class SessionRuntime implements ZmuxNativeSession {
             return 0L;
         }
         return Math.min(value, Protocol.MAX_VARINT62);
+    }
+
+    static int utf8EncodedLength(String value) {
+        if (value == null || value.isEmpty()) {
+            return 0;
+        }
+        int bytes = 0;
+        int index = 0;
+        while (index < value.length()) {
+            int width = utf8EncodedWidthAt(value, index);
+            if (bytes > Integer.MAX_VALUE - width) {
+                return Integer.MAX_VALUE;
+            }
+            bytes += width;
+            index += utf8CharCountAt(value, index);
+        }
+        return bytes;
+    }
+
+    private static int utf8CharCountAt(String value, int index) {
+        char ch = value.charAt(index);
+        return Character.isHighSurrogate(ch)
+                && index + 1 < value.length()
+                && Character.isLowSurrogate(value.charAt(index + 1)) ? 2 : 1;
+    }
+
+    private static int utf8EncodedWidthAt(String value, int index) {
+        char ch = value.charAt(index);
+        if (ch < 0x80) {
+            return 1;
+        }
+        if (ch < 0x800) {
+            return 2;
+        }
+        if (Character.isHighSurrogate(ch)) {
+            return index + 1 < value.length() && Character.isLowSurrogate(value.charAt(index + 1)) ? 4 : 1;
+        }
+        if (Character.isLowSurrogate(ch)) {
+            return 1;
+        }
+        return 3;
     }
 
     private static long averageFloor(long left, long right) {
@@ -1828,7 +1868,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     String retainPeerReasonLocked(long previousBytes, String reason) {
-        int codePoint;
         int width;
         this.releasePeerReasonBytesLocked(previousBytes);
         if (reason == null || reason.isEmpty()) {
@@ -1842,24 +1881,25 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (available <= 0L) {
             return "";
         }
-        int originalBytes = reason.getBytes(StandardCharsets.UTF_8).length;
+        int originalBytes = SessionRuntime.utf8EncodedLength(reason);
         if ((long) originalBytes <= available) {
             this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(this.retainedPeerReasonBytes, originalBytes);
             return reason;
         }
         int end = 0;
+        int retainedBytes = 0;
         int remaining = (int) available;
         while (end < reason.length()) {
-            codePoint = reason.codePointAt(end);
-            width = new String(Character.toChars(codePoint)).getBytes(StandardCharsets.UTF_8).length;
+            width = SessionRuntime.utf8EncodedWidthAt(reason, end);
             if (width > remaining) {
                 break;
             }
             remaining -= width;
-            end += Character.charCount(codePoint);
+            retainedBytes += width;
+            end += SessionRuntime.utf8CharCountAt(reason, end);
         }
         String trimmed = reason.substring(0, end);
-        this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(this.retainedPeerReasonBytes, trimmed.getBytes(StandardCharsets.UTF_8).length);
+        this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(this.retainedPeerReasonBytes, retainedBytes);
         return trimmed;
     }
 

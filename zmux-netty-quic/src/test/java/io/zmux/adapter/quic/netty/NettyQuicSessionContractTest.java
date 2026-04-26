@@ -1,5 +1,6 @@
 package io.zmux.adapter.quic.netty;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
@@ -575,6 +576,59 @@ class NettyQuicSessionContractTest {
 
             accepted.close();
             clientStream.close();
+        }
+    }
+
+    @Test
+    void drainedInboundOverflowDropsRetainedDequeBacking() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            NettyQuicStreamState state = NettyQuicStreamState.localBidi(
+                    (NettyQuicSession) pair.client,
+                    OpenOptions.empty()
+            );
+            ByteBuf first = Unpooled.wrappedBuffer(utf8("a"));
+            ByteBuf second = Unpooled.wrappedBuffer(utf8("b"));
+            try {
+                invokePrivate(
+                        state,
+                        "enqueueInboundLocked",
+                        new Class<?>[]{ByteBuf.class, int.class},
+                        first,
+                        first.readableBytes()
+                );
+                invokePrivate(
+                        state,
+                        "enqueueInboundLocked",
+                        new Class<?>[]{ByteBuf.class, int.class},
+                        second,
+                        second.readableBytes()
+                );
+
+                assertNotNull(getField(state, "inboundOverflow"), "second inbound buffer should allocate overflow storage");
+
+                byte[] drained = new byte[2];
+                int copied = (Integer) invokePrivate(
+                        state,
+                        "drainInboundLocked",
+                        new Class<?>[]{byte[].class, int.class, int.class},
+                        drained,
+                        0,
+                        drained.length
+                );
+
+                assertEquals(2, copied, "drain should consume both queued inbound buffers");
+                assertArrayEquals(utf8("ab"), drained, "drained inbound payload mismatch");
+                assertNull(getField(state, "inboundOverflow"), "draining the last overflow buffer should release deque backing");
+                assertEquals(0, first.refCnt(), "head buffer should be released after drain");
+                assertEquals(0, second.refCnt(), "overflow buffer should be released after drain");
+            } finally {
+                if (first.refCnt() > 0) {
+                    first.release();
+                }
+                if (second.refCnt() > 0) {
+                    second.release();
+                }
+            }
         }
     }
 

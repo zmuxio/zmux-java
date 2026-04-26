@@ -86,6 +86,44 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void peerReasonUtf8LengthMatchesJdkEncodingWithoutAllocatingForAccounting() throws Exception {
+        String[] values = {
+                "",
+                "ascii",
+                "\u00e9",
+                "\u20ac",
+                "\uD83D\uDE00",
+                "\uD800",
+                "\uDC00",
+                "a\uD83D\uDE00\uD800z"
+        };
+        for (String value : values) {
+            assertEquals(
+                    value.getBytes(StandardCharsets.UTF_8).length,
+                    SessionRuntime.utf8EncodedLength(value),
+                    "UTF-8 accounting length mismatch for " + value
+            );
+        }
+    }
+
+    @Test
+    void peerReasonRetentionTrimsMultibyteReasonsOnUtf8Boundary() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder().retainedPeerReasonBytesBudget(3L).build(),
+                0L,
+                Settings.defaults()
+        );
+
+        String retained;
+        synchronized (runtime.lock()) {
+            retained = runtime.retainPeerReasonLocked(0L, "\u20acx");
+        }
+
+        assertEquals("\u20ac", retained, "retained peer reason should keep only complete UTF-8 code points");
+        assertEquals(3L, runtime.stats().retainedPeerReasonBytes(), "retained peer reason byte accounting mismatch");
+    }
+
+    @Test
     void sessionRuntimeWrapsRawInputStreamInStatefulCodecDecoder() throws Exception {
         InputStream rawInput = new InputStream() {
             @Override
