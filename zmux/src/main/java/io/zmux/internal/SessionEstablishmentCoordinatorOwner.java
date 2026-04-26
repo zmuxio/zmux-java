@@ -5,6 +5,7 @@ import io.zmux.Preface;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.Objects;
 
 final class SessionEstablishmentCoordinatorOwner implements SessionEstablishmentCoordinator.Owner {
@@ -42,6 +43,16 @@ final class SessionEstablishmentCoordinatorOwner implements SessionEstablishment
     @Override
     public void notifyLockWaiters() {
         this.owner.notifyLockWaitersLocked();
+    }
+
+    @Override
+    public boolean supportsWriteDeadline() {
+        return this.owner.connection().supportsWriteDeadline();
+    }
+
+    @Override
+    public void setWriteDeadline(Instant deadline) throws IOException {
+        this.owner.connection().setWriteDeadline(deadline);
     }
 
     @Override

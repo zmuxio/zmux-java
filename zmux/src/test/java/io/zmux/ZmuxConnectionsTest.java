@@ -101,6 +101,7 @@ final class ZmuxConnectionsTest {
 
         assertSame(local, connection.localAddress());
         assertSame(remote, connection.remoteAddress());
+        assertTrue(connection.supportsWriteDeadline(), "bidi stream adapters should preserve write-deadline support");
         assertEquals(6, connection.input().read());
         connection.output().write(new byte[]{1, 2, 3});
         connection.close();
@@ -120,6 +121,7 @@ final class ZmuxConnectionsTest {
         try (JoinedDuplexConnection connection = ZmuxConnections.join(recv, send)) {
             assertSame(local, connection.localAddress());
             assertSame(remote, connection.remoteAddress());
+            assertTrue(connection.supportsWriteDeadline(), "joined stream halves should expose write-deadline support");
             assertEquals(1, connection.input().read());
             connection.output().write(new byte[]{4, 5});
         }

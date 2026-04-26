@@ -19,9 +19,7 @@ public final class ZmuxConnections {
 
     public static DuplexConnection of(ZmuxStream stream) {
         Objects.requireNonNull(stream, "stream");
-        return builder(stream.asInputStream(), stream.asOutputStream())
-                .addresses(stream.localAddress(), stream.remoteAddress())
-                .build();
+        return new JoinedDuplexConnection(stream, stream);
     }
 
     public static JoinedDuplexConnection join(InputStream input, OutputStream output) {

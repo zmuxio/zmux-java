@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.SocketAddress;
 import java.nio.channels.GatheringByteChannel;
+import java.time.Instant;
 
 public interface DuplexConnection extends Closeable {
     InputStream input();
@@ -22,6 +23,13 @@ public interface DuplexConnection extends Closeable {
 
     default SocketAddress remoteAddress() {
         return null;
+    }
+
+    default boolean supportsWriteDeadline() {
+        return false;
+    }
+
+    default void setWriteDeadline(Instant deadline) throws IOException {
     }
 
     @Override

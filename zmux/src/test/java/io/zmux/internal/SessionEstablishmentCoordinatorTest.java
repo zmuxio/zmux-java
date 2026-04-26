@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.*;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,6 +53,7 @@ final class SessionEstablishmentCoordinatorTest {
         assertTrue(owner.writerStartedLatch.await(1L, TimeUnit.SECONDS), "writer loop should start after establishment");
         assertEquals("zmux-reader", owner.readerThreadName.get(), "reader loop thread name mismatch");
         assertEquals("zmux-writer", owner.writerThreadName.get(), "writer loop thread name mismatch");
+        assertNull(owner.writeDeadline.get(), "successful establishment must clear the temporary write deadline");
     }
 
     @Test
@@ -100,6 +102,7 @@ final class SessionEstablishmentCoordinatorTest {
         assertTrue(owner.readyMarked.get(), "delayed establishment must mark the session ready");
         assertTrue(owner.readerStartedLatch.await(1L, TimeUnit.SECONDS), "reader loop should start after delayed establishment");
         assertTrue(owner.writerStartedLatch.await(1L, TimeUnit.SECONDS), "writer loop should start after carrier expiry");
+        assertNull(owner.writeDeadline.get(), "delayed establishment must clear the temporary write deadline before starting runtime writers");
     }
 
     @Test
@@ -154,6 +157,7 @@ final class SessionEstablishmentCoordinatorTest {
         private final AtomicBoolean writerStarted = new AtomicBoolean();
         private final CountDownLatch readerStartedLatch = new CountDownLatch(1);
         private final CountDownLatch writerStartedLatch = new CountDownLatch(1);
+        private final AtomicReference<Instant> writeDeadline = new AtomicReference<>();
         private final AtomicReference<String> readerThreadName = new AtomicReference<>();
         private final AtomicReference<String> writerThreadName = new AtomicReference<>();
 
@@ -178,7 +182,19 @@ final class SessionEstablishmentCoordinatorTest {
 
                 private void awaitRelease() throws IOException {
                     try {
-                        TestOwner.this.releaseWrites.await();
+                        while (TestOwner.this.releaseWrites.getCount() > 0L) {
+                            Instant deadline = TestOwner.this.writeDeadline.get();
+                            if (deadline == null) {
+                                TestOwner.this.releaseWrites.await();
+                                return;
+                            }
+                            Instant now = Instant.now();
+                            if (!deadline.isAfter(now)) {
+                                throw new WriteTimeoutException();
+                            }
+                            long waitMillis = Math.max(1L, Math.min(10L, Duration.between(now, deadline).toMillis()));
+                            TestOwner.this.releaseWrites.await(waitMillis, TimeUnit.MILLISECONDS);
+                        }
                     } catch (InterruptedException interruptedException) {
                         Thread.currentThread().interrupt();
                         throw new IOException("synthetic blocked preface write interrupted", interruptedException);
@@ -214,6 +230,16 @@ final class SessionEstablishmentCoordinatorTest {
 
         @Override
         public void notifyLockWaiters() {
+        }
+
+        @Override
+        public boolean supportsWriteDeadline() {
+            return true;
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+            this.writeDeadline.set(deadline);
         }
 
         @Override
