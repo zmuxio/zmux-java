@@ -70,7 +70,8 @@ final class ByteArrayQueue {
     }
 
     public void add(byte[] data, int offset, int length) {
-        addRetained(data, offset, length, length, null);
+        Objects.requireNonNull(data, "data");
+        addRetained(data, offset, length, data.length, null);
     }
 
     void addRetained(byte[] data, int offset, int length, int storageBytes, Runnable releaseAction) {

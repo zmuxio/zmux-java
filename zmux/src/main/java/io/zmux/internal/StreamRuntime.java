@@ -661,7 +661,7 @@ final class StreamRuntime implements ZmuxNativeStream {
     }
 
     void receiveDataLocked(byte[] data, int offset, int length) {
-        receiveDataLocked(data, offset, length, length, null);
+        receiveDataLocked(data, offset, length, data.length, null);
     }
 
     void receiveDataLocked(byte[] data,

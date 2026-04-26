@@ -52,6 +52,25 @@ final class ByteArrayQueueTest {
     }
 
     @Test
+    void queuedSliceTracksRetainedBackingStorage() {
+        ByteArrayQueue queue = new ByteArrayQueue();
+        byte[] source = new byte[1024];
+        source[1023] = 42;
+
+        queue.add(source, 1023, 1);
+
+        assertEquals(1L, queue.sizeLong(), "logical queued bytes should only include the requested slice");
+        assertEquals(source.length, queue.storageBytes(), "storage accounting should include the retained backing array");
+
+        byte[] dst = new byte[1];
+        ByteArrayQueue.ReadResult readResult = queue.readDetailed(dst, 0, dst.length);
+        assertEquals(1, readResult.bytes(), "read should drain the queued slice");
+        assertEquals(source.length, readResult.releasedStorageBytes(), "draining should release the retained backing bytes");
+        assertEquals(42, dst[0], "queued slice payload mismatch");
+        assertEquals(0L, queue.storageBytes(), "storage accounting should drop after the backing is released");
+    }
+
+    @Test
     void readAllReleasesOversizedChunkDequeStorage() throws Exception {
         ByteArrayQueue queue = new ByteArrayQueue();
         for (int i = 0; i < 1100; i++) {
