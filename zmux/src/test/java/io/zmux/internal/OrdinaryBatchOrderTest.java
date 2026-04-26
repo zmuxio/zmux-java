@@ -384,4 +384,123 @@ final class OrdinaryBatchOrderTest {
                 "session-scoped ordinary traffic must not erase retained real-stream next-head bias"
         );
     }
+
+    @Test
+    void retainedLagStateSkipsSyntheticStreamsAndTransientGroups() {
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+
+        List<OrdinaryBatchOrderer.BatchFrame> batch = listOf(
+                streamDataFrame(4L, 0L, null, 1L),
+                ordinarySessionExtFrame(1L),
+                ordinarySessionExtFrame(1L)
+        );
+
+        int[] order = OrdinaryBatchOrderer.order(batch, SchedulerHint.GROUP_FAIR, 16_384L, retainedBias);
+        assertEquals(batch.size(), order.length, "mixed transient batch should still produce a full ordering");
+
+        OrdinaryBatchRetainedState retainedState = retainedBias.state();
+        for (Long streamId : retainedState.streamLag.keySet()) {
+            assertTrue(streamId != null && streamId > 0L, "retained lag state must skip synthetic stream ids");
+        }
+        for (OrdinaryBatchOrderer.GroupKey groupKey : retainedState.groupLag.keySet()) {
+            assertNotNull(groupKey, "retained lag state should not contain null group keys");
+            assertNotEquals(2, groupKey.kind(), "retained lag state must skip transient group keys");
+        }
+    }
+
+    @Test
+    void mixedBatchRetainsOnlyRealStreamFinishTags() {
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+
+        List<OrdinaryBatchOrderer.BatchFrame> batch = listOf(
+                ordinarySessionExtFrame(1L),
+                streamDataFrame(4L, 0L, null, 1L),
+                ordinarySessionExtFrame(1L)
+        );
+
+        int[] order = OrdinaryBatchOrderer.order(batch, SchedulerHint.UNSPECIFIED_OR_BALANCED, 16_384L, retainedBias);
+        assertEquals(batch.size(), order.length, "mixed batch should still produce a full ordering");
+
+        OrdinaryBatchRetainedState retainedState = retainedBias.state();
+        assertEquals(1, retainedState.streamFinishTag.size(), "retained finish tags should keep only the real stream");
+        assertTrue(retainedState.streamFinishTag.containsKey(4L), "real stream finish tag should be retained");
+        for (Long streamId : retainedState.streamFinishTag.keySet()) {
+            assertTrue(streamId != null && streamId > 0L, "retained finish tags must skip synthetic stream ids");
+        }
+    }
+
+    @Test
+    void latencySchedulerReservesBulkOpportunityWithinFourSelections() {
+        List<OrdinaryBatchOrderer.BatchFrame> batch = listOf(
+                streamDataFrame(4L, 0L, null, 64L),
+                streamDataFrame(4L, 0L, null, 64L),
+                streamDataFrame(4L, 0L, null, 64L),
+                streamDataFrame(4L, 0L, null, 64L),
+                streamDataFrame(8L, 0L, null, 900L),
+                streamDataFrame(8L, 0L, null, 900L),
+                streamDataFrame(8L, 0L, null, 900L),
+                streamDataFrame(8L, 0L, null, 900L)
+        );
+
+        int[] order = OrdinaryBatchOrderer.order(
+                batch,
+                SchedulerHint.LATENCY,
+                1_024L,
+                new OrdinaryBatchOrderer.RetainedBias()
+        );
+
+        int bulkSelections = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (batch.get(order[i]).streamId() == 8L) {
+                ++bulkSelections;
+            }
+        }
+        assertTrue(bulkSelections >= 1, "latency scheduler should still reserve a bulk opportunity within the first four picks");
+    }
+
+    @Test
+    void retainedClassHysteresisKeepsMidQueueBulkAcrossBatches() {
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+
+        OrdinaryBatchOrderer.order(
+                listOf(
+                        streamDataFrame(8L, 0L, null, 64L),
+                        streamDataFrame(4L, 0L, null, 900L),
+                        streamDataFrame(4L, 0L, null, 900L),
+                        streamDataFrame(4L, 0L, null, 900L)
+                ),
+                SchedulerHint.BULK_THROUGHPUT,
+                1_024L,
+                retainedBias
+        );
+
+        OrdinaryBatchRetainedState retainedState = retainedBias.state();
+        assertEquals(
+                OrdinaryBatchOrderer.TrafficClass.BULK,
+                retainedState.streamClass.get(4L),
+                "large queued stream should be retained as bulk after the first batch"
+        );
+
+        OrdinaryBatchOrderer.order(
+                listOf(
+                        streamDataFrame(4L, 0L, null, 768L),
+                        streamDataFrame(4L, 0L, null, 768L),
+                        streamDataFrame(8L, 0L, null, 64L)
+                ),
+                SchedulerHint.BULK_THROUGHPUT,
+                1_024L,
+                retainedBias
+        );
+
+        assertEquals(
+                OrdinaryBatchOrderer.TrafficClass.BULK,
+                retainedState.streamClass.get(4L),
+                "mid-queue stream should keep its retained bulk classification across the hysteresis window"
+        );
+        assertEquals(
+                OrdinaryBatchOrderer.TrafficClass.INTERACTIVE,
+                retainedState.streamClass.get(8L),
+                "small queued stream should remain retained as interactive"
+        );
+    }
 }
