@@ -4683,7 +4683,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void notifyLockWaitersLocked() {
-        this.notifyLockWaitersLocked(LockWaitKind.GENERAL);
+        // Generic state transitions can unblock any wait class; hot paths use kind-specific notifiers.
+        if (this.lockWaiters > 0) {
+            this.lock.notifyAll();
+        }
     }
 
     void notifyAcceptWaitersLocked() {

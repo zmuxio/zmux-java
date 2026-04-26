@@ -3,7 +3,12 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 final class StreamTerminalErrorPriorityTest {
@@ -18,6 +23,22 @@ final class StreamTerminalErrorPriorityTest {
                     stream
             );
         }
+    }
+
+    private static void awaitWaiter(SessionRuntime runtime, SessionRuntime.LockWaitKind kind) throws Exception {
+        Field waiterField = SessionRuntime.class.getDeclaredField("lockWaitersByKind");
+        waiterField.setAccessible(true);
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            synchronized (runtime.lock()) {
+                int[] waiters = (int[]) waiterField.get(runtime);
+                if (waiters[kind.ordinal()] > 0) {
+                    return;
+                }
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("timed out waiting for " + kind + " waiter");
     }
 
     private static void assertSessionCloseHalfError(
@@ -53,6 +74,46 @@ final class StreamTerminalErrorPriorityTest {
             assertEquals(ZmuxErrorDirection.READ, error.direction(), "peer RESET direction mismatch");
             assertEquals(ZmuxTerminationKind.RESET, error.terminationKind(), "peer RESET termination mismatch");
         }
+    }
+
+    @Test
+    void peerResetWakesBlockedReadWaiter() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+        AtomicReference<Throwable> readFailure = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                stream.read(new byte[1]);
+            } catch (Throwable failure) {
+                readFailure.set(failure);
+            }
+        }, "peer-reset-read-waiter");
+
+        reader.start();
+        try {
+            awaitWaiter(runtime, SessionRuntime.LockWaitKind.READ_STREAM);
+            synchronized (runtime.lock()) {
+                stream.resetFromPeerLocked(ErrorCode.CANCELLED.code(), "peer reset", 0L);
+                runtime.notifyLockWaitersLocked();
+            }
+            reader.join(TimeUnit.SECONDS.toMillis(1L));
+
+            assertFalse(reader.isAlive(), "peer RESET should wake a blocked stream reader");
+            ApplicationError error = assertInstanceOf(
+                    ApplicationError.class,
+                    readFailure.get(),
+                    "blocked read should surface the peer RESET error"
+            );
+            assertEquals(ErrorCode.CANCELLED.code(), error.code(), "peer RESET code mismatch");
+            assertEquals(ZmuxErrorSource.REMOTE, error.source(), "peer RESET source mismatch");
+            assertEquals(ZmuxTerminationKind.RESET, error.terminationKind(), "peer RESET termination mismatch");
+        } finally {
+            if (reader.isAlive()) {
+                reader.interrupt();
+                reader.join(TimeUnit.SECONDS.toMillis(1L));
+            }
+        }
+        assertFalse(reader.isAlive(), "peer RESET read waiter leaked");
     }
 
     @Test
