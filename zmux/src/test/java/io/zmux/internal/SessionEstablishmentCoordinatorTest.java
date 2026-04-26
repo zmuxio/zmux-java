@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -145,6 +146,54 @@ final class SessionEstablishmentCoordinatorTest {
         assertFalse(owner.writerStarted.get(), "stalled preface write must not start the writer loop");
     }
 
+    @Test
+    void blockedEstablishmentFailureCloseWriteIsBoundedByDeadline() throws Exception {
+        BlockingCloseWriteOwner owner = new BlockingCloseWriteOwner(
+                preface(Role.INITIATOR, 1L),
+                preface(Role.INITIATOR, 2L)
+        );
+        SessionEstablishmentCoordinator coordinator = new SessionEstablishmentCoordinator(
+                owner,
+                Duration.ofMillis(40L),
+                Duration.ofMillis(200L),
+                Duration.ofMillis(1L)
+        );
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread establishThread = new Thread(() -> {
+            try {
+                coordinator.establish();
+                failure.set(new AssertionError("same-role conflict should fail establishment"));
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        }, "test-blocked-establishment-close");
+
+        establishThread.start();
+        try {
+            assertTrue(
+                    owner.closeWriteAttempted.await(1L, TimeUnit.SECONDS),
+                    "establishment failure must attempt to send a fatal CLOSE"
+            );
+            establishThread.join(1_000L);
+            assertFalse(
+                    establishThread.isAlive(),
+                    "blocked establishment failure CLOSE write must be bounded by failureWriteWait"
+            );
+            Throwable error = failure.get();
+            assertNotNull(error, "same-role conflict should surface locally");
+            ZmuxException zmuxError = assertInstanceOf(ZmuxException.class, error);
+            assertEquals(ErrorCode.ROLE_CONFLICT.code(), zmuxError.code(), "same-role conflict code mismatch");
+            assertTrue(owner.closeWriteSawDeadline.get(), "fatal CLOSE write should observe its own write deadline");
+            assertTrue(owner.transportClosed.get(), "establishment failure must close the transport");
+            assertFalse(owner.readyMarked.get(), "failed establishment must not mark the session ready");
+            assertFalse(owner.readerStarted.get(), "failed establishment must not start the reader loop");
+            assertFalse(owner.writerStarted.get(), "failed establishment must not start the writer loop");
+        } finally {
+            owner.releaseCloseWrite.countDown();
+            establishThread.join(1_000L);
+        }
+    }
+
     private static final class TestOwner implements SessionEstablishmentCoordinator.Owner {
         private final FrameCodec.Decoder input;
         private final BufferedOutputStream output;
@@ -274,6 +323,136 @@ final class SessionEstablishmentCoordinatorTest {
         public void closeTransport() {
             this.transportClosed.set(true);
             this.releaseWrites.countDown();
+        }
+    }
+
+    private static final class BlockingCloseWriteOwner implements SessionEstablishmentCoordinator.Owner {
+        private final FrameCodec.Decoder input;
+        private final BufferedOutputStream output;
+        private final Preface localPreface;
+        private final Object lock = new Object();
+        private final AtomicInteger transportWrites = new AtomicInteger();
+        private final CountDownLatch closeWriteAttempted = new CountDownLatch(1);
+        private final CountDownLatch releaseCloseWrite = new CountDownLatch(1);
+        private final AtomicBoolean closeWriteSawDeadline = new AtomicBoolean();
+        private final AtomicBoolean readyMarked = new AtomicBoolean();
+        private final AtomicBoolean transportClosed = new AtomicBoolean();
+        private final AtomicBoolean readerStarted = new AtomicBoolean();
+        private final AtomicBoolean writerStarted = new AtomicBoolean();
+        private final AtomicReference<Instant> writeDeadline = new AtomicReference<>();
+
+        private BlockingCloseWriteOwner(Preface localPreface, Preface remotePreface) throws IOException {
+            this.localPreface = localPreface;
+            this.input = FrameCodec.decoder(new ByteArrayInputStream(encodePreface(remotePreface)));
+            this.output = new BufferedOutputStream(new OutputStream() {
+                @Override
+                public void write(int value) throws IOException {
+                    acceptTransportWrite();
+                }
+
+                @Override
+                public void write(byte[] buffer, int offset, int length) throws IOException {
+                    acceptTransportWrite();
+                }
+
+                private void acceptTransportWrite() throws IOException {
+                    if (BlockingCloseWriteOwner.this.transportWrites.incrementAndGet() == 1) {
+                        return;
+                    }
+                    BlockingCloseWriteOwner.this.closeWriteAttempted.countDown();
+                    awaitCloseWriteDeadline();
+                }
+
+                private void awaitCloseWriteDeadline() throws IOException {
+                    try {
+                        while (BlockingCloseWriteOwner.this.releaseCloseWrite.getCount() > 0L) {
+                            Instant deadline = BlockingCloseWriteOwner.this.writeDeadline.get();
+                            if (deadline == null) {
+                                BlockingCloseWriteOwner.this.releaseCloseWrite.await(10L, TimeUnit.MILLISECONDS);
+                                continue;
+                            }
+                            BlockingCloseWriteOwner.this.closeWriteSawDeadline.set(true);
+                            Instant now = Instant.now();
+                            if (!deadline.isAfter(now)) {
+                                throw new WriteTimeoutException();
+                            }
+                            long waitMillis = Math.max(
+                                    1L,
+                                    Math.min(10L, Duration.between(now, deadline).toMillis())
+                            );
+                            BlockingCloseWriteOwner.this.releaseCloseWrite.await(waitMillis, TimeUnit.MILLISECONDS);
+                        }
+                    } catch (InterruptedException interruptedException) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("synthetic blocked close write interrupted", interruptedException);
+                    }
+                }
+            });
+        }
+
+        @Override
+        public FrameCodec.Decoder input() {
+            return this.input;
+        }
+
+        @Override
+        public BufferedOutputStream output() {
+            return this.output;
+        }
+
+        @Override
+        public Preface localPreface() {
+            return this.localPreface;
+        }
+
+        @Override
+        public Object lock() {
+            return this.lock;
+        }
+
+        @Override
+        public void markReadyLocked(Preface remotePreface, Negotiated negotiated, long readyAtNanos) {
+            this.readyMarked.set(true);
+        }
+
+        @Override
+        public void notifyLockWaiters() {
+        }
+
+        @Override
+        public boolean supportsWriteDeadline() {
+            return true;
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+            this.writeDeadline.set(deadline);
+        }
+
+        @Override
+        public Runnable readerLoopTask() {
+            return () -> this.readerStarted.set(true);
+        }
+
+        @Override
+        public Runnable writerLoopTask() {
+            return () -> this.writerStarted.set(true);
+        }
+
+        @Override
+        public IOException sessionInternalError(String operation, String message) {
+            return SessionRuntime.sessionInternalError(operation, message);
+        }
+
+        @Override
+        public IOException sessionInternalError(String operation, String message, Throwable cause) {
+            return SessionRuntime.sessionInternalError(operation, message, cause);
+        }
+
+        @Override
+        public void closeTransport() {
+            this.transportClosed.set(true);
+            this.releaseCloseWrite.countDown();
         }
     }
 

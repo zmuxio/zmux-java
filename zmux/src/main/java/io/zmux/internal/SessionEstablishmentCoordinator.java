@@ -187,7 +187,12 @@ final class SessionEstablishmentCoordinator {
             writeDeadline.expedite();
             this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.failureWriteWait, writeDeadline, false);
             writeDeadline.clearIgnoringFailure();
-            this.emitEstablishmentClose(remotePreface, error);
+            EstablishmentWriteDeadline closeDeadline = this.beginEstablishmentWriteDeadline(this.failureWriteWait);
+            try {
+                this.emitEstablishmentClose(remotePreface, error);
+            } finally {
+                closeDeadline.clearIgnoringFailure();
+            }
             wroteClose = true;
         } catch (IOException ignored) {
         } finally {
