@@ -67,6 +67,23 @@ final class ByteArrayQueueTest {
     }
 
     @Test
+    void gradualReadReleasesOversizedChunkDequeStorageWhenEventuallyEmpty() throws Exception {
+        ByteArrayQueue queue = new ByteArrayQueue();
+        for (int i = 0; i < 1100; i++) {
+            queue.add(new byte[]{(byte) i});
+        }
+        Object retainedChunks = chunks(queue);
+        byte[] dst = new byte[1];
+
+        for (int i = 0; i < 1100; i++) {
+            assertEquals(1, queue.read(dst, 0, 1), "single-byte drain should consume one chunk");
+        }
+
+        assertTrue(queue.isEmpty(), "queue should be empty after gradual draining");
+        assertNotSame(retainedChunks, chunks(queue), "gradual drains should also release oversized ArrayDeque backing");
+    }
+
+    @Test
     void discardAllReleasesOversizedChunkDequeStorage() throws Exception {
         ByteArrayQueue queue = new ByteArrayQueue();
         for (int i = 0; i < 1100; i++) {

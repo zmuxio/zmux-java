@@ -11,6 +11,7 @@ final class ByteArrayQueue {
     private ArrayDeque<Chunk> chunks = new ArrayDeque<>();
     private long size;
     private long storageBytes;
+    private int removedChunksSinceDequeReset;
 
     private static void releaseChunk(long storageBytes, Runnable releaseAction) {
         if (storageBytes <= 0 || releaseAction == null) {
@@ -26,6 +27,13 @@ final class ByteArrayQueue {
 
     private static int saturatedInt(long value) {
         return value >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) Math.max(0L, value);
+    }
+
+    private static int saturatingAddInt(int left, int right) {
+        if (right <= 0) {
+            return left;
+        }
+        return left > Integer.MAX_VALUE - right ? Integer.MAX_VALUE : left + right;
     }
 
     private static boolean shouldTightenAfterConsume(Chunk chunk) {
@@ -153,8 +161,10 @@ final class ByteArrayQueue {
     }
 
     private void releaseEmptyChunkDequeStorage(int removedChunks) {
-        if (removedChunks >= RELEASE_EMPTY_CHUNK_DEQUE_MIN_CHUNKS && chunks.isEmpty()) {
+        removedChunksSinceDequeReset = saturatingAddInt(removedChunksSinceDequeReset, removedChunks);
+        if (removedChunksSinceDequeReset >= RELEASE_EMPTY_CHUNK_DEQUE_MIN_CHUNKS && chunks.isEmpty()) {
             chunks = new ArrayDeque<>();
+            removedChunksSinceDequeReset = 0;
         }
     }
 
