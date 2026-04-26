@@ -15,6 +15,14 @@ import java.nio.ReadOnlyBufferException;
 import java.util.Objects;
 
 public final class StreamIoSupport {
+    private static final int TRANSIENT_BUFFER_CAPACITY = 8192;
+    private static final ThreadLocal<byte[]> TRANSIENT_BUFFER = new ThreadLocal<byte[]>() {
+        @Override
+        protected byte[] initialValue() {
+            return new byte[TRANSIENT_BUFFER_CAPACITY];
+        }
+    };
+
     private StreamIoSupport() {
     }
 
@@ -35,8 +43,8 @@ public final class StreamIoSupport {
             }
             return read;
         }
-        byte[] buffer = new byte[transientBufferSize(dst.remaining())];
-        int read = reader.read(buffer, 0, buffer.length);
+        byte[] buffer = TRANSIENT_BUFFER.get();
+        int read = reader.read(buffer, 0, transientBufferSize(dst.remaining()));
         if (read > 0) {
             dst.put(buffer, 0, read);
         }
@@ -57,16 +65,19 @@ public final class StreamIoSupport {
             return length;
         }
 
-        int initialPosition = src.position();
         int total = 0;
-        ByteBuffer duplicate = src.duplicate();
-        byte[] buffer = new byte[transientBufferSize(duplicate.remaining())];
-        while (duplicate.hasRemaining()) {
-            int length = Math.min(duplicate.remaining(), buffer.length);
-            duplicate.get(buffer, 0, length);
-            writer.write(buffer, 0, length);
-            total += length;
-            src.position(initialPosition + total);
+        byte[] buffer = TRANSIENT_BUFFER.get();
+        while (src.hasRemaining()) {
+            int position = src.position();
+            int length = Math.min(src.remaining(), buffer.length);
+            src.get(buffer, 0, length);
+            try {
+                writer.write(buffer, 0, length);
+                total += length;
+            } catch (IOException error) {
+                src.position(position);
+                throw error;
+            }
         }
         return total;
     }
@@ -97,6 +108,6 @@ public final class StreamIoSupport {
     }
 
     private static int transientBufferSize(int remaining) {
-        return Math.min(remaining, 8192);
+        return Math.min(remaining, TRANSIENT_BUFFER_CAPACITY);
     }
 }

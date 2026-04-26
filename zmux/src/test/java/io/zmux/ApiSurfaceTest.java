@@ -1746,6 +1746,46 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultByteBufferHelpersSupportDirectBuffersWithoutChangingSemantics() throws Exception {
+        RecordingDefaultSendStream send = new RecordingDefaultSendStream();
+        ByteBuffer writeBuffer = ByteBuffer.allocateDirect(4);
+        writeBuffer.put("abcd".getBytes(StandardCharsets.UTF_8));
+        writeBuffer.flip();
+        writeBuffer.position(1);
+        writeBuffer.limit(3);
+
+        assertEquals(2, send.write(writeBuffer));
+
+        assertEquals(3, writeBuffer.position());
+        assertEquals(1, send.writeCalls);
+        assertArrayEquals("bc".getBytes(StandardCharsets.UTF_8), send.lastWriteBytes);
+
+        RecordingDefaultSendStream finalSend = new RecordingDefaultSendStream();
+        ByteBuffer finalBuffer = ByteBuffer.allocateDirect(5);
+        finalBuffer.put("vwxyz".getBytes(StandardCharsets.UTF_8));
+        finalBuffer.flip();
+        finalBuffer.position(2);
+
+        assertEquals(3, finalSend.writeFinal(finalBuffer));
+
+        assertEquals(5, finalBuffer.position());
+        assertEquals(0, finalSend.writeCalls);
+        assertEquals(1, finalSend.writeFinalCalls);
+        assertArrayEquals("xyz".getBytes(StandardCharsets.UTF_8), finalSend.lastFinalBytes);
+
+        RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream("xy".getBytes(StandardCharsets.UTF_8));
+        ByteBuffer readBuffer = ByteBuffer.allocateDirect(4);
+        readBuffer.position(1);
+
+        assertEquals(2, recv.read(readBuffer));
+
+        assertEquals(3, readBuffer.position());
+        assertEquals((byte) 0, readBuffer.get(0));
+        assertEquals((byte) 'x', readBuffer.get(1));
+        assertEquals((byte) 'y', readBuffer.get(2));
+    }
+
+    @Test
     void defaultStreamViewsDelegateCloseToDirectionalClose() throws Exception {
         RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream("q".getBytes(StandardCharsets.UTF_8));
         InputStream input = recv.asInputStream();

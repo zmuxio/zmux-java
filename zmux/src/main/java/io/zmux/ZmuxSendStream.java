@@ -41,23 +41,35 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
             return written;
         }
 
-        int initialPosition = src.position();
         int total = 0;
-        ByteBuffer duplicate = src.duplicate();
-        byte[] buffer = new byte[StreamApiSupport.transientBufferSize(duplicate.remaining())];
-        while (duplicate.remaining() > buffer.length) {
-            duplicate.get(buffer, 0, buffer.length);
-            write(buffer, 0, buffer.length);
-            total += buffer.length;
-            src.position(initialPosition + total);
+        byte[] buffer = StreamApiSupport.transientBuffer();
+        while (src.remaining() > buffer.length) {
+            int position = src.position();
+            src.get(buffer, 0, buffer.length);
+            try {
+                write(buffer, 0, buffer.length);
+                total += buffer.length;
+            } catch (IOException error) {
+                src.position(position);
+                throw error;
+            }
         }
 
-        int finalLength = duplicate.remaining();
-        duplicate.get(buffer, 0, finalLength);
-        int written = writeFinal(buffer, 0, finalLength);
+        int finalPosition = src.position();
+        int finalLength = src.remaining();
+        src.get(buffer, 0, finalLength);
+        int written;
+        try {
+            written = writeFinal(buffer, 0, finalLength);
+        } catch (IOException error) {
+            src.position(finalPosition);
+            throw error;
+        }
+        if (written >= 0 && written < finalLength) {
+            src.position(finalPosition + written);
+        }
         if (written > 0) {
             total += written;
-            src.position(initialPosition + total);
         }
         return total;
     }
