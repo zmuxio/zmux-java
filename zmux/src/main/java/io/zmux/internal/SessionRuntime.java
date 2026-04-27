@@ -2421,6 +2421,18 @@ public final class SessionRuntime implements ZmuxNativeSession {
             return;
         }
         streamRuntime.markChurnCountedLocked();
+        this.recordVisibleTerminalChurnCountLocked("handle terminal churn");
+    }
+
+    void recordLocalAbortTerminalChurnLocked(StreamRuntime streamRuntime) throws IOException {
+        if (!this.shouldRecordLocalAbortTerminalChurnLocked(streamRuntime)) {
+            return;
+        }
+        streamRuntime.markChurnCountedLocked();
+        this.recordVisibleTerminalChurnCountLocked("queue ABORT");
+    }
+
+    private void recordVisibleTerminalChurnCountLocked(String operation) throws IOException {
         long nowNanos = System.nanoTime();
         this.recordVisibleTerminalChurnEventLocked();
         if (this.visibleTerminalChurnWindowStartedAtNanos == 0L
@@ -2436,7 +2448,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (this.visibleTerminalChurnCount > this.visibleTerminalChurnThresholdLocked()) {
             throw sessionError(
                     ErrorCode.PROTOCOL,
-                    "handle terminal churn",
+                    operation,
                     "visible terminal churn exceeded",
                     ZmuxErrorSource.REMOTE,
                     ZmuxErrorDirection.READ
@@ -2448,6 +2460,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return streamRuntime != null
                 && !streamRuntime.openedLocally()
                 && streamRuntime.applicationVisible()
+                && !streamRuntime.acceptedLocked()
+                && !streamRuntime.churnCountedLocked()
+                && streamRuntime.effectivelyFullyTerminalLocked();
+    }
+
+    private boolean shouldRecordLocalAbortTerminalChurnLocked(StreamRuntime streamRuntime) {
+        return streamRuntime != null
+                && streamRuntime.localAbortLocked()
+                && !streamRuntime.openedLocally()
                 && !streamRuntime.acceptedLocked()
                 && !streamRuntime.churnCountedLocked()
                 && streamRuntime.effectivelyFullyTerminalLocked();

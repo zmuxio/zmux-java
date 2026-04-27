@@ -294,6 +294,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
+    public void recordLocalAbortTerminalChurnLocked(StreamRuntime streamRuntime) throws IOException {
+        this.owner.recordLocalAbortTerminalChurnLocked(streamRuntime);
+    }
+
+    @Override
     public void enforceVisibleAcceptBacklogLocked() throws IOException {
         this.owner.enforceVisibleAcceptBacklogLocked();
     }

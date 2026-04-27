@@ -674,7 +674,11 @@ final class SessionReaderCoordinator {
                         dataLength
                 )) {
                     byte[] abortPayload = this.owner.buildControlErrorPayloadLocked(ErrorCode.FLOW_CONTROL.code(), "");
+                    if (!streamRuntime.openedLocally()) {
+                        this.owner.markPeerVisibleLocked(streamRuntime);
+                    }
                     streamRuntime.abortFromLocalLocked(ErrorCode.FLOW_CONTROL.code(), "");
+                    this.owner.recordLocalAbortTerminalChurnLocked(streamRuntime);
                     this.owner.enqueueReadLoopAbortLocked(streamRuntime, ErrorCode.FLOW_CONTROL.code(), abortPayload);
                     this.owner.maybeCompactStreamLocked(streamRuntime);
                     return;
@@ -1146,6 +1150,8 @@ final class SessionReaderCoordinator {
         void recordHiddenAbortChurnLocked(long nowNanos) throws IOException;
 
         void recordVisibleTerminalChurnLocked(StreamRuntime streamRuntime) throws IOException;
+
+        void recordLocalAbortTerminalChurnLocked(StreamRuntime streamRuntime) throws IOException;
 
         void enforceVisibleAcceptBacklogLocked() throws IOException;
 

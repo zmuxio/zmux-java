@@ -52,6 +52,15 @@ final class StreamTerminalState {
         return recvAbortError;
     }
 
+    boolean localAbort() {
+        if (!(localError instanceof ApplicationError)) {
+            return false;
+        }
+        ApplicationError applicationError = (ApplicationError) localError;
+        return applicationError.source() == ZmuxErrorSource.LOCAL
+                && applicationError.terminationKind() == ZmuxTerminationKind.ABORT;
+    }
+
     long terminalCode() {
         return terminalCode;
     }

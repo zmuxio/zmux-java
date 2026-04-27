@@ -1061,6 +1061,10 @@ final class StreamRuntime implements ZmuxNativeStream {
         return terminalState.terminalCode();
     }
 
+    boolean localAbortLocked() {
+        return terminalState.localAbort();
+    }
+
     String terminalReasonLocked() {
         return terminalState.terminalReason();
     }

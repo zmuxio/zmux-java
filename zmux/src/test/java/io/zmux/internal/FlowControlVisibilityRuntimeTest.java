@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
@@ -207,6 +208,41 @@ final class FlowControlVisibilityRuntimeTest {
             assertEquals(FrameType.ABORT, abort.type(), "stream max_data violation frame type mismatch");
             assertEquals(stream.streamIdInternal(), abort.streamId(), "stream max_data violation stream id mismatch");
         }
+    }
+
+    @Test
+    void rapidLocalFlowControlAbortChurnTriggersProtocolClose() throws Exception {
+        Settings localSettings = Settings.defaults().toBuilder()
+                .initialMaxData(2L)
+                .initialMaxStreamDataBidiPeerOpened(0L)
+                .build();
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .settings(localSettings)
+                .visibleTerminalChurnWindow(Duration.ofHours(1L))
+                .visibleTerminalChurnThreshold(1)
+                .acceptBacklogLimit(1024)
+                .acceptBacklogBytesLimit(1L << 20)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+        long firstPeerBidi = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, firstPeerBidi, new byte[]{1}));
+
+        IOException error = assertThrows(
+                IOException.class,
+                () -> handleDataFrame(runtime, new FrameCodec.Frame(
+                        FrameType.DATA,
+                        0,
+                        firstPeerBidi + 4L,
+                        new byte[]{1}
+                ))
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), ZmuxErrors.code(error, -1L),
+                "rapid local flow-control abort churn should fail as protocol abuse");
+        assertEquals(2L, runtime.stats().diagnostics().visibleTerminalChurnEvents(),
+                "local flow-control aborts should contribute to visible terminal churn diagnostics");
     }
 
     @Test
