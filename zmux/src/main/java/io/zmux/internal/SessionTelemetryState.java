@@ -533,17 +533,13 @@ final class SessionTelemetryState {
         }
     }
 
-    void noteTransportWriteIntentLocked(long nowNanos) {
+    void noteTransportWriteCompletedLocked(long nowNanos) {
+        this.lastTransportWriteAtNanos = nowNanos;
         if (!this.keepaliveEnabledLocked()) {
             return;
         }
         this.resetWriteIdlePingDueLocked(nowNanos);
         this.owner.notifyWriterWaitersLocked();
-    }
-
-    void noteTransportWriteCompletedLocked(long nowNanos) {
-        this.lastTransportWriteAtNanos = nowNanos;
-        this.noteTransportWriteIntentLocked(nowNanos);
     }
 
     void noteStreamProgressLocked(long nowNanos) {

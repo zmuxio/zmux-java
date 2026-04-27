@@ -1,7 +1,9 @@
 package io.zmux.internal;
 
+import io.zmux.FrameType;
 import io.zmux.PingTimeoutException;
 import io.zmux.SessionState;
+import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
 import org.junit.jupiter.api.Test;
 
@@ -350,6 +352,58 @@ final class SessionTelemetryStateTest {
         assertTrue(
                 getLongField(telemetry, "maxPingDueAtNanos") > nowNanos,
                 "max-ping recovery should still start from the current scheduler time"
+        );
+    }
+
+    @Test
+    void queuedOutboundControlDoesNotRefreshWriteIdleDeadline() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofSeconds(10L))
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+        long dueNanos = TimeUnit.SECONDS.toNanos(123L);
+        SessionRuntimeTestSupport.setLongField(runtime, "writeIdlePingDueAtNanos", dueNanos);
+
+        runtime.enqueueControlLocked(new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[8]));
+
+        assertEquals(
+                dueNanos,
+                SessionRuntimeTestSupport.getLongField(runtime, "writeIdlePingDueAtNanos"),
+                "queued outbound control is not transport progress and must not refresh write-idle keepalive"
+        );
+    }
+
+    @Test
+    void completedTransportWriteRefreshesWriteIdleDeadline() throws Exception {
+        TestTelemetryOwner owner = new TestTelemetryOwner();
+        SessionTelemetryState telemetry = new SessionTelemetryState(
+                owner,
+                ZmuxConfig.builder()
+                        .keepaliveInterval(Duration.ofMillis(80L))
+                        .build(),
+                System.nanoTime(),
+                Instant.now()
+        );
+        owner.telemetry = telemetry;
+        long writeCompletedAtNanos = TimeUnit.SECONDS.toNanos(456L);
+        setLongField(telemetry, "keepaliveJitterState", 1L);
+        setLongField(telemetry, "writeIdlePingDueAtNanos", 1L);
+
+        telemetry.noteTransportWriteCompletedLocked(writeCompletedAtNanos);
+
+        long dueNanos = getLongField(telemetry, "writeIdlePingDueAtNanos");
+        assertTrue(
+                dueNanos >= writeCompletedAtNanos + Duration.ofMillis(70L).toNanos()
+                        && dueNanos <= writeCompletedAtNanos + Duration.ofMillis(80L).toNanos(),
+                "completed transport writes should refresh write-idle keepalive from the actual write time"
+        );
+        assertEquals(
+                writeCompletedAtNanos,
+                getLongField(telemetry, "lastTransportWriteAtNanos"),
+                "transport progress should surface the completed write timestamp"
         );
     }
 

@@ -226,7 +226,6 @@ final class SessionWriterCoordinator {
             return Collections.emptyList();
         }
 
-        this.owner.noteTransportWriteIntentLocked(System.nanoTime());
         this.owner.setInflightBatch(batch);
         return batch;
     }
@@ -364,8 +363,6 @@ final class SessionWriterCoordinator {
         boolean hasPendingWindowUpdatesLocked();
 
         boolean hasPendingMaxDataLocked();
-
-        void noteTransportWriteIntentLocked(long nowNanos);
 
         void expireStopSendingGracefulDrainsLocked();
 

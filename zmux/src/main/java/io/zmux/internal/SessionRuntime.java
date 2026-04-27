@@ -2728,18 +2728,14 @@ public final class SessionRuntime implements ZmuxNativeSession {
             return;
         }
         if (deque == this.urgentQueue) {
-            if (this.enqueueUrgentFrameLocked(outboundFrame)) {
-                this.noteOutboundQueuedLocked();
-            }
+            this.enqueueUrgentFrameLocked(outboundFrame);
             return;
         }
         if (deque == this.dataQueue) {
             this.enqueueOrdinaryFrameLocked(outboundFrame);
-            this.noteOutboundQueuedLocked();
             return;
         }
         deque.offerLast(outboundFrame);
-        this.noteOutboundQueuedLocked();
     }
 
     boolean canAdmitUrgentOutboundLocked(OutboundFrame outboundFrame) {
@@ -2754,7 +2750,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
         int bytes = SessionRuntime.retainedQueueBytes(outboundFrame);
         this.outboundQueueBookkeeping.noteUrgentFrameEnqueuedLocked(bytes);
         this.urgentQueue.offerLast(outboundFrame);
-        this.noteOutboundQueuedLocked();
     }
 
     void enqueueExistingOrdinaryOutboundLocked(OutboundFrame outboundFrame) {
@@ -2762,14 +2757,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
             return;
         }
         this.enqueueOrdinaryFrameLocked(outboundFrame);
-        this.noteOutboundQueuedLocked();
-    }
-
-    private void noteOutboundQueuedLocked() {
-        if (!this.telemetry.keepaliveEnabledLocked()) {
-            return;
-        }
-        this.telemetry.resetWriteIdlePingDueLocked(System.nanoTime());
     }
 
     OutboundFrame pollQueuedOutboundLocked(Deque<OutboundFrame> deque) {
@@ -4026,10 +4013,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     void noteInboundFrameLocked(long nowNanos) {
         this.telemetry.noteInboundFrameLocked(nowNanos);
-    }
-
-    void noteTransportWriteIntentLocked(long nowNanos) {
-        this.telemetry.noteTransportWriteIntentLocked(nowNanos);
     }
 
     private void noteTransportWriteCompletedLocked(long nowNanos) {

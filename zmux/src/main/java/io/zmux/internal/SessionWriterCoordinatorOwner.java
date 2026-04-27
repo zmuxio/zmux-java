@@ -104,11 +104,6 @@ final class SessionWriterCoordinatorOwner implements SessionWriterCoordinator.Ow
     }
 
     @Override
-    public void noteTransportWriteIntentLocked(long nowNanos) {
-        this.owner.noteTransportWriteIntentLocked(nowNanos);
-    }
-
-    @Override
     public void expireStopSendingGracefulDrainsLocked() {
         this.owner.expireStopSendingGracefulDrainsLocked();
     }
