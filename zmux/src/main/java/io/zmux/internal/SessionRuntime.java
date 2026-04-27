@@ -4462,7 +4462,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void retainHiddenAbortTombstoneLocked(long streamId, long code, String reason, long nowNanos) {
-        this.terminalBookkeeping.retainHiddenAbortTombstoneLocked(streamId, code, reason, nowNanos);
+        if (this.terminalBookkeeping.retainHiddenAbortTombstoneLocked(streamId, code, reason, nowNanos)) {
+            this.noteHiddenStreamReapedLocked();
+        }
     }
 
     long aggregateLateDataCap() {

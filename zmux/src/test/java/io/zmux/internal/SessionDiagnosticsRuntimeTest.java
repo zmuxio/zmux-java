@@ -493,6 +493,27 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void abortFirstHiddenStreamTracksHiddenReapStats() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+
+        handleReaderFrame(runtime, "handleAbortFrame", controlFrame(
+                FrameType.ABORT,
+                streamId,
+                ErrorCode.CANCELLED.code()
+        ));
+
+        SessionStats stats = runtime.stats();
+        assertEquals(Long.valueOf(1L), stats.reasons().abort().get(ErrorCode.CANCELLED.code()), "hidden ABORT reason count mismatch");
+        assertEquals(1L, stats.hiddenState().reaped(), "ABORT-first hidden stream should count as reaped hidden state");
+        assertEquals(
+                1L,
+                stats.pressure().retainedStateBreakdown().hiddenControl().count(),
+                "ABORT-first hidden stream should retain hidden-control tombstone state"
+        );
+    }
+
+    @Test
     void hiddenRefusedOpenTracksRefusedAndAbortReasonStats() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);

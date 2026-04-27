@@ -109,12 +109,13 @@ final class SessionTerminalBookkeeping {
         this.enforceTerminalBookkeepingMemoryCapLocked();
     }
 
-    void retainHiddenAbortTombstoneLocked(long streamId, long code, String reason, long nowNanos) {
+    boolean retainHiddenAbortTombstoneLocked(long streamId, long code, String reason, long nowNanos) {
         Tombstone tombstone = this.tombstones.get(streamId);
         if (tombstone != null && tombstone.hidden()) {
-            return;
+            return false;
         }
         this.putTombstoneLocked(streamId, Tombstone.hidden(code, reason, nowNanos, LateDataCause.ABORT));
+        return true;
     }
 
     TerminalDataDisposition terminalDataDispositionForLocked(long streamId) {
@@ -563,7 +564,7 @@ final class SessionTerminalBookkeeping {
             this.hasReceiveHalf = hasReceiveHalf;
             this.gracefulReceiveClosed = gracefulReceiveClosed;
             this.terminalCode = terminalCode;
-            this.terminalReason = terminalReason;
+            this.terminalReason = "";
             this.lateDataCause = lateDataCause;
             this.hidden = hidden;
             this.createdAtNanos = createdAtNanos;

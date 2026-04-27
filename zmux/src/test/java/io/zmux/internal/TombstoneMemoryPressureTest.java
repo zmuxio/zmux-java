@@ -122,6 +122,21 @@ final class TombstoneMemoryPressureTest {
     }
 
     @Test
+    void tombstoneDoesNotRetainTerminalReasonText() {
+        SessionTerminalBookkeeping.Tombstone tombstone = new SessionTerminalBookkeeping.Tombstone(
+                true,
+                true,
+                9L,
+                "large diagnostic reason",
+                LateDataCause.ABORT,
+                false,
+                0L
+        );
+
+        assertEquals("", tombstone.terminalReason(), "compact tombstones should not retain diagnostic reason text");
+    }
+
+    @Test
     void trackedMemoryPressureReapsOldestVisibleTombstoneToMarkerOnly() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .sessionMemoryCap(64L)
