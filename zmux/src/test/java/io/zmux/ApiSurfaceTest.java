@@ -1924,6 +1924,19 @@ final class ApiSurfaceTest {
         assertEquals(1, stream.lastFinalLength);
     }
 
+    @Test
+    void defaultWritevFinalReturnsActualFinalWriteProgress() throws Exception {
+        RecordingDefaultSendStream stream = new RecordingDefaultSendStream(1);
+
+        int written = stream.writevFinal("ab".getBytes(StandardCharsets.UTF_8), "cd".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(3, written);
+        assertEquals(1, stream.writeCalls);
+        assertEquals(2, stream.lastWriteLength);
+        assertEquals(1, stream.writeFinalCalls);
+        assertEquals(2, stream.lastFinalLength);
+    }
+
     private static final class SelfCauseIOException extends IOException {
         private SelfCauseIOException(String message) {
             super(message);

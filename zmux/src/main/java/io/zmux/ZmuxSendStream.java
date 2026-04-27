@@ -86,6 +86,7 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
             return writeFinal(DeadlineSupport.EMPTY_BYTES);
         }
         int lastNonEmpty = StreamApiSupport.lastNonEmptyPart(parts);
+        int written = 0;
         for (int i = 0; i <= lastNonEmpty; i++) {
             byte[] part = parts[i];
             if (part.length == 0) {
@@ -93,11 +94,12 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
             }
             if (i < lastNonEmpty) {
                 write(part);
+                written += part.length;
             } else {
-                writeFinal(part);
+                written += StreamApiSupport.validateWriteFinalProgress(writeFinal(part), part.length);
             }
         }
-        return total;
+        return written;
     }
 
     default OutputStream asOutputStream() {
