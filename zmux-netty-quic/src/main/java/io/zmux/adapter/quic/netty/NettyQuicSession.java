@@ -1026,9 +1026,8 @@ final class NettyQuicSession implements ZmuxSession {
             try {
                 NettyQuicSupport.executeAcceptedPreludeTask(() -> prepareAcceptedStream(state));
             } catch (RejectedExecutionException ignored) {
-                preparingStreams.remove(state);
                 prepareSlots.release();
-                cleanupRejectedAcceptedPreparation(state);
+                cleanupRejectedAcceptedPreparation(state, ErrorCode.REFUSED_STREAM.code());
             }
         }
         if (drainedAny && pendingPrepare.isEmpty()) {
@@ -1041,12 +1040,12 @@ final class NettyQuicSession implements ZmuxSession {
             state.prepareAcceptedPrelude(acceptedPreludeReadTimeout);
             publishPreparedAcceptedStream(state);
         } catch (ReadTimeoutException timeout) {
-            cleanupRejectedAcceptedPreparation(state);
+            cleanupRejectedAcceptedPreparation(state, ErrorCode.PROTOCOL.code());
         } catch (InterruptedException | java.io.InterruptedIOException interrupted) {
             Thread.currentThread().interrupt();
             cleanupInterruptedAcceptedPreparation(state);
         } catch (IOException ignored) {
-            cleanupRejectedAcceptedPreparation(state);
+            cleanupRejectedAcceptedPreparation(state, ErrorCode.PROTOCOL.code());
         } finally {
             preparingStreams.remove(state);
             prepareSlots.release();
@@ -1059,7 +1058,7 @@ final class NettyQuicSession implements ZmuxSession {
         }
     }
 
-    private void cleanupRejectedAcceptedPreparation(NettyQuicStreamState state) {
+    private void cleanupRejectedAcceptedPreparation(NettyQuicStreamState state, long code) {
         if (state == null) {
             return;
         }
@@ -1075,7 +1074,7 @@ final class NettyQuicSession implements ZmuxSession {
             return;
         }
         noteHiddenStreamRefused(unreadBytes);
-        state.rejectAcceptedPrelude();
+        state.rejectAcceptedPrelude(code);
     }
 
     private void cleanupInterruptedAcceptedPreparation(NettyQuicStreamState state) {
@@ -1127,8 +1126,9 @@ final class NettyQuicSession implements ZmuxSession {
                                           TimeoutBudget budget) throws IOException, InterruptedException {
         long startedAtNanos = System.nanoTime();
         activeStreams.add(state);
-        Future<QuicStreamChannel> future = channel.createStream(streamType, state.newHandler());
+        Future<QuicStreamChannel> future = null;
         try {
+            future = channel.createStream(streamType, state.newHandler());
             state.attachChannel(awaitStreamFuture(future, budget));
             state.maybeSendOpenPreludeOnOpen();
             noteOpenLatency(startedAtNanos, System.nanoTime());
@@ -1152,7 +1152,9 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private void cleanupFailedLocalOpen(NettyQuicStreamState state, Future<QuicStreamChannel> future) {
-        future.cancel(true);
+        if (future != null) {
+            future.cancel(true);
+        }
         activeStreams.remove(state);
         state.closeRaw();
     }

@@ -340,6 +340,31 @@ class NettyQuicSupportTest {
     }
 
     @Test
+    void suppressedStructuredIOExceptionIsUnwrappedFromRuntimeWrapper() {
+        ApplicationError nested = new ApplicationError(
+                79L,
+                "suppressed-nested",
+                ZmuxErrorScope.STREAM,
+                ZmuxErrorSource.REMOTE,
+                ZmuxErrorDirection.READ,
+                ZmuxTerminationKind.ABORT
+        );
+        RuntimeException wrapper = new RuntimeException("wrapper");
+        wrapper.addSuppressed(nested);
+
+        ApplicationError translated = assertInstanceOf(
+                ApplicationError.class,
+                NettyQuicSupport.translateThrowable(wrapper)
+        );
+
+        assertEquals(79L, translated.code());
+        assertEquals("suppressed-nested", translated.reason());
+        assertEquals(ZmuxErrorSource.REMOTE, translated.source());
+        assertEquals(ZmuxErrorDirection.READ, translated.direction());
+        assertEquals(ZmuxTerminationKind.ABORT, translated.terminationKind());
+    }
+
+    @Test
     void plainClosedChannelExceptionFallsBackToStructuredSessionClose() {
         SessionClosedException error = assertInstanceOf(
                 SessionClosedException.class,

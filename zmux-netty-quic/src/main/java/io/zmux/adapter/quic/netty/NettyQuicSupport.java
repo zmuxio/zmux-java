@@ -328,14 +328,14 @@ final class NettyQuicSupport {
         }
         if (cause instanceof CancellationException) {
             CancellationException cancelled = (CancellationException) cause;
-            IOException nested = nestedIOException(cancelled.getCause());
+            IOException nested = nestedChildIOException(cancelled);
             return nested == null
                     ? sessionClosedError(ZmuxErrorSource.TRANSPORT, cancelled)
                     : translateThrowable(nested, seen, depth + 1);
         }
         if (cause instanceof IOException) {
             IOException ioException = (IOException) cause;
-            IOException nested = nestedIOException(ioException.getCause());
+            IOException nested = nestedChildIOException(ioException);
             if (nested != null) {
                 return translateThrowable(nested, seen, depth + 1);
             }
@@ -344,7 +344,7 @@ final class NettyQuicSupport {
             }
             return transportRuntimeFailure(ioException);
         }
-        IOException nested = nestedIOException(cause.getCause());
+        IOException nested = nestedChildIOException(cause);
         if (nested != null) {
             return translateThrowable(nested, seen, depth + 1);
         }
@@ -654,16 +654,42 @@ final class NettyQuicSupport {
         }
     }
 
-    private static IOException nestedIOException(Throwable cause) {
-        Throwable current = cause;
+    private static IOException nestedChildIOException(Throwable cause) {
+        if (cause == null) {
+            return null;
+        }
         IdentityHashMap<Throwable, Boolean> seen = new IdentityHashMap<>();
-        int depth = 0;
-        while (current != null && depth <= MAX_ERROR_UNWRAP_DEPTH && seen.put(current, Boolean.TRUE) == null) {
-            if (current instanceof IOException) {
-                return (IOException) current;
+        IOException nested = nestedIOException(cause.getCause(), seen, 0);
+        if (nested != null) {
+            return nested;
+        }
+        for (Throwable suppressed : cause.getSuppressed()) {
+            nested = nestedIOException(suppressed, seen, 0);
+            if (nested != null) {
+                return nested;
             }
-            current = current.getCause();
-            depth++;
+        }
+        return null;
+    }
+
+    private static IOException nestedIOException(Throwable cause,
+                                                 IdentityHashMap<Throwable, Boolean> seen,
+                                                 int depth) {
+        if (cause == null || depth > MAX_ERROR_UNWRAP_DEPTH || seen.put(cause, Boolean.TRUE) != null) {
+            return null;
+        }
+        if (cause instanceof IOException) {
+            return (IOException) cause;
+        }
+        IOException nested = nestedIOException(cause.getCause(), seen, depth + 1);
+        if (nested != null) {
+            return nested;
+        }
+        for (Throwable suppressed : cause.getSuppressed()) {
+            nested = nestedIOException(suppressed, seen, depth + 1);
+            if (nested != null) {
+                return nested;
+            }
         }
         return null;
     }

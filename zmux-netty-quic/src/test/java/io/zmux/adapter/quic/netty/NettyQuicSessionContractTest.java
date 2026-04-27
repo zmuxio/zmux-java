@@ -313,7 +313,7 @@ class NettyQuicSessionContractTest {
 
             ZmuxRecvStream accepted = await(acceptedFuture);
             assertEquals(5, written);
-            assertMetadata(accepted.metadata(), 5L, 0L, "uni");
+            assertMetadata(accepted.metadata(), 5L, null, "uni");
             assertArrayEquals(utf8("uni"), accepted.openInfo());
             assertArrayEquals(utf8("hello"), readAll(accepted));
             assertNotNull(
@@ -1059,13 +1059,13 @@ class NettyQuicSessionContractTest {
             OpenOptions bidiOptions = new OpenOptions(7L, 0L, utf8("ssh"));
             ZmuxStream bidi = pair.client.openStream(bidiOptions);
             ZmuxStream acceptedBidi = await(bidiAcceptedFuture);
-            assertMetadata(acceptedBidi.metadata(), 7L, 0L, "ssh");
+            assertMetadata(acceptedBidi.metadata(), 7L, null, "ssh");
             assertArrayEquals(utf8("ssh"), acceptedBidi.openInfo());
 
             CompletableFuture<ZmuxRecvStream> uniAcceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
             ZmuxSendStream send = pair.client.openUniStream(new OpenOptions(null, 0L, utf8("uni")));
             ZmuxRecvStream acceptedUni = await(uniAcceptedFuture);
-            assertMetadata(acceptedUni.metadata(), 0L, 0L, "uni");
+            assertMetadata(acceptedUni.metadata(), 0L, null, "uni");
             assertArrayEquals(utf8("uni"), acceptedUni.openInfo());
 
             acceptedUni.close();
@@ -1100,7 +1100,7 @@ class NettyQuicSessionContractTest {
             StreamMetadata updated = stream.metadata();
             assertNotSame(initial, updated, "metadata snapshot should refresh after local pending metadata changes");
             assertSame(updated, stream.metadata(), "updated metadata snapshot should be reused until the next change");
-            assertMetadata(updated, 5L, 0L, "");
+            assertMetadata(updated, 5L, null, "");
 
             stream.close();
         }
@@ -1162,7 +1162,7 @@ class NettyQuicSessionContractTest {
             stream.updateMetadata(new MetadataUpdate(5L, 0L));
 
             ZmuxStream accepted = await(acceptedFuture);
-            assertMetadata(accepted.metadata(), 5L, 0L, "");
+            assertMetadata(accepted.metadata(), 5L, null, "");
             accepted.close();
             stream.close();
         }
