@@ -35,6 +35,7 @@ public interface ReadHalf extends Closeable {
                 int read;
                 do {
                     read = ReadHalf.this.read(singleByte, 0, 1);
+                    StreamIoSupport.validateReadProgress(read, 1);
                 } while (read == 0);
                 return read < 0 ? -1 : singleByte[0] & 0xff;
             }
@@ -46,7 +47,7 @@ public interface ReadHalf extends Closeable {
                 if (length == 0) {
                     return 0;
                 }
-                return ReadHalf.this.read(buffer, offset, length);
+                return StreamIoSupport.validateReadProgress(ReadHalf.this.read(buffer, offset, length), length);
             }
 
             @Override

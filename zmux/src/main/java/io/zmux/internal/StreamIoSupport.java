@@ -31,15 +31,25 @@ public final class StreamIoSupport {
         if (dst.hasArray()) {
             int position = dst.position();
             int read = reader.read(dst.array(), dst.arrayOffset() + position, dst.remaining());
+            validateReadProgress(read, dst.remaining());
             if (read > 0) {
                 dst.position(position + read);
             }
             return read;
         }
         byte[] buffer = TRANSIENT_BUFFER.get();
-        int read = reader.read(buffer, 0, transientBufferSize(dst.remaining()));
+        int requested = transientBufferSize(dst.remaining());
+        int read = reader.read(buffer, 0, requested);
+        validateReadProgress(read, requested);
         if (read > 0) {
             dst.put(buffer, 0, read);
+        }
+        return read;
+    }
+
+    public static int validateReadProgress(int read, int requested) throws IOException {
+        if (read < -1 || read > requested) {
+            throw new IOException("read reported invalid progress");
         }
         return read;
     }

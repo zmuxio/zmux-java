@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.internal.StreamIoSupport;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -1017,13 +1019,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             int read;
             do {
                 read = stream.read(singleByte, 0, 1);
+                StreamIoSupport.validateReadProgress(read, 1);
             } while (read == 0);
             return read < 0 ? -1 : singleByte[0] & 0xff;
         }
 
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
-            return stream.read(buffer, offset, length);
+            return StreamIoSupport.validateReadProgress(stream.read(buffer, offset, length), length);
         }
 
         @Override
@@ -1060,13 +1063,14 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             int read;
             do {
                 read = half.read(singleByte, 0, 1);
+                StreamIoSupport.validateReadProgress(read, 1);
             } while (read == 0);
             return read < 0 ? -1 : singleByte[0] & 0xff;
         }
 
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
-            return half.read(buffer, offset, length);
+            return StreamIoSupport.validateReadProgress(half.read(buffer, offset, length), length);
         }
 
         @Override
@@ -1192,7 +1196,11 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 if (input == null) {
                     throw new StreamNotReadableException();
                 }
-                return input.read();
+                int read = input.read();
+                if (read < -1 || read > 0xff) {
+                    throw new IOException("read reported invalid progress");
+                }
+                return read;
             } finally {
                 leaveInput();
             }
@@ -1209,7 +1217,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 if (input == null) {
                     throw new StreamNotReadableException();
                 }
-                return input.read(buffer, offset, length);
+                return StreamIoSupport.validateReadProgress(input.read(buffer, offset, length), length);
             } finally {
                 leaveInput();
             }

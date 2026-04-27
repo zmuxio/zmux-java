@@ -204,6 +204,23 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedConnectionRejectsInvalidReadProgress() throws Exception {
+        int[] reads = {-2, 4};
+        for (int read : reads) {
+            try (JoinedDuplexConnection connection = ZmuxConnections.join(
+                    new InvalidProgressReadHalf(read),
+                    (WriteHalf) null
+            )) {
+                assertThrows(
+                        IOException.class,
+                        () -> connection.input().read(new byte[3]),
+                        "joined read should reject invalid progress " + read
+                );
+            }
+        }
+    }
+
+    @Test
     void joinedConnectionFallsBackToOtherHalfAddressesWhenPrimaryHalfHasNone() throws Exception {
         InetSocketAddress local = InetSocketAddress.createUnresolved("joined.write.local", 4567);
         InetSocketAddress remote = InetSocketAddress.createUnresolved("joined.write.remote", 4568);
@@ -1313,6 +1330,27 @@ final class ZmuxConnectionsTest {
 
         int readDeadlineClearCalls() {
             return readDeadlineClearCalls;
+        }
+    }
+
+    private static final class InvalidProgressReadHalf implements ReadHalf {
+        private final int read;
+
+        private InvalidProgressReadHalf(int read) {
+            this.read = read;
+        }
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return read;
+        }
+
+        @Override
+        public void closeRead() {
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
         }
     }
 

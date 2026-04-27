@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.internal.StreamIoSupport;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -30,7 +32,7 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
         byte[] buffer = new byte[Math.min(Math.max(maxBytes, 1), 8192)];
         while (true) {
-            int read = read(buffer, 0, buffer.length);
+            int read = StreamIoSupport.validateReadProgress(read(buffer, 0, buffer.length), buffer.length);
             if (read < 0) {
                 return out.toByteArray();
             }
@@ -53,6 +55,7 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
                 int read;
                 do {
                     read = ZmuxRecvStream.this.read(singleByte, 0, 1);
+                    StreamIoSupport.validateReadProgress(read, 1);
                 } while (read == 0);
                 return read < 0 ? -1 : singleByte[0] & 0xff;
             }
@@ -64,7 +67,7 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
                 if (length == 0) {
                     return 0;
                 }
-                return ZmuxRecvStream.this.read(buffer, offset, length);
+                return StreamIoSupport.validateReadProgress(ZmuxRecvStream.this.read(buffer, offset, length), length);
             }
 
             @Override

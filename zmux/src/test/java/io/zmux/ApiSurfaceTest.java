@@ -1762,6 +1762,16 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultReadHelpersRejectInvalidReadProgress() {
+        RecordingDefaultRecvStream negative = new RecordingDefaultRecvStream(-2, true);
+        assertThrows(IOException.class, negative::readAllBytes);
+
+        RecordingDefaultRecvStream oversized = new RecordingDefaultRecvStream(4, true);
+        assertThrows(IOException.class, () -> oversized.asInputStream().read(new byte[3]));
+        assertThrows(IOException.class, () -> oversized.read(ByteBuffer.allocate(3)));
+    }
+
+    @Test
     void defaultByteBufferHelpersAdvancePositionsAndDelegateWithoutExtraCopyForArrayBackedBuffers() throws Exception {
         RecordingDefaultSendStream send = new RecordingDefaultSendStream();
         ByteBuffer writeBuffer = ByteBuffer.wrap("abcd".getBytes(StandardCharsets.UTF_8));
@@ -2418,6 +2428,7 @@ final class ApiSurfaceTest {
 
     private static final class RecordingDefaultRecvStream implements ZmuxRecvStream {
         private final byte[] source;
+        private final Integer invalidRead;
         private int readCalls;
         private int readOffset;
         private int closeReadCalls;
@@ -2431,11 +2442,20 @@ final class ApiSurfaceTest {
 
         private RecordingDefaultRecvStream(byte[] source) {
             this.source = source;
+            this.invalidRead = null;
+        }
+
+        private RecordingDefaultRecvStream(int invalidRead, boolean ignored) {
+            this.source = new byte[0];
+            this.invalidRead = invalidRead;
         }
 
         @Override
         public int read(byte[] dst, int offset, int length) {
             this.readCalls++;
+            if (invalidRead != null) {
+                return invalidRead;
+            }
             if (readOffset >= source.length) {
                 return -1;
             }
