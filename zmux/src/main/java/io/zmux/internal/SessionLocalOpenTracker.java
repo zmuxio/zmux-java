@@ -342,7 +342,7 @@ final class SessionLocalOpenTracker {
         boolean changed = false;
         while (iterator.hasNext()) {
             StreamRuntime streamRuntime = iterator.next();
-            if (streamRuntime == null || streamRuntime.openedOnWire()) {
+            if (streamRuntime == null) {
                 continue;
             }
             iterator.remove();

@@ -79,6 +79,37 @@ final class GracefulCloseTrackingTest {
     }
 
     @Test
+    void gracefulCloseReclaimsQueuedButNotPeerVisibleLocalOpener() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+        stream.write("queued".getBytes(StandardCharsets.UTF_8));
+
+        synchronized (runtime.lock()) {
+            assertTrue(stream.openedOnWire(), "test requires an opening frame already queued for write");
+            assertFalse(stream.peerVisibleLocked(), "test requires the queued opener to remain not peer-visible");
+            assertTrue(stream.unseenLocalTracked(), "queued local opener should remain in unseen-local tracking");
+
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "reclaimGracefulCloseLocalStreamsLocked",
+                    new Class<?>[0]
+            );
+
+            assertFalse(stream.unseenLocalTracked(), "graceful reclaim should remove queued openers from unseen-local tracking");
+            assertTrue(stream.fullyTerminalLocked(), "graceful reclaim should refuse the queued local opener locally");
+            assertEquals(0L, SessionRuntimeTestSupport.getLongField(runtime, "gracefulCloseBlockingStreams"),
+                    "reclaimed queued opener should release the graceful-close blocker");
+            assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue").isEmpty(),
+                    "reclaimed queued opener should release its queued DATA frame");
+            assertFalse((Boolean) SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "hasGracefulClosePendingWorkLocked",
+                    new Class<?>[0]
+            ), "reclaimed queued opener should not keep graceful close pending");
+        }
+    }
+
+    @Test
     void peerOpenedBidiQueuedSendWorkTracksGracefulCloseBlockerCount() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = createPeerOpenedBidi(runtime);
