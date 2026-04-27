@@ -16,9 +16,7 @@ final class ImmutableStreamInfoSnapshot implements ZmuxStreamInfo {
                                 SocketAddress localAddress,
                                 SocketAddress remoteAddress) {
         this.streamId = streamId;
-        this.metadata = metadata == null
-                ? StreamMetadata.empty()
-                : new StreamMetadata(metadata.priority(), metadata.group(), metadata.openInfo());
+        this.metadata = metadata == null ? StreamMetadata.empty() : metadata;
         this.localAddress = localAddress;
         this.remoteAddress = remoteAddress;
     }
