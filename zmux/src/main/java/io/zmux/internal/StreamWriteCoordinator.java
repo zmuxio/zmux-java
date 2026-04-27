@@ -48,6 +48,7 @@ final class StreamWriteCoordinator {
                         this.owner.sessionInternal().markLocalStreamOpeningCommittedLocked(this.owner);
                         this.owner.abortFromLocalLocked(code, "");
                         this.owner.sessionInternal().enqueueAbortLocked(this.owner, code, abortPayload, false);
+                        this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
                     }
                     this.owner.notifyLockWaitersLocked();
                     return;
@@ -62,6 +63,7 @@ final class StreamWriteCoordinator {
                 this.owner.notifySendTerminalTransitionLocked(previousSendState);
                 this.owner.refreshGracefulCloseBlockingLocked();
                 this.owner.sessionInternal().enqueueResetLocked(this.owner, code, resetPayload, false);
+                this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
                 this.owner.notifyLockWaitersLocked();
             }
         } finally {
@@ -73,6 +75,9 @@ final class StreamWriteCoordinator {
         try {
             synchronized (this.owner.lockInternal()) {
                 this.throwIfSessionTerminalLocked("close");
+                if (this.owner.halfStateInternal().localAbortNoOp()) {
+                    return;
+                }
                 if (!this.owner.lifecycleStateInternal().idAssigned()) {
                     this.owner.sessionInternal().buildControlErrorPayloadLocked(code, reason);
                     this.owner.sessionInternal().failProvisionalLocalAbortLocked(this.owner, code, reason);
@@ -83,6 +88,7 @@ final class StreamWriteCoordinator {
                 this.owner.sessionInternal().markLocalStreamOpeningCommittedLocked(this.owner);
                 this.owner.abortFromLocalLocked(code, reason);
                 this.owner.sessionInternal().enqueueAbortLocked(this.owner, code, abortPayload, false);
+                this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
                 this.owner.notifyLockWaitersLocked();
             }
         } finally {

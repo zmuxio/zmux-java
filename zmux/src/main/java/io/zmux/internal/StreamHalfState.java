@@ -78,6 +78,10 @@ final class StreamHalfState {
         return sendState == SendState.ABORTED;
     }
 
+    boolean localAbortNoOp() {
+        return sendState == SendState.ABORTED || recvState == RecvState.ABORTED;
+    }
+
     EffectiveSendState effectiveSendState() {
         switch (sendState) {
             case ABSENT:

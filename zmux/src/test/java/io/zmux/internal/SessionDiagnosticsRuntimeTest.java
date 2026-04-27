@@ -249,18 +249,25 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
-    void duplicatePendingAbortCoalescesTerminalSignal() throws Exception {
+    void repeatedCloseWithErrorKeepsFirstPendingAbort() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = createPeerOpenedBidi(runtime);
 
         stream.closeWithError(7L, "abort");
-        stream.closeWithError(7L, "abort");
+        stream.closeWithError(8L, "later");
 
         Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
-        assertEquals(1, urgentQueue.size(), "duplicate pending ABORT should not grow the urgent queue");
-        assertEquals(FrameType.ABORT, SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).type());
-        assertEquals(1L, runtime.stats().diagnostics().coalescedTerminalSignals(), "duplicate ABORT should be counted as coalesced");
-        assertEquals(0L, runtime.stats().diagnostics().supersededTerminalSignals(), "duplicate ABORT should not be counted as superseded");
+        assertEquals(1, urgentQueue.size(), "repeated local ABORT should not grow the urgent queue");
+        FrameCodec.Frame queued = SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst());
+        assertEquals(FrameType.ABORT, queued.type(), "queued terminal control should remain ABORT");
+        FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(queued.payload());
+        assertEquals(7L, payload.code(), "first local ABORT code should remain sticky");
+        assertEquals("abort", payload.reason(), "first local ABORT reason should remain sticky");
+        ApplicationError terminal = assertInstanceOf(ApplicationError.class, stream.operationErrorLocked());
+        assertEquals(7L, terminal.code(), "stream terminal error should retain the first ABORT code");
+        assertEquals("abort", terminal.reason(), "stream terminal error should retain the first ABORT reason");
+        assertEquals(0L, runtime.stats().diagnostics().coalescedTerminalSignals(), "no-op ABORT should not be counted as queued coalescing");
+        assertEquals(0L, runtime.stats().diagnostics().supersededTerminalSignals(), "no-op ABORT should not supersede the first terminal signal");
     }
 
     @Test

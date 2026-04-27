@@ -239,7 +239,7 @@ final class SessionCloseCleanupRuntimeTest {
     }
 
     @Test
-    void terminalEofReadCompactsAcceptedStreamWithoutBufferedPayload() throws Exception {
+    void localCancelWriteCompactsTerminalAcceptedStreamWithoutBufferedPayload() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
 
@@ -252,13 +252,42 @@ final class SessionCloseCleanupRuntimeTest {
         StreamRuntime stream = (StreamRuntime) runtime.acceptStream();
         stream.cancelWrite(ErrorCode.CANCELLED.code());
 
-        assertEquals(-1, stream.read(new byte[1]), "empty DATA|FIN should surface EOF");
+        synchronized (runtime.lock()) {
+            assertNull(runtime.liveStreamLocked(streamId),
+                    "local RESET should compact a terminal accepted stream once no payload is buffered");
+            assertTrue(runtime.hasTerminalMarkerLocked(streamId),
+                    "RESET compaction should retain a terminal marker for future duplicate frames");
+            Deque<Object> urgent = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+            assertEquals(1, urgent.size(), "compaction must not drop the queued RESET signal");
+            assertEquals(FrameType.RESET, SessionRuntimeTestSupport.outboundFrame(urgent.peekFirst()).type(),
+                    "local cancel should still leave RESET queued for the peer");
+        }
+        assertEquals(-1, stream.read(new byte[1]), "compacted stream object should still expose EOF");
+    }
+
+    @Test
+    void localAbortCompactsAfterDiscardingBufferedPayload() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+
+        handleDataFrame(runtime, new FrameCodec.Frame(
+                FrameType.DATA,
+                0,
+                streamId,
+                new byte[]{1, 2, 3}
+        ));
+        StreamRuntime stream = (StreamRuntime) runtime.acceptStream();
+        stream.closeWithError(ErrorCode.CANCELLED.code(), "abort");
 
         synchronized (runtime.lock()) {
             assertNull(runtime.liveStreamLocked(streamId),
-                    "EOF read should compact a terminal accepted stream even when no payload was buffered");
+                    "local ABORT should compact after discarding unread buffered payload");
             assertTrue(runtime.hasTerminalMarkerLocked(streamId),
-                    "EOF compaction should retain a terminal marker for future duplicate frames");
+                    "ABORT compaction should retain a terminal marker for future duplicate frames");
+            Deque<Object> urgent = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+            assertEquals(1, urgent.size(), "compaction must not drop the queued ABORT signal");
+            assertEquals(FrameType.ABORT, SessionRuntimeTestSupport.outboundFrame(urgent.peekFirst()).type(),
+                    "local closeWithError should still leave ABORT queued for the peer");
         }
     }
 
