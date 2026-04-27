@@ -350,6 +350,38 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void largeTinyWritevFinalOnAdapterCoalescesFlushes() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
+            ZmuxSendStream send = pair.client.openUniStream();
+            int partCount = 1030;
+            int partLength = 1024;
+            byte[][] parts = new byte[partCount][];
+            byte[] expected = new byte[partCount * partLength];
+            for (int i = 0; i < partCount; ++i) {
+                byte value = (byte) ('a' + (i % 26));
+                parts[i] = new byte[partLength];
+                Arrays.fill(parts[i], value);
+                Arrays.fill(expected, i * partLength, (i + 1) * partLength, value);
+            }
+
+            long flushBefore = pair.client.stats().flush().count();
+            int written = send.writevFinal(parts);
+
+            ZmuxRecvStream accepted = await(acceptedFuture);
+            assertEquals(expected.length, written);
+            assertArrayEquals(expected, readExactly(accepted, written));
+            assertEquals(-1, accepted.read(new byte[1]));
+            assertTrue(
+                    pair.client.stats().flush().count() - flushBefore <= 3L,
+                    "large tiny multipart final write should coalesce payload flushes"
+            );
+            accepted.close();
+            send.close();
+        }
+    }
+
+    @Test
     void writevFinalOnAdapterRejectsAggregateLengthOverflowBeforeWrite() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             ZmuxSendStream send = pair.client.openUniStream();

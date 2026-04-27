@@ -513,11 +513,7 @@ final class NettyQuicStreamState {
             return;
         }
         submitOpenPrelude(pendingPrelude, commitsLocalOpen);
-        for (byte[] part : parts) {
-            if (part.length > 0) {
-                writeInternal(part, 0, part.length);
-            }
-        }
+        writeInternal(parts, totalLength);
     }
 
     void setDeadline(Instant deadline) throws IOException {
@@ -972,6 +968,41 @@ final class NettyQuicStreamState {
             int chunk = Math.min(remaining, MAX_BUFFERED_WRITE_BYTES);
             writeInternal(newWriteBuffer(src, cursor, chunk));
             cursor += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    private void writeInternal(byte[][] parts, int totalLength) throws IOException {
+        int index = 0;
+        int offset = 0;
+        int remaining = totalLength;
+        while (remaining > 0) {
+            int chunk = Math.min(remaining, MAX_BUFFERED_WRITE_BYTES);
+            ByteBuf buffer = null;
+            try {
+                buffer = channel.alloc().ioBuffer(chunk, chunk);
+                int chunkRemaining = chunk;
+                while (chunkRemaining > 0) {
+                    byte[] part = parts[index];
+                    if (offset >= part.length) {
+                        ++index;
+                        offset = 0;
+                        continue;
+                    }
+                    int take = Math.min(part.length - offset, chunkRemaining);
+                    buffer.writeBytes(part, offset, take);
+                    offset += take;
+                    chunkRemaining -= take;
+                    if (offset == part.length) {
+                        ++index;
+                        offset = 0;
+                    }
+                }
+            } catch (RuntimeException failure) {
+                releaseBuffer(buffer);
+                throw failure;
+            }
+            writeInternal(buffer);
             remaining -= chunk;
         }
     }
