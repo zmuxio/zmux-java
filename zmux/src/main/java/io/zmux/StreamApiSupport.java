@@ -28,6 +28,13 @@ final class StreamApiSupport {
         return StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
     }
 
+    static int validateWriteFinalProgress(int written, int requested) throws IOException {
+        if (written < 0 || written > requested) {
+            throw new IOException("writeFinal reported invalid progress");
+        }
+        return written;
+    }
+
     static int lastNonEmptyPart(byte[][] parts) {
         for (int i = parts.length - 1; i >= 0; i--) {
             if (parts[i].length > 0) {

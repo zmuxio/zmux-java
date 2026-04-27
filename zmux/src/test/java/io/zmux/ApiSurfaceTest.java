@@ -1837,6 +1837,24 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultWriteFinalHelpersRejectInvalidProgress() {
+        RecordingDefaultSendStream negative = new RecordingDefaultSendStream(-1);
+        assertThrows(IOException.class, () -> negative.writeFinal("abc".getBytes(StandardCharsets.UTF_8)));
+
+        RecordingDefaultSendStream oversizedArray = new RecordingDefaultSendStream(4);
+        ByteBuffer arrayBuffer = ByteBuffer.wrap("abc".getBytes(StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> oversizedArray.writeFinal(arrayBuffer));
+        assertEquals(0, arrayBuffer.position(), "array-backed invalid final progress must not advance position");
+
+        RecordingDefaultSendStream oversizedDirect = new RecordingDefaultSendStream(4);
+        ByteBuffer directBuffer = ByteBuffer.allocateDirect(3);
+        directBuffer.put("abc".getBytes(StandardCharsets.UTF_8));
+        directBuffer.flip();
+        assertThrows(IOException.class, () -> oversizedDirect.writeFinal(directBuffer));
+        assertEquals(0, directBuffer.position(), "direct invalid final progress must restore position");
+    }
+
+    @Test
     void defaultStreamViewsDelegateCloseToDirectionalClose() throws Exception {
         RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream("q".getBytes(StandardCharsets.UTF_8));
         InputStream input = recv.asInputStream();
@@ -2027,6 +2045,15 @@ final class ApiSurfaceTest {
         private byte[] lastFinalBytes = new byte[0];
         private String lastCloseWithErrorReason;
         private Instant lastWriteDeadline;
+        private final Integer invalidFinalWritten;
+
+        private RecordingDefaultSendStream() {
+            this.invalidFinalWritten = null;
+        }
+
+        private RecordingDefaultSendStream(int invalidFinalWritten) {
+            this.invalidFinalWritten = invalidFinalWritten;
+        }
 
         @Override
         public void write(byte[] src, int offset, int length) {
@@ -2040,7 +2067,7 @@ final class ApiSurfaceTest {
             this.writeFinalCalls++;
             this.lastFinalLength = length;
             this.lastFinalBytes = java.util.Arrays.copyOfRange(src, offset, offset + length);
-            return length;
+            return invalidFinalWritten == null ? length : invalidFinalWritten;
         }
 
         @Override

@@ -23,7 +23,7 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
 
     default int writeFinal(byte[] src) throws IOException {
         Objects.requireNonNull(src, "src");
-        return writeFinal(src, 0, src.length);
+        return StreamApiSupport.validateWriteFinalProgress(writeFinal(src, 0, src.length), src.length);
     }
 
     default int writeFinal(ByteBuffer src) throws IOException {
@@ -35,6 +35,7 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
             int position = src.position();
             int length = src.remaining();
             int written = writeFinal(src.array(), src.arrayOffset() + position, length);
+            StreamApiSupport.validateWriteFinalProgress(written, length);
             if (written > 0) {
                 src.position(position + written);
             }
@@ -61,6 +62,7 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
         int written;
         try {
             written = writeFinal(buffer, 0, finalLength);
+            StreamApiSupport.validateWriteFinalProgress(written, finalLength);
         } catch (IOException error) {
             src.position(finalPosition);
             throw error;
