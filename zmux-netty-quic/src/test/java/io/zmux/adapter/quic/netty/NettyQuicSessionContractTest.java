@@ -1035,6 +1035,18 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void streamCloseAfterSessionCloseSurfacesSessionClosed() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            ZmuxStream stream = pair.client.openStream();
+
+            pair.client.close();
+            assertTrue(pair.client.awaitTermination(Duration.ofSeconds(5)));
+
+            assertThrows(SessionClosedException.class, stream::close);
+        }
+    }
+
+    @Test
     void statsExposeReducedTransportKeepaliveSurface() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             SessionStats snapshot = awaitStats(
@@ -2355,8 +2367,7 @@ class NettyQuicSessionContractTest {
             assertEquals(0L, server.stats().acceptBacklog().count(), "late publication must not re-populate the accept backlog");
             assertThrows(SessionClosedException.class, () -> server.acceptStream(Duration.ofMillis(50)));
 
-            accepted.close();
-            clientStream.close();
+            assertThrows(SessionClosedException.class, accepted::close);
         }
     }
 

@@ -704,8 +704,7 @@ final class NettyQuicSupport {
         Object details = ZmuxErrors.details(error);
         return details instanceof ApplicationError
                 || details instanceof ReadClosedException
-                || details instanceof WriteClosedException
-                || details instanceof SessionClosedException;
+                || details instanceof WriteClosedException;
     }
 
     static <T> List<T> snapshotDeque(ReentrantLock lock, ArrayDeque<T> queue) {
