@@ -424,41 +424,28 @@ final class NettyQuicStreamState {
             pendingPrelude = EMPTY_BYTES;
         }
 
-        if (pendingPrelude.length > Integer.MAX_VALUE - length) {
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
+        if (pendingPrelude.length <= Integer.MAX_VALUE - length) {
+            int bufferedLength = pendingPrelude.length + length;
+            if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
+                ByteBuf buffer = null;
+                try {
+                    buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
+                    if (pendingPrelude.length > 0) {
+                        buffer.writeBytes(pendingPrelude);
+                    }
+                    buffer.writeBytes(src, offset, length);
+                } catch (RuntimeException failure) {
+                    if (buffer != null && buffer.refCnt() > 0) {
+                        buffer.release();
+                    }
+                    if (commitsLocalOpen) {
+                        abortOpenPreludeSubmission();
+                    }
+                    throw failure;
+                }
+                submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
+                return;
             }
-            throw new ZmuxException(
-                    ErrorCode.FRAME_SIZE.code(),
-                    "writeFinal",
-                    "final write plus stream prelude exceeds maximum supported size",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorSource.LOCAL,
-                    ZmuxErrorDirection.WRITE,
-                    ZmuxTerminationKind.UNKNOWN
-            );
-        }
-
-        int bufferedLength = pendingPrelude.length + length;
-        if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
-            ByteBuf buffer = null;
-            try {
-                buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
-                if (pendingPrelude.length > 0) {
-                    buffer.writeBytes(pendingPrelude);
-                }
-                buffer.writeBytes(src, offset, length);
-            } catch (RuntimeException failure) {
-                if (buffer != null && buffer.refCnt() > 0) {
-                    buffer.release();
-                }
-                if (commitsLocalOpen) {
-                    abortOpenPreludeSubmission();
-                }
-                throw failure;
-            }
-            submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
-            return;
         }
         submitOpenPrelude(pendingPrelude, commitsLocalOpen);
         writeInternal(src, offset, length);
@@ -472,45 +459,32 @@ final class NettyQuicStreamState {
             pendingPrelude = EMPTY_BYTES;
         }
 
-        if (pendingPrelude.length > Integer.MAX_VALUE - totalLength) {
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
-            }
-            throw new ZmuxException(
-                    ErrorCode.FRAME_SIZE.code(),
-                    "writevFinal",
-                    "multipart write plus stream prelude exceeds maximum supported size",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorSource.LOCAL,
-                    ZmuxErrorDirection.WRITE,
-                    ZmuxTerminationKind.UNKNOWN
-            );
-        }
-
-        int bufferedLength = pendingPrelude.length + totalLength;
-        if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
-            ByteBuf buffer = null;
-            try {
-                buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
-                if (pendingPrelude.length > 0) {
-                    buffer.writeBytes(pendingPrelude);
-                }
-                for (byte[] part : parts) {
-                    if (part.length > 0) {
-                        buffer.writeBytes(part);
+        if (pendingPrelude.length <= Integer.MAX_VALUE - totalLength) {
+            int bufferedLength = pendingPrelude.length + totalLength;
+            if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
+                ByteBuf buffer = null;
+                try {
+                    buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
+                    if (pendingPrelude.length > 0) {
+                        buffer.writeBytes(pendingPrelude);
                     }
+                    for (byte[] part : parts) {
+                        if (part.length > 0) {
+                            buffer.writeBytes(part);
+                        }
+                    }
+                } catch (RuntimeException failure) {
+                    if (buffer != null && buffer.refCnt() > 0) {
+                        buffer.release();
+                    }
+                    if (commitsLocalOpen) {
+                        abortOpenPreludeSubmission();
+                    }
+                    throw failure;
                 }
-            } catch (RuntimeException failure) {
-                if (buffer != null && buffer.refCnt() > 0) {
-                    buffer.release();
-                }
-                if (commitsLocalOpen) {
-                    abortOpenPreludeSubmission();
-                }
-                throw failure;
+                submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
+                return;
             }
-            submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
-            return;
         }
         submitOpenPrelude(pendingPrelude, commitsLocalOpen);
         writeInternal(parts, totalLength);
@@ -923,33 +897,27 @@ final class NettyQuicStreamState {
             writeInternal(src, offset, length);
             return;
         }
-        if (pendingPrelude.length > Integer.MAX_VALUE - length) {
-            abortOpenPreludeSubmission();
-            throw new ZmuxException(
-                    ErrorCode.FRAME_SIZE.code(),
-                    "write",
-                    "write plus stream prelude exceeds maximum supported size",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorSource.LOCAL,
-                    ZmuxErrorDirection.WRITE,
-                    ZmuxTerminationKind.UNKNOWN
-            );
-        }
-
-        ByteBuf buffer = null;
-        try {
+        if (pendingPrelude.length <= Integer.MAX_VALUE - length) {
             int bufferLength = pendingPrelude.length + length;
-            buffer = channel.alloc().ioBuffer(bufferLength, bufferLength);
-            if (pendingPrelude.length > 0) {
-                buffer.writeBytes(pendingPrelude);
+            if (bufferLength <= MAX_BUFFERED_WRITE_BYTES) {
+                ByteBuf buffer = null;
+                try {
+                    buffer = channel.alloc().ioBuffer(bufferLength, bufferLength);
+                    if (pendingPrelude.length > 0) {
+                        buffer.writeBytes(pendingPrelude);
+                    }
+                    buffer.writeBytes(src, offset, length);
+                } catch (RuntimeException failure) {
+                    releaseBuffer(buffer);
+                    abortOpenPreludeSubmission();
+                    throw failure;
+                }
+                submitBufferedWrite(buffer, true, bufferLength);
+                return;
             }
-            buffer.writeBytes(src, offset, length);
-        } catch (RuntimeException failure) {
-            releaseBuffer(buffer);
-            abortOpenPreludeSubmission();
-            throw failure;
         }
-        submitBufferedWrite(buffer, true, pendingPrelude.length + length);
+        submitOpenPrelude(pendingPrelude, true);
+        writeInternal(src, offset, length);
     }
 
     private void ensureWritableForDataWrite() throws IOException {

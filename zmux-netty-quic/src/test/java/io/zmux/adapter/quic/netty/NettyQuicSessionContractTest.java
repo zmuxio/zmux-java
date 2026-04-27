@@ -947,6 +947,35 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void largeFirstOrdinaryWriteSplitsOpenPreludeFromPayloadChunks() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            byte[] payload = new byte[(1 << 20) + 13];
+            Arrays.fill(payload, (byte) 'l');
+            long flushBefore = pair.client.stats().flush().count();
+            CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+
+            ZmuxStream clientStream = pair.client.openStream(new OpenOptions(7L, null, utf8("large-first-write")));
+            clientStream.write(payload);
+
+            ZmuxStream accepted = await(acceptedFuture);
+            assertMetadata(accepted.metadata(), 7L, null, "large-first-write");
+            assertArrayEquals(payload, readExactly(accepted, payload.length));
+            SessionStats clientStats = awaitStats(pair.client, Duration.ofSeconds(5), snapshot ->
+                    snapshot.flush().count() >= flushBefore + 3L
+                            && snapshot.flush().lastBytes() == 13L
+            );
+            assertEquals(
+                    flushBefore + 3L,
+                    clientStats.flush().count(),
+                    "large first ordinary write should submit the adapter prelude separately and chunk payload writes"
+            );
+
+            accepted.close();
+            clientStream.close();
+        }
+    }
+
+    @Test
     void closeWriteAdvancesControlProgressAfterPreludeWasAlreadySent() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
