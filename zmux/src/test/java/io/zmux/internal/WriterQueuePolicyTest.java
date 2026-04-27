@@ -6,8 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.GatheringByteChannel;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
@@ -863,17 +862,10 @@ final class WriterQueuePolicyTest {
     }
 
     @Test
-    void gatheringWriterBatchWritesWholeBatchInSingleArrayCall() throws Exception {
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+    void mergedWriterBatchWritesWholeBatchInSingleOutputCall() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(
-                        SessionRuntimeTestSupport.emptyInput(),
-                        SessionRuntimeTestSupport.discardingOutput(),
-                        null,
-                        null,
-                        null,
-                        gathering
-                ),
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
                 null,
                 0L,
                 Settings.defaults()
@@ -907,84 +899,89 @@ final class WriterQueuePolicyTest {
             );
 
             assertTrue(batchBytes > 0L, "writeBatch should report encoded bytes");
-            assertEquals(1, gathering.arrayWriteCalls(), "gathering writer path should emit the whole batch through one array write");
-            assertEquals(0, gathering.singleWriteCalls(), "batch gather path should not fall back to single-buffer writes");
-            assertEquals(4, gathering.lastBufferCount(), "batch gather path should emit one encoded header buffer plus one payload buffer per DATA frame");
+            assertEquals(1, output.arrayWriteCalls(), "writer should emit the whole batch through one merged write");
+            assertEquals(0, output.singleWriteCalls(), "merged writer path should not fall back to byte-at-a-time writes");
+
+            ByteArrayInputStream input = new ByteArrayInputStream(output.bytes());
+            FrameCodec.Frame firstFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+            FrameCodec.Frame secondFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+            assertEquals(first.streamIdInternal(), firstFrame.streamId(), "first merged frame stream id mismatch");
+            assertArrayEquals("a".getBytes(), firstFrame.payload(), "first merged frame payload mismatch");
+            assertEquals(second.streamIdInternal(), secondFrame.streamId(), "second merged frame stream id mismatch");
+            assertArrayEquals("b".getBytes(), secondFrame.payload(), "second merged frame payload mismatch");
+            assertEquals(0, input.available(), "merged batch should leave no trailing encoded bytes");
         }
     }
 
     @Test
-    void gatheringWriterBatchRetriesPartialArrayWritesUntilBatchCompletes() throws Exception {
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel(3, 2, 1, 4, 8);
+    void mergedWriterBatchPreservesMultipartPayloadEncoding() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(
-                        SessionRuntimeTestSupport.emptyInput(),
-                        SessionRuntimeTestSupport.discardingOutput(),
-                        null,
-                        null,
-                        null,
-                        gathering
-                ),
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
                 null,
                 0L,
                 Settings.defaults()
         );
-        StreamRuntime first = (StreamRuntime) runtime.openStream();
-        StreamRuntime second = (StreamRuntime) runtime.openStream();
+        List<SessionRuntime.OutboundFrame> batch = new ArrayList<>();
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 4L, StreamRuntime.EMPTY_BYTES),
+                null,
+                5,
+                false,
+                false,
+                null,
+                StreamRuntime.EMPTY_BYTES,
+                0,
+                5,
+                new byte[][]{"hel".getBytes(), "lo".getBytes()},
+                0,
+                0
+        ));
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 8L, StreamRuntime.EMPTY_BYTES),
+                null,
+                5,
+                false,
+                false,
+                null,
+                StreamRuntime.EMPTY_BYTES,
+                0,
+                5,
+                new byte[][]{"wor".getBytes(), "ld".getBytes()},
+                0,
+                0
+        ));
 
-        synchronized (runtime.lock()) {
-            makePeerVisible(runtime, first);
-            makePeerVisible(runtime, second);
-            first.write("hello".getBytes());
-            second.write("world".getBytes());
+        java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+        writerRuntimeField.setAccessible(true);
+        Object writerRuntime = writerRuntimeField.get(runtime);
 
-            @SuppressWarnings("unchecked")
-            List<Object> batch = (List<Object>) SessionRuntimeTestSupport.invokePrivate(
-                    runtime,
-                    "collectReadyBatchLocked",
-                    new Class<?>[0]
-            );
-            assertEquals(2, batch.size(), "test requires a two-frame batch");
+        long batchBytes = (Long) SessionRuntimeTestSupport.invokePrivate(
+                writerRuntime,
+                "writeBatch",
+                new Class<?>[]{List.class},
+                batch
+        );
 
-            java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
-            writerRuntimeField.setAccessible(true);
-            Object writerRuntime = writerRuntimeField.get(runtime);
+        assertTrue(batchBytes > 0L, "writeBatch should report encoded bytes");
+        assertEquals(1, output.arrayWriteCalls(), "multipart payloads should still be merged into one batch write");
+        assertEquals(batchBytes, output.bytes().length, "merged writer should emit the full encoded batch");
 
-            long batchBytes = (Long) SessionRuntimeTestSupport.invokePrivate(
-                    writerRuntime,
-                    "writeBatch",
-                    new Class<?>[]{List.class},
-                    batch
-            );
-
-            assertTrue(batchBytes > 0L, "writeBatch should report encoded bytes");
-            assertTrue(gathering.arrayWriteCalls() > 1, "gathering writer path should retry partial array writes until the batch completes");
-            assertEquals(0, gathering.singleWriteCalls(), "partial gather retries should not fall back to single-buffer writes");
-            assertEquals(batchBytes, gathering.bytes().length, "partial gather retries should emit the full encoded batch");
-
-            ByteArrayInputStream input = new ByteArrayInputStream(gathering.bytes());
-            FrameCodec.Frame firstFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
-            FrameCodec.Frame secondFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
-            assertEquals(first.streamIdInternal(), firstFrame.streamId(), "first gathered frame stream id mismatch after partial writes");
-            assertArrayEquals("hello".getBytes(), firstFrame.payload(), "first gathered frame payload mismatch after partial writes");
-            assertEquals(second.streamIdInternal(), secondFrame.streamId(), "second gathered frame stream id mismatch after partial writes");
-            assertArrayEquals("world".getBytes(), secondFrame.payload(), "second gathered frame payload mismatch after partial writes");
-            assertEquals(0, input.available(), "partial gather retries should leave no trailing encoded bytes");
-        }
+        ByteArrayInputStream input = new ByteArrayInputStream(output.bytes());
+        FrameCodec.Frame firstFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+        FrameCodec.Frame secondFrame = FrameCodec.readFrame(input, Settings.defaults().limits());
+        assertEquals(4L, firstFrame.streamId(), "first merged frame stream id mismatch");
+        assertArrayEquals("hello".getBytes(), firstFrame.payload(), "first multipart payload mismatch");
+        assertEquals(8L, secondFrame.streamId(), "second merged frame stream id mismatch");
+        assertArrayEquals("world".getBytes(), secondFrame.payload(), "second multipart payload mismatch");
+        assertEquals(0, input.available(), "merged multipart batch should leave no trailing encoded bytes");
     }
 
     @Test
-    void gatheringWriterBatchPreservesMixedEncodedFrameBytes() throws Exception {
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+    void mergedWriterBatchPreservesMixedEncodedFrameBytes() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(
-                        SessionRuntimeTestSupport.emptyInput(),
-                        SessionRuntimeTestSupport.discardingOutput(),
-                        null,
-                        null,
-                        null,
-                        gathering
-                ),
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
                 null,
                 0L,
                 Settings.defaults()
@@ -1030,83 +1027,58 @@ final class WriterQueuePolicyTest {
         );
 
         assertEquals(want.size(), batchBytes, "writeBatch should report the full mixed-frame encoded size");
-        assertArrayEquals(want.toByteArray(), gathering.bytes(),
-                "gathering writer path should preserve the exact mixed-frame wire encoding");
+        assertArrayEquals(want.toByteArray(), output.bytes(),
+                "merged writer path should preserve the exact mixed-frame wire encoding");
     }
 
     @Test
-    void gatheringWriterBatchClearsRetainedScatterGatherRefsAfterWriteCompletion() throws Exception {
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+    void mergedWriterBatchDropsOversizedEncodedScratchAfterWriteCompletion() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        Settings settings = Settings.defaults().toBuilder().maxFramePayload((1 << 20) + 4096L).build();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(
-                        SessionRuntimeTestSupport.emptyInput(),
-                        SessionRuntimeTestSupport.discardingOutput(),
-                        null,
-                        null,
-                        null,
-                        gathering
-                ),
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
                 null,
                 0L,
-                Settings.defaults()
+                settings
         );
-        StreamRuntime first = (StreamRuntime) runtime.openStream();
-        StreamRuntime second = (StreamRuntime) runtime.openStream();
+        byte[] payload = new byte[(1 << 20) + 1];
+        List<SessionRuntime.OutboundFrame> batch = new ArrayList<>();
+        batch.add(new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 4L, payload),
+                null,
+                payload.length,
+                false,
+                false
+        ));
 
-        synchronized (runtime.lock()) {
-            makePeerVisible(runtime, first);
-            makePeerVisible(runtime, second);
-            first.write("payload-one".getBytes());
-            second.write("payload-two".getBytes());
+        java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
+        writerRuntimeField.setAccessible(true);
+        Object writerRuntime = writerRuntimeField.get(runtime);
 
-            @SuppressWarnings("unchecked")
-            List<Object> batch = (List<Object>) SessionRuntimeTestSupport.invokePrivate(
-                    runtime,
-                    "collectReadyBatchLocked",
-                    new Class<?>[0]
-            );
-            assertEquals(2, batch.size(), "test requires a two-frame batch");
+        long batchBytes = (Long) SessionRuntimeTestSupport.invokePrivate(
+                writerRuntime,
+                "writeBatch",
+                new Class<?>[]{List.class},
+                batch
+        );
 
-            java.lang.reflect.Field writerRuntimeField = SessionRuntime.class.getDeclaredField("writerRuntime");
-            writerRuntimeField.setAccessible(true);
-            Object writerRuntime = writerRuntimeField.get(runtime);
+        java.lang.reflect.Field writerTransportField = writerRuntime.getClass().getDeclaredField("writerTransport");
+        writerTransportField.setAccessible(true);
+        Object writerTransport = writerTransportField.get(writerRuntime);
 
-            SessionRuntimeTestSupport.invokePrivate(
-                    writerRuntime,
-                    "writeBatch",
-                    new Class<?>[]{List.class},
-                    batch
-            );
+        java.lang.reflect.Field encodedScratchField = writerTransport.getClass().getDeclaredField("encodedBatchScratch");
+        encodedScratchField.setAccessible(true);
+        byte[] encodedScratch = (byte[]) encodedScratchField.get(writerTransport);
 
-            java.lang.reflect.Field writerTransportField = writerRuntime.getClass().getDeclaredField("writerTransport");
-            writerTransportField.setAccessible(true);
-            Object writerTransport = writerTransportField.get(writerRuntime);
-
-            java.lang.reflect.Field gatherScratchField = writerTransport.getClass().getDeclaredField("gatherScratch");
-            gatherScratchField.setAccessible(true);
-            FrameEnvelopeCodec.GatherScratch gatherScratch =
-                    (FrameEnvelopeCodec.GatherScratch) gatherScratchField.get(writerTransport);
-
-            assertEquals(0, gatherScratch.bufferCount(), "gather scratch should be reset to an empty active view after write completion");
-            for (int i = 0; i < gatherScratch.buffers().length; ++i) {
-                assertNull(gatherScratch.buffers()[i],
-                        "gather scratch slot " + i + " should not retain payload buffers after write completion");
-            }
-        }
+        assertEquals(batchBytes, output.bytes().length, "large merged batch should be written completely");
+        assertEquals(0, encodedScratch.length, "oversized encoded batch scratch should be dropped after write completion");
     }
 
     @Test
-    void gatheringWriterBatchClearsRetainedScatterGatherRefsAfterAppendFailure() throws Exception {
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
+    void mergedWriterBatchDoesNotEmitPartialBatchAfterAppendFailure() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(
-                        SessionRuntimeTestSupport.emptyInput(),
-                        SessionRuntimeTestSupport.discardingOutput(),
-                        null,
-                        null,
-                        null,
-                        gathering
-                ),
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
                 null,
                 0L,
                 Settings.defaults()
@@ -1142,94 +1114,24 @@ final class WriterQueuePolicyTest {
         );
         ZmuxException frameSize = assertInstanceOf(ZmuxException.class, error.getCause());
         assertEquals(ErrorCode.FRAME_SIZE.code(), frameSize.code(), "invalid trailing frame should fail with FRAME_SIZE");
-
-        java.lang.reflect.Field writerTransportField = writerRuntime.getClass().getDeclaredField("writerTransport");
-        writerTransportField.setAccessible(true);
-        Object writerTransport = writerTransportField.get(writerRuntime);
-
-        java.lang.reflect.Field gatherScratchField = writerTransport.getClass().getDeclaredField("gatherScratch");
-        gatherScratchField.setAccessible(true);
-        FrameEnvelopeCodec.GatherScratch gatherScratch =
-                (FrameEnvelopeCodec.GatherScratch) gatherScratchField.get(writerTransport);
-
-        assertEquals(0, gatherScratch.bufferCount(), "append failure should clear the active gather scratch view");
-        for (int i = 0; i < gatherScratch.buffers().length; ++i) {
-            assertNull(gatherScratch.buffers()[i],
-                    "gather scratch slot " + i + " should not retain payload buffers after append failure");
-        }
-        assertEquals(0, gathering.bytes().length, "writer should not emit a partial batch after append failure");
+        assertEquals(0, output.bytes().length, "writer should not emit a partial batch after append failure");
     }
 
-    private static final class RecordingGatheringChannel implements GatheringByteChannel {
+    private static final class RecordingOutputStream extends OutputStream {
         private final ByteArrayOutputStream output = new ByteArrayOutputStream();
-        private final int[] arrayWriteChunks;
-        private boolean open = true;
-        private int lastBufferCount;
         private int arrayWriteCalls;
         private int singleWriteCalls;
 
-        private RecordingGatheringChannel(int... arrayWriteChunks) {
-            this.arrayWriteChunks = arrayWriteChunks == null ? new int[0] : arrayWriteChunks.clone();
-        }
-
         @Override
-        public long write(ByteBuffer[] srcs, int offset, int length) {
-            int budget = Integer.MAX_VALUE;
-            if (arrayWriteCalls < arrayWriteChunks.length) {
-                budget = Math.max(0, arrayWriteChunks[arrayWriteCalls]);
-            }
-            long written = 0L;
-            int count = 0;
+        public void write(byte[] bytes, int offset, int length) {
             arrayWriteCalls++;
-            for (int i = 0; i < length; ++i) {
-                ByteBuffer src = srcs[offset + i];
-                if (src == null || !src.hasRemaining() || budget <= 0) {
-                    continue;
-                }
-                count++;
-                int remaining = Math.min(src.remaining(), budget);
-                byte[] bytes = new byte[remaining];
-                src.get(bytes);
-                output.write(bytes, 0, bytes.length);
-                written += remaining;
-                budget -= remaining;
-                if (budget <= 0) {
-                    break;
-                }
-            }
-            lastBufferCount = count;
-            return written;
+            output.write(bytes, offset, length);
         }
 
         @Override
-        public long write(ByteBuffer[] srcs) {
-            return write(srcs, 0, srcs.length);
-        }
-
-        @Override
-        public int write(ByteBuffer src) {
+        public void write(int value) {
             singleWriteCalls++;
-            int remaining = src.remaining();
-            byte[] bytes = new byte[remaining];
-            src.get(bytes);
-            output.write(bytes, 0, bytes.length);
-            lastBufferCount = remaining > 0 ? 1 : 0;
-            return remaining;
-        }
-
-        @Override
-        public boolean isOpen() {
-            return open;
-        }
-
-        @Override
-        public void close() throws IOException {
-            open = false;
-            output.close();
-        }
-
-        int lastBufferCount() {
-            return lastBufferCount;
+            output.write(value);
         }
 
         int arrayWriteCalls() {

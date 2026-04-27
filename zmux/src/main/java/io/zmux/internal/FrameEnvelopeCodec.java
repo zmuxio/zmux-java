@@ -255,6 +255,46 @@ final class FrameEnvelopeCodec {
         return frameLength + Varint62.length(frameLength);
     }
 
+    static int appendFrame(byte[] target,
+                           int offset,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[] payloadBytes,
+                           int payloadOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
+        int cursor = offset;
+        int encodedBytes = FrameCodec.checkedLength(
+                frameLength + Varint62.length(frameLength),
+                ErrorCode.FRAME_SIZE,
+                "write frame",
+                "encoded frame exceeds Java implementation limit"
+        );
+        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
+        cursor += Varint62.write(target, cursor, frameLength);
+        target[cursor++] = (byte) (frame.type().code() | frame.flags());
+        cursor += Varint62.write(target, cursor, frame.streamId());
+        if (prefix.length > 0) {
+            System.arraycopy(prefix, 0, target, cursor, prefix.length);
+            cursor += prefix.length;
+        }
+        if (payloadLength > 0) {
+            System.arraycopy(payload, payloadOffset, target, cursor, payloadLength);
+            cursor += payloadLength;
+        }
+        return cursor - offset;
+    }
+
     static long appendFrame(GatherScratch scratch,
                             FrameCodec.Frame frame,
                             byte[] payloadPrefix,
@@ -297,6 +337,40 @@ final class FrameEnvelopeCodec {
         }
         appendPayloadPartBuffers(scratch, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
         return frameLength + Varint62.length(frameLength);
+    }
+
+    static int appendFrame(byte[] target,
+                           int offset,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[][] payloadParts,
+                           int payloadPartIndex,
+                           int payloadPartOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        Limits normalized = limits.normalize();
+        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
+        validatePayloadParts(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
+        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
+        int cursor = offset;
+        int encodedBytes = FrameCodec.checkedLength(
+                frameLength + Varint62.length(frameLength),
+                ErrorCode.FRAME_SIZE,
+                "write frame",
+                "encoded frame exceeds Java implementation limit"
+        );
+        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
+        cursor += Varint62.write(target, cursor, frameLength);
+        target[cursor++] = (byte) (frame.type().code() | frame.flags());
+        cursor += Varint62.write(target, cursor, frame.streamId());
+        if (prefix.length > 0) {
+            System.arraycopy(prefix, 0, target, cursor, prefix.length);
+            cursor += prefix.length;
+        }
+        cursor = appendPayloadParts(target, cursor, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        return cursor - offset;
     }
 
     static void writeGatheredBuffers(GatheringByteChannel output, GatherScratch scratch) throws IOException {
@@ -476,6 +550,38 @@ final class FrameEnvelopeCodec {
         if (remaining != 0) {
             throw new IndexOutOfBoundsException("payload parts underrun");
         }
+    }
+
+    private static int appendPayloadParts(byte[] target,
+                                          int cursor,
+                                          byte[][] payloadParts,
+                                          int payloadPartIndex,
+                                          int payloadPartOffset,
+                                          int payloadLength) {
+        if (payloadLength <= 0) {
+            return cursor;
+        }
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = payloadParts[index];
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            System.arraycopy(part, offset, target, cursor, take);
+            cursor += take;
+            remaining -= take;
+            index++;
+            offset = 0;
+        }
+        if (remaining != 0) {
+            throw new IndexOutOfBoundsException("payload parts underrun");
+        }
+        return cursor;
     }
 
     private static int countPayloadPartBuffers(byte[][] payloadParts,
