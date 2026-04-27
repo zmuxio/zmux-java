@@ -539,6 +539,60 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     @Test
+    void lateDataDiscardQueuesSessionMaxDataImmediatelyWhenQueueFits() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId;
+        long sessionTarget;
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = createPeerOpenedBidi(runtime);
+            streamId = stream.streamIdInternal();
+            sessionTarget = runtime.sessionWindowTargetLocked();
+            runtime.setRecvSessionAdvertisedInternal(sessionTarget);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+            stream.resetFromPeerLocked(ErrorCode.CANCELLED.code(), "", 0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[10]));
+
+        synchronized (runtime.lock()) {
+            long expectedAdvertised = sessionTarget + 10L;
+            assertEquals(expectedAdvertised, runtime.recvSessionAdvertisedInternal(),
+                    "late-discard should immediately return session receive credit");
+            assertEquals(10L, runtime.recvSessionReceivedBytesInternal(),
+                    "late data should still consume session receive credit");
+            assertEquals(0L, runtime.recvSessionPendingInternal(),
+                    "queued late-discard MAX_DATA should not leave pending receive credit");
+            assertFalse(runtime.receiveReplenishRetryLocked(),
+                    "successful late-discard MAX_DATA queueing should not arm retry");
+
+            List<SessionFlowControlUpdateRegistry.PendingFrame> batch = new ArrayList<>();
+            runtime.flowControlUpdateRegistryInternal().takePendingWindowUpdatesLocked(batch, 8, streamId);
+            assertEquals(1, batch.size(), "late-discard should publish one session MAX_DATA");
+            assertEquals(FrameType.MAX_DATA, batch.get(0).type());
+            assertEquals(0L, batch.get(0).streamId());
+            assertEquals(expectedAdvertised, batch.get(0).value());
+        }
+    }
+
+    @Test
+    void hiddenLateDataDiscardCountsHiddenUnreadBytes() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId;
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = createPeerOpenedBidi(runtime);
+            assertFalse(stream.applicationVisible(), "test requires a hidden peer-opened stream");
+            streamId = stream.streamIdInternal();
+            runtime.setRecvSessionAdvertisedInternal(runtime.sessionWindowTargetLocked());
+            stream.resetFromPeerLocked(ErrorCode.CANCELLED.code(), "", 0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[4]));
+
+        assertEquals(4L, runtime.stats().hiddenState().unreadBytesDiscarded(),
+                "hidden late-discard bytes should be reported as hidden unread discards");
+    }
+
+    @Test
     void lateDataOnTerminalTombstoneCountsSessionFlowControl() throws Exception {
         SessionRuntime runtime = newReceiveReplenishRuntime();
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);

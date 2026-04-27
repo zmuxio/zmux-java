@@ -10,12 +10,9 @@ import java.util.Objects;
 
 final class SessionLateDataHandler {
     private final SessionReaderCoordinator.Owner owner;
-    private final SessionReceiveWindowUpdater receiveWindowUpdater;
 
-    SessionLateDataHandler(SessionReaderCoordinator.Owner owner,
-                           SessionReceiveWindowUpdater receiveWindowUpdater) {
+    SessionLateDataHandler(SessionReaderCoordinator.Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
-        this.receiveWindowUpdater = Objects.requireNonNull(receiveWindowUpdater, "receiveWindowUpdater");
     }
 
     void handleTerminalDataFrameLocked(FrameCodec.Frame frame,
@@ -93,15 +90,24 @@ final class SessionLateDataHandler {
         long received = RuntimeFlow.saturatingAdd(this.owner.recvSessionReceivedBytes(), length);
         this.owner.setRecvSessionReceivedBytes(received);
         this.owner.addReceivedDataBytes(length);
-        this.owner.setRecvSessionPending(SessionRuntime.saturatingAdd(this.owner.recvSessionPending(), length));
+        long desired = SessionRuntime.clampVarint62(
+                SessionRuntime.saturatingAdd(this.owner.recvSessionAdvertised(), length)
+        );
+        if (this.owner.queueSessionMaxDataLocked(desired)) {
+            this.owner.setRecvSessionAdvertised(desired);
+            this.owner.notifyWriterWaiters();
+        } else {
+            this.owner.setRecvSessionPending(SessionRuntime.saturatingAdd(this.owner.recvSessionPending(), length));
+            this.owner.setReceiveReplenishRetryLocked(true);
+        }
         this.owner.setAggregateLateDataReceived(RuntimeFlow.saturatingAdd(this.owner.aggregateLateDataReceived(), length));
         this.owner.noteLateDataDiscardLocked(length, cause);
         if (streamRuntime != null) {
+            if (!streamRuntime.applicationVisible()) {
+                this.owner.onHiddenUnreadBytesDiscardedLocked(length);
+            }
             streamRuntime.recordLateDataReceivedLocked(length);
             streamRuntime.clearRecvPendingLocked();
-        }
-        if (this.receiveWindowUpdater.maybeReplenishSessionLocked(false)) {
-            this.owner.notifyWriterWaiters();
         }
         if (this.owner.aggregateLateDataReceived() > this.owner.aggregateLateDataCap()) {
             throw this.owner.sessionError(

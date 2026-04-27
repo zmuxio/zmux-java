@@ -399,6 +399,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
+    public void onHiddenUnreadBytesDiscardedLocked(long bytes) {
+        this.owner.onHiddenUnreadBytesDiscardedLocked(bytes);
+    }
+
+    @Override
     public long aggregateLateDataCap() {
         return this.owner.aggregateLateDataCap();
     }

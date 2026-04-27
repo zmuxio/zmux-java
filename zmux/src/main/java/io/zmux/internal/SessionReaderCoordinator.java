@@ -13,7 +13,7 @@ final class SessionReaderCoordinator {
     SessionReaderCoordinator(Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.receiveWindowUpdater = new SessionReceiveWindowUpdater(owner);
-        this.lateDataHandler = new SessionLateDataHandler(owner, this.receiveWindowUpdater);
+        this.lateDataHandler = new SessionLateDataHandler(owner);
     }
 
     private static IOException transportReadFailure(IOException error) {
@@ -1192,6 +1192,8 @@ final class SessionReaderCoordinator {
         boolean flushPendingWindowUpdatesLocked(Long preferredStreamId) throws IOException;
 
         void noteLateDataDiscardLocked(int length, LateDataCause cause);
+
+        void onHiddenUnreadBytesDiscardedLocked(long bytes);
 
         long aggregateLateDataCap();
 
