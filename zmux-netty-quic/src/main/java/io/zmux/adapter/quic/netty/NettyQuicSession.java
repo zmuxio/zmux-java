@@ -893,23 +893,20 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private void onSessionClosed(IOException error) {
-        beginClosing(error);
+        IOException observed = error == null ? sessionUnavailableError() : error;
+        boolean committedCloseError = beginClosing(observed);
         if (!closed.compareAndSet(false, true)) {
             return;
         }
         noteControlProgress();
-        IOException observed = error == null ? sessionUnavailableError() : error;
-        if (isKeepaliveTimeout(observed)) {
+        if (committedCloseError && isKeepaliveTimeout(observed)) {
             saturatingAdd(keepaliveTimeouts, 1L);
-        }
-        IOException existing = closeError;
-        if (existing == null || existing instanceof io.zmux.SessionClosedException) {
-            closeError = observed;
         }
         bidiAcceptQueue.close();
         uniAcceptQueue.close();
+        IOException sessionError = sessionUnavailableError();
         for (NettyQuicStreamState state : activeStreams) {
-            state.onSessionClosed(closeError);
+            state.onSessionClosed(sessionError);
         }
         NettyQuicSupport.executeOnEventLoop(channel, () -> {
             if (channel.pipeline().context(handlerName) != null) {
@@ -948,16 +945,22 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     private SessionState closedState() {
-        QuicConnectionCloseEvent event = closeEvent;
-        if (event != null) {
-            return NettyQuicSupport.isGracefulApplicationClose(event) ? SessionState.CLOSED : SessionState.FAILED;
-        }
         IOException error = closeError;
         if (error instanceof ApplicationError) {
             ApplicationError applicationError = (ApplicationError) error;
             return applicationError.code() == 0L && applicationError.reason().isEmpty()
                     ? SessionState.CLOSED
                     : SessionState.FAILED;
+        }
+        if (error instanceof io.zmux.SessionClosedException) {
+            return SessionState.CLOSED;
+        }
+        if (error != null) {
+            return SessionState.FAILED;
+        }
+        QuicConnectionCloseEvent event = closeEvent;
+        if (event != null) {
+            return NettyQuicSupport.isGracefulApplicationClose(event) ? SessionState.CLOSED : SessionState.FAILED;
         }
         Throwable cause = channel.closeFuture().cause();
         if (cause != null) {
@@ -972,10 +975,7 @@ final class NettyQuicSession implements ZmuxSession {
                 return SessionState.FAILED;
             }
         }
-        if (error == null || error instanceof io.zmux.SessionClosedException) {
-            return SessionState.CLOSED;
-        }
-        return SessionState.FAILED;
+        return SessionState.CLOSED;
     }
 
     private IOException defaultSessionCloseError(Throwable cause) {
@@ -1242,15 +1242,12 @@ final class NettyQuicSession implements ZmuxSession {
         }
     }
 
-    private void beginClosing(IOException error) {
-        IOException existing = closeError;
-        if (error != null && (existing == null || existing instanceof io.zmux.SessionClosedException)) {
-            closeError = error;
-        }
+    private boolean beginClosing(IOException error) {
+        boolean committedCloseError = commitCloseError(error);
         boolean firstCloseSignal = closing.compareAndSet(false, true);
         signalLifecycleChanged();
         if (!firstCloseSignal) {
-            return;
+            return committedCloseError;
         }
         IOException closingError = sessionUnavailableError();
         bidiAcceptQueue.close(this::discardAcceptedBidi);
@@ -1280,6 +1277,20 @@ final class NettyQuicSession implements ZmuxSession {
         activeStreams.clear();
         for (NettyQuicStreamState state : activeSnapshot) {
             state.onSessionClosed(closingError);
+        }
+        return committedCloseError;
+    }
+
+    private boolean commitCloseError(IOException error) {
+        if (error == null) {
+            return false;
+        }
+        synchronized (this) {
+            if (closeError != null) {
+                return false;
+            }
+            closeError = error;
+            return true;
         }
     }
 

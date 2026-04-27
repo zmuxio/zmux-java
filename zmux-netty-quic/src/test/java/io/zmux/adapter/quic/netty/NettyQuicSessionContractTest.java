@@ -2723,6 +2723,37 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void locallyCommittedSessionCloseIgnoresLateTransportCloseNoise() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            NettyQuicSession client = (NettyQuicSession) pair.client;
+            IOException localClose = new SessionClosedException(ZmuxErrorSource.LOCAL);
+
+            invokePrivate(client, "beginClosing", new Class<?>[]{IOException.class}, localClose);
+            setField(client, "closeEvent", newCloseEvent(true, 123, utf8("late-transport-close")));
+            invokePrivate(
+                    client,
+                    "onSessionClosed",
+                    new Class<?>[]{IOException.class},
+                    NettyQuicSupport.sessionApplicationError(
+                            ErrorCode.IDLE_TIMEOUT.code(),
+                            "late-idle-timeout",
+                            ZmuxErrorSource.TRANSPORT,
+                            ZmuxTerminationKind.TIMEOUT
+                    )
+            );
+
+            assertSame(localClose, getField(client, "closeError"),
+                    "late transport close noise must not replace an already committed local close cause");
+            assertEquals(SessionState.CLOSED, client.state(),
+                    "late transport close noise must not turn a committed graceful close into failure");
+            assertFalse(client.terminationCause().isPresent(),
+                    "graceful local close should remain cause-free after late transport noise");
+            assertEquals(0L, client.stats().diagnostics().keepaliveTimeouts(),
+                    "late transport idle timeout should not be counted after another terminal cause was committed");
+        }
+    }
+
+    @Test
     void statsTrackTransportIdleTimeoutAsKeepaliveTimeout() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             NettyQuicSession client = (NettyQuicSession) pair.client;
