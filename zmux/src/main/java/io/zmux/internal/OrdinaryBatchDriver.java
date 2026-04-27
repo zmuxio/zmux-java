@@ -15,13 +15,21 @@ final class OrdinaryBatchDriver {
                                                 long feedbackWindow,
                                                 OrdinaryBatchOrderer.RetainedBias retainedBias,
                                                 int size) {
-        if (!build.hasRealStreamScoped()) {
-            return OrdinaryBatchOrderer.OrderView.identity(size);
-        }
-
         List<OrdinaryBatchOrderer.BatchGroup> groupsInOrder = build.groupsInOrder();
         workspace.loadRetainedBias(retainedBias);
         OrdinaryBatchRetainedState retainedState = workspace.retainedState();
+        boolean retainedRealState = retainedState.hasRetainedRealState();
+        if (!retainedRealState) {
+            retainedState.scrubIdleRetainedState();
+        }
+        if (!build.hasRealStreamScoped()) {
+            if (retainedBias != null && !retainedRealState) {
+                retainedState.release();
+                retainedBias.state().release();
+            }
+            return OrdinaryBatchOrderer.OrderView.identity(size);
+        }
+
         workspace.resetOrderScratch(size);
         OrdinaryBatchRunState runState = new OrdinaryBatchRunState(
                 workspace,

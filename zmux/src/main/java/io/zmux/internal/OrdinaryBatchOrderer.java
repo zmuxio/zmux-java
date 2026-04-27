@@ -34,7 +34,7 @@ final class OrdinaryBatchOrderer {
                                RetainedBias retainedBias,
                                Workspace workspace) {
         int size = batch == null ? 0 : batch.size();
-        if (size < 2 || sameStreamBurstKeepsOrder(batch)) {
+        if (retainedBias == null && (size < 2 || sameStreamBurstKeepsOrder(batch))) {
             if (workspace != null) {
                 workspace.clearRetainedBatchRefs();
             }

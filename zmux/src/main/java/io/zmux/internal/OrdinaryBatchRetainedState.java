@@ -185,6 +185,34 @@ final class OrdinaryBatchRetainedState {
         classSelectionsSinceBulk = 0;
     }
 
+    boolean hasRetainedRealState() {
+        return !groupVirtualTime.isEmpty()
+                || !groupFinishTag.isEmpty()
+                || !groupLastServed.isEmpty()
+                || !streamFinishTag.isEmpty()
+                || !streamLastServed.isEmpty()
+                || !streamClass.isEmpty()
+                || !streamLastSeenBatch.isEmpty()
+                || !smallBurstDisarmed.isEmpty()
+                || !preferredStreamHeads.isEmpty()
+                || preferredGroupHead != null;
+    }
+
+    void scrubIdleRetainedState() {
+        rootVirtualTime = 0L;
+        preferredGroupHead = null;
+        preferredStreamHeads.clear();
+        groupLag.clear();
+        streamLag.clear();
+        streamClass.clear();
+        streamLastSeenBatch.clear();
+        smallBurstDisarmed.clear();
+        serviceSeq = 0L;
+        batchSeq = 0L;
+        interactiveStreak = 0;
+        classSelectionsSinceBulk = 0;
+    }
+
     void release() {
         preferredGroupHead = null;
         preferredStreamHeads = new HashMap<>();
@@ -239,18 +267,7 @@ final class OrdinaryBatchRetainedState {
     }
 
     private void scrubIdleState() {
-        if (!groupVirtualTime.isEmpty()
-                || !groupFinishTag.isEmpty()
-                || !groupLastServed.isEmpty()
-                || !groupLag.isEmpty()
-                || !streamFinishTag.isEmpty()
-                || !streamLastServed.isEmpty()
-                || !streamLag.isEmpty()
-                || !streamClass.isEmpty()
-                || !streamLastSeenBatch.isEmpty()
-                || !smallBurstDisarmed.isEmpty()
-                || !preferredStreamHeads.isEmpty()
-                || preferredGroupHead != null) {
+        if (hasRetainedRealState()) {
             return;
         }
         release();

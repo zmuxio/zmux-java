@@ -142,6 +142,34 @@ final class OrdinaryBatchOrdererTest {
     }
 
     @Test
+    void sessionScopedOnlyBatchScrubsIdleRetainedSchedulerState() {
+        OrdinaryBatchOrderer.RetainedBias retainedBias = new OrdinaryBatchOrderer.RetainedBias();
+        OrdinaryBatchRetainedState state = retainedBias.state();
+        OrdinaryBatchOrderer.GroupKey staleGroup = new OrdinaryBatchOrderer.GroupKey(0, 4L);
+        state.rootVirtualTime = 11L;
+        state.serviceSeq = 7L;
+        state.batchSeq = 3L;
+        state.interactiveStreak = 2;
+        state.classSelectionsSinceBulk = 1;
+        state.groupLag.put(staleGroup, 5L);
+        state.streamLag.put(4L, 6L);
+
+        int[] order = OrdinaryBatchOrderer.order(
+                listOf(sessionScopedFrame()),
+                SchedulerHint.UNSPECIFIED_OR_BALANCED,
+                16_384L,
+                retainedBias
+        );
+
+        assertArrayEquals(new int[]{0}, order, "session-scoped ordinary batch should stay in input order");
+        assertEquals(0L, state.rootVirtualTime, "idle retained root virtual time should be scrubbed");
+        assertEquals(0L, state.serviceSeq, "idle retained service sequence should be scrubbed");
+        assertEquals(0L, state.batchSeq, "idle retained batch sequence should be scrubbed");
+        assertTrue(state.groupLag.isEmpty(), "idle retained group lag should be scrubbed");
+        assertTrue(state.streamLag.isEmpty(), "idle retained stream lag should be scrubbed");
+    }
+
+    @Test
     void orderViewReusesWorkspaceOrderedScratch() throws Exception {
         OrdinaryBatchOrderer.Workspace workspace = new OrdinaryBatchOrderer.Workspace();
 
