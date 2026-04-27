@@ -1,5 +1,2 @@
-# Normalize text files to LF for cross-platform scripts and build files.
-* text=auto eol=lf
-*.sh text eol=lf
-*.bat text eol=crlf
-*.cmd text eol=crlf
+# Auto detect text files and perform LF normalization
+* text=auto
