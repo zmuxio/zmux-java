@@ -1,9 +1,13 @@
 package io.zmux.internal;
 
 import io.zmux.FrameType;
+import io.zmux.OpenMetadataTooLargeException;
 import io.zmux.Protocol;
 import io.zmux.Settings;
 import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -104,6 +108,32 @@ final class StopSendingRuntimePolicyTest {
             assertEquals(FrameType.DATA, fin.type(), "graceful finish should still emit DATA");
             assertTrue((fin.flags() & Protocol.FRAME_FLAG_FIN) != 0, "graceful finish should carry FIN");
             assertTrue((fin.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0, "graceful finish should preserve opening metadata on the re-emitted opener");
+        }
+    }
+
+    @Test
+    void gracefulStopSendingQueueFailureDoesNotArmDrainDeadline() throws Exception {
+        Settings peerSettings = Settings.defaults().toBuilder()
+                .maxFramePayload(16L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(Protocol.CAPABILITY_OPEN_METADATA, peerSettings);
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            runtime.beginLocalOpenLocked(stream);
+            runtime.markLocalStreamOpeningCommittedLocked(stream);
+            stream.clearOpeningFramePendingLocked();
+            stream.applyOpenMetadataLocked(0L, null, "oversized-open-info".getBytes(StandardCharsets.UTF_8));
+            assertEquals(LocalOpenPhase.NEEDS_EMIT, stream.localOpenPhaseLocked(), "test requires a committed invisible opener");
+
+            assertInstanceOf(
+                    OpenMetadataTooLargeException.class,
+                    assertThrows(IOException.class, () -> runtime.tryGracefulStopSendingLocked(stream)),
+                    "oversized opening metadata should fail before graceful STOP_SENDING finish is queued"
+            );
+            assertEquals(0L, stream.stopSendingGracefulDeadlineNanosLocked(), "failed graceful finish queueing must not leave a stream deadline armed");
+            assertEquals(0L, runtime.nextStopSendingGracefulDeadlineLocked(), "failed graceful finish queueing must not leave a session wake deadline armed");
+            assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue").isEmpty(), "failed graceful finish queueing must not retain DATA frames");
         }
     }
 }

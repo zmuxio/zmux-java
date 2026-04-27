@@ -39,10 +39,10 @@ final class SessionStopSendingGracefulCoordinator {
                         StopSendingGracefulPolicy.drainWindow(this.owner.stopSendingGracefulDrainWindowLocked())
                 )
         );
-        streamRuntime.armStopSendingGracefulDrainLocked(deadlineNanos);
         if (!streamRuntime.sendTerminalLocked() && !streamRuntime.finQueuedLocked()) {
             streamRuntime.queuePeerStopGracefulFinishLocked();
         }
+        streamRuntime.armStopSendingGracefulDrainLocked(deadlineNanos);
         return true;
     }
 
