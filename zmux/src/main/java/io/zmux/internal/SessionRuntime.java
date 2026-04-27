@@ -739,6 +739,11 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return base + delta;
     }
 
+    private static long projectTrackedMemoryDelta(long tracked, long removed, long added) {
+        long base = removed >= tracked ? 0L : tracked - removed;
+        return SessionRuntime.saturatingAdd(base, added);
+    }
+
     private static long saturatingMultiply(long left, long right) {
         if (left <= 0L || right <= 0L) {
             return 0L;
@@ -1904,6 +1909,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void onStreamOpenInfoUpdatedLocked(int previousLength, int currentLength) {
+        long previousTracked = previousLength > currentLength ? this.trackedSessionMemoryLocked() : 0L;
         if (currentLength > previousLength) {
             this.retainedOpenInfoBytes = SessionRuntime.saturatingAdd(
                     this.retainedOpenInfoBytes,
@@ -1916,6 +1922,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
                     0L,
                     this.retainedOpenInfoBytes - ((long) previousLength - currentLength)
             );
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
         }
     }
 
@@ -1932,26 +1941,58 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (bytes <= 0L) {
             return;
         }
+        long previousTracked = this.trackedSessionMemoryLocked();
         this.retainedPeerReasonBytes = Math.max(0L, this.retainedPeerReasonBytes - bytes);
+        if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+            this.notifyStreamWriteWaitersLocked();
+        }
     }
 
     String retainPeerReasonLocked(long previousBytes, String reason) {
         int width;
-        this.releasePeerReasonBytesLocked(previousBytes);
+        long previousTracked = this.trackedSessionMemoryLocked();
+        long previousRetained = this.retainedPeerReasonBytes;
+        long baseRetained = Math.max(0L, previousRetained - Math.max(0L, previousBytes));
+        this.retainedPeerReasonBytes = baseRetained;
         if (reason == null || reason.isEmpty()) {
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
             return "";
         }
         long budget = this.retainedPeerReasonBudgetLocked();
-        if (budget <= 0L || this.retainedPeerReasonBytes >= budget) {
+        if (budget <= 0L || baseRetained >= budget) {
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
             return "";
         }
-        long available = budget - this.retainedPeerReasonBytes;
+        long available = budget - baseRetained;
+        long baseTracked = SessionRuntime.projectTrackedMemoryDelta(
+                previousTracked,
+                previousRetained,
+                baseRetained
+        );
+        long hardCap = this.sessionMemoryHardCapLocked();
+        if (baseTracked >= hardCap) {
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
+            return "";
+        }
+        available = Math.min(available, hardCap - baseTracked);
         if (available <= 0L) {
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
             return "";
         }
         int originalBytes = SessionRuntime.utf8EncodedLength(reason);
         if ((long) originalBytes <= available) {
-            this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(this.retainedPeerReasonBytes, originalBytes);
+            this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(baseRetained, originalBytes);
+            if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+                this.notifyStreamWriteWaitersLocked();
+            }
             return reason;
         }
         int end = 0;
@@ -1967,7 +2008,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
             end += SessionRuntime.utf8CharCountAt(reason, end);
         }
         String trimmed = reason.substring(0, end);
-        this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(this.retainedPeerReasonBytes, retainedBytes);
+        this.retainedPeerReasonBytes = SessionRuntime.saturatingAdd(baseRetained, retainedBytes);
+        if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+            this.notifyStreamWriteWaitersLocked();
+        }
         return trimmed;
     }
 

@@ -124,6 +124,32 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void peerReasonRetentionDoesNotExceedSessionMemoryHardCap() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .retainedPeerReasonBytesBudget(16L)
+                        .sessionMemoryCap(3L)
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+
+        synchronized (runtime.lock()) {
+            assertEquals("abc", runtime.retainPeerReasonLocked(0L, "abcdef"),
+                    "retained peer reason should be trimmed by the remaining session memory cap");
+            assertEquals("", runtime.retainPeerReasonLocked(0L, "z"),
+                    "new peer reason bytes should be rejected once retained memory reaches the cap");
+            assertEquals("xyz", runtime.retainPeerReasonLocked(3L, "xyzw"),
+                    "replacing an old retained reason should release its memory before applying the cap");
+        }
+
+        SessionStats stats = runtime.stats();
+        assertEquals(3L, stats.retainedPeerReasonBytes(), "retained peer reason bytes should remain capped");
+        assertEquals(3L, stats.pressure().trackedSessionMemoryBytes(),
+                "tracked session memory should not exceed the configured hard cap");
+    }
+
+    @Test
     void sessionRuntimeWrapsRawInputStreamInStatefulCodecDecoder() throws Exception {
         InputStream rawInput = new InputStream() {
             @Override
