@@ -930,6 +930,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             synchronized (lock) {
                 OutputStream previous = current;
                 current = next;
+                gathering = null;
                 return previous;
             }
         }

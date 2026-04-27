@@ -1104,6 +1104,35 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void joinedOutputReplacementClearsStaleGatheringOutput() throws Exception {
+        RecordingByteChannel firstGathering = new RecordingByteChannel();
+        ByteArrayOutputStream replacement = new ByteArrayOutputStream();
+
+        try (JoinedDuplexConnection connection = new JoinedDuplexConnection(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                firstGathering,
+                null,
+                null
+        )) {
+            GatheringByteChannel staleView = connection.gatheringOutput();
+            assertNotNull(staleView);
+
+            JoinedDuplexConnection.PausedOutput pausedOutput = connection.pauseOutput();
+            pausedOutput.set(replacement);
+            pausedOutput.resume();
+
+            assertNull(connection.gatheringOutput(), "plain OutputStream replacement must not retain stale gathering output");
+            assertFalse(staleView.isOpen(), "previous gathering view should close logically after replacement");
+            assertThrows(StreamNotWritableException.class, () -> staleView.write(ByteBuffer.wrap(new byte[]{1, 2, 3})));
+            connection.output().write(new byte[]{4, 5});
+        }
+
+        assertArrayEquals(new byte[0], firstGathering.writtenBytes(), "stale gathering channel must not receive writes");
+        assertArrayEquals(new byte[]{4, 5}, replacement.toByteArray());
+    }
+
+    @Test
     void joinedConnectionFallsBackToSyntheticAddresses() throws Exception {
         try (JoinedDuplexConnection connection = new JoinedDuplexConnection(
                 new ByteArrayInputStream(new byte[0]),
