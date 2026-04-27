@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.GatheringByteChannel;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -77,6 +80,55 @@ final class SessionWriterTransportTest {
     }
 
     @Test
+    void writeBatchUsesGatheringOutputForLargeDensePayload() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        RecordingGatheringByteChannel gathering = new RecordingGatheringByteChannel();
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, LARGE_FRAME_SETTINGS.limits(), gathering));
+        byte[] payload = repeated('g', 24 * 1024);
+        SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 1L, payload),
+                null,
+                payload.length,
+                false,
+                false
+        );
+
+        long written = transport.writeBatch(Collections.singletonList(outbound));
+
+        assertEquals(gathering.size(), written, "reported batch byte count should match gathered bytes");
+        assertEquals(1, gathering.writeCalls(), "large dense batch should use one gathering write");
+        assertEquals(0, output.size(), "gather path must not copy the batch through OutputStream.write");
+        assertEquals(1, output.flushes(), "gather path should preserve batch flush semantics");
+        FrameCodec.Frame decoded = FrameCodec.readFrame(
+                new ByteArrayInputStream(gathering.bytes()),
+                LARGE_FRAME_SETTINGS.limits()
+        );
+        assertEquals(FrameType.DATA, decoded.type(), "decoded frame type mismatch");
+        assertArrayEquals(payload, decoded.payload(), "decoded gathered payload mismatch");
+    }
+
+    @Test
+    void writeBatchKeepsTinyPayloadOnMergedPathEvenWithGatheringOutput() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        RecordingGatheringByteChannel gathering = new RecordingGatheringByteChannel();
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, Settings.defaults().limits(), gathering));
+        byte[] payload = "small".getBytes(StandardCharsets.UTF_8);
+        SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 1L, payload),
+                null,
+                payload.length,
+                false,
+                false
+        );
+
+        long written = transport.writeBatch(Collections.singletonList(outbound));
+
+        assertEquals(output.size(), written, "reported batch byte count should match merged bytes");
+        assertEquals(0, gathering.writeCalls(), "tiny batches should avoid gathering overhead");
+        assertEquals(1, output.flushes(), "merged path should flush once per batch");
+    }
+
+    @Test
     void writeBatchEncodesTinyPayloadOnMergedOutputPath() throws Exception {
         RecordingOutputStream output = new RecordingOutputStream();
         SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output));
@@ -137,19 +189,30 @@ final class SessionWriterTransportTest {
     private static final class TestOwner implements SessionWriterTransport.Owner {
         private final RecordingOutputStream output;
         private final Limits limits;
+        private final GatheringByteChannel gatheringOutput;
 
         private TestOwner(RecordingOutputStream output) {
             this(output, Settings.defaults().limits());
         }
 
         private TestOwner(RecordingOutputStream output, Limits limits) {
+            this(output, limits, null);
+        }
+
+        private TestOwner(RecordingOutputStream output, Limits limits, GatheringByteChannel gatheringOutput) {
             this.output = output;
             this.limits = limits;
+            this.gatheringOutput = gatheringOutput;
         }
 
         @Override
         public OutputStream output() {
             return output;
+        }
+
+        @Override
+        public GatheringByteChannel gatheringOutput() {
+            return gatheringOutput;
         }
 
         @Override
@@ -183,6 +246,66 @@ final class SessionWriterTransportTest {
 
         int flushes() {
             return flushes;
+        }
+
+        byte[] bytes() {
+            return bytes.toByteArray();
+        }
+    }
+
+    private static final class RecordingGatheringByteChannel implements GatheringByteChannel {
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private boolean open = true;
+        private int writeCalls;
+
+        @Override
+        public int write(ByteBuffer src) throws java.io.IOException {
+            long written = write(new ByteBuffer[]{src}, 0, 1);
+            return (int) written;
+        }
+
+        @Override
+        public long write(ByteBuffer[] srcs, int offset, int length) throws java.io.IOException {
+            if (!open) {
+                throw new ClosedChannelException();
+            }
+            writeCalls++;
+            long written = 0L;
+            for (int i = offset; i < offset + length; i++) {
+                ByteBuffer src = srcs[i];
+                int remaining = src.remaining();
+                if (remaining == 0) {
+                    continue;
+                }
+                byte[] copy = new byte[remaining];
+                src.get(copy);
+                bytes.write(copy, 0, copy.length);
+                written += remaining;
+            }
+            return written;
+        }
+
+        @Override
+        public long write(ByteBuffer[] srcs) throws java.io.IOException {
+            return write(srcs, 0, srcs.length);
+        }
+
+        @Override
+        public boolean isOpen() {
+            return open;
+        }
+
+        @Override
+        public void close() {
+            open = false;
+        }
+
+        int size() {
+            return bytes.size();
+        }
+
+        int writeCalls() {
+            return writeCalls;
         }
 
         byte[] bytes() {
