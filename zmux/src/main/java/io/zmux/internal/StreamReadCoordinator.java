@@ -29,8 +29,10 @@ final class StreamReadCoordinator {
                     this.owner.onReadBufferReleasedLocked(readBytes, readResult.releasedStorageBytes());
                     this.owner.onReadDiscardLocked(this.owner.halfStateInternal().recvOpen());
                     this.owner.noteReadPayloadProgressLocked(readBytes);
+                    this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
                     return readBytes;
                 }
+                this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
                 if (this.owner.halfStateInternal().readStopSent()) {
                     throw new ReadClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.STOPPED);
                 }

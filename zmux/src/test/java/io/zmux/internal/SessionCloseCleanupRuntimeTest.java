@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -45,6 +46,29 @@ final class SessionCloseCleanupRuntimeTest {
         Constructor<?> constructor = taskType.getDeclaredConstructor(outboundFrameType);
         constructor.setAccessible(true);
         return constructor.newInstance(new Object[]{null});
+    }
+
+    private static void handleDataFrame(SessionRuntime runtime, FrameCodec.Frame frame) throws Exception {
+        Field field = SessionRuntime.class.getDeclaredField("readerRuntime");
+        field.setAccessible(true);
+        Object readerRuntime = field.get(runtime);
+        try {
+            SessionRuntimeTestSupport.invokePrivate(
+                    readerRuntime,
+                    "handleDataFrame",
+                    new Class<?>[]{FrameCodec.Frame.class},
+                    frame
+            );
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw error;
+        }
     }
 
     private static Object getField(Object target, String name) throws Exception {
@@ -178,6 +202,64 @@ final class SessionCloseCleanupRuntimeTest {
                 "protocol worker should drain a full backlog and replace the retained deque backing");
         assertTrue(finished.await(1L, TimeUnit.SECONDS), "protocol worker should stop once the session is closed");
         assertNull(workerFailure.get(), "protocol worker should drain synthetic close-write tasks without failing");
+    }
+
+    @Test
+    void finalApplicationReadCompactsFullyTerminalAcceptedStream() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        byte[] payload = new byte[]{1, 2, 3};
+
+        handleDataFrame(runtime, new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_FIN,
+                streamId,
+                payload
+        ));
+        StreamRuntime stream = (StreamRuntime) runtime.acceptStream();
+        stream.cancelWrite(ErrorCode.CANCELLED.code());
+
+        synchronized (runtime.lock()) {
+            assertSame(stream, runtime.liveStreamLocked(streamId),
+                    "terminal stream must stay live while final payload is unread");
+            assertTrue(stream.fullyTerminalLocked(), "test requires both stream halves to be terminal");
+        }
+
+        byte[] dst = new byte[payload.length];
+        assertEquals(payload.length, stream.read(dst));
+        assertArrayEquals(payload, dst);
+
+        synchronized (runtime.lock()) {
+            assertNull(runtime.liveStreamLocked(streamId),
+                    "draining the final payload should compact the terminal accepted stream");
+            assertTrue(runtime.hasTerminalMarkerLocked(streamId),
+                    "compaction should retain a terminal marker for future duplicate frames");
+        }
+        assertEquals(-1, stream.read(new byte[1]), "compacted stream object should still expose EOF");
+    }
+
+    @Test
+    void terminalEofReadCompactsAcceptedStreamWithoutBufferedPayload() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+
+        handleDataFrame(runtime, new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_FIN,
+                streamId,
+                StreamRuntime.EMPTY_BYTES
+        ));
+        StreamRuntime stream = (StreamRuntime) runtime.acceptStream();
+        stream.cancelWrite(ErrorCode.CANCELLED.code());
+
+        assertEquals(-1, stream.read(new byte[1]), "empty DATA|FIN should surface EOF");
+
+        synchronized (runtime.lock()) {
+            assertNull(runtime.liveStreamLocked(streamId),
+                    "EOF read should compact a terminal accepted stream even when no payload was buffered");
+            assertTrue(runtime.hasTerminalMarkerLocked(streamId),
+                    "EOF compaction should retain a terminal marker for future duplicate frames");
+        }
     }
 
     @Test
