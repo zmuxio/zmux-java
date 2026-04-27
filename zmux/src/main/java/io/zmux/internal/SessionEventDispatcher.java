@@ -119,7 +119,7 @@ final class SessionEventDispatcher {
                 streamRuntime.markOpenedEventSentLocked();
                 break;
             case STREAM_ACCEPTED:
-                if (!streamRuntime.applicationVisible() || streamRuntime.acceptedEventSentLocked()) {
+                if (!streamRuntime.acceptedLocked() || streamRuntime.acceptedEventSentLocked()) {
                     return null;
                 }
                 streamRuntime.markAcceptedEventSentLocked();

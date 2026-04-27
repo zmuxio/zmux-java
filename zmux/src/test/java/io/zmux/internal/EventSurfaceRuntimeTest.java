@@ -79,6 +79,28 @@ final class EventSurfaceRuntimeTest {
     }
 
     @Test
+    void acceptedEventRequiresAcceptedState() throws Exception {
+        List<ZmuxEvent> events = new ArrayList<>();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder().eventHandler(events::add).build(),
+                0L,
+                Settings.defaults()
+        );
+
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = runtime.createPeerOpenedStreamLocked(
+                    SessionRuntime.firstPeerStreamId(Role.RESPONDER, true)
+            );
+            stream.setApplicationVisibleLocked(true);
+            runtime.enqueueStreamEventLocked(stream, ZmuxEventType.STREAM_ACCEPTED, null);
+            assertFalse(stream.acceptedEventSentLocked(), "accepted event must stay deferred until the stream is accepted");
+        }
+
+        runtime.emitPendingEvents();
+        assertTrue(events.isEmpty(), "application-visible peer stream should not emit accepted before accept returns it");
+    }
+
+    @Test
     void eventDispatcherSuppressesHandlerRuntimeExceptionsButPropagatesJvmErrors() {
         AtomicInteger runtimeCalls = new AtomicInteger();
         Object runtimeLock = new Object();
