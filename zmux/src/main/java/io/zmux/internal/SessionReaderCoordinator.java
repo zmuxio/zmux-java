@@ -813,7 +813,7 @@ final class SessionReaderCoordinator {
                 return;
             }
             this.owner.recordInboundPingFloodLocked();
-            this.owner.enqueuePongLocked(frame.payload().clone());
+            this.owner.enqueuePongLocked(frame.payload());
             this.owner.notifyWriterWaiters();
         }
     }
