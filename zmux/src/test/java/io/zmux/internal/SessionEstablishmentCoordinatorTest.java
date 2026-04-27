@@ -172,6 +172,39 @@ final class SessionEstablishmentCoordinatorTest {
     }
 
     @Test
+    void negotiationFailureSurfacesBeforeStalledLocalPrefaceWrite() throws Exception {
+        CountDownLatch releaseWrites = new CountDownLatch(1);
+        TestOwner owner = new TestOwner(
+                preface(Role.INITIATOR, 1L),
+                preface(Role.INITIATOR, 2L),
+                releaseWrites
+        );
+        SessionEstablishmentCoordinator coordinator = new SessionEstablishmentCoordinator(
+                owner,
+                Duration.ofMillis(40),
+                Duration.ofMillis(200),
+                Duration.ofMillis(1)
+        );
+
+        try {
+            ZmuxException error = assertInstanceOf(
+                    ZmuxException.class,
+                    assertThrows(IOException.class, coordinator::establish),
+                    "same-role conflict should fail before a stalled local preface write masks it"
+            );
+
+            assertEquals(ErrorCode.ROLE_CONFLICT.code(), error.code(), "same-role conflict code mismatch");
+            assertEquals("resolve roles", error.operation(), "same-role conflict operation mismatch");
+            assertTrue(owner.transportClosed.get(), "establishment failure must close the transport");
+            assertFalse(owner.readyMarked.get(), "failed establishment must not mark the session ready");
+            assertFalse(owner.readerStarted.get(), "failed establishment must not start the reader loop");
+            assertFalse(owner.writerStarted.get(), "failed establishment must not start the writer loop");
+        } finally {
+            releaseWrites.countDown();
+        }
+    }
+
+    @Test
     void stalledPeerPrefaceReadFailsSuccessfulEstablishmentAttempt() throws Exception {
         AtomicReference<Instant> readDeadline = new AtomicReference<>();
         TestOwner owner = new TestOwner(

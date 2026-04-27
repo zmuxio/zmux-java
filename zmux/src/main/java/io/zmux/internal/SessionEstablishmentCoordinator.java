@@ -151,6 +151,7 @@ final class SessionEstablishmentCoordinator {
                         clearReadDeadlineError
                 );
             }
+            Negotiated negotiated = FrameCodec.negotiate(this.owner.localPreface(), remotePreface);
             this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.successWriteWait, writeDeadline, true);
             IOException clearDeadlineError = writeDeadline.clear();
             if (clearDeadlineError != null) {
@@ -160,7 +161,6 @@ final class SessionEstablishmentCoordinator {
                         clearDeadlineError
                 );
             }
-            Negotiated negotiated = FrameCodec.negotiate(this.owner.localPreface(), remotePreface);
             synchronized (this.owner.lock()) {
                 this.owner.markReadyLocked(remotePreface, negotiated, System.nanoTime());
                 this.owner.notifyLockWaiters();
