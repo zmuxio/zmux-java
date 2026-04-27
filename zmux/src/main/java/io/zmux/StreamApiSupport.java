@@ -24,6 +24,11 @@ final class StreamApiSupport {
         return TRANSIENT_BUFFER.get();
     }
 
+    static int readAllBytesChunkSize(int maxBytes, int currentSize) {
+        int remaining = maxBytes - currentSize;
+        return transientBufferSize(Math.max(remaining, 1));
+    }
+
     static int checkedWritevTotalLength(byte[][] parts) throws IOException {
         return StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
     }

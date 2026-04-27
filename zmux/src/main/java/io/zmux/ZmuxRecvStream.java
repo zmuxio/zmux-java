@@ -30,9 +30,10 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
             throw new IllegalArgumentException("maxBytes must be >= 0");
         }
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
-        byte[] buffer = new byte[Math.min(Math.max(maxBytes, 1), 8192)];
+        byte[] buffer = StreamApiSupport.transientBuffer();
         while (true) {
-            int read = StreamIoSupport.validateReadProgress(read(buffer, 0, buffer.length), buffer.length);
+            int chunkSize = StreamApiSupport.readAllBytesChunkSize(maxBytes, out.size());
+            int read = StreamIoSupport.validateReadProgress(read(buffer, 0, chunkSize), chunkSize);
             if (read < 0) {
                 return out.toByteArray();
             }
