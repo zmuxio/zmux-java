@@ -13,14 +13,14 @@ final class StreamCloseCoordinator {
     }
 
     private static boolean isBenignCloseError(IOException error) {
-        return error instanceof StreamNotWritableException
-                || error instanceof StreamNotReadableException
-                || error instanceof WriteClosedException
-                || error instanceof ReadClosedException;
+        return ZmuxErrors.streamNotWritable(error)
+                || ZmuxErrors.streamNotReadable(error)
+                || ZmuxErrors.writeClosed(error)
+                || ZmuxErrors.readClosed(error);
     }
 
     private static boolean isBenignCancelAfterTimeoutError(IOException error) {
-        return isBenignCloseError(error) || error instanceof SessionClosedException;
+        return isBenignCloseError(error) || ZmuxErrors.sessionClosed(error);
     }
 
     void close() throws IOException {
@@ -51,7 +51,7 @@ final class StreamCloseCoordinator {
         } catch (IOException e) {
             if (!isBenignCloseError(e)) {
                 error = e;
-                if (e instanceof WriteTimeoutException) {
+                if (ZmuxErrors.timeout(e)) {
                     try {
                         this.owner.cancelWrite(ErrorCode.CANCELLED.code());
                     } catch (IOException cancelError) {

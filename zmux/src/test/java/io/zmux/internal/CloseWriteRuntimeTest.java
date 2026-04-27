@@ -2,15 +2,48 @@ package io.zmux.internal;
 
 import io.zmux.OpenMetadataTooLargeException;
 import io.zmux.Protocol;
+import io.zmux.ReadClosedException;
 import io.zmux.Settings;
+import io.zmux.SessionClosedException;
+import io.zmux.StreamNotReadableException;
+import io.zmux.WriteClosedException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class CloseWriteRuntimeTest {
+    @Test
+    void closeCoordinatorBenignErrorClassificationUnwrapsNestedErrors() throws Exception {
+        IOException wrappedWriteClosed = new IOException("wrapped", new WriteClosedException());
+        assertTrue(
+                streamCloseCoordinatorBoolean("isBenignCloseError", wrappedWriteClosed),
+                "Close should treat wrapped write-closed errors as benign like Go errors.Is"
+        );
+
+        IOException suppressedReadClosed = new IOException("suppressed");
+        suppressedReadClosed.addSuppressed(new ReadClosedException());
+        assertTrue(
+                streamCloseCoordinatorBoolean("isBenignCloseError", suppressedReadClosed),
+                "Close should treat suppressed read-closed errors as benign like Go errors.Is"
+        );
+
+        IOException wrappedSessionClosed = new IOException("wrapped", new SessionClosedException());
+        assertTrue(
+                streamCloseCoordinatorBoolean("isBenignCancelAfterTimeoutError", wrappedSessionClosed),
+                "Close timeout fallback should ignore wrapped session-closed cancel results"
+        );
+
+        IOException wrappedNotReadable = new IOException("wrapped", new StreamNotReadableException());
+        assertTrue(
+                streamCloseCoordinatorBoolean("isBenignCancelAfterTimeoutError", wrappedNotReadable),
+                "Close timeout fallback should also reuse the wrapped benign close classification"
+        );
+    }
+
     @Test
     void closeWriteKeepsLocalWriteOpenWhenOpeningMetadataValidationFails() throws Exception {
         Settings peerSettings = Settings.defaults().toBuilder()
@@ -81,5 +114,11 @@ final class CloseWriteRuntimeTest {
             assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").isEmpty(), "write failure must not queue urgent frames");
             assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue").isEmpty(), "write failure must not queue DATA frames");
         }
+    }
+
+    private static boolean streamCloseCoordinatorBoolean(String methodName, IOException error) throws Exception {
+        Method method = StreamCloseCoordinator.class.getDeclaredMethod(methodName, IOException.class);
+        method.setAccessible(true);
+        return (Boolean) method.invoke(null, error);
     }
 }
