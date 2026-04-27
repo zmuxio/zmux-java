@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 final class GoQuicInteropSmokeTest {
-    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration PROCESS_TIMEOUT = processTimeout();
     private static final String APPLICATION_PROTOCOL = "zmux-java-go-quic-interop";
     private static final long MAX_DATA = 1 << 20;
     private static final long QUIC_IDLE_TIMEOUT_SECONDS = 30L;
@@ -63,6 +63,51 @@ final class GoQuicInteropSmokeTest {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private static Duration processTimeout() {
+        long seconds = positiveLong(System.getProperty("zmux.interop.timeoutSeconds"));
+        if (seconds <= 0L) {
+            seconds = positiveLong(System.getenv("ZMUX_INTEROP_TIMEOUT_SECONDS"));
+        }
+        return Duration.ofSeconds(seconds <= 0L ? 120L : seconds);
+    }
+
+    private static long positiveLong(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return 0L;
+        }
+        try {
+            long parsed = Long.parseLong(value.trim());
+            return parsed > 0L ? parsed : 0L;
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    private static String helperExecutableName(String baseName) {
+        return isWindows() ? baseName + ".exe" : baseName;
+    }
+
+    private static Path buildGoHelper(Path work, String baseName) throws Exception {
+        Path executable = work.resolve(helperExecutableName(baseName));
+        Process process = new ProcessBuilder("go", "build", "-mod=mod", "-o", executable.toString(), ".")
+                .directory(work.toFile())
+                .redirectErrorStream(true)
+                .start();
+        try (BufferedReader output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            assertTrue(process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS),
+                    "go helper build did not exit");
+            String rest = output.lines().collect(Collectors.joining("\n"));
+            assertEquals(0, process.exitValue(), rest);
+        } finally {
+            terminateProcess(process);
+        }
+        return executable;
     }
 
     private static Path requireGoRoot() {
@@ -85,7 +130,7 @@ final class GoQuicInteropSmokeTest {
                         + "\n"
                         + "require (\n"
                         + "    github.com/quic-go/quic-go v0.59.0\n"
-                        + "    github.com/zmuxio/zmux-go v1.0.8\n"
+                        + "    github.com/zmuxio/zmux-go v0.0.0\n"
                         + "    github.com/zmuxio/zmux-go/adapter/quicmux v0.0.0\n"
                         + ")\n"
                         + "\n"
@@ -480,8 +525,9 @@ final class GoQuicInteropSmokeTest {
         Path work = Files.createTempDirectory("zmux-java-go-quic-server-");
         Files.write(work.resolve("go.mod"), goQuicMod(goRoot).getBytes(StandardCharsets.UTF_8));
         Files.write(work.resolve("main.go"), goQuicServerMain().getBytes(StandardCharsets.UTF_8));
+        Path helper = buildGoHelper(work, "go-quic-server");
 
-        Process process = new ProcessBuilder("go", "run", "-mod=mod", ".")
+        Process process = new ProcessBuilder(helper.toString())
                 .directory(work.toFile())
                 .redirectErrorStream(true)
                 .start();
@@ -504,6 +550,7 @@ final class GoQuicInteropSmokeTest {
         Path work = Files.createTempDirectory("zmux-go-java-quic-client-");
         Files.write(work.resolve("go.mod"), goQuicMod(goRoot).getBytes(StandardCharsets.UTF_8));
         Files.write(work.resolve("main.go"), goQuicClientMain().getBytes(StandardCharsets.UTF_8));
+        Path helper = buildGoHelper(work, "go-quic-client");
 
         GeneratedCertificate certificate = newCertificate();
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
@@ -539,7 +586,7 @@ final class GoQuicInteropSmokeTest {
             InetSocketAddress localAddress = (InetSocketAddress) serverDatagram.localAddress();
             String address = localAddress.getAddress().getHostAddress() + ":" + localAddress.getPort();
 
-            Process process = new ProcessBuilder("go", "run", "-mod=mod", ".", address)
+            Process process = new ProcessBuilder(helper.toString(), address)
                     .directory(work.toFile())
                     .redirectErrorStream(true)
                     .start();

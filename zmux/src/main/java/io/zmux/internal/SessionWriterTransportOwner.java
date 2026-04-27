@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.Limits;
 
 import java.io.OutputStream;
+import java.nio.channels.GatheringByteChannel;
 import java.util.Objects;
 
 final class SessionWriterTransportOwner implements SessionWriterTransport.Owner {
@@ -15,6 +16,11 @@ final class SessionWriterTransportOwner implements SessionWriterTransport.Owner 
     @Override
     public OutputStream output() {
         return this.owner.outputInternal();
+    }
+
+    @Override
+    public GatheringByteChannel gatheringOutput() {
+        return this.owner.gatheringOutputInternal();
     }
 
     @Override

@@ -5,6 +5,7 @@ import io.zmux.*;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.nio.channels.GatheringByteChannel;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -4886,6 +4887,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     OutputStream outputInternal() {
         return this.output;
+    }
+
+    GatheringByteChannel gatheringOutputInternal() {
+        return this.connection.gatheringOutput();
     }
 
     Runnable readerLoopTaskInternal() {

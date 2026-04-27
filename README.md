@@ -322,6 +322,22 @@ Netty QUIC adapter APIs:
 - Public codec helpers for integration tests, proxies, diagnostics, and
   conformance tools.
 
+## Semantics Notes
+
+- A successful `write(...)`, `writeFinal(...)`, or `writevFinal(...)` means the
+  bytes entered the local zmux send path; it is not a peer application
+  acknowledgement.
+- `closeWrite()` gracefully finishes only the local send half with `DATA|FIN`.
+- `closeRead()` stops local interest in inbound bytes and sends
+  `STOP_SENDING(CANCELLED)` by default.
+- `close()` is the full stream convenience helper: it closes ordinary local use
+  of both directions under the repository-default policy.
+- `closeWithError(code, reason)` is the explicit whole-stream abort helper and
+  carries the numeric application error plus optional diagnostic text.
+- `openInfo()` is peer-visible open-time metadata only when the negotiated
+  `OPEN_METADATA` path is actually used; otherwise requests that require
+  peer-visible open metadata fail instead of silently discarding it.
+
 ## Usage
 
 The examples assume the surrounding method declares `throws Exception`.
@@ -336,13 +352,11 @@ import io.zmux.ZmuxStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-try(Socket socket = new Socket("127.0.0.1", 9000);
-ZmuxSession session = Zmux.clientSession(socket);
-ZmuxStream stream = session.openStream()){
-        stream.
-
-writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+try (Socket socket = new Socket("127.0.0.1", 9000);
+     ZmuxSession session = Zmux.clientSession(socket);
+     ZmuxStream stream = session.openStream()) {
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+    String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -357,17 +371,13 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-try(ServerSocket listener = new ServerSocket(9000);
-Socket socket = listener.accept();
-ZmuxSession session = Zmux.serverSession(socket);
-ZmuxStream stream = session.acceptStream()){
-String request = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-    stream.
-
-writeFinal(("echo:"+request).
-
-getBytes(StandardCharsets.UTF_8));
-        }
+try (ServerSocket listener = new ServerSocket(9000);
+     Socket socket = listener.accept();
+     ZmuxSession session = Zmux.serverSession(socket);
+     ZmuxStream stream = session.acceptStream()) {
+    String request = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+    stream.writeFinal(("echo:" + request).getBytes(StandardCharsets.UTF_8));
+}
 ```
 
 ### Unidirectional Streams
@@ -378,15 +388,12 @@ import io.zmux.ZmuxSendStream;
 
 import java.nio.charset.StandardCharsets;
 
-try(ZmuxSendStream send = session.openUniStream()){
-        send.
+try (ZmuxSendStream send = session.openUniStream()) {
+    send.writeFinal("event".getBytes(StandardCharsets.UTF_8));
+}
 
-writeFinal("event".getBytes(StandardCharsets.UTF_8));
-        }
-
-        try(
-ZmuxRecvStream recv = session.acceptUniStream()){
-String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
+try (ZmuxRecvStream recv = session.acceptUniStream()) {
+    String event = new String(recv.readAllBytes(), StandardCharsets.UTF_8);
 }
 ```
 
@@ -501,17 +508,12 @@ OpenOptions options = OpenOptions.builder()
         .openInfo("ssh")
         .build();
 
-try(
-Socket socket = new Socket("127.0.0.1", 9000);
-ZmuxSession session = Zmux.clientSession(socket, config);
-ZmuxStream stream = session.openStream(options)){
-        stream.
-
-updateMetadata(MetadataUpdate.of(3L, 2L));
-        stream.
-
-writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-        }
+try (Socket socket = new Socket("127.0.0.1", 9000);
+     ZmuxSession session = Zmux.clientSession(socket, config);
+     ZmuxStream stream = session.openStream(options)) {
+    stream.updateMetadata(MetadataUpdate.of(3L, 2L));
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+}
 ```
 
 The peer can read `stream.openInfo()` and `stream.metadata()` after accepting
@@ -547,18 +549,10 @@ import io.zmux.ZmuxStream;
 import java.time.Duration;
 
 ZmuxStream stream = session.openStreamWithTimeout(Duration.ofSeconds(2));
-stream.
-
-setReadTimeout(Duration.ofSeconds(5));
-        stream.
-
-setWriteTimeout(Duration.ofSeconds(5));
-        stream.
-
-clearReadDeadline();
-stream.
-
-clearWriteDeadline();
+stream.setReadTimeout(Duration.ofSeconds(5));
+stream.setWriteTimeout(Duration.ofSeconds(5));
+stream.clearReadDeadline();
+stream.clearWriteDeadline();
 ```
 
 ### Closing
@@ -567,24 +561,12 @@ clearWriteDeadline();
 import java.time.Duration;
 
 stream.closeWrite();                  // graceful write-half close
-stream.
-
-closeRead();                   // local read cancellation
-stream.
-
-close();                       // local helper that closes both sides
-stream.
-
-closeWithError(0x100L,"bye"); // stream application error
-session.
-
-close();                      // graceful session close
-session.
-
-closeWithError(0x100L,"bye");
-session.
-
-awaitTerminationOrThrow(Duration.ofSeconds(5));
+stream.closeRead();                   // local read cancellation
+stream.close();                       // local helper that closes both sides
+stream.closeWithError(0x100L, "bye"); // stream application error
+session.close();                      // graceful session close
+session.closeWithError(0x100L, "bye");
+session.awaitTerminationOrThrow(Duration.ofSeconds(5));
 ```
 
 ### Errors
@@ -594,30 +576,23 @@ import io.zmux.ApplicationError;
 import io.zmux.ErrorCode;
 import io.zmux.ZmuxErrors;
 
-try{
-        stream.write(payload);
-}catch(
-IOException error){
-        if(ZmuxErrors.
-
-sessionClosed(error)){
+try {
+    stream.write(payload);
+} catch (IOException error) {
+    if (ZmuxErrors.sessionClosed(error)) {
         // session is already gone
-        }
-
-        if(ZmuxErrors.
-
-writeClosed(error)){
-        // write side is no longer available
-        }
-
-ApplicationError app = ZmuxErrors.applicationError(error);
-    if(app !=null&&app.
-
-isCode(ErrorCode.PROTOCOL)){
-long wireCode = app.applicationCode();
-String reason = app.reason();
     }
-            }
+
+    if (ZmuxErrors.writeClosed(error)) {
+        // write side is no longer available
+    }
+
+    ApplicationError app = ZmuxErrors.applicationError(error);
+    if (app != null && app.isCode(ErrorCode.PROTOCOL)) {
+        long wireCode = app.applicationCode();
+        String reason = app.reason();
+    }
+}
 ```
 
 ### Netty QUIC Adapter
@@ -639,13 +614,10 @@ NettyQuicSessionOptions options = NettyQuicSessionOptions.defaults()
 
 // Call the blocking zmux APIs from an application / worker thread, not from
 // the Netty event loop.
-try(
-ZmuxSession session = NettyQuic.wrapSessionWithOptions(channel, options);
-ZmuxStream stream = session.openStream()){
-        stream.
-
-writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-        }
+try (ZmuxSession session = NettyQuic.wrapSessionWithOptions(channel, options);
+     ZmuxStream stream = session.openStream()) {
+    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+}
 ```
 
 The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
@@ -653,6 +625,9 @@ The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
 its concrete stream objects also implement the native stream state-query
 interfaces. Use `zmux-netty-quic` only when the underlying transport is
 already a Netty `QuicChannel`. The adapter methods are intentionally blocking,
-so do not call them from the Netty event loop. Accepted prelude concurrency
-uses the shared adapter default when configured as `0`, accepts positive
-per-session overrides, and clamps oversized values to the adapter safety cap.
+so do not call them from the Netty event loop. It preserves numeric application
+error codes where Netty QUIC exposes them, but it does not try to model
+datagrams, packet acknowledgements, or transport RTT/loss state. Accepted
+prelude concurrency uses the shared adapter default when configured as `0`,
+accepts positive per-session overrides, and clamps oversized values to the
+adapter safety cap.
