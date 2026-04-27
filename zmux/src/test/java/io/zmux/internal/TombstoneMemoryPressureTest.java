@@ -5,6 +5,7 @@ import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Deque;
@@ -91,6 +92,33 @@ final class TombstoneMemoryPressureTest {
                 streamId,
                 tombstone
         );
+    }
+
+    @Test
+    void reapingTombstoneWakesSessionMemoryWaitersWhenThresholdCrosses() throws Exception {
+        RecordingTerminalOwner owner = new RecordingTerminalOwner();
+        SessionTerminalBookkeeping bookkeeping = new SessionTerminalBookkeeping(
+                owner,
+                64L,
+                java.util.concurrent.TimeUnit.SECONDS.toNanos(1L)
+        );
+
+        bookkeeping.putTombstoneLocked(
+                4L,
+                SessionTerminalBookkeeping.Tombstone.hidden(9L, "", System.nanoTime(), LateDataCause.ABORT)
+        );
+        owner.wakeNeeded = true;
+
+        Object reaped = SessionRuntimeTestSupport.invokePrivate(
+                bookkeeping,
+                "reapTombstoneLocked",
+                new Class<?>[]{long.class},
+                4L
+        );
+
+        assertEquals(Boolean.TRUE, reaped, "hidden tombstone should be reaped");
+        assertEquals(1, owner.notifyCalls, "tombstone memory release should wake stream writers");
+        assertEquals(owner.trackedMemory, owner.previousTracked, "wake decision should receive pre-release memory");
     }
 
     @Test
@@ -308,6 +336,77 @@ final class TombstoneMemoryPressureTest {
                     runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
                     "range-mode marker update should count the split range entries without stale map duplication"
             );
+        }
+    }
+
+    private static final class RecordingTerminalOwner implements SessionTerminalBookkeeping.Owner {
+        private final long trackedMemory = 8192L;
+        private boolean wakeNeeded;
+        private int notifyCalls;
+        private long previousTracked = -1L;
+
+        @Override
+        public int tombstoneLimitLocked() {
+            return 16;
+        }
+
+        @Override
+        public int markerOnlyUsedStreamHardCapLocked() {
+            return 16;
+        }
+
+        @Override
+        public int hiddenControlStateHardCapLocked() {
+            return 16;
+        }
+
+        @Override
+        public long trackedSessionMemoryLocked() {
+            return this.trackedMemory;
+        }
+
+        @Override
+        public long sessionMemoryHardCapLocked() {
+            return 1 << 20;
+        }
+
+        @Override
+        public long retainedStateUnitLocked() {
+            return 4096L;
+        }
+
+        @Override
+        public boolean sessionMemoryWakeNeededLocked(long previousTracked) {
+            this.previousTracked = previousTracked;
+            return this.wakeNeeded;
+        }
+
+        @Override
+        public void notifyStreamWriteWaitersLocked() {
+            this.notifyCalls++;
+        }
+
+        @Override
+        public boolean sessionTerminalLocked() {
+            return false;
+        }
+
+        @Override
+        public IOException sessionInternalError(String operation, String message) {
+            return new IOException(message);
+        }
+
+        @Override
+        public IOException sessionMemoryCapErrorLocked(String operation) {
+            return null;
+        }
+
+        @Override
+        public void failSession(IOException error) {
+        }
+
+        @Override
+        public void failSessionAsync(IOException error) {
         }
     }
 }

@@ -41,6 +41,16 @@ final class SessionTerminalBookkeepingOwner implements SessionTerminalBookkeepin
     }
 
     @Override
+    public boolean sessionMemoryWakeNeededLocked(long previousTracked) {
+        return this.owner.sessionMemoryWakeNeededLocked(previousTracked);
+    }
+
+    @Override
+    public void notifyStreamWriteWaitersLocked() {
+        this.owner.notifyStreamWriteWaitersLocked();
+    }
+
+    @Override
     public boolean sessionTerminalLocked() {
         return this.owner.stateInternal().terminal();
     }

@@ -386,6 +386,7 @@ final class SessionTerminalBookkeeping {
     }
 
     private boolean reapTombstoneLocked(long streamId) {
+        long previousTracked = this.owner.trackedSessionMemoryLocked();
         Tombstone removed = this.tombstones.remove(streamId);
         if (removed == null) {
             boolean orderChanged = this.tombstoneOrder.removeFirstOccurrence(streamId);
@@ -397,7 +398,14 @@ final class SessionTerminalBookkeeping {
         boolean hiddenChanged = this.hiddenTombstones.removeFirstOccurrence(streamId);
         this.retainMarkerOnlyUsedStreamLocked(streamId, removed);
         this.releaseEmptyQueueStorageLocked(orderChanged, hiddenChanged);
+        this.notifyMemoryReleasedLocked(previousTracked);
         return true;
+    }
+
+    private void notifyMemoryReleasedLocked(long previousTracked) {
+        if (this.owner.sessionMemoryWakeNeededLocked(previousTracked)) {
+            this.owner.notifyStreamWriteWaitersLocked();
+        }
     }
 
     void reapExpiredHiddenControlStateLocked(long nowNanos) {
@@ -467,6 +475,10 @@ final class SessionTerminalBookkeeping {
         long sessionMemoryHardCapLocked();
 
         long retainedStateUnitLocked();
+
+        boolean sessionMemoryWakeNeededLocked(long previousTracked);
+
+        void notifyStreamWriteWaitersLocked();
 
         boolean sessionTerminalLocked();
 
