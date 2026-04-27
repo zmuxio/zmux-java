@@ -791,6 +791,34 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void firstOrdinaryWriteCoalescesOpenPreludeAndPayloadIntoOneFlush() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            byte[] payload = utf8("coalesced-first-write");
+            long flushBefore = pair.client.stats().flush().count();
+            int expectedFlushBytes = NettyQuicPrelude.encode(OpenOptions.empty()).length + payload.length;
+            CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+
+            ZmuxStream clientStream = pair.client.openStream();
+            clientStream.write(payload);
+
+            ZmuxStream accepted = await(acceptedFuture);
+            assertArrayEquals(payload, readExactly(accepted, payload.length));
+            SessionStats clientStats = awaitStats(pair.client, Duration.ofSeconds(5), snapshot ->
+                    snapshot.flush().count() >= flushBefore + 1L
+                            && snapshot.flush().lastBytes() == expectedFlushBytes
+            );
+            assertEquals(
+                    flushBefore + 1L,
+                    clientStats.flush().count(),
+                    "first ordinary write should combine adapter prelude and payload into one transport flush"
+            );
+
+            accepted.close();
+            clientStream.close();
+        }
+    }
+
+    @Test
     void closeWriteAdvancesControlProgressAfterPreludeWasAlreadySent() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));

@@ -350,13 +350,6 @@ final class NettyQuicStreamState {
         NettyQuicSupport.ensureOffEventLoop(channel, "write");
         writeIoLock.lock();
         try {
-            ensureOpenPrelude(true);
-            lock.lock();
-            try {
-                ensureWritableLocked();
-            } finally {
-                lock.unlock();
-            }
             writeBytes(src, offset, length);
         } finally {
             writeIoLock.unlock();
@@ -883,7 +876,39 @@ final class NettyQuicStreamState {
     }
 
     private void writeBytes(byte[] src, int offset, int length) throws IOException {
-        writeInternal(src, offset, length);
+        byte[] pendingPrelude = claimOpenPrelude();
+        if (pendingPrelude == null) {
+            ensureWritableForDataWrite();
+            writeInternal(src, offset, length);
+            return;
+        }
+        if (pendingPrelude.length > Integer.MAX_VALUE - length) {
+            abortOpenPreludeSubmission();
+            throw new ZmuxException(
+                    ErrorCode.FRAME_SIZE.code(),
+                    "write",
+                    "write plus stream prelude exceeds maximum supported size",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE,
+                    ZmuxTerminationKind.UNKNOWN
+            );
+        }
+
+        ByteBuf buffer = null;
+        try {
+            int bufferLength = pendingPrelude.length + length;
+            buffer = channel.alloc().ioBuffer(bufferLength, bufferLength);
+            if (pendingPrelude.length > 0) {
+                buffer.writeBytes(pendingPrelude);
+            }
+            buffer.writeBytes(src, offset, length);
+        } catch (RuntimeException failure) {
+            releaseBuffer(buffer);
+            abortOpenPreludeSubmission();
+            throw failure;
+        }
+        submitBufferedWrite(buffer, true, pendingPrelude.length + length);
     }
 
     private void ensureWritableForDataWrite() throws IOException {
