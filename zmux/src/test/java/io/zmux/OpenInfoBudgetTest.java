@@ -133,7 +133,7 @@ final class OpenInfoBudgetTest {
             assertEquals(ZmuxErrorScope.STREAM, error.scope(), "open_info capability failure scope mismatch");
             assertEquals(ZmuxErrorSource.LOCAL, error.source(), "open_info capability failure source mismatch");
             assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "open_info capability failure direction mismatch");
-            assertEquals("open_info requires negotiated open_metadata", error.getMessage(), "open_info capability error mismatch");
+            assertEquals(OpenInfoUnavailableException.MESSAGE, error.getMessage(), "open_info capability error mismatch");
             assertEquals(0L, peer.session().stats().retainedOpenInfoBytes(), "failed local open must not retain open_info bytes");
             assertNull(peer.pollFrame(Duration.ofMillis(100)), "failed local open must not emit frames");
         }
@@ -160,7 +160,7 @@ final class OpenInfoBudgetTest {
             assertEquals(ZmuxErrorScope.STREAM, error.scope(), "oversized opening metadata scope mismatch");
             assertEquals(ZmuxErrorSource.LOCAL, error.source(), "oversized opening metadata source mismatch");
             assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "oversized opening metadata direction mismatch");
-            assertEquals("opening metadata exceeds peer max_frame_payload", error.getMessage(), "oversized opening metadata error mismatch");
+            assertEquals(OpenMetadataTooLargeException.MESSAGE, error.getMessage(), "oversized opening metadata error mismatch");
             assertEquals(0L, peer.session().stats().retainedOpenInfoBytes(), "failed oversized open must not retain open_info bytes");
             assertNull(peer.pollFrame(Duration.ofMillis(100)), "failed oversized open must not emit frames");
         }

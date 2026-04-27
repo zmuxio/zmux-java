@@ -34,7 +34,7 @@ final class CloseReadRuntimeTest {
                 "CloseRead open-metadata validation failure should surface a protocol-coded error"
         );
         assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "CloseRead open-metadata failure code mismatch");
-        assertEquals("opening metadata exceeds peer max_frame_payload", error.getMessage(), "CloseRead open-metadata failure mismatch");
+        assertEquals(OpenMetadataTooLargeException.MESSAGE, error.getMessage(), "CloseRead open-metadata failure mismatch");
 
         synchronized (runtime.lock()) {
             assertTrue(stream.readClosed(), "CloseRead should still close the local read side after opener validation failure");

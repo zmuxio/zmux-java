@@ -174,7 +174,7 @@ final class PriorityUpdateSemanticsTest {
             assertEquals(ZmuxErrorScope.STREAM, error.scope(), "pre-open metadata overflow scope mismatch");
             assertEquals(ZmuxErrorSource.LOCAL, error.source(), "pre-open metadata overflow source mismatch");
             assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "pre-open metadata overflow direction mismatch");
-            assertEquals("opening metadata exceeds peer max_frame_payload", error.getMessage(), "pre-open metadata overflow message mismatch");
+            assertEquals(OpenMetadataTooLargeException.MESSAGE, error.getMessage(), "pre-open metadata overflow message mismatch");
             assertEquals(0L, stream.metadata().priority(), "failed pre-open metadata update must not mutate priority");
             assertNull(stream.metadata().group(), "failed pre-open metadata update must not mutate group");
             assertArrayEquals(openInfo, stream.metadata().openInfo(), "failed pre-open metadata update must preserve existing open_info");

@@ -260,7 +260,7 @@ final class PriorityUpdateQueueTest {
             assertEquals(ZmuxErrorScope.STREAM, error.scope(), "priority-update overflow scope mismatch");
             assertEquals(ZmuxErrorSource.LOCAL, error.source(), "priority-update overflow source mismatch");
             assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "priority-update overflow direction mismatch");
-            assertEquals("priority update exceeds peer max_extension_payload_bytes", error.getMessage(), "priority-update overflow message mismatch");
+            assertEquals(PriorityUpdateTooLargeException.MESSAGE, error.getMessage(), "priority-update overflow message mismatch");
             assertEquals(0L, stream.metadata().priority(), "overflowing priority update must not mutate local metadata");
             assertFalse(stream.hasPendingPriorityUpdateLocked(), "overflowing priority update must not stay staged");
             assertFalse(stream.priorityUpdateQueuedLocked(), "overflowing priority update must not occupy the advisory lane");

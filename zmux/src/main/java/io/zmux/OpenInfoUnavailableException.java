@@ -1,7 +1,7 @@
 package io.zmux;
 
 public final class OpenInfoUnavailableException extends ZmuxException {
-    public static final String MESSAGE = "open_info requires negotiated open_metadata";
+    public static final String MESSAGE = "zmux: open_info requires negotiated open_metadata";
 
     public OpenInfoUnavailableException() {
         this("build open metadata", ZmuxErrorScope.SESSION, ZmuxErrorSource.LOCAL, ZmuxErrorDirection.WRITE, null);

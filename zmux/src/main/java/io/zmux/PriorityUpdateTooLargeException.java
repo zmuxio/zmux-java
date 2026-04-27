@@ -1,7 +1,7 @@
 package io.zmux;
 
 public final class PriorityUpdateTooLargeException extends ZmuxException {
-    public static final String MESSAGE = "priority update exceeds peer max_extension_payload_bytes";
+    public static final String MESSAGE = "zmux: priority update exceeds peer max_extension_payload_bytes";
 
     public PriorityUpdateTooLargeException() {
         this("build priority update", ZmuxErrorScope.SESSION, ZmuxErrorSource.LOCAL, ZmuxErrorDirection.WRITE, null);
