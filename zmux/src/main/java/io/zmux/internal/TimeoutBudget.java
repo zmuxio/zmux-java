@@ -49,10 +49,7 @@ public final class TimeoutBudget {
         if (deadlineNanos == Long.MAX_VALUE) {
             return Long.MAX_VALUE;
         }
-        if (nowNanos < 0L && deadlineNanos > Long.MAX_VALUE + nowNanos) {
-            return Long.MAX_VALUE;
-        }
-        return deadlineNanos - nowNanos;
+        return saturatingSubtract(deadlineNanos, nowNanos);
     }
 
     public static long positiveRemainingNanosUntil(long deadlineNanos, long nowNanos) {
@@ -68,6 +65,14 @@ public final class TimeoutBudget {
             return left;
         }
         return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    private static long saturatingSubtract(long left, long right) {
+        long result = left - right;
+        if (((left ^ right) & (left ^ result)) >= 0L) {
+            return result;
+        }
+        return left < right ? Long.MIN_VALUE : Long.MAX_VALUE;
     }
 
     public boolean bounded() {

@@ -29,9 +29,12 @@ final class DeadlineBudgetTest {
     void monotonicDeadlineMathSaturatesOverflowingSubtraction() {
         assertEquals(Long.MAX_VALUE, TimeoutBudget.remainingNanosUntil(Long.MAX_VALUE, -1L));
         assertEquals(Long.MAX_VALUE, TimeoutBudget.remainingNanosUntil(Long.MAX_VALUE - 1L, -2L));
+        assertEquals(Long.MIN_VALUE, TimeoutBudget.remainingNanosUntil(Long.MIN_VALUE, 1L));
+        assertEquals(Long.MIN_VALUE, TimeoutBudget.remainingNanosUntil(Long.MIN_VALUE + 1L, 2L));
         assertEquals(5L, TimeoutBudget.remainingNanosUntil(-5L, -10L));
         assertEquals(5L, TimeoutBudget.positiveRemainingNanosUntil(-5L, -10L));
         assertEquals(-1L, TimeoutBudget.remainingNanosUntil(9L, 10L));
+        assertEquals(1L, TimeoutBudget.positiveRemainingNanosUntil(Long.MIN_VALUE, 1L));
         assertEquals(1L, TimeoutBudget.positiveRemainingNanosUntil(9L, 10L));
         assertEquals(0L, TimeoutBudget.positiveRemainingNanosUntil(0L, 10L));
     }
