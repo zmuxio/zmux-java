@@ -350,6 +350,36 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void writevFinalOnAdapterRejectsAggregateLengthOverflowBeforeWrite() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            ZmuxSendStream send = pair.client.openUniStream();
+            byte[] chunk = new byte[1 << 20];
+            byte[][] parts = new byte[2048][];
+            Arrays.fill(parts, chunk);
+
+            ZmuxException error = assertInstanceOf(
+                    ZmuxException.class,
+                    assertThrows(IOException.class, () -> send.writevFinal(parts))
+            );
+            assertEquals(ErrorCode.FRAME_SIZE.code(), error.code());
+            ZmuxErrorDetails details = ZmuxErrors.details(error);
+            assertNotNull(details);
+            assertEquals("writevFinal", details.operation());
+            assertEquals(ZmuxErrorScope.STREAM, details.scope());
+            assertEquals(ZmuxErrorSource.LOCAL, details.source());
+            assertEquals(ZmuxErrorDirection.WRITE, details.direction());
+
+            CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
+            assertEquals(2, send.writeFinal(utf8("ok")));
+
+            ZmuxRecvStream accepted = await(acceptedFuture);
+            assertArrayEquals(utf8("ok"), readAll(accepted));
+            accepted.close();
+            send.close();
+        }
+    }
+
+    @Test
     void zeroLengthWriteDoesNotSubmitAdapterPrelude() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             ZmuxStream clientStream = pair.client.openStream();

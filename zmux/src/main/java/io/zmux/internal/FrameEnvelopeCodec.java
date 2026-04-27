@@ -609,14 +609,16 @@ final class FrameEnvelopeCodec {
                         | readRequiredFrameByte(input);
                 break;
             case 8:
-                value = ((first & 0x3fL) << 56)
-                        | ((long) readRequiredFrameByte(input) << 48)
-                        | ((long) readRequiredFrameByte(input) << 40)
-                        | ((long) readRequiredFrameByte(input) << 32)
-                        | ((long) readRequiredFrameByte(input) << 24)
-                        | ((long) readRequiredFrameByte(input) << 16)
-                        | ((long) readRequiredFrameByte(input) << 8)
-                        | readRequiredFrameByte(input);
+                value = Varint62.decodeEightByteValue(
+                        first,
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input)
+                );
                 break;
             default:
                 throw new IllegalStateException("unsupported stream_id length " + length);
@@ -643,14 +645,16 @@ final class FrameEnvelopeCodec {
                         | input.readByte();
                 break;
             case 8:
-                value = ((first & 0x3fL) << 56)
-                        | ((long) input.readByte() << 48)
-                        | ((long) input.readByte() << 40)
-                        | ((long) input.readByte() << 32)
-                        | ((long) input.readByte() << 24)
-                        | ((long) input.readByte() << 16)
-                        | ((long) input.readByte() << 8)
-                        | input.readByte();
+                value = Varint62.decodeEightByteValue(
+                        first,
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte()
+                );
                 break;
             default:
                 throw new IllegalStateException("unsupported stream_id length " + length);

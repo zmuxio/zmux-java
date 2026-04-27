@@ -129,14 +129,16 @@ public final class Varint62 {
                         | (source[offset + 3] & 0xffL);
                 break;
             case 8:
-                value = ((first & 0x3fL) << 56)
-                        | ((source[offset + 1] & 0xffL) << 48)
-                        | ((source[offset + 2] & 0xffL) << 40)
-                        | ((source[offset + 3] & 0xffL) << 32)
-                        | ((source[offset + 4] & 0xffL) << 24)
-                        | ((source[offset + 5] & 0xffL) << 16)
-                        | ((source[offset + 6] & 0xffL) << 8)
-                        | (source[offset + 7] & 0xffL);
+                value = decodeEightByteValue(
+                        first,
+                        source[offset + 1],
+                        source[offset + 2],
+                        source[offset + 3],
+                        source[offset + 4],
+                        source[offset + 5],
+                        source[offset + 6],
+                        source[offset + 7]
+                );
                 break;
             default:
                 throw error("parse varint62", "truncated varint62", null);
@@ -169,14 +171,16 @@ public final class Varint62 {
                         | readRequiredByte(input);
                 break;
             case 8:
-                value = ((first & 0x3fL) << 56)
-                        | ((long) readRequiredByte(input) << 48)
-                        | ((long) readRequiredByte(input) << 40)
-                        | ((long) readRequiredByte(input) << 32)
-                        | ((long) readRequiredByte(input) << 24)
-                        | ((long) readRequiredByte(input) << 16)
-                        | ((long) readRequiredByte(input) << 8)
-                        | readRequiredByte(input);
+                value = decodeEightByteValue(
+                        first,
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input)
+                );
                 break;
             default:
                 throw error("read varint62", "truncated varint62", null);
@@ -206,14 +210,16 @@ public final class Varint62 {
                         | input.readByte();
                 break;
             case 8:
-                value = ((first & 0x3fL) << 56)
-                        | ((long) input.readByte() << 48)
-                        | ((long) input.readByte() << 40)
-                        | ((long) input.readByte() << 32)
-                        | ((long) input.readByte() << 24)
-                        | ((long) input.readByte() << 16)
-                        | ((long) input.readByte() << 8)
-                        | input.readByte();
+                value = decodeEightByteValue(
+                        first,
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte(),
+                        input.readByte()
+                );
                 break;
             default:
                 throw error("read varint62", "truncated varint62", null);
@@ -230,6 +236,17 @@ public final class Varint62 {
             throw error("read varint62", "truncated varint62", null);
         }
         return next & 0xff;
+    }
+
+    static long decodeEightByteValue(int first, int b1, int b2, int b3, int b4, int b5, int b6, int b7) {
+        return ((first & 0x3fL) << 56)
+                | ((b1 & 0xffL) << 48)
+                | ((b2 & 0xffL) << 40)
+                | ((b3 & 0xffL) << 32)
+                | ((b4 & 0xffL) << 24)
+                | ((b5 & 0xffL) << 16)
+                | ((b6 & 0xffL) << 8)
+                | (b7 & 0xffL);
     }
 
     private static ZmuxException error(String operation, String message, Throwable cause) {

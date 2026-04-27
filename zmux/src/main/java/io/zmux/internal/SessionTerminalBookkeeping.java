@@ -54,7 +54,7 @@ final class SessionTerminalBookkeeping {
     }
 
     private static int saturatingAddInt(int left, int right) {
-        if (left >= Integer.MAX_VALUE || right >= Integer.MAX_VALUE || left > Integer.MAX_VALUE - right) {
+        if (left == Integer.MAX_VALUE || right == Integer.MAX_VALUE || left > Integer.MAX_VALUE - right) {
             return Integer.MAX_VALUE;
         }
         return left + right;
