@@ -153,6 +153,28 @@ class NettyQuicSupportTest {
     }
 
     @Test
+    void positiveIntegerPropertyClampsOversizedConfiguration() {
+        String name = "io.zmux.test.boundedIntegerProperty";
+        String previous = System.getProperty(name);
+        try {
+            System.setProperty(name, "999999");
+            assertEquals(64, NettyQuicSupport.positiveIntegerProperty(name, 8, 64));
+
+            System.setProperty(name, "-1");
+            assertEquals(8, NettyQuicSupport.positiveIntegerProperty(name, 8, 64));
+
+            System.setProperty(name, "not-an-integer");
+            assertEquals(8, NettyQuicSupport.positiveIntegerProperty(name, 8, 64));
+        } finally {
+            if (previous == null) {
+                System.clearProperty(name);
+            } else {
+                System.setProperty(name, previous);
+            }
+        }
+    }
+
+    @Test
     void elapsedHelpersPreserveNanoTimeWrapAndClampBackwardsClock() {
         assertEquals(21L, NettyQuicSupport.elapsedNanos(Long.MIN_VALUE + 10L, Long.MAX_VALUE - 10L));
         assertEquals(Long.MAX_VALUE, NettyQuicSupport.elapsedNanos(Long.MAX_VALUE, Long.MIN_VALUE + 1L));
