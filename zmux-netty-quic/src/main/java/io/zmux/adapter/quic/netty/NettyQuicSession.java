@@ -968,7 +968,7 @@ final class NettyQuicSession implements ZmuxSession {
             if (!acceptingNewStreams()) {
                 noteHiddenStreamReaped(state.discardUnreadInboundBytes());
                 state.onSessionClosed(sessionUnavailableError());
-                state.closeRaw();
+                state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
                 return;
             }
             drainPendingPreparationsLocked();
@@ -1045,7 +1045,7 @@ final class NettyQuicSession implements ZmuxSession {
                 noteHiddenStreamReaped(unreadBytes);
             }
             state.onSessionClosed(sessionUnavailableError());
-            state.closeRaw();
+            state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
             return;
         }
         noteHiddenStreamRefused(unreadBytes);
@@ -1062,7 +1062,7 @@ final class NettyQuicSession implements ZmuxSession {
         if (wasPreparing || wasActive) {
             noteHiddenStreamReaped(unreadBytes);
         }
-        state.closeRaw();
+        state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
     }
 
     boolean publishPreparedAcceptedStream(NettyQuicStreamState state) throws InterruptedException {
@@ -1070,7 +1070,7 @@ final class NettyQuicSession implements ZmuxSession {
             if (state != null) {
                 noteHiddenStreamReaped(state.discardUnreadInboundBytes());
                 state.onSessionClosed(sessionUnavailableError());
-                state.closeRaw();
+                state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
             }
             return false;
         }
@@ -1079,7 +1079,7 @@ final class NettyQuicSession implements ZmuxSession {
             activeStreams.remove(state);
             noteHiddenStreamReaped(state.discardUnreadInboundBytes());
             state.onSessionClosed(sessionUnavailableError());
-            state.closeRaw();
+            state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
             return false;
         }
         boolean published = state.bidirectional()
@@ -1091,7 +1091,7 @@ final class NettyQuicSession implements ZmuxSession {
         activeStreams.remove(state);
         noteHiddenStreamReaped(state.discardUnreadInboundBytes());
         state.onSessionClosed(sessionUnavailableError());
-        state.closeRaw();
+        state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
         return false;
     }
 
@@ -1236,7 +1236,7 @@ final class NettyQuicSession implements ZmuxSession {
                 NettyQuicStreamState state = pendingPrepare.removeFirst();
                 noteHiddenStreamReaped(state.discardUnreadInboundBytes());
                 state.onSessionClosed(closingError);
-                state.closeRaw();
+                state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
             }
             pendingPrepare = new ArrayDeque<>();
         } finally {
@@ -1248,7 +1248,7 @@ final class NettyQuicSession implements ZmuxSession {
                 noteHiddenStreamReaped(state.discardUnreadInboundBytes());
             }
             state.onSessionClosed(closingError);
-            state.closeRaw();
+            state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
         }
         ArrayList<NettyQuicStreamState> activeSnapshot = new ArrayList<>(activeStreams);
         activeStreams.clear();
@@ -1276,7 +1276,7 @@ final class NettyQuicSession implements ZmuxSession {
         activeStreams.remove(state);
         state.discardUnreadInboundBytes();
         state.onSessionClosed(sessionUnavailableError());
-        state.closeRaw();
+        state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
     }
 
     private void discardAcceptedUni(NettyQuicRecvStream stream) {
@@ -1287,7 +1287,7 @@ final class NettyQuicSession implements ZmuxSession {
         activeStreams.remove(state);
         state.discardUnreadInboundBytes();
         state.onSessionClosed(sessionUnavailableError());
-        state.closeRaw();
+        state.discardAcceptedPrelude(ErrorCode.CANCELLED.code());
     }
 
     private <T> T acceptQueuedStream(NettyQuicSupport.AcceptQueue<T> queue, Duration timeout)

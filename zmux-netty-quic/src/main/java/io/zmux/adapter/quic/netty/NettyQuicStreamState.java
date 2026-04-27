@@ -745,6 +745,14 @@ final class NettyQuicStreamState {
 
     void rejectAcceptedPrelude(long code) {
         session.noteAbortReason(code);
+        closeAcceptedPrelude(code);
+    }
+
+    void discardAcceptedPrelude(long code) {
+        closeAcceptedPrelude(code);
+    }
+
+    private void closeAcceptedPrelude(long code) {
         QuicStreamChannel current = channel;
         if (current == null) {
             return;
@@ -761,10 +769,14 @@ final class NettyQuicStreamState {
             } else {
                 dispatchControlFuture(current.shutdownInput(quicCode));
             }
-        } catch (IOException ignored) {
-            // The stream is already being rejected locally.
+        } catch (IOException | RuntimeException ignored) {
+            // The stream is already being discarded locally.
         } finally {
-            current.close();
+            try {
+                current.close();
+            } catch (RuntimeException ignored) {
+                // The parent event loop may already be shutting down.
+            }
         }
     }
 
