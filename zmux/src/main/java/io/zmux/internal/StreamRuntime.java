@@ -302,7 +302,9 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     @Override
     public byte[] openInfo() {
-        return metadataState.openInfo();
+        synchronized (session.lock()) {
+            return metadataState.openInfo();
+        }
     }
 
     @Override
@@ -372,9 +374,11 @@ final class StreamRuntime implements ZmuxNativeStream {
         if (address != null) {
             return address;
         }
-        return lifecycleState.idAssigned()
-                ? ZmuxSocketAddress.localStream(lifecycleState.streamIdInternal())
-                : ZmuxSocketAddress.localPending();
+        synchronized (session.lock()) {
+            return lifecycleState.idAssigned()
+                    ? ZmuxSocketAddress.localStream(lifecycleState.streamIdInternal())
+                    : ZmuxSocketAddress.localPending();
+        }
     }
 
     @Override
@@ -383,9 +387,11 @@ final class StreamRuntime implements ZmuxNativeStream {
         if (address != null) {
             return address;
         }
-        return lifecycleState.idAssigned()
-                ? ZmuxSocketAddress.remoteStream(lifecycleState.streamIdInternal())
-                : ZmuxSocketAddress.remotePending();
+        synchronized (session.lock()) {
+            return lifecycleState.idAssigned()
+                    ? ZmuxSocketAddress.remoteStream(lifecycleState.streamIdInternal())
+                    : ZmuxSocketAddress.remotePending();
+        }
     }
 
     @Override
