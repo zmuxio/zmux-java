@@ -1167,6 +1167,22 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void rawTimeoutAndInterruptedHelpersSearchCausesAndSuppressedErrors() {
+        IOException timeout = new IOException("outer", new SocketTimeoutException("deadline"));
+        IOException interrupted = new IOException("outer", new InterruptedIOException("paused"));
+        IOException aggregate = new IOException("aggregate");
+        aggregate.addSuppressed(new SocketTimeoutException("suppressed deadline"));
+        aggregate.addSuppressed(new InterruptedException("suppressed interrupt"));
+
+        assertTrue(ZmuxErrors.timeout(timeout));
+        assertFalse(ZmuxErrors.interrupted(timeout), "socket timeouts must not be classified as interrupted IO");
+        assertTrue(ZmuxErrors.interrupted(interrupted));
+        assertFalse(ZmuxErrors.timeout(interrupted));
+        assertTrue(ZmuxErrors.timeout(aggregate));
+        assertTrue(ZmuxErrors.interrupted(aggregate));
+    }
+
+    @Test
     void acceptInterruptionExposesStructuredInterruptedMetadata() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             AtomicReference<Throwable> error = new AtomicReference<>();

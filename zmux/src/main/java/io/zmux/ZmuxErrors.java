@@ -125,7 +125,8 @@ public final class ZmuxErrors {
 
     public static boolean timeout(Throwable error) {
         ZmuxErrorDetails details = details(error);
-        return details != null ? details.timeout() : error instanceof SocketTimeoutException;
+        return details != null && details.timeout()
+                || contains(error, ZmuxErrors::isRawTimeout, new IdentityHashMap<>(), 0);
     }
 
     public static boolean adapterUnsupported(Throwable error) {
@@ -193,9 +194,43 @@ public final class ZmuxErrors {
 
     public static boolean interrupted(Throwable error) {
         ZmuxErrorDetails details = details(error);
-        return details != null
-                ? details.interrupted()
-                : error instanceof InterruptedException
-                  || (error instanceof InterruptedIOException && !(error instanceof SocketTimeoutException));
+        return details != null && details.interrupted()
+                || contains(error, ZmuxErrors::isRawInterrupted, new IdentityHashMap<>(), 0);
+    }
+
+    private static boolean contains(Throwable error,
+                                    ThrowablePredicate predicate,
+                                    IdentityHashMap<Throwable, Boolean> seen,
+                                    int depth) {
+        if (error == null || depth > MAX_ERROR_UNWRAP_DEPTH || seen.put(error, Boolean.TRUE) != null) {
+            return false;
+        }
+        if (predicate.test(error)) {
+            return true;
+        }
+        if (contains(error.getCause(), predicate, seen, depth + 1)) {
+            return true;
+        }
+        Throwable[] suppressed = error.getSuppressed();
+        for (Throwable child : suppressed) {
+            if (contains(child, predicate, seen, depth + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isRawTimeout(Throwable error) {
+        return error instanceof SocketTimeoutException;
+    }
+
+    private static boolean isRawInterrupted(Throwable error) {
+        return error instanceof InterruptedException
+                || (error instanceof InterruptedIOException && !(error instanceof SocketTimeoutException));
+    }
+
+    @FunctionalInterface
+    private interface ThrowablePredicate {
+        boolean test(Throwable error);
     }
 }
