@@ -6,6 +6,8 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.channels.*;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.IdentityHashMap;
 import java.util.Objects;
 
@@ -138,6 +140,26 @@ public final class ZmuxConnections {
         }
     }
 
+    private static int socketReadTimeoutMillis(Instant deadline) {
+        if (deadline == null) {
+            return 0;
+        }
+        Instant now = Instant.now();
+        if (!deadline.isAfter(now)) {
+            return 1;
+        }
+        long millis;
+        try {
+            millis = Duration.between(now, deadline).toMillis();
+        } catch (ArithmeticException overflow) {
+            return Integer.MAX_VALUE;
+        }
+        if (millis <= 0L) {
+            return 1;
+        }
+        return millis >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) millis;
+    }
+
     private static final class SocketDuplexConnection implements DuplexConnection {
         private final Socket socket;
         private final InputStream input;
@@ -174,6 +196,16 @@ public final class ZmuxConnections {
         @Override
         public SocketAddress remoteAddress() {
             return socket.getRemoteSocketAddress();
+        }
+
+        @Override
+        public boolean supportsReadDeadline() {
+            return true;
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) throws IOException {
+            socket.setSoTimeout(socketReadTimeoutMillis(deadline));
         }
 
         @Override

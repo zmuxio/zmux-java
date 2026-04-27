@@ -56,6 +56,16 @@ final class SessionEstablishmentCoordinatorOwner implements SessionEstablishment
     }
 
     @Override
+    public boolean supportsReadDeadline() {
+        return this.owner.connection().supportsReadDeadline();
+    }
+
+    @Override
+    public void setReadDeadline(Instant deadline) throws IOException {
+        this.owner.connection().setReadDeadline(deadline);
+    }
+
+    @Override
     public Runnable readerLoopTask() {
         return this.owner.readerLoopTaskInternal();
     }

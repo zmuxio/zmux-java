@@ -58,6 +58,31 @@ final class SessionEstablishmentCoordinatorTest {
     }
 
     @Test
+    void successfulEstablishmentClearsTemporaryReadDeadline() throws Exception {
+        AtomicReference<Instant> readDeadline = new AtomicReference<>();
+        TestOwner owner = new TestOwner(
+                preface(Role.INITIATOR, 1L),
+                preface(Role.RESPONDER, 2L),
+                new CountDownLatch(0),
+                true,
+                readDeadline
+        );
+        SessionEstablishmentCoordinator coordinator = new SessionEstablishmentCoordinator(
+                owner,
+                Duration.ofMillis(50),
+                Duration.ofMillis(100),
+                Duration.ofMillis(1)
+        );
+
+        coordinator.establish();
+
+        assertTrue(owner.readyMarked.get(), "successful establishment must mark the session ready");
+        assertEquals(1, owner.readDeadlineSetCalls.get(), "establishment should arm one temporary read deadline");
+        assertEquals(1, owner.readDeadlineClearCalls.get(), "establishment should clear the temporary read deadline");
+        assertNull(owner.readDeadline.get(), "successful establishment must clear the temporary read deadline");
+    }
+
+    @Test
     void delayedPeerPrefaceFallsBackToFreshWriterAfterCarrierExpiry() throws Exception {
         CountDownLatch peerPrefaceReadAttempted = new CountDownLatch(1);
         CountDownLatch releasePeerPreface = new CountDownLatch(1);
@@ -144,6 +169,53 @@ final class SessionEstablishmentCoordinatorTest {
         assertFalse(owner.readyMarked.get(), "stalled preface write must not mark the session ready");
         assertFalse(owner.readerStarted.get(), "stalled preface write must not start the reader loop");
         assertFalse(owner.writerStarted.get(), "stalled preface write must not start the writer loop");
+    }
+
+    @Test
+    void stalledPeerPrefaceReadFailsSuccessfulEstablishmentAttempt() throws Exception {
+        AtomicReference<Instant> readDeadline = new AtomicReference<>();
+        TestOwner owner = new TestOwner(
+                preface(Role.INITIATOR, 1L),
+                new ReadDeadlineTimeoutInputStream(readDeadline),
+                new CountDownLatch(0),
+                true,
+                readDeadline
+        );
+        SessionEstablishmentCoordinator coordinator = new SessionEstablishmentCoordinator(
+                owner,
+                Duration.ofMillis(50),
+                Duration.ofMillis(40),
+                Duration.ofMillis(1)
+        );
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, coordinator::establish),
+                "stalled peer preface read must fail establishment"
+        );
+
+        assertEquals(ErrorCode.INTERNAL.code(), error.code(), "stalled preface read code mismatch");
+        assertEquals("read preface", error.operation(), "stalled preface read operation mismatch");
+        assertEquals(
+                "peer preface read stalled during establishment",
+                error.getMessage(),
+                "stalled preface read reason mismatch"
+        );
+        assertEquals(ZmuxErrorScope.SESSION, error.scope(), "stalled preface read scope mismatch");
+        assertEquals(ZmuxErrorSource.LOCAL, error.source(), "stalled preface read source mismatch");
+        assertEquals(ZmuxErrorDirection.BOTH, error.direction(), "stalled preface read direction mismatch");
+        assertEquals(
+                ZmuxTerminationKind.SESSION_TERMINATION,
+                error.terminationKind(),
+                "stalled preface read termination mismatch"
+        );
+        assertEquals(1, owner.readDeadlineSetCalls.get(), "establishment should arm one temporary read deadline");
+        assertEquals(1, owner.readDeadlineClearCalls.get(), "failed establishment should clear the read deadline");
+        assertNull(owner.readDeadline.get(), "failed establishment must not leave a read deadline armed");
+        assertTrue(owner.transportClosed.get(), "establishment failure must close the transport");
+        assertFalse(owner.readyMarked.get(), "stalled preface read must not mark the session ready");
+        assertFalse(owner.readerStarted.get(), "stalled preface read must not start the reader loop");
+        assertFalse(owner.writerStarted.get(), "stalled preface read must not start the writer loop");
     }
 
     @Test
@@ -234,6 +306,10 @@ final class SessionEstablishmentCoordinatorTest {
         private final CountDownLatch readerStartedLatch = new CountDownLatch(1);
         private final CountDownLatch writerStartedLatch = new CountDownLatch(1);
         private final AtomicReference<Instant> writeDeadline = new AtomicReference<>();
+        private final AtomicReference<Instant> readDeadline;
+        private final boolean supportsReadDeadline;
+        private final AtomicInteger readDeadlineSetCalls = new AtomicInteger();
+        private final AtomicInteger readDeadlineClearCalls = new AtomicInteger();
         private final AtomicReference<String> readerThreadName = new AtomicReference<>();
         private final AtomicReference<String> writerThreadName = new AtomicReference<>();
 
@@ -241,9 +317,33 @@ final class SessionEstablishmentCoordinatorTest {
             this(localPreface, new ByteArrayInputStream(encodePreface(remotePreface)), releaseWrites);
         }
 
+        private TestOwner(Preface localPreface,
+                          Preface remotePreface,
+                          CountDownLatch releaseWrites,
+                          boolean supportsReadDeadline,
+                          AtomicReference<Instant> readDeadline) throws IOException {
+            this(
+                    localPreface,
+                    new ByteArrayInputStream(encodePreface(remotePreface)),
+                    releaseWrites,
+                    supportsReadDeadline,
+                    readDeadline
+            );
+        }
+
         private TestOwner(Preface localPreface, InputStream input, CountDownLatch releaseWrites) {
+            this(localPreface, input, releaseWrites, false, new AtomicReference<>());
+        }
+
+        private TestOwner(Preface localPreface,
+                          InputStream input,
+                          CountDownLatch releaseWrites,
+                          boolean supportsReadDeadline,
+                          AtomicReference<Instant> readDeadline) {
             this.localPreface = localPreface;
             this.releaseWrites = releaseWrites;
+            this.supportsReadDeadline = supportsReadDeadline;
+            this.readDeadline = readDeadline;
             this.input = FrameCodec.decoder(input);
             this.output = new BufferedOutputStream(new OutputStream() {
                 @Override
@@ -316,6 +416,24 @@ final class SessionEstablishmentCoordinatorTest {
         @Override
         public void setWriteDeadline(Instant deadline) {
             this.writeDeadline.set(deadline);
+        }
+
+        @Override
+        public boolean supportsReadDeadline() {
+            return this.supportsReadDeadline;
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+            if (!this.supportsReadDeadline) {
+                throw new AssertionError("unsupported read deadline must not be armed");
+            }
+            this.readDeadline.set(deadline);
+            if (deadline == null) {
+                this.readDeadlineClearCalls.incrementAndGet();
+            } else {
+                this.readDeadlineSetCalls.incrementAndGet();
+            }
         }
 
         @Override
@@ -417,6 +535,16 @@ final class SessionEstablishmentCoordinatorTest {
         @Override
         public void setWriteDeadline(Instant deadline) {
             throw new AssertionError("unsupported write deadline must not be armed");
+        }
+
+        @Override
+        public boolean supportsReadDeadline() {
+            return false;
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+            throw new AssertionError("unsupported read deadline must not be armed");
         }
 
         @Override
@@ -549,6 +677,16 @@ final class SessionEstablishmentCoordinatorTest {
         }
 
         @Override
+        public boolean supportsReadDeadline() {
+            return false;
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+            throw new AssertionError("unsupported read deadline must not be armed");
+        }
+
+        @Override
         public Runnable readerLoopTask() {
             return () -> this.readerStarted.set(true);
         }
@@ -572,6 +710,47 @@ final class SessionEstablishmentCoordinatorTest {
         public void closeTransport() {
             this.transportClosed.set(true);
             this.releaseCloseWrite.countDown();
+        }
+    }
+
+    private static final class ReadDeadlineTimeoutInputStream extends InputStream {
+        private final AtomicReference<Instant> deadline;
+
+        private ReadDeadlineTimeoutInputStream(AtomicReference<Instant> deadline) {
+            this.deadline = deadline;
+        }
+
+        @Override
+        public int read() throws IOException {
+            awaitDeadline();
+            throw new AssertionError("awaitDeadline should only return by throwing");
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            awaitDeadline();
+            throw new AssertionError("awaitDeadline should only return by throwing");
+        }
+
+        private void awaitDeadline() throws IOException {
+            try {
+                while (true) {
+                    Instant current = deadline.get();
+                    if (current == null) {
+                        TimeUnit.MILLISECONDS.sleep(1L);
+                        continue;
+                    }
+                    Instant now = Instant.now();
+                    if (!current.isAfter(now)) {
+                        throw new ReadTimeoutException();
+                    }
+                    long waitMillis = Math.max(1L, Math.min(10L, Duration.between(now, current).toMillis()));
+                    TimeUnit.MILLISECONDS.sleep(waitMillis);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("synthetic blocked preface read interrupted", interrupted);
+            }
         }
     }
 

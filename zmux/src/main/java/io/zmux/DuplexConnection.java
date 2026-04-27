@@ -25,6 +25,13 @@ public interface DuplexConnection extends Closeable {
         return null;
     }
 
+    default boolean supportsReadDeadline() {
+        return false;
+    }
+
+    default void setReadDeadline(Instant deadline) throws IOException {
+    }
+
     default boolean supportsWriteDeadline() {
         return false;
     }

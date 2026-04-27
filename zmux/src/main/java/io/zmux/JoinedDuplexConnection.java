@@ -398,10 +398,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     }
 
     @Override
+    public boolean supportsReadDeadline() {
+        return true;
+    }
+
+    @Override
     public boolean supportsWriteDeadline() {
         return true;
     }
 
+    @Override
     public void setReadDeadline(Instant deadline) throws IOException {
         ReadHalf half;
         lock.lock();
@@ -437,6 +443,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    @Override
     public void setWriteDeadline(Instant deadline) throws IOException {
         WriteHalf half;
         lock.lock();

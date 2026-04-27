@@ -230,7 +230,9 @@ Native transport APIs:
   stream views that expose the same stream operations plus open direction,
   stream direction, and read/write closed state.
 - `DuplexConnection`, `BasicDuplexConnection`, `JoinedDuplexConnection`, and
-  `ZmuxConnections`: adapters for sockets, streams, and channels.
+  `ZmuxConnections`: adapters for sockets, streams, and channels. Deadline
+  capability probes tell zmux whether the underlying transport can bound
+  blocking reads and writes.
 
 Configuration and metadata APIs:
 
@@ -450,7 +452,8 @@ and `closeOutput()`. When you pause a directional half, the pause handle also
 exposes `currentReadHalf()` / `currentWriteHalf()` plus typed replacement
 helpers before `resume()`. `JoinedDuplexConnection` also exposes joined-level
 `setReadDeadline(...)`, `setWriteDeadline(...)`, and `setDeadline(...)` so
-paused reads, writes, and directional closes can still be bounded.
+paused reads, writes, and directional closes can still be bounded, and it
+advertises both read and write deadline support through `DuplexConnection`.
 
 ### Existing Buffers
 
@@ -531,6 +534,10 @@ DuplexConnection connection = ZmuxConnections.builder(input, output)
 ```
 
 This is the most generic integration path for custom transports and wrappers.
+If your transport can enforce blocking read or write deadlines, override
+`supportsReadDeadline()` / `setReadDeadline(...)` and
+`supportsWriteDeadline()` / `setWriteDeadline(...)`; otherwise the default
+capability probes return false and zmux will not rely on those setters.
 
 ### Timeouts And Deadlines
 

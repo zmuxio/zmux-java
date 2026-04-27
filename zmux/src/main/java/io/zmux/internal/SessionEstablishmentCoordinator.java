@@ -20,6 +20,7 @@ final class SessionEstablishmentCoordinator {
     private static final int WRITER_CARRIER_EXPIRED = 2;
     private static final int WRITER_CARRIER_ABORTED = 3;
     private static final String PREFACE_WRITE_STALLED = "local preface write stalled during establishment";
+    private static final String PREFACE_READ_STALLED = "peer preface read stalled during establishment";
 
     private final Owner owner;
     private final Duration failureWriteWait;
@@ -111,7 +112,8 @@ final class SessionEstablishmentCoordinator {
         AtomicBoolean runWriterLoop = new AtomicBoolean();
         AtomicInteger writerCarrierState = new AtomicInteger(WRITER_CARRIER_WAITING);
         AtomicReference<IOException> prefaceWriteError = new AtomicReference<>();
-        EstablishmentWriteDeadline writeDeadline = this.beginEstablishmentWriteDeadline(this.successWriteWait);
+        EstablishmentDeadline writeDeadline = this.beginEstablishmentWriteDeadline(this.successWriteWait);
+        EstablishmentDeadline readDeadline = this.beginEstablishmentReadDeadline(this.successWriteWait);
         Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", () -> {
             try {
                 FrameCodec.writePreface(this.owner.output(), this.owner.localPreface());
@@ -140,7 +142,15 @@ final class SessionEstablishmentCoordinator {
         Preface remotePreface = null;
         boolean established = false;
         try {
-            remotePreface = this.readPeerPreface();
+            remotePreface = this.readPeerPreface(readDeadline);
+            IOException clearReadDeadlineError = readDeadline.clear();
+            if (clearReadDeadlineError != null) {
+                throw SessionEstablishmentCoordinator.transportFailure(
+                        "clear read deadline",
+                        "zmux: transport read deadline clear failed",
+                        clearReadDeadlineError
+                );
+            }
             this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.successWriteWait, writeDeadline, true);
             IOException clearDeadlineError = writeDeadline.clear();
             if (clearDeadlineError != null) {
@@ -164,7 +174,14 @@ final class SessionEstablishmentCoordinator {
                 SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", this.owner.writerLoopTask()).start();
             }
         } catch (IOException error) {
-            this.finishEstablishmentFailure(prefaceWriteDone, prefaceWriteError, writeDeadline, remotePreface, error);
+            this.finishEstablishmentFailure(
+                    prefaceWriteDone,
+                    prefaceWriteError,
+                    writeDeadline,
+                    readDeadline,
+                    remotePreface,
+                    error
+            );
             throw error;
         } finally {
             if (!established) {
@@ -179,15 +196,17 @@ final class SessionEstablishmentCoordinator {
 
     private void finishEstablishmentFailure(CountDownLatch prefaceWriteDone,
                                             AtomicReference<IOException> prefaceWriteError,
-                                            EstablishmentWriteDeadline writeDeadline,
+                                            EstablishmentDeadline writeDeadline,
+                                            EstablishmentDeadline readDeadline,
                                             Preface remotePreface,
                                             IOException error) {
         boolean wroteClose = false;
         try {
+            readDeadline.clearIgnoringFailure();
             writeDeadline.expedite();
             this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.failureWriteWait, writeDeadline, false);
             writeDeadline.clearIgnoringFailure();
-            EstablishmentWriteDeadline closeDeadline = this.beginEstablishmentWriteDeadline(this.failureWriteWait);
+            EstablishmentDeadline closeDeadline = this.beginEstablishmentWriteDeadline(this.failureWriteWait);
             if (closeDeadline.armed()) {
                 try {
                     this.emitEstablishmentClose(remotePreface, error);
@@ -208,7 +227,7 @@ final class SessionEstablishmentCoordinator {
     private void awaitPrefaceWrite(CountDownLatch prefaceWriteDone,
                                    AtomicReference<IOException> prefaceWriteError,
                                    Duration duration,
-                                   EstablishmentWriteDeadline writeDeadline,
+                                   EstablishmentDeadline writeDeadline,
                                    boolean failOnStall) throws IOException {
         boolean completed;
         try {
@@ -245,23 +264,39 @@ final class SessionEstablishmentCoordinator {
         }
     }
 
-    private EstablishmentWriteDeadline beginEstablishmentWriteDeadline(Duration duration) {
+    private EstablishmentDeadline beginEstablishmentWriteDeadline(Duration duration) {
         Instant deadline = SessionEstablishmentCoordinator.deadlineAfter(duration);
         if (deadline == null || !this.owner.supportsWriteDeadline()) {
-            return EstablishmentWriteDeadline.disabled();
+            return EstablishmentDeadline.disabled();
         }
         try {
             this.owner.setWriteDeadline(deadline);
-            return new EstablishmentWriteDeadline(this.owner);
+            return EstablishmentDeadline.write(this.owner);
         } catch (IOException ignored) {
-            return EstablishmentWriteDeadline.disabled();
+            return EstablishmentDeadline.disabled();
         }
     }
 
-    private Preface readPeerPreface() throws IOException {
+    private EstablishmentDeadline beginEstablishmentReadDeadline(Duration duration) {
+        Instant deadline = SessionEstablishmentCoordinator.deadlineAfter(duration);
+        if (deadline == null || !this.owner.supportsReadDeadline()) {
+            return EstablishmentDeadline.disabled();
+        }
+        try {
+            this.owner.setReadDeadline(deadline);
+            return EstablishmentDeadline.read(this.owner);
+        } catch (IOException ignored) {
+            return EstablishmentDeadline.disabled();
+        }
+    }
+
+    private Preface readPeerPreface(EstablishmentDeadline readDeadline) throws IOException {
         try {
             return this.owner.input().readPreface();
         } catch (IOException error) {
+            if (readDeadline.armed() && ZmuxErrors.timeout(error)) {
+                throw this.owner.sessionInternalError("read preface", PREFACE_READ_STALLED, error);
+            }
             throw SessionEstablishmentCoordinator.transportFailure(
                     "read preface",
                     "zmux: transport preface read failed",
@@ -318,6 +353,10 @@ final class SessionEstablishmentCoordinator {
 
         void setWriteDeadline(Instant deadline) throws IOException;
 
+        boolean supportsReadDeadline();
+
+        void setReadDeadline(Instant deadline) throws IOException;
+
         Runnable readerLoopTask();
 
         Runnable writerLoopTask();
@@ -329,18 +368,28 @@ final class SessionEstablishmentCoordinator {
         void closeTransport();
     }
 
-    private static final class EstablishmentWriteDeadline {
-        private static final EstablishmentWriteDeadline DISABLED = new EstablishmentWriteDeadline(null);
+    private static final class EstablishmentDeadline {
+        private static final EstablishmentDeadline DISABLED = new EstablishmentDeadline(null, false);
         private final Owner owner;
+        private final boolean read;
         private boolean armed;
 
-        private EstablishmentWriteDeadline(Owner owner) {
+        private EstablishmentDeadline(Owner owner, boolean read) {
             this.owner = owner;
+            this.read = read;
             this.armed = owner != null;
         }
 
-        static EstablishmentWriteDeadline disabled() {
+        static EstablishmentDeadline disabled() {
             return DISABLED;
+        }
+
+        static EstablishmentDeadline read(Owner owner) {
+            return new EstablishmentDeadline(owner, true);
+        }
+
+        static EstablishmentDeadline write(Owner owner) {
+            return new EstablishmentDeadline(owner, false);
         }
 
         boolean armed() {
@@ -352,7 +401,7 @@ final class SessionEstablishmentCoordinator {
                 return null;
             }
             try {
-                owner.setWriteDeadline(null);
+                set(null);
                 armed = false;
                 return null;
             } catch (IOException error) {
@@ -365,7 +414,7 @@ final class SessionEstablishmentCoordinator {
                 return;
             }
             try {
-                owner.setWriteDeadline(null);
+                set(null);
                 armed = false;
             } catch (IOException ignored) {
             }
@@ -376,8 +425,16 @@ final class SessionEstablishmentCoordinator {
                 return;
             }
             try {
-                owner.setWriteDeadline(Instant.now());
+                set(Instant.now());
             } catch (IOException ignored) {
+            }
+        }
+
+        private void set(Instant deadline) throws IOException {
+            if (read) {
+                owner.setReadDeadline(deadline);
+            } else {
+                owner.setWriteDeadline(deadline);
             }
         }
     }
