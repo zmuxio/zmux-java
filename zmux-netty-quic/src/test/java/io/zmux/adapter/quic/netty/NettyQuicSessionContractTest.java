@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -319,6 +320,30 @@ class NettyQuicSessionContractTest {
                     pair.client.stats().progress().controlProgressAt(),
                     "combined writevFinal opener should count as adapter control progress"
             );
+            accepted.close();
+            send.close();
+        }
+    }
+
+    @Test
+    void largeWritevFinalOnAdapterKeepsPayloadAndCloseSemantics() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
+            ZmuxSendStream send = pair.client.openUniStream();
+            byte[] first = new byte[(1 << 20) + 17];
+            byte[] second = utf8("tail");
+            Arrays.fill(first, (byte) 'a');
+
+            int written = send.writevFinal(first, second);
+
+            ZmuxRecvStream accepted = await(acceptedFuture);
+            byte[] received = readExactly(accepted, written);
+            byte[] expected = new byte[written];
+            Arrays.fill(expected, 0, first.length, (byte) 'a');
+            System.arraycopy(second, 0, expected, first.length, second.length);
+            assertEquals(first.length + second.length, written);
+            assertArrayEquals(expected, received);
+            assertEquals(-1, accepted.read(new byte[1]));
             accepted.close();
             send.close();
         }

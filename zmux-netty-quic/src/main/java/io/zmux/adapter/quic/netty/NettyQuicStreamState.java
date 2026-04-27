@@ -27,6 +27,7 @@ import java.util.concurrent.locks.ReentrantLock;
 @SuppressWarnings("resource")
 final class NettyQuicStreamState {
     private static final byte[] EMPTY_BYTES = new byte[0];
+    private static final int MAX_BUFFERED_WRITE_BYTES = 1 << 20;
 
     private final NettyQuicSession session;
     private final boolean locallyCreated;
@@ -438,24 +439,29 @@ final class NettyQuicStreamState {
             );
         }
 
-        ByteBuf buffer = null;
-        try {
-            int bufferLength = pendingPrelude.length + length;
-            buffer = channel.alloc().ioBuffer(bufferLength, bufferLength);
-            if (pendingPrelude.length > 0) {
-                buffer.writeBytes(pendingPrelude);
+        int bufferedLength = pendingPrelude.length + length;
+        if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
+            ByteBuf buffer = null;
+            try {
+                buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
+                if (pendingPrelude.length > 0) {
+                    buffer.writeBytes(pendingPrelude);
+                }
+                buffer.writeBytes(src, offset, length);
+            } catch (RuntimeException failure) {
+                if (buffer != null && buffer.refCnt() > 0) {
+                    buffer.release();
+                }
+                if (commitsLocalOpen) {
+                    abortOpenPreludeSubmission();
+                }
+                throw failure;
             }
-            buffer.writeBytes(src, offset, length);
-        } catch (RuntimeException failure) {
-            if (buffer != null && buffer.refCnt() > 0) {
-                buffer.release();
-            }
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
-            }
-            throw failure;
+            submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
+            return;
         }
-        submitBufferedWrite(buffer, commitsLocalOpen, pendingPrelude.length + length);
+        submitOpenPrelude(pendingPrelude, commitsLocalOpen);
+        writeInternal(src, offset, length);
     }
 
     private void writeFinalParts(byte[][] parts, int totalLength) throws IOException {
@@ -481,28 +487,37 @@ final class NettyQuicStreamState {
             );
         }
 
-        ByteBuf buffer = null;
-        try {
-            int bufferLength = pendingPrelude.length + totalLength;
-            buffer = channel.alloc().ioBuffer(bufferLength, bufferLength);
-            if (pendingPrelude.length > 0) {
-                buffer.writeBytes(pendingPrelude);
-            }
-            for (byte[] part : parts) {
-                if (part.length > 0) {
-                    buffer.writeBytes(part);
+        int bufferedLength = pendingPrelude.length + totalLength;
+        if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
+            ByteBuf buffer = null;
+            try {
+                buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
+                if (pendingPrelude.length > 0) {
+                    buffer.writeBytes(pendingPrelude);
                 }
+                for (byte[] part : parts) {
+                    if (part.length > 0) {
+                        buffer.writeBytes(part);
+                    }
+                }
+            } catch (RuntimeException failure) {
+                if (buffer != null && buffer.refCnt() > 0) {
+                    buffer.release();
+                }
+                if (commitsLocalOpen) {
+                    abortOpenPreludeSubmission();
+                }
+                throw failure;
             }
-        } catch (RuntimeException failure) {
-            if (buffer != null && buffer.refCnt() > 0) {
-                buffer.release();
-            }
-            if (commitsLocalOpen) {
-                abortOpenPreludeSubmission();
-            }
-            throw failure;
+            submitBufferedWrite(buffer, commitsLocalOpen, bufferedLength);
+            return;
         }
-        submitBufferedWrite(buffer, commitsLocalOpen, pendingPrelude.length + totalLength);
+        submitOpenPrelude(pendingPrelude, commitsLocalOpen);
+        for (byte[] part : parts) {
+            if (part.length > 0) {
+                writeInternal(part, 0, part.length);
+            }
+        }
     }
 
     void setDeadline(Instant deadline) throws IOException {
@@ -951,7 +966,14 @@ final class NettyQuicStreamState {
     }
 
     private void writeInternal(byte[] src, int offset, int length) throws IOException {
-        writeInternal(newWriteBuffer(src, offset, length));
+        int cursor = offset;
+        int remaining = length;
+        while (remaining > 0) {
+            int chunk = Math.min(remaining, MAX_BUFFERED_WRITE_BYTES);
+            writeInternal(newWriteBuffer(src, cursor, chunk));
+            cursor += chunk;
+            remaining -= chunk;
+        }
     }
 
     private ByteBuf newWriteBuffer(byte[] src, int offset, int length) {
@@ -989,6 +1011,27 @@ final class NettyQuicStreamState {
             session.noteControlProgress();
         }
         awaitWriteFuture(future, bytes, startedAtNanos);
+    }
+
+    private void submitOpenPrelude(byte[] pendingPrelude, boolean commitsLocalOpen) throws IOException {
+        if (!commitsLocalOpen) {
+            return;
+        }
+        if (pendingPrelude.length == 0) {
+            completeOpenPreludeSubmission();
+            session.noteControlProgress();
+            return;
+        }
+        ByteBuf buffer = null;
+        try {
+            buffer = channel.alloc().ioBuffer(pendingPrelude.length, pendingPrelude.length);
+            buffer.writeBytes(pendingPrelude);
+        } catch (RuntimeException failure) {
+            releaseBuffer(buffer);
+            abortOpenPreludeSubmission();
+            throw failure;
+        }
+        submitBufferedWrite(buffer, true, pendingPrelude.length);
     }
 
     private ChannelFuture submitWrite(ByteBuf buffer) throws IOException {
