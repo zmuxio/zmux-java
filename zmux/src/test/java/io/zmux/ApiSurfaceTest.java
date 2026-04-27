@@ -1352,8 +1352,13 @@ final class ApiSurfaceTest {
         assertEquals(varint.length, decoded.length());
 
         byte[] tlvBytes = ZmuxCodec.appendTlv(null, Protocol.METADATA_STREAM_PRIORITY, ZmuxCodec.encodeVarint(7L));
-        Tlv tlv = ZmuxCodec.parseTlvs(tlvBytes).get(0);
+        java.util.List<Tlv> tlvs = ZmuxCodec.parseTlvs(tlvBytes);
+        Tlv tlv = tlvs.get(0);
         assertEquals(Protocol.METADATA_STREAM_PRIORITY, tlv.type());
+        assertEquals(7L, ZmuxCodec.parseVarint(tlv.value()).value());
+        assertThrows(UnsupportedOperationException.class, () -> tlvs.add(new Tlv(1L, null)));
+        byte[] exposedTlvValue = tlv.value();
+        exposedTlvValue[0] = 0;
         assertEquals(7L, ZmuxCodec.parseVarint(tlv.value()).value());
 
         Frame frame = new Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 4L, "ok".getBytes(StandardCharsets.UTF_8));

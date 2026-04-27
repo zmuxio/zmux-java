@@ -4,7 +4,6 @@ import io.zmux.internal.FrameCodec;
 import io.zmux.internal.Varint62;
 
 import java.io.*;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -71,12 +70,7 @@ public final class ZmuxCodec {
     }
 
     public static List<Tlv> parseTlvs(byte[] source) throws IOException {
-        List<io.zmux.internal.Tlv> parsed = FrameCodec.parseTlvs(source == null ? EMPTY_BYTES : source);
-        ArrayList<Tlv> out = new ArrayList<>(parsed.size());
-        for (io.zmux.internal.Tlv tlv : parsed) {
-            out.add(new Tlv(tlv.type(), tlv.value()));
-        }
-        return Collections.unmodifiableList(out);
+        return Collections.unmodifiableList(FrameCodec.parseTlvs(source == null ? EMPTY_BYTES : source));
     }
 
     public static ParsedFrame parseFrame(byte[] source, Limits limits) throws IOException {
