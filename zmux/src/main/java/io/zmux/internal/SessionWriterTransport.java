@@ -4,19 +4,14 @@ import io.zmux.*;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.channels.GatheringByteChannel;
 import java.util.List;
 import java.util.Objects;
 
 final class SessionWriterTransport {
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final int MAX_RETAINED_ENCODED_BATCH_BYTES = 1 << 20;
-    private static final int MIN_GATHER_BATCH_PAYLOAD_BYTES = 16 << 10;
-    private static final int MIN_GATHER_PAYLOAD_BYTES_PER_BUFFER = 1024;
-    private static final int MAX_GATHER_BATCH_BUFFERS = 64;
     private final Owner owner;
     private byte[] encodedBatchScratch = EMPTY_BYTES;
-    private final FrameEnvelopeCodec.GatherScratch gatherScratch = new FrameEnvelopeCodec.GatherScratch();
 
     SessionWriterTransport(Owner owner) {
         this.owner = Objects.requireNonNull(owner, "owner");
@@ -79,52 +74,12 @@ final class SessionWriterTransport {
         return (int) total;
     }
 
-    private static GatherPlan gatherPlan(List<SessionRuntime.OutboundFrame> batch) throws IOException {
-        int headerBytes = 0;
-        int bufferCount = 0;
-        long payloadBytes = 0L;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-            int payloadLength = Math.max(0, outboundFrame.payloadLength());
-            byte[] prefix = outboundFrame.payloadPrefix();
-            long encodedPayloadLength = SessionWriterTransport.outboundPayloadLength(outboundFrame);
-            payloadBytes = SessionRuntime.saturatingAdd(payloadBytes, encodedPayloadLength);
-            long frameLength = FrameEnvelopeCodec.frameLength(outboundFrame.frame().streamId(), encodedPayloadLength);
-            int frameHeaderBytes = FrameEnvelopeCodec.gatherHeaderBytes(frameLength, outboundFrame.frame().streamId());
-            int frameInlineBytes = FrameEnvelopeCodec.gatherInlineBytes(outboundFrame.frame(), prefix, payloadLength);
-            headerBytes = SessionWriterTransport.saturatingIntAdd(
-                    headerBytes,
-                    SessionWriterTransport.saturatingIntAdd(frameHeaderBytes, frameInlineBytes)
-            );
-            int frameBufferCount = SessionWriterTransport.hasPayloadParts(outboundFrame)
-                    ? FrameEnvelopeCodec.gatherBufferCount(
-                            prefix,
-                            outboundFrame.payloadParts(),
-                            outboundFrame.payloadPartIndex(),
-                            outboundFrame.payloadPartOffset(),
-                            payloadLength
-                    )
-                    : FrameEnvelopeCodec.gatherBufferCount(prefix, payloadLength);
-            bufferCount = SessionWriterTransport.saturatingIntAdd(bufferCount, frameBufferCount);
-        }
-        return new GatherPlan(headerBytes, bufferCount, payloadBytes);
-    }
-
     private static int safeVarintLength(long value) {
         try {
             return Varint62.length(value);
         } catch (ZmuxException invalid) {
             return 8;
         }
-    }
-
-    private static int saturatingIntAdd(int left, int right) {
-        if (right <= 0) {
-            return left;
-        }
-        if (left > Integer.MAX_VALUE - right) {
-            return Integer.MAX_VALUE;
-        }
-        return left + right;
     }
 
     long writeBatch(List<SessionRuntime.OutboundFrame> batch) throws IOException {
@@ -141,62 +96,7 @@ final class SessionWriterTransport {
         if (batch.isEmpty()) {
             return 0L;
         }
-        GatheringByteChannel gatheringOutput = this.owner.gatheringOutput();
-        if (gatheringOutput != null && gatheringOutput.isOpen()) {
-            Long gatheredBytes = this.tryWriteGatheredBatch(gatheringOutput, batch, limits);
-            if (gatheredBytes != null) {
-                output.flush();
-                return gatheredBytes;
-            }
-        }
         return this.writeEncodedBatch(output, batch, limits);
-    }
-
-    private Long tryWriteGatheredBatch(GatheringByteChannel output,
-                                       List<SessionRuntime.OutboundFrame> batch,
-                                       Limits limits) throws IOException {
-        GatherPlan plan = SessionWriterTransport.gatherPlan(batch);
-        if (!plan.shouldGather()) {
-            return null;
-        }
-        long batchBytes = 0L;
-        this.gatherScratch.reset(plan.headerBytes(), plan.bufferCount());
-        try {
-            for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-                if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
-                    batchBytes = SessionRuntime.saturatingAdd(
-                            batchBytes,
-                            FrameEnvelopeCodec.appendFrame(
-                                    this.gatherScratch,
-                                    outboundFrame.frame(),
-                                    outboundFrame.payloadPrefix(),
-                                    outboundFrame.payloadParts(),
-                                    outboundFrame.payloadPartIndex(),
-                                    outboundFrame.payloadPartOffset(),
-                                    outboundFrame.payloadLength(),
-                                    limits
-                            )
-                    );
-                } else {
-                    batchBytes = SessionRuntime.saturatingAdd(
-                            batchBytes,
-                            FrameEnvelopeCodec.appendFrame(
-                                    this.gatherScratch,
-                                    outboundFrame.frame(),
-                                    outboundFrame.payloadPrefix(),
-                                    outboundFrame.payloadBytes(),
-                                    outboundFrame.payloadOffset(),
-                                    outboundFrame.payloadLength(),
-                                    limits
-                            )
-                    );
-                }
-            }
-            FrameEnvelopeCodec.writeGatheredBuffers(output, this.gatherScratch);
-            return batchBytes;
-        } finally {
-            this.gatherScratch.clear();
-        }
     }
 
     private long writeEncodedBatch(OutputStream output,
@@ -259,35 +159,6 @@ final class SessionWriterTransport {
     interface Owner {
         OutputStream output();
 
-        GatheringByteChannel gatheringOutput();
-
         Limits limits();
-    }
-
-    private static final class GatherPlan {
-        private final int headerBytes;
-        private final int bufferCount;
-        private final long payloadBytes;
-
-        private GatherPlan(int headerBytes, int bufferCount, long payloadBytes) {
-            this.headerBytes = Math.max(0, headerBytes);
-            this.bufferCount = Math.max(0, bufferCount);
-            this.payloadBytes = Math.max(0L, payloadBytes);
-        }
-
-        int headerBytes() {
-            return headerBytes;
-        }
-
-        int bufferCount() {
-            return bufferCount;
-        }
-
-        boolean shouldGather() {
-            return payloadBytes >= MIN_GATHER_BATCH_PAYLOAD_BYTES
-                    && bufferCount > 0
-                    && bufferCount <= MAX_GATHER_BATCH_BUFFERS
-                    && payloadBytes / bufferCount >= MIN_GATHER_PAYLOAD_BYTES_PER_BUFFER;
-        }
     }
 }

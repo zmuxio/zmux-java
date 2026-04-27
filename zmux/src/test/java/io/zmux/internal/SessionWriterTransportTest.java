@@ -5,22 +5,22 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.channels.GatheringByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionWriterTransportTest {
-    @Test
-    void writeBatchUsesGatheringOutputForLargePayloadWhenAvailable() throws Exception {
-        RecordingOutputStream output = new RecordingOutputStream();
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
-        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, gathering));
+    private static final Settings LARGE_FRAME_SETTINGS = Settings.defaults()
+            .toBuilder()
+            .maxFramePayload(32 * 1024L)
+            .build();
 
+    @Test
+    void writeBatchEncodesLargeMultipartPayloadOnMergedOutputPath() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, LARGE_FRAME_SETTINGS.limits()));
         byte[][] parts = {
                 repeated('a', 8 * 1024),
                 repeated('b', 8 * 1024)
@@ -30,16 +30,15 @@ final class SessionWriterTransportTest {
                 null,
                 null,
                 "meta".getBytes(StandardCharsets.UTF_8),
-                Settings.defaults().maxFramePayload()
-        );
-        FrameCodec.Frame frame = new FrameCodec.Frame(
-                FrameType.DATA,
-                Protocol.FRAME_FLAG_OPEN_METADATA | Protocol.FRAME_FLAG_FIN,
-                1L,
-                prefix
+                LARGE_FRAME_SETTINGS.maxFramePayload()
         );
         SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
-                frame,
+                new FrameCodec.Frame(
+                        FrameType.DATA,
+                        Protocol.FRAME_FLAG_OPEN_METADATA | Protocol.FRAME_FLAG_FIN,
+                        1L,
+                        prefix
+                ),
                 null,
                 parts[0].length + parts[1].length,
                 true,
@@ -55,14 +54,12 @@ final class SessionWriterTransportTest {
 
         long written = transport.writeBatch(Collections.singletonList(outbound));
 
-        assertTrue(gathering.gatherWrites() > 0, "gathering output should receive the batch");
-        assertEquals(0, output.size(), "OutputStream path should not encode a duplicate batch");
-        assertEquals(1, output.flushes(), "transport should preserve batch flush semantics");
-        assertEquals(gathering.bytes().length, written, "reported batch byte count should match encoded bytes");
+        assertEquals(output.size(), written, "reported batch byte count should match encoded bytes");
+        assertEquals(1, output.flushes(), "transport should flush once per batch");
 
         FrameCodec.Frame decoded = FrameCodec.readFrame(
-                new ByteArrayInputStream(gathering.bytes()),
-                Settings.defaults().limits()
+                new ByteArrayInputStream(output.bytes()),
+                LARGE_FRAME_SETTINGS.limits()
         );
         assertEquals(FrameType.DATA, decoded.type(), "decoded frame type mismatch");
         assertEquals(Protocol.FRAME_FLAG_OPEN_METADATA | Protocol.FRAME_FLAG_FIN, decoded.flags(), "decoded flags mismatch");
@@ -74,10 +71,9 @@ final class SessionWriterTransportTest {
     }
 
     @Test
-    void writeBatchKeepsTinyPayloadOnEncodedOutputPath() throws Exception {
+    void writeBatchEncodesTinyPayloadOnMergedOutputPath() throws Exception {
         RecordingOutputStream output = new RecordingOutputStream();
-        RecordingGatheringChannel gathering = new RecordingGatheringChannel();
-        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, gathering));
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output));
         byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
         SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
                 new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 1L, payload),
@@ -89,27 +85,7 @@ final class SessionWriterTransportTest {
 
         long written = transport.writeBatch(Collections.singletonList(outbound));
 
-        assertEquals(0, gathering.gatherWrites(), "tiny payloads should avoid gathering overhead");
-        assertEquals(output.size(), written, "reported fallback batch byte count should match output bytes");
-        assertEquals(1, output.flushes(), "fallback path should flush once per batch");
-    }
-
-    @Test
-    void writeBatchFallsBackToOutputStreamWithoutGatheringOutput() throws Exception {
-        RecordingOutputStream output = new RecordingOutputStream();
-        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, null));
-        byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
-        SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
-                new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 1L, payload),
-                null,
-                payload.length,
-                false,
-                false
-        );
-
-        long written = transport.writeBatch(Collections.singletonList(outbound));
-
-        assertEquals(output.size(), written, "reported fallback batch byte count should match output bytes");
+        assertEquals(output.size(), written, "reported batch byte count should match output bytes");
         assertEquals(1, output.flushes(), "fallback path should flush once per batch");
         FrameCodec.Frame decoded = FrameCodec.readFrame(
                 new ByteArrayInputStream(output.bytes()),
@@ -119,13 +95,25 @@ final class SessionWriterTransportTest {
         assertEquals("hello", new String(decoded.payload(), StandardCharsets.UTF_8), "decoded payload mismatch");
     }
 
+    private static byte[] repeated(char value, int length) {
+        byte[] bytes = new byte[length];
+        for (int i = 0; i < length; i++) {
+            bytes[i] = (byte) value;
+        }
+        return bytes;
+    }
+
     private static final class TestOwner implements SessionWriterTransport.Owner {
         private final RecordingOutputStream output;
-        private final GatheringByteChannel gatheringOutput;
+        private final Limits limits;
 
-        private TestOwner(RecordingOutputStream output, GatheringByteChannel gatheringOutput) {
+        private TestOwner(RecordingOutputStream output) {
+            this(output, Settings.defaults().limits());
+        }
+
+        private TestOwner(RecordingOutputStream output, Limits limits) {
             this.output = output;
-            this.gatheringOutput = gatheringOutput;
+            this.limits = limits;
         }
 
         @Override
@@ -134,22 +122,9 @@ final class SessionWriterTransportTest {
         }
 
         @Override
-        public GatheringByteChannel gatheringOutput() {
-            return gatheringOutput;
-        }
-
-        @Override
         public Limits limits() {
-            return Settings.defaults().limits();
+            return limits;
         }
-    }
-
-    private static byte[] repeated(char value, int length) {
-        byte[] bytes = new byte[length];
-        for (int i = 0; i < length; i++) {
-            bytes[i] = (byte) value;
-        }
-        return bytes;
     }
 
     private static final class RecordingOutputStream extends OutputStream {
@@ -177,54 +152,6 @@ final class SessionWriterTransportTest {
 
         int flushes() {
             return flushes;
-        }
-
-        byte[] bytes() {
-            return bytes.toByteArray();
-        }
-    }
-
-    private static final class RecordingGatheringChannel implements GatheringByteChannel {
-        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        private boolean open = true;
-        private int gatherWrites;
-
-        @Override
-        public int write(ByteBuffer src) {
-            int remaining = src.remaining();
-            byte[] chunk = new byte[remaining];
-            src.get(chunk);
-            bytes.write(chunk, 0, chunk.length);
-            return remaining;
-        }
-
-        @Override
-        public long write(ByteBuffer[] srcs, int offset, int length) {
-            long total = 0L;
-            gatherWrites++;
-            for (int i = offset; i < offset + length; i++) {
-                total += write(srcs[i]);
-            }
-            return total;
-        }
-
-        @Override
-        public long write(ByteBuffer[] srcs) {
-            return write(srcs, 0, srcs.length);
-        }
-
-        @Override
-        public boolean isOpen() {
-            return open;
-        }
-
-        @Override
-        public void close() throws IOException {
-            open = false;
-        }
-
-        int gatherWrites() {
-            return gatherWrites;
         }
 
         byte[] bytes() {
