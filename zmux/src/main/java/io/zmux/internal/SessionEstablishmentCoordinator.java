@@ -2,8 +2,8 @@ package io.zmux.internal;
 
 import io.zmux.*;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -339,7 +339,7 @@ final class SessionEstablishmentCoordinator {
     interface Owner {
         FrameCodec.Decoder input();
 
-        BufferedOutputStream output();
+        OutputStream output();
 
         Preface localPreface();
 

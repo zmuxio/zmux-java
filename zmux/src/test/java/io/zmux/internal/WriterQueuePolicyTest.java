@@ -862,6 +862,19 @@ final class WriterQueuePolicyTest {
     }
 
     @Test
+    void runtimeWriterUsesConnectionOutputDirectly() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
+                null,
+                0L,
+                Settings.defaults()
+        );
+
+        assertSame(output, runtime.outputInternal(), "writer path should not add a second buffering/copy layer");
+    }
+
+    @Test
     void mergedWriterBatchWritesWholeBatchInSingleOutputCall() throws Exception {
         RecordingOutputStream output = new RecordingOutputStream();
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(

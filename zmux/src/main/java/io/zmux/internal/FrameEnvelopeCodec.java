@@ -378,11 +378,8 @@ final class FrameEnvelopeCodec {
             return;
         }
         try {
-            while (true) {
-                long remaining = remainingBytes(scratch.buffers(), scratch.bufferCount());
-                if (remaining == 0L) {
-                    return;
-                }
+            long remaining = remainingBytes(scratch.buffers(), scratch.bufferCount());
+            while (remaining > 0L) {
                 long wrote = output.write(scratch.buffers(), 0, scratch.bufferCount());
                 if (wrote <= 0L) {
                     throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write made no progress");
@@ -390,6 +387,7 @@ final class FrameEnvelopeCodec {
                 if (wrote > remaining) {
                     throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write reported invalid progress");
                 }
+                remaining -= wrote;
             }
         } finally {
             scratch.clear();

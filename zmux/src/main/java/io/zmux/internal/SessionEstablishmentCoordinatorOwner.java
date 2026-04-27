@@ -3,8 +3,8 @@ package io.zmux.internal;
 import io.zmux.Negotiated;
 import io.zmux.Preface;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.time.Instant;
 import java.util.Objects;
 
@@ -21,7 +21,7 @@ final class SessionEstablishmentCoordinatorOwner implements SessionEstablishment
     }
 
     @Override
-    public BufferedOutputStream output() {
+    public OutputStream output() {
         return this.owner.outputInternal();
     }
 

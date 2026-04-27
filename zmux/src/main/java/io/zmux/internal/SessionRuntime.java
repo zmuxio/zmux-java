@@ -2,8 +2,8 @@ package io.zmux.internal;
 
 import io.zmux.*;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -70,7 +70,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private final ZmuxConfig config;
     private final Preface localPreface;
     private final FrameCodec.Decoder input;
-    private final BufferedOutputStream output;
+    private final OutputStream output;
     private final InboundPayloadPool inboundPayloadPool;
     private final Object lock = new Object();
     private final SessionEventDispatcher eventDispatcher;
@@ -199,7 +199,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.config = config;
         this.localPreface = config.localPreface();
         this.input = FrameCodec.decoder(connection.input());
-        this.output = new BufferedOutputStream(connection.output());
+        this.output = connection.output();
         this.inboundPayloadPool = new InboundPayloadPool(
                 inboundPayloadPoolLimit(config.settings()),
                 INBOUND_PAYLOAD_POOL_DEPTH_PER_LENGTH
@@ -4884,7 +4884,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return mixed ^ mixed >>> 31;
     }
 
-    BufferedOutputStream outputInternal() {
+    OutputStream outputInternal() {
         return this.output;
     }
 
