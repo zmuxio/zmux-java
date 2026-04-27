@@ -18,6 +18,7 @@ final class FrameEnvelopeCodec {
     private static final long MAX_INBOUND_FRAME_HEADER_OVERHEAD = 9L;
     private static final int GATHER_SCRATCH_RETAIN_FACTOR = 4;
     private static final int MIN_GATHER_SCRATCH_HINT = 32;
+    private static final int MAX_RETAINED_GATHER_SCRATCH_BUFFERS = 2048;
     private static final int GATHER_INLINE_PREFIX_BYTES = 256;
     private static final int GATHER_INLINE_CONTROL_PAYLOAD_BYTES = 128;
 
@@ -799,6 +800,9 @@ final class FrameEnvelopeCodec {
             }
             headerUsed = 0;
             bufferCount = 0;
+            if (buffers.length > MAX_RETAINED_GATHER_SCRATCH_BUFFERS) {
+                buffers = new ByteBuffer[0];
+            }
         }
 
         private void ensureHeaderCapacity(int required) {

@@ -34,6 +34,23 @@ final class FrameEnvelopeGatherScratchTest {
     }
 
     @Test
+    void gatherScratchDropsOversizedRetainedBuffersOnClear() {
+        FrameEnvelopeCodec.GatherScratch scratch = new FrameEnvelopeCodec.GatherScratch();
+
+        scratch.ensureCapacity(0, 2049);
+        scratch.addBuffer(ByteBuffer.wrap(new byte[]{1}));
+        assertTrue(scratch.buffers().length > 2048,
+                "test requires an oversized retained gather buffer array before clear");
+
+        scratch.clear();
+
+        assertEquals(0, scratch.buffers().length,
+                "clear should drop oversized retained gather buffer slots");
+        assertEquals(0, scratch.bufferCount(),
+                "clear should leave gather scratch empty and ready for reuse");
+    }
+
+    @Test
     void writeGatheredBuffersRejectsInvalidGatheringProgress() {
         long[] writes = {-1L, 4L};
         for (long write : writes) {
