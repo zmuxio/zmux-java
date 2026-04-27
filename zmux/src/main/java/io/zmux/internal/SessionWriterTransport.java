@@ -9,7 +9,9 @@ import java.util.Objects;
 
 final class SessionWriterTransport {
     private static final byte[] EMPTY_BYTES = new byte[0];
-    private static final int MAX_RETAINED_ENCODED_BATCH_BYTES = 1 << 20;
+    private static final int MAX_BATCH_FRAMES = 32;
+    private static final int MAX_RETAINED_ENCODED_BATCH_BYTES =
+            (int) Math.min(Integer.MAX_VALUE, MAX_BATCH_FRAMES * Settings.defaults().maxFramePayload());
     private final Owner owner;
     private byte[] encodedBatchScratch = EMPTY_BYTES;
 

@@ -6,15 +6,21 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionWriterTransportTest {
+    private static final int RETAINED_ENCODED_BATCH_LIMIT = 32 * (int) Settings.defaults().maxFramePayload();
     private static final Settings LARGE_FRAME_SETTINGS = Settings.defaults()
             .toBuilder()
             .maxFramePayload(32 * 1024L)
+            .build();
+    private static final Settings OVERSIZED_FRAME_SETTINGS = Settings.defaults()
+            .toBuilder()
+            .maxFramePayload(RETAINED_ENCODED_BATCH_LIMIT + 4096L)
             .build();
 
     @Test
@@ -93,6 +99,31 @@ final class SessionWriterTransportTest {
         );
         assertEquals(FrameType.DATA, decoded.type(), "decoded frame type mismatch");
         assertEquals("hello", new String(decoded.payload(), StandardCharsets.UTF_8), "decoded payload mismatch");
+    }
+
+    @Test
+    void writeBatchDropsOversizedMergedBufferRetention() throws Exception {
+        RecordingOutputStream output = new RecordingOutputStream();
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output, OVERSIZED_FRAME_SETTINGS.limits()));
+        byte[] payload = repeated('x', RETAINED_ENCODED_BATCH_LIMIT);
+        SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 1L, payload),
+                null,
+                payload.length,
+                false,
+                false
+        );
+
+        long written = transport.writeBatch(Collections.singletonList(outbound));
+
+        assertTrue(written > RETAINED_ENCODED_BATCH_LIMIT, "encoded frame should exceed the retained scratch cap");
+        assertEquals(0, encodedBatchScratchLength(transport), "oversized merged write buffer should be dropped");
+    }
+
+    private static int encodedBatchScratchLength(SessionWriterTransport transport) throws Exception {
+        Field field = SessionWriterTransport.class.getDeclaredField("encodedBatchScratch");
+        field.setAccessible(true);
+        return ((byte[]) field.get(transport)).length;
     }
 
     private static byte[] repeated(char value, int length) {
