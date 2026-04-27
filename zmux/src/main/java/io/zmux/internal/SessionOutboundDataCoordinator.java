@@ -37,22 +37,16 @@ final class SessionOutboundDataCoordinator {
         if (fin) {
             frameFlags |= 0x40;
         }
-        this.reserveSendLocked(streamRuntime, payloadLength);
+        this.reserveSendLocked(streamRuntime, payloadLength, queuedDataTrackedBytes(payloadLength, 1));
         byte[] retainedPayload = this.owner.retainPayload(payload, payloadOffset, payloadLength, payloadOwnership);
-        streamRuntime.markLocalSendStartedLocked();
-        if (fin) {
-            streamRuntime.markFinQueuedLocked();
-        }
-        this.owner.enqueueQueuedOutboundLocked(
-                this.owner.dataQueueInternal(),
-                new SessionRuntime.OutboundFrame(
-                        new FrameCodec.Frame(FrameType.DATA, frameFlags, streamRuntime.streamIdInternal(), retainedPayload),
-                        streamRuntime,
-                        payloadLength,
-                        false,
-                        false
-                )
+        SessionRuntime.OutboundFrame outboundFrame = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, frameFlags, streamRuntime.streamIdInternal(), retainedPayload),
+                streamRuntime,
+                payloadLength,
+                false,
+                false
         );
+        this.enqueueReservedDataLocked(streamRuntime, outboundFrame, payloadLength, fin);
     }
 
     void queueDataLocked(StreamRuntime streamRuntime,
@@ -66,12 +60,8 @@ final class SessionOutboundDataCoordinator {
         if (fin) {
             flags |= 0x40;
         }
-        this.reserveSendLocked(streamRuntime, length);
+        this.reserveSendLocked(streamRuntime, length, queuedDataTrackedBytes(length, 1));
         byte[][] payloadParts = this.owner.retainPayloadParts(parts, partIndex, partOffset, length, payloadOwnership);
-        streamRuntime.markLocalSendStartedLocked();
-        if (fin) {
-            streamRuntime.markFinQueuedLocked();
-        }
         SessionRuntime.OutboundFrame outboundFrame;
         if (payloadParts.length <= 1) {
             byte[] payload = payloadParts.length == 0 ? StreamRuntime.EMPTY_BYTES : payloadParts[0];
@@ -98,16 +88,26 @@ final class SessionOutboundDataCoordinator {
                     0
             );
         }
-        this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
+        this.enqueueReservedDataLocked(streamRuntime, outboundFrame, length, fin);
     }
 
     void reserveSendLocked(StreamRuntime streamRuntime, int bytes) throws IOException {
+        this.reserveSendLocked(streamRuntime, bytes, bytes);
+    }
+
+    void reserveSendLocked(StreamRuntime streamRuntime, int bytes, long trackedAdditional) throws IOException {
+        long memoryAdditional = Math.max(0L, trackedAdditional);
         while (true) {
             long streamCredit = streamSendCreditLocked(streamRuntime);
             long sessionCredit = this.owner.sessionRemainingSendCreditLocked();
             boolean flowBlocked = streamCredit < (long) bytes || sessionCredit < (long) bytes;
             boolean watermarkBlocked = !this.withinQueuedDataWatermarkLocked(streamRuntime, bytes);
-            boolean memoryBlocked = this.owner.sessionWriteMemoryBlockedLocked(bytes);
+            IOException memoryError = this.owner.streamWriteQueueMemoryErrorLocked(memoryAdditional);
+            if (memoryError != null) {
+                this.owner.failSession(memoryError);
+                throw this.owner.sessionOperationErrorLocked("write", memoryError);
+            }
+            boolean memoryBlocked = this.owner.sessionWriteMemoryBlockedLocked(memoryAdditional);
             if (!flowBlocked && !watermarkBlocked && !memoryBlocked) {
                 streamRuntime.reserveSendBytesLocked(bytes);
                 this.owner.reserveSessionSendBytesLocked(bytes);
@@ -245,6 +245,47 @@ final class SessionOutboundDataCoordinator {
     private void queueBlockedFrameLocked(long streamId, long offset) {
         if (this.owner.flowControlUpdateRegistryInternal().queueBlockedFrameLocked(streamId, offset)) {
             this.owner.notifyWriterWaitersLocked();
+        }
+    }
+
+    static long queuedDataTrackedBytes(int dataBytes, int retainedQueueBytes) {
+        return SessionRuntime.saturatingAdd(Math.max(0L, dataBytes), Math.max(0L, retainedQueueBytes));
+    }
+
+    void ensureStreamWriteQueueMemoryLocked(SessionRuntime.OutboundFrame outboundFrame) throws IOException {
+        IOException memoryError = this.owner.streamWriteQueueMemoryErrorLocked(
+                SessionRuntime.retainedQueueBytes(outboundFrame)
+        );
+        if (memoryError == null) {
+            return;
+        }
+        this.owner.failSession(memoryError);
+        throw this.owner.sessionOperationErrorLocked("write", memoryError);
+    }
+
+    void releaseReservedSendLocked(StreamRuntime streamRuntime, int bytes) {
+        if (streamRuntime == null || bytes <= 0) {
+            return;
+        }
+        streamRuntime.releaseReservedSendBytesLocked(bytes);
+        this.owner.releaseSessionReservedSendBytesLocked(bytes);
+        this.owner.notifyStreamWriteWaitersLocked();
+    }
+
+    private void enqueueReservedDataLocked(StreamRuntime streamRuntime,
+                                           SessionRuntime.OutboundFrame outboundFrame,
+                                           int dataBytes,
+                                           boolean fin) throws IOException {
+        try {
+            this.ensureStreamWriteQueueMemoryLocked(outboundFrame);
+            streamRuntime.markLocalSendStartedLocked();
+            if (fin) {
+                streamRuntime.markFinQueuedLocked();
+            }
+            this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
+        } catch (IOException error) {
+            this.releaseReservedSendLocked(streamRuntime, dataBytes);
+            throw error;
         }
     }
 

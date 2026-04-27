@@ -1650,6 +1650,13 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return this.sessionMemoryCapErrorWithAdditionalLocked("queue urgent control", retainedBytes);
     }
 
+    IOException streamWriteQueueMemoryErrorLocked(long retainedBytes) {
+        if (retainedBytes <= 0L) {
+            return null;
+        }
+        return this.sessionMemoryCapErrorWithAdditionalLocked("queue stream write", retainedBytes);
+    }
+
     void recordProtocolBacklogBlockedLocked() {
         this.outboundQueueBookkeeping.recordProtocolBacklogBlockedLocked();
     }
@@ -3310,6 +3317,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.outboundDataCoordinator.reserveSendLocked(streamRuntime, bytes);
     }
 
+    void reserveSendLocked(StreamRuntime streamRuntime, int bytes, long trackedAdditional) throws IOException {
+        this.outboundDataCoordinator.reserveSendLocked(streamRuntime, bytes, trackedAdditional);
+    }
+
     private boolean withinQueuedDataWatermarkLocked(StreamRuntime streamRuntime, int bytes) {
         return this.outboundDataCoordinator.withinQueuedDataWatermarkLocked(streamRuntime, bytes);
     }
@@ -3464,6 +3475,14 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     void releaseQueuedDataLocked(OutboundFrame outboundFrame) {
         this.outboundDataCoordinator.releaseQueuedDataLocked(outboundFrame);
+    }
+
+    void ensureStreamWriteQueueMemoryLocked(OutboundFrame outboundFrame) throws IOException {
+        this.outboundDataCoordinator.ensureStreamWriteQueueMemoryLocked(outboundFrame);
+    }
+
+    void releaseReservedSendLocked(StreamRuntime streamRuntime, int bytes) {
+        this.outboundDataCoordinator.releaseReservedSendLocked(streamRuntime, bytes);
     }
 
     void discardQueuedStreamDataLocked(StreamRuntime streamRuntime, boolean preserveAfterSendClose) {

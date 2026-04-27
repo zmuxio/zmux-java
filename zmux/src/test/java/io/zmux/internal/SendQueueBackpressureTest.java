@@ -1,11 +1,16 @@
 package io.zmux.internal;
 
+import io.zmux.ErrorCode;
 import io.zmux.Role;
+import io.zmux.SessionState;
 import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
+import io.zmux.ZmuxException;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -159,6 +164,38 @@ final class SendQueueBackpressureTest {
             assertNull(blockedWrite.error(), "projected-memory write waiter should resume cleanly after memory relief");
         } finally {
             blockedWrite.join();
+        }
+    }
+
+    @Test
+    void streamWriteExceedingHardMemoryCapFailsSessionInsteadOfWaitingForDeadline() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .sessionMemoryCap(8L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, largeSendWindowSettings());
+        StreamRuntime stream;
+
+        synchronized (runtime.lock()) {
+            stream = runtime.createPeerOpenedStreamLocked(SessionRuntime.firstPeerStreamId(Role.RESPONDER, true));
+            assertTrue(runtime.replacePendingControlBytesLocked(0L, 7L), "test setup should retain memory below the hard cap");
+            assertEquals(7L, runtime.trackedSessionMemoryLocked(), "test setup should leave one byte of hard-cap headroom");
+        }
+        stream.setWriteDeadline(Instant.now().minusMillis(1L));
+
+        IOException thrown = assertThrows(IOException.class, () -> stream.write(new byte[]{1}));
+        ZmuxException error = assertInstanceOf(ZmuxException.class, thrown);
+        assertEquals(ErrorCode.INTERNAL.code(), error.code(), "hard-cap write failure code mismatch");
+        assertEquals("write", error.operation(), "write surface should wrap the queue memory failure");
+        ZmuxException cause = assertInstanceOf(ZmuxException.class, error.getCause());
+        assertEquals("queue stream write", cause.operation(), "stored memory failure operation mismatch");
+        assertTrue(cause.getMessage().contains("session memory cap exceeded"), "memory failure reason mismatch");
+
+        synchronized (runtime.lock()) {
+            assertEquals(SessionState.FAILED, runtime.stateInternal(), "hard-cap write failure should fail the session");
+            assertEquals(0L, stream.reservedSendBytes(), "failed hard-cap admission must not retain stream send credit");
+            assertEquals(0L, SessionRuntimeTestSupport.getLongField(runtime, "sessionReservedSendBytes"),
+                    "failed hard-cap admission must not retain session send credit");
         }
     }
 

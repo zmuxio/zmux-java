@@ -276,55 +276,50 @@ final class SessionOpeningCoordinator {
                                 SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
         int frameFlags = this.prepareOpeningWriteFrameLocked(streamRuntime, openingPrefix, payloadLength, fin);
         byte[] retainedPayload = this.owner.retainPayload(payload, payloadOffset, payloadLength, payloadOwnership);
-        streamRuntime.markLocalSendStartedLocked();
-        if (fin) {
-            streamRuntime.markFinQueuedLocked();
-        }
-        this.owner.enqueueQueuedOutboundLocked(
-                this.owner.dataQueueInternal(),
-                new SessionRuntime.OutboundFrame(
-                        new FrameCodec.Frame(FrameType.DATA, frameFlags, streamRuntime.streamIdInternal(), openingPrefix),
-                        streamRuntime,
-                        payloadLength,
-                        true,
-                        false,
-                        openingPrefix,
-                        retainedPayload,
-                        0,
-                        retainedPayload.length,
-                        null,
-                        0,
-                        0
-                )
+        SessionRuntime.OutboundFrame outboundFrame = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, frameFlags, streamRuntime.streamIdInternal(), openingPrefix),
+                streamRuntime,
+                payloadLength,
+                true,
+                false,
+                openingPrefix,
+                retainedPayload,
+                0,
+                retainedPayload.length,
+                null,
+                0,
+                0
         );
-        streamRuntime.markOpeningFramePendingLocked();
-        this.owner.markLocalStreamOpeningCommittedLocked(streamRuntime);
-        this.owner.flushPendingPriorityUpdateLocked(streamRuntime);
+        this.enqueueReservedOpeningDataLocked(streamRuntime, outboundFrame, payloadLength, fin);
     }
 
     void queueOpeningFinLocked(StreamRuntime streamRuntime, byte[] openingPrefix) throws IOException {
         if (!streamRuntime.idAssigned()) {
             this.owner.beginLocalOpenForCloseLocked(streamRuntime);
         }
+        this.owner.reserveSendLocked(
+                streamRuntime,
+                0,
+                SessionOutboundDataCoordinator.queuedDataTrackedBytes(0, openingPrefix.length + 1)
+        );
+        SessionRuntime.OutboundFrame outboundFrame = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, openingPrefix.length == 0 ? 0x40 : 0x60, streamRuntime.streamIdInternal(), openingPrefix),
+                streamRuntime,
+                0,
+                true,
+                false,
+                openingPrefix,
+                StreamRuntime.EMPTY_BYTES,
+                0,
+                0,
+                null,
+                0,
+                0
+        );
+        this.owner.ensureStreamWriteQueueMemoryLocked(outboundFrame);
         streamRuntime.markLocalSendStartedLocked();
         streamRuntime.markFinQueuedLocked();
-        this.owner.enqueueQueuedOutboundLocked(
-                this.owner.dataQueueInternal(),
-                new SessionRuntime.OutboundFrame(
-                        new FrameCodec.Frame(FrameType.DATA, openingPrefix.length == 0 ? 0x40 : 0x60, streamRuntime.streamIdInternal(), openingPrefix),
-                        streamRuntime,
-                        0,
-                        true,
-                        false,
-                        openingPrefix,
-                        StreamRuntime.EMPTY_BYTES,
-                        0,
-                        0,
-                        null,
-                        0,
-                        0
-                )
-        );
+        this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
         streamRuntime.markOpeningFramePendingLocked();
         this.owner.markLocalStreamOpeningCommittedLocked(streamRuntime);
         this.owner.flushPendingPriorityUpdateLocked(streamRuntime);
@@ -340,10 +335,6 @@ final class SessionOpeningCoordinator {
                                 SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
         int flags = this.prepareOpeningWriteFrameLocked(streamRuntime, prefix, length, fin);
         byte[][] payloadParts = this.owner.retainPayloadParts(parts, partIndex, partOffset, length, payloadOwnership);
-        streamRuntime.markLocalSendStartedLocked();
-        if (fin) {
-            streamRuntime.markFinQueuedLocked();
-        }
         SessionRuntime.OutboundFrame outboundFrame;
         if (payloadParts.length <= 1) {
             byte[] payload = payloadParts.length == 0 ? StreamRuntime.EMPTY_BYTES : payloadParts[0];
@@ -377,10 +368,7 @@ final class SessionOpeningCoordinator {
                     0
             );
         }
-        this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
-        streamRuntime.markOpeningFramePendingLocked();
-        this.owner.markLocalStreamOpeningCommittedLocked(streamRuntime);
-        this.owner.flushPendingPriorityUpdateLocked(streamRuntime);
+        this.enqueueReservedOpeningDataLocked(streamRuntime, outboundFrame, length, fin);
     }
 
     void markPeerVisibleLocked(StreamRuntime streamRuntime) throws IOException {
@@ -471,6 +459,30 @@ final class SessionOpeningCoordinator {
         );
     }
 
+    private void enqueueReservedOpeningDataLocked(StreamRuntime streamRuntime,
+                                                  SessionRuntime.OutboundFrame outboundFrame,
+                                                  int dataBytes,
+                                                  boolean fin) throws IOException {
+        boolean queued = false;
+        try {
+            this.owner.ensureStreamWriteQueueMemoryLocked(outboundFrame);
+            streamRuntime.markLocalSendStartedLocked();
+            if (fin) {
+                streamRuntime.markFinQueuedLocked();
+            }
+            this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
+            queued = true;
+            streamRuntime.markOpeningFramePendingLocked();
+            this.owner.markLocalStreamOpeningCommittedLocked(streamRuntime);
+            this.owner.flushPendingPriorityUpdateLocked(streamRuntime);
+        } catch (IOException error) {
+            if (!queued) {
+                this.owner.releaseReservedSendLocked(streamRuntime, dataBytes);
+            }
+            throw error;
+        }
+    }
+
     private int prepareOpeningWriteFrameLocked(StreamRuntime streamRuntime,
                                                byte[] openingPrefix,
                                                int payloadLength,
@@ -478,7 +490,11 @@ final class SessionOpeningCoordinator {
         if (!streamRuntime.idAssigned()) {
             this.owner.beginLocalOpenForWriteLocked(streamRuntime);
         }
-        this.owner.reserveSendLocked(streamRuntime, payloadLength);
+        this.owner.reserveSendLocked(
+                streamRuntime,
+                payloadLength,
+                SessionOutboundDataCoordinator.queuedDataTrackedBytes(payloadLength, openingPrefix.length + 1)
+        );
         int frameFlags = openingPrefix.length == 0 ? 0 : 0x20;
         if (fin) {
             frameFlags |= 0x40;
