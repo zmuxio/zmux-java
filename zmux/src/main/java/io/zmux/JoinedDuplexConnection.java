@@ -1197,9 +1197,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                     throw new StreamNotReadableException();
                 }
                 int read = input.read();
-                if (read < -1 || read > 0xff) {
-                    throw new IOException("read reported invalid progress");
-                }
                 return read;
             } finally {
                 leaveInput();
