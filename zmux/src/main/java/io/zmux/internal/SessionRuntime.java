@@ -1524,6 +1524,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return Math.max(MIN_RETAINED_STATE_UNIT, unit);
     }
 
+    long compactTerminalStateUnitLocked() {
+        return MIN_COMPACT_TERMINAL_STATE_UNIT;
+    }
+
     int hiddenControlStateRetainedLocked() {
         return this.terminalBookkeeping.hiddenControlStateRetainedLocked();
     }

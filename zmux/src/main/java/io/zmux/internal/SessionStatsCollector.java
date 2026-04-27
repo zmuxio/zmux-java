@@ -319,6 +319,7 @@ final class SessionStatsCollector {
         long sessionMemoryHighThreshold = this.runtime.sessionMemoryHighThresholdLocked();
         long sessionMemoryHardCap = this.runtime.sessionMemoryHardCapLocked();
         long retainedStateUnit = this.runtime.retainedStateUnitLocked();
+        long compactTerminalStateUnit = this.runtime.compactTerminalStateUnitLocked();
 
         SessionStats.AcceptBacklogStats acceptBacklog = new SessionStats.AcceptBacklogStats(
                 pendingAcceptedCount,
@@ -396,8 +397,8 @@ final class SessionStatsCollector {
                 retainedBucketStats(hiddenRetained, retainedStateUnit),
                 retainedBucketStats(pendingAcceptedCount, retainedStateUnit),
                 retainedBucketStats(localOpenTracker.totalProvisionalCountLocked(), retainedStateUnit),
-                retainedBucketStats(visibleTombstones, retainedStateUnit),
-                retainedBucketStats(markerOnly, retainedStateUnit)
+                retainedBucketStats(visibleTombstones, compactTerminalStateUnit),
+                retainedBucketStats(markerOnly, compactTerminalStateUnit)
         );
         SessionStats.PressureStats pressure = new SessionStats.PressureStats(
                 trackedSessionMemory,

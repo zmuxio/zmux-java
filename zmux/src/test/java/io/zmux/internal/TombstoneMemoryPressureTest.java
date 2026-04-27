@@ -223,6 +223,16 @@ final class TombstoneMemoryPressureTest {
                     visibleStats.pressure().retainedStateBreakdown().visibleTombstones().count(),
                     "visible replacement should count as one visible tombstone"
             );
+            assertEquals(
+                    runtime.compactTerminalStateUnitLocked(),
+                    visibleStats.pressure().retainedStateBreakdown().visibleTombstones().bytes(),
+                    "visible tombstone stats should use the compact terminal-state unit"
+            );
+            assertEquals(
+                    runtime.compactTerminalStateUnitLocked(),
+                    visibleStats.pressure().trackedRetainedStateMemoryBytes(),
+                    "visible tombstone breakdown bytes should match tracked retained memory"
+            );
         }
     }
 
@@ -322,6 +332,16 @@ final class TombstoneMemoryPressureTest {
                     1L,
                     runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
                     "marker-only range retention should count compact range entries"
+            );
+            assertEquals(
+                    runtime.compactTerminalStateUnitLocked(),
+                    runtime.stats().pressure().retainedStateBreakdown().markerOnly().bytes(),
+                    "marker-only stats should use the compact terminal-state unit"
+            );
+            assertEquals(
+                    runtime.compactTerminalStateUnitLocked(),
+                    runtime.stats().pressure().trackedRetainedStateMemoryBytes(),
+                    "marker-only breakdown bytes should match tracked retained memory"
             );
         }
     }
