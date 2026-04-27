@@ -24,16 +24,15 @@ final class SessionEventDispatcher {
         if (this.handler == null) {
             return;
         }
-        if (!this.hasPendingEvents()) {
-            return;
-        }
-        if (!this.claimEmitter()) {
-            return;
-        }
-        try {
-            this.drainEvents();
-        } finally {
-            this.releaseEmitter();
+        while (this.hasPendingEvents()) {
+            if (!this.tryClaimEmitter()) {
+                return;
+            }
+            try {
+                this.drainEvents();
+            } finally {
+                this.releaseEmitter();
+            }
         }
     }
 
@@ -41,21 +40,12 @@ final class SessionEventDispatcher {
         return this.pendingEventsAvailable;
     }
 
-    private boolean claimEmitter() {
-        Thread currentThread = Thread.currentThread();
+    private boolean tryClaimEmitter() {
         synchronized (this) {
-            if (this.emittingThread == currentThread) {
+            if (this.emittingThread != null) {
                 return false;
             }
-            while (this.emittingThread != null) {
-                try {
-                    this.wait();
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                }
-            }
-            this.emittingThread = currentThread;
+            this.emittingThread = Thread.currentThread();
             return true;
         }
     }
@@ -63,7 +53,6 @@ final class SessionEventDispatcher {
     private void releaseEmitter() {
         synchronized (this) {
             this.emittingThread = null;
-            this.notifyAll();
         }
     }
 

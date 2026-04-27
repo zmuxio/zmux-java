@@ -118,6 +118,7 @@ final class EventSurfaceRuntimeTest {
         AtomicInteger activeHandlers = new AtomicInteger();
         AtomicInteger maxActiveHandlers = new AtomicInteger();
         AtomicReference<Throwable> emitterFailure = new AtomicReference<>();
+        CountDownLatch secondEmitterReturned = new CountDownLatch(1);
 
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 ZmuxConfig.builder().eventHandler(event -> {
@@ -162,9 +163,15 @@ final class EventSurfaceRuntimeTest {
                 runtime.emitPendingEvents();
             } catch (Throwable failure) {
                 emitterFailure.compareAndSet(null, failure);
+            } finally {
+                secondEmitterReturned.countDown();
             }
         }, "event-serial-second");
         secondEmitter.start();
+        assertTrue(
+                secondEmitterReturned.await(500, TimeUnit.MILLISECONDS),
+                "non-empty emitPendingEvents call should not wait behind an active handler"
+        );
 
         releaseFirstHandler.countDown();
         firstEmitter.join(TimeUnit.SECONDS.toMillis(2));
