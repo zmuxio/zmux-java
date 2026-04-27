@@ -69,7 +69,7 @@ final class SessionTerminalBookkeeping {
     }
 
     int markerOnlyRetainedLocked() {
-        return saturatingAddInt(this.markerOnlyMapCountLocked(), this.markerOnlyRangeStreamCountLocked());
+        return saturatingAddInt(this.markerOnlyMapCountLocked(), this.markerOnlyRangeCountLocked());
     }
 
     int markerOnlyRangeCountLocked() {
@@ -177,14 +177,6 @@ final class SessionTerminalBookkeeping {
             if (!this.tombstones.containsKey(streamId)) {
                 count++;
             }
-        }
-        return count;
-    }
-
-    private int markerOnlyRangeStreamCountLocked() {
-        int count = 0;
-        for (MarkerRange range : this.markerOnlyRanges) {
-            count = saturatingAddInt(count, range.streamCount());
         }
         return count;
     }
@@ -538,13 +530,6 @@ final class SessionTerminalBookkeeping {
             return disposition != null && disposition.sameAs(other);
         }
 
-        int streamCount() {
-            if (end < start) {
-                return 0;
-            }
-            long count = (end - start) / 4L + 1L;
-            return count > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) count;
-        }
     }
 
     static final class Tombstone {

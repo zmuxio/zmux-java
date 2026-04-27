@@ -258,7 +258,7 @@ final class TombstoneMemoryPressureTest {
     }
 
     @Test
-    void markerOnlyRangeCompactionReleasesEmptyMapBackingAndCountsStreams() throws Exception {
+    void markerOnlyRangeCompactionReleasesEmptyMapBackingAndCountsEntries() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         Object tombstone = newTombstone(true, true, 0L, "", false, 0L);
 
@@ -276,9 +276,9 @@ final class TombstoneMemoryPressureTest {
                     "sequential markers should merge into one range"
             );
             assertEquals(
-                    64L,
+                    1L,
                     runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
-                    "marker-only range retention should count streams, not ranges"
+                    "marker-only range retention should count compact range entries"
             );
         }
     }
@@ -304,9 +304,9 @@ final class TombstoneMemoryPressureTest {
             assertFalse(markerOnly(runtime).containsKey(4L), "range-mode marker update should drop stale map entry");
             assertNotSame(retainedMap, markerOnly(runtime), "range-mode marker update should release empty map backing");
             assertEquals(
-                    64L,
+                    2L,
                     runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
-                    "stale map entry must not double-count a ranged marker"
+                    "range-mode marker update should count the split range entries without stale map duplication"
             );
         }
     }
