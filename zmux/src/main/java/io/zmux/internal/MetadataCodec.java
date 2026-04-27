@@ -9,12 +9,13 @@ import java.util.List;
 
 final class MetadataCodec {
     private static final byte[] EMPTY_BYTES = new byte[0];
+    private static final int MAX_TLV_PARSE_CAPACITY_HINT = 64;
 
     private MetadataCodec() {
     }
 
     static List<Tlv> parseTlvs(byte[] source) throws IOException {
-        List<Tlv> output = new ArrayList<>();
+        List<Tlv> output = new ArrayList<>(tlvParseCapacityHint(source.length));
         FrameCodec.walkTlvs(source, 0, source.length, (type, value, offset, length) ->
                 output.add(new Tlv(type, FrameCodec.copySlice(value, offset, length))));
         return output;
@@ -257,6 +258,13 @@ final class MetadataCodec {
 
     private static long tlvEncodedSize(long type, int valueLength) throws IOException {
         return Varint62.length(type) + Varint62.length(valueLength) + valueLength;
+    }
+
+    private static int tlvParseCapacityHint(int sourceLength) {
+        if (sourceLength <= 0) {
+            return 0;
+        }
+        return Math.min(MAX_TLV_PARSE_CAPACITY_HINT, Math.max(1, sourceLength / 2));
     }
 
     private static int longestPrefixThatFits(int totalLength, long availableBytes) throws IOException {

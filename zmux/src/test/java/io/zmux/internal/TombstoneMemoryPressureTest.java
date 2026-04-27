@@ -83,6 +83,16 @@ final class TombstoneMemoryPressureTest {
         );
     }
 
+    private static void retainMarkerOnly(SessionRuntime runtime, long streamId, Object tombstone) throws Exception {
+        SessionRuntimeTestSupport.invokePrivate(
+                terminalBookkeeping(runtime),
+                "retainMarkerOnlyUsedStreamLocked",
+                new Class<?>[]{long.class, tombstone.getClass()},
+                streamId,
+                tombstone
+        );
+    }
+
     @Test
     void trackedMemoryPressureReapsOldestVisibleTombstoneToMarkerOnly() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
@@ -244,6 +254,60 @@ final class TombstoneMemoryPressureTest {
             assertNotSame(retainedOrder, tombstoneOrder(runtime), "empty tombstone order should release retained backing");
             assertNotSame(retainedHidden, hiddenTombstones(runtime), "empty hidden tombstone queue should release retained backing");
             assertTrue(markerOnly(runtime).containsKey(4L), "expired hidden tombstone should retain marker-only state");
+        }
+    }
+
+    @Test
+    void markerOnlyRangeCompactionReleasesEmptyMapBackingAndCountsStreams() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        Object tombstone = newTombstone(true, true, 0L, "", false, 0L);
+
+        synchronized (runtime.lock()) {
+            Map<Long, Object> retainedMap = markerOnly(runtime);
+            for (int i = 0; i < 64; i++) {
+                retainMarkerOnly(runtime, 4L + i * 4L, tombstone);
+            }
+
+            assertTrue(markerOnly(runtime).isEmpty(), "range compaction should remove migrated map entries");
+            assertNotSame(retainedMap, markerOnly(runtime), "range compaction should release empty marker-only map backing");
+            assertEquals(
+                    1L,
+                    runtime.stats().diagnostics().markerOnlyRangeCount(),
+                    "sequential markers should merge into one range"
+            );
+            assertEquals(
+                    64L,
+                    runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
+                    "marker-only range retention should count streams, not ranges"
+            );
+        }
+    }
+
+    @Test
+    void rangeModeMarkerUpdateDropsStaleMapEntry() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        Object graceful = newTombstone(true, true, 0L, "", false, 0L);
+        Object abortive = newTombstone(false, false, 0L, "", false, 0L);
+
+        synchronized (runtime.lock()) {
+            for (int i = 0; i < 64; i++) {
+                retainMarkerOnly(runtime, 4L + i * 4L, graceful);
+            }
+            Map<Long, Object> retainedMap = markerOnly(runtime);
+            retainedMap.put(4L, new SessionTerminalBookkeeping.TerminalDataDisposition(
+                    SessionTerminalBookkeeping.LateDataAction.ABORT_CLOSED,
+                    LateDataCause.NONE
+            ));
+
+            retainMarkerOnly(runtime, 4L, abortive);
+
+            assertFalse(markerOnly(runtime).containsKey(4L), "range-mode marker update should drop stale map entry");
+            assertNotSame(retainedMap, markerOnly(runtime), "range-mode marker update should release empty map backing");
+            assertEquals(
+                    64L,
+                    runtime.stats().pressure().retainedStateBreakdown().markerOnly().count(),
+                    "stale map entry must not double-count a ranged marker"
+            );
         }
     }
 }

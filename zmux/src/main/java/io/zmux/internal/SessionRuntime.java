@@ -3558,7 +3558,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.explicitGroupTracker.onStreamSendTerminalLocked(streamRuntime);
     }
 
-    private void dropOrdinaryBatchStateLocked(StreamRuntime streamRuntime) {
+    void dropOrdinaryBatchStateLocked(StreamRuntime streamRuntime) {
         this.explicitGroupTracker.dropOrdinaryBatchStateLocked(
                 streamRuntime,
                 this.peerSettings().schedulerHints()
@@ -4887,6 +4887,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     static final class PendingPing {
         private final long startedAtNanos;
         private final byte[] payload;
+        private boolean queued;
         private boolean done;
         private long completedAtNanos;
         private IOException error;
@@ -4903,6 +4904,14 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
         byte[] payload() {
             return this.payload;
+        }
+
+        boolean queued() {
+            return this.queued;
+        }
+
+        void markQueued() {
+            this.queued = true;
         }
 
         synchronized boolean done() {

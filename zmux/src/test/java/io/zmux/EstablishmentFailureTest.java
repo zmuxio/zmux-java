@@ -7,6 +7,7 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,13 +75,7 @@ final class EstablishmentFailureTest {
 
         AtomicReference<Throwable> openError = new AtomicReference<>();
         CountDownLatch finished = new CountDownLatch(1);
-        BasicDuplexConnection connection = new BasicDuplexConnection(
-                sessionSocket.getInputStream(),
-                sessionSocket.getOutputStream(),
-                sessionSocket,
-                sessionSocket.getLocalSocketAddress(),
-                sessionSocket.getRemoteSocketAddress()
-        );
+        DeadlineSocketDuplexConnection connection = new DeadlineSocketDuplexConnection(sessionSocket);
 
         Thread openThread = new Thread(() -> {
             try {
@@ -202,6 +197,52 @@ final class EstablishmentFailureTest {
 
     private interface EstablishmentOpen {
         void open(DuplexConnection connection) throws IOException;
+    }
+
+    private static final class DeadlineSocketDuplexConnection implements DuplexConnection {
+        private final Socket socket;
+        private final InputStream input;
+        private final OutputStream output;
+
+        private DeadlineSocketDuplexConnection(Socket socket) throws IOException {
+            this.socket = socket;
+            this.input = socket.getInputStream();
+            this.output = socket.getOutputStream();
+        }
+
+        @Override
+        public InputStream input() {
+            return this.input;
+        }
+
+        @Override
+        public OutputStream output() {
+            return this.output;
+        }
+
+        @Override
+        public java.net.SocketAddress localAddress() {
+            return this.socket.getLocalSocketAddress();
+        }
+
+        @Override
+        public java.net.SocketAddress remoteAddress() {
+            return this.socket.getRemoteSocketAddress();
+        }
+
+        @Override
+        public boolean supportsWriteDeadline() {
+            return true;
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+        }
+
+        @Override
+        public void close() throws IOException {
+            this.socket.close();
+        }
     }
 
     private static final class CountingDuplexConnection implements DuplexConnection {

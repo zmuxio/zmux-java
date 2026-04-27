@@ -53,6 +53,13 @@ final class SessionTerminalBookkeeping {
         }
     }
 
+    private static int saturatingAddInt(int left, int right) {
+        if (left >= Integer.MAX_VALUE || right >= Integer.MAX_VALUE || left > Integer.MAX_VALUE - right) {
+            return Integer.MAX_VALUE;
+        }
+        return left + right;
+    }
+
     int hiddenControlStateRetainedLocked() {
         return this.hiddenTombstones.size();
     }
@@ -62,7 +69,7 @@ final class SessionTerminalBookkeeping {
     }
 
     int markerOnlyRetainedLocked() {
-        return this.markerOnlyMapCountLocked() + this.markerOnlyRanges.size();
+        return saturatingAddInt(this.markerOnlyMapCountLocked(), this.markerOnlyRangeStreamCountLocked());
     }
 
     int markerOnlyRangeCountLocked() {
@@ -152,6 +159,7 @@ final class SessionTerminalBookkeeping {
         }
         if (this.markerOnlyRangeMode) {
             this.upsertMarkerRangeLocked(streamId, disposition);
+            this.dropMarkerOnlyMapEntryLocked(streamId);
             this.enforceMarkerOnlyUsedStreamLimitLocked();
             return;
         }
@@ -173,6 +181,24 @@ final class SessionTerminalBookkeeping {
         return count;
     }
 
+    private int markerOnlyRangeStreamCountLocked() {
+        int count = 0;
+        for (MarkerRange range : this.markerOnlyRanges) {
+            count = saturatingAddInt(count, range.streamCount());
+        }
+        return count;
+    }
+
+    private void dropMarkerOnlyMapEntryLocked(Long streamId) {
+        if (this.markerOnlyUsedStreams.isEmpty()) {
+            return;
+        }
+        this.markerOnlyUsedStreams.remove(streamId);
+        if (this.markerOnlyUsedStreams.isEmpty()) {
+            this.markerOnlyUsedStreams = new HashMap<>();
+        }
+    }
+
     private void compactMarkerOnlyRangesLocked() {
         int markerOnlyCount = this.markerOnlyMapCountLocked();
         if (markerOnlyCount <= this.owner.markerOnlyUsedStreamHardCapLocked() && markerOnlyCount < 64) {
@@ -192,11 +218,13 @@ final class SessionTerminalBookkeeping {
         }
         Collections.sort(streamIds);
         for (Long streamId : streamIds) {
-            TerminalDataDisposition disposition = this.markerOnlyUsedStreams.remove(streamId);
+            TerminalDataDisposition disposition = this.markerOnlyUsedStreams.get(streamId);
             if (disposition != null) {
                 this.upsertMarkerRangeLocked(streamId, disposition);
             }
+            this.dropMarkerOnlyMapEntryLocked(streamId);
         }
+        this.markerOnlyRanges.trimToSize();
         this.markerOnlyRangeMode = true;
     }
 
@@ -508,6 +536,14 @@ final class SessionTerminalBookkeeping {
 
         boolean sameDisposition(TerminalDataDisposition other) {
             return disposition != null && disposition.sameAs(other);
+        }
+
+        int streamCount() {
+            if (end < start) {
+                return 0;
+            }
+            long count = (end - start) / 4L + 1L;
+            return count > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) count;
         }
     }
 

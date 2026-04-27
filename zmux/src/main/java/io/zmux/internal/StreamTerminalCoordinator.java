@@ -27,6 +27,7 @@ final class StreamTerminalCoordinator {
         this.owner.clearWriteAdvisoryLocked();
         StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().concludeStopSendingWithReset();
         this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, false);
+        this.owner.sessionInternal().dropOrdinaryBatchStateLocked(this.owner);
         this.owner.notifySendTerminalTransitionLocked(previousSendState);
         this.owner.refreshGracefulCloseBlockingLocked();
     }
@@ -60,6 +61,7 @@ final class StreamTerminalCoordinator {
         this.owner.clearWriteAdvisoryLocked();
         StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().abortBoth();
         this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, false);
+        this.owner.sessionInternal().dropOrdinaryBatchStateLocked(this.owner);
         this.owner.notifySendTerminalTransitionLocked(previousSendState);
         this.owner.discardReadBufferLocked();
         this.owner.refreshGracefulCloseBlockingLocked();

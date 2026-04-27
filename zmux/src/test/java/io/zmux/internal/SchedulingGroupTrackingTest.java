@@ -45,6 +45,51 @@ final class SchedulingGroupTrackingTest {
         return new OrdinaryBatchOrderer.GroupKey(kind, value);
     }
 
+    private static void seedRetainedBatchState(SessionRuntime runtime, StreamRuntime stream, long group) throws Exception {
+        OrdinaryBatchRetainedState state = retainedBias(runtime).state();
+        long streamId = stream.streamIdInternal();
+        OrdinaryBatchOrderer.GroupKey streamKey = groupKey(0, streamId);
+        OrdinaryBatchOrderer.GroupKey groupKey = groupKey(1, group);
+        state.streamFinishTag.put(streamId, 3L);
+        state.streamLastServed.put(streamId, 5L);
+        state.streamLag.put(streamId, 7L);
+        state.streamClass.put(streamId, OrdinaryBatchOrderer.TrafficClass.INTERACTIVE);
+        state.streamLastSeenBatch.put(streamId, 11L);
+        state.smallBurstDisarmed.add(streamId);
+        state.groupVirtualTime.put(streamKey, 13L);
+        state.groupVirtualTime.put(groupKey, 17L);
+        state.groupFinishTag.put(streamKey, 19L);
+        state.groupFinishTag.put(groupKey, 23L);
+        state.groupLastServed.put(streamKey, 29L);
+        state.groupLastServed.put(groupKey, 31L);
+        state.groupLag.put(streamKey, 37L);
+        state.groupLag.put(groupKey, 41L);
+        state.preferredStreamHeads.put(streamKey, streamId);
+        state.preferredStreamHeads.put(groupKey, streamId);
+    }
+
+    private static void assertRetainedBatchStateDropped(SessionRuntime runtime, long streamId, long group) throws Exception {
+        OrdinaryBatchRetainedState state = retainedBias(runtime).state();
+        OrdinaryBatchOrderer.GroupKey streamKey = groupKey(0, streamId);
+        OrdinaryBatchOrderer.GroupKey groupKey = groupKey(1, group);
+        assertFalse(state.streamFinishTag.containsKey(streamId), "stream finish tag should be dropped");
+        assertFalse(state.streamLastServed.containsKey(streamId), "stream last-served state should be dropped");
+        assertFalse(state.streamLag.containsKey(streamId), "stream lag state should be dropped");
+        assertFalse(state.streamClass.containsKey(streamId), "stream class state should be dropped");
+        assertFalse(state.streamLastSeenBatch.containsKey(streamId), "stream last-seen batch state should be dropped");
+        assertFalse(state.smallBurstDisarmed.contains(streamId), "small-burst state should be dropped");
+        assertFalse(state.groupVirtualTime.containsKey(streamKey), "stream group virtual time should be dropped");
+        assertFalse(state.groupVirtualTime.containsKey(groupKey), "explicit group virtual time should be dropped");
+        assertFalse(state.groupFinishTag.containsKey(streamKey), "stream group finish tag should be dropped");
+        assertFalse(state.groupFinishTag.containsKey(groupKey), "explicit group finish tag should be dropped");
+        assertFalse(state.groupLastServed.containsKey(streamKey), "stream group last-served state should be dropped");
+        assertFalse(state.groupLastServed.containsKey(groupKey), "explicit group last-served state should be dropped");
+        assertFalse(state.groupLag.containsKey(streamKey), "stream group lag should be dropped");
+        assertFalse(state.groupLag.containsKey(groupKey), "explicit group lag should be dropped");
+        assertFalse(state.preferredStreamHeads.containsKey(streamKey), "stream preferred head should be dropped");
+        assertFalse(state.preferredStreamHeads.containsKey(groupKey), "explicit group preferred head should be dropped");
+    }
+
     @Test
     void overflowExplicitGroupUsesFallbackBucket() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
@@ -95,6 +140,58 @@ final class SchedulingGroupTrackingTest {
         synchronized (runtime.lock()) {
             assertFalse(stream.schedulingGroupTrackedLocked(), "send-terminal stream should drop explicit group tracking");
             assertFalse(activeExplicitGroupRefs(runtime).containsKey(7L), "last explicit group ref should be released on send terminal");
+        }
+    }
+
+    @Test
+    void closeWithErrorDropsRetainedOrdinaryBatchState() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                Protocol.CAPABILITY_STREAM_GROUPS,
+                Settings.builder()
+                        .schedulerHints(SchedulerHint.GROUP_FAIR)
+                        .maxFramePayload(16_384L)
+                        .build()
+        );
+        StreamRuntime stream = (StreamRuntime) runtime.openStream(new OpenOptions(0L, 7L, new byte[0]));
+
+        synchronized (runtime.lock()) {
+            makePeerVisible(runtime, stream);
+            seedRetainedBatchState(runtime, stream, 7L);
+        }
+
+        stream.closeWithError(ErrorCode.CANCELLED.code(), "abort");
+
+        synchronized (runtime.lock()) {
+            assertFalse(stream.schedulingGroupTrackedLocked(), "local abort should drop explicit group tracking");
+            assertFalse(activeExplicitGroupRefs(runtime).containsKey(7L), "local abort should release the explicit group ref");
+            assertRetainedBatchStateDropped(runtime, stream.streamIdInternal(), 7L);
+        }
+    }
+
+    @Test
+    void preCommitCancelWriteDropsRetainedOrdinaryBatchState() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                Protocol.CAPABILITY_STREAM_GROUPS,
+                Settings.builder()
+                        .schedulerHints(SchedulerHint.GROUP_FAIR)
+                        .maxFramePayload(16_384L)
+                        .build()
+        );
+        StreamRuntime stream = (StreamRuntime) runtime.openStream(new OpenOptions(0L, 7L, new byte[0]));
+        long streamId;
+
+        synchronized (runtime.lock()) {
+            runtime.beginLocalOpenForWriteLocked(stream);
+            streamId = stream.streamIdInternal();
+            seedRetainedBatchState(runtime, stream, 7L);
+        }
+
+        stream.cancelWrite(ErrorCode.CANCELLED.code());
+
+        synchronized (runtime.lock()) {
+            assertFalse(stream.schedulingGroupTrackedLocked(), "pre-commit abort should drop explicit group tracking");
+            assertFalse(activeExplicitGroupRefs(runtime).containsKey(7L), "pre-commit abort should release the explicit group ref");
+            assertRetainedBatchStateDropped(runtime, streamId, 7L);
         }
     }
 

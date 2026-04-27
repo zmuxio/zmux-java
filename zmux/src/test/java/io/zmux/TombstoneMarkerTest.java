@@ -277,10 +277,10 @@ final class TombstoneMarkerTest {
     }
 
     @Test
-    void markerOnlyRangesCompressSequentialStreamIdsUnderCap() throws Exception {
+    void markerOnlySequentialStreamIdsStayUnderStreamCap() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .tombstoneLimit(1)
-                .markerOnlyUsedStreamLimit(1)
+                .markerOnlyUsedStreamLimit(3)
                 .build();
         try (RawPeerSession peer = RawPeerSession.open(config, 0L)) {
             peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 2L, new byte[0]));
@@ -293,13 +293,8 @@ final class TombstoneMarkerTest {
             peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 10L, new byte[0]));
             acceptEmptyUni(peer.session());
 
-            await(
-                    Duration.ofSeconds(1),
-                    () -> peer.session().stats().diagnostics().markerOnlyRangeCount() == 1,
-                    "marker-only range compaction"
-            );
-            assertFalse(peer.session().state().terminal(), "mergeable marker-only ranges should not trip a cap of one");
-            assertNull(peer.pollFrame(Duration.ofMillis(150)), "range compaction should not emit a CLOSE frame");
+            assertFalse(peer.session().state().terminal(), "marker-only streams should stay under the stream cap");
+            assertNull(peer.pollFrame(Duration.ofMillis(150)), "in-cap marker-only streams should not emit a CLOSE frame");
         }
     }
 

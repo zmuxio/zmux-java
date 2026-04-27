@@ -58,6 +58,7 @@ final class StreamWriteCoordinator {
                 this.owner.terminalStateInternal().recordLocalWriteReset(code);
                 this.owner.clearWriteAdvisoryLocked();
                 this.owner.sessionInternal().discardQueuedStreamDataLocked(this.owner, true);
+                this.owner.sessionInternal().dropOrdinaryBatchStateLocked(this.owner);
                 this.owner.notifySendTerminalTransitionLocked(previousSendState);
                 this.owner.refreshGracefulCloseBlockingLocked();
                 this.owner.sessionInternal().enqueueResetLocked(this.owner, code, resetPayload, false);

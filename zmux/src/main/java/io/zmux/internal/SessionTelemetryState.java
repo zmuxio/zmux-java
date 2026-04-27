@@ -17,6 +17,9 @@ final class SessionTelemetryState {
     private static final int MIN_SEND_RATE_SAMPLE_BYTES = 4 << 10;
     private static final long MIN_SEND_RATE_SAMPLE_DURATION_NANOS = TimeUnit.MILLISECONDS.toNanos(25L);
     private static final long KEEPALIVE_JITTER_GAMMA = -7046029254386353131L;
+    private static final int PING_NONCE_BYTES = Long.BYTES;
+    private static final long PING_PAYLOAD_HASH_OFFSET = 0xcbf29ce484222325L;
+    private static final long PING_PAYLOAD_HASH_PRIME = 0x100000001b3L;
     private static final AtomicLong KEEPALIVE_JITTER_COUNTER = new AtomicLong();
     private static final String KEEPALIVE_TIMEOUT_REASON = "zmux: keepalive timeout";
     private final Owner owner;
@@ -47,6 +50,10 @@ final class SessionTelemetryState {
     private long writeIdlePingDueAtNanos;
     private long maxPingDueAtNanos;
     private long keepaliveJitterState;
+    private long canceledPingNonce;
+    private long canceledPingHash;
+    private int canceledPingLength;
+    private boolean canceledPingSet;
 
     SessionTelemetryState(Owner owner, ZmuxConfig config, long timeOriginNanos, Instant timeOriginInstant) {
         this.owner = Objects.requireNonNull(owner, "owner");
@@ -88,6 +95,23 @@ final class SessionTelemetryState {
             return left + (right - left) / 2L;
         }
         return right + (left - right) / 2L;
+    }
+
+    private static long pingPayloadNonce(byte[] payload) {
+        long nonce = 0L;
+        for (int i = 0; i < PING_NONCE_BYTES; i++) {
+            nonce = nonce << 8 | payload[i] & 0xffL;
+        }
+        return nonce;
+    }
+
+    private static long pingPayloadHash(byte[] payload) {
+        long hash = PING_PAYLOAD_HASH_OFFSET;
+        for (byte value : payload) {
+            hash ^= value & 0xffL;
+            hash *= PING_PAYLOAD_HASH_PRIME;
+        }
+        return hash;
     }
 
     private static long initKeepaliveJitterState(long seed) {
@@ -336,6 +360,9 @@ final class SessionTelemetryState {
             return;
         }
         long previousTracked = this.owner.trackedSessionMemoryLocked();
+        if (error != null && this.shouldRetainCanceledPingLocked(pendingPing)) {
+            this.retainCanceledPingLocked(pendingPing.payload());
+        }
         this.activePing = null;
         if (this.keepaliveEnabledLocked()) {
             this.resetReadIdlePingDueLocked(completedAtNanos);
@@ -363,11 +390,15 @@ final class SessionTelemetryState {
     }
 
     private void queueActivePingLocked(byte[] payload) throws IOException {
+        SessionRuntime.PendingPing pendingPing = this.activePing;
         try {
             this.owner.enqueuePingLocked(payload);
         } catch (IOException error) {
             this.completeActivePingLocked(error, System.nanoTime());
             throw error;
+        }
+        if (pendingPing != null && pendingPing.payload() == payload) {
+            pendingPing.markQueued();
         }
         this.owner.notifyWriterWaitersLocked();
     }
@@ -578,6 +609,7 @@ final class SessionTelemetryState {
 
     void clearTerminalKeepaliveStateLocked() {
         this.clearKeepaliveSchedulesLocked();
+        this.clearCanceledPingLocked();
         this.lastPingSentAtNanos = 0L;
         this.lastPongAtNanos = 0L;
         this.lastPingRttNanos = 0L;
@@ -675,11 +707,49 @@ final class SessionTelemetryState {
     boolean handlePongLocked(byte[] payload, long nowNanos) {
         this.lastPongAtNanos = nowNanos;
         if (this.activePing == null || !Arrays.equals(payload, this.activePing.payload())) {
-            return false;
+            if (!this.canceledPingMatches(payload)) {
+                return false;
+            }
+            this.clearCanceledPingLocked();
+            return true;
         }
         this.lastPingRttNanos = RuntimeFlow.elapsedNanos(nowNanos, this.activePing.startedAtNanos());
         this.completeActivePingLocked(null, nowNanos);
         return true;
+    }
+
+    private boolean shouldRetainCanceledPingLocked(SessionRuntime.PendingPing pendingPing) {
+        return pendingPing.queued()
+                && !this.owner.closeFrameQueued()
+                && this.owner.state() != SessionState.CLOSING
+                && !this.owner.state().terminal();
+    }
+
+    private void retainCanceledPingLocked(byte[] payload) {
+        if (payload == null || payload.length < PING_NONCE_BYTES) {
+            this.clearCanceledPingLocked();
+            return;
+        }
+        this.canceledPingNonce = pingPayloadNonce(payload);
+        this.canceledPingHash = pingPayloadHash(payload);
+        this.canceledPingLength = payload.length;
+        this.canceledPingSet = true;
+    }
+
+    private boolean canceledPingMatches(byte[] payload) {
+        return this.canceledPingSet
+                && payload != null
+                && payload.length == this.canceledPingLength
+                && payload.length >= PING_NONCE_BYTES
+                && pingPayloadNonce(payload) == this.canceledPingNonce
+                && pingPayloadHash(payload) == this.canceledPingHash;
+    }
+
+    private void clearCanceledPingLocked() {
+        this.canceledPingNonce = 0L;
+        this.canceledPingHash = 0L;
+        this.canceledPingLength = 0;
+        this.canceledPingSet = false;
     }
 
     private long bytesPerSecondSample(long bytes, long writeDurationNanos) {

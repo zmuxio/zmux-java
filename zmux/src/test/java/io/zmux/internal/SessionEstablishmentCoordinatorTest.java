@@ -194,6 +194,33 @@ final class SessionEstablishmentCoordinatorTest {
         }
     }
 
+    @Test
+    void establishmentFailureSkipsFatalCloseWithoutWriteDeadlineSupport() throws Exception {
+        NoWriteDeadlineFailureOwner owner = new NoWriteDeadlineFailureOwner(
+                preface(Role.INITIATOR, 1L),
+                preface(Role.INITIATOR, 2L)
+        );
+        SessionEstablishmentCoordinator coordinator = new SessionEstablishmentCoordinator(
+                owner,
+                Duration.ofMillis(40L),
+                Duration.ofMillis(200L),
+                Duration.ofMillis(1L)
+        );
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, coordinator::establish),
+                "same-role conflict should fail establishment"
+        );
+
+        assertEquals(ErrorCode.ROLE_CONFLICT.code(), error.code(), "same-role conflict code mismatch");
+        assertEquals(1, owner.transportWrites.get(), "unsupported write deadline must skip fatal CLOSE writes");
+        assertTrue(owner.transportClosed.get(), "establishment failure must close the transport");
+        assertFalse(owner.readyMarked.get(), "failed establishment must not mark the session ready");
+        assertFalse(owner.readerStarted.get(), "failed establishment must not start the reader loop");
+        assertFalse(owner.writerStarted.get(), "failed establishment must not start the writer loop");
+    }
+
     private static final class TestOwner implements SessionEstablishmentCoordinator.Owner {
         private final FrameCodec.Decoder input;
         private final BufferedOutputStream output;
@@ -323,6 +350,98 @@ final class SessionEstablishmentCoordinatorTest {
         public void closeTransport() {
             this.transportClosed.set(true);
             this.releaseWrites.countDown();
+        }
+    }
+
+    private static final class NoWriteDeadlineFailureOwner implements SessionEstablishmentCoordinator.Owner {
+        private final FrameCodec.Decoder input;
+        private final BufferedOutputStream output;
+        private final Preface localPreface;
+        private final Object lock = new Object();
+        private final AtomicInteger transportWrites = new AtomicInteger();
+        private final AtomicBoolean readyMarked = new AtomicBoolean();
+        private final AtomicBoolean transportClosed = new AtomicBoolean();
+        private final AtomicBoolean readerStarted = new AtomicBoolean();
+        private final AtomicBoolean writerStarted = new AtomicBoolean();
+
+        private NoWriteDeadlineFailureOwner(Preface localPreface, Preface remotePreface) throws IOException {
+            this.localPreface = localPreface;
+            this.input = FrameCodec.decoder(new ByteArrayInputStream(encodePreface(remotePreface)));
+            this.output = new BufferedOutputStream(new OutputStream() {
+                @Override
+                public void write(int value) {
+                    NoWriteDeadlineFailureOwner.this.transportWrites.incrementAndGet();
+                }
+
+                @Override
+                public void write(byte[] buffer, int offset, int length) {
+                    NoWriteDeadlineFailureOwner.this.transportWrites.incrementAndGet();
+                }
+            });
+        }
+
+        @Override
+        public FrameCodec.Decoder input() {
+            return this.input;
+        }
+
+        @Override
+        public BufferedOutputStream output() {
+            return this.output;
+        }
+
+        @Override
+        public Preface localPreface() {
+            return this.localPreface;
+        }
+
+        @Override
+        public Object lock() {
+            return this.lock;
+        }
+
+        @Override
+        public void markReadyLocked(Preface remotePreface, Negotiated negotiated, long readyAtNanos) {
+            this.readyMarked.set(true);
+        }
+
+        @Override
+        public void notifyLockWaiters() {
+        }
+
+        @Override
+        public boolean supportsWriteDeadline() {
+            return false;
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+            throw new AssertionError("unsupported write deadline must not be armed");
+        }
+
+        @Override
+        public Runnable readerLoopTask() {
+            return () -> this.readerStarted.set(true);
+        }
+
+        @Override
+        public Runnable writerLoopTask() {
+            return () -> this.writerStarted.set(true);
+        }
+
+        @Override
+        public IOException sessionInternalError(String operation, String message) {
+            return SessionRuntime.sessionInternalError(operation, message);
+        }
+
+        @Override
+        public IOException sessionInternalError(String operation, String message, Throwable cause) {
+            return SessionRuntime.sessionInternalError(operation, message, cause);
+        }
+
+        @Override
+        public void closeTransport() {
+            this.transportClosed.set(true);
         }
     }
 

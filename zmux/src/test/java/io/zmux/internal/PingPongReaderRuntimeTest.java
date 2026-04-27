@@ -5,7 +5,11 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.Deque;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -47,6 +51,23 @@ final class PingPongReaderRuntimeTest {
         return field.getInt(target);
     }
 
+    private static byte[] awaitQueuedPayload(SessionRuntime runtime, FrameType type) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            synchronized (runtime.lock()) {
+                Deque<Object> queue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+                for (Object outbound : queue) {
+                    if (SessionRuntimeTestSupport.outboundFrame(outbound).type() == type) {
+                        return SessionRuntimeTestSupport.outboundPayload(outbound);
+                    }
+                }
+            }
+            TimeUnit.MILLISECONDS.sleep(1L);
+        }
+        fail("timed out waiting for queued " + type);
+        return new byte[0];
+    }
+
     @Test
     void directMalformedPongFailsBeforeCloseStart() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -71,6 +92,43 @@ final class PingPongReaderRuntimeTest {
         synchronized (runtime.lock()) {
             assertEquals(0, getIntField(runtime, "noOpControlCount"), "ignored closing PONG must not consume no-op budget");
         }
+    }
+
+    @Test
+    void lateMatchingPongAfterPingTimeoutClearsNoOpBudget() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .role(Role.RESPONDER)
+                        .noOpControlFloodThreshold(1)
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> pingFailure = new AtomicReference<>();
+        Thread pingThread = new Thread(() -> {
+            try {
+                runtime.ping(new byte[]{9}, Duration.ofMillis(20L));
+                pingFailure.set(new AssertionError("ping should time out without a PONG"));
+            } catch (Throwable error) {
+                pingFailure.set(error);
+            }
+        }, "late-pong-timeout");
+
+        pingThread.start();
+        byte[] timedOutPingPayload = awaitQueuedPayload(runtime, FrameType.PING);
+        pingThread.join(1_000L);
+
+        assertFalse(pingThread.isAlive(), "timed-out ping should return");
+        assertInstanceOf(PingTimeoutException.class, pingFailure.get(), "ping should fail with a timeout");
+
+        byte[] unexpected = new byte[]{0, 0, 0, 0, 0, 0, 0, 1};
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, unexpected));
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, timedOutPingPayload));
+
+        synchronized (runtime.lock()) {
+            assertEquals(0, getIntField(runtime, "noOpControlCount"), "late matching PONG should reset no-op budget");
+        }
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, unexpected));
     }
 
     @Test
