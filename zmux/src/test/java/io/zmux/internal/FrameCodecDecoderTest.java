@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class FrameCodecDecoderTest {
     @Test
@@ -40,6 +41,31 @@ final class FrameCodecDecoderTest {
         assertEquals(8, frame.payload().length, "decoded frame payload length mismatch");
         assertEquals(0, input.singleByteReads(), "stateful decoder should not fall back to raw single-byte reads on a normal bulk-capable stream");
         assertEquals(1, input.bulkReads(), "decoder should preserve prefetched bytes across preface/frame boundaries");
+    }
+
+    @Test
+    void directInputReadRejectsInvalidProgress() {
+        int[] reads = {-2, 4};
+        for (int read : reads) {
+            assertThrows(
+                    IOException.class,
+                    () -> FrameCodec.readInputBytes(new InvalidProgressInputStream(read), 3),
+                    "direct input reads should reject invalid progress " + read
+            );
+        }
+    }
+
+    @Test
+    void decoderReadRejectsInvalidProgress() {
+        int[] reads = {-2, 8193};
+        for (int read : reads) {
+            FrameCodec.Decoder decoder = FrameCodec.decoder(new InvalidProgressInputStream(read));
+            assertThrows(
+                    IOException.class,
+                    () -> decoder.readFrame(Settings.defaults().limits()),
+                    "buffered decoder should reject invalid progress " + read
+            );
+        }
     }
 
     private static final class CountingBurstInputStream extends InputStream {
@@ -82,6 +108,24 @@ final class FrameCodecDecoderTest {
 
         private int bulkReads() {
             return bulkReads;
+        }
+    }
+
+    private static final class InvalidProgressInputStream extends InputStream {
+        private final int read;
+
+        private InvalidProgressInputStream(int read) {
+            this.read = read;
+        }
+
+        @Override
+        public int read() {
+            return -1;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            return read;
         }
     }
 }

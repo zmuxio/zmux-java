@@ -33,10 +33,12 @@ public final class FrameCodec {
         byte[] bytes = new byte[length];
         int offset = 0;
         while (offset < length) {
-            int read = input.read(bytes, offset, length - offset);
-            if (read < 0) {
+            int remaining = length - offset;
+            int read = input.read(bytes, offset, remaining);
+            if (read == -1) {
                 break;
             }
+            validateReadProgress(read, remaining);
             if (read == 0) {
                 int one = input.read();
                 if (one < 0) {
@@ -48,6 +50,12 @@ public final class FrameCodec {
             offset += read;
         }
         return offset == length ? bytes : Arrays.copyOf(bytes, offset);
+    }
+
+    private static void validateReadProgress(int read, int requested) throws IOException {
+        if (read < 0 || read > requested) {
+            throw new IOException("input read reported invalid progress");
+        }
     }
 
     public static void writeFrame(OutputStream output, Frame frame, Limits limits) throws IOException {
@@ -614,6 +622,9 @@ public final class FrameCodec {
 
         private int readDirect(byte[] dst, int offset, int length) throws IOException {
             int read = input.read(dst, offset, length);
+            if (read != -1) {
+                validateReadProgress(read, length);
+            }
             if (read > 0) {
                 return read;
             }
