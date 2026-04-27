@@ -6,6 +6,7 @@ import io.zmux.ZmuxConfig;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class SessionReasonStatsTest {
     @Test
@@ -34,5 +35,37 @@ final class SessionReasonStatsTest {
         assertEquals(overflow, reasons.abortOverflow());
         assertEquals(2L, reasons.reset().get(10_000L));
         assertEquals(2L, reasons.abort().get(20_000L));
+    }
+
+    @Test
+    void reasonStatsSnapshotsAreImmutableAndDetached() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder().build(),
+                0L,
+                Settings.defaults()
+        );
+
+        synchronized (runtime.lock()) {
+            runtime.noteResetReasonLocked(7L);
+            runtime.noteAbortReasonLocked(9L);
+        }
+
+        SessionStats.ReasonStats first = runtime.stats().reasons();
+        assertEquals(1L, first.reset().get(7L));
+        assertEquals(1L, first.abort().get(9L));
+        assertThrows(UnsupportedOperationException.class, () -> first.reset().put(8L, 1L));
+        assertThrows(UnsupportedOperationException.class, () -> first.abort().put(10L, 1L));
+
+        synchronized (runtime.lock()) {
+            runtime.noteResetReasonLocked(7L);
+            runtime.noteAbortReasonLocked(9L);
+        }
+
+        assertEquals(1L, first.reset().get(7L));
+        assertEquals(1L, first.abort().get(9L));
+
+        SessionStats.ReasonStats second = runtime.stats().reasons();
+        assertEquals(2L, second.reset().get(7L));
+        assertEquals(2L, second.abort().get(9L));
     }
 }

@@ -1066,6 +1066,10 @@ public final class SessionStats {
             if (source == null || source.isEmpty()) {
                 return Collections.emptyMap();
             }
+            if (source.size() == 1) {
+                Map.Entry<Long, Long> entry = source.entrySet().iterator().next();
+                return Collections.singletonMap(entry.getKey(), entry.getValue());
+            }
             return Collections.unmodifiableMap(new LinkedHashMap<>(source));
         }
 

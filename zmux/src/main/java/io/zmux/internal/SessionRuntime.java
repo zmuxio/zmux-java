@@ -368,13 +368,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return seed != 0L ? seed : SESSION_NONCE_SEED_COUNTER.addAndGet(SESSION_NONCE_GAMMA);
     }
 
-    private static Map<Long, Long> copyReasonCounts(Map<Long, Long> reasons) {
-        if (reasons == null || reasons.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        return Collections.unmodifiableMap(new HashMap<>(reasons));
-    }
-
     private static boolean countsQueuedData(OutboundFrame outboundFrame) {
         return outboundFrame != null
                 && outboundFrame.stream != null
@@ -4564,9 +4557,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     SessionStatsReasonSnapshot statsReasonSnapshotLocked() {
         return new SessionStatsReasonSnapshot(
-                copyReasonCounts(this.resetReasonCounts),
+                this.resetReasonCounts,
                 this.resetReasonOverflowCount,
-                copyReasonCounts(this.abortReasonCounts),
+                this.abortReasonCounts,
                 this.abortReasonOverflowCount
         );
     }
