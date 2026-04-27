@@ -24,10 +24,14 @@ final class StreamMetadataState {
         if (normalized.initialPriority() != null || normalized.initialGroup() != null || initialOpenInfo.length > 0) {
             metadata = new StreamMetadata(
                     normalized.initialPriority() == null ? 0L : normalized.initialPriority(),
-                    normalized.initialGroup(),
+                    normalizeEffectiveGroup(normalized.initialGroup()),
                     initialOpenInfo
             );
         }
+    }
+
+    private static Long normalizeEffectiveGroup(Long group) {
+        return group == null || group == 0L ? null : group;
     }
 
     byte[] openInfo() {
@@ -80,7 +84,7 @@ final class StreamMetadataState {
         byte[] currentOpenInfo = metadata.openInfoLength() == 0 ? EMPTY_BYTES : metadata.openInfo();
         StreamMetadata nextMetadata = new StreamMetadata(
                 update.priority() == null ? metadata.priority() : update.priority(),
-                update.group() == null ? metadata.group() : update.group(),
+                update.group() == null ? metadata.group() : normalizeEffectiveGroup(update.group()),
                 currentOpenInfo
         );
         if (!openedOnWire) {
@@ -93,7 +97,7 @@ final class StreamMetadataState {
         byte[] currentOpenInfo = metadata.openInfoLength() == 0 ? EMPTY_BYTES : metadata.openInfo();
         StreamMetadata nextMetadata = new StreamMetadata(
                 update.priority() == null ? metadata.priority() : update.priority(),
-                update.group() == null ? metadata.group() : update.group(),
+                update.group() == null ? metadata.group() : normalizeEffectiveGroup(update.group()),
                 currentOpenInfo
         );
         validateOpeningMetadataUpdateLocked(session, nextMetadata);
@@ -104,7 +108,7 @@ final class StreamMetadataState {
                                  long priority,
                                  Long group,
                                  byte[] openInfo) {
-        replaceMetadataLocked(session, streamRuntime, new StreamMetadata(priority, group, openInfo));
+        replaceMetadataLocked(session, streamRuntime, new StreamMetadata(priority, normalizeEffectiveGroup(group), openInfo));
     }
 
     boolean applyPriorityUpdateLocked(SessionRuntime session,
@@ -114,7 +118,7 @@ final class StreamMetadataState {
             return false;
         }
         long nextPriority = update.hasPriority() ? update.priority() : metadata.priority();
-        Long nextGroup = update.hasGroup() ? update.group() : metadata.group();
+        Long nextGroup = update.hasGroup() ? normalizeEffectiveGroup(update.group()) : metadata.group();
         if (metadata.priority() == nextPriority && Objects.equals(metadata.group(), nextGroup)) {
             return false;
         }

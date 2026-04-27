@@ -78,6 +78,7 @@ final class MetadataValueTypeTest {
         assertTrue(MetadataUpdate.of(null, null).isEmpty());
         assertFalse(MetadataUpdate.of(null, null).hasPriority());
         assertFalse(MetadataUpdate.of(null, null).hasGroup());
+        assertTrue(MetadataUpdate.group(0L).hasGroup(), "group zero must remain an explicit update field");
     }
 
     @Test
@@ -121,6 +122,8 @@ final class MetadataValueTypeTest {
         assertFalse(StreamMetadata.empty().hasGroup());
         assertFalse(StreamMetadata.empty().hasOpenInfo());
         assertTrue(StreamMetadata.empty().isEmpty());
+        assertNull(new StreamMetadata(0L, 0L, null).group(), "group zero is no explicit runtime group");
+        assertFalse(new StreamMetadata(0L, 0L, null).hasGroup(), "group zero should not be exposed as an explicit group");
     }
 
     @Test

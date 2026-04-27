@@ -225,6 +225,33 @@ final class SchedulingGroupTrackingTest {
     }
 
     @Test
+    void groupResetToZeroReleasesTrackedExplicitGroup() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                Protocol.CAPABILITY_STREAM_GROUPS | Protocol.CAPABILITY_PRIORITY_UPDATE,
+                Settings.builder()
+                        .schedulerHints(SchedulerHint.GROUP_FAIR)
+                        .maxFramePayload(16_384L)
+                        .build()
+        );
+        StreamRuntime stream = (StreamRuntime) runtime.openStream(new OpenOptions(0L, 7L, new byte[0]));
+
+        synchronized (runtime.lock()) {
+            makePeerVisible(runtime, stream);
+            retainedBias(runtime).state().groupVirtualTime.put(groupKey(1, 7L), 11L);
+        }
+
+        stream.updateMetadata(new MetadataUpdate(null, 0L));
+
+        synchronized (runtime.lock()) {
+            assertNull(stream.metadata().group(), "group zero should clear the runtime explicit group");
+            assertFalse(stream.schedulingGroupTrackedLocked(), "group reset should drop explicit group tracking");
+            assertFalse(activeExplicitGroupRefs(runtime).containsKey(7L), "group reset should release the explicit group ref");
+            assertFalse(retainedBias(runtime).state().groupVirtualTime.containsKey(groupKey(1, 7L)),
+                    "last departing explicit group should drop retained ordinary-batch state");
+        }
+    }
+
+    @Test
     void explicitGroupRefcountDoesNotSaturateAtIntMax() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 Protocol.CAPABILITY_STREAM_GROUPS,

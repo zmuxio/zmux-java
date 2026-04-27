@@ -352,6 +352,22 @@ final class PriorityUpdateSemanticsTest {
             Thread.sleep(50L);
             assertEquals(9L, accepted.metadata().priority(), "group-only update must preserve priority");
             assertEquals(Long.valueOf(11L), accepted.metadata().group(), "group-only update should replace group");
+
+            peer.send(new FrameCodec.Frame(
+                    FrameType.EXT,
+                    0,
+                    4L,
+                    FrameCodec.buildPriorityUpdatePayload(
+                            capabilities,
+                            null,
+                            0L,
+                            Settings.defaults().maxExtensionPayloadBytes()
+                    )
+            ));
+
+            await(Duration.ofSeconds(1), () -> accepted.metadata().group() == null);
+            assertEquals(9L, accepted.metadata().priority(), "group reset must preserve priority");
+            assertNull(accepted.metadata().group(), "stream_group zero should clear the explicit group");
         }
     }
 

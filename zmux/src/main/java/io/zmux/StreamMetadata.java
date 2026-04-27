@@ -15,7 +15,7 @@ public final class StreamMetadata {
         requireVarint62(priority, "priority");
         requireOptionalVarint62(group, "group");
         this.priority = priority;
-        this.group = group;
+        this.group = normalizeGroup(group);
         this.openInfo = normalizeOpenInfo(openInfo);
     }
 
@@ -52,6 +52,10 @@ public final class StreamMetadata {
             return;
         }
         requireVarint62(value, field);
+    }
+
+    private static Long normalizeGroup(Long group) {
+        return group == null || group == 0L ? null : group;
     }
 
     public long priority() {
