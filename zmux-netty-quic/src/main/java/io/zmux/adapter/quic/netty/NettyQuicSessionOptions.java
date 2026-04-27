@@ -36,7 +36,7 @@ public final class NettyQuicSessionOptions {
 
     static int normalizeAcceptedPreludeMaxConcurrent(int maxConcurrent) {
         return maxConcurrent > 0
-                ? maxConcurrent
+                ? NettyQuic.clampAcceptedPreludeMaxConcurrent(maxConcurrent)
                 : NettyQuic.defaultAcceptedPreludeMaxConcurrent();
     }
 

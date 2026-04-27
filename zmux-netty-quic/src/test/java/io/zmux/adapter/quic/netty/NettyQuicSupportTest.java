@@ -68,6 +68,21 @@ class NettyQuicSupportTest {
     void acceptedPreludeConcurrencyFallsBackToSharedDefault() {
         assertEquals(NettyQuic.defaultAcceptedPreludeMaxConcurrent(), NettyQuicSupport.normalizeAcceptedPreludeMaxConcurrent(0));
         assertEquals(3, NettyQuicSupport.normalizeAcceptedPreludeMaxConcurrent(3));
+
+        int previousDefault = NettyQuic.defaultAcceptedPreludeMaxConcurrent();
+        try {
+            NettyQuic.setDefaultAcceptedPreludeMaxConcurrent(NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT + 1);
+            assertEquals(
+                    NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT,
+                    NettyQuic.defaultAcceptedPreludeMaxConcurrent()
+            );
+            assertEquals(
+                    NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT,
+                    NettyQuicSupport.normalizeAcceptedPreludeMaxConcurrent(NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT + 1)
+            );
+        } finally {
+            NettyQuic.setDefaultAcceptedPreludeMaxConcurrent(previousDefault);
+        }
     }
 
     @Test

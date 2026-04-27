@@ -645,4 +645,6 @@ The QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
 its concrete stream objects also implement the native stream state-query
 interfaces. Use `zmux-netty-quic` only when the underlying transport is
 already a Netty `QuicChannel`. The adapter methods are intentionally blocking,
-so do not call them from the Netty event loop.
+so do not call them from the Netty event loop. Accepted prelude concurrency
+uses the shared adapter default when configured as `0`, accepts positive
+per-session overrides, and clamps oversized values to the adapter safety cap.
