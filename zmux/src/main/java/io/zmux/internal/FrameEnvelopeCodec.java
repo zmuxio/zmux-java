@@ -303,10 +303,17 @@ final class FrameEnvelopeCodec {
             return;
         }
         try {
-            while (hasRemaining(scratch.buffers(), scratch.bufferCount())) {
+            while (true) {
+                long remaining = remainingBytes(scratch.buffers(), scratch.bufferCount());
+                if (remaining == 0L) {
+                    return;
+                }
                 long wrote = output.write(scratch.buffers(), 0, scratch.bufferCount());
                 if (wrote <= 0L) {
                     throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write made no progress");
+                }
+                if (wrote > remaining) {
+                    throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write reported invalid progress");
                 }
             }
         } finally {
@@ -681,14 +688,15 @@ final class FrameEnvelopeCodec {
         }
     }
 
-    private static boolean hasRemaining(ByteBuffer[] buffers, int length) {
+    private static long remainingBytes(ByteBuffer[] buffers, int length) {
+        long remainingBytes = 0L;
         for (int i = 0; i < length; ++i) {
             ByteBuffer buffer = buffers[i];
             if (buffer != null && buffer.hasRemaining()) {
-                return true;
+                remainingBytes += buffer.remaining();
             }
         }
-        return false;
+        return remainingBytes;
     }
 
     private static void validateFlags(FrameType type, int flags) throws IOException {
