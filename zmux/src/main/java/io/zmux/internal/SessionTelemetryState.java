@@ -278,7 +278,7 @@ final class SessionTelemetryState {
             );
         }
         if (waitError != null) {
-            this.completeActivePingIfCurrent(pendingPing, null);
+            this.cancelActivePingIfCurrent(pendingPing);
             throw waitError;
         }
         if (!pendingPing.done()) {
@@ -351,6 +351,18 @@ final class SessionTelemetryState {
                 return;
             }
             this.completeActivePingLocked(error, System.nanoTime());
+        }
+    }
+
+    private void cancelActivePingIfCurrent(SessionRuntime.PendingPing pendingPing) {
+        synchronized (this.owner.lock()) {
+            if (this.activePing != pendingPing) {
+                return;
+            }
+            if (this.shouldRetainCanceledPingLocked(pendingPing)) {
+                this.retainCanceledPingLocked(pendingPing.payload());
+            }
+            this.completeActivePingLocked(null, System.nanoTime());
         }
     }
 

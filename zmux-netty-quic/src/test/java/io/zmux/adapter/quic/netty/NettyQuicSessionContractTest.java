@@ -356,6 +356,7 @@ class NettyQuicSessionContractTest {
 
             SessionStats stats = awaitStats(pair.server, Duration.ofSeconds(5), snapshot ->
                     snapshot.acceptBacklog().count() == 1L
+                            && snapshot.activeStreams().peerBidi() == 1L
                             && snapshot.acceptBacklog().bytes() >= payload.length
                             && snapshot.retainedOpenInfoBytes() >= openInfo.length
                             && snapshot.pressure().trackedSessionMemoryBytes() >= payload.length
@@ -363,6 +364,8 @@ class NettyQuicSessionContractTest {
 
             assertEquals(SessionState.READY, stats.state());
             assertTrue(stats.openStreams() >= 1L, "accepted-but-not-yet-consumed stream should count as open");
+            assertEquals(1L, stats.activeStreams().peerBidi(), "accept backlog stream should count as active peer bidi");
+            assertEquals(1L, stats.activeStreams().total(), "accept backlog stream should count in active total");
             assertEquals(1L, stats.acceptBacklog().count(), "accept backlog count mismatch");
             assertTrue(stats.acceptBacklog().bytes() >= payload.length, "accept backlog bytes should reflect buffered data");
             assertTrue(stats.retainedOpenInfoBytes() >= openInfo.length, "retained open_info should surface in adapter stats");

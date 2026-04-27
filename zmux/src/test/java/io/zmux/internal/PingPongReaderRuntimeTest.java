@@ -132,6 +132,44 @@ final class PingPongReaderRuntimeTest {
     }
 
     @Test
+    void lateMatchingPongAfterPingInterruptClearsNoOpBudget() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .role(Role.RESPONDER)
+                        .noOpControlFloodThreshold(1)
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> pingFailure = new AtomicReference<>();
+        Thread pingThread = new Thread(() -> {
+            try {
+                runtime.ping(new byte[]{7}, Duration.ofSeconds(5L));
+                pingFailure.set(new AssertionError("ping should be interrupted before a PONG"));
+            } catch (Throwable error) {
+                pingFailure.set(error);
+            }
+        }, "late-pong-interrupt");
+
+        pingThread.start();
+        byte[] interruptedPingPayload = awaitQueuedPayload(runtime, FrameType.PING);
+        pingThread.interrupt();
+        pingThread.join(1_000L);
+
+        assertFalse(pingThread.isAlive(), "interrupted ping should return");
+        assertInstanceOf(ZmuxInterruptedException.class, pingFailure.get(), "ping should fail with an interrupted sentinel");
+
+        byte[] unexpected = new byte[]{0, 0, 0, 0, 0, 0, 0, 2};
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, unexpected));
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, interruptedPingPayload));
+
+        synchronized (runtime.lock()) {
+            assertEquals(0, getIntField(runtime, "noOpControlCount"), "late matching PONG should reset no-op budget after interrupt");
+        }
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, unexpected));
+    }
+
+    @Test
     void inboundPingFloodUsesConfiguredThreshold() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 ZmuxConfig.builder()
