@@ -130,12 +130,16 @@ final class FrameEnvelopeCodec {
                            int payloadPartOffset,
                            int payloadLength,
                            Limits limits) throws IOException {
-        Limits normalized = limits.normalize();
-        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
-        validatePayloadParts(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
-        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
-        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
-        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        long frameLength = validatedPartsPayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payloadParts,
+                payloadPartIndex,
+                payloadPartOffset,
+                payloadLength
+        );
         Varint62.write(output, frameLength);
         output.write(frame.type().code() | frame.flags());
         Varint62.write(output, frame.streamId());
@@ -273,21 +277,7 @@ final class FrameEnvelopeCodec {
                 payloadOffset,
                 payloadLength
         );
-        int cursor = offset;
-        int encodedBytes = FrameCodec.checkedLength(
-                frameLength + Varint62.length(frameLength),
-                ErrorCode.FRAME_SIZE,
-                "write frame",
-                "encoded frame exceeds Java implementation limit"
-        );
-        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
-        cursor += Varint62.write(target, cursor, frameLength);
-        target[cursor++] = (byte) (frame.type().code() | frame.flags());
-        cursor += Varint62.write(target, cursor, frame.streamId());
-        if (prefix.length > 0) {
-            System.arraycopy(prefix, 0, target, cursor, prefix.length);
-            cursor += prefix.length;
-        }
+        int cursor = appendFrameHeaderAndPrefix(target, offset, frame, prefix, frameLength);
         if (payloadLength > 0) {
             System.arraycopy(payload, payloadOffset, target, cursor, payloadLength);
             cursor += payloadLength;
@@ -348,27 +338,17 @@ final class FrameEnvelopeCodec {
                            int payloadPartOffset,
                            int payloadLength,
                            Limits limits) throws IOException {
-        Limits normalized = limits.normalize();
-        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
-        validatePayloadParts(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
-        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
-        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
-        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
-        int cursor = offset;
-        int encodedBytes = FrameCodec.checkedLength(
-                frameLength + Varint62.length(frameLength),
-                ErrorCode.FRAME_SIZE,
-                "write frame",
-                "encoded frame exceeds Java implementation limit"
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        long frameLength = validatedPartsPayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payloadParts,
+                payloadPartIndex,
+                payloadPartOffset,
+                payloadLength
         );
-        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
-        cursor += Varint62.write(target, cursor, frameLength);
-        target[cursor++] = (byte) (frame.type().code() | frame.flags());
-        cursor += Varint62.write(target, cursor, frame.streamId());
-        if (prefix.length > 0) {
-            System.arraycopy(prefix, 0, target, cursor, prefix.length);
-            cursor += prefix.length;
-        }
+        int cursor = appendFrameHeaderAndPrefix(target, offset, frame, prefix, frameLength);
         cursor = appendPayloadParts(target, cursor, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
         return cursor - offset;
     }
@@ -822,6 +802,29 @@ final class FrameEnvelopeCodec {
         return payloadBytes == null ? EMPTY_BYTES : payloadBytes;
     }
 
+    private static int appendFrameHeaderAndPrefix(byte[] target,
+                                                  int offset,
+                                                  FrameCodec.Frame frame,
+                                                  byte[] prefix,
+                                                  long frameLength) throws IOException {
+        int encodedBytes = FrameCodec.checkedLength(
+                frameLength + Varint62.length(frameLength),
+                ErrorCode.FRAME_SIZE,
+                "write frame",
+                "encoded frame exceeds Java implementation limit"
+        );
+        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
+        int cursor = offset;
+        cursor += Varint62.write(target, cursor, frameLength);
+        target[cursor++] = (byte) (frame.type().code() | frame.flags());
+        cursor += Varint62.write(target, cursor, frame.streamId());
+        if (prefix.length > 0) {
+            System.arraycopy(prefix, 0, target, cursor, prefix.length);
+            cursor += prefix.length;
+        }
+        return cursor;
+    }
+
     private static long validatedBytePayloadFrameLength(FrameCodec.Frame frame,
                                                         Limits limits,
                                                         byte[] prefix,
@@ -832,6 +835,20 @@ final class FrameEnvelopeCodec {
         RangeChecks.checkFromIndexSize(payloadOffset, payloadLength, payload.length);
         long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
         validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0);
+        return frameLength(frame.streamId(), encodedPayloadLength);
+    }
+
+    private static long validatedPartsPayloadFrameLength(FrameCodec.Frame frame,
+                                                         Limits limits,
+                                                         byte[] prefix,
+                                                         byte[][] payloadParts,
+                                                         int payloadPartIndex,
+                                                         int payloadPartOffset,
+                                                         int payloadLength) throws IOException {
+        Limits normalized = limits.normalize();
+        validatePayloadParts(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
         return frameLength(frame.streamId(), encodedPayloadLength);
     }
 
