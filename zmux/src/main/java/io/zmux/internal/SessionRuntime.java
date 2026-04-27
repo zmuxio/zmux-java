@@ -2543,6 +2543,22 @@ public final class SessionRuntime implements ZmuxNativeSession {
         }
     }
 
+    void recordGroupRebucketLocked(StreamRuntime streamRuntime, Long previousGroup) throws IOException {
+        if (!this.shouldRecordGroupRebucketLocked(streamRuntime, previousGroup)) {
+            return;
+        }
+        this.recordGroupRebucketLocked();
+    }
+
+    private boolean shouldRecordGroupRebucketLocked(StreamRuntime streamRuntime, Long previousGroup) {
+        return streamRuntime != null
+                && this.peerSettings().schedulerHints() == SchedulerHint.GROUP_FAIR
+                && Protocol.canCarryGroupInUpdate(this.capabilities())
+                && streamRuntime.localSend()
+                && !streamRuntime.sendTerminalLocked()
+                && !Objects.equals(previousGroup, streamRuntime.groupLocked());
+    }
+
     void clearBlockedFrameLocked(long streamId) {
         this.flowControlUpdateRegistry.clearBlockedFrameLocked(streamId);
     }

@@ -585,7 +585,10 @@ final class SessionDiagnosticsRuntimeTest {
     @Test
     void priorityUpdateGroupRebucketTracksDiagnostic() throws Exception {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_STREAM_GROUPS;
-        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
+        Settings peerSettings = Settings.defaults().toBuilder()
+                .schedulerHints(SchedulerHint.GROUP_FAIR)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, peerSettings);
         StreamRuntime stream = createPeerOpenedBidi(runtime);
 
         handleReaderFrame(runtime, "handleExtFrame", new FrameCodec.Frame(
@@ -601,6 +604,28 @@ final class SessionDiagnosticsRuntimeTest {
         ));
 
         assertEquals(1L, runtime.stats().diagnostics().groupRebucketEvents(), "effective group rebucket should surface in diagnostics");
+    }
+
+    @Test
+    void priorityUpdateGroupChangeOutsideGroupFairDoesNotTrackDiagnostic() throws Exception {
+        long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_STREAM_GROUPS;
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
+        StreamRuntime stream = createPeerOpenedBidi(runtime);
+
+        handleReaderFrame(runtime, "handleExtFrame", new FrameCodec.Frame(
+                FrameType.EXT,
+                0,
+                stream.streamIdInternal(),
+                FrameCodec.buildPriorityUpdatePayload(
+                        capabilities,
+                        null,
+                        7L,
+                        Settings.defaults().maxExtensionPayloadBytes()
+                )
+        ));
+
+        assertEquals(Long.valueOf(7L), stream.metadata().group(), "group update should still apply outside group-fair scheduling");
+        assertEquals(0L, runtime.stats().diagnostics().groupRebucketEvents(), "non-group-fair updates must not count as rebucket churn");
     }
 
     @Test

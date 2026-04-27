@@ -478,8 +478,8 @@ final class SessionReaderCoordinator {
             Long previousGroup = streamRuntime.groupLocked();
             boolean changed = streamRuntime.applyPriorityUpdateLocked(parsedPriorityUpdate);
             if (changed) {
-                if (parsedPriorityUpdate.hasGroup() && !Objects.equals(previousGroup, streamRuntime.groupLocked())) {
-                    this.owner.recordGroupRebucketLocked();
+                if (parsedPriorityUpdate.hasGroup()) {
+                    this.owner.recordGroupRebucketLocked(streamRuntime, previousGroup);
                 }
                 this.owner.clearNoOpPriorityUpdateLocked();
             } else {
@@ -1139,7 +1139,7 @@ final class SessionReaderCoordinator {
 
         void clearNoOpPriorityUpdateLocked();
 
-        void recordGroupRebucketLocked() throws IOException;
+        void recordGroupRebucketLocked(StreamRuntime streamRuntime, Long previousGroup) throws IOException;
 
         void noteResetReasonLocked(long code);
 

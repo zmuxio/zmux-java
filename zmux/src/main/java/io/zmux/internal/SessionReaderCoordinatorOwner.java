@@ -264,8 +264,8 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
-    public void recordGroupRebucketLocked() throws IOException {
-        this.owner.recordGroupRebucketLocked();
+    public void recordGroupRebucketLocked(StreamRuntime streamRuntime, Long previousGroup) throws IOException {
+        this.owner.recordGroupRebucketLocked(streamRuntime, previousGroup);
     }
 
     @Override
