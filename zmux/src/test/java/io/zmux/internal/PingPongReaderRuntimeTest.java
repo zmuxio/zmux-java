@@ -51,6 +51,19 @@ final class PingPongReaderRuntimeTest {
         return field.getInt(target);
     }
 
+    @SuppressWarnings("unchecked")
+    private static Deque<Object> readLoopProtocolTasks(SessionRuntime runtime) throws Exception {
+        Field field = SessionRuntime.class.getDeclaredField("readLoopProtocolTasks");
+        field.setAccessible(true);
+        return (Deque<Object>) field.get(runtime);
+    }
+
+    private static Object readLoopProtocolTaskOutboundFrame(Object task) throws Exception {
+        Field field = task.getClass().getDeclaredField("outboundFrame");
+        field.setAccessible(true);
+        return field.get(task);
+    }
+
     private static byte[] awaitQueuedPayload(SessionRuntime runtime, FrameType type) throws Exception {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
         while (System.nanoTime() < deadlineNanos) {
@@ -206,6 +219,36 @@ final class PingPongReaderRuntimeTest {
         assertNotNull(outbound, "PING should enqueue a PONG response");
         assertEquals(FrameType.PONG, SessionRuntimeTestSupport.outboundFrame(outbound).type(), "PING response frame type mismatch");
         assertArrayEquals(expected, SessionRuntimeTestSupport.outboundPayload(outbound), "PONG should echo the inbound PING payload snapshot");
+    }
+
+    @Test
+    void deferredInboundPingEchoRetainsStablePayloadSnapshot() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder()
+                        .role(Role.RESPONDER)
+                        .urgentQueuedBytesCap(1L)
+                        .build(),
+                0L,
+                Settings.defaults()
+        );
+        byte[] payload = new byte[]{0, 1, 2, 3, 4, 5, 6, 7};
+        byte[] expected = Arrays.copyOf(payload, payload.length);
+
+        synchronized (runtime.lock()) {
+            runtime.enqueueControlLocked(new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[0]));
+            SessionRuntimeTestSupport.setField(runtime, "readLoopProtocolWorkerStarted", true);
+        }
+
+        handlePingFrame(runtime, new FrameCodec.Frame(FrameType.PING, 0, 0L, payload));
+        payload[0] = 99;
+
+        synchronized (runtime.lock()) {
+            Deque<Object> tasks = readLoopProtocolTasks(runtime);
+            assertEquals(1, tasks.size(), "backpressured PONG should be deferred into the read-loop protocol queue");
+            Object outbound = readLoopProtocolTaskOutboundFrame(tasks.peekFirst());
+            assertEquals(FrameType.PONG, SessionRuntimeTestSupport.outboundFrame(outbound).type(), "deferred response frame type mismatch");
+            assertArrayEquals(expected, SessionRuntimeTestSupport.outboundPayload(outbound), "deferred PONG should retain the inbound PING snapshot");
+        }
     }
 
     @Test

@@ -268,6 +268,12 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return cost >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) cost;
     }
 
+    private static int retainedControlFrameBytes(int payloadLength) {
+        long retained = Math.max(0L, payloadLength);
+        long cost = SessionRuntime.saturatingAdd(1L, retained);
+        return cost >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) cost;
+    }
+
     private static long outboundBatchCost(OutboundFrame outboundFrame) {
         if (outboundFrame == null) {
             return 1L;
@@ -2903,8 +2909,13 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (terminalMerge.coalesced()) {
             return null;
         }
-        int retainedBytes = SessionRuntime.retainedQueueBytes(outboundFrame);
-        long replacedBytes = terminalMerge.replacedBytes();
+        return this.readLoopProtocolUrgentMemoryErrorLocked(
+                SessionRuntime.retainedQueueBytes(outboundFrame),
+                terminalMerge.replacedBytes()
+        );
+    }
+
+    private IOException readLoopProtocolUrgentMemoryErrorLocked(int retainedBytes, long replacedBytes) {
         long currentTracked = this.trackedSessionMemoryLocked();
         long projectedTracked = SessionRuntime.saturatingAdd(
                 Math.max(0L, currentTracked - replacedBytes),
@@ -2928,10 +2939,17 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (terminalMerge.coalesced()) {
             return true;
         }
+        return this.readLoopProtocolUrgentCapacityAvailableLocked(
+                SessionRuntime.retainedQueueBytes(outboundFrame),
+                terminalMerge.replacedBytes()
+        );
+    }
+
+    private boolean readLoopProtocolUrgentCapacityAvailableLocked(int retainedBytes, long replacedBytes) {
         long currentUrgent = this.outboundQueueBookkeeping.urgentQueuedControlBytesLocked();
         long projectedUrgent = SessionRuntime.saturatingAdd(
-                Math.max(0L, currentUrgent - terminalMerge.replacedBytes()),
-                SessionRuntime.retainedQueueBytes(outboundFrame)
+                Math.max(0L, currentUrgent - replacedBytes),
+                retainedBytes
         );
         return projectedUrgent <= this.urgentQueuedBytesHardCapLocked();
     }
@@ -4376,18 +4394,32 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void enqueuePongLocked(byte[] payload) throws IOException {
+        int payloadLength = payload == null ? 0 : payload.length;
+        int retainedBytes = SessionRuntime.retainedControlFrameBytes(payloadLength);
+        IOException memoryError = this.readLoopProtocolUrgentMemoryErrorLocked(retainedBytes, 0L);
+        if (memoryError != null) {
+            throw memoryError;
+        }
+        boolean urgentAvailable = this.readLoopProtocolUrgentCapacityAvailableLocked(retainedBytes, 0L);
+        if (!urgentAvailable && this.readLoopProtocolTasks.size() >= MAX_PENDING_READ_LOOP_PROTOCOL_TASKS) {
+            this.outboundQueueBookkeeping.recordProtocolBacklogBlockedLocked();
+            return;
+        }
+        byte[] retainedPayload = payloadLength == 0 ? EMPTY_BYTES : Arrays.copyOf(payload, payloadLength);
         OutboundFrame outboundFrame = new OutboundFrame(
-                new FrameCodec.Frame(FrameType.PONG, 0, 0L, payload),
+                new FrameCodec.Frame(FrameType.PONG, 0, 0L, retainedPayload),
                 null,
                 0,
                 false,
                 false
         );
-        if (this.readLoopProtocolUrgentAdmissibleLocked(outboundFrame)) {
+        if (urgentAvailable) {
             this.enqueueQueuedOutboundLocked(this.urgentQueue, outboundFrame);
             return;
         }
-        this.enqueueReadLoopProtocolFrameLocked(outboundFrame, true);
+        this.readLoopProtocolTasks.offerLast(new ReadLoopProtocolTask(outboundFrame));
+        this.startReadLoopProtocolWorkerLocked();
+        this.notifyLockWaitersLocked();
     }
 
     boolean handlePongLocked(byte[] payload, long nowNanos) {
