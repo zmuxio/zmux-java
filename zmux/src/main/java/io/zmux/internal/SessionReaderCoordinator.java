@@ -85,6 +85,20 @@ final class SessionReaderCoordinator {
         }
     }
 
+    private FrameCodec.DataPayload parseDataPayloadForPeerNonCloseFrame(FrameCodec.Frame frame) throws IOException {
+        if (this.ignorePeerNonCloseFrame(frame.type())) {
+            return null;
+        }
+        try {
+            return FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+        } catch (IOException error) {
+            if (this.ignorePeerNonCloseFrame(frame.type())) {
+                return null;
+            }
+            throw error;
+        }
+    }
+
     void run() {
         try {
             while (this.shouldContinueReadLoop()) {
@@ -559,25 +573,21 @@ final class SessionReaderCoordinator {
         if (this.ignorePeerNonCloseFrame(frame.type())) {
             return;
         }
-        FrameCodec.DataPayload dataPayload;
-        try {
-            dataPayload = FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
-        } catch (IOException error) {
-            if (this.ignorePeerNonCloseFrame(frame.type())) {
-                return;
-            }
-            throw error;
-        }
         synchronized (this.owner.lock()) {
             if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
                 return;
             }
             StreamRuntime streamRuntime = this.owner.liveStreamLocked(frame.streamId());
             boolean existingStream = streamRuntime != null;
-            boolean openingMetadata = (frame.flags() & 0x20) != 0;
+            boolean openingMetadata = (frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0;
             SessionTerminalBookkeeping.TerminalDataDisposition terminalDisposition =
                     streamRuntime == null ? this.owner.terminalDataDispositionForLocked(frame.streamId()) : null;
+            FrameCodec.DataPayload dataPayload = null;
             if (streamRuntime == null && terminalDisposition != null) {
+                dataPayload = this.parseDataPayloadForPeerNonCloseFrame(frame);
+                if (dataPayload == null) {
+                    return;
+                }
                 this.lateDataHandler.handleTerminalDataFrameLocked(frame, dataPayload.appDataLength(), terminalDisposition);
                 return;
             }
@@ -602,21 +612,16 @@ final class SessionReaderCoordinator {
                     this.owner.refusePeerOpeningStreamLocked(frame.streamId(), true, false);
                     return;
                 }
+                dataPayload = this.parseDataPayloadForPeerNonCloseFrame(frame);
+                if (dataPayload == null) {
+                    return;
+                }
                 streamRuntime = this.owner.createPeerOpenedStreamLocked(frame.streamId());
                 this.owner.recordAcceptedPeerStreamLocked(frame.streamId());
-            } else if (openingMetadata) {
-                throw this.owner.sessionError(
-                        ErrorCode.PROTOCOL,
-                        "handle DATA",
-                        "OPEN_METADATA is only valid on the opening DATA frame",
-                        ZmuxErrorSource.REMOTE,
-                        ZmuxErrorDirection.READ
-                );
             }
 
-            int dataLength = dataPayload.appDataLength();
             StreamRuntime.PeerDataAction peerDataAction =
-                    streamRuntime.peerDataActionLocked((frame.flags() & 0x40) != 0);
+                    streamRuntime.peerDataActionLocked((frame.flags() & Protocol.FRAME_FLAG_FIN) != 0);
             if (peerDataAction != StreamRuntime.PeerDataAction.ACCEPT) {
                 if (openingMetadata) {
                     throw this.owner.sessionError(
@@ -630,7 +635,12 @@ final class SessionReaderCoordinator {
                 switch (peerDataAction) {
                     case IGNORE:
                     case IGNORE_AND_FIN:
-                        this.lateDataHandler.discardLatePeerDataLocked(streamRuntime, dataLength);
+                        FrameCodec.DataPayload ignoredDataPayload = this.parseDataPayloadForPeerNonCloseFrame(frame);
+                        if (ignoredDataPayload == null) {
+                            return;
+                        }
+                        int ignoredDataLength = ignoredDataPayload.appDataLength();
+                        this.lateDataHandler.discardLatePeerDataLocked(streamRuntime, ignoredDataLength);
                         if (peerDataAction == StreamRuntime.PeerDataAction.IGNORE_AND_FIN) {
                             streamRuntime.finishReceiveLocked();
                         }
@@ -652,6 +662,23 @@ final class SessionReaderCoordinator {
                 }
             }
 
+            if (dataPayload == null) {
+                dataPayload = this.parseDataPayloadForPeerNonCloseFrame(frame);
+                if (dataPayload == null) {
+                    return;
+                }
+            }
+            if (existingStream && openingMetadata) {
+                throw this.owner.sessionError(
+                        ErrorCode.PROTOCOL,
+                        "handle DATA",
+                        "OPEN_METADATA is only valid on the opening DATA frame",
+                        ZmuxErrorSource.REMOTE,
+                        ZmuxErrorDirection.READ
+                );
+            }
+
+            int dataLength = dataPayload.appDataLength();
             long nextSessionReceived = 0L;
             if (dataLength > 0) {
                 if (RuntimeFlow.receiveWindowExceeded(
@@ -703,7 +730,7 @@ final class SessionReaderCoordinator {
             if (dataPayload.hasMetadata() && dataPayload.metadataValid()) {
                 streamRuntime.applyOpenMetadataLocked(dataPayload.priority(), dataPayload.group(), dataPayload.openInfo());
             }
-            if ((frame.flags() & 0x40) != 0) {
+            if ((frame.flags() & Protocol.FRAME_FLAG_FIN) != 0) {
                 streamRuntime.finishReceiveLocked();
             }
             boolean acceptedQueued = false;
@@ -712,9 +739,11 @@ final class SessionReaderCoordinator {
                 acceptedQueued = true;
             }
 
-            if (existingStream && dataLength == 0 && !dataPayload.hasMetadata() && (frame.flags() & 0x40) == 0) {
+            if (existingStream && dataLength == 0 && !dataPayload.hasMetadata()
+                    && (frame.flags() & Protocol.FRAME_FLAG_FIN) == 0) {
                 this.owner.recordNoOpZeroDataLocked();
-            } else if (dataLength > 0 || dataPayload.hasMetadata() || (frame.flags() & 0x40) != 0) {
+            } else if (dataLength > 0 || dataPayload.hasMetadata()
+                    || (frame.flags() & Protocol.FRAME_FLAG_FIN) != 0) {
                 this.owner.clearNoOpZeroDataLocked();
             }
 
@@ -726,7 +755,7 @@ final class SessionReaderCoordinator {
             this.owner.maybeCompactStreamLocked(streamRuntime);
             if (acceptedQueued) {
                 this.owner.notifyAcceptWaiters();
-            } else if (dataLength > 0 || (frame.flags() & 0x40) != 0) {
+            } else if (dataLength > 0 || (frame.flags() & Protocol.FRAME_FLAG_FIN) != 0) {
                 this.owner.notifyStreamReadWaiters();
             }
         }

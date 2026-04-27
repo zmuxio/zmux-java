@@ -518,6 +518,34 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
+    void goAwayRefusedOpeningDataDoesNotParseMalformedOpenMetadata() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                Protocol.CAPABILITY_OPEN_METADATA,
+                Settings.defaults()
+        );
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        SessionRuntimeTestSupport.setLongField(runtime, "localGoAwayBidi", 0L);
+
+        assertDoesNotThrow(() -> handleReaderFrame(runtime, "handleDataFrame", new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_OPEN_METADATA,
+                streamId,
+                new byte[0]
+        )));
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        assertEquals(1, urgentQueue.size(), "GOAWAY-refused DATA should queue one ABORT without parsing payload");
+        FrameCodec.Frame refused = SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst());
+        assertEquals(FrameType.ABORT, refused.type(), "refused opening DATA should be answered with ABORT");
+        assertEquals(streamId, refused.streamId(), "refused stream id mismatch");
+        assertEquals(
+                ErrorCode.REFUSED_STREAM.code(),
+                FrameCodec.parseErrorPayload(refused.payload()).code(),
+                "refused opening DATA should use REFUSED_STREAM"
+        );
+    }
+
+    @Test
     void terminalCompactionSkipsUnacceptedQueuedStreamWithOpenInfo() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(Protocol.CAPABILITY_OPEN_METADATA, Settings.defaults());
         StreamRuntime stream = createPeerOpenedBidi(runtime);
