@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.GatheringByteChannel;
 
@@ -73,6 +74,44 @@ final class FrameCodecErrorWrappingTest {
 
         assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "short stream_id must fail as frame-size");
         assertEquals(3, input.reads(), "reader must stop after the first stream_id byte");
+    }
+
+    @Test
+    void readFrameWrapsMissingOpenMetadataLengthAsFrameSize() throws Exception {
+        byte[] bytes = frame(FrameType.DATA, Protocol.FRAME_FLAG_OPEN_METADATA, 4L, new byte[0]);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(bytes), Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "missing OPEN_METADATA length should fail as frame-size");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source());
+        assertEquals(ZmuxErrorDirection.READ, error.direction());
+    }
+
+    @Test
+    void readFrameWrapsMissingControlPayloadVarintAsFrameSize() throws Exception {
+        byte[] bytes = frame(FrameType.RESET, 0, 4L, new byte[0]);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(bytes), Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "missing RESET error code should fail as frame-size");
+    }
+
+    @Test
+    void readFrameWrapsMissingGoAwayPayloadVarintsAsFrameSize() throws Exception {
+        byte[] bytes = frame(FrameType.GOAWAY, 0, 0L, new byte[0]);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(bytes), Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "missing GOAWAY fields should fail as frame-size");
     }
 
     @Test
@@ -159,6 +198,16 @@ final class FrameCodecErrorWrappingTest {
         assertEquals(ZmuxErrorScope.SESSION, error.scope());
         assertEquals(ZmuxErrorSource.LOCAL, error.source());
         assertEquals(ZmuxErrorDirection.WRITE, error.direction());
+    }
+
+    private static byte[] frame(FrameType type, int flags, long streamId, byte[] payload) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        long frameLength = 1L + Varint62.length(streamId) + payload.length;
+        Varint62.write(output, frameLength);
+        output.write(type.code() | flags);
+        Varint62.write(output, streamId);
+        output.write(payload);
+        return output.toByteArray();
     }
 
     private static final class CountingInputStream extends ByteArrayInputStream {

@@ -196,7 +196,17 @@ final class MetadataCodec {
         if ((flags & Protocol.FRAME_FLAG_OPEN_METADATA) == 0) {
             return new FrameCodec.DataPayload(false, false, 0L, null, EMPTY_BYTES, 0, 0, payload, 0, payload.length);
         }
-        Varint62.Decoded metadataLength = Varint62.decode(payload, 0);
+        Varint62.Decoded metadataLength;
+        try {
+            metadataLength = Varint62.decode(payload, 0);
+        } catch (IOException error) {
+            throw FrameCodec.error(
+                    ErrorCode.FRAME_SIZE,
+                    "parse DATA payload",
+                    error.getMessage() == null ? "invalid open metadata length" : error.getMessage(),
+                    error
+            );
+        }
         int metadataOffset = metadataLength.length();
         if (metadataLength.value() > payload.length - metadataOffset) {
             throw FrameCodec.error(ErrorCode.FRAME_SIZE, "parse DATA payload", "open metadata overruns data payload");

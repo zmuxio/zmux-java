@@ -869,7 +869,12 @@ final class FrameEnvelopeCodec {
         switch (frame.type()) {
             case MAX_DATA:
             case BLOCKED: {
-                Varint62.Decoded decoded = Varint62.decode(frame.payload(), 0);
+                Varint62.Decoded decoded;
+                try {
+                    decoded = Varint62.decode(frame.payload(), 0);
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate " + frame.type(), error);
+                }
                 if (decoded.length() != frame.payload().length) {
                     throw FrameCodec.error(ErrorCode.PROTOCOL, "validate " + frame.type(), "unexpected trailing bytes");
                 }
@@ -885,10 +890,18 @@ final class FrameEnvelopeCodec {
             case RESET:
             case ABORT:
             case CLOSE:
-                FrameCodec.parseErrorPayload(frame.payload());
+                try {
+                    FrameCodec.parseErrorPayload(frame.payload());
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate " + frame.type(), error);
+                }
                 break;
             case GOAWAY:
-                FrameCodec.parseGoAwayPayload(frame.payload());
+                try {
+                    FrameCodec.parseGoAwayPayload(frame.payload());
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate GOAWAY payload", error);
+                }
                 break;
             case EXT:
                 if (frame.payload().length == 0) {
@@ -905,6 +918,15 @@ final class FrameEnvelopeCodec {
             default:
                 break;
         }
+    }
+
+    private static IOException frameSizePayloadError(String operation, IOException cause) {
+        return FrameCodec.error(
+                ErrorCode.FRAME_SIZE,
+                operation,
+                cause.getMessage() == null ? "invalid frame payload" : cause.getMessage(),
+                cause
+        );
     }
 
     private static long remainingBytes(ByteBuffer[] buffers, int length) {
