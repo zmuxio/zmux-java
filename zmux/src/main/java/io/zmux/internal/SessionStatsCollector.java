@@ -421,6 +421,7 @@ final class SessionStatsCollector {
                 surface.receivedDataBytes(),
                 surface.openStreams(),
                 surface.acceptedStreams(),
+                this.runtime.streamBookkeepingInternal().activeStreamStatsLocked(),
                 acceptBacklog,
                 surface.retainedOpenInfoBytes(),
                 this.runtime.retainedOpenInfoBudgetLocked(),

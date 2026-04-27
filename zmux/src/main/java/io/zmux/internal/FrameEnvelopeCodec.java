@@ -34,7 +34,7 @@ final class FrameEnvelopeCodec {
         }
         FrameType type = parseFrameType(code & 0x1f);
         int flags = code & 0xe0;
-        Varint62.Decoded streamIdDecoded = Varint62.read(input);
+        Varint62.Decoded streamIdDecoded = readStreamId(input, frameLength.value());
         long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), streamIdDecoded.length());
         byte[] payload = FrameCodec.readInputBytes(input, FrameCodec.checkedLength(
                 payloadLength,
@@ -62,7 +62,7 @@ final class FrameEnvelopeCodec {
         int code = input.readByte();
         FrameType type = parseFrameType(code & 0x1f);
         int flags = code & 0xe0;
-        Varint62.Decoded streamIdDecoded = Varint62.read(input);
+        Varint62.Decoded streamIdDecoded = readStreamId(input, frameLength.value());
         long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), streamIdDecoded.length());
         int payloadLengthInt = FrameCodec.checkedLength(
                 payloadLength,
@@ -586,6 +586,99 @@ final class FrameEnvelopeCodec {
 
     private static Varint62.Decoded readValidatedFrameLength(FrameCodec.Decoder input, Limits normalized) throws IOException {
         return validateFrameLength(Varint62.read(input), normalized);
+    }
+
+    private static Varint62.Decoded readStreamId(InputStream input, long frameLength) throws IOException {
+        int first = input.read();
+        if (first < 0) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame");
+        }
+        int length = validatedStreamIdLength(first, frameLength);
+        long value;
+        switch (length) {
+            case 1:
+                value = first & 0x3fL;
+                break;
+            case 2:
+                value = ((first & 0x3fL) << 8) | readRequiredFrameByte(input);
+                break;
+            case 4:
+                value = ((first & 0x3fL) << 24)
+                        | ((long) readRequiredFrameByte(input) << 16)
+                        | ((long) readRequiredFrameByte(input) << 8)
+                        | readRequiredFrameByte(input);
+                break;
+            case 8:
+                value = ((first & 0x3fL) << 56)
+                        | ((long) readRequiredFrameByte(input) << 48)
+                        | ((long) readRequiredFrameByte(input) << 40)
+                        | ((long) readRequiredFrameByte(input) << 32)
+                        | ((long) readRequiredFrameByte(input) << 24)
+                        | ((long) readRequiredFrameByte(input) << 16)
+                        | ((long) readRequiredFrameByte(input) << 8)
+                        | readRequiredFrameByte(input);
+                break;
+            default:
+                throw new IllegalStateException("unsupported stream_id length " + length);
+        }
+        validateStreamIdCanonical(value, length);
+        return new Varint62.Decoded(value, length);
+    }
+
+    private static Varint62.Decoded readStreamId(FrameCodec.Decoder input, long frameLength) throws IOException {
+        int first = input.readByte();
+        int length = validatedStreamIdLength(first, frameLength);
+        long value;
+        switch (length) {
+            case 1:
+                value = first & 0x3fL;
+                break;
+            case 2:
+                value = ((first & 0x3fL) << 8) | input.readByte();
+                break;
+            case 4:
+                value = ((first & 0x3fL) << 24)
+                        | ((long) input.readByte() << 16)
+                        | ((long) input.readByte() << 8)
+                        | input.readByte();
+                break;
+            case 8:
+                value = ((first & 0x3fL) << 56)
+                        | ((long) input.readByte() << 48)
+                        | ((long) input.readByte() << 40)
+                        | ((long) input.readByte() << 32)
+                        | ((long) input.readByte() << 24)
+                        | ((long) input.readByte() << 16)
+                        | ((long) input.readByte() << 8)
+                        | input.readByte();
+                break;
+            default:
+                throw new IllegalStateException("unsupported stream_id length " + length);
+        }
+        validateStreamIdCanonical(value, length);
+        return new Varint62.Decoded(value, length);
+    }
+
+    private static int validatedStreamIdLength(int first, long frameLength) throws IOException {
+        int length = 1 << (first >>> 6);
+        if (frameLength < 1L + length) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame too short");
+        }
+        return length;
+    }
+
+    private static void validateStreamIdCanonical(long value, int length) throws IOException {
+        if (Varint62.length(value) != length) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "non-canonical stream_id");
+        }
+    }
+
+    private static int readRequiredFrameByte(InputStream input) throws IOException {
+        int next = input.read();
+        if (next < 0) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame");
+        }
+        return next & 0xff;
     }
 
     private static Varint62.Decoded validateFrameLength(Varint62.Decoded frameLength, Limits normalized) throws IOException {

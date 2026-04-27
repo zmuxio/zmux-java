@@ -251,7 +251,8 @@ Events, stats, and errors:
 
 - `ZmuxEventHandler`, `ZmuxEvent`, and `ZmuxEventType`: session and stream event
   callbacks.
-- `SessionState` and `SessionStats`: runtime state and diagnostics snapshots.
+- `SessionState` and `SessionStats`: runtime state, active stream counts split
+  by local/peer and bidi/uni, and diagnostics snapshots.
 - `ZmuxException` and typed exceptions such as `OpenTimeoutException`,
   `AcceptTimeoutException`, `ReadTimeoutException`, `WriteTimeoutException`,
   `SessionClosedException`, `ReadClosedException`, and `WriteClosedException`.

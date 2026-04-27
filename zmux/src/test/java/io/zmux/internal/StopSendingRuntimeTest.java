@@ -19,11 +19,15 @@ final class StopSendingRuntimeTest {
     }
 
     private static FrameCodec.Frame stopSendingFrame(long streamId) throws IOException {
+        return stopSendingFrame(streamId, ErrorCode.CANCELLED.code(), "");
+    }
+
+    private static FrameCodec.Frame stopSendingFrame(long streamId, long code, String reason) throws IOException {
         return new FrameCodec.Frame(
                 FrameType.STOP_SENDING,
                 0,
                 streamId,
-                FrameCodec.buildErrorPayload(ErrorCode.CANCELLED.code(), "", Settings.defaults().maxControlPayloadBytes())
+                FrameCodec.buildErrorPayload(code, reason, Settings.defaults().maxControlPayloadBytes())
         );
     }
 
@@ -165,6 +169,30 @@ final class StopSendingRuntimeTest {
             assertTrue(hasQueuedReset(runtime, stream.streamIdInternal()), "stop-driven reset should remain queued after benign closeWrite");
             assertFalse(hasQueuedDataFin(runtime, stream.streamIdInternal()), "closeWrite after stop-driven reset must not enqueue a second DATA|FIN");
         }
+    }
+
+    @Test
+    void writeAfterStopDrivenResetSurfacesPeerStop() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+        stream.write(new byte[576]);
+
+        SessionRuntimeTestSupport.invokePrivate(
+                runtime,
+                "handleStopSendingFrame",
+                new Class<?>[]{FrameCodec.Frame.class},
+                stopSendingFrame(stream.streamIdInternal(), 77L, "peer stop")
+        );
+
+        WriteClosedException error = assertInstanceOf(
+                WriteClosedException.class,
+                assertThrows(IOException.class, () -> stream.write(new byte[]{1})),
+                "writes after a STOP_SENDING-driven RESET should preserve the peer STOP_SENDING surface"
+        );
+        assertEquals(77L, error.code(), "peer STOP_SENDING code should win over the local CANCELLED reset");
+        assertEquals("peer stop", error.reason(), "peer STOP_SENDING reason should be retained");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source(), "peer STOP_SENDING source mismatch");
+        assertEquals(ZmuxTerminationKind.STOPPED, error.terminationKind(), "peer STOP_SENDING termination mismatch");
     }
 
     @Test

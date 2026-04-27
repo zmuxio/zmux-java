@@ -417,6 +417,44 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void statsExposeActiveStreamsByOpenerAndDirection() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxStream> bidiAcceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+            ZmuxStream bidi = pair.client.openStream(new OpenOptions(null, null, utf8("bidi-active")));
+            ZmuxStream acceptedBidi = await(bidiAcceptedFuture);
+
+            SessionStats.ActiveStreamStats clientBidi = pair.client.stats().activeStreams();
+            SessionStats.ActiveStreamStats serverBidi = pair.server.stats().activeStreams();
+            assertEquals(1L, clientBidi.localBidi(), "client local bidi active count mismatch");
+            assertEquals(1L, clientBidi.total(), "client bidi active total mismatch");
+            assertEquals(1L, serverBidi.peerBidi(), "server peer bidi active count mismatch");
+            assertEquals(1L, serverBidi.total(), "server bidi active total mismatch");
+
+            bidi.close();
+            acceptedBidi.close();
+            awaitStats(pair.client, Duration.ofSeconds(5), snapshot -> snapshot.activeStreams().total() == 0L);
+            awaitStats(pair.server, Duration.ofSeconds(5), snapshot -> snapshot.activeStreams().total() == 0L);
+
+            CompletableFuture<ZmuxRecvStream> uniAcceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
+            ZmuxSendStream uni = pair.client.openUniStream(new OpenOptions(null, null, utf8("uni-active")));
+            ZmuxRecvStream acceptedUni = await(uniAcceptedFuture);
+
+            SessionStats.ActiveStreamStats clientUni = pair.client.stats().activeStreams();
+            SessionStats.ActiveStreamStats serverUni = pair.server.stats().activeStreams();
+            assertEquals(1L, clientUni.localUni(), "client local uni active count mismatch");
+            assertEquals(1L, clientUni.total(), "client uni active total mismatch");
+            assertEquals(1L, serverUni.peerUni(), "server peer uni active count mismatch");
+            assertEquals(1L, serverUni.total(), "server uni active total mismatch");
+
+            byte[] payload = utf8("done");
+            assertEquals(payload.length, uni.writeFinal(payload));
+            awaitStats(pair.client, Duration.ofSeconds(5), snapshot -> snapshot.activeStreams().localUni() == 0L);
+            assertArrayEquals(payload, readAll(acceptedUni));
+            awaitStats(pair.server, Duration.ofSeconds(5), snapshot -> snapshot.activeStreams().peerUni() == 0L);
+        }
+    }
+
+    @Test
     void statsSaturateReceivedPlusBufferedBytes() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             ZmuxStream stream = pair.client.openStream();

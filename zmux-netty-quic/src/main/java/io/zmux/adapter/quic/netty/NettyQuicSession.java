@@ -117,6 +117,30 @@ final class NettyQuicSession implements ZmuxSession {
         return SessionStats.ProvisionalStats.empty();
     }
 
+    private static SessionStats.ActiveStreamStats activeStreamStats(Iterable<NettyQuicStreamState> states) {
+        long localBidi = 0L;
+        long localUni = 0L;
+        long peerBidi = 0L;
+        long peerUni = 0L;
+        for (NettyQuicStreamState state : states) {
+            if (state == null || !state.activeForStats()) {
+                continue;
+            }
+            if (state.openedLocally()) {
+                if (state.bidirectional()) {
+                    localBidi = NettyQuicSupport.saturatingAdd(localBidi, 1L);
+                } else {
+                    localUni = NettyQuicSupport.saturatingAdd(localUni, 1L);
+                }
+            } else if (state.bidirectional()) {
+                peerBidi = NettyQuicSupport.saturatingAdd(peerBidi, 1L);
+            } else {
+                peerUni = NettyQuicSupport.saturatingAdd(peerUni, 1L);
+            }
+        }
+        return new SessionStats.ActiveStreamStats(localBidi, localUni, peerBidi, peerUni);
+    }
+
     private static SessionStats.PressureStats reducedPressureStats(long trackedMemoryBytes,
                                                                    long trackedRetainedStateBytes,
                                                                    long hiddenRetainedCount,
@@ -545,6 +569,7 @@ final class NettyQuicSession implements ZmuxSession {
                 lastFlushBytes
         );
         SessionStats.KeepaliveStats keepalive = reducedTransportKeepaliveStats();
+        SessionStats.ActiveStreamStats activeStreamStats = activeStreamStats(activeStreams);
         return new SessionStats(
                 currentState,
                 0L,
@@ -553,6 +578,7 @@ final class NettyQuicSession implements ZmuxSession {
                 receivedDataBytes.get(),
                 stats.trackedStateCount(),
                 acceptedStreams.get(),
+                activeStreamStats,
                 acceptBacklog,
                 stats.retainedOpenInfoBytes(),
                 0L,

@@ -694,6 +694,7 @@ class SessionSurfaceRuntimeTest {
 
         assertEquals(2L, before.openStreams(), "pre-close stats should report peer-visible live streams");
         assertEquals(1L, before.acceptedStreams(), "pre-close stats should retain accepted stream count");
+        assertEquals(2L, before.activeStreams().peerBidi(), "pre-close stats should retain active peer bidi streams");
         assertEquals(1L, before.acceptBacklog().count(), "pre-close stats should retain the remaining accept backlog");
 
         synchronized (runtime.lock()) {
@@ -705,8 +706,37 @@ class SessionSurfaceRuntimeTest {
         assertEquals(SessionState.CLOSED, after.state(), "terminal stats should report the closed public state");
         assertEquals(0L, after.openStreams(), "terminal stats should clear live stream counts");
         assertEquals(0L, after.acceptedStreams(), "terminal stats should clear accepted stream counts");
+        assertEquals(0L, after.activeStreams().total(), "terminal stats should clear active stream counts");
         assertEquals(0L, after.acceptBacklog().count(), "terminal stats should clear accept backlog counts");
         assertEquals(0L, after.acceptBacklog().bytes(), "terminal stats should clear accept backlog bytes");
+    }
+
+    @Test
+    void statsExposeActiveStreamsByOpenerAndDirection() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                ZmuxConfig.builder().role(io.zmux.Role.RESPONDER).build(),
+                0L,
+                Settings.defaults()
+        );
+        StreamRuntime localBidi = (StreamRuntime) runtime.openStream();
+        StreamRuntime localUni = ((AbstractNativeStreamView) runtime.openUniStream()).runtime;
+
+        synchronized (runtime.lock()) {
+            runtime.beginLocalOpenLocked(localBidi);
+            runtime.markLocalStreamOpeningCommittedLocked(localBidi);
+            runtime.beginLocalOpenLocked(localUni);
+            runtime.markLocalStreamOpeningCommittedLocked(localUni);
+        }
+        createPeerOpenedBidi(runtime, SessionRuntime.firstPeerStreamId(io.zmux.Role.RESPONDER, true));
+        createPeerOpenedBidi(runtime, SessionRuntime.firstPeerStreamId(io.zmux.Role.RESPONDER, false));
+
+        SessionStats.ActiveStreamStats active = runtime.stats().activeStreams();
+
+        assertEquals(1L, active.localBidi(), "local bidi active stream count mismatch");
+        assertEquals(1L, active.localUni(), "local uni active stream count mismatch");
+        assertEquals(1L, active.peerBidi(), "peer bidi active stream count mismatch");
+        assertEquals(1L, active.peerUni(), "peer uni active stream count mismatch");
+        assertEquals(4L, active.total(), "total active stream count mismatch");
     }
 
     @Test

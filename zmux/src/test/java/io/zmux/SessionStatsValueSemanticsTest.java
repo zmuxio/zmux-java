@@ -17,6 +17,10 @@ final class SessionStatsValueSemanticsTest {
     @Test
     void nestedStatsCompareByValue() {
         assertEquals(
+                new SessionStats.ActiveStreamStats(1L, 2L, 3L, 4L),
+                new SessionStats.ActiveStreamStats(1L, 2L, 3L, 4L)
+        );
+        assertEquals(
                 new SessionStats.QueueStats(1, 2, 3, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
                 new SessionStats.QueueStats(1, 2, 3, 4L, 5L, 6L, 7L, 8L, 9L, 10L)
         );
@@ -81,6 +85,14 @@ final class SessionStatsValueSemanticsTest {
                         9L,
                         10L
                 )
+        );
+    }
+
+    @Test
+    void activeStreamTotalSaturates() {
+        assertEquals(
+                Long.MAX_VALUE,
+                new SessionStats.ActiveStreamStats(Long.MAX_VALUE, 1L, 0L, 0L).total()
         );
     }
 }

@@ -14,6 +14,7 @@ public final class SessionStats {
     private final long receivedDataBytes;
     private final long openStreams;
     private final long acceptedStreams;
+    private final ActiveStreamStats activeStreams;
     private final AcceptBacklogStats acceptBacklog;
     private final long retainedOpenInfoBytes;
     private final long retainedOpenInfoBudget;
@@ -54,6 +55,58 @@ public final class SessionStats {
                         ReasonStats reasons,
                         DiagnosticStats diagnostics,
                         PressureStats pressure) {
+        this(
+                state,
+                sentFrames,
+                receivedFrames,
+                sentDataBytes,
+                receivedDataBytes,
+                openStreams,
+                acceptedStreams,
+                ActiveStreamStats.empty(),
+                acceptBacklog,
+                retainedOpenInfoBytes,
+                retainedOpenInfoBudget,
+                retainedPeerReasonBytes,
+                retainedPeerReasonBudget,
+                keepalive,
+                progress,
+                flush,
+                blockedWriteTotalNanos,
+                lastOpenLatencyNanos,
+                queues,
+                provisionals,
+                hiddenState,
+                reasons,
+                diagnostics,
+                pressure
+        );
+    }
+
+    public SessionStats(SessionState state,
+                        long sentFrames,
+                        long receivedFrames,
+                        long sentDataBytes,
+                        long receivedDataBytes,
+                        long openStreams,
+                        long acceptedStreams,
+                        ActiveStreamStats activeStreams,
+                        AcceptBacklogStats acceptBacklog,
+                        long retainedOpenInfoBytes,
+                        long retainedOpenInfoBudget,
+                        long retainedPeerReasonBytes,
+                        long retainedPeerReasonBudget,
+                        KeepaliveStats keepalive,
+                        ProgressStats progress,
+                        FlushStats flush,
+                        long blockedWriteTotalNanos,
+                        long lastOpenLatencyNanos,
+                        QueueStats queues,
+                        ProvisionalStats provisionals,
+                        HiddenStateStats hiddenState,
+                        ReasonStats reasons,
+                        DiagnosticStats diagnostics,
+                        PressureStats pressure) {
         this.state = state;
         this.sentFrames = sentFrames;
         this.receivedFrames = receivedFrames;
@@ -61,6 +114,7 @@ public final class SessionStats {
         this.receivedDataBytes = receivedDataBytes;
         this.openStreams = openStreams;
         this.acceptedStreams = acceptedStreams;
+        this.activeStreams = activeStreams == null ? ActiveStreamStats.empty() : activeStreams;
         this.acceptBacklog = acceptBacklog;
         this.retainedOpenInfoBytes = retainedOpenInfoBytes;
         this.retainedOpenInfoBudget = retainedOpenInfoBudget;
@@ -107,6 +161,16 @@ public final class SessionStats {
         );
     }
 
+    private static long saturatingAdd(long left, long right) {
+        if (left <= 0L) {
+            return Math.max(0L, right);
+        }
+        if (right <= 0L) {
+            return left;
+        }
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
     public SessionState state() {
         return state;
     }
@@ -133,6 +197,10 @@ public final class SessionStats {
 
     public long acceptedStreams() {
         return acceptedStreams;
+    }
+
+    public ActiveStreamStats activeStreams() {
+        return activeStreams;
     }
 
     public AcceptBacklogStats acceptBacklog() {
@@ -221,6 +289,7 @@ public final class SessionStats {
                 && blockedWriteTotalNanos == that.blockedWriteTotalNanos
                 && lastOpenLatencyNanos == that.lastOpenLatencyNanos
                 && state == that.state
+                && Objects.equals(activeStreams, that.activeStreams)
                 && Objects.equals(acceptBacklog, that.acceptBacklog)
                 && Objects.equals(keepalive, that.keepalive)
                 && Objects.equals(progress, that.progress)
@@ -243,6 +312,7 @@ public final class SessionStats {
                 receivedDataBytes,
                 openStreams,
                 acceptedStreams,
+                activeStreams,
                 acceptBacklog,
                 retainedOpenInfoBytes,
                 retainedOpenInfoBudget,
@@ -260,6 +330,70 @@ public final class SessionStats {
                 diagnostics,
                 pressure
         );
+    }
+
+    public static final class ActiveStreamStats {
+        private final long localBidi;
+        private final long localUni;
+        private final long peerBidi;
+        private final long peerUni;
+        private final long total;
+
+        public ActiveStreamStats(long localBidi, long localUni, long peerBidi, long peerUni) {
+            this.localBidi = Math.max(0L, localBidi);
+            this.localUni = Math.max(0L, localUni);
+            this.peerBidi = Math.max(0L, peerBidi);
+            this.peerUni = Math.max(0L, peerUni);
+            this.total = saturatingAdd(
+                    saturatingAdd(this.localBidi, this.localUni),
+                    saturatingAdd(this.peerBidi, this.peerUni)
+            );
+        }
+
+        public static ActiveStreamStats empty() {
+            return new ActiveStreamStats(0L, 0L, 0L, 0L);
+        }
+
+        public long localBidi() {
+            return localBidi;
+        }
+
+        public long localUni() {
+            return localUni;
+        }
+
+        public long peerBidi() {
+            return peerBidi;
+        }
+
+        public long peerUni() {
+            return peerUni;
+        }
+
+        public long total() {
+            return total;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof ActiveStreamStats)) {
+                return false;
+            }
+            ActiveStreamStats that = (ActiveStreamStats) other;
+            return localBidi == that.localBidi
+                    && localUni == that.localUni
+                    && peerBidi == that.peerBidi
+                    && peerUni == that.peerUni
+                    && total == that.total;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(localBidi, localUni, peerBidi, peerUni, total);
+        }
     }
 
     public static final class AcceptBacklogStats {

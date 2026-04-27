@@ -62,6 +62,20 @@ final class FrameCodecErrorWrappingTest {
     }
 
     @Test
+    void readFrameRejectsShortStreamIdBeforeReadingNextFrameBytes() {
+        byte[] bytes = new byte[]{2, (byte) FrameType.DATA.code(), (byte) 0xc0, 99, 98, 97};
+        CountingInputStream input = new CountingInputStream(bytes);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(input, Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "short stream_id must fail as frame-size");
+        assertEquals(3, input.reads(), "reader must stop after the first stream_id byte");
+    }
+
+    @Test
     void readPrefaceWrapsInvalidRoleAsProtocolError() throws Exception {
         byte[] preface = new byte[]{
                 'Z', 'M', 'U', 'X',
@@ -145,5 +159,26 @@ final class FrameCodecErrorWrappingTest {
         assertEquals(ZmuxErrorScope.SESSION, error.scope());
         assertEquals(ZmuxErrorSource.LOCAL, error.source());
         assertEquals(ZmuxErrorDirection.WRITE, error.direction());
+    }
+
+    private static final class CountingInputStream extends ByteArrayInputStream {
+        private int reads;
+
+        private CountingInputStream(byte[] bytes) {
+            super(bytes);
+        }
+
+        @Override
+        public synchronized int read() {
+            int value = super.read();
+            if (value >= 0) {
+                reads++;
+            }
+            return value;
+        }
+
+        private int reads() {
+            return reads;
+        }
     }
 }

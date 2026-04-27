@@ -261,6 +261,24 @@ final class NettyQuicStreamState {
         }
     }
 
+    boolean activeForStats() {
+        lock.lock();
+        try {
+            IOException currentSessionError = currentSessionError();
+            boolean readActive = readAllowed
+                    && !readHalf.localClosed()
+                    && readHalf.remoteError() == null
+                    && currentSessionError == null
+                    && (bufferedInboundBytes > 0L || !readHalf.remoteTerminated());
+            boolean writeActive = writeAllowed
+                    && !writeHalf.localClosed()
+                    && currentSessionError == null;
+            return readActive || writeActive;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     byte[] openInfo() {
         lock.lock();
         try {

@@ -184,6 +184,9 @@ final class StreamTerminalState {
             case RECV_ABORT:
                 return recvAbortErrorOrFallback();
             case SEND_RESET:
+                if (halfState.sendResetFromPeerStop() && sendStopError != null) {
+                    return peerStopWriteClosed();
+                }
                 return localWriteResetError();
             case RECV_RESET:
                 return recvResetErrorOrFallback();

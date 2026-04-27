@@ -1,5 +1,7 @@
 package io.zmux.internal;
 
+import io.zmux.SessionStats;
+
 final class SessionStreamBookkeeping {
     private long acceptedStreams;
     private long activeLocalBidi;
@@ -22,6 +24,15 @@ final class SessionStreamBookkeeping {
 
     long activePeerCountLocked(boolean bidirectional) {
         return bidirectional ? this.activePeerBidi : this.activePeerUni;
+    }
+
+    SessionStats.ActiveStreamStats activeStreamStatsLocked() {
+        return new SessionStats.ActiveStreamStats(
+                this.activeLocalBidi,
+                this.activeLocalUni,
+                this.activePeerBidi,
+                this.activePeerUni
+        );
     }
 
     void onLocalOpenedLocked(boolean bidirectional) {

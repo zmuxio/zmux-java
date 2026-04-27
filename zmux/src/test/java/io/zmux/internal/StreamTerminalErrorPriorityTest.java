@@ -181,6 +181,28 @@ final class StreamTerminalErrorPriorityTest {
     }
 
     @Test
+    void stopDrivenSendResetSurfacesPeerStopInOperationError() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+
+        synchronized (runtime.lock()) {
+            stream.stopSendingFromPeerLocked(77L, "peer stop", 0L);
+            stream.concludeStopSendingWithResetLocked();
+
+            WriteClosedException error = assertInstanceOf(
+                    WriteClosedException.class,
+                    stream.operationErrorLocked(),
+                    "STOP_SENDING-driven RESET should keep the peer STOP_SENDING error identity"
+            );
+            assertEquals(77L, error.code(), "peer STOP_SENDING code mismatch");
+            assertEquals("peer stop", error.reason(), "peer STOP_SENDING reason mismatch");
+            assertEquals(ZmuxErrorSource.REMOTE, error.source(), "peer STOP_SENDING source mismatch");
+            assertEquals(ZmuxErrorDirection.WRITE, error.direction(), "peer STOP_SENDING direction mismatch");
+            assertEquals(ZmuxTerminationKind.STOPPED, error.terminationKind(), "peer STOP_SENDING termination mismatch");
+        }
+    }
+
+    @Test
     void queuedGracefulSendFinBeatsEarlierPeerStopInOperationError() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();

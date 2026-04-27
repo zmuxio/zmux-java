@@ -68,6 +68,21 @@ final class FrameCodecDecoderTest {
         }
     }
 
+    @Test
+    void decoderRejectsShortStreamIdBeforeConsumingNextFrameBytes() {
+        byte[] bytes = new byte[]{2, (byte) FrameType.DATA.code(), (byte) 0xc0, 99, 98, 97};
+        OneByteInputStream input = new OneByteInputStream(bytes);
+        FrameCodec.Decoder decoder = FrameCodec.decoder(input);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> decoder.readFrame(Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "short stream_id must fail as frame-size");
+        assertEquals(3, input.reads(), "decoder must stop after the first stream_id byte");
+    }
+
     private static final class CountingBurstInputStream extends InputStream {
         private final byte[] bytes;
         private int position;
@@ -108,6 +123,42 @@ final class FrameCodecDecoderTest {
 
         private int bulkReads() {
             return bulkReads;
+        }
+    }
+
+    private static final class OneByteInputStream extends InputStream {
+        private final byte[] bytes;
+        private int position;
+        private int reads;
+
+        private OneByteInputStream(byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        @Override
+        public int read() {
+            if (position >= bytes.length) {
+                return -1;
+            }
+            reads++;
+            return bytes[position++] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            if (length == 0) {
+                return 0;
+            }
+            if (position >= bytes.length) {
+                return -1;
+            }
+            buffer[offset] = bytes[position++];
+            reads++;
+            return 1;
+        }
+
+        private int reads() {
+            return reads;
         }
     }
 

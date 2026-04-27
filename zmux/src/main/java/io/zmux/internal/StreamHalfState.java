@@ -6,6 +6,7 @@ final class StreamHalfState {
     private boolean localReadStop;
     private boolean localReadSignalPending;
     private boolean remoteWriteStop;
+    private boolean sendResetFromPeerStop;
 
     StreamHalfState(boolean localSend, boolean localReceive) {
         initialize(localSend, localReceive);
@@ -38,6 +39,7 @@ final class StreamHalfState {
         localReadStop = false;
         localReadSignalPending = false;
         remoteWriteStop = false;
+        sendResetFromPeerStop = false;
     }
 
     SendState sendState() {
@@ -66,6 +68,10 @@ final class StreamHalfState {
 
     boolean sendResetOrAborted() {
         return sendState == SendState.RESET || sendState == SendState.ABORTED;
+    }
+
+    boolean sendResetFromPeerStop() {
+        return sendState == SendState.RESET && sendResetFromPeerStop;
     }
 
     boolean sendAborted() {
@@ -133,6 +139,7 @@ final class StreamHalfState {
     SendState markSendReset() {
         SendState previous = sendState;
         sendState = SendState.RESET;
+        sendResetFromPeerStop = false;
         return previous;
     }
 
@@ -148,6 +155,7 @@ final class StreamHalfState {
         SendState previous = sendState;
         if (sendState == SendState.OPEN || sendState == SendState.FIN_QUEUED) {
             sendState = SendState.RESET;
+            sendResetFromPeerStop = remoteWriteStop;
         }
         return previous;
     }
@@ -160,6 +168,7 @@ final class StreamHalfState {
         SendState previous = sendState;
         sendState = sendState == SendState.ABSENT ? SendState.ABSENT : SendState.ABORTED;
         recvState = recvState == RecvState.ABSENT ? RecvState.ABSENT : RecvState.ABORTED;
+        sendResetFromPeerStop = false;
         return previous;
     }
 
@@ -266,6 +275,7 @@ final class StreamHalfState {
         if (graceful) {
             if (localSend && !sendTerminal()) {
                 sendState = SendState.FIN;
+                sendResetFromPeerStop = false;
             }
             if (localReceive && !recvTerminal()) {
                 recvState = RecvState.FIN;
@@ -274,6 +284,7 @@ final class StreamHalfState {
         }
         if (localSend && !sendTerminal()) {
             sendState = SendState.ABORTED;
+            sendResetFromPeerStop = false;
         }
         if (localReceive && !recvTerminal()) {
             recvState = RecvState.ABORTED;

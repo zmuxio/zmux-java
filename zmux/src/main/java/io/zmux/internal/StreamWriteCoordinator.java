@@ -310,6 +310,9 @@ final class StreamWriteCoordinator {
         if (!this.owner.halfStateInternal().sendResetOrAborted()) {
             return;
         }
+        if (this.owner.halfStateInternal().sendResetFromPeerStop()) {
+            throw this.owner.terminalStateInternal().peerStopWriteClosed();
+        }
         if (this.owner.terminalStateInternal().recvAbortError() != null) {
             throw this.owner.terminalStateInternal().recvAbortError();
         }
