@@ -64,6 +64,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private static final int INBOUND_PAYLOAD_POOL_DEPTH_PER_LENGTH = 4;
     private static final int MAX_INBOUND_POOLED_PAYLOAD_BYTES = 64 * 1024;
     private static final int MAX_PENDING_READ_LOOP_PROTOCOL_TASKS = 256;
+    private static final int MIN_MERGED_BORROWED_WRITEV_SEGMENTS = 16;
+    private static final int MAX_MERGED_BORROWED_WRITEV_AVERAGE_SEGMENT_BYTES = 1024;
     private final DuplexConnection connection;
     private final ZmuxConfig config;
     private final Preface localPreface;
@@ -412,6 +414,41 @@ public final class SessionRuntime implements ZmuxNativeSession {
             throw new IllegalArgumentException("multipart payload underrun");
         }
         return segmentCount;
+    }
+
+    private static boolean shouldMergeBorrowedPayloadParts(int segmentCount,
+                                                           int length,
+                                                           PayloadOwnership payloadOwnership) {
+        if (payloadOwnership == PayloadOwnership.OWNED || segmentCount < MIN_MERGED_BORROWED_WRITEV_SEGMENTS) {
+            return false;
+        }
+        return (long) length <= (long) segmentCount * MAX_MERGED_BORROWED_WRITEV_AVERAGE_SEGMENT_BYTES;
+    }
+
+    private static byte[] copyPayloadParts(byte[][] parts, int partIndex, int partOffset, int length) {
+        if (length == 0) {
+            return EMPTY_BYTES;
+        }
+        byte[] merged = new byte[length];
+        int cursor = 0;
+        int index = partIndex;
+        int offset = partOffset;
+        int remaining = length;
+        while (remaining > 0) {
+            byte[] part = Objects.requireNonNull(parts[index], "parts[" + index + "]");
+            if (offset >= part.length) {
+                ++index;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            System.arraycopy(part, offset, merged, cursor, take);
+            cursor += take;
+            remaining -= take;
+            ++index;
+            offset = 0;
+        }
+        return merged;
     }
 
     private static UncheckedIOException internalIoFailure(String operation, IOException error) {
@@ -3073,6 +3110,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
         int segmentCount = countRetainedPayloadSegments(parts, partIndex, partOffset, length);
         if (segmentCount == 0) {
             return EMPTY_PARTS;
+        }
+        if (shouldMergeBorrowedPayloadParts(segmentCount, length, payloadOwnership)) {
+            return new byte[][]{copyPayloadParts(parts, partIndex, partOffset, length)};
         }
 
         byte[][] retained = new byte[segmentCount][];

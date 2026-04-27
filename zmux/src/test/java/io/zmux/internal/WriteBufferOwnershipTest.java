@@ -73,6 +73,29 @@ final class WriteBufferOwnershipTest {
     }
 
     @Test
+    void writevFinalMergesManyTinyBorrowedParts() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        ZmuxStream stream = runtime.openStream();
+
+        byte[][] parts = new byte[20][];
+        StringBuilder expected = new StringBuilder(parts.length);
+        for (int i = 0; i < parts.length; ++i) {
+            char next = (char) ('a' + i);
+            expected.append(next);
+            parts[i] = new byte[]{(byte) next};
+        }
+        stream.writevFinal(parts);
+        parts[0][0] = 'x';
+
+        Object outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
+        assertNotNull(outbound, "expected multipart DATA to be queued");
+        assertEquals(expected.toString(), new String(SessionRuntimeTestSupport.outboundPayload(outbound), StandardCharsets.UTF_8),
+                "merged tiny multipart payload must not alias caller buffers");
+        assertEquals(0, SessionRuntimeTestSupport.outboundPayloadPartCount(outbound),
+                "many tiny borrowed parts should be merged to avoid retaining many small arrays");
+    }
+
+    @Test
     void ordinaryZeroLengthWritevDoesNotObserveClosedWriteSide() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
