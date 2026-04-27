@@ -1692,6 +1692,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         if (!SessionRuntime.isTerminalControlFrame(candidate)) {
             return;
         }
+        boolean removed = false;
         Iterator<OutboundFrame> iterator = this.urgentQueue.iterator();
         while (iterator.hasNext()) {
             OutboundFrame queued = iterator.next();
@@ -1701,6 +1702,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
             }
             iterator.remove();
             this.onUrgentFrameDequeuedLocked(queued);
+            removed = true;
+        }
+        if (removed) {
+            this.releaseEmptyQueuedOutboundStorageLocked(this.urgentQueue);
         }
     }
 
@@ -1747,10 +1752,29 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void onQueuedFrameDequeuedLocked(Deque<OutboundFrame> deque, OutboundFrame outboundFrame) {
+        if (outboundFrame == null) {
+            return;
+        }
         if (deque == this.urgentQueue) {
             this.onUrgentFrameDequeuedLocked(outboundFrame);
+            this.releaseEmptyQueuedOutboundStorageLocked(deque);
         } else if (deque == this.dataQueue) {
             this.onOrdinaryFrameDequeuedLocked(outboundFrame);
+            this.releaseEmptyQueuedOutboundStorageLocked(deque);
+        }
+    }
+
+    private void releaseEmptyQueuedOutboundStorageLocked(Deque<OutboundFrame> deque) {
+        if (deque == this.urgentQueue && this.urgentQueue.isEmpty()) {
+            this.urgentQueue = new ArrayDeque<>();
+        } else if (deque == this.dataQueue && this.dataQueue.isEmpty()) {
+            this.dataQueue = new ArrayDeque<>();
+        }
+    }
+
+    void releaseEmptyAdvisoryQueueStorageLocked() {
+        if (this.advisoryQueue.isEmpty()) {
+            this.advisoryQueue = new ArrayDeque<>();
         }
     }
 
@@ -2622,10 +2646,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     OutboundFrame pollQueuedOutboundLocked(Deque<OutboundFrame> deque) {
         OutboundFrame outboundFrame = deque.pollFirst();
+        if (outboundFrame == null) {
+            return null;
+        }
         if (deque == this.urgentQueue) {
             this.onUrgentFrameDequeuedLocked(outboundFrame);
+            this.releaseEmptyQueuedOutboundStorageLocked(deque);
         } else if (deque == this.dataQueue) {
             this.onOrdinaryFrameDequeuedLocked(outboundFrame);
+            this.releaseEmptyQueuedOutboundStorageLocked(deque);
         }
         return outboundFrame;
     }

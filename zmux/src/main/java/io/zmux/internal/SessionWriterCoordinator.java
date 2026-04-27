@@ -391,6 +391,8 @@ final class SessionWriterCoordinator {
 
         SessionRuntime.OutboundFrame pollQueuedOutboundLocked(Deque<SessionRuntime.OutboundFrame> deque);
 
+        void releaseEmptyAdvisoryQueueStorageLocked();
+
         void releaseQueuedDataLocked(SessionRuntime.OutboundFrame outboundFrame);
 
         void releaseWriterHeldFrameLocked(SessionRuntime.OutboundFrame outboundFrame);

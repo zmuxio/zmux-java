@@ -139,6 +139,9 @@ final class SessionWriterBatchCollector {
             if (streamRuntime == null) {
                 return null;
             }
+            if (this.owner.advisoryQueue().isEmpty()) {
+                this.owner.releaseEmptyAdvisoryQueueStorageLocked();
+            }
 
             streamRuntime.clearPriorityUpdateQueuedLocked();
             if (!streamRuntime.hasPendingPriorityUpdateLocked()) {

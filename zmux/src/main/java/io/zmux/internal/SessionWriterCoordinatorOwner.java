@@ -166,6 +166,11 @@ final class SessionWriterCoordinatorOwner implements SessionWriterCoordinator.Ow
     }
 
     @Override
+    public void releaseEmptyAdvisoryQueueStorageLocked() {
+        this.owner.releaseEmptyAdvisoryQueueStorageLocked();
+    }
+
+    @Override
     public void releaseQueuedDataLocked(SessionRuntime.OutboundFrame outboundFrame) {
         this.owner.releaseQueuedDataLocked(outboundFrame);
     }

@@ -180,9 +180,14 @@ final class SessionPriorityUpdateCoordinator {
 
     void discardPendingPriorityQueueLocked() {
         StreamRuntime streamRuntime;
+        boolean drained = false;
         while ((streamRuntime = this.owner.advisoryQueueInternal().pollFirst()) != null) {
             this.clearPendingPriorityUpdateRetainedLocked(streamRuntime, true);
             streamRuntime.clearPriorityUpdateQueuedLocked();
+            drained = true;
+        }
+        if (drained) {
+            this.owner.releaseEmptyAdvisoryQueueStorageLocked();
         }
     }
 
@@ -262,21 +267,29 @@ final class SessionPriorityUpdateCoordinator {
     }
 
     private void removeQueuedPriorityUpdateAdvisoryLocked(StreamRuntime streamRuntime) {
-        if (this.owner.advisoryQueueInternal().peekFirst() == streamRuntime) {
-            this.owner.advisoryQueueInternal().pollFirst();
+        Deque<StreamRuntime> advisoryQueue = this.owner.advisoryQueueInternal();
+        if (advisoryQueue.peekFirst() == streamRuntime) {
+            advisoryQueue.pollFirst();
+            this.owner.releaseEmptyAdvisoryQueueStorageLocked();
             return;
         }
-        if (this.owner.advisoryQueueInternal().peekLast() == streamRuntime) {
-            this.owner.advisoryQueueInternal().pollLast();
+        if (advisoryQueue.peekLast() == streamRuntime) {
+            advisoryQueue.pollLast();
+            this.owner.releaseEmptyAdvisoryQueueStorageLocked();
             return;
         }
-        Iterator<StreamRuntime> iterator = this.owner.advisoryQueueInternal().iterator();
+        Iterator<StreamRuntime> iterator = advisoryQueue.iterator();
+        boolean removed = false;
         while (iterator.hasNext()) {
             StreamRuntime queuedStream = iterator.next();
             if (queuedStream != streamRuntime) {
                 continue;
             }
             iterator.remove();
+            removed = true;
+        }
+        if (removed) {
+            this.owner.releaseEmptyAdvisoryQueueStorageLocked();
         }
     }
 

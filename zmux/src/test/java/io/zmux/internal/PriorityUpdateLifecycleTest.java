@@ -35,6 +35,22 @@ final class PriorityUpdateLifecycleTest {
         return types;
     }
 
+    private static void makePeerVisible(SessionRuntime runtime, StreamRuntime stream) throws Exception {
+        SessionRuntimeTestSupport.invokePrivate(
+                runtime,
+                "beginLocalOpenLocked",
+                new Class<?>[]{StreamRuntime.class},
+                stream
+        );
+        runtime.markLocalStreamOpeningCommittedLocked(stream);
+        SessionRuntimeTestSupport.invokePrivate(
+                runtime,
+                "markPeerVisibleLocked",
+                new Class<?>[]{StreamRuntime.class},
+                stream
+        );
+    }
+
     private static boolean queueContains(SessionRuntime runtime, String fieldName, long streamId, FrameType type) throws Exception {
         if ("advisoryQueue".equals(fieldName)) {
             return type == FrameType.EXT && SessionRuntimeTestSupport.advisoryQueueStreamIds(runtime).contains(streamId);
@@ -108,6 +124,35 @@ final class PriorityUpdateLifecycleTest {
             assertFalse(stream.hasPendingPriorityUpdateLocked(), "cancelWrite should clear any staged advisory update");
             assertFalse(hasQueuedFrame(runtime, stream.streamIdInternal(), FrameType.EXT), "cancelWrite should drop queued PRIORITY_UPDATE");
             assertTrue(hasQueuedFrame(runtime, stream.streamIdInternal(), FrameType.RESET), "cancelWrite should still queue RESET");
+        }
+    }
+
+    @Test
+    void drainedAdvisoryQueueReleasesRetainedBacking() throws Exception {
+        long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
+
+        for (int i = 0; i < 96; ++i) {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            synchronized (runtime.lock()) {
+                makePeerVisible(runtime, stream);
+            }
+            stream.updateMetadata(new MetadataUpdate((long) i + 1L, null));
+        }
+
+        Deque<Object> retainedQueue;
+        synchronized (runtime.lock()) {
+            retainedQueue = SessionRuntimeTestSupport.advisoryQueue(runtime);
+            assertEquals(96, retainedQueue.size(), "test must build a large advisory queue");
+            while (!SessionRuntimeTestSupport.advisoryQueue(runtime).isEmpty()) {
+                List<Object> batch = collectReadyBatch(runtime);
+                assertFalse(batch.isEmpty(), "advisory drain should make progress");
+            }
+            assertNotSame(
+                    retainedQueue,
+                    SessionRuntimeTestSupport.advisoryQueue(runtime),
+                    "empty advisory queue should release its retained backing after drain"
+            );
         }
     }
 }
