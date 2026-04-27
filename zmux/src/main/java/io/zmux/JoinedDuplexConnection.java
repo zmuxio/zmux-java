@@ -1196,8 +1196,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                 if (input == null) {
                     throw new StreamNotReadableException();
                 }
-                int read = input.read();
-                return read;
+                return input.read();
             } finally {
                 leaveInput();
             }
