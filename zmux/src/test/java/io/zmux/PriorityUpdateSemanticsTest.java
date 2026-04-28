@@ -214,6 +214,83 @@ final class PriorityUpdateSemanticsTest {
     }
 
     @Test
+    void openMetadataIgnoresUnnegotiatedPriorityAndGroupFields() throws Exception {
+        long negotiatedCapabilities = Protocol.CAPABILITY_OPEN_METADATA;
+        long payloadCapabilities = Protocol.CAPABILITY_OPEN_METADATA
+                | Protocol.CAPABILITY_PRIORITY_HINTS
+                | Protocol.CAPABILITY_STREAM_GROUPS;
+        ZmuxConfig config = ZmuxConfig.builder()
+                .capabilities(negotiatedCapabilities)
+                .build();
+
+        try (RawPeerSession peer = RawPeerSession.open(config, negotiatedCapabilities)) {
+            byte[] openPrefix = FrameCodec.buildOpenMetadataPrefix(
+                    payloadCapabilities,
+                    5L,
+                    7L,
+                    "ssh".getBytes(StandardCharsets.UTF_8),
+                    Settings.defaults().maxFramePayload()
+            );
+            byte[] body = "body".getBytes(StandardCharsets.UTF_8);
+            byte[] payload = new byte[openPrefix.length + body.length];
+            System.arraycopy(openPrefix, 0, payload, 0, openPrefix.length);
+            System.arraycopy(body, 0, payload, openPrefix.length, body.length);
+
+            peer.send(new FrameCodec.Frame(
+                    FrameType.DATA,
+                    Protocol.FRAME_FLAG_OPEN_METADATA,
+                    4L,
+                    payload
+            ));
+
+            ZmuxStream accepted = peer.session().acceptStream(Duration.ofSeconds(1));
+            assertEquals("body", readUtf8(accepted), "accepted payload mismatch");
+            assertEquals(0L, accepted.metadata().priority(), "unnegotiated opening priority must be ignored");
+            assertNull(accepted.metadata().group(), "unnegotiated opening group must be ignored");
+            assertArrayEquals("ssh".getBytes(StandardCharsets.UTF_8), accepted.metadata().openInfo(), "negotiated open_info should still apply");
+        }
+    }
+
+    @Test
+    void priorityUpdateIgnoresUnnegotiatedPriorityAndGroupFields() throws Exception {
+        long negotiatedCapabilities = Protocol.CAPABILITY_PRIORITY_UPDATE;
+        long payloadCapabilities = Protocol.CAPABILITY_PRIORITY_UPDATE
+                | Protocol.CAPABILITY_PRIORITY_HINTS
+                | Protocol.CAPABILITY_STREAM_GROUPS;
+        ZmuxConfig config = ZmuxConfig.builder()
+                .capabilities(negotiatedCapabilities)
+                .build();
+
+        try (RawPeerSession peer = RawPeerSession.open(config, negotiatedCapabilities)) {
+            peer.send(new FrameCodec.Frame(
+                    FrameType.DATA,
+                    0,
+                    4L,
+                    "body".getBytes(StandardCharsets.UTF_8)
+            ));
+
+            ZmuxStream accepted = peer.session().acceptStream(Duration.ofSeconds(1));
+            assertEquals("body", readUtf8(accepted), "accepted payload mismatch");
+
+            peer.send(new FrameCodec.Frame(
+                    FrameType.EXT,
+                    0,
+                    4L,
+                    FrameCodec.buildPriorityUpdatePayload(
+                            payloadCapabilities,
+                            9L,
+                            11L,
+                            Settings.defaults().maxExtensionPayloadBytes()
+                    )
+            ));
+
+            Thread.sleep(50L);
+            assertEquals(0L, accepted.metadata().priority(), "unnegotiated PRIORITY_UPDATE priority must be ignored");
+            assertNull(accepted.metadata().group(), "unnegotiated PRIORITY_UPDATE group must be ignored");
+        }
+    }
+
+    @Test
     void priorityUpdateDoesNotReviveTerminalStream() throws Exception {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         ZmuxConfig config = ZmuxConfig.builder()

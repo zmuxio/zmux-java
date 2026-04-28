@@ -256,9 +256,9 @@ public final class FrameCodec {
     }
 
     static long parseMetadataVarint(byte[] source, int offset, int length, String operation) throws IOException {
-        Varint62.Decoded decoded = Varint62.decode(source, offset);
+        Varint62.Decoded decoded = Varint62.decode(source, offset, offset + length);
         if (decoded.length() != length) {
-            throw error(ErrorCode.PROTOCOL, operation, "invalid metadata varint");
+            throw error(ErrorCode.PROTOCOL, operation, "tlv value overruns containing payload");
         }
         return decoded.value();
     }

@@ -108,7 +108,13 @@ final class StreamMetadataState {
                                  long priority,
                                  Long group,
                                  byte[] openInfo) {
-        replaceMetadataLocked(session, streamRuntime, new StreamMetadata(priority, normalizeEffectiveGroup(group), openInfo));
+        long capabilities = session.capabilities();
+        long nextPriority = Protocol.canCarryPriorityOnOpen(capabilities) ? priority : metadata.priority();
+        Long nextGroup = Protocol.canCarryGroupOnOpen(capabilities) ? normalizeEffectiveGroup(group) : metadata.group();
+        byte[] nextOpenInfo = Protocol.canCarryOpenInfo(capabilities)
+                ? openInfo
+                : (metadata.openInfoLength() == 0 ? EMPTY_BYTES : metadata.openInfo());
+        replaceMetadataLocked(session, streamRuntime, new StreamMetadata(nextPriority, nextGroup, nextOpenInfo));
     }
 
     boolean applyPriorityUpdateLocked(SessionRuntime session,
@@ -117,8 +123,13 @@ final class StreamMetadataState {
         if (update == null || !update.valid()) {
             return false;
         }
-        long nextPriority = update.hasPriority() ? update.priority() : metadata.priority();
-        Long nextGroup = update.hasGroup() ? normalizeEffectiveGroup(update.group()) : metadata.group();
+        long capabilities = session.capabilities();
+        long nextPriority = update.hasPriority() && Protocol.canCarryPriorityInUpdate(capabilities)
+                ? update.priority()
+                : metadata.priority();
+        Long nextGroup = update.hasGroup() && Protocol.canCarryGroupInUpdate(capabilities)
+                ? normalizeEffectiveGroup(update.group())
+                : metadata.group();
         if (metadata.priority() == nextPriority && Objects.equals(metadata.group(), nextGroup)) {
             return false;
         }

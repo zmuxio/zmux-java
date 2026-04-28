@@ -181,6 +181,65 @@ final class FrameCodecPayloadViewTest {
     }
 
     @Test
+    void parseStreamMetadataBoundsVarintsToTlvValue() {
+        byte[] metadata = {
+                (byte) Protocol.METADATA_STREAM_PRIORITY,
+                1,
+                0x40,
+                (byte) Protocol.METADATA_OPEN_INFO,
+                1,
+                'x'
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseStreamMetadataView(metadata)
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated metadata varint should be a protocol parse error");
+        assertEquals("truncated varint62", error.getMessage(), "metadata varint must not read into the following TLV");
+    }
+
+    @Test
+    void parseStreamMetadataRejectsTrailingMetadataVarintBytesAsTlvOverrun() {
+        byte[] metadata = {
+                (byte) Protocol.METADATA_STREAM_PRIORITY,
+                2,
+                7,
+                'x'
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseStreamMetadataView(metadata)
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "trailing metadata varint bytes should be a protocol parse error");
+        assertEquals("tlv value overruns containing payload", error.getMessage(), "metadata varint must consume the full TLV value");
+    }
+
+    @Test
+    void parsePriorityUpdateBoundsVarintsToTlvValue() {
+        byte[] payload = {
+                (byte) Protocol.EXT_PRIORITY_UPDATE,
+                (byte) Protocol.METADATA_STREAM_PRIORITY,
+                1,
+                0x40,
+                (byte) Protocol.METADATA_OPEN_INFO,
+                1,
+                'x'
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parsePriorityUpdatePayload(payload)
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated priority-update varint should be a protocol parse error");
+        assertEquals("truncated varint62", error.getMessage(), "priority-update varint must not read into the following TLV");
+    }
+
+    @Test
     void writeFrameSupportsOpeningPrefixPlusBodySlice() throws Exception {
         byte[] prefix = FrameCodec.buildOpenMetadataPrefix(
                 Protocol.CAPABILITY_OPEN_METADATA | Protocol.CAPABILITY_PRIORITY_HINTS | Protocol.CAPABILITY_STREAM_GROUPS,
