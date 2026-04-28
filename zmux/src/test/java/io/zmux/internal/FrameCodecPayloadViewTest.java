@@ -168,6 +168,41 @@ final class FrameCodecPayloadViewTest {
     }
 
     @Test
+    void parseDataPayloadBoundsMetadataTlvTypeToMetadataLength() {
+        byte[] payload = {
+                1,
+                0x40,
+                0
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseDataPayloadView(payload, Protocol.FRAME_FLAG_OPEN_METADATA)
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated metadata TLV type should be a protocol error");
+        assertEquals("truncated tlv", error.getMessage(), "metadata TLV type must not read into app data");
+    }
+
+    @Test
+    void parseDataPayloadBoundsMetadataTlvLengthToMetadataLength() {
+        byte[] payload = {
+                2,
+                (byte) Protocol.METADATA_OPEN_INFO,
+                0x40,
+                0
+        };
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseDataPayloadView(payload, Protocol.FRAME_FLAG_OPEN_METADATA)
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated metadata TLV length should be a protocol error");
+        assertEquals("truncated tlv", error.getMessage(), "metadata TLV length must not read into app data");
+    }
+
+    @Test
     void parseDataPayloadRejectsOpenMetadataLengthPastPayload() throws Exception {
         byte[] payload = Varint62.encode(Protocol.MAX_VARINT62);
 

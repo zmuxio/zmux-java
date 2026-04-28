@@ -205,7 +205,7 @@ public final class FrameCodec {
         while (cursor < limit) {
             Varint62.Decoded type;
             try {
-                type = Varint62.decode(source, cursor);
+                type = Varint62.decode(source, cursor, limit);
             } catch (IOException error) {
                 if (Varint62.isTruncatedVarint(error)) {
                     throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
@@ -215,7 +215,7 @@ public final class FrameCodec {
             cursor += type.length();
             Varint62.Decoded valueLength;
             try {
-                valueLength = Varint62.decode(source, cursor);
+                valueLength = Varint62.decode(source, cursor, limit);
             } catch (IOException error) {
                 if (Varint62.isTruncatedVarint(error)) {
                     throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
