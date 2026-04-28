@@ -1,7 +1,9 @@
 package io.zmux.internal;
 
 import io.zmux.FrameType;
+import io.zmux.Protocol;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -61,7 +63,7 @@ final class SessionWriterBatchOrderer {
             StreamRuntime streamRuntime = outboundFrame.stream();
             long streamId = outboundFrame.frame().streamId();
             boolean streamScoped = streamId != 0L;
-            boolean priorityUpdate = streamScoped && outboundFrame.frame().type() == FrameType.EXT;
+            boolean priorityUpdate = streamScoped && priorityUpdateFrame(outboundFrame);
             Long group = streamRuntime == null ? null : this.owner.outboundSchedulingGroupLocked(streamRuntime);
             if (batchIndex == this.ordinaryOrderItems.size()) {
                 this.ordinaryOrderItems.add(new OrdinaryBatchOrderer.BatchFrame(
@@ -144,9 +146,22 @@ final class SessionWriterBatchOrderer {
     }
 
     private long ordinaryBatchStreamId(SessionRuntime.OutboundFrame outboundFrame) {
-        if (outboundFrame == null || outboundFrame.frame().type() == FrameType.EXT) {
+        if (outboundFrame == null || priorityUpdateFrame(outboundFrame)) {
             return 0L;
         }
         return outboundFrame.frame().streamId();
+    }
+
+    private static boolean priorityUpdateFrame(SessionRuntime.OutboundFrame outboundFrame) {
+        if (outboundFrame == null
+                || outboundFrame.frame().type() != FrameType.EXT
+                || outboundFrame.frame().streamId() == 0L) {
+            return false;
+        }
+        try {
+            return Varint62.decode(outboundFrame.frame().payload(), 0).value() == Protocol.EXT_PRIORITY_UPDATE;
+        } catch (IOException invalidExtPayload) {
+            return false;
+        }
     }
 }

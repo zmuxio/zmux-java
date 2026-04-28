@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,12 +71,57 @@ final class OrdinaryBatchOrderTest {
         return new OrdinaryBatchOrderer.BatchFrame(0L, false, false, false, cost, 0L, null);
     }
 
+    private static SessionRuntime.OutboundFrame streamExtFrame(long streamId, long subtype) throws Exception {
+        return new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.EXT, 0, streamId, Varint62.encode(subtype)),
+                null,
+                0,
+                false,
+                false
+        );
+    }
+
+    private static boolean priorityUpdateFrame(SessionRuntime.OutboundFrame outboundFrame) throws Exception {
+        Method method = SessionWriterBatchOrderer.class.getDeclaredMethod(
+                "priorityUpdateFrame",
+                SessionRuntime.OutboundFrame.class
+        );
+        method.setAccessible(true);
+        return (Boolean) method.invoke(null, outboundFrame);
+    }
+
     private static List<Integer> toList(int[] order) {
         List<Integer> values = new ArrayList<>(order.length);
         for (int index : order) {
             values.add(index);
         }
         return values;
+    }
+
+    @Test
+    void streamScopedExtPriorityClassificationUsesSubtype() throws Exception {
+        assertTrue(
+                priorityUpdateFrame(streamExtFrame(4L, Protocol.EXT_PRIORITY_UPDATE)),
+                "PRIORITY_UPDATE ext frames should keep priority-update ordering"
+        );
+        assertFalse(
+                priorityUpdateFrame(streamExtFrame(4L, 99L)),
+                "unknown stream-scoped EXT frames must not be ordered as PRIORITY_UPDATE"
+        );
+        assertFalse(
+                priorityUpdateFrame(streamExtFrame(0L, Protocol.EXT_PRIORITY_UPDATE)),
+                "session-scoped EXT frames are not stream priority updates"
+        );
+        assertFalse(
+                priorityUpdateFrame(new SessionRuntime.OutboundFrame(
+                        new FrameCodec.Frame(FrameType.EXT, 0, 4L, new byte[]{0x40}),
+                        null,
+                        0,
+                        false,
+                        false
+                )),
+                "malformed EXT payloads must not be promoted to priority-update ordering"
+        );
     }
 
     @Test
