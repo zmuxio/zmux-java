@@ -166,6 +166,21 @@ final class GoAwayRuntimeTest {
     }
 
     @Test
+    void peerGoAwayRejectsWrongCreatorWatermark() throws Exception {
+        SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
+        long peerCreatedBidi = peerGoAwayWatermark(true, 1);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> handleGoAway(runtime, peerCreatedBidi, 0L),
+                "peer GOAWAY watermark must refer to locally created streams"
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "wrong-creator peer GOAWAY should be a protocol error");
+        assertEquals(SessionState.READY, runtime.state(), "invalid peer GOAWAY must not move the session to DRAINING");
+    }
+
+    @Test
     void invalidLocalGoAwayCodeDoesNotCommitDrainStateOrWatermarks() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         long initialBidi = runtime.localGoAwayBidiInternal();
