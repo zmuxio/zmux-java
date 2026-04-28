@@ -593,6 +593,38 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     @Test
+    void lateDataOnFullyTerminalLiveStreamSkipsPerStreamLateCounter() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        StreamRuntime stream;
+        long streamId;
+        long beforeLateData;
+        synchronized (runtime.lock()) {
+            stream = createPeerOpenedBidi(runtime);
+            streamId = stream.streamIdInternal();
+            runtime.markPeerVisibleLocked(stream);
+            runtime.setRecvSessionAdvertisedInternal(1024L);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+            stream.terminalStateInternal().recordLocalWriteReset(ErrorCode.CANCELLED.code());
+            stream.halfStateInternal().markSendReset();
+            stream.finishReceiveLocked();
+            assertTrue(stream.fullyTerminalLocked(), "test requires a fully terminal live stream");
+            beforeLateData = stream.lateDataReceivedLocked();
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1, 2, 3, 4}));
+
+        synchronized (runtime.lock()) {
+            assertEquals(beforeLateData, stream.lateDataReceivedLocked(),
+                    "fully terminal live stream should not consume the per-stream late-data budget");
+            assertEquals(4L, runtime.aggregateLateDataReceivedInternal(),
+                    "fully terminal late DATA should still count against the aggregate cap");
+            assertEquals(4L, runtime.recvSessionReceivedBytesInternal(),
+                    "fully terminal late DATA should still consume session receive credit");
+            assertNull(runtime.liveStreamLocked(streamId), "fully terminal stream should compact after late DATA");
+        }
+    }
+
+    @Test
     void lateDataOnTerminalTombstoneCountsSessionFlowControl() throws Exception {
         SessionRuntime runtime = newReceiveReplenishRuntime();
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);

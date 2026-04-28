@@ -640,7 +640,8 @@ final class SessionReaderCoordinator {
                             return;
                         }
                         int ignoredDataLength = ignoredDataPayload.appDataLength();
-                        this.lateDataHandler.discardLatePeerDataLocked(streamRuntime, ignoredDataLength);
+                        StreamRuntime lateDataStream = streamRuntime.tracksLatePeerDataLocked() ? streamRuntime : null;
+                        this.lateDataHandler.discardLatePeerDataLocked(lateDataStream, ignoredDataLength);
                         if (peerDataAction == StreamRuntime.PeerDataAction.IGNORE_AND_FIN) {
                             streamRuntime.finishReceiveLocked();
                         }

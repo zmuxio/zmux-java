@@ -320,6 +320,17 @@ final class StreamHalfState {
         return !localReceive || effectiveRecvState() != EffectiveRecvState.OPEN;
     }
 
+    boolean tracksLatePeerData() {
+        switch (effectiveRecvState()) {
+            case STOPPED:
+            case RESET:
+            case ABORTED:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     boolean writeClosed() {
         return effectiveSendState() != EffectiveSendState.OPEN;
     }

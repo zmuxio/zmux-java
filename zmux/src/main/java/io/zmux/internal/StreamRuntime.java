@@ -1055,6 +1055,10 @@ final class StreamRuntime implements ZmuxNativeStream {
         return halfState.peerDataAction(localReceive, fullyTerminalLocked(), fin);
     }
 
+    boolean tracksLatePeerDataLocked() {
+        return halfState.tracksLatePeerData();
+    }
+
     boolean fullyTerminalLocked() {
         return halfState.fullyTerminal();
     }
