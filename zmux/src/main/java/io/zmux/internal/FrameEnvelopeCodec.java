@@ -903,18 +903,25 @@ final class FrameEnvelopeCodec {
                     throw frameSizePayloadError("validate GOAWAY payload", error);
                 }
                 break;
-            case EXT:
-                if (frame.payload().length == 0) {
-                    throw FrameCodec.error(ErrorCode.PROTOCOL, "validate EXT payload", "truncated varint62");
+            case EXT: {
+                long extType;
+                try {
+                    extType = Varint62.decode(frame.payload(), 0).value();
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate EXT payload", error);
                 }
-                long extType = Varint62.decode(frame.payload(), 0).value();
                 if (extType == Protocol.EXT_PRIORITY_UPDATE) {
                     if (frame.streamId() == 0L) {
                         throw FrameCodec.error(ErrorCode.PROTOCOL, "validate EXT payload", "PRIORITY_UPDATE requires non-zero stream_id");
                     }
-                    FrameCodec.parsePriorityUpdatePayload(frame.payload());
+                    try {
+                        FrameCodec.parsePriorityUpdatePayload(frame.payload());
+                    } catch (IOException error) {
+                        throw frameSizePayloadError("validate EXT payload", error);
+                    }
                 }
                 break;
+            }
             default:
                 break;
         }

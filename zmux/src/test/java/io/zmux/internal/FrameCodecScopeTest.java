@@ -64,6 +64,30 @@ final class FrameCodecScopeTest {
     }
 
     @Test
+    void readFrameRejectsEmptyExtPayloadWithFrameSize() throws Exception {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(
+                        new ByteArrayInputStream(encodeFrame(FrameType.EXT, 0, 4L, new byte[0])),
+                        Settings.defaults().limits()
+                )
+        );
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "empty EXT payload must fail with FRAME_SIZE");
+    }
+
+    @Test
+    void readFrameRejectsTruncatedExtSubtypeWithFrameSize() throws Exception {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(
+                        new ByteArrayInputStream(encodeFrame(FrameType.EXT, 0, 4L, new byte[]{0x40})),
+                        Settings.defaults().limits()
+                )
+        );
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "truncated EXT subtype must fail with FRAME_SIZE");
+    }
+
+    @Test
     void readFrameRejectsCloseOnNonZeroStreamId() throws Exception {
         byte[] payload = FrameCodec.buildErrorPayload(ErrorCode.INTERNAL.code(), "close", Settings.defaults().maxControlPayloadBytes());
         ZmuxException error = assertThrows(
