@@ -27,6 +27,10 @@ final class SessionOutboundDataCoordinator {
         );
     }
 
+    static long queuedDataTrackedBytes(int dataBytes, int retainedQueueBytes) {
+        return SessionRuntime.saturatingAdd(Math.max(0L, dataBytes), Math.max(0L, retainedQueueBytes));
+    }
+
     void queueDataLocked(StreamRuntime streamRuntime,
                          byte[] payload,
                          int payloadOffset,
@@ -246,10 +250,6 @@ final class SessionOutboundDataCoordinator {
         if (this.owner.flowControlUpdateRegistryInternal().queueBlockedFrameLocked(streamId, offset)) {
             this.owner.notifyWriterWaitersLocked();
         }
-    }
-
-    static long queuedDataTrackedBytes(int dataBytes, int retainedQueueBytes) {
-        return SessionRuntime.saturatingAdd(Math.max(0L, dataBytes), Math.max(0L, retainedQueueBytes));
     }
 
     void ensureStreamWriteQueueMemoryLocked(SessionRuntime.OutboundFrame outboundFrame) throws IOException {

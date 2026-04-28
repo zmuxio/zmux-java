@@ -42,17 +42,17 @@ final class NettyQuicSupport {
     static final ZmuxSession CLOSED_SESSION = Zmux.closedSession();
     private static final int ACCEPTED_PRELUDE_WORKER_MAX_CAP = NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT;
     private static final int ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY_CAP = ACCEPT_PRELUDE_PENDING_MAX_CAPACITY * 16;
+    private static final int ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY = positiveIntegerProperty(
+            "io.zmux.netty.acceptedPreludeWorkerQueueCapacity",
+            4096,
+            ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY_CAP
+    );
     private static final int MAX_ERROR_UNWRAP_DEPTH = 64;
     private static final AtomicLong PRELUDE_WORKER_SEQUENCE = new AtomicLong();
     private static final int ACCEPTED_PRELUDE_WORKER_MAX = positiveIntegerProperty(
             "io.zmux.netty.acceptedPreludeWorkers",
             defaultAcceptedPreludeWorkerMax(),
             ACCEPTED_PRELUDE_WORKER_MAX_CAP
-    );
-    private static final int ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY = positiveIntegerProperty(
-            "io.zmux.netty.acceptedPreludeWorkerQueueCapacity",
-            4096,
-            ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY_CAP
     );
     private static final ThreadPoolExecutor ACCEPTED_PRELUDE_EXECUTOR = new ThreadPoolExecutor(
             ACCEPTED_PRELUDE_WORKER_MAX,

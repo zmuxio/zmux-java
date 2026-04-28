@@ -12,11 +12,31 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 final class JoinedDuplexConnectionTest {
+    private static void waitUntilPaused(JoinedDuplexConnection connection) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadline) {
+            if (connection.inputHalf() == null) {
+                return;
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("connection did not enter paused input state");
+    }
+
+    private static void waitUntilOutputPaused(JoinedDuplexConnection connection) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadline) {
+            if (connection.outputHalf() == null) {
+                return;
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("connection did not enter paused output state");
+    }
+
     @Test
     void readDeadlineDuringPauseReachesAttachedActiveReadHalf() throws Exception {
         BlockingReadHalf readHalf = new BlockingReadHalf();
@@ -95,28 +115,6 @@ final class JoinedDuplexConnectionTest {
             writeThread.join(1000L);
             pauseThread.join(1000L);
         }
-    }
-
-    private static void waitUntilPaused(JoinedDuplexConnection connection) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-        while (System.nanoTime() < deadline) {
-            if (connection.inputHalf() == null) {
-                return;
-            }
-            Thread.sleep(1L);
-        }
-        throw new AssertionError("connection did not enter paused input state");
-    }
-
-    private static void waitUntilOutputPaused(JoinedDuplexConnection connection) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-        while (System.nanoTime() < deadline) {
-            if (connection.outputHalf() == null) {
-                return;
-            }
-            Thread.sleep(1L);
-        }
-        throw new AssertionError("connection did not enter paused output state");
     }
 
     private static final class BlockingReadHalf implements ReadHalf {

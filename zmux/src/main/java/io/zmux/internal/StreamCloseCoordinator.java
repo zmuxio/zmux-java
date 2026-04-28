@@ -1,6 +1,7 @@
 package io.zmux.internal;
 
-import io.zmux.*;
+import io.zmux.ErrorCode;
+import io.zmux.ZmuxErrors;
 
 import java.io.IOException;
 import java.util.Objects;

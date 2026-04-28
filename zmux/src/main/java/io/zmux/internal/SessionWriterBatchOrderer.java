@@ -35,6 +35,19 @@ final class SessionWriterBatchOrderer {
         return new ArrayList<>(batch);
     }
 
+    private static boolean priorityUpdateFrame(SessionRuntime.OutboundFrame outboundFrame) {
+        if (outboundFrame == null
+                || outboundFrame.frame().type() != FrameType.EXT
+                || outboundFrame.frame().streamId() == 0L) {
+            return false;
+        }
+        try {
+            return Varint62.decode(outboundFrame.frame().payload(), 0).value() == Protocol.EXT_PRIORITY_UPDATE;
+        } catch (IOException invalidExtPayload) {
+            return false;
+        }
+    }
+
     void orderUrgent(ArrayList<SessionRuntime.OutboundFrame> batch) {
         if (batch == null || batch.size() < 2) {
             return;
@@ -150,18 +163,5 @@ final class SessionWriterBatchOrderer {
             return 0L;
         }
         return outboundFrame.frame().streamId();
-    }
-
-    private static boolean priorityUpdateFrame(SessionRuntime.OutboundFrame outboundFrame) {
-        if (outboundFrame == null
-                || outboundFrame.frame().type() != FrameType.EXT
-                || outboundFrame.frame().streamId() == 0L) {
-            return false;
-        }
-        try {
-            return Varint62.decode(outboundFrame.frame().payload(), 0).value() == Protocol.EXT_PRIORITY_UPDATE;
-        } catch (IOException invalidExtPayload) {
-            return false;
-        }
     }
 }

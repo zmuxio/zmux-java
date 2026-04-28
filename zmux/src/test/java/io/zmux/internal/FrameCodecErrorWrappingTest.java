@@ -13,6 +13,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class FrameCodecErrorWrappingTest {
+    private static byte[] frame(FrameType type, int flags, long streamId, byte[] payload) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        long frameLength = 1L + Varint62.length(streamId) + payload.length;
+        Varint62.write(output, frameLength);
+        output.write(type.code() | flags);
+        Varint62.write(output, streamId);
+        output.write(payload);
+        return output.toByteArray();
+    }
+
     @Test
     void readFrameWrapsInvalidFrameTypeAsProtocolError() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -214,16 +224,6 @@ final class FrameCodecErrorWrappingTest {
         assertEquals(ZmuxErrorScope.SESSION, error.scope());
         assertEquals(ZmuxErrorSource.LOCAL, error.source());
         assertEquals(ZmuxErrorDirection.WRITE, error.direction());
-    }
-
-    private static byte[] frame(FrameType type, int flags, long streamId, byte[] payload) throws IOException {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        long frameLength = 1L + Varint62.length(streamId) + payload.length;
-        Varint62.write(output, frameLength);
-        output.write(type.code() | flags);
-        Varint62.write(output, streamId);
-        output.write(payload);
-        return output.toByteArray();
     }
 
     private static final class CountingInputStream extends ByteArrayInputStream {

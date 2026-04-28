@@ -2066,6 +2066,7 @@ final class ApiSurfaceTest {
     }
 
     private static final class RecordingDefaultSendStream implements ZmuxNativeSendStream {
+        private final Integer invalidFinalWritten;
         private int writeCalls;
         private int writeFinalCalls;
         private int closeWriteCalls;
@@ -2079,7 +2080,6 @@ final class ApiSurfaceTest {
         private byte[] lastFinalBytes = new byte[0];
         private String lastCloseWithErrorReason;
         private Instant lastWriteDeadline;
-        private final Integer invalidFinalWritten;
 
         private RecordingDefaultSendStream() {
             this.invalidFinalWritten = null;

@@ -1,15 +1,18 @@
 package io.zmux.internal;
 
-import io.zmux.*;
+import io.zmux.FrameType;
+import io.zmux.Limits;
+import io.zmux.Protocol;
+import io.zmux.Settings;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.GatheringByteChannel;
-import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 
@@ -25,6 +28,20 @@ final class SessionWriterTransportTest {
             .toBuilder()
             .maxFramePayload(RETAINED_ENCODED_BATCH_LIMIT + 4096L)
             .build();
+
+    private static int encodedBatchScratchLength(SessionWriterTransport transport) throws Exception {
+        Field field = SessionWriterTransport.class.getDeclaredField("encodedBatchScratch");
+        field.setAccessible(true);
+        return ((byte[]) field.get(transport)).length;
+    }
+
+    private static byte[] repeated(char value, int length) {
+        byte[] bytes = new byte[length];
+        for (int i = 0; i < length; i++) {
+            bytes[i] = (byte) value;
+        }
+        return bytes;
+    }
 
     @Test
     void writeBatchEncodesLargeMultipartPayloadOnMergedOutputPath() throws Exception {
@@ -170,20 +187,6 @@ final class SessionWriterTransportTest {
 
         assertTrue(written > RETAINED_ENCODED_BATCH_LIMIT, "encoded frame should exceed the retained scratch cap");
         assertEquals(0, encodedBatchScratchLength(transport), "oversized merged write buffer should be dropped");
-    }
-
-    private static int encodedBatchScratchLength(SessionWriterTransport transport) throws Exception {
-        Field field = SessionWriterTransport.class.getDeclaredField("encodedBatchScratch");
-        field.setAccessible(true);
-        return ((byte[]) field.get(transport)).length;
-    }
-
-    private static byte[] repeated(char value, int length) {
-        byte[] bytes = new byte[length];
-        for (int i = 0; i < length; i++) {
-            bytes[i] = (byte) value;
-        }
-        return bytes;
     }
 
     private static final class TestOwner implements SessionWriterTransport.Owner {

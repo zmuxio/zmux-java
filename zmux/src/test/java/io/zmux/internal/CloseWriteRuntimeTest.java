@@ -1,12 +1,6 @@
 package io.zmux.internal;
 
-import io.zmux.OpenMetadataTooLargeException;
-import io.zmux.Protocol;
-import io.zmux.ReadClosedException;
-import io.zmux.Settings;
-import io.zmux.SessionClosedException;
-import io.zmux.StreamNotReadableException;
-import io.zmux.WriteClosedException;
+import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -16,6 +10,12 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class CloseWriteRuntimeTest {
+    private static boolean streamCloseCoordinatorBoolean(String methodName, IOException error) throws Exception {
+        Method method = StreamCloseCoordinator.class.getDeclaredMethod(methodName, IOException.class);
+        method.setAccessible(true);
+        return (Boolean) method.invoke(null, error);
+    }
+
     @Test
     void closeCoordinatorBenignErrorClassificationUnwrapsNestedErrors() throws Exception {
         IOException wrappedWriteClosed = new IOException("wrapped", new WriteClosedException());
@@ -114,11 +114,5 @@ final class CloseWriteRuntimeTest {
             assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").isEmpty(), "write failure must not queue urgent frames");
             assertTrue(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue").isEmpty(), "write failure must not queue DATA frames");
         }
-    }
-
-    private static boolean streamCloseCoordinatorBoolean(String methodName, IOException error) throws Exception {
-        Method method = StreamCloseCoordinator.class.getDeclaredMethod(methodName, IOException.class);
-        method.setAccessible(true);
-        return (Boolean) method.invoke(null, error);
     }
 }

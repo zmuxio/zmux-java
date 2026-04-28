@@ -837,6 +837,61 @@ public final class SessionRuntime implements ZmuxNativeSession {
         }
     }
 
+    private static byte[] clonePayloadBytes(byte[] payload, int payloadLength) {
+        if (payloadLength == 0) {
+            return EMPTY_BYTES;
+        }
+        return Arrays.copyOf(payload, payloadLength);
+    }
+
+    private static PingPaddingBounds pingPaddingBounds(long maxAllowed, long configuredMin, long configuredMax) {
+        long boundedMaxAllowed = Math.max(0L, maxAllowed);
+        long maxEchoByInt = Integer.MAX_VALUE - (long) PING_NONCE_BYTES;
+        if (boundedMaxAllowed > maxEchoByInt) {
+            boundedMaxAllowed = maxEchoByInt;
+        }
+        long maxPadding = configuredMax == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MAX_BYTES : configuredMax;
+        if (maxPadding > boundedMaxAllowed) {
+            maxPadding = boundedMaxAllowed;
+        }
+        if (maxPadding == 0L) {
+            return new PingPaddingBounds(0L, 0L);
+        }
+        long minPadding = configuredMin == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MIN_BYTES : configuredMin;
+        if (minPadding > maxPadding) {
+            minPadding = maxPadding;
+        }
+        return new PingPaddingBounds(minPadding, maxPadding);
+    }
+
+    private static boolean hasPingPaddingTag(byte[] payload, long key) {
+        return key != 0L
+                && payload != null
+                && payload.length >= PING_NONCE_BYTES + PING_PADDING_TAG_BYTES
+                && readLongBigEndian(payload, PING_NONCE_BYTES) == pingPaddingTag(key, readLongBigEndian(payload, 0));
+    }
+
+    private static long pingPaddingTag(long key, long nonce) {
+        long value = key ^ nonce ^ PING_PADDING_TAG_SALT;
+        value = (value ^ value >>> 30) * -4658895280553007687L;
+        value = (value ^ value >>> 27) * -7723592293110705685L;
+        return value ^ value >>> 31;
+    }
+
+    private static long readLongBigEndian(byte[] payload, int offset) {
+        long value = 0L;
+        for (int i = 0; i < Long.BYTES; i++) {
+            value = value << 8 | payload[offset + i] & 0xffL;
+        }
+        return value;
+    }
+
+    private static void writeLongBigEndian(byte[] output, int offset, long value) {
+        for (int i = 0; i < Long.BYTES; i++) {
+            output[offset + Long.BYTES - 1 - i] = (byte) (value >>> i * 8);
+        }
+    }
+
     @Override
     public ZmuxNativeStream acceptStream() throws IOException, InterruptedException {
         return this.acceptStream(null);
@@ -4079,13 +4134,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
         return reply;
     }
 
-    private static byte[] clonePayloadBytes(byte[] payload, int payloadLength) {
-        if (payloadLength == 0) {
-            return EMPTY_BYTES;
-        }
-        return Arrays.copyOf(payload, payloadLength);
-    }
-
     private byte[] makePingPaddingLocked(long maxAllowed, long minRequired) {
         if (!this.config.pingPadding()) {
             return EMPTY_BYTES;
@@ -4132,54 +4180,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
             for (int shift = 56; shift >= 0 && offset < padding.length; shift -= 8) {
                 padding[offset++] = (byte) (value >>> shift);
             }
-        }
-    }
-
-    private static PingPaddingBounds pingPaddingBounds(long maxAllowed, long configuredMin, long configuredMax) {
-        long boundedMaxAllowed = Math.max(0L, maxAllowed);
-        long maxEchoByInt = Integer.MAX_VALUE - (long) PING_NONCE_BYTES;
-        if (boundedMaxAllowed > maxEchoByInt) {
-            boundedMaxAllowed = maxEchoByInt;
-        }
-        long maxPadding = configuredMax == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MAX_BYTES : configuredMax;
-        if (maxPadding > boundedMaxAllowed) {
-            maxPadding = boundedMaxAllowed;
-        }
-        if (maxPadding == 0L) {
-            return new PingPaddingBounds(0L, 0L);
-        }
-        long minPadding = configuredMin == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MIN_BYTES : configuredMin;
-        if (minPadding > maxPadding) {
-            minPadding = maxPadding;
-        }
-        return new PingPaddingBounds(minPadding, maxPadding);
-    }
-
-    private static boolean hasPingPaddingTag(byte[] payload, long key) {
-        return key != 0L
-                && payload != null
-                && payload.length >= PING_NONCE_BYTES + PING_PADDING_TAG_BYTES
-                && readLongBigEndian(payload, PING_NONCE_BYTES) == pingPaddingTag(key, readLongBigEndian(payload, 0));
-    }
-
-    private static long pingPaddingTag(long key, long nonce) {
-        long value = key ^ nonce ^ PING_PADDING_TAG_SALT;
-        value = (value ^ value >>> 30) * -4658895280553007687L;
-        value = (value ^ value >>> 27) * -7723592293110705685L;
-        return value ^ value >>> 31;
-    }
-
-    private static long readLongBigEndian(byte[] payload, int offset) {
-        long value = 0L;
-        for (int i = 0; i < Long.BYTES; i++) {
-            value = value << 8 | payload[offset + i] & 0xffL;
-        }
-        return value;
-    }
-
-    private static void writeLongBigEndian(byte[] output, int offset, long value) {
-        for (int i = 0; i < Long.BYTES; i++) {
-            output[offset + Long.BYTES - 1 - i] = (byte) (value >>> i * 8);
         }
     }
 
