@@ -203,25 +203,9 @@ public final class FrameCodec {
         int cursor = offset;
         int limit = offset + length;
         while (cursor < limit) {
-            Varint62.Decoded type;
-            try {
-                type = Varint62.decode(source, cursor, limit);
-            } catch (IOException error) {
-                if (Varint62.isTruncatedVarint(error)) {
-                    throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
-                }
-                throw error;
-            }
+            Varint62.Decoded type = decodeTlvVarint(source, cursor, limit);
             cursor += type.length();
-            Varint62.Decoded valueLength;
-            try {
-                valueLength = Varint62.decode(source, cursor, limit);
-            } catch (IOException error) {
-                if (Varint62.isTruncatedVarint(error)) {
-                    throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
-                }
-                throw error;
-            }
+            Varint62.Decoded valueLength = decodeTlvVarint(source, cursor, limit);
             cursor += valueLength.length();
             if (valueLength.value() > limit - cursor) {
                 throw error(ErrorCode.PROTOCOL, "parse tlv", "tlv value overruns containing payload");
@@ -229,6 +213,17 @@ public final class FrameCodec {
             int valueLengthInt = (int) valueLength.value();
             visitor.accept(type.value(), source, cursor, valueLengthInt);
             cursor += valueLengthInt;
+        }
+    }
+
+    private static Varint62.Decoded decodeTlvVarint(byte[] source, int offset, int limit) throws IOException {
+        try {
+            return Varint62.decode(source, offset, limit);
+        } catch (IOException error) {
+            if (Varint62.isTruncatedVarint(error)) {
+                throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
+            }
+            throw error;
         }
     }
 
