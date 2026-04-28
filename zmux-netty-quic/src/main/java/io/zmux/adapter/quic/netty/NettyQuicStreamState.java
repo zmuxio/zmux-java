@@ -28,6 +28,7 @@ import java.util.concurrent.locks.ReentrantLock;
 final class NettyQuicStreamState {
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final int MAX_BUFFERED_WRITE_BYTES = 1 << 20;
+    private static final int MAX_WRITEV_FINAL_COALESCE_BYTES = 64 << 10;
 
     private final NettyQuicSession session;
     private final boolean locallyCreated;
@@ -461,7 +462,7 @@ final class NettyQuicStreamState {
 
         if (pendingPrelude.length <= Integer.MAX_VALUE - totalLength) {
             int bufferedLength = pendingPrelude.length + totalLength;
-            if (bufferedLength <= MAX_BUFFERED_WRITE_BYTES) {
+            if (bufferedLength <= MAX_WRITEV_FINAL_COALESCE_BYTES) {
                 ByteBuf buffer = null;
                 try {
                     buffer = channel.alloc().ioBuffer(bufferedLength, bufferedLength);
