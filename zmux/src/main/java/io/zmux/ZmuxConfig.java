@@ -3,12 +3,19 @@ package io.zmux;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 public final class ZmuxConfig {
+    public static final long DEFAULT_PREFACE_PADDING_MIN_BYTES = 16L;
+    public static final long DEFAULT_PREFACE_PADDING_MAX_BYTES = 256L;
+    public static final long DEFAULT_PING_PADDING_MIN_BYTES = 16L;
+    public static final long DEFAULT_PING_PADDING_MAX_BYTES = 64L;
     private static final Duration DEFAULT_IDLE_KEEPALIVE_INTERVAL = Duration.ofMinutes(1);
     private static final Duration DEFAULT_KEEPALIVE_MAX_PING_INTERVAL = Duration.ofMinutes(5);
     private static final SecureRandom NONCE_RANDOM = new SecureRandom();
-    private static final ZmuxConfig DEFAULTS = new Builder().build();
+    private static final Object DEFAULT_LOCK = new Object();
+    private static final ZmuxConfig BUILTIN_DEFAULTS = new Builder().build();
+    private static ZmuxConfig defaultTemplate = BUILTIN_DEFAULTS;
 
     private final Role role;
     private final long tieBreakerNonce;
@@ -16,9 +23,15 @@ public final class ZmuxConfig {
     private final long maxProto;
     private final long capabilities;
     private final Settings settings;
+    private final boolean prefacePadding;
+    private final long prefacePaddingMinBytes;
+    private final long prefacePaddingMaxBytes;
     private final Duration keepaliveInterval;
     private final Duration keepaliveMaxPingInterval;
     private final Duration keepaliveTimeout;
+    private final boolean pingPadding;
+    private final long pingPaddingMinBytes;
+    private final long pingPaddingMaxBytes;
     private final long sessionMemoryCap;
     private final long perStreamQueuedDataHwm;
     private final long sessionQueuedDataHwm;
@@ -99,6 +112,110 @@ public final class ZmuxConfig {
                       long retainedPeerReasonBytesBudget,
                       long aggregateLateDataCap,
                       ZmuxEventHandler eventHandler) {
+        this(
+                role,
+                tieBreakerNonce,
+                minProto,
+                maxProto,
+                capabilities,
+                settings,
+                false,
+                0L,
+                0L,
+                keepaliveInterval,
+                keepaliveMaxPingInterval,
+                keepaliveTimeout,
+                false,
+                0L,
+                0L,
+                sessionMemoryCap,
+                perStreamQueuedDataHwm,
+                sessionQueuedDataHwm,
+                urgentQueuedBytesCap,
+                pendingControlBytesBudget,
+                pendingPriorityBytesBudget,
+                abuseWindow,
+                gracefulCloseDrainTimeout,
+                stopSendingGracefulDrainWindow,
+                stopSendingGracefulTailCap,
+                hiddenAbortChurnWindow,
+                hiddenAbortChurnThreshold,
+                visibleTerminalChurnWindow,
+                visibleTerminalChurnThreshold,
+                inboundControlFrameBudget,
+                inboundControlBytesBudget,
+                inboundExtFrameBudget,
+                inboundExtBytesBudget,
+                inboundMixedFrameBudget,
+                inboundMixedBytesBudget,
+                noOpControlFloodThreshold,
+                noOpMaxDataFloodThreshold,
+                noOpBlockedFloodThreshold,
+                noOpZeroDataFloodThreshold,
+                noOpPriorityUpdateFloodThreshold,
+                groupRebucketChurnThreshold,
+                inboundPingFloodThreshold,
+                acceptBacklogLimit,
+                acceptBacklogBytesLimit,
+                tombstoneLimit,
+                markerOnlyUsedStreamLimit,
+                retainedOpenInfoBytesBudget,
+                retainedPeerReasonBytesBudget,
+                aggregateLateDataCap,
+                eventHandler
+        );
+    }
+
+    public ZmuxConfig(Role role,
+                      long tieBreakerNonce,
+                      long minProto,
+                      long maxProto,
+                      long capabilities,
+                      Settings settings,
+                      boolean prefacePadding,
+                      long prefacePaddingMinBytes,
+                      long prefacePaddingMaxBytes,
+                      Duration keepaliveInterval,
+                      Duration keepaliveMaxPingInterval,
+                      Duration keepaliveTimeout,
+                      boolean pingPadding,
+                      long pingPaddingMinBytes,
+                      long pingPaddingMaxBytes,
+                      long sessionMemoryCap,
+                      long perStreamQueuedDataHwm,
+                      long sessionQueuedDataHwm,
+                      long urgentQueuedBytesCap,
+                      long pendingControlBytesBudget,
+                      long pendingPriorityBytesBudget,
+                      Duration abuseWindow,
+                      Duration gracefulCloseDrainTimeout,
+                      Duration stopSendingGracefulDrainWindow,
+                      long stopSendingGracefulTailCap,
+                      Duration hiddenAbortChurnWindow,
+                      int hiddenAbortChurnThreshold,
+                      Duration visibleTerminalChurnWindow,
+                      int visibleTerminalChurnThreshold,
+                      int inboundControlFrameBudget,
+                      long inboundControlBytesBudget,
+                      int inboundExtFrameBudget,
+                      long inboundExtBytesBudget,
+                      int inboundMixedFrameBudget,
+                      long inboundMixedBytesBudget,
+                      int noOpControlFloodThreshold,
+                      int noOpMaxDataFloodThreshold,
+                      int noOpBlockedFloodThreshold,
+                      int noOpZeroDataFloodThreshold,
+                      int noOpPriorityUpdateFloodThreshold,
+                      int groupRebucketChurnThreshold,
+                      int inboundPingFloodThreshold,
+                      int acceptBacklogLimit,
+                      long acceptBacklogBytesLimit,
+                      int tombstoneLimit,
+                      int markerOnlyUsedStreamLimit,
+                      long retainedOpenInfoBytesBudget,
+                      long retainedPeerReasonBytesBudget,
+                      long aggregateLateDataCap,
+                      ZmuxEventHandler eventHandler) {
         role = role == null ? Role.AUTO : role;
         requireVarint62(tieBreakerNonce, "tieBreakerNonce");
         minProto = normalizeProtocolVersion(minProto, "minProto");
@@ -108,9 +225,13 @@ public final class ZmuxConfig {
         }
         requireVarint62(capabilities, "capabilities");
         settings = normalizeConfigSettings(settings);
+        requireNonNegative(prefacePaddingMinBytes, "prefacePaddingMinBytes");
+        requireNonNegative(prefacePaddingMaxBytes, "prefacePaddingMaxBytes");
         keepaliveInterval = normalizeOptionalDuration(keepaliveInterval, "keepaliveInterval");
         keepaliveMaxPingInterval = normalizeOptionalDuration(keepaliveMaxPingInterval, "keepaliveMaxPingInterval");
         keepaliveTimeout = normalizeOptionalDuration(keepaliveTimeout, "keepaliveTimeout");
+        requireNonNegative(pingPaddingMinBytes, "pingPaddingMinBytes");
+        requireNonNegative(pingPaddingMaxBytes, "pingPaddingMaxBytes");
         requireNonNegative(sessionMemoryCap, "sessionMemoryCap");
         requireNonNegative(perStreamQueuedDataHwm, "perStreamQueuedDataHwm");
         requireNonNegative(sessionQueuedDataHwm, "sessionQueuedDataHwm");
@@ -151,9 +272,15 @@ public final class ZmuxConfig {
         this.maxProto = maxProto;
         this.capabilities = capabilities;
         this.settings = settings;
+        this.prefacePadding = prefacePadding;
+        this.prefacePaddingMinBytes = prefacePaddingMinBytes;
+        this.prefacePaddingMaxBytes = prefacePaddingMaxBytes;
         this.keepaliveInterval = keepaliveInterval;
         this.keepaliveMaxPingInterval = keepaliveMaxPingInterval;
         this.keepaliveTimeout = keepaliveTimeout;
+        this.pingPadding = pingPadding;
+        this.pingPaddingMinBytes = pingPaddingMinBytes;
+        this.pingPaddingMaxBytes = pingPaddingMaxBytes;
         this.sessionMemoryCap = sessionMemoryCap;
         this.perStreamQueuedDataHwm = perStreamQueuedDataHwm;
         this.sessionQueuedDataHwm = sessionQueuedDataHwm;
@@ -192,11 +319,35 @@ public final class ZmuxConfig {
     }
 
     public static ZmuxConfig defaults() {
-        return DEFAULTS;
+        synchronized (DEFAULT_LOCK) {
+            return defaultTemplate;
+        }
     }
 
     public static Builder builder() {
         return new Builder();
+    }
+
+    public static void configureDefaultConfig(Consumer<Builder> customizer) {
+        if (customizer == null) {
+            return;
+        }
+        ZmuxConfig base;
+        synchronized (DEFAULT_LOCK) {
+            base = defaultTemplate;
+        }
+        Builder builder = base.toBuilder();
+        customizer.accept(builder);
+        ZmuxConfig next = sanitizeDefaultTemplate(builder.build());
+        synchronized (DEFAULT_LOCK) {
+            defaultTemplate = next;
+        }
+    }
+
+    public static void resetDefaultConfig() {
+        synchronized (DEFAULT_LOCK) {
+            defaultTemplate = BUILTIN_DEFAULTS;
+        }
     }
 
     private static long randomVarint62() {
@@ -205,6 +356,17 @@ public final class ZmuxConfig {
             value = NONCE_RANDOM.nextLong() & Protocol.MAX_VARINT62;
         } while (value == 0L);
         return value;
+    }
+
+    private static ZmuxConfig sanitizeDefaultTemplate(ZmuxConfig config) {
+        Settings settings = config.settings();
+        if (settings.pingPaddingKey() != 0L) {
+            settings = settings.toBuilder().pingPaddingKey(0L).build();
+        }
+        return config.toBuilder()
+                .tieBreakerNonce(0L)
+                .settings(settings)
+                .build();
     }
 
     private static Settings normalizeConfigSettings(Settings value) {
@@ -277,9 +439,15 @@ public final class ZmuxConfig {
                 .maxProto(maxProto)
                 .capabilities(capabilities)
                 .settings(settings)
+                .prefacePadding(prefacePadding)
+                .prefacePaddingMinBytes(prefacePaddingMinBytes)
+                .prefacePaddingMaxBytes(prefacePaddingMaxBytes)
                 .keepaliveInterval(keepaliveInterval)
                 .keepaliveMaxPingInterval(keepaliveMaxPingInterval)
                 .keepaliveTimeout(keepaliveTimeout)
+                .pingPadding(pingPadding)
+                .pingPaddingMinBytes(pingPaddingMinBytes)
+                .pingPaddingMaxBytes(pingPaddingMaxBytes)
                 .sessionMemoryCap(sessionMemoryCap)
                 .perStreamQueuedDataHwm(perStreamQueuedDataHwm)
                 .sessionQueuedDataHwm(sessionQueuedDataHwm)
@@ -333,6 +501,18 @@ public final class ZmuxConfig {
         } else if (nonce == 0L) {
             nonce = randomVarint62();
         }
+        Settings localSettings = settings;
+        if (pingPadding) {
+            if (localSettings.pingPaddingKey() == 0L) {
+                localSettings = localSettings.toBuilder()
+                        .pingPaddingKey(randomVarint62())
+                        .build();
+            }
+        } else if (localSettings.pingPaddingKey() != 0L) {
+            localSettings = localSettings.toBuilder()
+                    .pingPaddingKey(0L)
+                    .build();
+        }
         return new Preface(
                 Protocol.PREFACE_VERSION,
                 role,
@@ -340,7 +520,7 @@ public final class ZmuxConfig {
                 minProto,
                 maxProto,
                 capabilities,
-                settings
+                localSettings
         );
     }
 
@@ -368,6 +548,18 @@ public final class ZmuxConfig {
         return settings;
     }
 
+    public boolean prefacePadding() {
+        return prefacePadding;
+    }
+
+    public long prefacePaddingMinBytes() {
+        return prefacePaddingMinBytes;
+    }
+
+    public long prefacePaddingMaxBytes() {
+        return prefacePaddingMaxBytes;
+    }
+
     public Duration keepaliveInterval() {
         return keepaliveInterval;
     }
@@ -378,6 +570,18 @@ public final class ZmuxConfig {
 
     public Duration keepaliveTimeout() {
         return keepaliveTimeout;
+    }
+
+    public boolean pingPadding() {
+        return pingPadding;
+    }
+
+    public long pingPaddingMinBytes() {
+        return pingPaddingMinBytes;
+    }
+
+    public long pingPaddingMaxBytes() {
+        return pingPaddingMaxBytes;
     }
 
     public long sessionMemoryCap() {
@@ -533,6 +737,12 @@ public final class ZmuxConfig {
                 && minProto == that.minProto
                 && maxProto == that.maxProto
                 && capabilities == that.capabilities
+                && prefacePadding == that.prefacePadding
+                && prefacePaddingMinBytes == that.prefacePaddingMinBytes
+                && prefacePaddingMaxBytes == that.prefacePaddingMaxBytes
+                && pingPadding == that.pingPadding
+                && pingPaddingMinBytes == that.pingPaddingMinBytes
+                && pingPaddingMaxBytes == that.pingPaddingMaxBytes
                 && sessionMemoryCap == that.sessionMemoryCap
                 && perStreamQueuedDataHwm == that.perStreamQueuedDataHwm
                 && sessionQueuedDataHwm == that.sessionQueuedDataHwm
@@ -584,9 +794,15 @@ public final class ZmuxConfig {
                 maxProto,
                 capabilities,
                 settings,
+                prefacePadding,
+                prefacePaddingMinBytes,
+                prefacePaddingMaxBytes,
                 keepaliveInterval,
                 keepaliveMaxPingInterval,
                 keepaliveTimeout,
+                pingPadding,
+                pingPaddingMinBytes,
+                pingPaddingMaxBytes,
                 sessionMemoryCap,
                 perStreamQueuedDataHwm,
                 sessionQueuedDataHwm,
@@ -632,9 +848,15 @@ public final class ZmuxConfig {
         private long maxProto = Protocol.PROTO_VERSION;
         private long capabilities;
         private Settings settings = Settings.defaults();
+        private boolean prefacePadding;
+        private long prefacePaddingMinBytes;
+        private long prefacePaddingMaxBytes;
         private Duration keepaliveInterval = DEFAULT_IDLE_KEEPALIVE_INTERVAL;
         private Duration keepaliveMaxPingInterval = DEFAULT_KEEPALIVE_MAX_PING_INTERVAL;
         private Duration keepaliveTimeout = Duration.ZERO;
+        private boolean pingPadding;
+        private long pingPaddingMinBytes;
+        private long pingPaddingMaxBytes;
         private long sessionMemoryCap;
         private long perStreamQueuedDataHwm;
         private long sessionQueuedDataHwm;
@@ -701,6 +923,21 @@ public final class ZmuxConfig {
             return this;
         }
 
+        public Builder prefacePadding(boolean value) {
+            this.prefacePadding = value;
+            return this;
+        }
+
+        public Builder prefacePaddingMinBytes(long value) {
+            this.prefacePaddingMinBytes = value;
+            return this;
+        }
+
+        public Builder prefacePaddingMaxBytes(long value) {
+            this.prefacePaddingMaxBytes = value;
+            return this;
+        }
+
         public Builder keepaliveInterval(Duration value) {
             this.keepaliveInterval = value;
             return this;
@@ -713,6 +950,21 @@ public final class ZmuxConfig {
 
         public Builder keepaliveTimeout(Duration value) {
             this.keepaliveTimeout = value;
+            return this;
+        }
+
+        public Builder pingPadding(boolean value) {
+            this.pingPadding = value;
+            return this;
+        }
+
+        public Builder pingPaddingMinBytes(long value) {
+            this.pingPaddingMinBytes = value;
+            return this;
+        }
+
+        public Builder pingPaddingMaxBytes(long value) {
+            this.pingPaddingMaxBytes = value;
             return this;
         }
 
@@ -899,9 +1151,15 @@ public final class ZmuxConfig {
                     maxProto,
                     capabilities,
                     settings,
+                    prefacePadding,
+                    prefacePaddingMinBytes,
+                    prefacePaddingMaxBytes,
                     keepaliveInterval,
                     keepaliveMaxPingInterval,
                     keepaliveTimeout,
+                    pingPadding,
+                    pingPaddingMinBytes,
+                    pingPaddingMaxBytes,
                     sessionMemoryCap,
                     perStreamQueuedDataHwm,
                     sessionQueuedDataHwm,

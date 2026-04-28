@@ -2,6 +2,7 @@ package io.zmux.internal;
 
 import io.zmux.Negotiated;
 import io.zmux.Preface;
+import io.zmux.ZmuxConfig;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -28,6 +29,11 @@ final class SessionEstablishmentCoordinatorOwner implements SessionEstablishment
     @Override
     public Preface localPreface() {
         return this.owner.localPreface();
+    }
+
+    @Override
+    public ZmuxConfig config() {
+        return this.owner.config();
     }
 
     @Override

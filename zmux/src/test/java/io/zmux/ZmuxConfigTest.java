@@ -18,6 +18,7 @@ final class ZmuxConfigTest {
                 .maxControlPayloadBytes(8_192L)
                 .maxExtensionPayloadBytes(8_192L)
                 .schedulerHints(SchedulerHint.LATENCY)
+                .pingPaddingKey(123L)
                 .build();
         ZmuxEventHandler handler = event -> {
         };
@@ -28,9 +29,15 @@ final class ZmuxConfigTest {
                 .maxProto(2L)
                 .capabilities(0x55AAL)
                 .settings(settings)
+                .prefacePadding(true)
+                .prefacePaddingMinBytes(3L)
+                .prefacePaddingMaxBytes(9L)
                 .keepaliveInterval(Duration.ofSeconds(3))
                 .keepaliveMaxPingInterval(Duration.ofSeconds(11))
                 .keepaliveTimeout(Duration.ofSeconds(5))
+                .pingPadding(true)
+                .pingPaddingMinBytes(5L)
+                .pingPaddingMaxBytes(13L)
                 .sessionMemoryCap(9_999L)
                 .perStreamQueuedDataHwm(1_111L)
                 .sessionQueuedDataHwm(2_222L)
@@ -92,6 +99,8 @@ final class ZmuxConfigTest {
         assertEquals(Duration.ofMinutes(1), defaults.keepaliveInterval());
         assertEquals(Duration.ofMinutes(5), defaults.keepaliveMaxPingInterval());
         assertEquals(Duration.ZERO, defaults.gracefulCloseDrainTimeout());
+        assertFalse(defaults.prefacePadding());
+        assertFalse(defaults.pingPadding());
     }
 
     @Test
@@ -188,6 +197,49 @@ final class ZmuxConfigTest {
         assertEquals(Settings.defaults().maxControlPayloadBytes(), config.settings().maxControlPayloadBytes());
         assertEquals(Settings.defaults().maxExtensionPayloadBytes(), config.settings().maxExtensionPayloadBytes());
         assertEquals(config.settings(), config.localPreface().settings());
+    }
+
+    @Test
+    void localPrefaceAdvertisesPingPaddingKeyOnlyWhenEnabled() {
+        Settings keyed = Settings.defaults().toBuilder()
+                .pingPaddingKey(77L)
+                .build();
+
+        ZmuxConfig disabled = ZmuxConfig.builder()
+                .role(Role.INITIATOR)
+                .settings(keyed)
+                .pingPadding(false)
+                .build();
+        assertEquals(0L, disabled.localPreface().settings().pingPaddingKey());
+
+        ZmuxConfig configuredKey = disabled.toBuilder()
+                .pingPadding(true)
+                .build();
+        assertEquals(77L, configuredKey.localPreface().settings().pingPaddingKey());
+
+        ZmuxConfig generatedKey = ZmuxConfig.builder()
+                .role(Role.INITIATOR)
+                .pingPadding(true)
+                .build();
+        assertNotEquals(0L, generatedKey.localPreface().settings().pingPaddingKey());
+    }
+
+    @Test
+    void configureDefaultConfigDoesNotRetainPerSessionRandomFields() {
+        try {
+            ZmuxConfig.configureDefaultConfig(builder -> builder
+                    .tieBreakerNonce(99L)
+                    .pingPadding(true)
+                    .settings(Settings.defaults().toBuilder().pingPaddingKey(123L).build()));
+
+            ZmuxConfig defaults = ZmuxConfig.defaults();
+
+            assertEquals(0L, defaults.tieBreakerNonce());
+            assertTrue(defaults.pingPadding());
+            assertEquals(0L, defaults.settings().pingPaddingKey());
+        } finally {
+            ZmuxConfig.resetDefaultConfig();
+        }
     }
 
     @Test

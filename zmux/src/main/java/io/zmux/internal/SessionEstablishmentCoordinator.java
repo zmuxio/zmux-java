@@ -116,7 +116,7 @@ final class SessionEstablishmentCoordinator {
         EstablishmentDeadline readDeadline = this.beginEstablishmentReadDeadline(this.successWriteWait);
         Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", () -> {
             try {
-                FrameCodec.writePreface(this.owner.output(), this.owner.localPreface());
+                FrameCodec.writePreface(this.owner.output(), this.owner.localPreface(), this.owner.config());
                 this.owner.output().flush();
             } catch (IOException error) {
                 prefaceWriteError.set(error);
@@ -342,6 +342,10 @@ final class SessionEstablishmentCoordinator {
         OutputStream output();
 
         Preface localPreface();
+
+        default ZmuxConfig config() {
+            return null;
+        }
 
         Object lock();
 

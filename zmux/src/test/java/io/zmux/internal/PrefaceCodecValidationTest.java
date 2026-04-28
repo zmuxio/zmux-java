@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
@@ -143,5 +144,54 @@ final class PrefaceCodecValidationTest {
         Settings parsed = PrefaceCodec.parseSettings(raw);
 
         assertEquals(Settings.defaults(), parsed, "unknown setting payload should be skipped as opaque TLV value");
+    }
+
+    @Test
+    void parseSettingsReadsPingPaddingKeyAndSkipsPrefacePaddingPayload() throws IOException {
+        byte[] raw = ZmuxCodec.appendTlv(
+                null,
+                Protocol.SETTING_PING_PADDING_KEY,
+                ZmuxCodec.encodeVarint(456L)
+        );
+        raw = ZmuxCodec.appendTlv(raw, Protocol.SETTING_PREFACE_PADDING, new byte[]{1, 2, 3, 4});
+
+        Settings parsed = PrefaceCodec.parseSettings(raw);
+
+        assertEquals(456L, parsed.pingPaddingKey());
+    }
+
+    @Test
+    void parseSettingsRejectsDuplicatePrefacePaddingSetting() throws IOException {
+        byte[] raw = ZmuxCodec.appendTlv(null, Protocol.SETTING_PREFACE_PADDING, new byte[]{1});
+        raw = ZmuxCodec.appendTlv(raw, Protocol.SETTING_PREFACE_PADDING, new byte[]{2});
+        byte[] encoded = raw;
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, () -> PrefaceCodec.parseSettings(encoded))
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertEquals("duplicate setting id " + Protocol.SETTING_PREFACE_PADDING, error.getMessage());
+    }
+
+    @Test
+    void writePrefaceWithConfigAddsIgnoredSettingsPadding() throws IOException {
+        Preface preface = ZmuxConfig.builder()
+                .role(Role.INITIATOR)
+                .build()
+                .localPreface();
+        ZmuxConfig paddingConfig = ZmuxConfig.builder()
+                .prefacePadding(true)
+                .prefacePaddingMinBytes(16L)
+                .prefacePaddingMaxBytes(16L)
+                .build();
+        ByteArrayOutputStream plain = new ByteArrayOutputStream();
+        ByteArrayOutputStream padded = new ByteArrayOutputStream();
+
+        FrameCodec.writePreface(plain, preface);
+        FrameCodec.writePreface(padded, preface, paddingConfig);
+
+        assertTrue(padded.size() > plain.size(), "preface padding should increase encoded settings length");
+        assertEquals(preface, FrameCodec.readPreface(new ByteArrayInputStream(padded.toByteArray())));
     }
 }

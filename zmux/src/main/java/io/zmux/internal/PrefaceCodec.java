@@ -7,11 +7,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.HashSet;
 import java.util.Set;
 
 final class PrefaceCodec {
+    private static final byte[] EMPTY_BYTES = new byte[0];
     private static final byte[] MAGIC_BYTES = Protocol.MAGIC.getBytes(StandardCharsets.US_ASCII);
+    private static final SecureRandom PADDING_RANDOM = new SecureRandom();
 
     private PrefaceCodec() {
     }
@@ -54,6 +57,10 @@ final class PrefaceCodec {
     }
 
     static void writePreface(OutputStream output, Preface preface) throws IOException {
+        writePreface(output, preface, null);
+    }
+
+    static void writePreface(OutputStream output, Preface preface, ZmuxConfig config) throws IOException {
         validatePrefaceForMarshal(preface);
         output.write(MAGIC_BYTES);
         output.write(preface.prefaceVersion());
@@ -62,7 +69,9 @@ final class PrefaceCodec {
         Varint62.write(output, preface.minProto());
         Varint62.write(output, preface.maxProto());
         Varint62.write(output, preface.capabilities());
-        byte[] settingsBytes = marshalSettings(preface.settings());
+        byte[] settingsBytes = config != null && config.prefacePadding()
+                ? marshalSettingsWithPadding(preface.settings(), config)
+                : marshalSettings(preface.settings());
         if (settingsBytes.length > Protocol.MAX_PREFACE_SETTINGS_BYTES) {
             throw FrameCodec.error(
                     ErrorCode.FRAME_SIZE,
@@ -156,6 +165,22 @@ final class PrefaceCodec {
         appendSetting(output, Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES, settings.maxControlPayloadBytes(), defaults.maxControlPayloadBytes());
         appendSetting(output, Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES, settings.maxExtensionPayloadBytes(), defaults.maxExtensionPayloadBytes());
         appendSetting(output, Protocol.SETTING_SCHEDULER_HINTS, settings.schedulerHints().code(), defaults.schedulerHints().code());
+        appendSetting(output, Protocol.SETTING_PING_PADDING_KEY, settings.pingPaddingKey(), defaults.pingPaddingKey());
+        return output.toByteArray();
+    }
+
+    private static byte[] marshalSettingsWithPadding(Settings settings, ZmuxConfig config) throws IOException {
+        byte[] settingsBytes = marshalSettings(settings);
+        byte[] padding = randomPrefacePadding(settings, config);
+        if (padding.length == 0) {
+            return settingsBytes;
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream(
+                settingsBytes.length + Varint62.length(Protocol.SETTING_PREFACE_PADDING)
+                        + Varint62.length(padding.length) + padding.length
+        );
+        output.write(settingsBytes);
+        appendRawTlv(output, Protocol.SETTING_PREFACE_PADDING, padding);
         return output.toByteArray();
     }
 
@@ -196,6 +221,10 @@ final class PrefaceCodec {
                 offset += valueLength;
                 continue;
             }
+            if (type == Protocol.SETTING_PREFACE_PADDING) {
+                offset += valueLength;
+                continue;
+            }
             Varint62.Decoded decoded = Varint62.decode(source, offset);
             if (decoded.length() != valueLength) {
                 throw FrameCodec.error(ErrorCode.PROTOCOL, "parse settings", "setting " + type + " has trailing bytes");
@@ -226,6 +255,8 @@ final class PrefaceCodec {
                 builder.maxExtensionPayloadBytes(value);
             } else if (type == Protocol.SETTING_SCHEDULER_HINTS) {
                 builder.schedulerHints(SchedulerHint.fromCode(value));
+            } else if (type == Protocol.SETTING_PING_PADDING_KEY) {
+                builder.pingPaddingKey(value);
             }
         }
         return builder.build();
@@ -267,6 +298,12 @@ final class PrefaceCodec {
         }
         if (type == Protocol.SETTING_SCHEDULER_HINTS) {
             return 1 << 11;
+        }
+        if (type == Protocol.SETTING_PING_PADDING_KEY) {
+            return 1 << 12;
+        }
+        if (type == Protocol.SETTING_PREFACE_PADDING) {
+            return 1 << 13;
         }
         return 0;
     }
@@ -383,6 +420,7 @@ final class PrefaceCodec {
         total += settingEncodedSize(Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES, settings.maxControlPayloadBytes(), defaults.maxControlPayloadBytes());
         total += settingEncodedSize(Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES, settings.maxExtensionPayloadBytes(), defaults.maxExtensionPayloadBytes());
         total += settingEncodedSize(Protocol.SETTING_SCHEDULER_HINTS, settings.schedulerHints().code(), defaults.schedulerHints().code());
+        total += settingEncodedSize(Protocol.SETTING_PING_PADDING_KEY, settings.pingPaddingKey(), defaults.pingPaddingKey());
         if (total > Integer.MAX_VALUE) {
             throw FrameCodec.error(ErrorCode.FRAME_SIZE, "marshal settings", "settings_tlv exceeds Java implementation limit");
         }
@@ -404,6 +442,74 @@ final class PrefaceCodec {
         Varint62.write(output, type);
         Varint62.write(output, Varint62.length(value));
         Varint62.write(output, value);
+    }
+
+    private static void appendRawTlv(ByteArrayOutputStream output, long type, byte[] value) throws IOException {
+        Varint62.write(output, type);
+        Varint62.write(output, value.length);
+        output.write(value);
+    }
+
+    private static byte[] randomPrefacePadding(Settings settings, ZmuxConfig config) throws IOException {
+        long maxPayload = maxPrefacePaddingPayloadBytes(settings, config.prefacePaddingMaxBytes());
+        if (maxPayload <= 0L) {
+            return EMPTY_BYTES;
+        }
+        long minPayload = config.prefacePaddingMinBytes();
+        if (minPayload == 0L) {
+            minPayload = ZmuxConfig.DEFAULT_PREFACE_PADDING_MIN_BYTES;
+        }
+        if (minPayload > maxPayload) {
+            minPayload = maxPayload;
+        }
+        long paddingLength = minPayload;
+        long span = maxPayload - minPayload + 1L;
+        if (span > 1L) {
+            paddingLength += randomLongBounded(span);
+        }
+        int length = FrameCodec.checkedLength(
+                paddingLength,
+                ErrorCode.FRAME_SIZE,
+                "marshal preface",
+                "settings padding exceeds Java implementation limit"
+        );
+        byte[] padding = new byte[length];
+        PADDING_RANDOM.nextBytes(padding);
+        return padding;
+    }
+
+    private static long maxPrefacePaddingPayloadBytes(Settings settings, long configuredMax) throws IOException {
+        byte[] settingsBytes = marshalSettings(settings);
+        if (settingsBytes.length >= Protocol.MAX_PREFACE_SETTINGS_BYTES) {
+            return 0L;
+        }
+        long maxPayload = configuredMax == 0L ? ZmuxConfig.DEFAULT_PREFACE_PADDING_MAX_BYTES : configuredMax;
+        long remaining = Protocol.MAX_PREFACE_SETTINGS_BYTES - (long) settingsBytes.length;
+        if (maxPayload > remaining) {
+            maxPayload = remaining;
+        }
+        int typeLength = Varint62.length(Protocol.SETTING_PREFACE_PADDING);
+        while (maxPayload > 0L) {
+            int lengthLength = Varint62.length(maxPayload);
+            long overhead = typeLength + (long) lengthLength;
+            if (overhead <= remaining && maxPayload <= remaining - overhead) {
+                return maxPayload;
+            }
+            maxPayload--;
+        }
+        return 0L;
+    }
+
+    private static long randomLongBounded(long bound) {
+        if (bound <= 1L) {
+            return 0L;
+        }
+        long limit = Long.MAX_VALUE - Long.MAX_VALUE % bound;
+        long value;
+        do {
+            value = PADDING_RANDOM.nextLong() & Long.MAX_VALUE;
+        } while (value >= limit);
+        return value % bound;
     }
 
     private interface PrefaceReader {

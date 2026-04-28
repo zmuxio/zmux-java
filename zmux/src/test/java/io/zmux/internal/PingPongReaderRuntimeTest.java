@@ -51,6 +51,26 @@ final class PingPongReaderRuntimeTest {
         return field.getInt(target);
     }
 
+    private static byte[] taggedPingPayload(long nonce, long key) {
+        byte[] payload = new byte[Long.BYTES * 2];
+        writeLongBigEndian(payload, 0, nonce);
+        writeLongBigEndian(payload, Long.BYTES, pingPaddingTag(key, nonce));
+        return payload;
+    }
+
+    private static long pingPaddingTag(long key, long nonce) {
+        long value = key ^ nonce ^ 0x6d1d9f6d33f9772dL;
+        value = (value ^ value >>> 30) * -4658895280553007687L;
+        value = (value ^ value >>> 27) * -7723592293110705685L;
+        return value ^ value >>> 31;
+    }
+
+    private static void writeLongBigEndian(byte[] output, int offset, long value) {
+        for (int i = 0; i < Long.BYTES; i++) {
+            output[offset + Long.BYTES - 1 - i] = (byte) (value >>> i * 8);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static Deque<Object> readLoopProtocolTasks(SessionRuntime runtime) throws Exception {
         Field field = SessionRuntime.class.getDeclaredField("readLoopProtocolTasks");
@@ -219,6 +239,68 @@ final class PingPongReaderRuntimeTest {
         assertNotNull(outbound, "PING should enqueue a PONG response");
         assertEquals(FrameType.PONG, SessionRuntimeTestSupport.outboundFrame(outbound).type(), "PING response frame type mismatch");
         assertArrayEquals(expected, SessionRuntimeTestSupport.outboundPayload(outbound), "PONG should echo the inbound PING payload snapshot");
+    }
+
+    @Test
+    void paddedOutgoingPingAcceptsPongWithMatchingPrefixAndExtraSuffix() throws Exception {
+        Settings localSettings = Settings.defaults().toBuilder()
+                .pingPaddingKey(321L)
+                .build();
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .settings(localSettings)
+                .pingPadding(true)
+                .pingPaddingMinBytes(8L)
+                .pingPaddingMaxBytes(8L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+        AtomicReference<Throwable> pingFailure = new AtomicReference<>();
+        Thread pingThread = new Thread(() -> {
+            try {
+                runtime.ping(new byte[]{7}, Duration.ofSeconds(1L));
+            } catch (Throwable error) {
+                pingFailure.set(error);
+            }
+        }, "padded-ping-prefix-pong");
+
+        pingThread.start();
+        byte[] pingPayload = awaitQueuedPayload(runtime, FrameType.PING);
+
+        assertTrue(pingPayload.length > Long.BYTES + 1, "padded PING should carry tag bytes before echo");
+        byte[] paddedPong = Arrays.copyOf(pingPayload, pingPayload.length + 3);
+        handlePongFrame(runtime, new FrameCodec.Frame(FrameType.PONG, 0, 0L, paddedPong));
+        pingThread.join(1_000L);
+
+        assertFalse(pingThread.isAlive(), "matching padded PONG should complete ping");
+        assertNull(pingFailure.get(), "matching padded PONG should not fail ping");
+    }
+
+    @Test
+    void inboundTaggedPingReceivesPaddedPongReply() throws Exception {
+        long peerPaddingKey = 654L;
+        Settings peerSettings = Settings.defaults().toBuilder()
+                .pingPaddingKey(peerPaddingKey)
+                .build();
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .pingPadding(true)
+                .pingPaddingMinBytes(8L)
+                .pingPaddingMaxBytes(8L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, peerSettings);
+        byte[] payload = taggedPingPayload(9L, peerPaddingKey);
+
+        handlePingFrame(runtime, new FrameCodec.Frame(FrameType.PING, 0, 0L, payload));
+
+        Object outbound;
+        synchronized (runtime.lock()) {
+            outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "urgentQueue");
+        }
+        assertNotNull(outbound, "tagged PING should enqueue a PONG response");
+        byte[] reply = SessionRuntimeTestSupport.outboundPayload(outbound);
+        assertEquals(FrameType.PONG, SessionRuntimeTestSupport.outboundFrame(outbound).type());
+        assertTrue(reply.length > payload.length, "recognized tagged PING should receive PONG padding");
+        assertArrayEquals(payload, Arrays.copyOf(reply, payload.length), "padded PONG must preserve original PING prefix");
     }
 
     @Test

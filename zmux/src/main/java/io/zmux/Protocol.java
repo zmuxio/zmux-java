@@ -29,6 +29,8 @@ public final class Protocol {
     public static final long SETTING_MAX_CONTROL_PAYLOAD_BYTES = 10;
     public static final long SETTING_MAX_EXTENSION_PAYLOAD_BYTES = 11;
     public static final long SETTING_SCHEDULER_HINTS = 12;
+    public static final long SETTING_PING_PADDING_KEY = 13;
+    public static final long SETTING_PREFACE_PADDING = 63;
 
     public static final long METADATA_STREAM_PRIORITY = 1;
     public static final long METADATA_STREAM_GROUP = 2;

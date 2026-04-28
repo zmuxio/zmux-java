@@ -36,6 +36,33 @@ final class SettingsTest {
     }
 
     @Test
+    void pingPaddingKeyRoundTripsThroughBuilderAndConstructor() {
+        Settings settings = Settings.defaults().toBuilder()
+                .pingPaddingKey(123_456L)
+                .build();
+
+        assertEquals(123_456L, settings.pingPaddingKey());
+        assertEquals(settings, settings.toBuilder().build());
+
+        Settings constructed = new Settings(
+                settings.initialMaxStreamDataBidiLocallyOpened(),
+                settings.initialMaxStreamDataBidiPeerOpened(),
+                settings.initialMaxStreamDataUni(),
+                settings.initialMaxData(),
+                settings.maxIncomingStreamsBidi(),
+                settings.maxIncomingStreamsUni(),
+                settings.maxFramePayload(),
+                settings.idleTimeoutMillis(),
+                settings.keepaliveHintMillis(),
+                settings.maxControlPayloadBytes(),
+                settings.maxExtensionPayloadBytes(),
+                settings.schedulerHints(),
+                settings.pingPaddingKey()
+        );
+        assertEquals(settings, constructed);
+    }
+
+    @Test
     void limitsViewIsCached() {
         Settings settings = Settings.defaults();
 

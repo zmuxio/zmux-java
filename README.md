@@ -238,9 +238,11 @@ Configuration and metadata APIs:
 
 - `ZmuxConfig`: session configuration for settings, limits, capabilities,
   scheduler hints, keepalive, graceful close, flow-control budgets, memory
-  budgets, abuse protection, and event handlers.
+  budgets, abuse protection, optional preface/ping padding, process-wide
+  default templates, and event handlers.
 - `Settings` and `Limits`: negotiated protocol limits, frame payload limits,
-  stream limits, data windows, and control/extension payload budgets.
+  stream limits, data windows, control/extension payload budgets, and the
+  optional `pingPaddingKey` advertised when ping padding is enabled.
 - `OpenOptions`: initial stream priority, group, and open metadata, with
   constructor, factory, and builder APIs.
 - `MetadataUpdate`: runtime priority/group updates, with constructor, factory,

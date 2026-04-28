@@ -53,6 +53,7 @@ final class SessionTelemetryState {
     private long canceledPingNonce;
     private long canceledPingHash;
     private int canceledPingLength;
+    private boolean canceledPingAllowsPadding;
     private boolean canceledPingSet;
 
     SessionTelemetryState(Owner owner, ZmuxConfig config, long timeOriginNanos, Instant timeOriginInstant) {
@@ -106,12 +107,37 @@ final class SessionTelemetryState {
     }
 
     private static long pingPayloadHash(byte[] payload) {
+        return pingPayloadHash(payload, payload.length);
+    }
+
+    private static long pingPayloadHash(byte[] payload, int length) {
         long hash = PING_PAYLOAD_HASH_OFFSET;
-        for (byte value : payload) {
-            hash ^= value & 0xffL;
+        for (int i = 0; i < length; i++) {
+            hash ^= payload[i] & 0xffL;
             hash *= PING_PAYLOAD_HASH_PRIME;
         }
         return hash;
+    }
+
+    private static boolean pongPayloadMatchesPing(byte[] pong, SessionRuntime.PendingPing ping) {
+        byte[] pingPayload = ping.payload();
+        if (Arrays.equals(pong, pingPayload)) {
+            return true;
+        }
+        return ping.acceptsPaddedPong()
+                && pong != null
+                && pingPayload != null
+                && pong.length >= pingPayload.length
+                && startsWith(pong, pingPayload);
+    }
+
+    private static boolean startsWith(byte[] payload, byte[] prefix) {
+        for (int i = 0; i < prefix.length; i++) {
+            if (payload[i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static long initKeepaliveJitterState(long seed) {
@@ -259,7 +285,11 @@ final class SessionTelemetryState {
             }
             byte[] pingPayload = this.owner.buildPingPayloadLocked(payload);
             long startedAtNanos = System.nanoTime();
-            pendingPing = new SessionRuntime.PendingPing(startedAtNanos, pingPayload);
+            pendingPing = new SessionRuntime.PendingPing(
+                    startedAtNanos,
+                    pingPayload,
+                    this.owner.pingAcceptsPaddedPongLocked(pingPayload)
+            );
             this.activePing = pendingPing;
             this.notePingSentLocked(startedAtNanos);
             this.resetMaxPingDueLocked(startedAtNanos);
@@ -360,7 +390,7 @@ final class SessionTelemetryState {
                 return;
             }
             if (this.shouldRetainCanceledPingLocked(pendingPing)) {
-                this.retainCanceledPingLocked(pendingPing.payload());
+                this.retainCanceledPingLocked(pendingPing);
             }
             this.completeActivePingLocked(null, System.nanoTime());
         }
@@ -373,7 +403,7 @@ final class SessionTelemetryState {
         }
         long previousTracked = this.owner.trackedSessionMemoryLocked();
         if (error != null && this.shouldRetainCanceledPingLocked(pendingPing)) {
-            this.retainCanceledPingLocked(pendingPing.payload());
+            this.retainCanceledPingLocked(pendingPing);
         }
         this.activePing = null;
         if (this.keepaliveEnabledLocked()) {
@@ -395,7 +425,11 @@ final class SessionTelemetryState {
             return;
         }
         byte[] payload = this.owner.buildPingPayloadLocked(null);
-        this.activePing = new SessionRuntime.PendingPing(nowNanos, payload);
+        this.activePing = new SessionRuntime.PendingPing(
+                nowNanos,
+                payload,
+                this.owner.pingAcceptsPaddedPongLocked(payload)
+        );
         this.notePingSentLocked(nowNanos);
         this.resetMaxPingDueLocked(nowNanos);
         this.queueActivePingLocked(payload);
@@ -714,7 +748,7 @@ final class SessionTelemetryState {
 
     boolean handlePongLocked(byte[] payload, long nowNanos) {
         this.lastPongAtNanos = nowNanos;
-        if (this.activePing == null || !Arrays.equals(payload, this.activePing.payload())) {
+        if (this.activePing == null || !pongPayloadMatchesPing(payload, this.activePing)) {
             if (!this.canceledPingMatches(payload)) {
                 return false;
             }
@@ -733,7 +767,8 @@ final class SessionTelemetryState {
                 && !this.owner.state().terminal();
     }
 
-    private void retainCanceledPingLocked(byte[] payload) {
+    private void retainCanceledPingLocked(SessionRuntime.PendingPing pendingPing) {
+        byte[] payload = pendingPing.payload();
         if (payload == null || payload.length < PING_NONCE_BYTES) {
             this.clearCanceledPingLocked();
             return;
@@ -741,22 +776,29 @@ final class SessionTelemetryState {
         this.canceledPingNonce = pingPayloadNonce(payload);
         this.canceledPingHash = pingPayloadHash(payload);
         this.canceledPingLength = payload.length;
+        this.canceledPingAllowsPadding = pendingPing.acceptsPaddedPong();
         this.canceledPingSet = true;
     }
 
     private boolean canceledPingMatches(byte[] payload) {
-        return this.canceledPingSet
-                && payload != null
-                && payload.length == this.canceledPingLength
-                && payload.length >= PING_NONCE_BYTES
-                && pingPayloadNonce(payload) == this.canceledPingNonce
-                && pingPayloadHash(payload) == this.canceledPingHash;
+        if (!this.canceledPingSet
+                || payload == null
+                || payload.length < PING_NONCE_BYTES
+                || pingPayloadNonce(payload) != this.canceledPingNonce) {
+            return false;
+        }
+        if (this.canceledPingAllowsPadding) {
+            return payload.length >= this.canceledPingLength
+                    && pingPayloadHash(payload, this.canceledPingLength) == this.canceledPingHash;
+        }
+        return payload.length == this.canceledPingLength && pingPayloadHash(payload) == this.canceledPingHash;
     }
 
     private void clearCanceledPingLocked() {
         this.canceledPingNonce = 0L;
         this.canceledPingHash = 0L;
         this.canceledPingLength = 0;
+        this.canceledPingAllowsPadding = false;
         this.canceledPingSet = false;
     }
 
@@ -778,6 +820,10 @@ final class SessionTelemetryState {
         IOException sessionErrorLocked();
 
         byte[] buildPingPayloadLocked(byte[] payload) throws IOException;
+
+        default boolean pingAcceptsPaddedPongLocked(byte[] payload) {
+            return false;
+        }
 
         void enqueuePingLocked(byte[] payload) throws IOException;
 

@@ -39,6 +39,11 @@ final class SessionTelemetryOwner implements SessionTelemetryState.Owner {
     }
 
     @Override
+    public boolean pingAcceptsPaddedPongLocked(byte[] payload) {
+        return this.owner.pingAcceptsPaddedPongLocked(payload);
+    }
+
+    @Override
     public void enqueuePingLocked(byte[] payload) throws IOException {
         this.owner.enqueueControlLocked(new FrameCodec.Frame(FrameType.PING, 0, 0L, payload));
     }

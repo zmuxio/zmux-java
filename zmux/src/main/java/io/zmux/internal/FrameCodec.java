@@ -116,6 +116,10 @@ public final class FrameCodec {
         PrefaceCodec.writePreface(output, preface);
     }
 
+    static void writePreface(OutputStream output, Preface preface, ZmuxConfig config) throws IOException {
+        PrefaceCodec.writePreface(output, preface, config);
+    }
+
     public static Negotiated negotiate(Preface local, Preface peer) throws IOException {
         return PrefaceCodec.negotiate(local, peer);
     }

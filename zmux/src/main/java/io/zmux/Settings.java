@@ -15,7 +15,8 @@ public final class Settings {
             0L,
             4_096L,
             4_096L,
-            SchedulerHint.UNSPECIFIED_OR_BALANCED
+            SchedulerHint.UNSPECIFIED_OR_BALANCED,
+            0L
     );
 
     private final long initialMaxStreamDataBidiLocallyOpened;
@@ -30,6 +31,7 @@ public final class Settings {
     private final long maxControlPayloadBytes;
     private final long maxExtensionPayloadBytes;
     private final SchedulerHint schedulerHints;
+    private final long pingPaddingKey;
     private final Limits limits;
 
     public Settings(long initialMaxStreamDataBidiLocallyOpened,
@@ -44,6 +46,36 @@ public final class Settings {
                     long maxControlPayloadBytes,
                     long maxExtensionPayloadBytes,
                     SchedulerHint schedulerHints) {
+        this(
+                initialMaxStreamDataBidiLocallyOpened,
+                initialMaxStreamDataBidiPeerOpened,
+                initialMaxStreamDataUni,
+                initialMaxData,
+                maxIncomingStreamsBidi,
+                maxIncomingStreamsUni,
+                maxFramePayload,
+                idleTimeoutMillis,
+                keepaliveHintMillis,
+                maxControlPayloadBytes,
+                maxExtensionPayloadBytes,
+                schedulerHints,
+                0L
+        );
+    }
+
+    public Settings(long initialMaxStreamDataBidiLocallyOpened,
+                    long initialMaxStreamDataBidiPeerOpened,
+                    long initialMaxStreamDataUni,
+                    long initialMaxData,
+                    long maxIncomingStreamsBidi,
+                    long maxIncomingStreamsUni,
+                    long maxFramePayload,
+                    long idleTimeoutMillis,
+                    long keepaliveHintMillis,
+                    long maxControlPayloadBytes,
+                    long maxExtensionPayloadBytes,
+                    SchedulerHint schedulerHints,
+                    long pingPaddingKey) {
         requireVarint62(initialMaxStreamDataBidiLocallyOpened, "initialMaxStreamDataBidiLocallyOpened");
         requireVarint62(initialMaxStreamDataBidiPeerOpened, "initialMaxStreamDataBidiPeerOpened");
         requireVarint62(initialMaxStreamDataUni, "initialMaxStreamDataUni");
@@ -55,6 +87,7 @@ public final class Settings {
         requireVarint62(keepaliveHintMillis, "keepaliveHintMillis");
         requireVarint62(maxControlPayloadBytes, "maxControlPayloadBytes");
         requireVarint62(maxExtensionPayloadBytes, "maxExtensionPayloadBytes");
+        requireVarint62(pingPaddingKey, "pingPaddingKey");
         this.initialMaxStreamDataBidiLocallyOpened = initialMaxStreamDataBidiLocallyOpened;
         this.initialMaxStreamDataBidiPeerOpened = initialMaxStreamDataBidiPeerOpened;
         this.initialMaxStreamDataUni = initialMaxStreamDataUni;
@@ -67,6 +100,7 @@ public final class Settings {
         this.maxControlPayloadBytes = maxControlPayloadBytes;
         this.maxExtensionPayloadBytes = maxExtensionPayloadBytes;
         this.schedulerHints = schedulerHints == null ? SchedulerHint.UNSPECIFIED_OR_BALANCED : schedulerHints;
+        this.pingPaddingKey = pingPaddingKey;
         this.limits = new Limits(maxFramePayload, maxControlPayloadBytes, maxExtensionPayloadBytes);
     }
 
@@ -100,7 +134,8 @@ public final class Settings {
                 .keepaliveHintMillis(keepaliveHintMillis)
                 .maxControlPayloadBytes(maxControlPayloadBytes)
                 .maxExtensionPayloadBytes(maxExtensionPayloadBytes)
-                .schedulerHints(schedulerHints);
+                .schedulerHints(schedulerHints)
+                .pingPaddingKey(pingPaddingKey);
     }
 
     public Limits limits() {
@@ -155,6 +190,10 @@ public final class Settings {
         return schedulerHints;
     }
 
+    public long pingPaddingKey() {
+        return pingPaddingKey;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -175,6 +214,7 @@ public final class Settings {
                 && keepaliveHintMillis == that.keepaliveHintMillis
                 && maxControlPayloadBytes == that.maxControlPayloadBytes
                 && maxExtensionPayloadBytes == that.maxExtensionPayloadBytes
+                && pingPaddingKey == that.pingPaddingKey
                 && schedulerHints == that.schedulerHints;
     }
 
@@ -192,7 +232,8 @@ public final class Settings {
                 keepaliveHintMillis,
                 maxControlPayloadBytes,
                 maxExtensionPayloadBytes,
-                schedulerHints
+                schedulerHints,
+                pingPaddingKey
         );
     }
 
@@ -210,6 +251,7 @@ public final class Settings {
                 + ", maxControlPayloadBytes=" + maxControlPayloadBytes
                 + ", maxExtensionPayloadBytes=" + maxExtensionPayloadBytes
                 + ", schedulerHints=" + schedulerHints
+                + ", pingPaddingKey=" + pingPaddingKey
                 + "]";
     }
 
@@ -226,6 +268,7 @@ public final class Settings {
         private long maxControlPayloadBytes = DEFAULTS.maxControlPayloadBytes();
         private long maxExtensionPayloadBytes = DEFAULTS.maxExtensionPayloadBytes();
         private SchedulerHint schedulerHints = DEFAULTS.schedulerHints();
+        private long pingPaddingKey = DEFAULTS.pingPaddingKey();
 
         public Builder initialMaxStreamDataBidiLocallyOpened(long value) {
             this.initialMaxStreamDataBidiLocallyOpened = value;
@@ -287,6 +330,11 @@ public final class Settings {
             return this;
         }
 
+        public Builder pingPaddingKey(long value) {
+            this.pingPaddingKey = value;
+            return this;
+        }
+
         public Settings build() {
             return new Settings(
                     initialMaxStreamDataBidiLocallyOpened,
@@ -300,7 +348,8 @@ public final class Settings {
                     keepaliveHintMillis,
                     maxControlPayloadBytes,
                     maxExtensionPayloadBytes,
-                    schedulerHints
+                    schedulerHints,
+                    pingPaddingKey
             );
         }
     }

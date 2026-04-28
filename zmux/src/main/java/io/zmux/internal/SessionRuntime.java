@@ -61,6 +61,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final byte[][] EMPTY_PARTS = new byte[0][];
     private static final int PING_NONCE_BYTES = Long.BYTES;
+    private static final int PING_PADDING_TAG_BYTES = Long.BYTES;
+    private static final long PING_PADDING_TAG_SALT = 0x6d1d9f6d33f9772dL;
     private static final int INBOUND_PAYLOAD_POOL_DEPTH_PER_LENGTH = 4;
     private static final int MAX_INBOUND_POOLED_PAYLOAD_BYTES = 64 * 1024;
     private static final int MAX_PENDING_READ_LOOP_PROTOCOL_TASKS = 256;
@@ -105,6 +107,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private Map<Long, StreamRuntime> streams = new HashMap<>();
     private long pingNonceState;
+    private long lastPingPaddingLength;
+    private byte[] lastBuiltPingPayload;
+    private boolean lastBuiltPingAcceptsPaddedPong;
     private long resetReasonOverflowCount;
     private long abortReasonOverflowCount;
     private List<OutboundFrame> inflightBatch = Collections.emptyList();
@@ -1345,7 +1350,11 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     Settings localSettings() {
-        return this.config.settings();
+        return this.localPreface.settings();
+    }
+
+    ZmuxConfig config() {
+        return this.config;
     }
 
     DuplexConnection connection() {
@@ -3873,6 +3882,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.writerHeldRetainedBytes = 0L;
         this.streamBookkeeping.clear();
         this.telemetry.clearTerminalKeepaliveStateLocked();
+        this.lastPingPaddingLength = 0L;
+        this.lastBuiltPingPayload = null;
+        this.lastBuiltPingAcceptsPaddedPong = false;
         this.notifyLockWaitersLocked();
     }
 
@@ -3936,7 +3948,31 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     byte[] buildPingPayloadLocked(byte[] payloadSuffix) throws IOException {
         int suffixLength = payloadSuffix == null ? 0 : payloadSuffix.length;
-        long payloadLength = PING_NONCE_BYTES + (long) suffixLength;
+        long basePayloadLength = PING_NONCE_BYTES + (long) suffixLength;
+        if (basePayloadLength > Integer.MAX_VALUE) {
+            throw sessionError(
+                    ErrorCode.FRAME_SIZE,
+                    "ping",
+                    "PING payload " + basePayloadLength + " exceeds Java array limit " + Integer.MAX_VALUE,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE
+            );
+        }
+        long payloadLimit = this.pingPayloadLimitLocked();
+        if (basePayloadLength > payloadLimit) {
+            throw sessionError(
+                    ErrorCode.FRAME_SIZE,
+                    "ping",
+                    "PING payload " + basePayloadLength + " exceeds control payload limit " + payloadLimit,
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE
+            );
+        }
+        this.lastBuiltPingPayload = null;
+        this.lastBuiltPingAcceptsPaddedPong = false;
+        long token = this.nextPingNonceLocked();
+        PaddedPingSuffix suffix = this.buildPaddedPingSuffixLocked(payloadSuffix, suffixLength, token, payloadLimit);
+        long payloadLength = PING_NONCE_BYTES + (long) suffix.length();
         if (payloadLength > Integer.MAX_VALUE) {
             throw sessionError(
                     ErrorCode.FRAME_SIZE,
@@ -3946,25 +3982,198 @@ public final class SessionRuntime implements ZmuxNativeSession {
                     ZmuxErrorDirection.WRITE
             );
         }
-        long payloadLimit = this.pingPayloadLimitLocked();
-        if (payloadLength > payloadLimit) {
-            throw sessionError(
-                    ErrorCode.FRAME_SIZE,
-                    "ping",
-                    "PING payload " + payloadLength + " exceeds control payload limit " + payloadLimit,
-                    ZmuxErrorSource.LOCAL,
-                    ZmuxErrorDirection.WRITE
-            );
-        }
         byte[] payload = new byte[(int) payloadLength];
-        long token = this.nextPingNonceLocked();
         for (int i = 0; i < PING_NONCE_BYTES; ++i) {
             payload[PING_NONCE_BYTES - 1 - i] = (byte) (token >>> i * 8);
         }
-        if (suffixLength > 0) {
-            System.arraycopy(payloadSuffix, 0, payload, PING_NONCE_BYTES, suffixLength);
-        }
+        suffix.copyTo(payload, PING_NONCE_BYTES);
+        this.lastBuiltPingPayload = payload;
+        this.lastBuiltPingAcceptsPaddedPong = suffix.acceptsPaddedPong();
         return payload;
+    }
+
+    boolean pingAcceptsPaddedPongLocked(byte[] payload) {
+        boolean accepts = payload != null
+                && payload == this.lastBuiltPingPayload
+                && this.lastBuiltPingAcceptsPaddedPong;
+        if (payload == this.lastBuiltPingPayload) {
+            this.lastBuiltPingPayload = null;
+            this.lastBuiltPingAcceptsPaddedPong = false;
+        }
+        return accepts;
+    }
+
+    private PaddedPingSuffix buildPaddedPingSuffixLocked(
+            byte[] echo,
+            int echoLength,
+            long nonce,
+            long payloadLimit
+    ) {
+        if (!this.config.pingPadding()) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        long minPayloadLength = PING_NONCE_BYTES + (long) echoLength + PING_PADDING_TAG_BYTES;
+        if (payloadLimit < minPayloadLength) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        long maxAllowed = payloadLimit - PING_NONCE_BYTES - echoLength;
+        PingPaddingBounds bounds = pingPaddingBounds(
+                maxAllowed,
+                this.config.pingPaddingMinBytes(),
+                this.config.pingPaddingMaxBytes()
+        );
+        if (bounds.max() < PING_PADDING_TAG_BYTES) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        long key = this.localPreface.settings().pingPaddingKey();
+        if (key == 0L) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        byte[] padding = this.makePingPaddingLocked(maxAllowed, PING_PADDING_TAG_BYTES);
+        if (padding.length == 0) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        long suffixLength = (long) echoLength + padding.length;
+        if (suffixLength > Integer.MAX_VALUE - (long) PING_NONCE_BYTES) {
+            return PaddedPingSuffix.borrowed(echo, echoLength);
+        }
+        byte[] suffix = new byte[(int) suffixLength];
+        writeLongBigEndian(suffix, 0, pingPaddingTag(key, nonce));
+        if (echoLength > 0) {
+            System.arraycopy(echo, 0, suffix, PING_PADDING_TAG_BYTES, echoLength);
+        }
+        if (padding.length > PING_PADDING_TAG_BYTES) {
+            System.arraycopy(
+                    padding,
+                    PING_PADDING_TAG_BYTES,
+                    suffix,
+                    PING_PADDING_TAG_BYTES + echoLength,
+                    padding.length - PING_PADDING_TAG_BYTES
+            );
+        }
+        return PaddedPingSuffix.owned(suffix);
+    }
+
+    private byte[] pongPayloadForPingLocked(byte[] payload) {
+        int payloadLength = payload == null ? 0 : payload.length;
+        if (!hasPingPaddingTag(payload, this.peerSettings().pingPaddingKey())) {
+            return clonePayloadBytes(payload, payloadLength);
+        }
+        long maxPayload = this.pingPayloadLimitLocked();
+        if (payloadLength >= maxPayload) {
+            return clonePayloadBytes(payload, payloadLength);
+        }
+        byte[] padding = this.makePingPaddingLocked(maxPayload - payloadLength, 0L);
+        if (padding.length == 0 || (long) payloadLength + padding.length > Integer.MAX_VALUE) {
+            return clonePayloadBytes(payload, payloadLength);
+        }
+        byte[] reply = Arrays.copyOf(payload, payloadLength + padding.length);
+        System.arraycopy(padding, 0, reply, payloadLength, padding.length);
+        return reply;
+    }
+
+    private static byte[] clonePayloadBytes(byte[] payload, int payloadLength) {
+        if (payloadLength == 0) {
+            return EMPTY_BYTES;
+        }
+        return Arrays.copyOf(payload, payloadLength);
+    }
+
+    private byte[] makePingPaddingLocked(long maxAllowed, long minRequired) {
+        if (!this.config.pingPadding()) {
+            return EMPTY_BYTES;
+        }
+        PingPaddingBounds bounds = pingPaddingBounds(
+                maxAllowed,
+                this.config.pingPaddingMinBytes(),
+                this.config.pingPaddingMaxBytes()
+        );
+        if (bounds.max() == 0L || minRequired > bounds.max()) {
+            return EMPTY_BYTES;
+        }
+        long minPadding = Math.max(bounds.min(), minRequired);
+        long paddingLength = minPadding;
+        long span = bounds.max() - minPadding + 1L;
+        if (span > 1L) {
+            paddingLength += this.nextPingPaddingLongBoundedLocked(span);
+            if (paddingLength == this.lastPingPaddingLength) {
+                paddingLength = minPadding + (paddingLength - minPadding + 1L) % span;
+            }
+        }
+        this.lastPingPaddingLength = paddingLength;
+        byte[] padding = new byte[(int) paddingLength];
+        this.fillPingPaddingLocked(padding);
+        return padding;
+    }
+
+    private long nextPingPaddingLongBoundedLocked(long bound) {
+        if (bound <= 1L) {
+            return 0L;
+        }
+        long limit = -1L - Long.remainderUnsigned(-1L, bound);
+        long value;
+        do {
+            value = this.nextPingNonceLocked();
+        } while (Long.compareUnsigned(value, limit) >= 0);
+        return Long.remainderUnsigned(value, bound);
+    }
+
+    private void fillPingPaddingLocked(byte[] padding) {
+        int offset = 0;
+        while (offset < padding.length) {
+            long value = this.nextPingNonceLocked();
+            for (int shift = 56; shift >= 0 && offset < padding.length; shift -= 8) {
+                padding[offset++] = (byte) (value >>> shift);
+            }
+        }
+    }
+
+    private static PingPaddingBounds pingPaddingBounds(long maxAllowed, long configuredMin, long configuredMax) {
+        long boundedMaxAllowed = Math.max(0L, maxAllowed);
+        long maxEchoByInt = Integer.MAX_VALUE - (long) PING_NONCE_BYTES;
+        if (boundedMaxAllowed > maxEchoByInt) {
+            boundedMaxAllowed = maxEchoByInt;
+        }
+        long maxPadding = configuredMax == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MAX_BYTES : configuredMax;
+        if (maxPadding > boundedMaxAllowed) {
+            maxPadding = boundedMaxAllowed;
+        }
+        if (maxPadding == 0L) {
+            return new PingPaddingBounds(0L, 0L);
+        }
+        long minPadding = configuredMin == 0L ? ZmuxConfig.DEFAULT_PING_PADDING_MIN_BYTES : configuredMin;
+        if (minPadding > maxPadding) {
+            minPadding = maxPadding;
+        }
+        return new PingPaddingBounds(minPadding, maxPadding);
+    }
+
+    private static boolean hasPingPaddingTag(byte[] payload, long key) {
+        return key != 0L
+                && payload != null
+                && payload.length >= PING_NONCE_BYTES + PING_PADDING_TAG_BYTES
+                && readLongBigEndian(payload, PING_NONCE_BYTES) == pingPaddingTag(key, readLongBigEndian(payload, 0));
+    }
+
+    private static long pingPaddingTag(long key, long nonce) {
+        long value = key ^ nonce ^ PING_PADDING_TAG_SALT;
+        value = (value ^ value >>> 30) * -4658895280553007687L;
+        value = (value ^ value >>> 27) * -7723592293110705685L;
+        return value ^ value >>> 31;
+    }
+
+    private static long readLongBigEndian(byte[] payload, int offset) {
+        long value = 0L;
+        for (int i = 0; i < Long.BYTES; i++) {
+            value = value << 8 | payload[offset + i] & 0xffL;
+        }
+        return value;
+    }
+
+    private static void writeLongBigEndian(byte[] output, int offset, long value) {
+        for (int i = 0; i < Long.BYTES; i++) {
+            output[offset + Long.BYTES - 1 - i] = (byte) (value >>> i * 8);
+        }
     }
 
     long controlPayloadLimitLocked() {
@@ -4460,8 +4669,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void enqueuePongLocked(byte[] payload) throws IOException {
-        int payloadLength = payload == null ? 0 : payload.length;
-        int retainedBytes = SessionRuntime.retainedControlFrameBytes(payloadLength);
+        byte[] retainedPayload = this.pongPayloadForPingLocked(payload);
+        int retainedBytes = SessionRuntime.retainedControlFrameBytes(retainedPayload.length);
         IOException memoryError = this.readLoopProtocolUrgentMemoryErrorLocked(retainedBytes, 0L);
         if (memoryError != null) {
             throw memoryError;
@@ -4471,7 +4680,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
             this.outboundQueueBookkeeping.recordProtocolBacklogBlockedLocked();
             return;
         }
-        byte[] retainedPayload = payloadLength == 0 ? EMPTY_BYTES : Arrays.copyOf(payload, payloadLength);
         OutboundFrame outboundFrame = new OutboundFrame(
                 new FrameCodec.Frame(FrameType.PONG, 0, 0L, retainedPayload),
                 null,
@@ -5067,9 +5275,62 @@ public final class SessionRuntime implements ZmuxNativeSession {
         }
     }
 
+    private static final class PingPaddingBounds {
+        private final long min;
+        private final long max;
+
+        private PingPaddingBounds(long min, long max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        private long min() {
+            return this.min;
+        }
+
+        private long max() {
+            return this.max;
+        }
+    }
+
+    private static final class PaddedPingSuffix {
+        private final byte[] bytes;
+        private final int length;
+        private final boolean acceptsPaddedPong;
+
+        private PaddedPingSuffix(byte[] bytes, int length, boolean acceptsPaddedPong) {
+            this.bytes = bytes;
+            this.length = length;
+            this.acceptsPaddedPong = acceptsPaddedPong;
+        }
+
+        private static PaddedPingSuffix borrowed(byte[] bytes, int length) {
+            return new PaddedPingSuffix(bytes, length, false);
+        }
+
+        private static PaddedPingSuffix owned(byte[] bytes) {
+            return new PaddedPingSuffix(bytes, bytes.length, true);
+        }
+
+        private int length() {
+            return this.length;
+        }
+
+        private boolean acceptsPaddedPong() {
+            return this.acceptsPaddedPong;
+        }
+
+        private void copyTo(byte[] output, int offset) {
+            if (this.length > 0) {
+                System.arraycopy(this.bytes, 0, output, offset, this.length);
+            }
+        }
+    }
+
     static final class PendingPing {
         private final long startedAtNanos;
         private final byte[] payload;
+        private final boolean acceptsPaddedPong;
         private boolean queued;
         private boolean done;
         private long completedAtNanos;
@@ -5077,8 +5338,13 @@ public final class SessionRuntime implements ZmuxNativeSession {
         private int waiters;
 
         PendingPing(long startedAtNanos, byte[] payload) {
+            this(startedAtNanos, payload, false);
+        }
+
+        PendingPing(long startedAtNanos, byte[] payload, boolean acceptsPaddedPong) {
             this.startedAtNanos = startedAtNanos;
             this.payload = payload;
+            this.acceptsPaddedPong = acceptsPaddedPong;
         }
 
         long startedAtNanos() {
@@ -5087,6 +5353,10 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
         byte[] payload() {
             return this.payload;
+        }
+
+        boolean acceptsPaddedPong() {
+            return this.acceptsPaddedPong;
         }
 
         boolean queued() {
