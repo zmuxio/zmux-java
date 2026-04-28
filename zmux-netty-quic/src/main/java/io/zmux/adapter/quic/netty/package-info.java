@@ -17,6 +17,10 @@
  * terminal control such as {@code closeRead()} / {@code cancelRead(...)} sends
  * QUIC {@code STOP_SENDING}.
  *
+ * <p>Fresh write-side reset or abort visibility is not a portable adapter
+ * guarantee because QUIC {@code RESET_STREAM} may discard previously written
+ * but unacknowledged stream data, including a just-submitted metadata prelude.
+ *
  * <p>QUIC does not represent post-open ZMux metadata updates or stream-level
  * reason strings on cancellation frames. After the prelude is emitted, metadata
  * updates fail with {@link io.zmux.PriorityUpdateUnavailableException}; reason

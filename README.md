@@ -632,4 +632,6 @@ error codes where Netty QUIC exposes them, but it does not try to model
 datagrams, packet acknowledgements, or transport RTT/loss state. Accepted
 prelude concurrency uses the shared adapter default when configured as `0`,
 accepts positive per-session overrides, and clamps oversized values to the
-adapter safety cap.
+adapter safety cap. Fresh write-side reset or abort visibility is not portable:
+QUIC `RESET_STREAM` may discard previously written but unacknowledged stream
+data, including a just-submitted metadata prelude.
