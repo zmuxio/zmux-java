@@ -180,7 +180,7 @@ final class PrefaceCodec {
                         + Varint62.length(padding.length) + padding.length
         );
         output.write(settingsBytes);
-        appendRawTlv(output, Protocol.SETTING_PREFACE_PADDING, padding);
+        FrameCodec.appendTlv(output, Protocol.SETTING_PREFACE_PADDING, padding);
         return output.toByteArray();
     }
 
@@ -442,12 +442,6 @@ final class PrefaceCodec {
         Varint62.write(output, type);
         Varint62.write(output, Varint62.length(value));
         Varint62.write(output, value);
-    }
-
-    private static void appendRawTlv(ByteArrayOutputStream output, long type, byte[] value) throws IOException {
-        Varint62.write(output, type);
-        Varint62.write(output, value.length);
-        output.write(value);
     }
 
     private static byte[] randomPrefacePadding(Settings settings, ZmuxConfig config) throws IOException {

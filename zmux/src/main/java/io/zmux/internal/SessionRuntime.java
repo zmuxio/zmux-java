@@ -4055,19 +4055,20 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     private byte[] pongPayloadForPingLocked(byte[] payload) {
-        int payloadLength = payload == null ? 0 : payload.length;
         if (!hasPingPaddingTag(payload, this.peerSettings().pingPaddingKey())) {
-            return clonePayloadBytes(payload, payloadLength);
+            return clonePayloadBytes(payload, payload == null ? 0 : payload.length);
         }
+        byte[] taggedPayload = Objects.requireNonNull(payload, "payload");
+        int payloadLength = taggedPayload.length;
         long maxPayload = this.pingPayloadLimitLocked();
         if (payloadLength >= maxPayload) {
-            return clonePayloadBytes(payload, payloadLength);
+            return clonePayloadBytes(taggedPayload, payloadLength);
         }
         byte[] padding = this.makePingPaddingLocked(maxPayload - payloadLength, 0L);
         if (padding.length == 0 || (long) payloadLength + padding.length > Integer.MAX_VALUE) {
-            return clonePayloadBytes(payload, payloadLength);
+            return clonePayloadBytes(taggedPayload, payloadLength);
         }
-        byte[] reply = Arrays.copyOf(payload, payloadLength + padding.length);
+        byte[] reply = Arrays.copyOf(taggedPayload, payloadLength + padding.length);
         System.arraycopy(padding, 0, reply, payloadLength, padding.length);
         return reply;
     }
