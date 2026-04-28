@@ -17,7 +17,7 @@ final class MetadataCodec {
     static List<Tlv> parseTlvs(byte[] source) throws IOException {
         List<Tlv> output = new ArrayList<>(tlvParseCapacityHint(source.length));
         FrameCodec.walkTlvs(source, 0, source.length, (type, value, offset, length) ->
-                output.add(new Tlv(type, FrameCodec.copySlice(value, offset, length))));
+                output.add(new Tlv(type, value, offset, length)));
         return output;
     }
 

@@ -203,9 +203,25 @@ public final class FrameCodec {
         int cursor = offset;
         int limit = offset + length;
         while (cursor < limit) {
-            Varint62.Decoded type = Varint62.decode(source, cursor);
+            Varint62.Decoded type;
+            try {
+                type = Varint62.decode(source, cursor);
+            } catch (IOException error) {
+                if (Varint62.isTruncatedVarint(error)) {
+                    throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
+                }
+                throw error;
+            }
             cursor += type.length();
-            Varint62.Decoded valueLength = Varint62.decode(source, cursor);
+            Varint62.Decoded valueLength;
+            try {
+                valueLength = Varint62.decode(source, cursor);
+            } catch (IOException error) {
+                if (Varint62.isTruncatedVarint(error)) {
+                    throw error(ErrorCode.PROTOCOL, "parse tlv", "truncated tlv", error);
+                }
+                throw error;
+            }
             cursor += valueLength.length();
             if (valueLength.value() > limit - cursor) {
                 throw error(ErrorCode.PROTOCOL, "parse tlv", "tlv value overruns containing payload");

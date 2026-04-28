@@ -1,6 +1,7 @@
 package io.zmux;
 
 import java.util.Arrays;
+import java.util.Objects;
 
 public final class Tlv {
     private static final byte[] EMPTY_BYTES = new byte[0];
@@ -14,6 +15,20 @@ public final class Tlv {
         }
         this.type = type;
         this.value = value == null || value.length == 0 ? EMPTY_BYTES : Arrays.copyOf(value, value.length);
+    }
+
+    public Tlv(long type, byte[] value, int offset, int length) {
+        if (type < 0L || type > Protocol.MAX_VARINT62) {
+            throw new IllegalArgumentException("zmux tlv type must be within varint62 range");
+        }
+        Objects.requireNonNull(value, "value");
+        if ((offset | length) < 0 || length > value.length - offset) {
+            throw new IndexOutOfBoundsException(
+                    "range [" + offset + ", " + offset + " + " + length + ") out of bounds for length " + value.length
+            );
+        }
+        this.type = type;
+        this.value = length == 0 ? EMPTY_BYTES : Arrays.copyOfRange(value, offset, offset + length);
     }
 
     public long type() {

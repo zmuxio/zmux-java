@@ -131,6 +131,43 @@ final class FrameCodecPayloadViewTest {
     }
 
     @Test
+    void parseTlvsWrapsTruncatedTypeVarintAsTlvError() {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseTlvs(new byte[]{0x40})
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated TLV type should be a protocol error");
+        assertEquals("truncated tlv", error.getMessage(), "truncated TLV type error mismatch");
+        assertNotNull(error.getCause(), "truncated TLV should retain the varint cause");
+        assertEquals("truncated varint62", error.getCause().getMessage(), "truncated TLV cause mismatch");
+    }
+
+    @Test
+    void parseTlvsWrapsTruncatedLengthVarintAsTlvError() {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseTlvs(new byte[]{0x01, 0x40})
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated TLV length should be a protocol error");
+        assertEquals("truncated tlv", error.getMessage(), "truncated TLV length error mismatch");
+        assertNotNull(error.getCause(), "truncated TLV should retain the varint cause");
+        assertEquals("truncated varint62", error.getCause().getMessage(), "truncated TLV cause mismatch");
+    }
+
+    @Test
+    void parseTlvsPreservesNonCanonicalVarintError() {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.parseTlvs(new byte[]{0x40, 0x01, 0x00})
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "non-canonical TLV varint should be a protocol error");
+        assertEquals("non-canonical varint62", error.getMessage(), "non-canonical varint error should be preserved");
+    }
+
+    @Test
     void parseDataPayloadRejectsOpenMetadataLengthPastPayload() throws Exception {
         byte[] payload = Varint62.encode(Protocol.MAX_VARINT62);
 

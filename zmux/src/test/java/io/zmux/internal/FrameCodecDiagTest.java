@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class FrameCodecDiagTest {
     private static void appendTlv(ByteArrayOutputStream output, long type, byte[] value) throws Exception {
@@ -90,6 +91,17 @@ final class FrameCodecDiagTest {
         FrameCodec.ErrorPayload parsed = FrameCodec.parseErrorPayload(payload.toByteArray());
         assertEquals(ErrorCode.PROTOCOL.code(), parsed.code(), "error code mismatch");
         assertEquals("", parsed.reason(), "surrogate UTF-8 should not surface a replacement-character reason");
+    }
+
+    @Test
+    void parseDiagReasonTruncatedVarintReturnsTruncatedTlv() {
+        io.zmux.ZmuxException error = assertThrows(
+                io.zmux.ZmuxException.class,
+                () -> FrameCodec.parseDiagReason(new byte[]{0x40})
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated DIAG TLV should be a protocol error");
+        assertEquals("truncated tlv", error.getMessage(), "truncated DIAG TLV error mismatch");
     }
 
     @Test

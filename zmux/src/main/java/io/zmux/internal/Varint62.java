@@ -249,6 +249,10 @@ public final class Varint62 {
                 | (b7 & 0xffL);
     }
 
+    static boolean isTruncatedVarint(IOException error) {
+        return error instanceof ZmuxException && "truncated varint62".equals(error.getMessage());
+    }
+
     private static ZmuxException error(String operation, String message, Throwable cause) {
         return new ZmuxException(
                 ErrorCode.PROTOCOL.code(),
