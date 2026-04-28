@@ -190,9 +190,9 @@ final class PrefaceCodec {
         Set<Long> seenUnknown = null;
         int offset = 0;
         while (offset < source.length) {
-            Varint62.Decoded typeDecoded = Varint62.decode(source, offset);
+            Varint62.Decoded typeDecoded = decodeSettingsVarint(source, offset, source.length);
             offset += typeDecoded.length();
-            Varint62.Decoded lengthDecoded = Varint62.decode(source, offset);
+            Varint62.Decoded lengthDecoded = decodeSettingsVarint(source, offset, source.length);
             offset += lengthDecoded.length();
             long type = typeDecoded.value();
             long length = lengthDecoded.value();
@@ -225,7 +225,7 @@ final class PrefaceCodec {
                 offset += valueLength;
                 continue;
             }
-            Varint62.Decoded decoded = Varint62.decode(source, offset);
+            Varint62.Decoded decoded = decodeSettingsVarint(source, offset, offset + valueLength);
             if (decoded.length() != valueLength) {
                 throw FrameCodec.error(ErrorCode.PROTOCOL, "parse settings", "setting " + type + " has trailing bytes");
             }
@@ -260,6 +260,19 @@ final class PrefaceCodec {
             }
         }
         return builder.build();
+    }
+
+    private static Varint62.Decoded decodeSettingsVarint(byte[] source, int offset, int limit) throws IOException {
+        try {
+            return Varint62.decode(source, offset, limit);
+        } catch (IOException error) {
+            throw FrameCodec.error(
+                    ErrorCode.PROTOCOL,
+                    "parse settings",
+                    error.getMessage() == null ? "invalid settings varint" : error.getMessage(),
+                    error
+            );
+        }
     }
 
     private static int knownSettingSeenBit(long type) {

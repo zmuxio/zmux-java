@@ -175,6 +175,61 @@ final class PrefaceCodecValidationTest {
     }
 
     @Test
+    void parseSettingsBoundsKnownSettingValueVarintToTlvValue() throws IOException {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        Varint62.write(raw, Protocol.SETTING_INITIAL_MAX_DATA);
+        Varint62.write(raw, 1L);
+        raw.write(0x40);
+        FrameCodec.appendTlv(raw, 99L, new byte[]{0x01});
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, () -> PrefaceCodec.parseSettings(raw.toByteArray()))
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertEquals("parse settings", error.operation());
+        assertEquals("truncated varint62", error.getMessage());
+        assertNotNull(error.getCause(), "bounded setting value parse should retain the varint cause");
+        assertEquals("truncated varint62", error.getCause().getMessage());
+    }
+
+    @Test
+    void parseSettingsRejectsEmptyKnownSettingValueAsTruncatedVarint() throws IOException {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        Varint62.write(raw, Protocol.SETTING_INITIAL_MAX_DATA);
+        Varint62.write(raw, 0L);
+        FrameCodec.appendTlv(raw, 99L, new byte[]{0x01});
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, () -> PrefaceCodec.parseSettings(raw.toByteArray()))
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertEquals("parse settings", error.operation());
+        assertEquals("truncated varint62", error.getMessage());
+    }
+
+    @Test
+    void parseSettingsPreservesNonCanonicalKnownSettingValue() throws IOException {
+        byte[] raw = ZmuxCodec.appendTlv(
+                null,
+                Protocol.SETTING_INITIAL_MAX_DATA,
+                new byte[]{0x40, 0x01}
+        );
+
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                assertThrows(IOException.class, () -> PrefaceCodec.parseSettings(raw))
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code());
+        assertEquals("parse settings", error.operation());
+        assertEquals("non-canonical varint62", error.getMessage());
+    }
+
+    @Test
     void writePrefaceWithConfigAddsIgnoredSettingsPadding() throws IOException {
         Preface preface = ZmuxConfig.builder()
                 .role(Role.INITIATOR)

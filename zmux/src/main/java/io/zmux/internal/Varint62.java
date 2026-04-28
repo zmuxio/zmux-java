@@ -99,19 +99,27 @@ public final class Varint62 {
 
     public static Decoded decode(byte[] source, int offset) throws ZmuxException {
         Objects.requireNonNull(source, "source");
+        return decode(source, offset, source.length);
+    }
+
+    static Decoded decode(byte[] source, int offset, int limit) throws ZmuxException {
+        Objects.requireNonNull(source, "source");
         if (offset < 0) {
             throw new IndexOutOfBoundsException("offset < 0");
         }
         if (offset > source.length) {
             throw new IndexOutOfBoundsException("offset > source.length");
         }
-        if (offset >= source.length) {
+        if (limit < offset || limit > source.length) {
+            throw new IndexOutOfBoundsException("limit out of bounds");
+        }
+        if (offset >= limit) {
             throw error("parse varint62", "truncated varint62", null);
         }
         int first = source[offset] & 0xff;
         int prefix = first >>> 6;
         int length = 1 << prefix;
-        if (length > source.length - offset) {
+        if (length > limit - offset) {
             throw error("parse varint62", "truncated varint62", null);
         }
         long value;
