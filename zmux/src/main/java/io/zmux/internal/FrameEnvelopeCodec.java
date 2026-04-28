@@ -422,7 +422,7 @@ final class FrameEnvelopeCodec {
                 throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate DATA payload", "payload exceeds configured limit");
             }
             if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
-                FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+                validateDataPayload(frame, "parse DATA payload");
             }
             return;
         }
@@ -449,11 +449,19 @@ final class FrameEnvelopeCodec {
                 throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate DATA payload", "payload exceeds configured limit");
             }
             if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
-                FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+                validateDataPayload(frame, "write DATA payload");
             }
             return;
         }
         validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), encodedPayloadLength, segmented);
+    }
+
+    private static void validateDataPayload(FrameCodec.Frame frame, String operation) throws IOException {
+        try {
+            FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+        } catch (IOException error) {
+            throw frameSizePayloadError(operation, error);
+        }
     }
 
     private static void validatePayloadParts(byte[][] payloadParts,

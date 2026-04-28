@@ -91,6 +91,22 @@ final class FrameCodecErrorWrappingTest {
     }
 
     @Test
+    void readFrameWrapsMalformedOpenMetadataTlvAsFrameSize() throws Exception {
+        byte[] payload = new byte[]{
+                2,
+                (byte) Protocol.METADATA_STREAM_PRIORITY
+        };
+        byte[] bytes = frame(FrameType.DATA, Protocol.FRAME_FLAG_OPEN_METADATA, 4L, payload);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(bytes), Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "malformed OPEN_METADATA TLV should fail as frame-size");
+    }
+
+    @Test
     void readFrameWrapsMissingControlPayloadVarintAsFrameSize() throws Exception {
         byte[] bytes = frame(FrameType.RESET, 0, 4L, new byte[0]);
 
