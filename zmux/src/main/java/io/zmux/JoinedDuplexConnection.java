@@ -415,7 +415,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             ensureOpenLocked();
             readDeadline = deadline;
             readDeadlineGeneration++;
-            half = inputPaused ? null : typedReadHalf(inputHalf);
+            half = typedReadHalf(inputHalf);
             if (half != null) {
                 activeInputDeadlineOperations++;
             }
@@ -451,7 +451,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             ensureOpenLocked();
             writeDeadline = deadline;
             writeDeadlineGeneration++;
-            half = outputPaused ? null : typedWriteHalf(outputHalf);
+            half = typedWriteHalf(outputHalf);
             if (half != null) {
                 activeOutputDeadlineOperations++;
             }
