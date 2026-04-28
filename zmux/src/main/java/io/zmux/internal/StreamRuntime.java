@@ -447,6 +447,18 @@ final class StreamRuntime implements ZmuxNativeStream {
         return lifecycleState.churnCounted();
     }
 
+    boolean activeCountedLocked() {
+        return lifecycleState.activeCounted();
+    }
+
+    void markActiveCountedLocked() {
+        lifecycleState.markActiveCounted();
+    }
+
+    void clearActiveCountedLocked() {
+        lifecycleState.clearActiveCounted();
+    }
+
     long peerSendLimit() {
         return sendAccountingState.peerSendLimit();
     }

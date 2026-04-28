@@ -3686,15 +3686,22 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void maybeCompactStreamLocked(StreamRuntime streamRuntime) {
-        if (streamRuntime == null
-                || !streamRuntime.fullyTerminalLocked()
-                || !streamRuntime.readBufferEmptyLocked()) {
-            return;
-        }
-        if (streamRuntime.acceptQueued()) {
+        if (streamRuntime == null || !streamRuntime.fullyTerminalLocked()) {
             return;
         }
         if (this.streams.get(streamRuntime.streamIdInternal()) != streamRuntime) {
+            return;
+        }
+        this.localOpenTracker.removeUnseenLocalLocked(streamRuntime);
+        boolean activeFinalized = this.streamBookkeeping.finalizeActiveIfTerminalLocked(streamRuntime);
+        if (activeFinalized) {
+            this.notifyOpenWaitersLocked();
+            this.notifyLifecycleWaitersLocked();
+        }
+        if (!streamRuntime.readBufferEmptyLocked()) {
+            return;
+        }
+        if (streamRuntime.acceptQueued()) {
             return;
         }
         this.releaseStreamPeerReasonBudgetLocked(streamRuntime);
@@ -3702,7 +3709,6 @@ public final class SessionRuntime implements ZmuxNativeSession {
         this.flowControlUpdateRegistry.clearStreamStateLocked(streamRuntime.streamIdInternal());
         this.streams.remove(streamRuntime.streamIdInternal());
         this.dropOrdinaryBatchStateLocked(streamRuntime);
-        this.localOpenTracker.removeUnseenLocalLocked(streamRuntime);
         this.onStreamOpenInfoUpdatedLocked(streamRuntime.openInfoLengthLocked(), 0);
         boolean hidden = !streamRuntime.applicationVisible();
         long nowNanos = hidden ? System.nanoTime() : 0L;
@@ -4618,6 +4624,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 this.streams.get(streamRuntime.streamIdInternal()) == streamRuntime
         );
         this.streamBookkeeping.onPeerOpenedLocked(bidirectional);
+        streamRuntime.markActiveCountedLocked();
         return streamRuntime;
     }
 
@@ -5066,6 +5073,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
             this.nextLocalUni = SessionRuntime.saturatingAdd(assignedStreamId, 4L);
         }
         this.streamBookkeeping.onLocalOpenedLocked(bidirectional);
+        streamRuntime.markActiveCountedLocked();
         long peerSendLimit = bidirectional
                 ? this.peerSettings().initialMaxStreamDataBidiPeerOpened()
                 : this.peerSettings().initialMaxStreamDataUni();

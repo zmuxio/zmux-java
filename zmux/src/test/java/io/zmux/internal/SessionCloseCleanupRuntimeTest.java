@@ -223,6 +223,8 @@ final class SessionCloseCleanupRuntimeTest {
             assertSame(stream, runtime.liveStreamLocked(streamId),
                     "terminal stream must stay live while final payload is unread");
             assertTrue(stream.fullyTerminalLocked(), "test requires both stream halves to be terminal");
+            assertEquals(0L, runtime.stats().activeStreams().peerBidi(),
+                    "fully terminal peer-opened stream should release its incoming slot before unread payload drains");
         }
 
         byte[] dst = new byte[payload.length];
@@ -236,6 +238,51 @@ final class SessionCloseCleanupRuntimeTest {
                     "compaction should retain a terminal marker for future duplicate frames");
         }
         assertEquals(-1, stream.read(new byte[1]), "compacted stream object should still expose EOF");
+    }
+
+    @Test
+    void terminalPeerUniReleasesIncomingSlotBeforeAcceptQueueDrains() throws Exception {
+        Settings localSettings = Settings.defaults()
+                .toBuilder()
+                .maxIncomingStreamsUni(1L)
+                .build();
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .settings(localSettings)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+        long firstId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, false);
+        long secondId = firstId + 4L;
+
+        handleDataFrame(runtime, new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_FIN,
+                firstId,
+                new byte[]{1, 2, 3}
+        ));
+
+        synchronized (runtime.lock()) {
+            StreamRuntime first = runtime.liveStreamLocked(firstId);
+            assertNotNull(first, "terminal peer uni stream should stay live while still accept-queued");
+            assertTrue(first.fullyTerminalLocked(), "peer uni DATA|FIN should make the stream fully terminal");
+            assertTrue(first.acceptQueued(), "first peer uni stream should still be pending application accept");
+            assertEquals(0L, runtime.stats().activeStreams().peerUni(),
+                    "incoming uni slot should be reusable as soon as the stream is fully terminal");
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_FIN,
+                secondId,
+                new byte[]{4}
+        ));
+
+        synchronized (runtime.lock()) {
+            assertNotNull(runtime.liveStreamLocked(secondId),
+                    "second peer uni stream should not be refused while the first terminal stream is still queued");
+            assertEquals(0L, runtime.stats().activeStreams().peerUni(),
+                    "second terminal peer uni stream should also release its incoming slot immediately");
+        }
     }
 
     @Test

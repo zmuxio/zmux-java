@@ -8,6 +8,7 @@ final class StreamLifecycleState {
     private boolean openedEventSent;
     private boolean acceptedEventSent;
     private boolean churnCounted;
+    private boolean activeCounted;
     private boolean provisionalTracked;
     private boolean unseenLocalTracked;
     private long provisionalCreatedAtNanos;
@@ -85,6 +86,18 @@ final class StreamLifecycleState {
 
     void markChurnCounted() {
         churnCounted = true;
+    }
+
+    boolean activeCounted() {
+        return activeCounted;
+    }
+
+    void markActiveCounted() {
+        activeCounted = true;
+    }
+
+    void clearActiveCounted() {
+        activeCounted = false;
     }
 
     long visibilitySequence() {

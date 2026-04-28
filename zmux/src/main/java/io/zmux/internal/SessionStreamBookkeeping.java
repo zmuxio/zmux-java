@@ -52,22 +52,31 @@ final class SessionStreamBookkeeping {
     }
 
     void onStreamFullyClosedLocked(StreamRuntime streamRuntime) {
+        finalizeActiveIfTerminalLocked(streamRuntime);
+    }
+
+    boolean finalizeActiveIfTerminalLocked(StreamRuntime streamRuntime) {
         if (streamRuntime == null) {
-            return;
+            return false;
         }
+        if (!streamRuntime.activeCountedLocked() || !streamRuntime.fullyTerminalLocked()) {
+            return false;
+        }
+        streamRuntime.clearActiveCountedLocked();
         if (streamRuntime.openedLocally()) {
             if (streamRuntime.bidirectional()) {
                 this.activeLocalBidi = Math.max(0L, this.activeLocalBidi - 1L);
             } else {
                 this.activeLocalUni = Math.max(0L, this.activeLocalUni - 1L);
             }
-            return;
+            return true;
         }
         if (streamRuntime.bidirectional()) {
             this.activePeerBidi = Math.max(0L, this.activePeerBidi - 1L);
         } else {
             this.activePeerUni = Math.max(0L, this.activePeerUni - 1L);
         }
+        return true;
     }
 
     boolean hasGracefulCloseBlockingStreamsLocked() {
