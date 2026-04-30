@@ -1,30 +1,20 @@
 # Releasing
 
-This document is for maintainers publishing the Java artifacts. User-facing
-installation instructions belong in `README.md`.
+This document is for maintainers. User installation instructions belong in
+`README.md`.
 
-The Maven reactor publishes these coordinates:
+Published coordinates:
 
-- parent POM: `io.github.zmuxio:zmux-parent`
-- core library: `io.github.zmuxio:zmux`
-- optional Netty QUIC adapter: `io.github.zmuxio:zmux-netty-quic`
+- `io.github.zmuxio:zmux-parent`
+- `io.github.zmuxio:zmux`
+- `io.github.zmuxio:zmux-netty-quic`
 
-The parent POM is publication metadata. The user-facing artifacts to verify
-after publication are `zmux` and `zmux-netty-quic`.
+The parent POM is publication metadata. Users should depend on `zmux` and,
+when needed, `zmux-netty-quic`.
 
-## Version Tags
+## Before Release
 
-Use one reactor version and one Git tag for all Java artifacts:
-
-- Maven version: `X.Y.Z`
-- Git tag: `vX.Y.Z`
-
-Do not publish `zmux` and `zmux-netty-quic` with different versions. The adapter
-depends on the core module at `${project.version}`.
-
-## Prerequisites
-
-Start from `main` with a clean local view of the remote:
+Start from an up-to-date `main`:
 
 ```bash
 git status --short --branch
@@ -32,23 +22,18 @@ git fetch origin
 git rev-list --left-right --count main...origin/main
 ```
 
-The ahead/behind count should be `0 0` before release work starts.
+The ahead/behind count should be `0 0`.
 
-Maven Central publishing also requires:
+Central publishing requires:
 
-- Maven Central credentials in Maven `settings.xml` under server id `central`.
+- Central Portal namespace access for `io.github.zmuxio`.
+- Central Portal token in Maven `settings.xml` under server id `central`.
 - A GPG key available to `maven-gpg-plugin`.
-- No `SNAPSHOT` dependencies or plugins in the release build.
+- No `SNAPSHOT` dependencies or plugins.
 
-The repository `release` profile attaches source jars, javadoc jars, GPG
-signatures, and configures `central-publishing-maven-plugin` with
-`autoPublish=false`. A deploy creates a Central Portal deployment for manual
-review; it does not publish artifacts automatically.
+## Update External Dependencies
 
-## Dependency Update Pass
-
-Before changing the release version, check whether dependency and plugin
-properties should be updated:
+Before setting the release version, check external dependencies and plugins:
 
 ```bash
 mvn -B versions:display-property-updates
@@ -56,33 +41,67 @@ mvn -B versions:display-dependency-updates
 mvn -B versions:display-plugin-updates
 ```
 
-Apply updates deliberately:
+Review updates deliberately:
 
-- Root `pom.xml` owns common plugin, JUnit, GPG, Central publishing, and
-  compatibility properties.
-- `zmux-netty-quic/pom.xml` owns the Netty QUIC version used by the adapter.
-- If Netty QUIC is updated, keep the compile-time QUIC classes dependency and
-  test native QUIC dependency aligned through the same property.
-- Keep Central publishing and signing plugin updates separate from behavior
-  changes when possible.
-- Do not change the Java compatibility target unless the public compatibility
-  policy is intentionally changing.
-- If dependency updates affect user installation guidance, update `README.md`
-  using placeholders such as `VERSION` and `NETTY_VERSION`, not concrete
-  release numbers.
+- Root `pom.xml` owns shared Maven plugins, JUnit, GPG, Central publishing,
+  benchmark, compatibility, and test dependency properties.
+- `zmux-netty-quic/pom.xml` owns the Netty QUIC version.
+- Keep Netty QUIC compile and native test dependencies aligned through the same
+  property.
+- Do not take pre-release dependency versions unless the release intentionally
+  depends on them.
+- Do not change Java compatibility unless the public compatibility policy is
+  changing.
+- If dependency changes affect user installation, update `README.md` with
+  placeholders such as `VERSION`, `NETTY_VERSION`, and `OS_CLASSIFIER`.
 
-Run the verification matrix after dependency edits, before preparing the release
+After dependency edits, run the release checks before changing the project
 version.
 
-## Version Update
+## Verify Candidate
 
-Update the root version and child parent versions to `X.Y.Z`:
+For every release candidate:
+
+```bash
+mvn -B -Pjava8-compat test
+mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
+```
+
+PowerShell needs the dotted property quoted:
+
+```powershell
+mvn -B -Prelease '-Dgpg.skip=true' -DskipTests verify
+```
+
+When Go/spec repositories are available, prefer the helper:
+
+```powershell
+.\tools\verify-release.ps1 -GoRoot PATH_TO_ZMUX_GO -SpecRoot PATH_TO_ZMUX_SPEC -RunInterop
+```
+
+POSIX:
+
+```bash
+ZMUX_GO_ROOT=/path/to/zmux-go ZMUX_SPEC_ROOT=/path/to/zmux-spec tools/verify-release.sh --run-interop
+```
+
+Run dependency updates and these checks again if any release fix changes code,
+public API, dependencies, or publishing metadata.
+
+## Set Version
+
+Use one Maven version and one Git tag for all Java artifacts:
+
+- Maven version: `X.Y.Z`
+- Git tag: `vX.Y.Z`
+
+Update the reactor version:
 
 ```bash
 mvn -B versions:set -DnewVersion=X.Y.Z -DgenerateBackupPoms=false
 ```
 
-Confirm the reactor agrees on one version:
+Confirm all modules agree:
 
 ```bash
 mvn -B help:evaluate -Dexpression=project.version -q -DforceStdout
@@ -90,105 +109,41 @@ mvn -B -pl zmux help:evaluate -Dexpression=project.version -q -DforceStdout
 mvn -B -pl zmux-netty-quic help:evaluate -Dexpression=project.version -q -DforceStdout
 ```
 
-## Verification Matrix
-
-Use `java8-compat` for normal repository checks because published artifacts are
-Java 8-compatible. Use `release` only for release packaging checks because it
-also attaches source jars, javadoc jars, signatures, and Central publishing
-configuration.
-
-For a small core-only edit during iteration:
+Run the release checks again after the version change:
 
 ```bash
-mvn -B -Pjava8-compat -pl zmux -DskipTests compile
-```
-
-For any core protocol, runtime, lifecycle, flow-control, queueing, memory, API,
-or conformance change:
-
-```bash
-mvn -B -Pjava8-compat -pl zmux test
-```
-
-For any QUIC adapter change, public connection-interface change, dependency
-change, or release candidate:
-
-```bash
-mvn -B -Pjava8-compat -pl zmux-netty-quic -am test
-```
-
-Before publishing every release candidate, run the full reactor and the release
-packaging dry run:
-
-```bash
-mvn -B -Pjava8-compat test
-mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
-```
-
-Focused test groups are useful while iterating, but they do not replace the
-release-candidate checks above:
-
-```bash
-mvn -B -Pjava8-compat -pl zmux -Dtest=SessionWriterTransportTest,WriterQueuePolicyTest,WriteBufferOwnershipTest test
-mvn -B -Pjava8-compat -pl zmux -Dtest=SessionTelemetryStateTest,PingPongReaderRuntimeTest,KeepaliveTest,PingSemanticsTest test
-mvn -B -Pjava8-compat -pl zmux -Dtest=SessionCloseCleanupRuntimeTest,SessionTerminationTest,GracefulCloseTest test
-mvn -B -Pjava8-compat -pl zmux-netty-quic -am -Dtest=NettyQuicSessionContractTest,NettyQuicSupportTest,NettyQuicConformanceTest test
-```
-
-Use the repository helper when validating a release candidate or when Go/spec
-repositories are available locally.
-
-PowerShell:
-
-```powershell
-.\tools\verify-release.ps1 -GoRoot PATH_TO_ZMUX_GO -SpecRoot PATH_TO_ZMUX_SPEC -RunInterop
-```
-
-POSIX shell:
-
-```bash
-ZMUX_GO_ROOT=/path/to/zmux-go ZMUX_SPEC_ROOT=/path/to/zmux-spec tools/verify-release.sh --run-interop
-```
-
-The helper runs Java compile/tests, optional Go tests, optional spec asset
-validation, optional interop smoke, and release-profile verification. Use
-`-RunBenchmarks` / `--run-benchmarks` only when performance-sensitive changes
-need a quick JMH pass.
-
-Standalone quick benchmarks:
-
-```bash
-tools/run-benchmarks.sh --quick
-```
-
-PowerShell:
-
-```powershell
-.\tools\run-benchmarks.ps1 -Quick
-```
-
-Finish every release commit with:
-
-```bash
-git status --short --branch
 git diff --check
 mvn -B -Pjava8-compat test
 mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
 ```
 
-## Local Consumption Test
+PowerShell:
 
-For a no-network smoke test of user consumption, install release-compatible
-artifacts locally and try a clean sample project using the README coordinates:
+```powershell
+mvn -B -Prelease '-Dgpg.skip=true' -DskipTests verify
+```
+
+Optionally install locally and try a clean sample project using the README
+coordinates:
 
 ```bash
 mvn -B -Pjava8-compat -DskipTests install
 ```
 
-This verifies local Maven metadata and dependency resolution before any Central
-Portal upload.
+## Commit And Tag
 
-## Central Portal Test Upload
+Commit the release version and intentional dependency/doc updates:
+
+```bash
+git status --short --branch
+git add pom.xml zmux/pom.xml zmux-netty-quic/pom.xml README.md RELEASING.md
+git commit -m "release: prepare vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+```
+
+Do not publish a dirty worktree.
+
+## Upload To Central Portal
 
 Deploy with signing enabled:
 
@@ -196,81 +151,37 @@ Deploy with signing enabled:
 mvn -B -Prelease clean deploy
 ```
 
-Do not pass `-Dgpg.skip=true` for this deploy. Because `autoPublish=false`, the
-upload should appear in the Central Portal as an unpublished deployment. Inspect
-the deployment, generated POMs, source jars, javadoc jars, signatures, and
-artifact list before publishing.
+Do not pass `-Dgpg.skip=true`. The release profile attaches source jars,
+javadoc jars, GPG signatures, and uploads with `autoPublish=false`, so the
+Central Portal deployment must still be reviewed manually.
 
-If anything is wrong, drop the Central Portal deployment and fix the release
-commit before retrying. Do not publish a deployment that has not been reviewed.
+In Central Portal, inspect:
+
+- `zmux-parent`, `zmux`, and `zmux-netty-quic` artifacts.
+- Generated POM metadata.
+- Main jars, source jars, javadoc jars, and signatures.
+
+Drop the deployment if anything is wrong. Fix, commit, retag if needed, and
+upload again. Do not publish an unreviewed deployment.
 
 ## Publish And Verify
 
-After publishing the reviewed Central Portal deployment, verify both
-user-facing artifacts from a clean Maven cache or clean sample project:
+After publishing in Central Portal, verify both user-facing artifacts from a
+clean Maven cache or clean sample project:
 
 ```bash
 mvn -U dependency:get -Dartifact=io.github.zmuxio:zmux:X.Y.Z
 mvn -U dependency:get -Dartifact=io.github.zmuxio:zmux-netty-quic:X.Y.Z
 ```
 
-Then smoke-test a minimal Gradle or Maven application using the installation
-snippets in `README.md`.
+Smoke-test a minimal Maven or Gradle app using the README snippets.
 
-## Commit, Tag, Push
-
-Commit the release version and any dependency/doc changes before deploying:
-
-```bash
-git add pom.xml zmux/pom.xml zmux-netty-quic/pom.xml README.md RELEASING.md
-git commit -m "release: prepare vX.Y.Z"
-git tag -a vX.Y.Z -m "vX.Y.Z"
-```
-
-Push only after the Central deployment has been accepted and verified:
+Push only after Central publication is accepted and verified:
 
 ```bash
 git push origin main
 git push origin vX.Y.Z
 ```
 
-## Template
-
-Release `vX.Y.Z`:
-
-```bash
-git status --short --branch
-git fetch origin
-git rev-list --left-right --count main...origin/main
-
-mvn -B versions:display-property-updates
-mvn -B versions:display-dependency-updates
-mvn -B versions:display-plugin-updates
-
-# Apply intentional dependency/plugin/doc updates, then verify.
-mvn -B -Pjava8-compat test
-mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
-
-mvn -B versions:set -DnewVersion=X.Y.Z -DgenerateBackupPoms=false
-mvn -B help:evaluate -Dexpression=project.version -q -DforceStdout
-mvn -B -pl zmux help:evaluate -Dexpression=project.version -q -DforceStdout
-mvn -B -pl zmux-netty-quic help:evaluate -Dexpression=project.version -q -DforceStdout
-
-mvn -B -Pjava8-compat test
-mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
-mvn -B -Pjava8-compat -DskipTests install
-git diff --check
-
-git add pom.xml zmux/pom.xml zmux-netty-quic/pom.xml README.md RELEASING.md
-git commit -m "release: prepare vX.Y.Z"
-git tag -a vX.Y.Z -m "vX.Y.Z"
-
-mvn -B -Prelease clean deploy
-
-# Review and publish the Central Portal deployment, then verify:
-mvn -U dependency:get -Dartifact=io.github.zmuxio:zmux:X.Y.Z
-mvn -U dependency:get -Dartifact=io.github.zmuxio:zmux-netty-quic:X.Y.Z
-
-git push origin main
-git push origin vX.Y.Z
-```
+Maven Central versions are immutable. If a published version is wrong, release a
+new version.
