@@ -53,7 +53,7 @@ jobs:
         run: |
           rm -rf target/staging-deploy
           mvn -B -Prelease -DskipTests deploy \
-            -DaltDeploymentRepository=local::default::file://${{ github.workspace }}/target/staging-deploy
+            -DaltDeploymentRepository=local::file://${{ github.workspace }}/target/staging-deploy
 
       - name: Publish with JReleaser
         uses: jreleaser/release-action@v2
