@@ -10,12 +10,10 @@ and `io.zmux.adapter.quic.netty`; `io.zmux.internal` is implementation detail.
 - `io.github.zmuxio:zmux`: core ZMux APIs and native framing transport.
 - `io.github.zmuxio:zmux-netty-quic`: optional adapter for existing Netty QUIC
   `QuicChannel` transports.
-- `io.github.zmuxio:zmux-parent`: Maven reactor metadata; applications should
-  not depend on it directly.
 
 Replace placeholders in the snippets below:
 
-- `VERSION`: released zmux-java version.
+- `VERSION`: zmux-java version.
 - `NETTY_VERSION`: Netty QUIC version compatible with `zmux-netty-quic`.
 - `OS_CLASSIFIER`: Netty native runtime classifier, such as `windows-x86_64`,
   `linux-x86_64`, `linux-aarch_64`, `osx-x86_64`, or `osx-aarch_64`.
@@ -85,9 +83,6 @@ dependencies {
 }
 ```
 
-When building from a source checkout, inspect `zmux-netty-quic/pom.xml` for the
-adapter's compatible Netty version.
-
 ### Maven
 
 ```xml
@@ -120,46 +115,6 @@ artifacts, add the platform native dependency:
     <scope>runtime</scope>
 </dependency>
 ```
-
-### Source Snapshots
-
-Use Maven Central for releases. For an unreleased Git tag or commit, use
-JitPack:
-
-```kts
-repositories {
-    mavenCentral()
-    maven("https://jitpack.io")
-}
-
-dependencies {
-    implementation("com.github.zmuxio.zmux-java:zmux:TAG_OR_COMMIT")
-}
-```
-
-```xml
-<repositories>
-    <repository>
-        <id>jitpack.io</id>
-        <url>https://jitpack.io</url>
-    </repository>
-</repositories>
-
-<dependency>
-    <groupId>com.github.zmuxio.zmux-java</groupId>
-    <artifactId>zmux</artifactId>
-    <version>TAG_OR_COMMIT</version>
-</dependency>
-```
-
-For local development against a checkout:
-
-```bash
-mvn -Pjava8-compat -DskipTests install
-```
-
-Then use `mavenLocal()` in Gradle or the normal Maven Central coordinates in
-Maven. Maven checks the local cache before remote repositories.
 
 ## Quick Start
 
