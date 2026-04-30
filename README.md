@@ -5,22 +5,21 @@ Java implementation of the ZMux stream multiplexing protocol.
 Released artifacts are Java 8+ compatible. Public APIs live under `io.zmux`
 and `io.zmux.adapter.quic.netty`; `io.zmux.internal` is implementation detail.
 
-## Artifacts
+## Installation
 
-- `io.github.zmuxio:zmux`: core ZMux APIs and native framing transport.
-- `io.github.zmuxio:zmux-netty-quic`: optional adapter for existing Netty QUIC
-  `QuicChannel` transports.
+Use `io.github.zmuxio:zmux` for the core APIs and native ZMux transport.
+Add `io.github.zmuxio:zmux-netty-quic` only when wrapping an existing Netty
+QUIC `QuicChannel`.
 
-Replace placeholders in the snippets below:
+Placeholders:
 
 - `VERSION`: zmux-java version.
 - `NETTY_VERSION`: Netty QUIC version compatible with `zmux-netty-quic`.
 - `OS_CLASSIFIER`: Netty native runtime classifier, such as `windows-x86_64`,
   `linux-x86_64`, `linux-aarch_64`, `osx-x86_64`, or `osx-aarch_64`.
 
-## Installation
-
-### Gradle
+<details>
+<summary>Gradle</summary>
 
 `build.gradle.kts`:
 
@@ -31,6 +30,23 @@ repositories {
 
 dependencies {
     implementation("io.github.zmuxio:zmux:VERSION")
+}
+```
+
+Optional Netty QUIC adapter:
+
+```kts
+dependencies {
+    implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
+}
+```
+
+If your application does not already provide Netty QUIC native runtime
+artifacts, add the platform native runtime too:
+
+```kts
+dependencies {
+    runtimeOnly("io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER")
 }
 ```
 
@@ -48,16 +64,6 @@ dependencies {
 
 Optional Netty QUIC adapter:
 
-`build.gradle.kts`:
-
-```kts
-dependencies {
-    implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
-}
-```
-
-`build.gradle`:
-
 ```groovy
 dependencies {
     implementation 'io.github.zmuxio:zmux-netty-quic:VERSION'
@@ -67,23 +73,16 @@ dependencies {
 If your application does not already provide Netty QUIC native runtime
 artifacts, add the platform native runtime too:
 
-`build.gradle.kts`:
-
-```kts
-dependencies {
-    runtimeOnly("io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER")
-}
-```
-
-`build.gradle`:
-
 ```groovy
 dependencies {
     runtimeOnly 'io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER'
 }
 ```
 
-### Maven
+</details>
+
+<details>
+<summary>Maven</summary>
 
 ```xml
 <dependency>
@@ -115,6 +114,8 @@ artifacts, add the platform native dependency:
     <scope>runtime</scope>
 </dependency>
 ```
+
+</details>
 
 ## Quick Start
 
