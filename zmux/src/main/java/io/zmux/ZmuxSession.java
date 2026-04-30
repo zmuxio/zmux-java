@@ -53,6 +53,14 @@ public interface ZmuxSession extends Closeable {
 
     ZmuxStream openAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException;
 
+    default ZmuxStream openAndSendUtf8(String data) throws IOException, InterruptedException {
+        return openAndSend(TextSupport.utf8Bytes(data, "data"));
+    }
+
+    default ZmuxStream openAndSendUtf8(OpenOptions options, String data) throws IOException, InterruptedException {
+        return openAndSend(options, TextSupport.utf8Bytes(data, "data"));
+    }
+
     default ZmuxStream openAndSend(byte[] data, int offset, int length) throws IOException, InterruptedException {
         return openAndSend(OpenOptions.empty(), data, offset, length);
     }
@@ -90,6 +98,15 @@ public interface ZmuxSession extends Closeable {
     default ZmuxStream openAndSend(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
         return openAndSendWithTimeout(options, timeout, data);
+    }
+
+    default ZmuxStream openAndSendUtf8(Duration timeout, String data) throws IOException, InterruptedException {
+        return openAndSendWithTimeout(timeout, TextSupport.utf8Bytes(data, "data"));
+    }
+
+    default ZmuxStream openAndSendUtf8(OpenOptions options, Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return openAndSendWithTimeout(options, timeout, TextSupport.utf8Bytes(data, "data"));
     }
 
     default ZmuxStream openAndSend(Duration timeout, byte[] data, int offset, int length)
@@ -191,6 +208,14 @@ public interface ZmuxSession extends Closeable {
 
     ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException;
 
+    default ZmuxSendStream openUniAndSendUtf8(String data) throws IOException, InterruptedException {
+        return openUniAndSend(TextSupport.utf8Bytes(data, "data"));
+    }
+
+    default ZmuxSendStream openUniAndSendUtf8(OpenOptions options, String data) throws IOException, InterruptedException {
+        return openUniAndSend(options, TextSupport.utf8Bytes(data, "data"));
+    }
+
     default ZmuxSendStream openUniAndSend(byte[] data, int offset, int length) throws IOException, InterruptedException {
         return openUniAndSend(OpenOptions.empty(), data, offset, length);
     }
@@ -223,6 +248,16 @@ public interface ZmuxSession extends Closeable {
     default ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
         return openUniAndSendWithTimeout(options, timeout, data);
+    }
+
+    default ZmuxSendStream openUniAndSendUtf8(Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(timeout, TextSupport.utf8Bytes(data, "data"));
+    }
+
+    default ZmuxSendStream openUniAndSendUtf8(OpenOptions options, Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return openUniAndSendWithTimeout(options, timeout, TextSupport.utf8Bytes(data, "data"));
     }
 
     default ZmuxSendStream openUniAndSend(Duration timeout, byte[] data, int offset, int length)

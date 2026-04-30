@@ -47,6 +47,14 @@ public interface ZmuxRecvStream extends ZmuxStreamInfo, ReadHalf {
         }
     }
 
+    default String readAllUtf8() throws IOException {
+        return TextSupport.utf8String(readAllBytes());
+    }
+
+    default String readAllUtf8(int maxBytes) throws IOException {
+        return TextSupport.utf8String(readAllBytes(maxBytes));
+    }
+
     default InputStream asInputStream() {
         return new InputStream() {
             private final byte[] singleByte = new byte[1];

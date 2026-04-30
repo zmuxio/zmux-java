@@ -26,6 +26,10 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
         return StreamApiSupport.validateWriteFinalProgress(writeFinal(src, 0, src.length), src.length);
     }
 
+    default int writeFinalUtf8(String src) throws IOException {
+        return writeFinal(TextSupport.utf8Bytes(src, "src"));
+    }
+
     default int writeFinal(ByteBuffer src) throws IOException {
         Objects.requireNonNull(src, "src");
         if (!src.hasRemaining()) {

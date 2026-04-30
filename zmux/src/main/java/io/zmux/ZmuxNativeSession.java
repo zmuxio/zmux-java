@@ -69,6 +69,16 @@ public interface ZmuxNativeSession extends ZmuxSession {
     ZmuxNativeStream openAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException;
 
     @Override
+    default ZmuxNativeStream openAndSendUtf8(String data) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSendUtf8(data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSendUtf8(OpenOptions options, String data) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSendUtf8(options, data);
+    }
+
+    @Override
     default ZmuxNativeStream openAndSend(byte[] data, int offset, int length) throws IOException, InterruptedException {
         return openAndSend(OpenOptions.empty(), data, offset, length);
     }
@@ -98,6 +108,17 @@ public interface ZmuxNativeSession extends ZmuxSession {
     default ZmuxNativeStream openAndSend(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
         return (ZmuxNativeStream) ZmuxSession.super.openAndSend(options, timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSendUtf8(Duration timeout, String data) throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSendUtf8(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeStream openAndSendUtf8(OpenOptions options, Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeStream) ZmuxSession.super.openAndSendUtf8(options, timeout, data);
     }
 
     @Override
@@ -166,6 +187,17 @@ public interface ZmuxNativeSession extends ZmuxSession {
     ZmuxNativeSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException;
 
     @Override
+    default ZmuxNativeSendStream openUniAndSendUtf8(String data) throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSendUtf8(data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSendUtf8(OpenOptions options, String data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSendUtf8(options, data);
+    }
+
+    @Override
     default ZmuxNativeSendStream openUniAndSend(byte[] data, int offset, int length) throws IOException, InterruptedException {
         return openUniAndSend(OpenOptions.empty(), data, offset, length);
     }
@@ -196,6 +228,18 @@ public interface ZmuxNativeSession extends ZmuxSession {
     default ZmuxNativeSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
         return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSend(options, timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSendUtf8(Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSendUtf8(timeout, data);
+    }
+
+    @Override
+    default ZmuxNativeSendStream openUniAndSendUtf8(OpenOptions options, Duration timeout, String data)
+            throws IOException, InterruptedException {
+        return (ZmuxNativeSendStream) ZmuxSession.super.openUniAndSendUtf8(options, timeout, data);
     }
 
     @Override

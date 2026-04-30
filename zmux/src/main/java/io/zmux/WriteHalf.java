@@ -23,6 +23,10 @@ public interface WriteHalf extends Closeable {
         write(src, 0, src.length);
     }
 
+    default void writeUtf8(String src) throws IOException {
+        write(TextSupport.utf8Bytes(src, "src"));
+    }
+
     default int write(ByteBuffer src) throws IOException {
         return StreamIoSupport.writeFromByteBuffer(src, this);
     }
