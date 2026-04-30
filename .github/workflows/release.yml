@@ -58,6 +58,7 @@ jobs:
       - name: Publish with JReleaser
         uses: jreleaser/release-action@v2
         with:
+          version: 1.23.0
           arguments: deploy
           setup-java: false
         env:
