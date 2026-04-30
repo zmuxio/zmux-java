@@ -426,19 +426,28 @@ final class NettyQuicStreamState {
         if (length == 0) {
             return NettyQuicSupport.completedVoid();
         }
-        byte[] payload = new byte[length];
-        System.arraycopy(src, offset, payload, 0, length);
-        return submitBlockingAsync(() -> write(payload, 0, payload.length));
+        ByteBuf buffer;
+        try {
+            buffer = newWriteBuffer(src, offset, length);
+        } catch (Throwable failure) {
+            return NettyQuicSupport.failedFuture(failure);
+        }
+        return NettyQuicSupport.completionStageFromChannelFuture(writeNettyAsync(buffer));
     }
 
     CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
         Objects.requireNonNull(src, "src");
         RangeChecks.checkFromIndexSize(offset, length, src.length);
-        byte[] payload = new byte[length];
-        if (length > 0) {
-            System.arraycopy(src, offset, payload, 0, length);
+        if (length == 0) {
+            return NettyQuicSupport.completionStageFromChannelFuture(closeWriteNettyAsync());
         }
-        return submitBlockingAsync(() -> writeFinal(payload, 0, payload.length));
+        ByteBuf buffer;
+        try {
+            buffer = newWriteBuffer(src, offset, length);
+        } catch (Throwable failure) {
+            return NettyQuicSupport.failedFuture(failure);
+        }
+        return NettyQuicSupport.completionStageFromChannelFuture(writeFinalNettyAsync(buffer));
     }
 
     CompletionStage<Void> closeWriteAsync() {

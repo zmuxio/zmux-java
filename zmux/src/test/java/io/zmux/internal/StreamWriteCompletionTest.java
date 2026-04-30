@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -83,6 +84,26 @@ final class StreamWriteCompletionTest {
             assertTrue(containsMessage(error, "transport boom"), "write should preserve the transport failure reason");
         } finally {
             closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void writeAsyncCompletesAfterQueueAdmissionWithoutWriterTransport() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+
+            CompletionStage<Void> write = stream.writeAsync("async".getBytes(StandardCharsets.UTF_8));
+            write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+
+            synchronized (runtime.lock()) {
+                assertFalse(runtime.dataQueueInternal().isEmpty(), "async write should be accepted into the zmux send queue");
+                assertEquals("async".length(), stream.queuedDataBytesLocked(), "async write should count queued payload bytes");
+            }
+            assertEquals(0, output.size(), "async write should not require the underlying writer to run");
+        } finally {
+            closeRuntime(runtime, null);
         }
     }
 
