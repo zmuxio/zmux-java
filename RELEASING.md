@@ -22,45 +22,6 @@ The tag must match the Maven reactor version exactly:
 - Maven version: `X.Y.Z`
 - Git tag: `vX.Y.Z`
 
-## Required GitHub Secrets
-
-- `JRELEASER_MAVENCENTRAL_USERNAME`
-- `JRELEASER_MAVENCENTRAL_TOKEN`
-- `JRELEASER_GPG_PUBLIC_KEY`
-- `JRELEASER_GPG_SECRET_KEY`
-- `JRELEASER_GPG_PASSPHRASE`
-
-The Central Portal namespace must allow publishing under `io.github.zmuxio`.
-`JRELEASER_GITHUB_TOKEN` is provided by GitHub Actions through
-`${{ secrets.GITHUB_TOKEN }}` and does not need to be created manually.
-
-Central Portal token values map to the old Maven `settings.xml` shape like
-this:
-
-```xml
-<server>
-  <id>central</id>
-  <username>...</username>
-  <password>...</password>
-</server>
-```
-
-Use the `<username>` value as `JRELEASER_MAVENCENTRAL_USERNAME` and the
-`<password>` value as `JRELEASER_MAVENCENTRAL_TOKEN`. The server id is not used
-by the workflow because Maven only stages artifacts locally; JReleaser uploads
-to Maven Central.
-
-Export the signing key material as armored text and store it as GitHub Secrets:
-
-```bash
-gpg --armor --export KEY_ID
-gpg --armor --export-secret-key KEY_ID
-```
-
-Use the public key output for `JRELEASER_GPG_PUBLIC_KEY`, the secret key output
-for `JRELEASER_GPG_SECRET_KEY`, and the key passphrase for
-`JRELEASER_GPG_PASSPHRASE`.
-
 ## Before Release
 
 Start from an up-to-date clean `main`:
