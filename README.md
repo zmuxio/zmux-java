@@ -2,95 +2,28 @@
 
 Java implementation of the ZMux stream multiplexing protocol.
 
-Released artifacts are Java 8+ compatible. Public APIs live under `io.zmux`
-and `io.zmux.adapter.quic.netty`; `io.zmux.internal` is implementation detail.
+Released artifacts are Java 8+ compatible. Core public APIs live under
+`io.zmux`; `io.zmux.internal` is implementation detail.
 
 It provides:
 
 - native ZMux sessions through `ZmuxNativeSession`
 - transport-agnostic stable interfaces: `ZmuxSession`, `ZmuxStream`,
   `ZmuxSendStream`, and `ZmuxRecvStream`
-- an optional Netty QUIC adapter in `zmux-netty-quic`
+- an optional Netty QUIC adapter in
+  [`zmux-netty-quic`](zmux-netty-quic/README.md)
 
 ## Installation
 
-Use `io.github.zmuxio:zmux` for the core APIs and native ZMux transport.
-Add `io.github.zmuxio:zmux-netty-quic` only when wrapping an existing Netty
-QUIC `QuicChannel`.
-
-Placeholders:
-
-- `VERSION`: zmux-java version.
-- `NETTY_VERSION`: Netty QUIC version compatible with `zmux-netty-quic`.
-- `OS_CLASSIFIER`: Netty native runtime classifier, such as `windows-x86_64`,
-  `linux-x86_64`, `linux-aarch_64`, `osx-x86_64`, or `osx-aarch_64`.
-
-<details>
-<summary>Gradle</summary>
-
-`build.gradle.kts`:
+Gradle:
 
 ```kts
-repositories {
-    mavenCentral()
-}
-
 dependencies {
     implementation("io.github.zmuxio:zmux:VERSION")
 }
 ```
 
-Optional Netty QUIC adapter:
-
-```kts
-dependencies {
-    implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
-}
-```
-
-The adapter artifact brings the Netty QUIC classes it compiles against. If
-your application does not already provide Netty QUIC native runtime artifacts,
-add the platform native runtime too:
-
-```kts
-dependencies {
-    runtimeOnly("io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER")
-}
-```
-
-`build.gradle`:
-
-```groovy
-repositories {
-    mavenCentral()
-}
-
-dependencies {
-    implementation 'io.github.zmuxio:zmux:VERSION'
-}
-```
-
-Optional Netty QUIC adapter:
-
-```groovy
-dependencies {
-    implementation 'io.github.zmuxio:zmux-netty-quic:VERSION'
-}
-```
-
-If your application does not already provide Netty QUIC native runtime
-artifacts, add the platform native runtime too:
-
-```groovy
-dependencies {
-    runtimeOnly 'io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER'
-}
-```
-
-</details>
-
-<details>
-<summary>Maven</summary>
+Maven:
 
 ```xml
 <dependency>
@@ -100,30 +33,8 @@ dependencies {
 </dependency>
 ```
 
-Optional Netty QUIC adapter:
-
-```xml
-<dependency>
-    <groupId>io.github.zmuxio</groupId>
-    <artifactId>zmux-netty-quic</artifactId>
-    <version>VERSION</version>
-</dependency>
-```
-
-If your application does not already provide Netty QUIC native runtime
-artifacts, add the platform native dependency:
-
-```xml
-<dependency>
-    <groupId>io.netty</groupId>
-    <artifactId>netty-codec-native-quic</artifactId>
-    <version>NETTY_VERSION</version>
-    <classifier>OS_CLASSIFIER</classifier>
-    <scope>runtime</scope>
-</dependency>
-```
-
-</details>
+For the optional Netty QUIC adapter, use
+[`zmux-netty-quic`](zmux-netty-quic/README.md).
 
 ## Constructors
 
@@ -694,29 +605,7 @@ read or write half.
 
 ## Netty QUIC Adapter
 
-Use `zmux-netty-quic` only when your application already has an established
-Netty `QuicChannel`. The adapter exposes the stable `ZmuxSession`,
-`ZmuxStream`, `ZmuxSendStream`, and `ZmuxRecvStream` interfaces, so the same
-upper-layer code can handle native ZMux sessions and adapted QUIC sessions.
-
-```java
-import io.netty.handler.codec.quic.QuicChannel;
-import io.zmux.ZmuxSession;
-import io.zmux.ZmuxStream;
-import io.zmux.adapter.quic.netty.NettyQuic;
-
-import java.nio.charset.StandardCharsets;
-
-QuicChannel channel = ...;
-try (ZmuxSession session = NettyQuic.wrapSession(channel);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-}
-```
-
-Call blocking ZMux APIs from application or worker threads, not from the Netty
-event loop. Adapter-specific constructors, options, metadata mapping, error
-mapping, and reduced behavior are documented in
+The optional Netty QUIC adapter is documented in
 [`zmux-netty-quic/README.md`](zmux-netty-quic/README.md).
 
 ## Codec And Diagnostics
@@ -743,9 +632,8 @@ ZmuxCodec.writePreface(output, preface);
 ZmuxCodec.negotiatePrefaces(local, peer);
 ```
 
-`ZmuxConformance`, `ZmuxCoreConformance`, and
-`io.zmux.adapter.quic.netty.NettyQuicConformance` provide conformance support
-for implementation tests.
+`ZmuxConformance` and `ZmuxCoreConformance` provide conformance support for
+implementation tests.
 
 `Protocol`, `Preface`, and `Negotiated` expose capability helpers such as
 `hasCapability(...)`, `supportsOpenMetadata()`, `supportsPriorityUpdate()`,
