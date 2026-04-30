@@ -177,7 +177,7 @@
                         <artifactId>maven-deploy-plugin</artifactId>
                         <version>${maven.deploy.version}</version>
                         <configuration>
-                            <altDeploymentRepository>local::file:${maven.multiModuleProjectDirectory}/target/staging-deploy</altDeploymentRepository>
+                            <altDeploymentRepository>local::default::file:${maven.multiModuleProjectDirectory}/target/staging-deploy</altDeploymentRepository>
                         </configuration>
                     </plugin>
                 </plugins>

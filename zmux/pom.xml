@@ -12,6 +12,7 @@
     <artifactId>zmux</artifactId>
     <name>zmux</name>
     <description>Core Java implementation of the ZMux multiplexing protocol.</description>
+    <url>https://github.com/zmuxio/zmux-java/tree/main/zmux</url>
 
     <dependencies>
         <dependency>
