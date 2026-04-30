@@ -61,10 +61,9 @@
         <zmux.compat.java.release>8</zmux.compat.java.release>
         <junit.version>5.14.4</junit.version>
         <maven.surefire.version>3.5.5</maven.surefire.version>
+        <maven.deploy.version>3.1.4</maven.deploy.version>
         <maven.source.version>3.4.0</maven.source.version>
         <maven.javadoc.version>3.12.0</maven.javadoc.version>
-        <maven.gpg.version>3.2.8</maven.gpg.version>
-        <central.publishing.maven.plugin.version>0.10.0</central.publishing.maven.plugin.version>
         <jmh.version>1.37</jmh.version>
         <bouncycastle.version>1.84</bouncycastle.version>
         <surefire.forkCount>1</surefire.forkCount>
@@ -175,27 +174,10 @@
                     </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-gpg-plugin</artifactId>
-                        <version>${maven.gpg.version}</version>
-                        <executions>
-                            <execution>
-                                <id>sign-artifacts</id>
-                                <phase>verify</phase>
-                                <goals>
-                                    <goal>sign</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.sonatype.central</groupId>
-                        <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>${central.publishing.maven.plugin.version}</version>
-                        <extensions>true</extensions>
+                        <artifactId>maven-deploy-plugin</artifactId>
+                        <version>${maven.deploy.version}</version>
                         <configuration>
-                            <publishingServerId>central</publishingServerId>
-                            <deploymentName>zmux-java ${project.version}</deploymentName>
-                            <autoPublish>false</autoPublish>
+                            <altDeploymentRepository>local::file:${maven.multiModuleProjectDirectory}/target/staging-deploy</altDeploymentRepository>
                         </configuration>
                     </plugin>
                 </plugins>

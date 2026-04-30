@@ -23,6 +23,9 @@ dependencies {
 }
 ```
 
+Use `mavenCentral()` in `repositories` and replace `VERSION` with a released
+version.
+
 Maven:
 
 ```xml

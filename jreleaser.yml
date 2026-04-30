@@ -1,0 +1,38 @@
+project:
+  name: zmux-java
+  description: Java implementation of the ZMux stream multiplexing protocol.
+  authors:
+    - ZMux maintainers
+  license: Apache-2.0
+  links:
+    homepage: https://github.com/zmuxio/zmux-java
+  languages:
+    java:
+      groupId: io.github.zmuxio
+      version: 8
+      multiProject: true
+
+signing:
+  active: RELEASE
+  pgp:
+    active: RELEASE
+    armored: true
+    mode: MEMORY
+
+release:
+  github:
+    owner: zmuxio
+    name: zmux-java
+    skipTag: true
+    skipRelease: true
+
+deploy:
+  maven:
+    mavenCentral:
+      zmux:
+        active: RELEASE
+        url: https://central.sonatype.com/api/v1/publisher
+        namespace: io.github.zmuxio
+        applyMavenCentralRules: true
+        stagingRepositories:
+          - target/staging-deploy
