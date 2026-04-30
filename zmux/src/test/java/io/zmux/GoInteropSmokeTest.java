@@ -25,7 +25,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 final class GoInteropSmokeTest {
-    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(20);
+    private static final Duration PROCESS_TIMEOUT = processTimeout();
+
+    private static Duration processTimeout() {
+        String raw = System.getenv("ZMUX_INTEROP_TIMEOUT_SECONDS");
+        if (raw == null || raw.trim().isEmpty()) {
+            return Duration.ofSeconds(20);
+        }
+        try {
+            long seconds = Long.parseLong(raw.trim());
+            if (seconds > 0L) {
+                return Duration.ofSeconds(seconds);
+            }
+        } catch (NumberFormatException ignored) {
+            // Fall back to the default below.
+        }
+        return Duration.ofSeconds(20);
+    }
 
     private static ZmuxConfig interopConfig() {
         long capabilities = Protocol.CAPABILITY_OPEN_METADATA
@@ -35,6 +51,12 @@ final class GoInteropSmokeTest {
         return ZmuxConfig.defaults()
                 .toBuilder()
                 .capabilities(capabilities)
+                .prefacePadding(true)
+                .prefacePaddingMinBytes(16L)
+                .prefacePaddingMaxBytes(16L)
+                .pingPadding(true)
+                .pingPaddingMinBytes(16L)
+                .pingPaddingMaxBytes(16L)
                 .build();
     }
 
@@ -54,6 +76,10 @@ final class GoInteropSmokeTest {
         int port = Integer.parseInt(hostPort[1]);
         try (Socket socket = new Socket(host, port);
              ZmuxNativeSession session = Zmux.client(socketConnection(socket), interopConfig())) {
+            assertTrue(session.localPreface().settings().pingPaddingKey() != 0L, "local ping padding key not advertised");
+            assertTrue(session.peerPreface().settings().pingPaddingKey() != 0L, "peer ping padding key not advertised");
+            session.ping("java-ping-go-server".getBytes(StandardCharsets.UTF_8), Duration.ofSeconds(5));
+
             OpenOptions options = new OpenOptions(
                     7L,
                     9L,
@@ -77,6 +103,10 @@ final class GoInteropSmokeTest {
     private static void runJavaServer(Socket socket) throws Exception {
         try (Socket acceptedSocket = socket;
              ZmuxNativeSession session = Zmux.server(socketConnection(acceptedSocket), interopConfig())) {
+            assertTrue(session.localPreface().settings().pingPaddingKey() != 0L, "local ping padding key not advertised");
+            assertTrue(session.peerPreface().settings().pingPaddingKey() != 0L, "peer ping padding key not advertised");
+            session.ping("java-ping-go-client".getBytes(StandardCharsets.UTF_8), Duration.ofSeconds(5));
+
             ZmuxNativeStream stream = session.acceptStream(Duration.ofSeconds(5));
             assertEquals("go-open", new String(stream.openInfo(), StandardCharsets.UTF_8));
             StreamMetadata metadata = stream.metadata();
@@ -123,17 +153,36 @@ final class GoInteropSmokeTest {
         }
     }
 
-    private static String goMod(Path goRoot) {
+    private static String goMod(Path goRoot) throws IOException {
         return String.format(
                 "module zmux_java_interop_smoke\n"
                         + "\n"
-                        + "go 1.25\n"
+                        + "go %s\n"
                         + "\n"
                         + "require github.com/zmuxio/zmux-go v0.0.0\n"
                         + "\n"
                         + "replace github.com/zmuxio/zmux-go => %s\n",
-                goRoot.toAbsolutePath().toString().replace('\\', '/')
+                goModVersion(goRoot),
+                goModString(goRoot)
         );
+    }
+
+    private static String goModVersion(Path goRoot) throws IOException {
+        for (String line : Files.readAllLines(goRoot.resolve("go.mod"), StandardCharsets.UTF_8)) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("go ")) {
+                String[] parts = trimmed.split("\\s+");
+                if (parts.length >= 2) {
+                    return parts[1];
+                }
+            }
+        }
+        throw new IOException("Go root go.mod missing go directive");
+    }
+
+    private static String goModString(Path path) {
+        String normalized = path.toAbsolutePath().normalize().toString().replace('\\', '/');
+        return "\"" + normalized.replace("\"", "\\\"") + "\"";
     }
 
     private static void deleteTree(Path root) {
@@ -238,7 +287,15 @@ final class GoInteropSmokeTest {
                 "        fatal(\"accept: %v\", err)",
                 "    }",
                 "    caps := zmux.CapabilityOpenMetadata | zmux.CapabilityPriorityUpdate | zmux.CapabilityPriorityHints | zmux.CapabilityStreamGroups",
-                "    session, err := zmux.Server(raw, &zmux.Config{Capabilities: caps})",
+                "    session, err := zmux.Server(raw, &zmux.Config{",
+                "        Capabilities: caps,",
+                "        PrefacePadding: true,",
+                "        PrefacePaddingMinBytes: 16,",
+                "        PrefacePaddingMaxBytes: 16,",
+                "        PingPadding: true,",
+                "        PingPaddingMinBytes: 16,",
+                "        PingPaddingMaxBytes: 16,",
+                "    })",
                 "    if err != nil {",
                 "        fatal(\"server: %v\", err)",
                 "    }",
@@ -246,6 +303,15 @@ final class GoInteropSmokeTest {
                 "",
                 "    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)",
                 "    defer cancel()",
+                "    if session.LocalPreface().Settings.PingPaddingKey == 0 {",
+                "        fatal(\"local ping padding key was not advertised\")",
+                "    }",
+                "    if session.PeerPreface().Settings.PingPaddingKey == 0 {",
+                "        fatal(\"peer ping padding key was not advertised\")",
+                "    }",
+                "    if _, err := session.Ping(ctx, []byte(\"go-ping-java-client\")); err != nil {",
+                "        fatal(\"ping java client: %v\", err)",
+                "    }",
                 "    stream, err := session.AcceptStream(ctx)",
                 "    if err != nil {",
                 "        fatal(\"accept stream: %v\", err)",
@@ -260,6 +326,9 @@ final class GoInteropSmokeTest {
                 "    payload, err := io.ReadAll(stream)",
                 "    if err != nil {",
                 "        fatal(\"read stream: %v\", err)",
+                "    }",
+                "    if got := string(payload); got != \"java->go\" {",
+                "        fatal(\"payload = %q\", got)",
                 "    }",
                 "    if _, err := stream.WriteFinal([]byte(\"go:\"+string(payload))); err != nil {",
                 "        fatal(\"write final: %v\", err)",
@@ -306,7 +375,15 @@ final class GoInteropSmokeTest {
                 "        fatal(\"dial: %v\", err)",
                 "    }",
                 "    caps := zmux.CapabilityOpenMetadata | zmux.CapabilityPriorityUpdate | zmux.CapabilityPriorityHints | zmux.CapabilityStreamGroups",
-                "    session, err := zmux.Client(raw, &zmux.Config{Capabilities: caps})",
+                "    session, err := zmux.Client(raw, &zmux.Config{",
+                "        Capabilities: caps,",
+                "        PrefacePadding: true,",
+                "        PrefacePaddingMinBytes: 16,",
+                "        PrefacePaddingMaxBytes: 16,",
+                "        PingPadding: true,",
+                "        PingPaddingMinBytes: 16,",
+                "        PingPaddingMaxBytes: 16,",
+                "    })",
                 "    if err != nil {",
                 "        fatal(\"client: %v\", err)",
                 "    }",
@@ -314,6 +391,15 @@ final class GoInteropSmokeTest {
                 "",
                 "    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)",
                 "    defer cancel()",
+                "    if session.LocalPreface().Settings.PingPaddingKey == 0 {",
+                "        fatal(\"local ping padding key was not advertised\")",
+                "    }",
+                "    if session.PeerPreface().Settings.PingPaddingKey == 0 {",
+                "        fatal(\"peer ping padding key was not advertised\")",
+                "    }",
+                "    if _, err := session.Ping(ctx, []byte(\"go-ping-java-server\")); err != nil {",
+                "        fatal(\"ping java server: %v\", err)",
+                "    }",
                 "    priority := uint64(7)",
                 "    group := uint64(9)",
                 "    stream, err := session.OpenStreamWithOptions(ctx, zmux.OpenOptions{",
@@ -353,13 +439,14 @@ final class GoInteropSmokeTest {
         assumeTrue(goRootEnv != null && !goRootEnv.trim().isEmpty(), "set ZMUX_GO_ROOT to the Go implementation root");
         Path goRoot = Paths.get(goRootEnv);
         assumeTrue(Files.isDirectory(goRoot), "Go implementation root not found: " + goRoot);
+        goRoot = goRoot.toRealPath();
         assumeTrue(commandExists("go"), "go executable not found");
 
         Path work = Files.createTempDirectory("zmux-java-go-interop-");
         Files.write(work.resolve("go.mod"), goMod(goRoot).getBytes(StandardCharsets.UTF_8));
         Files.write(work.resolve("main.go"), goServerMain().getBytes(StandardCharsets.UTF_8));
 
-        Process process = new ProcessBuilder("go", "run", ".")
+        Process process = new ProcessBuilder("go", "run", "-mod=mod", ".")
                 .directory(work.toFile())
                 .redirectErrorStream(true)
                 .start();
@@ -383,6 +470,7 @@ final class GoInteropSmokeTest {
         assumeTrue(goRootEnv != null && !goRootEnv.trim().isEmpty(), "set ZMUX_GO_ROOT to the Go implementation root");
         Path goRoot = Paths.get(goRootEnv);
         assumeTrue(Files.isDirectory(goRoot), "Go implementation root not found: " + goRoot);
+        goRoot = goRoot.toRealPath();
         assumeTrue(commandExists("go"), "go executable not found");
 
         Path work = Files.createTempDirectory("zmux-go-java-interop-");
@@ -400,7 +488,7 @@ final class GoInteropSmokeTest {
             });
 
             String address = "127.0.0.1:" + listener.getLocalPort();
-            Process process = new ProcessBuilder("go", "run", ".", address)
+            Process process = new ProcessBuilder("go", "run", "-mod=mod", ".", address)
                     .directory(work.toFile())
                     .redirectErrorStream(true)
                     .start();

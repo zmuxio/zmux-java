@@ -2,7 +2,10 @@ package io.zmux.internal;
 
 import io.zmux.*;
 
+import java.io.EOFException;
 import java.io.IOException;
+import java.net.SocketException;
+import java.util.Locale;
 import java.util.Objects;
 
 final class SessionReaderCoordinator {
@@ -30,6 +33,24 @@ final class SessionReaderCoordinator {
                 ZmuxErrorDirection.BOTH,
                 ZmuxTerminationKind.SESSION_TERMINATION
         );
+    }
+
+    private static boolean isTransportClose(IOException error) {
+        if (error instanceof EOFException) {
+            return true;
+        }
+        if (!(error instanceof SocketException)) {
+            return false;
+        }
+        String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("closed")
+                || normalized.contains("reset")
+                || normalized.contains("abort")
+                || normalized.contains("broken pipe");
     }
 
     private boolean ignorePeerNonCloseFrame(FrameType frameType) {
@@ -130,12 +151,14 @@ final class SessionReaderCoordinator {
             }
         } catch (IOException error) {
             synchronized (this.owner.lock()) {
-                if (this.owner.state() == SessionState.CLOSING
-                        || this.owner.state() == SessionState.CLOSED
-                        || this.owner.state() == SessionState.FAILED) {
+                SessionState state = this.owner.state();
+                if ((state == SessionState.CLOSING
+                        || state == SessionState.CLOSED
+                        || state == SessionState.FAILED)
+                        && SessionReaderCoordinator.isTransportClose(error)) {
                     this.owner.finishSessionLocked(
                             null,
-                            this.owner.state() == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED
+                            state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED
                     );
                     return;
                 }

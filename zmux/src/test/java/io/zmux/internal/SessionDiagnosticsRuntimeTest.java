@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -189,6 +190,57 @@ final class SessionDiagnosticsRuntimeTest {
         }, name);
         reader.start();
         return reader;
+    }
+
+    private static final class BlockingBytesInputStream extends java.io.InputStream {
+        private final byte[] bytes;
+        private final CountDownLatch readStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseRead = new CountDownLatch(1);
+        private int position;
+
+        private BlockingBytesInputStream(byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        boolean awaitReadStart() throws InterruptedException {
+            return this.readStarted.await(1L, TimeUnit.SECONDS);
+        }
+
+        void releaseRead() {
+            this.releaseRead.countDown();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return 0;
+            }
+            this.readStarted.countDown();
+            this.awaitRelease();
+            if (this.position >= this.bytes.length) {
+                return -1;
+            }
+            int count = Math.min(length, this.bytes.length - this.position);
+            System.arraycopy(this.bytes, this.position, buffer, offset, count);
+            this.position += count;
+            return count;
+        }
+
+        @Override
+        public int read() throws IOException {
+            byte[] one = new byte[1];
+            int count = this.read(one, 0, 1);
+            return count < 0 ? -1 : one[0] & 0xff;
+        }
+
+        private void awaitRelease() throws IOException {
+            try {
+                this.releaseRead.await();
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                throw new IOException("synthetic blocked read interrupted", interruptedException);
+            }
+        }
     }
 
     @Test
@@ -970,6 +1022,39 @@ final class SessionDiagnosticsRuntimeTest {
         assertNull(failure.get(), "reader loop should not treat ignored inbound state as a transport failure");
         assertFalse(runtime.awaitTermination(Duration.ofMillis(20)), "reader loop exit should not finalize the session before the queued CLOSE flushes");
         assertEquals(SessionState.CLOSING, runtime.state(), "local close start should remain in CLOSING until the close frame flushes");
+    }
+
+    @Test
+    void readerProtocolFailureRacingLocalCloseFailsSession() throws Exception {
+        BlockingBytesInputStream input = new BlockingBytesInputStream(
+                encodeFrame(FrameType.PING, 0, 4L, new byte[8])
+        );
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(
+                        input,
+                        SessionRuntimeTestSupport.discardingOutput()
+                ),
+                null,
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        Thread reader = startReaderLoop(runtime, failure, "session-reader-protocol-races-local-close");
+        assertTrue(input.awaitReadStart(), "reader loop should block in transport read before local close starts");
+        runtime.closeWithError(ErrorCode.NO_ERROR.code(), "");
+        input.releaseRead();
+        reader.join(1_000L);
+
+        assertFalse(reader.isAlive(), "reader loop should terminate after the protocol failure");
+        assertNull(failure.get(), "reader loop should retain the protocol failure in runtime state");
+        assertEquals(SessionState.FAILED, runtime.state(), "protocol failure must not be converted into a clean local close");
+        IOException terminationCause = runtime.terminationCause().orElseThrow(() ->
+                new AssertionError("protocol failure should remain as the runtime termination cause")
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), ZmuxErrors.code(terminationCause, -1L), "termination code mismatch");
+        assertEquals(ZmuxErrorSource.REMOTE, ZmuxErrors.source(terminationCause), "termination source mismatch");
+        assertEquals(ZmuxErrorDirection.READ, ZmuxErrors.direction(terminationCause), "termination direction mismatch");
     }
 
     @Test

@@ -93,6 +93,10 @@ final class GoQuicInteropSmokeTest {
         return isWindows() ? baseName + ".exe" : baseName;
     }
 
+    private static String goModString(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
     private static Path buildGoHelper(Path work, String baseName) throws Exception {
         Path executable = work.resolve(helperExecutableName(baseName));
         Process process = new ProcessBuilder("go", "build", "-mod=mod", "-o", executable.toString(), ".")
@@ -121,8 +125,8 @@ final class GoQuicInteropSmokeTest {
     }
 
     private static String goQuicMod(Path goRoot) {
-        String goPath = goRoot.toAbsolutePath().toString().replace('\\', '/');
-        String adapterPath = goRoot.resolve("adapter").resolve("quicmux").toAbsolutePath().toString().replace('\\', '/');
+        String goPath = goModString(goRoot.toAbsolutePath().toString().replace('\\', '/'));
+        String adapterPath = goModString(goRoot.resolve("adapter").resolve("quicmux").toAbsolutePath().toString().replace('\\', '/'));
         return String.format(
                 "module zmux_java_go_quic_interop_smoke\n"
                         + "\n"
@@ -260,6 +264,16 @@ final class GoQuicInteropSmokeTest {
         }
     }
 
+    private static void closeQuietly(ZmuxSession session) {
+        if (session == null) {
+            return;
+        }
+        try {
+            session.close();
+        } catch (IOException ignored) {
+        }
+    }
+
     private static void shutdownGroupQuietly(EventLoopGroup group) {
         if (group == null) {
             return;
@@ -308,7 +322,8 @@ final class GoQuicInteropSmokeTest {
                             .connect()
             );
 
-            try (ZmuxSession session = NettyQuic.wrapSession(rawClient)) {
+            ZmuxSession session = NettyQuic.wrapSession(rawClient);
+            try {
                 ZmuxStream stream = session.openStream(new OpenOptions(
                         7L,
                         11L,
@@ -317,13 +332,23 @@ final class GoQuicInteropSmokeTest {
                 stream.writeFinal("java->go".getBytes(StandardCharsets.UTF_8));
                 ByteArrayOutputStream response = new ByteArrayOutputStream();
                 byte[] buffer = new byte[64];
-                int read;
-                while ((read = stream.read(buffer)) >= 0) {
+                for (;;) {
+                    int read;
+                    try {
+                        read = stream.read(buffer);
+                    } catch (io.zmux.SessionClosedException remoteClosed) {
+                        break;
+                    }
+                    if (read < 0) {
+                        break;
+                    }
                     response.write(buffer, 0, read);
                 }
                 assertEquals("go:java->go", response.toString(StandardCharsets.UTF_8.name()));
-                session.close();
-                session.awaitTerminationOrThrow(Duration.ofSeconds(5));
+                closeQuietly(session);
+                assertTrue(session.awaitTermination(Duration.ofSeconds(5)));
+            } finally {
+                closeQuietly(session);
             }
         } finally {
             closeQuietly(rawClient);
@@ -427,6 +452,10 @@ final class GoQuicInteropSmokeTest {
                 "    }",
                 "    if _, err := stream.WriteFinal([]byte(\"go:\" + string(payload))); err != nil {",
                 "        fatal(\"write final: %v\", err)",
+                "    }",
+                "    var gate [1]byte",
+                "    if _, err := os.Stdin.Read(gate[:]); err != nil {",
+                "        fatal(\"read close signal: %v\", err)",
                 "    }",
                 "    if err := session.Close(); err != nil {",
                 "        fatal(\"close session: %v\", err)",
@@ -535,6 +564,9 @@ final class GoQuicInteropSmokeTest {
             String address = firstOutputLine(output);
             assertTrue(address.startsWith("ADDR "), "unexpected go helper output: " + address);
             runJavaClient(address.substring("ADDR ".length()));
+            process.getOutputStream().write(1);
+            process.getOutputStream().flush();
+            process.getOutputStream().close();
             assertTrue(process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS), "go helper did not exit");
             String rest = output.lines().collect(Collectors.joining("\n"));
             assertEquals(0, process.exitValue(), rest);
@@ -592,7 +624,8 @@ final class GoQuicInteropSmokeTest {
                     .start();
             try (BufferedReader output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 rawServer = NettyQuicTestSupport.await(acceptedServer);
-                try (ZmuxSession session = NettyQuic.wrapSession(rawServer)) {
+                ZmuxSession session = NettyQuic.wrapSession(rawServer);
+                try {
                     process.getOutputStream().write(1);
                     process.getOutputStream().flush();
                     process.getOutputStream().close();
@@ -603,14 +636,12 @@ final class GoQuicInteropSmokeTest {
                     assertEquals(Long.valueOf(11L), metadata.group());
                     assertEquals("go->java", new String(NettyQuicTestSupport.readAll(stream), StandardCharsets.UTF_8));
                     stream.writeFinal("java:go->java".getBytes(StandardCharsets.UTF_8));
-                    stream.close();
-                    session.close();
-                    session.awaitTerminationOrThrow(Duration.ofSeconds(5));
+                    assertTrue(process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS), "go helper did not exit");
+                    String rest = output.lines().collect(Collectors.joining("\n"));
+                    assertEquals(0, process.exitValue(), rest);
+                } finally {
+                    closeQuietly(session);
                 }
-
-                assertTrue(process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS), "go helper did not exit");
-                String rest = output.lines().collect(Collectors.joining("\n"));
-                assertEquals(0, process.exitValue(), rest);
             } finally {
                 terminateProcess(process);
             }

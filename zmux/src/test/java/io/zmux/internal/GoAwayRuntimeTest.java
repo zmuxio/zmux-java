@@ -200,6 +200,26 @@ final class GoAwayRuntimeTest {
     }
 
     @Test
+    void outOfRangeLocalGoAwayWatermarkDoesNotCommitDrainStateOrWatermarks() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        long initialBidi = runtime.localGoAwayBidiInternal();
+        long initialUni = runtime.localGoAwayUniInternal();
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> runtime.goAway(Protocol.MAX_VARINT62 + 1L, 0L, ErrorCode.NO_ERROR.code(), "invalid"),
+                "out-of-range GOAWAY watermark should fail before committing local GOAWAY state"
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "out-of-range GOAWAY watermark error code mismatch");
+        assertEquals("GOAWAY watermark exceeds varint62 range", error.getMessage(), "out-of-range GOAWAY watermark message mismatch");
+        assertEquals(SessionState.READY, runtime.state(), "out-of-range GOAWAY watermark must not move the session to DRAINING");
+        assertEquals(initialBidi, runtime.localGoAwayBidiInternal(), "out-of-range GOAWAY watermark must not commit the bidi watermark");
+        assertEquals(initialUni, runtime.localGoAwayUniInternal(), "out-of-range GOAWAY watermark must not commit the uni watermark");
+        assertEquals(0, SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size(), "out-of-range GOAWAY watermark must not enqueue a control frame");
+    }
+
+    @Test
     void duplicateLocalGoAwayDoesNotQueueDuplicateControlFrames() throws Exception {
         SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
 

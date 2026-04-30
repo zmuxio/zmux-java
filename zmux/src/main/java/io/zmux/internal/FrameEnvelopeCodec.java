@@ -5,6 +5,7 @@ import io.zmux.FrameType;
 import io.zmux.Limits;
 import io.zmux.Protocol;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -59,7 +60,7 @@ final class FrameEnvelopeCodec {
                                          InboundPayloadPool payloadPool) throws IOException {
         Limits normalized = limits.normalize();
         Varint62.Decoded frameLength = readValidatedFrameLength(input, normalized);
-        int code = input.readByte();
+        int code = readRequiredFrameByte(input);
         FrameType type = parseFrameType(code & 0x1f);
         int flags = code & 0xe0;
         Varint62.Decoded streamIdDecoded = readStreamId(input, frameLength.value());
@@ -78,7 +79,11 @@ final class FrameEnvelopeCodec {
                 : handle == null ? new byte[payloadLengthInt] : handle.bytes();
         boolean success = false;
         try {
-            input.readFully(payload, 0, payloadLengthInt);
+            try {
+                input.readFully(payload, 0, payloadLengthInt);
+            } catch (EOFException eof) {
+                throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame", eof);
+            }
             FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
             validateFrame(frame, normalized, true);
             success = true;
@@ -677,7 +682,48 @@ final class FrameEnvelopeCodec {
     }
 
     private static Varint62.Decoded readValidatedFrameLength(FrameCodec.Decoder input, Limits normalized) throws IOException {
-        return validateFrameLength(Varint62.read(input), normalized);
+        return validateFrameLength(readDecoderFrameLength(input), normalized);
+    }
+
+    private static Varint62.Decoded readDecoderFrameLength(FrameCodec.Decoder input) throws IOException {
+        int first = input.readByteOrEof();
+        if (first < 0) {
+            throw new EOFException();
+        }
+        int length = 1 << (first >>> 6);
+        long value;
+        switch (length) {
+            case 1:
+                value = first & 0x3fL;
+                break;
+            case 2:
+                value = ((first & 0x3fL) << 8) | readRequiredVarintByte(input);
+                break;
+            case 4:
+                value = ((first & 0x3fL) << 24)
+                        | ((long) readRequiredVarintByte(input) << 16)
+                        | ((long) readRequiredVarintByte(input) << 8)
+                        | readRequiredVarintByte(input);
+                break;
+            case 8:
+                value = Varint62.decodeEightByteValue(
+                        first,
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input)
+                );
+                break;
+            default:
+                throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "truncated varint62");
+        }
+        if (Varint62.length(value) != length) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "non-canonical varint62");
+        }
+        return new Varint62.Decoded(value, length);
     }
 
     private static Varint62.Decoded readStreamId(InputStream input, long frameLength) throws IOException {
@@ -720,7 +766,7 @@ final class FrameEnvelopeCodec {
     }
 
     private static Varint62.Decoded readStreamId(FrameCodec.Decoder input, long frameLength) throws IOException {
-        int first = input.readByte();
+        int first = readRequiredFrameByte(input);
         int length = validatedStreamIdLength(first, frameLength);
         long value;
         switch (length) {
@@ -728,24 +774,24 @@ final class FrameEnvelopeCodec {
                 value = first & 0x3fL;
                 break;
             case 2:
-                value = ((first & 0x3fL) << 8) | input.readByte();
+                value = ((first & 0x3fL) << 8) | readRequiredFrameByte(input);
                 break;
             case 4:
                 value = ((first & 0x3fL) << 24)
-                        | ((long) input.readByte() << 16)
-                        | ((long) input.readByte() << 8)
-                        | input.readByte();
+                        | ((long) readRequiredFrameByte(input) << 16)
+                        | ((long) readRequiredFrameByte(input) << 8)
+                        | readRequiredFrameByte(input);
                 break;
             case 8:
                 value = Varint62.decodeEightByteValue(
                         first,
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte()
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input),
+                        readRequiredFrameByte(input)
                 );
                 break;
             default:
@@ -775,6 +821,22 @@ final class FrameEnvelopeCodec {
             throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame");
         }
         return next & 0xff;
+    }
+
+    private static int readRequiredVarintByte(FrameCodec.Decoder input) throws IOException {
+        try {
+            return input.readByte();
+        } catch (EOFException eof) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "truncated varint62", eof);
+        }
+    }
+
+    private static int readRequiredFrameByte(FrameCodec.Decoder input) throws IOException {
+        try {
+            return input.readByte();
+        } catch (EOFException eof) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame", eof);
+        }
     }
 
     private static Varint62.Decoded validateFrameLength(Varint62.Decoded frameLength, Limits normalized) throws IOException {

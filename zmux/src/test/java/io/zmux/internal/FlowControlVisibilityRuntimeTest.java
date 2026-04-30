@@ -68,7 +68,7 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     private static long quarterThreshold(long value) {
-        return value <= 0L ? 0L : Math.max(1L, value / 4L);
+        return value <= 4L ? 1L : value / 4L;
     }
 
     private static void setStreamLongField(StreamRuntime stream, String ownerField, String fieldName, long value)
@@ -152,6 +152,16 @@ final class FlowControlVisibilityRuntimeTest {
                 throw (Error) cause;
             }
             throw error;
+        }
+    }
+
+    @Test
+    void zeroTargetReplenishmentThresholdsMatchRepositoryPolicy() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+
+        synchronized (runtime.lock()) {
+            assertEquals(1L, SessionRuntime.replenishMinPending(0L, 16_384L));
+            assertEquals(1L, runtime.streamEmergencyThresholdLocked(0L));
         }
     }
 

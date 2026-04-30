@@ -3,7 +3,9 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -41,6 +43,49 @@ final class FrameCodecDecoderTest {
         assertEquals(8, frame.payload().length, "decoded frame payload length mismatch");
         assertEquals(0, input.singleByteReads(), "stateful decoder should not fall back to raw single-byte reads on a normal bulk-capable stream");
         assertEquals(1, input.bulkReads(), "decoder should preserve prefetched bytes across preface/frame boundaries");
+    }
+
+    @Test
+    void decoderBareEofAtFrameBoundarySurfacesTransportEof() {
+        FrameCodec.Decoder decoder = FrameCodec.decoder(new ByteArrayInputStream(new byte[0]));
+
+        assertThrows(
+                EOFException.class,
+                () -> decoder.readFrame(Settings.defaults().limits()),
+                "empty input at a frame boundary should remain a transport EOF"
+        );
+    }
+
+    @Test
+    void decoderPartialFrameLengthSurfacesProtocolTruncation() {
+        FrameCodec.Decoder decoder = FrameCodec.decoder(new ByteArrayInputStream(new byte[]{0x40}));
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> decoder.readFrame(Settings.defaults().limits())
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "partial frame length must be a protocol error");
+        assertEquals("truncated varint62", error.getMessage(), "partial frame length message mismatch");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source(), "partial frame length source mismatch");
+        assertEquals(ZmuxErrorDirection.READ, error.direction(), "partial frame length direction mismatch");
+    }
+
+    @Test
+    void decoderTruncatedFrameBodySurfacesProtocolTruncation() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        Varint62.write(bytes, 3L);
+        bytes.write(FrameType.PING.code());
+        Varint62.write(bytes, 0L);
+        FrameCodec.Decoder decoder = FrameCodec.decoder(new ByteArrayInputStream(bytes.toByteArray()));
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> decoder.readFrame(Settings.defaults().limits())
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated frame body must be a protocol error");
+        assertEquals("truncated frame", error.getMessage(), "truncated frame body message mismatch");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source(), "truncated frame body source mismatch");
+        assertEquals(ZmuxErrorDirection.READ, error.direction(), "truncated frame body direction mismatch");
     }
 
     @Test

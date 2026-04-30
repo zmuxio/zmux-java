@@ -504,7 +504,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     private static long quarterThreshold(long value) {
-        return value <= 0L ? 0L : Math.max(1L, value / 4L);
+        return value <= 4L ? 1L : value / 4L;
     }
 
     static boolean shouldReplenishPendingWindow(long remaining, long target, long advertised, long pending, long emergencyThreshold, long minPending) {
@@ -3719,6 +3719,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private void validateOutgoingGoAwayWatermarkLocked(long watermark, boolean bidirectional) throws IOException {
         if (watermark == 0L) {
             return;
+        }
+        if (watermark > Protocol.MAX_VARINT62) {
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "goAway",
+                    "GOAWAY watermark exceeds varint62 range",
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE
+            );
         }
         if (SessionRuntime.streamIsBidi(watermark) != bidirectional) {
             throw sessionError(

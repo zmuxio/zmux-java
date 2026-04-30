@@ -591,8 +591,20 @@ public final class FrameCodec {
         }
 
         int readByte() throws IOException {
+            int value = readByteOrEof();
+            if (value < 0) {
+                throw new EOFException();
+            }
+            return value;
+        }
+
+        int readByteOrEof() throws IOException {
             if (position >= limit) {
-                refill();
+                position = 0;
+                limit = readDirectOrEof(buffer, 0, buffer.length);
+                if (limit == 0) {
+                    return -1;
+                }
             }
             return buffer[position++] & 0xff;
         }
@@ -636,6 +648,14 @@ public final class FrameCodec {
         }
 
         private int readDirect(byte[] dst, int offset, int length) throws IOException {
+            int read = readDirectOrEof(dst, offset, length);
+            if (read == 0) {
+                throw new EOFException();
+            }
+            return read;
+        }
+
+        private int readDirectOrEof(byte[] dst, int offset, int length) throws IOException {
             int read = input.read(dst, offset, length);
             if (read != -1) {
                 validateReadProgress(read, length);
@@ -644,11 +664,11 @@ public final class FrameCodec {
                 return read;
             }
             if (read < 0) {
-                throw new EOFException();
+                return 0;
             }
             int single = input.read();
             if (single < 0) {
-                throw new EOFException();
+                return 0;
             }
             dst[offset] = (byte) single;
             return 1;
