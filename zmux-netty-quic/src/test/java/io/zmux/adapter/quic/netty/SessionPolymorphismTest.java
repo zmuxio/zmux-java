@@ -52,6 +52,17 @@ final class SessionPolymorphismTest {
             assertArrayEquals(utf8("server-uni"), readAll(inbound));
         }
 
+        ZmuxAsyncSession asyncClient = ZmuxAsync.session(client);
+        ZmuxAsyncSession asyncServer = ZmuxAsync.session(server);
+        CompletableFuture<ZmuxAsyncStream> acceptedAsyncFuture = asyncServer.acceptStreamAsync().toCompletableFuture();
+        ZmuxAsyncStream asyncOutbound = asyncClient.openStreamAsync(OpenOptions.empty()).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        asyncOutbound.writeAsync(utf8("async-surface")).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        asyncOutbound.closeWriteAsync().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        ZmuxAsyncStream asyncInbound = acceptedAsyncFuture.get(5, TimeUnit.SECONDS);
+        assertArrayEquals(utf8("async-surface"), readAll(asyncInbound));
+        asyncOutbound.closeAsync().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        asyncInbound.closeAsync().toCompletableFuture().get(5, TimeUnit.SECONDS);
+
         client.close();
         server.close();
         assertTrue(client.awaitTermination(TIMEOUT));

@@ -5,10 +5,14 @@ import io.zmux.*;
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
-final class StreamRuntime implements ZmuxNativeStream {
+final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
+    private static final ThreadLocal<StreamRuntime> ACTIVE_ASYNC_DRAIN = new ThreadLocal<>();
     static final byte[] EMPTY_BYTES = new byte[0];
 
     private final SessionRuntime session;
@@ -30,6 +34,7 @@ final class StreamRuntime implements ZmuxNativeStream {
     private final StreamTerminalCoordinator terminalCoordinator;
     private final ByteArrayQueue readBuffer = new ByteArrayQueue();
     private final ArrayList<StreamWriteCompletion> pendingWriteCompletions = new ArrayList<>();
+    private final ArrayDeque<AsyncStreamOperation> asyncOperations = new ArrayDeque<>();
     private final ZmuxNativeSendStream sendView;
     private final ZmuxNativeRecvStream recvView;
 
@@ -37,6 +42,8 @@ final class StreamRuntime implements ZmuxNativeStream {
     private boolean localReceive;
     private long readDeadlineNanos;
     private long writeDeadlineNanos;
+    private long pendingAsyncAdmissionBytes;
+    private boolean asyncOperationRunning;
     private boolean gracefulCloseBlocking;
 
     StreamRuntime(SessionRuntime session, boolean openedLocally, boolean bidirectional, OpenOptions openOptions) {
@@ -91,6 +98,7 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     @Override
     public void write(byte[] src, int offset, int length) throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.writeCoordinator.write(src, offset, length, false);
     }
 
@@ -100,8 +108,32 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.writeCoordinator.write(src, offset, length, true);
         return length;
+    }
+
+    @Override
+    public CompletionStage<Void> writeAsync(byte[] src, int offset, int length) {
+        Objects.requireNonNull(src, "src");
+        RangeChecks.checkFromIndexSize(offset, length, src.length);
+        if (length == 0) {
+            return AsyncSupport.completedVoid();
+        }
+        byte[] payload = new byte[length];
+        System.arraycopy(src, offset, payload, 0, length);
+        return this.submitAsyncOperation(AsyncStreamOperation.write(payload, false));
+    }
+
+    @Override
+    public CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
+        Objects.requireNonNull(src, "src");
+        RangeChecks.checkFromIndexSize(offset, length, src.length);
+        byte[] payload = new byte[length];
+        if (length > 0) {
+            System.arraycopy(src, offset, payload, 0, length);
+        }
+        return this.submitAsyncOperation(AsyncStreamOperation.write(payload, true));
     }
 
     int queueWriteFinal(byte[] src, int offset, int length) throws IOException {
@@ -290,6 +322,7 @@ final class StreamRuntime implements ZmuxNativeStream {
     void notifyWriteWaitersLocked() {
         session.notifyStreamWriteWaitersLocked();
         notifyWriteCompletionWaitersLocked();
+        scheduleAsyncDeadlineChecksLocked();
     }
 
     void waitOnLock() throws InterruptedException {
@@ -302,6 +335,167 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     void emitPendingEvents() {
         session.emitPendingEvents();
+    }
+
+    long pendingAsyncAdmissionBytesLocked() {
+        return pendingAsyncAdmissionBytes;
+    }
+
+    void reservePendingAsyncAdmissionBytesLocked(long bytes) {
+        if (bytes > 0L) {
+            pendingAsyncAdmissionBytes = SessionRuntime.saturatingAdd(pendingAsyncAdmissionBytes, bytes);
+        }
+    }
+
+    void releasePendingAsyncAdmissionBytesLocked(long bytes) {
+        if (bytes > 0L) {
+            pendingAsyncAdmissionBytes = Math.max(0L, pendingAsyncAdmissionBytes - bytes);
+        }
+    }
+
+    private CompletionStage<Void> submitAsyncOperation(AsyncStreamOperation operation) {
+        Objects.requireNonNull(operation, "operation");
+        CompletableFuture<Void> future = operation.future();
+        try {
+            synchronized (session.lock()) {
+                IOException admissionError = session.reservePendingAsyncAdmissionLocked(this, operation.admissionBytes());
+                if (admissionError != null) {
+                    return AsyncSupport.failed(admissionError);
+                }
+                asyncOperations.addLast(operation);
+                if (writeDeadlineNanos != 0L) {
+                    operation.scheduleDeadlineCheck(this, 0L);
+                }
+                scheduleAsyncOperationDrainLocked();
+            }
+        } catch (Throwable failure) {
+            return AsyncSupport.failed(failure);
+        }
+        return future;
+    }
+
+    private void scheduleAsyncOperationDrainLocked() {
+        if (asyncOperationRunning || asyncOperations.isEmpty()) {
+            return;
+        }
+        asyncOperationRunning = true;
+        AsyncSupport.execute(this::drainAsyncOperations);
+    }
+
+    private void drainAsyncOperations() {
+        while (true) {
+            AsyncStreamOperation operation;
+            synchronized (session.lock()) {
+                operation = asyncOperations.peekFirst();
+                if (operation == null) {
+                    asyncOperationRunning = false;
+                    notifyLockWaitersLocked();
+                    return;
+                }
+                if (!operation.markRunning()) {
+                    asyncOperations.pollFirst();
+                    releaseAsyncOperationAdmissionLocked(operation);
+                    notifyLockWaitersLocked();
+                    continue;
+                }
+            }
+
+            Throwable failure = null;
+            ACTIVE_ASYNC_DRAIN.set(this);
+            try {
+                operation.run(this);
+            } catch (Throwable error) {
+                failure = error;
+            } finally {
+                ACTIVE_ASYNC_DRAIN.remove();
+            }
+
+            synchronized (session.lock()) {
+                if (asyncOperations.peekFirst() == operation) {
+                    asyncOperations.pollFirst();
+                } else {
+                    asyncOperations.remove(operation);
+                }
+                operation.markDone();
+                releaseAsyncOperationAdmissionLocked(operation);
+                notifyLockWaitersLocked();
+            }
+            operation.complete(failure);
+            emitPendingEvents();
+        }
+    }
+
+    private void releaseAsyncOperationAdmissionLocked(AsyncStreamOperation operation) {
+        session.releasePendingAsyncAdmissionLocked(this, operation.admissionBytes());
+    }
+
+    private void awaitAsyncOperationPredecessors() throws IOException {
+        if (ACTIVE_ASYNC_DRAIN.get() == this) {
+            return;
+        }
+        synchronized (session.lock()) {
+            while (asyncOperationRunning || !asyncOperations.isEmpty()) {
+                if (session.shouldFailSessionOperationsLocked()) {
+                    throw session.sessionOperationErrorLocked("write", session.currentErrorLocked());
+                }
+                long waitNanos = remainingWriteDeadlineNanosLocked();
+                if (waitNanos < 0L) {
+                    throw new WriteTimeoutException();
+                }
+                try {
+                    if (waitNanos == 0L) {
+                        session.waitOnLock(SessionRuntime.LockWaitKind.WRITE_STREAM);
+                    } else {
+                        session.waitOnLockNanos(waitNanos, SessionRuntime.LockWaitKind.WRITE_STREAM);
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw SessionRuntime.interruptedIo(
+                            "zmux: interrupted while waiting for async stream operations",
+                            "write",
+                            ZmuxErrorScope.STREAM,
+                            ZmuxErrorDirection.WRITE,
+                            interrupted
+                    );
+                }
+            }
+        }
+    }
+
+    private void scheduleAsyncDeadlineChecksLocked() {
+        if (asyncOperations.isEmpty()) {
+            return;
+        }
+        for (AsyncStreamOperation operation : asyncOperations) {
+            operation.scheduleDeadlineCheck(this, 0L);
+        }
+    }
+
+    private void checkAsyncOperationDeadline(AsyncStreamOperation operation) {
+        boolean removed = false;
+        synchronized (session.lock()) {
+            if (!operation.queued()) {
+                return;
+            }
+            long remainingNanos = remainingWriteDeadlineNanosLocked();
+            if (remainingNanos == 0L) {
+                return;
+            }
+            if (remainingNanos > 0L) {
+                operation.scheduleDeadlineCheck(this, remainingNanos);
+                return;
+            }
+            removed = asyncOperations.remove(operation);
+            if (removed) {
+                operation.markDone();
+                releaseAsyncOperationAdmissionLocked(operation);
+                notifyLockWaitersLocked();
+            }
+        }
+        if (removed) {
+            operation.complete(new WriteTimeoutException());
+            emitPendingEvents();
+        }
     }
 
     ZmuxNativeSendStream sendView() {
@@ -343,23 +537,51 @@ final class StreamRuntime implements ZmuxNativeStream {
     }
 
     @Override
+    public CompletionStage<Void> closeReadAsync() {
+        return this.submitAsyncOperation(AsyncStreamOperation.closeRead());
+    }
+
+    @Override
     public void cancelRead(long code) throws IOException {
         this.readCoordinator.cancelRead(code);
     }
 
     @Override
+    public CompletionStage<Void> cancelReadAsync(long code) {
+        return this.submitAsyncOperation(AsyncStreamOperation.cancelRead(code));
+    }
+
+    @Override
     public void closeWrite() throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.writeCoordinator.closeWrite();
     }
 
     @Override
+    public CompletionStage<Void> closeWriteAsync() {
+        return this.submitAsyncOperation(AsyncStreamOperation.closeWrite());
+    }
+
+    @Override
     public void cancelWrite(long code) throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.writeCoordinator.cancelWrite(code);
     }
 
     @Override
+    public CompletionStage<Void> cancelWriteAsync(long code) {
+        return this.submitAsyncOperation(AsyncStreamOperation.cancelWrite(code));
+    }
+
+    @Override
     public void closeWithError(long code, String reason) throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.writeCoordinator.closeWithError(code, reason);
+    }
+
+    @Override
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return this.submitAsyncOperation(AsyncStreamOperation.closeWithError(code, reason));
     }
 
     @Override
@@ -414,7 +636,13 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     @Override
     public void close() throws IOException {
+        this.awaitAsyncOperationPredecessors();
         this.closeCoordinator.close();
+    }
+
+    @Override
+    public CompletionStage<Void> closeAsync() {
+        return this.submitAsyncOperation(AsyncStreamOperation.closeStream());
     }
 
     boolean localSend() {
@@ -1200,6 +1428,138 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     boolean finQueuedLocked() {
         return halfState.sendFinQueued();
+    }
+
+    private static final class AsyncStreamOperation {
+        private final Kind kind;
+        private final byte[] payload;
+        private final boolean fin;
+        private final long code;
+        private final String reason;
+        private final long admissionBytes;
+        private final CompletableFuture<Void> future = new CompletableFuture<>();
+        private State state = State.QUEUED;
+
+        private AsyncStreamOperation(Kind kind, byte[] payload, boolean fin, long code, String reason, long admissionBytes) {
+            this.kind = kind;
+            this.payload = payload == null ? EMPTY_BYTES : payload;
+            this.fin = fin;
+            this.code = code;
+            this.reason = reason;
+            this.admissionBytes = Math.max(1L, admissionBytes);
+        }
+
+        static AsyncStreamOperation write(byte[] payload, boolean fin) {
+            return new AsyncStreamOperation(Kind.WRITE, payload, fin, 0L, null, payload == null ? 0L : payload.length);
+        }
+
+        static AsyncStreamOperation closeWrite() {
+            return new AsyncStreamOperation(Kind.CLOSE_WRITE, null, false, 0L, null, 1L);
+        }
+
+        static AsyncStreamOperation cancelWrite(long code) {
+            return new AsyncStreamOperation(Kind.CANCEL_WRITE, null, false, code, null, 1L);
+        }
+
+        static AsyncStreamOperation closeRead() {
+            return new AsyncStreamOperation(Kind.CLOSE_READ, null, false, ErrorCode.CANCELLED.code(), null, 1L);
+        }
+
+        static AsyncStreamOperation cancelRead(long code) {
+            return new AsyncStreamOperation(Kind.CANCEL_READ, null, false, code, null, 1L);
+        }
+
+        static AsyncStreamOperation closeWithError(long code, String reason) {
+            return new AsyncStreamOperation(Kind.CLOSE_WITH_ERROR, null, false, code, reason, 1L);
+        }
+
+        static AsyncStreamOperation closeStream() {
+            return new AsyncStreamOperation(Kind.CLOSE_STREAM, null, false, 0L, null, 1L);
+        }
+
+        CompletableFuture<Void> future() {
+            return future;
+        }
+
+        long admissionBytes() {
+            return admissionBytes;
+        }
+
+        boolean queued() {
+            return state == State.QUEUED;
+        }
+
+        boolean markRunning() {
+            if (state != State.QUEUED) {
+                return false;
+            }
+            state = State.RUNNING;
+            return true;
+        }
+
+        void markDone() {
+            state = State.DONE;
+        }
+
+        void scheduleDeadlineCheck(StreamRuntime owner, long delayNanos) {
+            AsyncSupport.schedule(() -> owner.checkAsyncOperationDeadline(this), delayNanos);
+        }
+
+        void run(StreamRuntime owner) throws IOException {
+            switch (kind) {
+                case WRITE:
+                    if (fin) {
+                        owner.writeFinal(payload, 0, payload.length);
+                    } else {
+                        owner.write(payload, 0, payload.length);
+                    }
+                    return;
+                case CLOSE_WRITE:
+                    owner.closeWrite();
+                    return;
+                case CANCEL_WRITE:
+                    owner.cancelWrite(code);
+                    return;
+                case CLOSE_READ:
+                    owner.closeRead();
+                    return;
+                case CANCEL_READ:
+                    owner.cancelRead(code);
+                    return;
+                case CLOSE_WITH_ERROR:
+                    owner.closeWithError(code, reason);
+                    return;
+                case CLOSE_STREAM:
+                    owner.close();
+                    return;
+                default:
+                    throw new IllegalStateException("unknown async stream operation: " + kind);
+            }
+        }
+
+        void complete(Throwable failure) {
+            if (failure == null) {
+                future.complete(null);
+            } else {
+                future.completeExceptionally(failure);
+            }
+        }
+
+        private enum Kind {
+            WRITE,
+            CLOSE_WRITE,
+            CANCEL_WRITE,
+            CLOSE_READ,
+            CANCEL_READ,
+            CLOSE_WITH_ERROR,
+            CLOSE_STREAM
+        }
+
+        private enum State {
+            QUEUED,
+            RUNNING,
+            DONE
+        }
     }
 
     enum PeerDataAction {

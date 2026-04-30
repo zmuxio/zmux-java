@@ -2,6 +2,7 @@ package io.zmux.adapter.quic.netty;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.quic.*;
@@ -13,6 +14,8 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
@@ -23,7 +26,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 @SuppressWarnings("resource")
-final class NettyQuicSession implements ZmuxSession {
+final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     private static final byte[] EMPTY_BYTES = new byte[0];
     private static final AtomicLong HANDLER_SEQUENCE = new AtomicLong();
 
@@ -325,6 +328,16 @@ final class NettyQuicSession implements ZmuxSession {
     }
 
     @Override
+    public CompletionStage<ZmuxAsyncStream> acceptStreamAsync() {
+        return submitSessionAsync(() -> (ZmuxAsyncStream) acceptStream());
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncRecvStream> acceptUniStreamAsync() {
+        return submitSessionAsync(() -> (ZmuxAsyncRecvStream) acceptUniStream());
+    }
+
+    @Override
     public ZmuxStream openStream() throws IOException, InterruptedException {
         return openBidiStream(OpenOptions.empty(), TimeoutBudget.unbounded());
     }
@@ -332,6 +345,11 @@ final class NettyQuicSession implements ZmuxSession {
     @Override
     public ZmuxStream openStream(OpenOptions options) throws IOException, InterruptedException {
         return openBidiStream(options, TimeoutBudget.unbounded());
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncStream> openStreamAsync(OpenOptions options) {
+        return submitSessionAsync(() -> (ZmuxAsyncStream) openStream(options));
     }
 
     @Override
@@ -352,6 +370,11 @@ final class NettyQuicSession implements ZmuxSession {
     @Override
     public ZmuxSendStream openUniStream(OpenOptions options) throws IOException, InterruptedException {
         return openUniSendStream(options, TimeoutBudget.unbounded());
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync(OpenOptions options) {
+        return submitSessionAsync(() -> (ZmuxAsyncSendStream) openUniStream(options));
     }
 
     @Override
@@ -462,6 +485,37 @@ final class NettyQuicSession implements ZmuxSession {
                 channel.close(true, quicCode, Unpooled.wrappedBuffer(NettyQuicSupport.encodeReason(reason)))
         );
         noteControlProgress();
+    }
+
+    @Override
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        if (closed.get()) {
+            return NettyQuicSupport.completedVoid();
+        }
+        int quicCode;
+        try {
+            quicCode = NettyQuicSupport.requireQuicApplicationCode(
+                    code,
+                    "close",
+                    io.zmux.ZmuxErrorScope.SESSION,
+                    io.zmux.ZmuxErrorDirection.BOTH
+            );
+        } catch (Throwable failure) {
+            return NettyQuicSupport.failedFuture(failure);
+        }
+        beginClosing(NettyQuicSupport.sessionApplicationError(
+                code,
+                reason == null ? "" : reason,
+                ZmuxErrorSource.LOCAL,
+                ZmuxTerminationKind.SESSION_TERMINATION
+        ));
+        ChannelFuture future = channel.close(true, quicCode, Unpooled.wrappedBuffer(NettyQuicSupport.encodeReason(reason)));
+        future.addListener(ignored -> {
+            if (future.isSuccess()) {
+                noteControlProgress();
+            }
+        });
+        return NettyQuicSupport.completionStageFromChannelFuture(future);
     }
 
     @Override
@@ -675,6 +729,26 @@ final class NettyQuicSession implements ZmuxSession {
         beginClosing(NettyQuicSupport.sessionClosedError(ZmuxErrorSource.LOCAL));
         NettyQuicSupport.awaitChannelFuture(channel.close(true, 0, Unpooled.EMPTY_BUFFER));
         noteControlProgress();
+    }
+
+    @Override
+    public CompletionStage<Void> closeAsync() {
+        if (closed.get()) {
+            return NettyQuicSupport.completedVoid();
+        }
+        beginClosing(NettyQuicSupport.sessionClosedError(ZmuxErrorSource.LOCAL));
+        ChannelFuture future = channel.close(true, 0, Unpooled.EMPTY_BUFFER);
+        future.addListener(ignored -> {
+            if (future.isSuccess()) {
+                noteControlProgress();
+            }
+        });
+        return NettyQuicSupport.completionStageFromChannelFuture(future);
+    }
+
+    @Override
+    public QuicChannel unsafeQuicChannel() {
+        return channel;
     }
 
     void unregister(NettyQuicStreamState state) {
@@ -1348,6 +1422,22 @@ final class NettyQuicSession implements ZmuxSession {
         }
         saturatingIncrement(acceptedStreams);
         return stream;
+    }
+
+    private <T> CompletionStage<T> submitSessionAsync(SessionCallable<T> action) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        NettyQuicSupport.executeAsyncTask(() -> {
+            try {
+                future.complete(action.call());
+            } catch (Throwable failure) {
+                future.completeExceptionally(failure);
+            }
+        });
+        return future;
+    }
+
+    private interface SessionCallable<T> {
+        T call() throws IOException, InterruptedException;
     }
 
     private static final class AcceptBacklogSnapshot {

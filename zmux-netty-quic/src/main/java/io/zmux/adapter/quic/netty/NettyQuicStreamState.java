@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
 import io.netty.channel.socket.DuplexChannelConfig;
 import io.netty.handler.codec.quic.QuicChannelOption;
@@ -21,6 +22,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -415,6 +418,181 @@ final class NettyQuicStreamState {
             writeIoLock.unlock();
         }
         return totalLength;
+    }
+
+    CompletionStage<Void> writeAsync(byte[] src, int offset, int length) {
+        Objects.requireNonNull(src, "src");
+        RangeChecks.checkFromIndexSize(offset, length, src.length);
+        if (length == 0) {
+            return NettyQuicSupport.completedVoid();
+        }
+        byte[] payload = new byte[length];
+        System.arraycopy(src, offset, payload, 0, length);
+        return submitBlockingAsync(() -> write(payload, 0, payload.length));
+    }
+
+    CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
+        Objects.requireNonNull(src, "src");
+        RangeChecks.checkFromIndexSize(offset, length, src.length);
+        byte[] payload = new byte[length];
+        if (length > 0) {
+            System.arraycopy(src, offset, payload, 0, length);
+        }
+        return submitBlockingAsync(() -> writeFinal(payload, 0, payload.length));
+    }
+
+    CompletionStage<Void> closeWriteAsync() {
+        return submitBlockingAsync(this::closeWrite);
+    }
+
+    CompletionStage<Void> cancelWriteAsync(long code) {
+        return submitBlockingAsync(() -> cancelWrite(code));
+    }
+
+    CompletionStage<Void> closeReadAsync() {
+        return submitBlockingAsync(this::closeRead);
+    }
+
+    CompletionStage<Void> cancelReadAsync(long code) {
+        return submitBlockingAsync(() -> cancelRead(code));
+    }
+
+    CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return submitBlockingAsync(() -> closeWithError(code, reason));
+    }
+
+    CompletionStage<Void> submitWriteCloseWithErrorAsync(long code, String reason) {
+        return submitBlockingAsync(() -> closeWriteWithError(code, reason));
+    }
+
+    CompletionStage<Void> submitReadCloseWithErrorAsync(long code, String reason) {
+        return submitBlockingAsync(() -> closeReadWithError(code, reason));
+    }
+
+    CompletionStage<Void> closeAsync(boolean closeWrite, boolean closeRead) {
+        return submitBlockingAsync(() -> {
+            IOException first = null;
+            if (closeWrite) {
+                try {
+                    closeWrite();
+                } catch (IOException error) {
+                    if (!NettyQuicSupport.isBenignCloseError(error)) {
+                        first = error;
+                    }
+                }
+            }
+            if (closeRead) {
+                try {
+                    closeRead();
+                } catch (IOException error) {
+                    if (first == null && !NettyQuicSupport.isBenignCloseError(error)) {
+                        first = error;
+                    }
+                }
+            }
+            if (first != null) {
+                throw first;
+            }
+        });
+    }
+
+    ChannelFuture writeNettyAsync(ByteBuf data) {
+        Objects.requireNonNull(data, "data");
+        if (!data.isReadable()) {
+            releaseBuffer(data);
+            return channel.newSucceededFuture();
+        }
+        writeIoLock.lock();
+        try {
+            ensureOpenPreludeSubmitted();
+            ensureWritableForDataWrite();
+            int bytes = Math.max(0, data.readableBytes());
+            long startedAtNanos = System.nanoTime();
+            ChannelFuture future = submitWrite(data);
+            submitAsyncWriteFuture(future, bytes, startedAtNanos);
+            return future;
+        } catch (Throwable failure) {
+            releaseBuffer(data);
+            return channel.newFailedFuture(failure);
+        } finally {
+            writeIoLock.unlock();
+        }
+    }
+
+    ChannelFuture writeFinalNettyAsync(ByteBuf data) {
+        Objects.requireNonNull(data, "data");
+        if (!data.isReadable()) {
+            releaseBuffer(data);
+            return closeWriteNettyAsync();
+        }
+        writeIoLock.lock();
+        try {
+            ensureOpenPreludeSubmitted();
+            ensureWritableForDataWrite();
+            int bytes = Math.max(0, data.readableBytes());
+            long startedAtNanos = System.nanoTime();
+            ChannelPromise result = channel.newPromise();
+            ChannelFuture writeFuture = submitWrite(data);
+            submitAsyncWriteFuture(writeFuture, bytes, startedAtNanos);
+            writeFuture.addListener(ignored -> {
+                if (writeFuture.isSuccess()) {
+                    ChannelFuture closeFuture = closeWriteNettyAsync();
+                    closeFuture.addListener(closeIgnored -> {
+                        if (closeFuture.isSuccess()) {
+                            result.setSuccess();
+                        } else {
+                            result.setFailure(closeFuture.cause());
+                        }
+                    });
+                } else {
+                    result.setFailure(writeFuture.cause());
+                }
+            });
+            return result;
+        } catch (Throwable failure) {
+            releaseBuffer(data);
+            return channel.newFailedFuture(failure);
+        } finally {
+            writeIoLock.unlock();
+        }
+    }
+
+    private ChannelFuture closeWriteNettyAsync() {
+        try {
+            lock.lock();
+            try {
+                if (writeHalf.localClosed()) {
+                    throw localWriteErrorOrDefault();
+                }
+                ensureSessionOpenForControlLocked();
+                writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+                signalWriteChangedLocked();
+            } finally {
+                lock.unlock();
+            }
+            ChannelFuture future = channel.shutdownOutput();
+            submitWriteSideControlFuture(future, System.nanoTime());
+            return future;
+        } catch (Throwable failure) {
+            return channel.newFailedFuture(failure);
+        }
+    }
+
+    QuicStreamChannel unsafeQuicStreamChannel() {
+        return channel;
+    }
+
+    private CompletionStage<Void> submitBlockingAsync(IoRunnable action) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        NettyQuicSupport.executeAsyncTask(() -> {
+            try {
+                action.run();
+                future.complete(null);
+            } catch (Throwable failure) {
+                future.completeExceptionally(failure);
+            }
+        });
+        return future;
     }
 
     private void writeFinalBytes(byte[] src, int offset, int length) throws IOException {
@@ -1703,6 +1881,10 @@ final class NettyQuicStreamState {
         } finally {
             lock.unlock();
         }
+    }
+
+    private interface IoRunnable {
+        void run() throws IOException;
     }
 
     private static final class ReadHalfState {

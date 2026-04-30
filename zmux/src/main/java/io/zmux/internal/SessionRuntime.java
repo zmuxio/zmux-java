@@ -8,12 +8,14 @@ import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 @SuppressWarnings("resource")
-public final class SessionRuntime implements ZmuxNativeSession {
+public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession {
     private static final int MAX_BATCH_FRAMES = 32;
     private static final int MAX_EXPLICIT_GROUPS = 16;
     private static final long FALLBACK_GROUP_BUCKET = Long.MAX_VALUE;
@@ -103,6 +105,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
     private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
     private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
+    private Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
+    private Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
     private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private Map<Long, StreamRuntime> streams = new HashMap<>();
@@ -134,6 +138,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
     private long sessionSentBytes;
     private long sessionReservedSendBytes;
     private long sessionQueuedDataBytes;
+    private long pendingAsyncAdmissionBytes;
     private long bufferedReceiveBytes;
     private long bufferedReceiveStorageBytes;
     private long recvSessionAdvertised;
@@ -917,6 +922,16 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     @Override
+    public CompletionStage<ZmuxAsyncStream> acceptStreamAsync() {
+        return this.acceptAsync(true);
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncRecvStream> acceptUniStreamAsync() {
+        return this.acceptUniAsync();
+    }
+
+    @Override
     public ZmuxNativeStream openStream() throws IOException {
         return this.openStream(OpenOptions.empty());
     }
@@ -925,6 +940,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
     public ZmuxNativeStream openStream(OpenOptions options) throws IOException {
         synchronized (this.lock) {
             return this.newLocalStreamLocked(true, options);
+        }
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncStream> openStreamAsync(OpenOptions options) {
+        try {
+            return CompletableFuture.completedFuture((ZmuxAsyncStream) this.openStream(options));
+        } catch (Throwable failure) {
+            return AsyncSupport.failed(failure);
         }
     }
 
@@ -950,6 +974,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
     public ZmuxNativeSendStream openUniStream(OpenOptions options) throws IOException {
         synchronized (this.lock) {
             return this.newLocalStreamLocked(false, options).sendView();
+        }
+    }
+
+    @Override
+    public CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync(OpenOptions options) {
+        try {
+            return CompletableFuture.completedFuture((ZmuxAsyncSendStream) this.openUniStream(options));
+        } catch (Throwable failure) {
+            return AsyncSupport.failed(failure);
         }
     }
 
@@ -1083,6 +1116,16 @@ public final class SessionRuntime implements ZmuxNativeSession {
             }
         } finally {
             this.emitPendingEvents();
+        }
+    }
+
+    @Override
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        try {
+            this.closeWithError(code, reason);
+            return AsyncSupport.completedVoid();
+        } catch (Throwable failure) {
+            return AsyncSupport.failed(failure);
         }
     }
 
@@ -1328,6 +1371,20 @@ public final class SessionRuntime implements ZmuxNativeSession {
         } finally {
             this.emitPendingEvents();
         }
+    }
+
+    @Override
+    public CompletionStage<Void> closeAsync() {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        AsyncSupport.execute(() -> {
+            try {
+                close();
+                future.complete(null);
+            } catch (Throwable failure) {
+                future.completeExceptionally(failure);
+            }
+        });
+        return future;
     }
 
     private boolean trySendGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
@@ -1625,6 +1682,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     long trackedSessionMemoryLocked() {
         long total = this.sessionReservedSendBytes;
+        total = SessionRuntime.saturatingAdd(total, this.pendingAsyncAdmissionBytes);
         total = SessionRuntime.saturatingAdd(total, this.bufferedReceiveStorageBytes);
         total = SessionRuntime.saturatingAdd(total, this.outboundQueueBookkeeping.urgentQueuedControlBytesLocked());
         total = SessionRuntime.saturatingAdd(total, this.outboundQueueBookkeeping.ordinaryQueuedControlBytesLocked());
@@ -1728,6 +1786,50 @@ public final class SessionRuntime implements ZmuxNativeSession {
             return null;
         }
         return this.sessionMemoryCapErrorWithAdditionalLocked("queue stream write", retainedBytes);
+    }
+
+    IOException reservePendingAsyncAdmissionLocked(StreamRuntime streamRuntime, long bytes) {
+        if (bytes <= 0L) {
+            return null;
+        }
+        long perStreamLimit = this.perStreamQueuedDataHighWatermarkLocked();
+        long sessionLimit = this.sessionQueuedDataHighWatermarkLocked();
+        if (streamRuntime != null
+                && SessionRuntime.saturatingAdd(streamRuntime.pendingAsyncAdmissionBytesLocked(), bytes) > perStreamLimit) {
+            return sessionInternalError(
+                    "write",
+                    "zmux: per-stream async write admission queue is full"
+            );
+        }
+        if (SessionRuntime.saturatingAdd(this.pendingAsyncAdmissionBytes, bytes) > sessionLimit) {
+            return sessionInternalError(
+                    "write",
+                    "zmux: session async write admission queue is full"
+            );
+        }
+        IOException memoryError = this.sessionMemoryCapErrorWithAdditionalLocked("queue async write", bytes);
+        if (memoryError != null) {
+            return memoryError;
+        }
+        this.pendingAsyncAdmissionBytes = SessionRuntime.saturatingAdd(this.pendingAsyncAdmissionBytes, bytes);
+        if (streamRuntime != null) {
+            streamRuntime.reservePendingAsyncAdmissionBytesLocked(bytes);
+        }
+        return null;
+    }
+
+    void releasePendingAsyncAdmissionLocked(StreamRuntime streamRuntime, long bytes) {
+        if (bytes <= 0L) {
+            return;
+        }
+        long previousTracked = this.trackedSessionMemoryLocked();
+        this.pendingAsyncAdmissionBytes = Math.max(0L, this.pendingAsyncAdmissionBytes - bytes);
+        if (streamRuntime != null) {
+            streamRuntime.releasePendingAsyncAdmissionBytesLocked(bytes);
+        }
+        if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
+            this.notifyStreamWriteWaitersLocked();
+        }
     }
 
     void recordProtocolBacklogBlockedLocked() {
@@ -2728,6 +2830,127 @@ public final class SessionRuntime implements ZmuxNativeSession {
         }
     }
 
+    private CompletionStage<ZmuxAsyncStream> acceptAsync(boolean bidirectional) {
+        boolean emitEvents = false;
+        CompletionStage<ZmuxAsyncStream> result;
+        synchronized (this.lock) {
+            StreamRuntime streamRuntime = this.acceptRegistry.pollAcceptedHeadLocked(bidirectional);
+            if (streamRuntime != null) {
+                this.recordAsyncAcceptedLocked(streamRuntime);
+                emitEvents = true;
+                result = CompletableFuture.completedFuture(streamRuntime);
+            } else if (this.shouldFailSessionOperationsLocked()) {
+                result = AsyncSupport.failed(this.sessionOperationErrorLocked("accept", this.currentErrorLocked()));
+            } else {
+                Deque<CompletableFuture<ZmuxAsyncStream>> queue = this.pendingAsyncBidiAccepts;
+                if (queue.size() >= this.asyncAcceptHardCapLocked()) {
+                    result = AsyncSupport.failed(sessionInternalError(
+                            "accept",
+                            "zmux: async accept queue is full"
+                    ));
+                } else {
+                    CompletableFuture<ZmuxAsyncStream> future = new CompletableFuture<>();
+                    queue.addLast(future);
+                    result = future;
+                }
+            }
+        }
+        if (emitEvents) {
+            this.emitPendingEvents();
+        }
+        return result;
+    }
+
+    private CompletionStage<ZmuxAsyncRecvStream> acceptUniAsync() {
+        boolean emitEvents = false;
+        CompletionStage<ZmuxAsyncRecvStream> result;
+        synchronized (this.lock) {
+            StreamRuntime streamRuntime = this.acceptRegistry.pollAcceptedHeadLocked(false);
+            if (streamRuntime != null) {
+                this.recordAsyncAcceptedLocked(streamRuntime);
+                emitEvents = true;
+                result = CompletableFuture.completedFuture((ZmuxAsyncRecvStream) streamRuntime.recvView());
+            } else if (this.shouldFailSessionOperationsLocked()) {
+                result = AsyncSupport.failed(this.sessionOperationErrorLocked("accept", this.currentErrorLocked()));
+            } else if (this.pendingAsyncUniAccepts.size() >= this.asyncAcceptHardCapLocked()) {
+                result = AsyncSupport.failed(sessionInternalError(
+                        "accept",
+                        "zmux: async accept queue is full"
+                ));
+            } else {
+                CompletableFuture<ZmuxAsyncRecvStream> future = new CompletableFuture<>();
+                this.pendingAsyncUniAccepts.addLast(future);
+                result = future;
+            }
+        }
+        if (emitEvents) {
+            this.emitPendingEvents();
+        }
+        return result;
+    }
+
+    private int asyncAcceptHardCapLocked() {
+        return SessionRuntime.admissionHardCap(this.visibleAcceptBacklogHardCapLocked());
+    }
+
+    private void recordAsyncAcceptedLocked(StreamRuntime streamRuntime) {
+        this.streamBookkeeping.recordAcceptedStreamLocked();
+        this.enqueueStreamEventLocked(streamRuntime, ZmuxEventType.STREAM_ACCEPTED, null);
+    }
+
+    private void completePendingAsyncAcceptsLocked(boolean bidirectional) {
+        if (bidirectional) {
+            while (!this.pendingAsyncBidiAccepts.isEmpty()) {
+                StreamRuntime streamRuntime = this.acceptRegistry.pollAcceptedHeadLocked(true);
+                if (streamRuntime == null) {
+                    return;
+                }
+                CompletableFuture<ZmuxAsyncStream> future = this.pendingAsyncBidiAccepts.pollFirst();
+                this.recordAsyncAcceptedLocked(streamRuntime);
+                this.completeAsyncAccept(future, streamRuntime);
+            }
+            return;
+        }
+        while (!this.pendingAsyncUniAccepts.isEmpty()) {
+            StreamRuntime streamRuntime = this.acceptRegistry.pollAcceptedHeadLocked(false);
+            if (streamRuntime == null) {
+                return;
+            }
+            CompletableFuture<ZmuxAsyncRecvStream> future = this.pendingAsyncUniAccepts.pollFirst();
+            this.recordAsyncAcceptedLocked(streamRuntime);
+            this.completeAsyncAccept(future, (ZmuxAsyncRecvStream) streamRuntime.recvView());
+        }
+    }
+
+    private <T> void completeAsyncAccept(CompletableFuture<T> future, T value) {
+        AsyncSupport.execute(() -> {
+            future.complete(value);
+            emitPendingEvents();
+        });
+    }
+
+    private void failPendingAsyncAcceptsLocked(IOException error) {
+        if (this.pendingAsyncBidiAccepts.isEmpty() && this.pendingAsyncUniAccepts.isEmpty()) {
+            return;
+        }
+        IOException failure = this.sessionOperationErrorLocked(
+                "accept",
+                error == null ? new SessionClosedException(ZmuxErrorSource.LOCAL) : error
+        );
+        while (!this.pendingAsyncBidiAccepts.isEmpty()) {
+            CompletableFuture<ZmuxAsyncStream> future = this.pendingAsyncBidiAccepts.pollFirst();
+            this.completeAsyncAcceptFailure(future, failure);
+        }
+        while (!this.pendingAsyncUniAccepts.isEmpty()) {
+            CompletableFuture<ZmuxAsyncRecvStream> future = this.pendingAsyncUniAccepts.pollFirst();
+            this.completeAsyncAcceptFailure(future, failure);
+        }
+    }
+
+    private void completeAsyncAcceptFailure(CompletableFuture<?> future, IOException failure) {
+        AsyncSupport.execute(() -> future.completeExceptionally(failure));
+    }
+
     private StreamRuntime newLocalStreamLocked(boolean bidirectional, OpenOptions openOptions) throws IOException {
         return this.openingCoordinator.newLocalStreamLocked(bidirectional, openOptions);
     }
@@ -2889,6 +3112,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     void finishSessionLocked(IOException error, SessionState sessionState) {
         this.lifecycleRuntime.finishSessionLocked(error, sessionState);
+        this.failPendingAsyncAcceptsLocked(error);
     }
 
     private void beginSessionTerminationLocked(IOException error, SessionState sessionState) {
@@ -3932,6 +4156,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     void enqueueAcceptedLocked(StreamRuntime streamRuntime) {
         this.acceptRegistry.enqueueAcceptedLocked(streamRuntime);
+        this.completePendingAsyncAcceptsLocked(streamRuntime != null && streamRuntime.bidirectional());
     }
 
     private StreamRuntime pollAcceptedHeadLocked(boolean bidirectional) {

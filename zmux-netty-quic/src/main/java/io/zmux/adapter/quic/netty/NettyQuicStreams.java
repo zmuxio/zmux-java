@@ -1,10 +1,14 @@
 package io.zmux.adapter.quic.netty;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFuture;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.zmux.*;
 
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.time.Instant;
+import java.util.concurrent.CompletionStage;
 
 abstract class AbstractNettyQuicStream {
     final NettyQuicStreamState state;
@@ -41,6 +45,14 @@ abstract class AbstractNettyQuicStream {
         return state.remoteAddress();
     }
 
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return state.closeWithErrorAsync(code, reason);
+    }
+
+    public QuicStreamChannel unsafeQuicStreamChannel() {
+        return state.unsafeQuicStreamChannel();
+    }
+
     final void applyDeadline(Instant deadline) throws IOException {
         state.setDeadline(deadline);
     }
@@ -58,7 +70,7 @@ abstract class AbstractNettyQuicStream {
     }
 }
 
-final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxNativeStream {
+final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxNativeStream, NettyQuicAsyncStream {
     NettyQuicBidiStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -76,6 +88,26 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxN
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
         return state.writeFinal(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeAsync(byte[] src, int offset, int length) {
+        return state.writeAsync(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
+        return state.writeFinalAsync(src, offset, length);
+    }
+
+    @Override
+    public ChannelFuture writeNettyAsync(ByteBuf data) {
+        return state.writeNettyAsync(data);
+    }
+
+    @Override
+    public ChannelFuture writeFinalNettyAsync(ByteBuf data) {
+        return state.writeFinalNettyAsync(data);
     }
 
     @Override
@@ -109,8 +141,18 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxN
     }
 
     @Override
+    public CompletionStage<Void> closeReadAsync() {
+        return state.closeReadAsync();
+    }
+
+    @Override
     public void cancelRead(long code) throws IOException {
         state.cancelRead(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelReadAsync(long code) {
+        return state.cancelReadAsync(code);
     }
 
     @Override
@@ -119,8 +161,18 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxN
     }
 
     @Override
+    public CompletionStage<Void> closeWriteAsync() {
+        return state.closeWriteAsync();
+    }
+
+    @Override
     public void cancelWrite(long code) throws IOException {
         state.cancelWrite(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelWriteAsync(long code) {
+        return state.cancelWriteAsync(code);
     }
 
     @Override
@@ -159,9 +211,14 @@ final class NettyQuicBidiStream extends AbstractNettyQuicStream implements ZmuxN
             throw first;
         }
     }
+
+    @Override
+    public CompletionStage<Void> closeAsync() {
+        return state.closeAsync(true, true);
+    }
 }
 
-final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxNativeSendStream {
+final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxNativeSendStream, NettyQuicAsyncSendStream {
     NettyQuicSendStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -174,6 +231,26 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxN
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
         return state.writeFinal(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeAsync(byte[] src, int offset, int length) {
+        return state.writeAsync(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
+        return state.writeFinalAsync(src, offset, length);
+    }
+
+    @Override
+    public ChannelFuture writeNettyAsync(ByteBuf data) {
+        return state.writeNettyAsync(data);
+    }
+
+    @Override
+    public ChannelFuture writeFinalNettyAsync(ByteBuf data) {
+        return state.writeFinalNettyAsync(data);
     }
 
     @Override
@@ -197,8 +274,18 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxN
     }
 
     @Override
+    public CompletionStage<Void> closeWriteAsync() {
+        return state.closeWriteAsync();
+    }
+
+    @Override
     public void cancelWrite(long code) throws IOException {
         state.cancelWrite(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelWriteAsync(long code) {
+        return state.cancelWriteAsync(code);
     }
 
     @Override
@@ -209,6 +296,11 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxN
     @Override
     public void closeWithError(long code, String reason) throws IOException {
         state.closeWriteWithError(code, reason);
+    }
+
+    @Override
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return state.submitWriteCloseWithErrorAsync(code, reason);
     }
 
     @Override
@@ -223,7 +315,7 @@ final class NettyQuicSendStream extends AbstractNettyQuicStream implements ZmuxN
     }
 }
 
-final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxNativeRecvStream {
+final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxNativeRecvStream, NettyQuicAsyncRecvStream {
     NettyQuicRecvStream(NettyQuicStreamState state) {
         super(state);
     }
@@ -244,8 +336,18 @@ final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxN
     }
 
     @Override
+    public CompletionStage<Void> closeReadAsync() {
+        return state.closeReadAsync();
+    }
+
+    @Override
     public void cancelRead(long code) throws IOException {
         state.cancelRead(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelReadAsync(long code) {
+        return state.cancelReadAsync(code);
     }
 
     @Override
@@ -256,6 +358,11 @@ final class NettyQuicRecvStream extends AbstractNettyQuicStream implements ZmuxN
     @Override
     public void closeWithError(long code, String reason) throws IOException {
         state.closeReadWithError(code, reason);
+    }
+
+    @Override
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return state.submitReadCloseWithErrorAsync(code, reason);
     }
 
     @Override

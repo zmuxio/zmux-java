@@ -2,12 +2,12 @@ package io.zmux.internal;
 
 import io.zmux.MetadataUpdate;
 import io.zmux.StreamMetadata;
-import io.zmux.ZmuxNativeRecvStream;
-import io.zmux.ZmuxNativeSendStream;
+import io.zmux.*;
 
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.time.Instant;
+import java.util.concurrent.CompletionStage;
 
 abstract class AbstractNativeStreamView {
     protected final StreamRuntime runtime;
@@ -32,6 +32,10 @@ abstract class AbstractNativeStreamView {
         runtime.closeWithError(code, reason);
     }
 
+    public CompletionStage<Void> closeWithErrorAsync(long code, String reason) {
+        return runtime.closeWithErrorAsync(code, reason);
+    }
+
     public boolean openedLocally() {
         return runtime.openedLocally();
     }
@@ -53,7 +57,7 @@ abstract class AbstractNativeStreamView {
     }
 }
 
-final class NativeSendStreamView extends AbstractNativeStreamView implements ZmuxNativeSendStream {
+final class NativeSendStreamView extends AbstractNativeStreamView implements ZmuxNativeSendStream, ZmuxAsyncSendStream {
     NativeSendStreamView(StreamRuntime runtime) {
         super(runtime);
     }
@@ -66,6 +70,16 @@ final class NativeSendStreamView extends AbstractNativeStreamView implements Zmu
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
         return runtime.writeFinal(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeAsync(byte[] src, int offset, int length) {
+        return runtime.writeAsync(src, offset, length);
+    }
+
+    @Override
+    public CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length) {
+        return runtime.writeFinalAsync(src, offset, length);
     }
 
     @Override
@@ -89,8 +103,18 @@ final class NativeSendStreamView extends AbstractNativeStreamView implements Zmu
     }
 
     @Override
+    public CompletionStage<Void> closeWriteAsync() {
+        return runtime.closeWriteAsync();
+    }
+
+    @Override
     public void cancelWrite(long code) throws IOException {
         runtime.cancelWrite(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelWriteAsync(long code) {
+        return runtime.cancelWriteAsync(code);
     }
 
     @Override
@@ -99,7 +123,7 @@ final class NativeSendStreamView extends AbstractNativeStreamView implements Zmu
     }
 }
 
-final class NativeRecvStreamView extends AbstractNativeStreamView implements ZmuxNativeRecvStream {
+final class NativeRecvStreamView extends AbstractNativeStreamView implements ZmuxNativeRecvStream, ZmuxAsyncRecvStream {
     NativeRecvStreamView(StreamRuntime runtime) {
         super(runtime);
     }
@@ -120,8 +144,18 @@ final class NativeRecvStreamView extends AbstractNativeStreamView implements Zmu
     }
 
     @Override
+    public CompletionStage<Void> closeReadAsync() {
+        return runtime.closeReadAsync();
+    }
+
+    @Override
     public void cancelRead(long code) throws IOException {
         runtime.cancelRead(code);
+    }
+
+    @Override
+    public CompletionStage<Void> cancelReadAsync(long code) {
+        return runtime.cancelReadAsync(code);
     }
 
     @Override

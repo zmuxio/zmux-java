@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -728,6 +729,32 @@ final class NettyQuicSupport {
 
     static void executeAcceptedPreludeTask(Runnable task) {
         ACCEPTED_PRELUDE_EXECUTOR.execute(task);
+    }
+
+    static void executeAsyncTask(Runnable task) {
+        ACCEPTED_PRELUDE_EXECUTOR.execute(task);
+    }
+
+    static CompletableFuture<Void> completedVoid() {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    static <T> CompletableFuture<T> failedFuture(Throwable failure) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        future.completeExceptionally(failure);
+        return future;
+    }
+
+    static CompletableFuture<Void> completionStageFromChannelFuture(ChannelFuture future) {
+        CompletableFuture<Void> completion = new CompletableFuture<>();
+        future.addListener(ignored -> {
+            if (future.isSuccess()) {
+                completion.complete(null);
+            } else {
+                completion.completeExceptionally(translateThrowable(future.cause()));
+            }
+        });
+        return completion;
     }
 
     private static int defaultAcceptedPreludeWorkerMax() {

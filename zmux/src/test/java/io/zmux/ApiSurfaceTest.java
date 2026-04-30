@@ -274,6 +274,31 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void officialRuntimeExposesCompletionStageAsyncSurface() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            ZmuxAsyncSession client = ZmuxAsync.session(pair.client());
+            ZmuxAsyncSession server = ZmuxAsync.session(pair.server());
+
+            java.util.concurrent.CompletableFuture<ZmuxAsyncStream> acceptedFuture =
+                    server.acceptStreamAsync().toCompletableFuture();
+            ZmuxAsyncStream outbound = client.openStreamAsync(OpenOptions.empty())
+                    .toCompletableFuture()
+                    .get(1, TimeUnit.SECONDS);
+
+            assertTrue(outbound instanceof ZmuxNativeStream);
+            outbound.writeAsync("async".getBytes(StandardCharsets.UTF_8)).toCompletableFuture().get(1, TimeUnit.SECONDS);
+            outbound.closeWriteAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
+
+            ZmuxAsyncStream inbound = acceptedFuture.get(1, TimeUnit.SECONDS);
+            assertTrue(inbound instanceof ZmuxNativeStream);
+            assertEquals("async", new String(inbound.readAllBytes(), StandardCharsets.UTF_8));
+
+            outbound.closeAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
+            inbound.closeAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void openStreamExposesNativeBidiSurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxStream stream = pair.client().openStream();
