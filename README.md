@@ -11,11 +11,26 @@ detail and is not covered by compatibility guarantees.
 
 ## Installation
 
-Pick one of these common import styles.
+Use Maven Central for normal application builds. Replace placeholders before
+copying:
+
+- `VERSION`: the released zmux-java version you want to use.
+- `NETTY_VERSION`: the Netty QUIC version used by your application, or the
+  compatible Netty version declared by `zmux-netty-quic`.
+- `OS_CLASSIFIER`: the Netty native runtime classifier for your platform.
+
+The published user-facing artifacts are:
+
+- `io.github.zmuxio:zmux`: core ZMux Java APIs.
+- `io.github.zmuxio:zmux-netty-quic`: optional adapter for existing Netty QUIC
+  `QuicChannel` transports.
+
+Applications should not depend on `zmux-parent`; it is published only as Maven
+reactor metadata for the artifacts above.
 
 ### Gradle From Maven Central
 
-Use this after a release is published:
+Kotlin DSL:
 
 ```kotlin
 repositories {
@@ -27,6 +42,18 @@ dependencies {
 }
 ```
 
+Groovy DSL:
+
+```groovy
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'io.github.zmuxio:zmux:VERSION'
+}
+```
+
 Optional Netty QUIC adapter:
 
 ```kotlin
@@ -35,9 +62,17 @@ dependencies {
 }
 ```
 
+Groovy DSL:
+
+```groovy
+dependencies {
+    implementation 'io.github.zmuxio:zmux-netty-quic:VERSION'
+}
+```
+
 The adapter wraps an existing Netty `QuicChannel`. If your application does
-not already provide Netty QUIC native runtime artifacts, add the native module
-for your platform too:
+not already provide Netty QUIC native runtime artifacts, add the matching
+native runtime module for your platform:
 
 ```kotlin
 dependencies {
@@ -45,15 +80,22 @@ dependencies {
 }
 ```
 
+Groovy DSL:
+
+```groovy
+dependencies {
+    runtimeOnly 'io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER'
+}
+```
+
 Typical classifiers are `windows-x86_64`, `linux-x86_64`, `linux-aarch_64`,
 `osx-x86_64`, and `osx-aarch_64`.
+When building from a source checkout, inspect `zmux-netty-quic/pom.xml` for the
+adapter's compatible Netty version.
 
 ### Maven From Maven Central
 
-Use this after a release is published:
-
 ```xml
-
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux</artifactId>
@@ -64,7 +106,6 @@ Use this after a release is published:
 Optional Netty QUIC adapter:
 
 ```xml
-
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux-netty-quic</artifactId>
@@ -76,7 +117,6 @@ If your application does not already provide Netty QUIC native runtime
 artifacts, add the platform native dependency as well:
 
 ```xml
-
 <dependency>
     <groupId>io.netty</groupId>
     <artifactId>netty-codec-native-quic</artifactId>
@@ -86,10 +126,15 @@ artifacts, add the platform native dependency as well:
 </dependency>
 ```
 
+Maven resolves transitive dependencies from `zmux-netty-quic`, but the native
+QUIC runtime classifier is platform-specific and should be selected by the
+application build.
+
 ### Gradle From GitHub
 
 Maven and Gradle do not consume a raw GitHub URL as a normal dependency. For a
-GitHub tag or commit without manual cloning, use JitPack.
+GitHub tag or commit without manual cloning, use JitPack. Prefer Maven Central
+for releases and use JitPack only for development snapshots.
 
 Gradle Kotlin DSL:
 
@@ -130,7 +175,6 @@ Use a release tag or commit hash for repeatable builds.
 ### Maven From GitHub
 
 ```xml
-
 <repositories>
     <repository>
         <id>jitpack.io</id>
@@ -139,16 +183,15 @@ Use a release tag or commit hash for repeatable builds.
 </repositories>
 
 <dependency>
-<groupId>com.github.zmuxio.zmux-java</groupId>
-<artifactId>zmux</artifactId>
-<version>TAG_OR_COMMIT</version>
+    <groupId>com.github.zmuxio.zmux-java</groupId>
+    <artifactId>zmux</artifactId>
+    <version>TAG_OR_COMMIT</version>
 </dependency>
 ```
 
 Optional Netty QUIC adapter:
 
 ```xml
-
 <dependency>
     <groupId>com.github.zmuxio.zmux-java</groupId>
     <artifactId>zmux-netty-quic</artifactId>
@@ -158,8 +201,8 @@ Optional Netty QUIC adapter:
 
 ### Gradle From A Local Maven Install
 
-If you want locally installed artifacts to match the Java 8-compatible release
-build, install with the compatibility profile once:
+For local development against a checkout, install the reactor into your local
+Maven cache with the same Java-compatible bytecode used by releases:
 
 ```bash
 mvn -Pjava8-compat -DskipTests install
@@ -180,8 +223,8 @@ dependencies {
 
 ### Maven From A Local Maven Install
 
-If you already have the source checkout and want to install it into your local
-Maven cache with the same Java 8-compatible bytecode as the published release:
+For local development against a checkout, install the reactor into your local
+Maven cache:
 
 ```bash
 mvn -Pjava8-compat -DskipTests install
