@@ -1509,9 +1509,9 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             switch (kind) {
                 case WRITE:
                     if (fin) {
-                        owner.queueWriteFinal(payload, 0, payload.length);
+                        owner.writeFinal(payload, 0, payload.length);
                     } else {
-                        owner.queueWrite(payload, 0, payload.length);
+                        owner.write(payload, 0, payload.length);
                     }
                     return;
                 case CLOSE_WRITE:

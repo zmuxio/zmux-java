@@ -88,22 +88,22 @@ final class StreamWriteCompletionTest {
     }
 
     @Test
-    void writeAsyncCompletesAfterQueueAdmissionWithoutWriterTransport() throws Exception {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+    void writeAsyncWaitsUntilWriterCompletesUnderlyingTransportWrite() throws Exception {
+        BlockingOutputStream output = new BlockingOutputStream();
         SessionRuntime runtime = newRuntime(output);
+        Thread writer = startWriter(runtime);
         try {
             StreamRuntime stream = (StreamRuntime) runtime.openStream();
 
             CompletionStage<Void> write = stream.writeAsync("async".getBytes(StandardCharsets.UTF_8));
-            write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
 
-            synchronized (runtime.lock()) {
-                assertFalse(runtime.dataQueueInternal().isEmpty(), "async write should be accepted into the zmux send queue");
-                assertEquals("async".length(), stream.queuedDataBytesLocked(), "async write should count queued payload bytes");
-            }
-            assertEquals(0, output.size(), "async write should not require the underlying writer to run");
+            assertTrue(output.awaitWriteEntered(), "writer should reach the underlying transport");
+            assertFalse(write.toCompletableFuture().isDone(), "writeAsync must not complete while transport write is blocked");
+
+            output.release();
+            write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
         } finally {
-            closeRuntime(runtime, null);
+            closeRuntime(runtime, writer);
         }
     }
 
