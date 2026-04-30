@@ -34,10 +34,6 @@ public final class StreamMetadata {
         return of(0L, null, openInfo);
     }
 
-    public static StreamMetadata withOpenInfoUtf8(String openInfo) {
-        return withOpenInfo(TextSupport.utf8Bytes(openInfo, "openInfo"));
-    }
-
     private static byte[] normalizeOpenInfo(byte[] openInfo) {
         if (openInfo == null || openInfo.length == 0) {
             return EMPTY_OPEN_INFO;
@@ -76,10 +72,6 @@ public final class StreamMetadata {
 
     public byte[] openInfo() {
         return openInfo.length == 0 ? EMPTY_OPEN_INFO : Arrays.copyOf(openInfo, openInfo.length);
-    }
-
-    public String openInfoUtf8() {
-        return TextSupport.utf8String(openInfo);
     }
 
     public int openInfoLength() {

@@ -119,41 +119,6 @@ final class ApiSurfaceTest {
     }
 
     @Test
-    void utf8SessionSendHelpersDelegateToBytePayloadVariants() throws Exception {
-        RecordingDefaultSendStream send = new RecordingDefaultSendStream();
-        DefaultRecordingNativeSession session = new DefaultRecordingNativeSession(send);
-        OpenOptions options = OpenOptions.priority(5L);
-        Duration timeout = Duration.ofMillis(30);
-
-        assertSame(session.bidiStream, session.openAndSendUtf8("h\u00e9"));
-        assertEquals(1, session.openAndSendCalls);
-        assertSame(OpenOptions.empty(), session.lastOpenAndSendOptions);
-        assertArrayEquals("h\u00e9".getBytes(StandardCharsets.UTF_8), session.lastOpenAndSendData);
-
-        assertSame(session.bidiStream, session.openAndSendUtf8(options, "client"));
-        assertEquals(2, session.openAndSendCalls);
-        assertSame(options, session.lastOpenAndSendOptions);
-        assertArrayEquals("client".getBytes(StandardCharsets.UTF_8), session.lastOpenAndSendData);
-
-        assertSame(session.bidiStream, session.openAndSendUtf8(timeout, "timed"));
-        assertEquals(1, session.openStreamWithTimeoutCalls);
-        assertSame(OpenOptions.empty(), session.lastOpenStreamOptions);
-        assertEquals(timeout, session.lastOpenStreamTimeout);
-        assertArrayEquals("timed".getBytes(StandardCharsets.UTF_8), session.bidiStream.lastWriteBytes);
-
-        assertSame(send, session.openUniAndSendUtf8("uni"));
-        assertEquals(1, session.openUniAndSendCalls);
-        assertSame(OpenOptions.empty(), session.lastOpenUniAndSendOptions);
-        assertArrayEquals("uni".getBytes(StandardCharsets.UTF_8), session.lastOpenUniAndSendData);
-
-        assertSame(send, session.openUniAndSendUtf8(options, timeout, "timed-uni"));
-        assertEquals(1, session.openUniStreamWithTimeoutCalls);
-        assertSame(options, session.lastOpenUniStreamOptions);
-        assertEquals(timeout, session.lastOpenUniStreamTimeout);
-        assertArrayEquals("timed-uni".getBytes(StandardCharsets.UTF_8), send.lastFinalBytes);
-    }
-
-    @Test
     void acceptUniStreamExposesRecvOnlySurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxSendStream outbound = pair.client().openUniStream();
@@ -1809,12 +1774,6 @@ final class ApiSurfaceTest {
         assertArrayEquals("payload".getBytes(StandardCharsets.UTF_8), stream.readAllBytes());
         assertEquals(2, stream.readCalls, "readAllBytes should stop after the first EOF");
 
-        RecordingDefaultRecvStream text = new RecordingDefaultRecvStream("h\u00e9".getBytes(StandardCharsets.UTF_8));
-        assertEquals("h\u00e9", text.readAllUtf8());
-
-        RecordingDefaultRecvStream limitedText = new RecordingDefaultRecvStream("abc".getBytes(StandardCharsets.UTF_8));
-        assertEquals("abc", limitedText.readAllUtf8(3));
-
         RecordingDefaultRecvStream limited = new RecordingDefaultRecvStream("abc".getBytes(StandardCharsets.UTF_8));
         ZmuxException tooLarge = assertThrows(ZmuxException.class, () -> limited.readAllBytes(2));
         assertEquals(ErrorCode.FRAME_SIZE.code(), tooLarge.code());
@@ -1845,10 +1804,6 @@ final class ApiSurfaceTest {
         assertEquals(3, writeBuffer.position());
         assertEquals(1, send.writeCalls);
         assertArrayEquals("bc".getBytes(StandardCharsets.UTF_8), send.lastWriteBytes);
-
-        send.writeUtf8("h\u00e9");
-        assertEquals(2, send.writeCalls);
-        assertArrayEquals("h\u00e9".getBytes(StandardCharsets.UTF_8), send.lastWriteBytes);
 
         RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream("xy".getBytes(StandardCharsets.UTF_8));
         ByteBuffer readBuffer = ByteBuffer.allocate(4);
@@ -1889,10 +1844,6 @@ final class ApiSurfaceTest {
         assertEquals(0, finalSend.writeCalls);
         assertEquals(1, finalSend.writeFinalCalls);
         assertArrayEquals("xyz".getBytes(StandardCharsets.UTF_8), finalSend.lastFinalBytes);
-
-        assertEquals(3, finalSend.writeFinalUtf8("fin"));
-        assertEquals(2, finalSend.writeFinalCalls);
-        assertArrayEquals("fin".getBytes(StandardCharsets.UTF_8), finalSend.lastFinalBytes);
 
         RecordingDefaultRecvStream recv = new RecordingDefaultRecvStream("xy".getBytes(StandardCharsets.UTF_8));
         ByteBuffer readBuffer = ByteBuffer.allocateDirect(4);
@@ -2232,7 +2183,6 @@ final class ApiSurfaceTest {
         private Instant lastDeadline;
         private int deadlineSetCalls;
         private int deadlineClearCalls;
-        private byte[] lastWriteBytes = new byte[0];
 
         @Override
         public int read(byte[] dst, int offset, int length) {
@@ -2241,7 +2191,6 @@ final class ApiSurfaceTest {
 
         @Override
         public void write(byte[] src, int offset, int length) {
-            this.lastWriteBytes = java.util.Arrays.copyOfRange(src, offset, offset + length);
         }
 
         @Override
@@ -2348,8 +2297,6 @@ final class ApiSurfaceTest {
         private final RecordingDefaultBidiStream bidiStream = new RecordingDefaultBidiStream();
         private int openStreamWithTimeoutCalls;
         private int openUniStreamWithTimeoutCalls;
-        private int openAndSendCalls;
-        private int openUniAndSendCalls;
         private int goAwayCalls;
         private int closeCalls;
         private int closeWithErrorCalls;
@@ -2366,10 +2313,6 @@ final class ApiSurfaceTest {
         private Duration lastOpenStreamTimeout;
         private OpenOptions lastOpenUniStreamOptions;
         private Duration lastOpenUniStreamTimeout;
-        private OpenOptions lastOpenAndSendOptions;
-        private byte[] lastOpenAndSendData;
-        private OpenOptions lastOpenUniAndSendOptions;
-        private byte[] lastOpenUniAndSendData;
         private Duration lastAwaitTerminationTimeout;
         private boolean awaitTerminationResult;
         private java.util.Optional<IOException> terminationCause = java.util.Optional.empty();
@@ -2446,28 +2389,22 @@ final class ApiSurfaceTest {
 
         @Override
         public ZmuxNativeStream openAndSend(byte[] data) {
-            return openAndSend(OpenOptions.empty(), data);
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public ZmuxNativeStream openAndSend(OpenOptions options, byte[] data) {
-            this.openAndSendCalls++;
-            this.lastOpenAndSendOptions = options;
-            this.lastOpenAndSendData = data;
-            return bidiStream;
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public ZmuxNativeSendStream openUniAndSend(byte[] data) {
-            return openUniAndSend(OpenOptions.empty(), data);
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public ZmuxNativeSendStream openUniAndSend(OpenOptions options, byte[] data) {
-            this.openUniAndSendCalls++;
-            this.lastOpenUniAndSendOptions = options;
-            this.lastOpenUniAndSendData = data;
-            return stream;
+            throw new UnsupportedOperationException();
         }
 
         @Override

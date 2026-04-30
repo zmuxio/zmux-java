@@ -7,10 +7,6 @@ public interface ZmuxStreamInfo {
 
     byte[] openInfo();
 
-    default String openInfoUtf8() {
-        return TextSupport.utf8String(openInfo());
-    }
-
     default int openInfoLength() {
         return metadata().openInfoLength();
     }

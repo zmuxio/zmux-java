@@ -30,9 +30,9 @@ reactor metadata for the artifacts above.
 
 ### Gradle From Maven Central
 
-Kotlin DSL:
+`.gradle.kts`:
 
-```kotlin
+```kts
 repositories {
     mavenCentral()
 }
@@ -56,7 +56,7 @@ dependencies {
 
 Optional Netty QUIC adapter:
 
-```kotlin
+```kts
 dependencies {
     implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
 }
@@ -74,7 +74,7 @@ The adapter wraps an existing Netty `QuicChannel`. If your application does
 not already provide Netty QUIC native runtime artifacts, add the matching
 native runtime module for your platform:
 
-```kotlin
+```kts
 dependencies {
     runtimeOnly("io.netty:netty-codec-native-quic:NETTY_VERSION:OS_CLASSIFIER")
 }
@@ -136,9 +136,9 @@ Maven and Gradle do not consume a raw GitHub URL as a normal dependency. For a
 GitHub tag or commit without manual cloning, use JitPack. Prefer Maven Central
 for releases and use JitPack only for development snapshots.
 
-Gradle Kotlin DSL:
+Gradle `.gradle.kts`:
 
-```kotlin
+```kts
 repositories {
     mavenCentral()
     maven("https://jitpack.io")
@@ -164,7 +164,7 @@ dependencies {
 
 Optional Netty QUIC adapter:
 
-```kotlin
+```kts
 dependencies {
     implementation("com.github.zmuxio.zmux-java:zmux-netty-quic:TAG_OR_COMMIT")
 }
@@ -210,7 +210,7 @@ mvn -Pjava8-compat -DskipTests install
 
 Then use `mavenLocal()`:
 
-```kotlin
+```kts
 repositories {
     mavenLocal()
     mavenCentral()
@@ -251,20 +251,18 @@ Core session and stream APIs:
   `DuplexConnection`.
 - `ZmuxSession`: accepts and opens bidirectional streams, accepts and opens
   unidirectional streams, provides `openAndSend` helpers for whole arrays,
-  array slices, `ByteBuffer`, and UTF-8 text, reports state/stats, closes
-  gracefully or with an application error, and waits for termination.
+  array slices, and `ByteBuffer`, reports state/stats, closes gracefully or
+  with an application error, and waits for termination.
 - `ZmuxStream`: bidirectional stream interface combining send and receive
   operations.
 - `ZmuxSendStream`: write side interface for `byte[]`, `ByteBuffer`,
-  UTF-8 text, `OutputStream` adaptation, `writeFinal`, `writevFinal`,
-  metadata updates, write deadlines, graceful write close, and write
-  cancellation.
+  `OutputStream` adaptation, `writeFinal`, `writevFinal`, metadata updates,
+  write deadlines, graceful write close, and write cancellation.
 - `ZmuxRecvStream`: read side interface for `byte[]`, `ByteBuffer`,
-  `readAllBytes`, UTF-8 text, `InputStream` adaptation, read deadlines, local
-  read close, and read cancellation.
+  `readAllBytes`, `InputStream` adaptation, read deadlines, local read close,
+  and read cancellation.
 - `ZmuxStreamInfo`: common stream metadata such as stream id, open info,
-  priority/group metadata, UTF-8 open-info helpers, and local/remote
-  addresses.
+  priority/group metadata, and local/remote addresses.
 
 Native transport APIs:
 
@@ -388,50 +386,6 @@ Netty QUIC adapter APIs:
 ## Usage
 
 The examples assume the surrounding method declares `throws Exception`.
-
-### Kotlin
-
-Kotlin users can use the same Maven Central coordinates and the same runtime
-interfaces as Java users. The public session and stream interfaces implement
-`Closeable`, so Kotlin's `use` helper works directly:
-
-```kotlin
-import io.zmux.OpenOptions
-import io.zmux.Zmux
-import java.net.Socket
-
-Socket("127.0.0.1", 9000).use { socket ->
-    Zmux.clientSession(socket).use { session ->
-        val options = OpenOptions.builder()
-            .priority(7)
-            .openInfoUtf8("rpc")
-            .build()
-
-        session.openStream(options).use { stream ->
-            stream.writeFinalUtf8("hello")
-            val reply = stream.readAllUtf8()
-        }
-    }
-}
-```
-
-For one-shot opens, use the UTF-8 helpers instead of manually converting text
-to `ByteArray`:
-
-```kotlin
-session.openAndSendUtf8("request").use { stream ->
-    stream.closeWrite()
-    val response = stream.readAllUtf8()
-}
-
-session.openUniAndSendUtf8("event").use {
-    // the send half has already written a final payload
-}
-```
-
-The Netty QUIC adapter returns the same `ZmuxSession`, `ZmuxStream`,
-`ZmuxSendStream`, and `ZmuxRecvStream` interfaces, so the Kotlin code above
-also works when `session` comes from `NettyQuic.wrapSession(...)`.
 
 ### Client
 

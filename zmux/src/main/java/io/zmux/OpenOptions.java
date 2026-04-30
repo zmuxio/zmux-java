@@ -47,10 +47,6 @@ public final class OpenOptions {
         return withOpenInfo(Objects.requireNonNull(openInfo, "openInfo").getBytes(StandardCharsets.UTF_8));
     }
 
-    public static OpenOptions withOpenInfoUtf8(String openInfo) {
-        return withOpenInfo(TextSupport.utf8Bytes(openInfo, "openInfo"));
-    }
-
     public static Builder builder() {
         return new Builder();
     }
@@ -90,10 +86,6 @@ public final class OpenOptions {
 
     public byte[] openInfo() {
         return openInfo.length == 0 ? EMPTY_OPEN_INFO : Arrays.copyOf(openInfo, openInfo.length);
-    }
-
-    public String openInfoUtf8() {
-        return TextSupport.utf8String(openInfo);
     }
 
     public int openInfoLength() {
@@ -173,10 +165,6 @@ public final class OpenOptions {
 
         public Builder openInfo(String openInfo) {
             return openInfo(Objects.requireNonNull(openInfo, "openInfo").getBytes(StandardCharsets.UTF_8));
-        }
-
-        public Builder openInfoUtf8(String openInfo) {
-            return openInfo(TextSupport.utf8Bytes(openInfo, "openInfo"));
         }
 
         public OpenOptions build() {

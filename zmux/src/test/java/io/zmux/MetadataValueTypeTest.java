@@ -40,14 +40,12 @@ final class MetadataValueTypeTest {
         OpenOptions built = OpenOptions.builder()
                 .priority(7L)
                 .group(9L)
-                .openInfoUtf8("abc")
+                .openInfo("abc")
                 .build();
 
         assertEquals(new OpenOptions(7L, 9L, new byte[]{'a', 'b', 'c'}), built);
         assertEquals(new OpenOptions(null, null, new byte[]{'x'}), OpenOptions.withOpenInfo(new byte[]{'x'}));
         assertEquals(new OpenOptions(null, null, new byte[]{'y'}), OpenOptions.withOpenInfo("y"));
-        assertEquals(new OpenOptions(null, null, new byte[]{'z'}), OpenOptions.withOpenInfoUtf8("z"));
-        assertEquals("abc", built.openInfoUtf8());
         assertEquals(new OpenOptions(7L, null, null), OpenOptions.priority(7L));
         assertEquals(new OpenOptions(null, 9L, null), OpenOptions.group(9L));
         assertSame(OpenOptions.empty(), OpenOptions.of(null, null, null));
@@ -117,9 +115,6 @@ final class MetadataValueTypeTest {
 
         assertEquals(new StreamMetadata(3L, 11L, new byte[]{4, 5, 6}), metadata);
         assertEquals(new StreamMetadata(0L, null, new byte[]{7}), StreamMetadata.withOpenInfo(new byte[]{7}));
-        assertEquals(new StreamMetadata(0L, null, new byte[]{'h', (byte) 0xc3, (byte) 0xa9}),
-                StreamMetadata.withOpenInfoUtf8("h\u00e9"));
-        assertEquals("h\u00e9", StreamMetadata.withOpenInfoUtf8("h\u00e9").openInfoUtf8());
         assertSame(StreamMetadata.empty(), StreamMetadata.of(0L, null, null));
         assertTrue(metadata.hasGroup());
         assertTrue(metadata.hasOpenInfo());
@@ -162,7 +157,6 @@ final class MetadataValueTypeTest {
 
         assertEquals(3, info.openInfoLength());
         assertTrue(info.hasOpenInfo());
-        assertEquals("\u0001\u0002\u0003", info.openInfoUtf8());
     }
 
     @Test
