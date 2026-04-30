@@ -729,7 +729,7 @@ final class NettyQuicStreamState {
         lock.lock();
         try {
             sessionError = error;
-            pauseInboundAutoReadLocked();
+            releaseInboundLocked();
             signalStateChangedLocked();
         } finally {
             lock.unlock();

@@ -507,6 +507,32 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void sessionCloseReleasesActiveStreamBufferedInbound() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            ZmuxStream outbound = pair.client.openStream();
+            byte[] payload = utf8("active-buffer-release");
+            outbound.write(payload);
+
+            ZmuxStream accepted = pair.server.acceptStream(Duration.ofSeconds(5));
+            NettyQuicBidiStream acceptedAdapter = assertInstanceOf(NettyQuicBidiStream.class, accepted);
+            awaitTrackedState(acceptedAdapter.state, 0, payload.length, Duration.ofSeconds(5));
+            assertTrue(
+                    acceptedAdapter.state.bufferedInboundBytes() >= payload.length,
+                    "test setup should leave unread inbound payload buffered"
+            );
+
+            pair.server.closeWithError(91L, "release-active-buffer");
+
+            assertEquals(
+                    0L,
+                    acceptedAdapter.state.bufferedInboundBytes(),
+                    "session close should release unread active stream buffers"
+            );
+            assertThrows(IOException.class, () -> accepted.read(new byte[1]));
+        }
+    }
+
+    @Test
     void statsExposeActiveStreamsByOpenerAndDirection() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxStream> bidiAcceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
@@ -1637,12 +1663,14 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
-    void cancelReadAfterSessionCloseDoesNotDiscardBufferedData() throws Exception {
+    void cancelReadAfterSessionCloseReleasesBufferedData() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
             ZmuxStream clientStream = pair.client.openStream();
             clientStream.write(utf8("s"));
             ZmuxStream accepted = await(acceptedFuture);
+            NettyQuicBidiStream acceptedAdapter = assertInstanceOf(NettyQuicBidiStream.class, accepted);
+            awaitTrackedState(acceptedAdapter.state, 0, 1, Duration.ofSeconds(5));
 
             pair.client.closeWithError(88L, "adapter-session-close");
             awaitStats(pair.server, Duration.ofSeconds(5), snapshot -> snapshot.state() != SessionState.READY);
@@ -1663,7 +1691,18 @@ class NettyQuicSessionContractTest {
             assertEquals(88L, invalidCodeCloseError.code());
             assertEquals("adapter-session-close", invalidCodeCloseError.reason());
 
-            assertArrayEquals(utf8("s"), readExactly(accepted, 1), "failed cancelRead must not discard buffered data");
+            assertEquals(
+                    0L,
+                    acceptedAdapter.state.bufferedInboundBytes(),
+                    "session close should release buffered data before failed cancelRead"
+            );
+            ApplicationError readAfterClose = assertInstanceOf(
+                    ApplicationError.class,
+                    assertThrows(IOException.class, () -> accepted.read(new byte[1])),
+                    "read after session close should surface the structured session error"
+            );
+            assertEquals(88L, readAfterClose.code());
+            assertEquals("adapter-session-close", readAfterClose.reason());
 
             accepted.close();
             clientStream.close();
