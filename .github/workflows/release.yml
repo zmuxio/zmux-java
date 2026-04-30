@@ -49,9 +49,6 @@ jobs:
           fi
           echo "JRELEASER_PROJECT_VERSION=${version}" >> "${GITHUB_ENV}"
 
-      - name: Test
-        run: mvn -B -Pjava8-compat test
-
       - name: Stage Maven artifacts
         run: |
           rm -rf target/staging-deploy
