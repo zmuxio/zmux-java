@@ -46,40 +46,46 @@ final class StreamWriteCompletion {
         notifyAll();
     }
 
-    boolean awaitWritten(long remainingNanos) throws IOException {
-        synchronized (this) {
-            if (remainingNanos < 0L) {
-                return false;
-            }
-            if (remainingNanos == 0L) {
-                awaitUnboundedLocked();
-                throwIfFailedLocked();
-                return true;
-            }
-            long deadlineNanos = SessionRuntime.saturatingAdd(System.nanoTime(), remainingNanos);
-            while (!done) {
-                long waitNanos = TimeoutBudget.remainingNanosUntil(deadlineNanos);
-                if (waitNanos <= 0L) {
-                    return false;
-                }
-                long millis = TimeUnit.NANOSECONDS.toMillis(waitNanos);
-                int nanos = (int) (waitNanos - TimeUnit.MILLISECONDS.toNanos(millis));
-                try {
-                    wait(millis, nanos);
-                } catch (InterruptedException interruptedException) {
-                    Thread.currentThread().interrupt();
-                    throw SessionRuntime.interruptedIo(
-                            "zmux: interrupted while waiting for stream write",
-                            "write",
-                            ZmuxErrorScope.STREAM,
-                            ZmuxErrorDirection.WRITE,
-                            interruptedException
-                    );
-                }
-            }
+    synchronized boolean done() {
+        return done;
+    }
+
+    synchronized void throwIfFailed() throws IOException {
+        throwIfFailedLocked();
+    }
+
+    synchronized boolean awaitSignal(long waitNanos) throws IOException {
+        if (done) {
             throwIfFailedLocked();
             return true;
         }
+        try {
+            if (waitNanos == 0L) {
+                wait();
+            } else {
+                long millis = TimeUnit.NANOSECONDS.toMillis(waitNanos);
+                int nanos = (int) (waitNanos - TimeUnit.MILLISECONDS.toNanos(millis));
+                wait(millis, nanos);
+            }
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            throw SessionRuntime.interruptedIo(
+                    "zmux: interrupted while waiting for stream write",
+                    "write",
+                    ZmuxErrorScope.STREAM,
+                    ZmuxErrorDirection.WRITE,
+                    interruptedException
+            );
+        }
+        if (done) {
+            throwIfFailedLocked();
+            return true;
+        }
+        return false;
+    }
+
+    synchronized void notifyWaiters() {
+        notifyAll();
     }
 
     synchronized boolean canCancelQueuedFrames(int queuedFrameCount) {
@@ -94,23 +100,6 @@ final class StreamWriteCompletion {
         done = true;
         notifyAll();
         return true;
-    }
-
-    private void awaitUnboundedLocked() throws IOException {
-        while (!done) {
-            try {
-                wait();
-            } catch (InterruptedException interruptedException) {
-                Thread.currentThread().interrupt();
-                throw SessionRuntime.interruptedIo(
-                        "zmux: interrupted while waiting for stream write",
-                        "write",
-                        ZmuxErrorScope.STREAM,
-                        ZmuxErrorDirection.WRITE,
-                        interruptedException
-                );
-            }
-        }
     }
 
     private void throwIfFailedLocked() throws IOException {

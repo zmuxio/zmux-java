@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -117,6 +118,84 @@ final class StreamWriteCompletionTest {
     }
 
     @Test
+    void writeDeadlineShortenedAfterQueueAdmissionCancelsQueuedWrite() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = null;
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            CountDownLatch writeReturned = new CountDownLatch(1);
+
+            Thread caller = new Thread(() -> {
+                try {
+                    stream.write("x".getBytes(StandardCharsets.UTF_8));
+                } catch (Throwable throwable) {
+                    failure.set(throwable);
+                } finally {
+                    writeReturned.countDown();
+                }
+            }, "stream-write-shortened-deadline-caller");
+            caller.start();
+
+            waitUntilQueued(runtime);
+            assertFalse(writeReturned.await(50L, TimeUnit.MILLISECONDS), "write should wait without an initial deadline");
+
+            stream.setWriteDeadline(Instant.now());
+
+            assertTrue(writeReturned.await(1L, TimeUnit.SECONDS), "shortened deadline should wake the waiting write");
+            assertTrue(failure.get() instanceof WriteTimeoutException, "queued write should return the new timeout");
+            synchronized (runtime.lock()) {
+                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out queued write should be removed");
+                assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out queued write should release accounting");
+                assertEquals(0L, stream.reservedSendBytes(), "timed-out queued write should release send reservations");
+            }
+
+            stream.clearWriteDeadline();
+            writer = startWriter(runtime);
+            stream.write("y".getBytes(StandardCharsets.UTF_8));
+        } finally {
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void writeDeadlineExtendedAfterQueueAdmissionDoesNotUseStaleTimeout() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = null;
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            stream.setWriteTimeout(Duration.ofMillis(100L));
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            CountDownLatch writeReturned = new CountDownLatch(1);
+
+            Thread caller = new Thread(() -> {
+                try {
+                    stream.write("x".getBytes(StandardCharsets.UTF_8));
+                } catch (Throwable throwable) {
+                    failure.set(throwable);
+                } finally {
+                    writeReturned.countDown();
+                }
+            }, "stream-write-extended-deadline-caller");
+            caller.start();
+
+            waitUntilQueued(runtime);
+            stream.setWriteTimeout(Duration.ofSeconds(2L));
+
+            assertFalse(writeReturned.await(250L, TimeUnit.MILLISECONDS), "old deadline should not cancel the queued write");
+            assertNull(failure.get(), "write should still be waiting after the original timeout");
+
+            writer = startWriter(runtime);
+            assertTrue(writeReturned.await(1L, TimeUnit.SECONDS), "write should complete after writer drains the queue");
+            assertNull(failure.get(), "extended deadline should allow successful write completion");
+        } finally {
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
     void writeTimeoutAfterWriterOwnsBatchDoesNotCancelInflightWrite() throws Exception {
         BlockingOutputStream output = new BlockingOutputStream();
         SessionRuntime runtime = newRuntime(output);
@@ -175,6 +254,19 @@ final class StreamWriteCompletionTest {
         if (writer != null) {
             writer.join(1_000L);
         }
+    }
+
+    private static void waitUntilQueued(SessionRuntime runtime) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            synchronized (runtime.lock()) {
+                if (!runtime.dataQueueInternal().isEmpty()) {
+                    return;
+                }
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("write did not enter the outbound queue");
     }
 
     private static boolean containsMessage(Throwable error, String expected) {

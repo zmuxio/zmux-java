@@ -111,7 +111,7 @@ final class StreamWriteCoordinator {
             return;
         }
         StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
-        long completionWaitNanos = 0L;
+        boolean waitForCompletion = false;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -164,14 +164,15 @@ final class StreamWriteCoordinator {
                 this.owner.noteWritePayloadProgressLocked(length);
                 this.owner.notifyLockWaitersLocked();
                 if (completion != null && completion.hasFrames()) {
-                    completionWaitNanos = this.owner.remainingWriteDeadlineNanosLocked();
+                    this.owner.registerWriteCompletionWaiterLocked(completion);
+                    waitForCompletion = true;
                 }
             }
         } finally {
             this.owner.emitPendingEvents();
         }
-        if (completion != null && completion.hasFrames()) {
-            this.awaitTransportWrite(completion, completionWaitNanos);
+        if (waitForCompletion) {
+            this.awaitTransportWrite(completion);
         }
     }
 
@@ -191,7 +192,7 @@ final class StreamWriteCoordinator {
         }
 
         StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
-        long completionWaitNanos = 0L;
+        boolean waitForCompletion = false;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -289,28 +290,46 @@ final class StreamWriteCoordinator {
                 this.owner.noteWritePayloadProgressLocked(totalLength);
                 this.owner.notifyLockWaitersLocked();
                 if (completion != null && completion.hasFrames()) {
-                    completionWaitNanos = this.owner.remainingWriteDeadlineNanosLocked();
+                    this.owner.registerWriteCompletionWaiterLocked(completion);
+                    waitForCompletion = true;
                 }
             }
         } finally {
             this.owner.emitPendingEvents();
         }
-        if (completion != null && completion.hasFrames()) {
-            this.awaitTransportWrite(completion, completionWaitNanos);
+        if (waitForCompletion) {
+            this.awaitTransportWrite(completion);
         }
         return totalLength;
     }
 
-    private void awaitTransportWrite(StreamWriteCompletion completion, long remainingNanos) throws IOException {
-        WriteTimeoutException timeout = new WriteTimeoutException();
-        boolean written = completion.awaitWritten(remainingNanos);
-        if (written) {
-            return;
+    private void awaitTransportWrite(StreamWriteCompletion completion) throws IOException {
+        boolean deadlineCancellationAttempted = false;
+        try {
+            while (true) {
+                if (completion.done()) {
+                    completion.throwIfFailed();
+                    return;
+                }
+                long waitNanos;
+                synchronized (this.owner.lockInternal()) {
+                    waitNanos = deadlineCancellationAttempted ? 0L : this.owner.remainingWriteDeadlineNanosLocked();
+                }
+                if (!deadlineCancellationAttempted && waitNanos < 0L) {
+                    WriteTimeoutException timeout = new WriteTimeoutException();
+                    if (this.cancelQueuedWriteAfterTimeout(completion, timeout)) {
+                        throw timeout;
+                    }
+                    deadlineCancellationAttempted = true;
+                    continue;
+                }
+                completion.awaitSignal(waitNanos);
+            }
+        } finally {
+            synchronized (this.owner.lockInternal()) {
+                this.owner.unregisterWriteCompletionWaiterLocked(completion);
+            }
         }
-        if (this.cancelQueuedWriteAfterTimeout(completion, timeout)) {
-            throw timeout;
-        }
-        completion.awaitWritten(0L);
     }
 
     private boolean cancelQueuedWriteAfterTimeout(StreamWriteCompletion completion, IOException timeout) {

@@ -5,6 +5,7 @@ import io.zmux.*;
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Objects;
 
 final class StreamRuntime implements ZmuxNativeStream {
@@ -28,6 +29,7 @@ final class StreamRuntime implements ZmuxNativeStream {
     private final StreamAdvisoryCoordinator advisoryCoordinator;
     private final StreamTerminalCoordinator terminalCoordinator;
     private final ByteArrayQueue readBuffer = new ByteArrayQueue();
+    private final ArrayList<StreamWriteCompletion> pendingWriteCompletions = new ArrayList<>();
     private final ZmuxNativeSendStream sendView;
     private final ZmuxNativeRecvStream recvView;
 
@@ -273,10 +275,12 @@ final class StreamRuntime implements ZmuxNativeStream {
     void notifyLockWaitersLocked() {
         session.notifyStreamWaitersLocked();
         session.notifyWriterWaitersLocked();
+        notifyWriteCompletionWaitersLocked();
     }
 
     void notifyStreamWaitersOnlyLocked() {
         session.notifyStreamWaitersLocked();
+        notifyWriteCompletionWaitersLocked();
     }
 
     void notifyReadWaitersLocked() {
@@ -285,6 +289,7 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     void notifyWriteWaitersLocked() {
         session.notifyStreamWriteWaitersLocked();
+        notifyWriteCompletionWaitersLocked();
     }
 
     void waitOnLock() throws InterruptedException {
@@ -1112,6 +1117,29 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     long remainingWriteDeadlineNanosLocked() {
         return remainingDeadlineNanosLocked(writeDeadlineNanos);
+    }
+
+    void registerWriteCompletionWaiterLocked(StreamWriteCompletion completion) {
+        if (completion == null || pendingWriteCompletions.contains(completion)) {
+            return;
+        }
+        pendingWriteCompletions.add(completion);
+    }
+
+    void unregisterWriteCompletionWaiterLocked(StreamWriteCompletion completion) {
+        if (completion == null) {
+            return;
+        }
+        pendingWriteCompletions.remove(completion);
+    }
+
+    private void notifyWriteCompletionWaitersLocked() {
+        if (pendingWriteCompletions.isEmpty()) {
+            return;
+        }
+        for (StreamWriteCompletion completion : pendingWriteCompletions) {
+            completion.notifyWaiters();
+        }
     }
 
     void setWriteDeadlineNanos(long deadlineNanos) {
