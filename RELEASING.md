@@ -51,7 +51,7 @@ policy changes.
 
 ```bash
 mvn -B -Pjava8-compat test
-mvn -B -Prelease -DskipTests deploy
+mvn -B -Prelease -Dmaven.test.skip=true deploy
 ```
 
 The release profile stages artifacts under `target/staging-deploy`; it does
