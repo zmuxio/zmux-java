@@ -192,57 +192,6 @@ final class SessionDiagnosticsRuntimeTest {
         return reader;
     }
 
-    private static final class BlockingBytesInputStream extends java.io.InputStream {
-        private final byte[] bytes;
-        private final CountDownLatch readStarted = new CountDownLatch(1);
-        private final CountDownLatch releaseRead = new CountDownLatch(1);
-        private int position;
-
-        private BlockingBytesInputStream(byte[] bytes) {
-            this.bytes = bytes;
-        }
-
-        boolean awaitReadStart() throws InterruptedException {
-            return this.readStarted.await(1L, TimeUnit.SECONDS);
-        }
-
-        void releaseRead() {
-            this.releaseRead.countDown();
-        }
-
-        @Override
-        public int read(byte[] buffer, int offset, int length) throws IOException {
-            if (length == 0) {
-                return 0;
-            }
-            this.readStarted.countDown();
-            this.awaitRelease();
-            if (this.position >= this.bytes.length) {
-                return -1;
-            }
-            int count = Math.min(length, this.bytes.length - this.position);
-            System.arraycopy(this.bytes, this.position, buffer, offset, count);
-            this.position += count;
-            return count;
-        }
-
-        @Override
-        public int read() throws IOException {
-            byte[] one = new byte[1];
-            int count = this.read(one, 0, 1);
-            return count < 0 ? -1 : one[0] & 0xff;
-        }
-
-        private void awaitRelease() throws IOException {
-            try {
-                this.releaseRead.await();
-            } catch (InterruptedException interruptedException) {
-                Thread.currentThread().interrupt();
-                throw new IOException("synthetic blocked read interrupted", interruptedException);
-            }
-        }
-    }
-
     @Test
     void peerResetAndLateDataPopulateReasonAndDiagnosticStats() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -1223,5 +1172,56 @@ final class SessionDiagnosticsRuntimeTest {
         assertEquals(1L, runtime.stats().diagnostics().keepaliveTimeouts(), "keepalive timeout should increment diagnostics");
         assertEquals(0L, runtime.stats().diagnostics().gracefulCloseTimeouts(), "keepalive timeout should not increment graceful-close diagnostics");
         assertEquals(0L, runtime.stats().diagnostics().closeCompletionTimeouts(), "keepalive timeout should not increment close-completion diagnostics");
+    }
+
+    private static final class BlockingBytesInputStream extends java.io.InputStream {
+        private final byte[] bytes;
+        private final CountDownLatch readStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseRead = new CountDownLatch(1);
+        private int position;
+
+        private BlockingBytesInputStream(byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        boolean awaitReadStart() throws InterruptedException {
+            return this.readStarted.await(1L, TimeUnit.SECONDS);
+        }
+
+        void releaseRead() {
+            this.releaseRead.countDown();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return 0;
+            }
+            this.readStarted.countDown();
+            this.awaitRelease();
+            if (this.position >= this.bytes.length) {
+                return -1;
+            }
+            int count = Math.min(length, this.bytes.length - this.position);
+            System.arraycopy(this.bytes, this.position, buffer, offset, count);
+            this.position += count;
+            return count;
+        }
+
+        @Override
+        public int read() throws IOException {
+            byte[] one = new byte[1];
+            int count = this.read(one, 0, 1);
+            return count < 0 ? -1 : one[0] & 0xff;
+        }
+
+        private void awaitRelease() throws IOException {
+            try {
+                this.releaseRead.await();
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                throw new IOException("synthetic blocked read interrupted", interruptedException);
+            }
+        }
     }
 }

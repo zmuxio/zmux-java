@@ -1,10 +1,6 @@
 package io.zmux.adapter.quic.netty;
 
-import io.zmux.Zmux;
-import io.zmux.ZmuxRecvStream;
-import io.zmux.ZmuxSendStream;
-import io.zmux.ZmuxSession;
-import io.zmux.ZmuxStream;
+import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -17,25 +13,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.zmux.adapter.quic.netty.NettyQuicTestSupport.async;
-import static io.zmux.adapter.quic.netty.NettyQuicTestSupport.await;
-import static io.zmux.adapter.quic.netty.NettyQuicTestSupport.readAll;
-import static io.zmux.adapter.quic.netty.NettyQuicTestSupport.utf8;
+import static io.zmux.adapter.quic.netty.NettyQuicTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SessionPolymorphismTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
-
-    @Test
-    void sameUpperLayerCodeWorksWithNativeAndNettyQuicSessions() throws Exception {
-        try (CommonPair pair = NativePair.open()) {
-            exerciseCommonSessionCode(pair.client(), pair.server());
-        }
-
-        try (CommonPair pair = AdapterPair.open()) {
-            exerciseCommonSessionCode(pair.client(), pair.server());
-        }
-    }
 
     private static void exerciseCommonSessionCode(ZmuxSession client, ZmuxSession server) throws Exception {
         assertNotNull(client);
@@ -76,6 +58,42 @@ final class SessionPolymorphismTest {
         assertTrue(server.awaitTermination(TIMEOUT));
         assertTrue(client.isClosed());
         assertTrue(server.isClosed());
+    }
+
+    private static IOException closeSuppress(ZmuxSession session) {
+        if (session == null) {
+            return null;
+        }
+        try {
+            session.close();
+            return null;
+        } catch (IOException error) {
+            return error;
+        }
+    }
+
+    private static void rethrow(Throwable error) throws Exception {
+        if (error == null) {
+            return;
+        }
+        if (error instanceof Exception) {
+            throw (Exception) error;
+        }
+        if (error instanceof Error) {
+            throw (Error) error;
+        }
+        throw new RuntimeException(error);
+    }
+
+    @Test
+    void sameUpperLayerCodeWorksWithNativeAndNettyQuicSessions() throws Exception {
+        try (CommonPair pair = NativePair.open()) {
+            exerciseCommonSessionCode(pair.client(), pair.server());
+        }
+
+        try (CommonPair pair = AdapterPair.open()) {
+            exerciseCommonSessionCode(pair.client(), pair.server());
+        }
     }
 
     private interface CommonPair extends AutoCloseable {
@@ -192,30 +210,5 @@ final class SessionPolymorphismTest {
         public void close() throws Exception {
             pair.close();
         }
-    }
-
-    private static IOException closeSuppress(ZmuxSession session) {
-        if (session == null) {
-            return null;
-        }
-        try {
-            session.close();
-            return null;
-        } catch (IOException error) {
-            return error;
-        }
-    }
-
-    private static void rethrow(Throwable error) throws Exception {
-        if (error == null) {
-            return;
-        }
-        if (error instanceof Exception) {
-            throw (Exception) error;
-        }
-        if (error instanceof Error) {
-            throw (Error) error;
-        }
-        throw new RuntimeException(error);
     }
 }

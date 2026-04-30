@@ -332,7 +332,7 @@ final class GoQuicInteropSmokeTest {
                 stream.writeFinal("java->go".getBytes(StandardCharsets.UTF_8));
                 ByteArrayOutputStream response = new ByteArrayOutputStream();
                 byte[] buffer = new byte[64];
-                for (;;) {
+                for (; ; ) {
                     int read;
                     try {
                         read = stream.read(buffer);

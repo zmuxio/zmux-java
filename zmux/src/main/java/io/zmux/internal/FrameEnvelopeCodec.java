@@ -818,10 +818,6 @@ final class FrameEnvelopeCodec {
         }
     }
 
-    private interface FrameByteReader {
-        int readByte() throws IOException;
-    }
-
     private static Varint62.Decoded validateFrameLength(Varint62.Decoded frameLength, Limits normalized) throws IOException {
         if (frameLength.value() < 2) {
             throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame too short");
@@ -1049,6 +1045,10 @@ final class FrameEnvelopeCodec {
             return false;
         }
         return retainedCap > batchScratchRetainLimit(hint);
+    }
+
+    private interface FrameByteReader {
+        int readByte() throws IOException;
     }
 
     static final class GatherScratch {
