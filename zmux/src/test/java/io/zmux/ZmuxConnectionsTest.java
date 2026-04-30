@@ -108,8 +108,21 @@ final class ZmuxConnectionsTest {
         connection.close();
 
         assertArrayEquals(new byte[]{1, 2, 3}, stream.writtenBytes());
-        assertEquals(1, stream.closeReadCalls());
-        assertEquals(1, stream.closeWriteCalls());
+        assertEquals(1, stream.closeCalls());
+        assertEquals(0, stream.closeReadCalls());
+        assertEquals(0, stream.closeWriteCalls());
+    }
+
+    @Test
+    void joinClosesSharedBidiStreamWithFullClose() throws Exception {
+        RecordingBidiStream stream = new RecordingBidiStream(new byte[0], null, null);
+
+        try (JoinedDuplexConnection ignored = ZmuxConnections.join((ZmuxRecvStream) stream, (ZmuxSendStream) stream)) {
+        }
+
+        assertEquals(1, stream.closeCalls());
+        assertEquals(0, stream.closeReadCalls());
+        assertEquals(0, stream.closeWriteCalls());
     }
 
     @Test
@@ -129,8 +142,10 @@ final class ZmuxConnectionsTest {
         }
 
         assertArrayEquals(new byte[]{4, 5}, send.writtenBytes());
-        assertEquals(1, recv.closeReadCalls());
-        assertEquals(1, send.closeWriteCalls());
+        assertEquals(1, recv.closeCalls());
+        assertEquals(0, recv.closeReadCalls());
+        assertEquals(1, send.closeCalls());
+        assertEquals(0, send.closeWriteCalls());
     }
 
     @Test
@@ -325,9 +340,13 @@ final class ZmuxConnectionsTest {
         }
 
         assertEquals(0, firstRecv.closeReadCalls());
+        assertEquals(0, firstRecv.closeCalls());
         assertEquals(0, firstSend.closeWriteCalls());
-        assertEquals(1, secondRecv.closeReadCalls());
-        assertEquals(1, secondSend.closeWriteCalls());
+        assertEquals(0, firstSend.closeCalls());
+        assertEquals(0, secondRecv.closeReadCalls());
+        assertEquals(1, secondRecv.closeCalls());
+        assertEquals(0, secondSend.closeWriteCalls());
+        assertEquals(1, secondSend.closeCalls());
         assertArrayEquals(new byte[]{9}, secondSend.writtenBytes());
     }
 
@@ -1239,6 +1258,7 @@ final class ZmuxConnectionsTest {
         private final SocketAddress localAddress;
         private final SocketAddress remoteAddress;
         private int closeReadCalls;
+        private int closeCalls;
 
         private RecordingRecvStream(byte[] data, SocketAddress localAddress, SocketAddress remoteAddress) {
             this.input = new ByteArrayInputStream(data);
@@ -1270,6 +1290,7 @@ final class ZmuxConnectionsTest {
 
         @Override
         public void close() {
+            closeCalls++;
         }
 
         @Override
@@ -1299,6 +1320,10 @@ final class ZmuxConnectionsTest {
 
         int closeReadCalls() {
             return closeReadCalls;
+        }
+
+        int closeCalls() {
+            return closeCalls;
         }
     }
 
@@ -1409,6 +1434,7 @@ final class ZmuxConnectionsTest {
         private final SocketAddress remoteAddress;
         private int closeReadCalls;
         private int closeWriteCalls;
+        private int closeCalls;
 
         private RecordingBidiStream(byte[] inputBytes, SocketAddress localAddress, SocketAddress remoteAddress) {
             this.input = new ByteArrayInputStream(inputBytes);
@@ -1472,6 +1498,7 @@ final class ZmuxConnectionsTest {
 
         @Override
         public void close() {
+            closeCalls++;
         }
 
         @Override
@@ -1530,6 +1557,10 @@ final class ZmuxConnectionsTest {
         int closeWriteCalls() {
             return closeWriteCalls;
         }
+
+        int closeCalls() {
+            return closeCalls;
+        }
     }
 
     private static final class RecordingOutputStream extends ByteArrayOutputStream {
@@ -1586,6 +1617,7 @@ final class ZmuxConnectionsTest {
         private final SocketAddress localAddress;
         private final SocketAddress remoteAddress;
         private int closeWriteCalls;
+        private int closeCalls;
 
         private RecordingSendStream(SocketAddress localAddress, SocketAddress remoteAddress) {
             this.localAddress = localAddress;
@@ -1626,6 +1658,7 @@ final class ZmuxConnectionsTest {
 
         @Override
         public void close() {
+            closeCalls++;
         }
 
         @Override
@@ -1659,6 +1692,10 @@ final class ZmuxConnectionsTest {
 
         int closeWriteCalls() {
             return closeWriteCalls;
+        }
+
+        int closeCalls() {
+            return closeCalls;
         }
     }
 

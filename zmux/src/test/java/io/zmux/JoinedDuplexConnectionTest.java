@@ -117,6 +117,47 @@ final class JoinedDuplexConnectionTest {
         }
     }
 
+    @Test
+    void closeUsesUnderlyingCloseForAttachedHalves() throws Exception {
+        CountingReadHalf readHalf = new CountingReadHalf();
+        CountingWriteHalf writeHalf = new CountingWriteHalf();
+        JoinedDuplexConnection connection = new JoinedDuplexConnection(readHalf, writeHalf);
+
+        connection.close();
+
+        assertEquals(1, readHalf.closeCount.get(), "read half close() should release its underlying resource");
+        assertEquals(0, readHalf.closeReadCount.get(), "connection close must not degrade to closeRead()");
+        assertEquals(1, writeHalf.closeCount.get(), "write half close() should release its underlying resource");
+        assertEquals(0, writeHalf.closeWriteCount.get(), "connection close must not degrade to closeWrite()");
+    }
+
+    @Test
+    void closeUsesSharedUnderlyingCloseOnlyOnce() throws Exception {
+        CountingDuplexHalf half = new CountingDuplexHalf();
+        JoinedDuplexConnection connection = new JoinedDuplexConnection((ReadHalf) half, (WriteHalf) half);
+
+        connection.close();
+
+        assertEquals(1, half.closeCount.get(), "shared underlying resource should be closed once");
+        assertEquals(0, half.closeReadCount.get(), "shared connection close must not call closeRead()");
+        assertEquals(0, half.closeWriteCount.get(), "shared connection close must not call closeWrite()");
+    }
+
+    @Test
+    void directionalCloseKeepsHalfCloseSemantics() throws Exception {
+        CountingReadHalf readHalf = new CountingReadHalf();
+        CountingWriteHalf writeHalf = new CountingWriteHalf();
+        JoinedDuplexConnection connection = new JoinedDuplexConnection(readHalf, writeHalf);
+
+        connection.closeRead();
+        connection.closeWrite();
+
+        assertEquals(1, readHalf.closeReadCount.get(), "closeRead should close only the read side");
+        assertEquals(0, readHalf.closeCount.get(), "closeRead should not fully close the read resource");
+        assertEquals(1, writeHalf.closeWriteCount.get(), "closeWrite should close only the write side");
+        assertEquals(0, writeHalf.closeCount.get(), "closeWrite should not fully close the write resource");
+    }
+
     private static final class BlockingReadHalf implements ReadHalf {
         private final CountDownLatch readEntered = new CountDownLatch(1);
         private final CountDownLatch releaseRead = new CountDownLatch(1);
@@ -155,6 +196,121 @@ final class JoinedDuplexConnectionTest {
         @Override
         public SocketAddress remoteAddress() {
             return ZmuxSocketAddress.remotePending();
+        }
+    }
+
+    private static final class CountingReadHalf implements ReadHalf {
+        private final AtomicInteger closeReadCount = new AtomicInteger();
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public void closeRead() {
+            closeReadCount.incrementAndGet();
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return ZmuxSocketAddress.localPending();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return ZmuxSocketAddress.remotePending();
+        }
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+        }
+    }
+
+    private static final class CountingWriteHalf implements WriteHalf {
+        private final AtomicInteger closeWriteCount = new AtomicInteger();
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+        }
+
+        @Override
+        public void closeWrite() {
+            closeWriteCount.incrementAndGet();
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return ZmuxSocketAddress.localPending();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return ZmuxSocketAddress.remotePending();
+        }
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+        }
+    }
+
+    private static final class CountingDuplexHalf implements ReadHalf, WriteHalf {
+        private final AtomicInteger closeReadCount = new AtomicInteger();
+        private final AtomicInteger closeWriteCount = new AtomicInteger();
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public int read(byte[] dst, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public void write(byte[] src, int offset, int length) {
+        }
+
+        @Override
+        public void closeRead() {
+            closeReadCount.incrementAndGet();
+        }
+
+        @Override
+        public void closeWrite() {
+            closeWriteCount.incrementAndGet();
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) {
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+        }
+
+        @Override
+        public SocketAddress localAddress() {
+            return ZmuxSocketAddress.localPending();
+        }
+
+        @Override
+        public SocketAddress remoteAddress() {
+            return ZmuxSocketAddress.remotePending();
+        }
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
         }
     }
 

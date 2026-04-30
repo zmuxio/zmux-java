@@ -118,10 +118,19 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return new SocketTimeoutException("zmux: joined connection pause timed out");
     }
 
+    private static Object closeIdentity(AutoCloseable closeable) {
+        return closeable instanceof CloseIdentityHalf ? ((CloseIdentityHalf) closeable).closeIdentity() : closeable;
+    }
+
+    private static AutoCloseable closeTarget(AutoCloseable closeable) {
+        Object identity = closeIdentity(closeable);
+        return identity instanceof AutoCloseable ? (AutoCloseable) identity : closeable;
+    }
+
     private static IOException closeOnce(AutoCloseable closeable,
                                          IdentityHashMap<Object, Boolean> closedObjects,
                                          IOException current) {
-        if (closeable == null || closedObjects.put(closeable, Boolean.TRUE) != null) {
+        if (closeable == null || closedObjects.put(closeIdentity(closeable), Boolean.TRUE) != null) {
             return current;
         }
         try {
@@ -529,8 +538,8 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
 
         IdentityHashMap<Object, Boolean> closedObjects = new IdentityHashMap<>(3);
-        IOException error = closeOnce(input, closedObjects, null);
-        error = closeOnce(output, closedObjects, error);
+        IOException error = closeOnce(closeTarget(input), closedObjects, null);
+        error = closeOnce(closeTarget(output), closedObjects, error);
         error = closeOnce(gathering, closedObjects, error);
         if (error != null) {
             throw error;
@@ -809,6 +818,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         WriteHalf writeHalf();
     }
 
+    private interface CloseIdentityHalf {
+        Object closeIdentity();
+    }
+
     private static final class ResumeSnapshot {
         private final Instant deadline;
         private final long generation;
@@ -1014,7 +1027,8 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    private static final class StreamInputHalf extends InputStream implements AddressAwareHalf, TypedInputHalf {
+    private static final class StreamInputHalf extends InputStream
+            implements AddressAwareHalf, TypedInputHalf, CloseIdentityHalf {
         private final ZmuxRecvStream stream;
         private final byte[] singleByte = new byte[1];
 
@@ -1056,9 +1070,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public ReadHalf readHalf() {
             return stream;
         }
+
+        @Override
+        public Object closeIdentity() {
+            return stream;
+        }
     }
 
-    private static final class GenericInputHalf extends InputStream implements AddressAwareHalf, TypedInputHalf {
+    private static final class GenericInputHalf extends InputStream
+            implements AddressAwareHalf, TypedInputHalf, CloseIdentityHalf {
         private final ReadHalf half;
         private final byte[] singleByte = new byte[1];
 
@@ -1100,9 +1120,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public ReadHalf readHalf() {
             return half;
         }
+
+        @Override
+        public Object closeIdentity() {
+            return half;
+        }
     }
 
-    private static final class StreamOutputHalf extends OutputStream implements AddressAwareHalf, TypedOutputHalf {
+    private static final class StreamOutputHalf extends OutputStream
+            implements AddressAwareHalf, TypedOutputHalf, CloseIdentityHalf {
         private final ZmuxSendStream stream;
         private final byte[] singleByte = new byte[1];
 
@@ -1147,9 +1173,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         public WriteHalf writeHalf() {
             return stream;
         }
+
+        @Override
+        public Object closeIdentity() {
+            return stream;
+        }
     }
 
-    private static final class GenericOutputHalf extends OutputStream implements AddressAwareHalf, TypedOutputHalf {
+    private static final class GenericOutputHalf extends OutputStream
+            implements AddressAwareHalf, TypedOutputHalf, CloseIdentityHalf {
         private final WriteHalf half;
         private final byte[] singleByte = new byte[1];
 
@@ -1192,6 +1224,11 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
         @Override
         public WriteHalf writeHalf() {
+            return half;
+        }
+
+        @Override
+        public Object closeIdentity() {
             return half;
         }
     }
