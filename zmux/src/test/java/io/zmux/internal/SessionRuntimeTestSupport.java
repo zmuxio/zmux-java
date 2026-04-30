@@ -3,6 +3,7 @@ package io.zmux.internal;
 import io.zmux.*;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Constructor;
@@ -35,6 +36,18 @@ final class SessionRuntimeTestSupport {
             public void write(byte[] buffer, int offset, int length) {
             }
         };
+    }
+
+    static void queueWrite(Object stream, byte[] payload) throws IOException {
+        ((StreamRuntime) stream).queueWrite(payload, 0, payload.length);
+    }
+
+    static int queueWriteFinal(Object stream, byte[] payload) throws IOException {
+        return ((StreamRuntime) stream).queueWriteFinal(payload, 0, payload.length);
+    }
+
+    static int queueWritevFinal(Object stream, byte[]... parts) throws IOException {
+        return ((StreamRuntime) stream).queueWritevFinal(parts);
     }
 
     static SessionRuntime newRuntime(io.zmux.DuplexConnection connection, ZmuxConfig config) throws Exception {

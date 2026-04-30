@@ -3110,6 +3110,15 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
     void queueOpeningDataLocked(StreamRuntime streamRuntime, byte[] openingPrefix, byte[] payload, boolean fin)
             throws IOException {
+        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, fin, null);
+    }
+
+    void queueOpeningDataLocked(StreamRuntime streamRuntime,
+                                byte[] openingPrefix,
+                                byte[] payload,
+                                boolean fin,
+                                StreamWriteCompletion completion)
+            throws IOException {
         this.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
@@ -3117,7 +3126,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 0,
                 payload.length,
                 fin,
-                PayloadOwnership.BORROWED
+                PayloadOwnership.BORROWED,
+                completion
         );
     }
 
@@ -3129,6 +3139,18 @@ public final class SessionRuntime implements ZmuxNativeSession {
             int payloadLength,
             boolean fin
     ) throws IOException {
+        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
+    }
+
+    void queueOpeningDataLocked(
+            StreamRuntime streamRuntime,
+            byte[] openingPrefix,
+            byte[] payload,
+            int payloadOffset,
+            int payloadLength,
+            boolean fin,
+            StreamWriteCompletion completion
+    ) throws IOException {
         this.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
@@ -3136,7 +3158,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 payloadOffset,
                 payloadLength,
                 fin,
-                PayloadOwnership.BORROWED
+                PayloadOwnership.BORROWED,
+                completion
         );
     }
 
@@ -3149,6 +3172,19 @@ public final class SessionRuntime implements ZmuxNativeSession {
             boolean fin,
             PayloadOwnership payloadOwnership
     ) throws IOException {
+        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
+    }
+
+    void queueOpeningDataLocked(
+            StreamRuntime streamRuntime,
+            byte[] openingPrefix,
+            byte[] payload,
+            int payloadOffset,
+            int payloadLength,
+            boolean fin,
+            PayloadOwnership payloadOwnership,
+            StreamWriteCompletion completion
+    ) throws IOException {
         this.openingCoordinator.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
@@ -3156,7 +3192,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 payloadOffset,
                 payloadLength,
                 fin,
-                payloadOwnership
+                payloadOwnership,
+                completion
         );
     }
 
@@ -3172,6 +3209,18 @@ public final class SessionRuntime implements ZmuxNativeSession {
                                 int length,
                                 boolean fin,
                                 PayloadOwnership payloadOwnership) throws IOException {
+        this.queueOpeningDataLocked(streamRuntime, prefix, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
+    }
+
+    void queueOpeningDataLocked(StreamRuntime streamRuntime,
+                                byte[] prefix,
+                                byte[][] parts,
+                                int partIndex,
+                                int partOffset,
+                                int length,
+                                boolean fin,
+                                PayloadOwnership payloadOwnership,
+                                StreamWriteCompletion completion) throws IOException {
         this.openingCoordinator.queueOpeningDataLocked(
                 streamRuntime,
                 prefix,
@@ -3180,17 +3229,35 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 partOffset,
                 length,
                 fin,
-                payloadOwnership
+                payloadOwnership,
+                completion
         );
     }
 
     void queueDataLocked(StreamRuntime streamRuntime, byte[] payload, boolean fin) throws IOException {
-        this.queueDataLocked(streamRuntime, payload, 0, payload.length, fin, PayloadOwnership.BORROWED);
+        this.queueDataLocked(streamRuntime, payload, fin, null);
+    }
+
+    void queueDataLocked(StreamRuntime streamRuntime,
+                         byte[] payload,
+                         boolean fin,
+                         StreamWriteCompletion completion) throws IOException {
+        this.queueDataLocked(streamRuntime, payload, 0, payload.length, fin, PayloadOwnership.BORROWED, completion);
     }
 
     void queueDataLocked(StreamRuntime streamRuntime, byte[] payload, int payloadOffset, int payloadLength, boolean fin)
             throws IOException {
-        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, PayloadOwnership.BORROWED);
+        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
+    }
+
+    void queueDataLocked(StreamRuntime streamRuntime,
+                         byte[] payload,
+                         int payloadOffset,
+                         int payloadLength,
+                         boolean fin,
+                         StreamWriteCompletion completion)
+            throws IOException {
+        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, PayloadOwnership.BORROWED, completion);
     }
 
     void queueDataLocked(
@@ -3201,13 +3268,26 @@ public final class SessionRuntime implements ZmuxNativeSession {
             boolean fin,
             PayloadOwnership payloadOwnership
     ) throws IOException {
+        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
+    }
+
+    void queueDataLocked(
+            StreamRuntime streamRuntime,
+            byte[] payload,
+            int payloadOffset,
+            int payloadLength,
+            boolean fin,
+            PayloadOwnership payloadOwnership,
+            StreamWriteCompletion completion
+    ) throws IOException {
         this.outboundDataCoordinator.queueDataLocked(
                 streamRuntime,
                 payload,
                 payloadOffset,
                 payloadLength,
                 fin,
-                payloadOwnership
+                payloadOwnership,
+                completion
         );
     }
 
@@ -3218,6 +3298,17 @@ public final class SessionRuntime implements ZmuxNativeSession {
                          int length,
                          boolean fin,
                          PayloadOwnership payloadOwnership) throws IOException {
+        this.queueDataLocked(streamRuntime, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
+    }
+
+    void queueDataLocked(StreamRuntime streamRuntime,
+                         byte[][] parts,
+                         int partIndex,
+                         int partOffset,
+                         int length,
+                         boolean fin,
+                         PayloadOwnership payloadOwnership,
+                         StreamWriteCompletion completion) throws IOException {
         this.outboundDataCoordinator.queueDataLocked(
                 streamRuntime,
                 parts,
@@ -3225,7 +3316,8 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 partOffset,
                 length,
                 fin,
-                payloadOwnership
+                payloadOwnership,
+                completion
         );
     }
 
@@ -3644,8 +3736,154 @@ public final class SessionRuntime implements ZmuxNativeSession {
             if (outboundFrame.stream != null && outboundFrame.openingFrame) {
                 outboundFrame.stream.clearOpeningFramePendingLocked();
             }
+            this.failWriteCompletionLocked(outboundFrame, this.writeDiscardErrorLocked(outboundFrame));
             this.releaseQueuedDataLocked(outboundFrame);
         }
+    }
+
+    void failWriteCompletionLocked(OutboundFrame outboundFrame, IOException error) {
+        if (outboundFrame != null) {
+            outboundFrame.completeWriteFailure(error == null ? this.writeDiscardErrorLocked(outboundFrame) : error);
+        }
+    }
+
+    private void failWriteCompletionsLocked(List<OutboundFrame> outboundFrames, IOException error) {
+        if (outboundFrames == null || outboundFrames.isEmpty()) {
+            return;
+        }
+        for (OutboundFrame outboundFrame : outboundFrames) {
+            this.failWriteCompletionLocked(outboundFrame, error);
+        }
+    }
+
+    void failInflightWriteCompletionsLocked(IOException error) {
+        this.failWriteCompletionsLocked(this.inflightBatch, error);
+    }
+
+    boolean cancelQueuedWriteCompletionLocked(StreamWriteCompletion completion) {
+        if (completion == null) {
+            return false;
+        }
+        if (this.hasWriteCompletionLocked(this.inflightBatch, completion)) {
+            return false;
+        }
+        int queuedFrames = this.writeCompletionFrameCountLocked(this.urgentQueue, completion)
+                + this.writeCompletionFrameCountLocked(this.dataQueue, completion);
+        if (!completion.canCancelQueuedFrames(queuedFrames)) {
+            return false;
+        }
+        Set<StreamRuntime> openingStreams = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<StreamRuntime> finStreams = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<StreamRuntime> touchedStreams = Collections.newSetFromMap(new IdentityHashMap<>());
+        boolean removed = this.cancelQueuedWriteCompletionLocked(this.urgentQueue, completion, openingStreams, finStreams, touchedStreams);
+        removed = this.cancelQueuedWriteCompletionLocked(this.dataQueue, completion, openingStreams, finStreams, touchedStreams) || removed;
+        if (!removed) {
+            return false;
+        }
+        for (StreamRuntime streamRuntime : openingStreams) {
+            if (!this.hasQueuedOpeningFrameLocked(streamRuntime) && !this.hasInflightOpeningFrameLocked(streamRuntime)) {
+                streamRuntime.clearOpeningFramePendingLocked();
+            }
+        }
+        for (StreamRuntime streamRuntime : finStreams) {
+            if (!this.hasQueuedFinFrameLocked(streamRuntime) && !this.hasInflightFinFrameLocked(streamRuntime)) {
+                streamRuntime.clearFinQueuedLocked();
+            }
+        }
+        for (StreamRuntime streamRuntime : touchedStreams) {
+            this.maybeCompactStreamLocked(streamRuntime);
+        }
+        this.notifyStreamWriteWaitersLocked();
+        this.notifyWriterWaitersLocked();
+        return true;
+    }
+
+    private boolean cancelQueuedWriteCompletionLocked(Deque<OutboundFrame> deque,
+                                                      StreamWriteCompletion completion,
+                                                      Set<StreamRuntime> openingStreams,
+                                                      Set<StreamRuntime> finStreams,
+                                                      Set<StreamRuntime> touchedStreams) {
+        boolean removed = false;
+        Iterator<OutboundFrame> iterator = deque.iterator();
+        while (iterator.hasNext()) {
+            OutboundFrame outboundFrame = iterator.next();
+            if (!outboundFrame.writeCompletionIs(completion)) {
+                continue;
+            }
+            iterator.remove();
+            this.onQueuedFrameDequeuedLocked(deque, outboundFrame);
+            this.releaseQueuedDataLocked(outboundFrame);
+            if (outboundFrame.stream != null) {
+                touchedStreams.add(outboundFrame.stream);
+                if (outboundFrame.openingFrame) {
+                    openingStreams.add(outboundFrame.stream);
+                }
+                if (outboundFrame.finFrame()) {
+                    finStreams.add(outboundFrame.stream);
+                }
+            }
+            removed = true;
+        }
+        return removed;
+    }
+
+    private int writeCompletionFrameCountLocked(Deque<OutboundFrame> deque, StreamWriteCompletion completion) {
+        int count = 0;
+        for (OutboundFrame outboundFrame : deque) {
+            if (outboundFrame.writeCompletionIs(completion)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean hasWriteCompletionLocked(List<OutboundFrame> outboundFrames, StreamWriteCompletion completion) {
+        if (outboundFrames == null || outboundFrames.isEmpty()) {
+            return false;
+        }
+        for (OutboundFrame outboundFrame : outboundFrames) {
+            if (outboundFrame.writeCompletionIs(completion)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasQueuedFinFrameLocked(StreamRuntime streamRuntime) {
+        return this.hasFinFrameLocked(this.urgentQueue, streamRuntime) || this.hasFinFrameLocked(this.dataQueue, streamRuntime);
+    }
+
+    private boolean hasInflightFinFrameLocked(StreamRuntime streamRuntime) {
+        return this.hasFinFrameLocked(this.inflightBatch, streamRuntime);
+    }
+
+    private boolean hasFinFrameLocked(Collection<OutboundFrame> outboundFrames, StreamRuntime streamRuntime) {
+        if (streamRuntime == null || outboundFrames == null || outboundFrames.isEmpty()) {
+            return false;
+        }
+        for (OutboundFrame outboundFrame : outboundFrames) {
+            if (outboundFrame.stream == streamRuntime && outboundFrame.finFrame()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private IOException writeDiscardErrorLocked(OutboundFrame outboundFrame) {
+        if (outboundFrame != null && outboundFrame.stream != null) {
+            IOException streamError = outboundFrame.stream.operationErrorLocked();
+            if (streamError != null) {
+                return streamError;
+            }
+        }
+        IOException sessionError = this.currentErrorLocked();
+        if (sessionError != null) {
+            IOException operationError = this.sessionOperationErrorLocked("write", sessionError);
+            if (operationError != null) {
+                return operationError;
+            }
+        }
+        return new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.SESSION_TERMINATION);
     }
 
     void onReadDiscardLocked(StreamRuntime streamRuntime, boolean acceptQueuedStream) {
@@ -4523,6 +4761,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
                 }
                 maybeCompactStreamLocked(outboundFrame.stream);
             }
+            outboundFrame.completeWriteSuccess();
             if (outboundFrame.frame().type() == FrameType.CLOSE) {
                 finishSessionLocked(null, state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED);
                 return;
@@ -4874,6 +5113,9 @@ public final class SessionRuntime implements ZmuxNativeSession {
     }
 
     void setInflightBatchInternal(List<OutboundFrame> batch) {
+        if ((batch == null || batch.isEmpty()) && !this.inflightBatch.isEmpty()) {
+            this.failWriteCompletionsLocked(this.inflightBatch, this.sessionOperationErrorLocked("write", this.currentErrorLocked()));
+        }
         this.inflightBatch = batch == null ? Collections.emptyList() : batch;
     }
 
@@ -5506,6 +5748,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
         private final int dataBytes;
         private final boolean openingFrame;
         private final boolean preserveAfterSendClose;
+        private final StreamWriteCompletion writeCompletion;
         private final byte[] payloadPrefix;
         private final byte[] payloadBytes;
         private final int payloadOffset;
@@ -5519,6 +5762,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
                       int dataBytes,
                       boolean openingFrame,
                       boolean preserveAfterSendClose,
+                      StreamWriteCompletion writeCompletion,
                       byte[] payloadPrefix,
                       byte[] payloadBytes,
                       int payloadOffset,
@@ -5531,6 +5775,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
             this.dataBytes = dataBytes;
             this.openingFrame = openingFrame;
             this.preserveAfterSendClose = preserveAfterSendClose;
+            this.writeCompletion = writeCompletion;
             this.payloadPrefix = payloadPrefix;
             this.payloadBytes = payloadBytes;
             this.payloadOffset = payloadOffset;
@@ -5540,8 +5785,46 @@ public final class SessionRuntime implements ZmuxNativeSession {
             this.payloadPartOffset = payloadPartOffset;
         }
 
+        OutboundFrame(FrameCodec.Frame frame,
+                      StreamRuntime stream,
+                      int dataBytes,
+                      boolean openingFrame,
+                      boolean preserveAfterSendClose,
+                      byte[] payloadPrefix,
+                      byte[] payloadBytes,
+                      int payloadOffset,
+                      int payloadLength,
+                      byte[][] payloadParts,
+                      int payloadPartIndex,
+                      int payloadPartOffset) {
+            this(
+                    frame,
+                    stream,
+                    dataBytes,
+                    openingFrame,
+                    preserveAfterSendClose,
+                    null,
+                    payloadPrefix,
+                    payloadBytes,
+                    payloadOffset,
+                    payloadLength,
+                    payloadParts,
+                    payloadPartIndex,
+                    payloadPartOffset
+            );
+        }
+
         OutboundFrame(FrameCodec.Frame frame, StreamRuntime stream, int dataBytes, boolean openingFrame, boolean preserveAfterSendClose) {
-            this(frame, stream, dataBytes, openingFrame, preserveAfterSendClose, null, frame.payload(), 0, frame.payload().length, null, 0, 0);
+            this(frame, stream, dataBytes, openingFrame, preserveAfterSendClose, null);
+        }
+
+        OutboundFrame(FrameCodec.Frame frame,
+                      StreamRuntime stream,
+                      int dataBytes,
+                      boolean openingFrame,
+                      boolean preserveAfterSendClose,
+                      StreamWriteCompletion writeCompletion) {
+            this(frame, stream, dataBytes, openingFrame, preserveAfterSendClose, writeCompletion, null, frame.payload(), 0, frame.payload().length, null, 0, 0);
         }
 
         FrameCodec.Frame frame() {
@@ -5562,6 +5845,32 @@ public final class SessionRuntime implements ZmuxNativeSession {
 
         boolean preserveAfterSendClose() {
             return preserveAfterSendClose;
+        }
+
+        void retainWriteCompletion() {
+            if (this.writeCompletion != null) {
+                this.writeCompletion.retainFrame();
+            }
+        }
+
+        void completeWriteSuccess() {
+            if (this.writeCompletion != null) {
+                this.writeCompletion.completeFrameWritten();
+            }
+        }
+
+        void completeWriteFailure(IOException error) {
+            if (this.writeCompletion != null) {
+                this.writeCompletion.completeFailure(error);
+            }
+        }
+
+        boolean writeCompletionIs(StreamWriteCompletion completion) {
+            return this.writeCompletion == completion;
+        }
+
+        boolean finFrame() {
+            return this.frame.type() == FrameType.DATA && (this.frame.flags() & Protocol.FRAME_FLAG_FIN) != 0;
         }
 
         byte[] payloadPrefix() {
@@ -5600,7 +5909,7 @@ public final class SessionRuntime implements ZmuxNativeSession {
             if (this.preserveAfterSendClose == preserveAfterSendClose) {
                 return this;
             }
-            return new OutboundFrame(this.frame, this.stream, this.dataBytes, this.openingFrame, preserveAfterSendClose, this.payloadPrefix, this.payloadBytes, this.payloadOffset, this.payloadLength, this.payloadParts, this.payloadPartIndex, this.payloadPartOffset);
+            return new OutboundFrame(this.frame, this.stream, this.dataBytes, this.openingFrame, preserveAfterSendClose, this.writeCompletion, this.payloadPrefix, this.payloadBytes, this.payloadOffset, this.payloadLength, this.payloadParts, this.payloadPartIndex, this.payloadPartOffset);
         }
     }
 

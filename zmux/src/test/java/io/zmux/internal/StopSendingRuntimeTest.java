@@ -61,7 +61,7 @@ final class StopSendingRuntimeTest {
     void smallInflightTailWithLargeSuppressibleQueueStillFinishesGracefully() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write(new byte[576]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[576]);
 
         synchronized (runtime.lock()) {
             Object inflight = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
@@ -98,7 +98,7 @@ final class StopSendingRuntimeTest {
     void cancelWriteAfterGracefulStopSendingFinishStaysGracefullyClosed() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write(new byte[576]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[576]);
 
         synchronized (runtime.lock()) {
             Object inflight = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
@@ -130,7 +130,7 @@ final class StopSendingRuntimeTest {
     void largeQueuedOnlyTailFallsBackToReset() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write(new byte[576]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[576]);
 
         SessionRuntimeTestSupport.invokePrivate(
                 runtime,
@@ -154,7 +154,7 @@ final class StopSendingRuntimeTest {
     void closeWriteAfterStopDrivenResetBecomesBenignNoOp() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write(new byte[576]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[576]);
 
         SessionRuntimeTestSupport.invokePrivate(
                 runtime,
@@ -175,7 +175,7 @@ final class StopSendingRuntimeTest {
     void writeAfterStopDrivenResetSurfacesPeerStop() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, constrainedPeerSettings());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write(new byte[576]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[576]);
 
         SessionRuntimeTestSupport.invokePrivate(
                 runtime,

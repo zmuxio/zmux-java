@@ -682,13 +682,13 @@ final class FlowControlVisibilityRuntimeTest {
             runtime.markLocalStreamOpeningCommittedLocked(stream);
             runtime.markPeerVisibleLocked(stream);
         }
-        stream.write(new byte[]{1});
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[]{1});
 
         CountDownLatch writerDone = new CountDownLatch(1);
         AtomicReference<Throwable> writerError = new AtomicReference<>();
         Thread writer = new Thread(() -> {
             try {
-                stream.write(new byte[]{2});
+                SessionRuntimeTestSupport.queueWrite(stream, new byte[]{2});
             } catch (Throwable error) {
                 writerError.set(error);
             } finally {
@@ -741,13 +741,13 @@ final class FlowControlVisibilityRuntimeTest {
             runtime.markLocalStreamOpeningCommittedLocked(stream);
             runtime.markPeerVisibleLocked(stream);
         }
-        stream.write(new byte[]{1});
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[]{1});
 
         CountDownLatch writerDone = new CountDownLatch(1);
         AtomicReference<Throwable> writerError = new AtomicReference<>();
         Thread writer = new Thread(() -> {
             try {
-                stream.write(new byte[]{2});
+                SessionRuntimeTestSupport.queueWrite(stream, new byte[]{2});
             } catch (Throwable error) {
                 writerError.set(error);
             } finally {
@@ -808,7 +808,7 @@ final class FlowControlVisibilityRuntimeTest {
             assertTrue(headroomToThreshold > 0L, "test requires initial tracked memory below high threshold");
             firstWriteBytes = (int) (headroomToThreshold - 16L);
         }
-        stream.write(new byte[firstWriteBytes]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[firstWriteBytes]);
         synchronized (runtime.lock()) {
             assertTrue(
                     runtime.trackedSessionMemoryLocked() < runtime.sessionMemoryHighThresholdLocked(),
@@ -824,7 +824,7 @@ final class FlowControlVisibilityRuntimeTest {
         AtomicReference<Throwable> writerError = new AtomicReference<>();
         Thread writer = new Thread(() -> {
             try {
-                stream.write(new byte[32]);
+                SessionRuntimeTestSupport.queueWrite(stream, new byte[32]);
             } catch (Throwable error) {
                 writerError.set(error);
             } finally {

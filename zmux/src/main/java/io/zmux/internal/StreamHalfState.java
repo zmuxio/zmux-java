@@ -155,6 +155,14 @@ final class StreamHalfState {
         return previous;
     }
 
+    SendState clearFinQueuedIfQueued() {
+        SendState previous = sendState;
+        if (sendState == SendState.FIN_QUEUED) {
+            sendState = SendState.OPEN;
+        }
+        return previous;
+    }
+
     SendState concludeStopSendingWithReset() {
         SendState previous = sendState;
         if (sendState == SendState.OPEN || sendState == SendState.FIN_QUEUED) {

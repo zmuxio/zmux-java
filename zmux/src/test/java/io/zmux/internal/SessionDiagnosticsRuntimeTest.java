@@ -807,7 +807,7 @@ final class SessionDiagnosticsRuntimeTest {
         );
         AtomicReference<Throwable> failure = new AtomicReference<>();
 
-        ((StreamRuntime) runtime.openStream()).write("payload".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(runtime.openStream(), "payload".getBytes(StandardCharsets.UTF_8));
 
         Thread writer = new Thread(() -> {
             try {
@@ -837,7 +837,7 @@ final class SessionDiagnosticsRuntimeTest {
         );
         AtomicReference<Throwable> failure = new AtomicReference<>();
 
-        ((StreamRuntime) runtime.openStream()).write("payload".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(runtime.openStream(), "payload".getBytes(StandardCharsets.UTF_8));
 
         Thread writer = startWriterLoop(runtime, failure, "session-structured-writer-io");
         writer.join(1_000L);

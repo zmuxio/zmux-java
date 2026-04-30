@@ -82,7 +82,7 @@ final class GracefulCloseTrackingTest {
     void gracefulCloseReclaimsQueuedButNotPeerVisibleLocalOpener() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("queued".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "queued".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             assertTrue(stream.openedOnWire(), "test requires an opening frame already queued for write");
@@ -119,7 +119,7 @@ final class GracefulCloseTrackingTest {
             assertFalse((Boolean) SessionRuntimeTestSupport.invokePrivate(runtime, "hasGracefulClosePendingWorkLocked", new Class<?>[0]), "idle peer-opened bidi should not keep graceful close pending");
         }
 
-        stream.write("reply".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "reply".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             assertEquals(1L, SessionRuntimeTestSupport.getLongField(runtime, "gracefulCloseBlockingStreams"), "queued local send work on a peer-opened bidi should contribute one graceful-close blocker");
@@ -140,7 +140,7 @@ final class GracefulCloseTrackingTest {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = createPeerOpenedBidi(runtime);
 
-        stream.write("reply".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "reply".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             assertEquals(1L, SessionRuntimeTestSupport.getLongField(runtime, "gracefulCloseBlockingStreams"), "queued local send work on a peer-opened bidi should initially block graceful close");

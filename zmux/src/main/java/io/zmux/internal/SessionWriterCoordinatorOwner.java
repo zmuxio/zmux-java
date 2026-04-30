@@ -171,6 +171,11 @@ final class SessionWriterCoordinatorOwner implements SessionWriterCoordinator.Ow
     }
 
     @Override
+    public void failWriteCompletionLocked(SessionRuntime.OutboundFrame outboundFrame, IOException error) {
+        this.owner.failWriteCompletionLocked(outboundFrame, error);
+    }
+
+    @Override
     public void releaseWriterHeldFrameLocked(SessionRuntime.OutboundFrame outboundFrame) {
         this.owner.releaseWriterHeldFrameLocked(outboundFrame);
     }
@@ -197,6 +202,11 @@ final class SessionWriterCoordinatorOwner implements SessionWriterCoordinator.Ow
                                       long batchStartedAtNanos,
                                       long batchCompletedAtNanos) throws IOException {
         this.owner.afterWriteBatchLocked(batch, batchBytes, batchStartedAtNanos, batchCompletedAtNanos);
+    }
+
+    @Override
+    public void failInflightWriteCompletionsLocked(IOException error) {
+        this.owner.failInflightWriteCompletionsLocked(error);
     }
 
     @Override

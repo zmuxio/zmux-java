@@ -93,7 +93,7 @@ final class SessionCloseCleanupRuntimeTest {
             makePeerVisible(runtime, ordinary);
             makePeerVisible(runtime, advisory);
 
-            ordinary.write("ordinary".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(ordinary, "ordinary".getBytes(StandardCharsets.UTF_8));
             advisory.updateMetadata(MetadataUpdate.priority(7L));
             runtime.enqueueControlLocked(new FrameCodec.Frame(FrameType.PING, 0, 0L, new byte[]{1}));
 

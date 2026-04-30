@@ -16,7 +16,7 @@ final class LocalOpenVisibilityTest {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
 
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("hello".getBytes(StandardCharsets.UTF_8));
+        stream.queueWrite("hello".getBytes(StandardCharsets.UTF_8), 0, "hello".length());
 
         synchronized (runtime.lock()) {
             assertTrue(stream.openedOnWire(), "opening commit should consume the stream id");
@@ -143,7 +143,7 @@ final class LocalOpenVisibilityTest {
     void peerGoAwayReclaimsCommittedButStillUnseenLocalStream() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("body".getBytes(StandardCharsets.UTF_8));
+        stream.queueWrite("body".getBytes(StandardCharsets.UTF_8), 0, "body".length());
 
         synchronized (runtime.lock()) {
             assertFalse(stream.peerVisible(), "test requires a committed stream that is still unseen by the peer");

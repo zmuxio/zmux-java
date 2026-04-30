@@ -72,7 +72,7 @@ final class WritePolicyRuntimeTest {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, peerSettings);
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
 
-        stream.write(new byte[9_000]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[9_000]);
 
         synchronized (runtime.lock()) {
             assertEquals(WritePolicy.MILD_WRITE_BURST_FRAMES, stream.writeBurstLimitLocked(), "latency hint should bias default streams toward shorter bursts");
@@ -90,7 +90,7 @@ final class WritePolicyRuntimeTest {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, peerSettings);
         StreamRuntime stream = (StreamRuntime) runtime.openStream(new OpenOptions(20L, null, "ssh".getBytes(StandardCharsets.UTF_8)));
 
-        stream.write(new byte[5_000]);
+        SessionRuntimeTestSupport.queueWrite(stream, new byte[5_000]);
 
         synchronized (runtime.lock()) {
             List<Object> queued = new ArrayList<>(SessionRuntimeTestSupport.outboundQueue(runtime, "dataQueue"));

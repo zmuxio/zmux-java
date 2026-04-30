@@ -59,6 +59,7 @@ final class SessionWriterBatchFilter {
             if (outboundFrame.stream() != null && outboundFrame.openingFrame()) {
                 outboundFrame.stream().clearOpeningFramePendingLocked();
             }
+            this.owner.failWriteCompletionLocked(outboundFrame, null);
             this.owner.releaseQueuedDataLocked(outboundFrame);
             this.owner.releaseWriterHeldFrameLocked(outboundFrame);
             if (outboundFrame.stream() != null) {
@@ -99,6 +100,7 @@ final class SessionWriterBatchFilter {
         if (outboundFrame.frame().type() == FrameType.DATA
                 && outboundFrame.stream() != null
                 && !outboundFrame.stream().shouldEmitQueuedDataLocked(outboundFrame.preserveAfterSendClose())) {
+            this.owner.failWriteCompletionLocked(outboundFrame, null);
             this.owner.releaseWriterHeldFrameLocked(outboundFrame);
             this.owner.releaseQueuedDataLocked(outboundFrame);
             this.owner.maybeCompactStreamLocked(outboundFrame.stream());

@@ -92,15 +92,28 @@ final class StreamRuntime implements ZmuxNativeStream {
         this.writeCoordinator.write(src, offset, length, false);
     }
 
+    void queueWrite(byte[] src, int offset, int length) throws IOException {
+        this.writeCoordinator.queueWrite(src, offset, length, false);
+    }
+
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
         this.writeCoordinator.write(src, offset, length, true);
         return length;
     }
 
+    int queueWriteFinal(byte[] src, int offset, int length) throws IOException {
+        this.writeCoordinator.queueWrite(src, offset, length, true);
+        return length;
+    }
+
     @Override
     public int writevFinal(byte[]... parts) throws IOException {
         return this.writeCoordinator.writev(parts, true);
+    }
+
+    int queueWritevFinal(byte[]... parts) throws IOException {
+        return this.writeCoordinator.queueWritev(parts, true);
     }
 
     @Override
@@ -609,6 +622,12 @@ final class StreamRuntime implements ZmuxNativeStream {
 
     void markFinQueuedLocked() {
         if (halfState.markFinQueuedIfOpen() == StreamHalfState.SendState.OPEN) {
+            refreshGracefulCloseBlockingLocked();
+        }
+    }
+
+    void clearFinQueuedLocked() {
+        if (halfState.clearFinQueuedIfQueued() == StreamHalfState.SendState.FIN_QUEUED) {
             refreshGracefulCloseBlockingLocked();
         }
     }

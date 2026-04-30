@@ -84,6 +84,7 @@ final class SessionWriterCoordinator {
                     interruptedException
             );
             synchronized (this.owner.lock()) {
+                this.owner.failInflightWriteCompletionsLocked(interrupted);
                 if (this.owner.state().terminal()) {
                     this.owner.finishSessionLocked(interrupted, this.owner.state());
                     return;
@@ -92,6 +93,7 @@ final class SessionWriterCoordinator {
             }
         } catch (IOException error) {
             synchronized (this.owner.lock()) {
+                this.owner.failInflightWriteCompletionsLocked(error);
                 boolean closeFrameInflight = this.owner.batchContainsCloseFrameLocked(this.owner.inflightBatch());
                 if (closeFrameInflight) {
                     this.owner.recordCloseFrameFlushErrorLocked();
@@ -392,6 +394,8 @@ final class SessionWriterCoordinator {
 
         void releaseQueuedDataLocked(SessionRuntime.OutboundFrame outboundFrame);
 
+        void failWriteCompletionLocked(SessionRuntime.OutboundFrame outboundFrame, IOException error);
+
         void releaseWriterHeldFrameLocked(SessionRuntime.OutboundFrame outboundFrame);
 
         void maybeCompactStreamLocked(StreamRuntime streamRuntime);
@@ -405,6 +409,8 @@ final class SessionWriterCoordinator {
                                    long batchBytes,
                                    long batchStartedAtNanos,
                                    long batchCompletedAtNanos) throws IOException;
+
+        void failInflightWriteCompletionsLocked(IOException error);
 
         void emitKeepaliveTimeoutClose() throws IOException;
 

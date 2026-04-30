@@ -52,7 +52,7 @@ final class SessionProgressRuntimeTest {
             stream.setProvisionalCreatedAtNanosLocked(System.nanoTime() - TimeUnit.MILLISECONDS.toNanos(25L));
         }
 
-        stream.write("local".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "local".getBytes(StandardCharsets.UTF_8));
 
         SessionStats stats = runtime.stats();
         assertNotNull(stats.progress().streamProgressAt(), "local write should record stream progress");
@@ -92,7 +92,7 @@ final class SessionProgressRuntimeTest {
 
         Thread writer = new Thread(() -> {
             try {
-                stream.write("x".getBytes(StandardCharsets.UTF_8));
+                SessionRuntimeTestSupport.queueWrite(stream, "x".getBytes(StandardCharsets.UTF_8));
             } catch (Throwable throwable) {
                 failure.set(throwable);
             }

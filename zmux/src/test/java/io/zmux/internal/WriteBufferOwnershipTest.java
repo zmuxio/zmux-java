@@ -32,7 +32,7 @@ final class WriteBufferOwnershipTest {
         ZmuxStream stream = runtime.openStream();
 
         byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
-        stream.write(payload);
+        SessionRuntimeTestSupport.queueWrite(stream, payload);
         payload[0] = 'x';
 
         Object outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
@@ -44,10 +44,10 @@ final class WriteBufferOwnershipTest {
     void postOpenWriteRetainsBorrowedPayloadBeforeReturn() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         ZmuxStream stream = runtime.openStream();
-        stream.write("open".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "open".getBytes(StandardCharsets.UTF_8));
 
         byte[] payload = "later".getBytes(StandardCharsets.UTF_8);
-        stream.write(payload);
+        SessionRuntimeTestSupport.queueWrite(stream, payload);
         payload[0] = 'x';
 
         Object outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
@@ -62,7 +62,7 @@ final class WriteBufferOwnershipTest {
 
         byte[] first = "he".getBytes(StandardCharsets.UTF_8);
         byte[] second = "llo".getBytes(StandardCharsets.UTF_8);
-        stream.writevFinal(first, second);
+        SessionRuntimeTestSupport.queueWritevFinal(stream, first, second);
         first[0] = 'x';
         second[0] = 'y';
 
@@ -84,7 +84,7 @@ final class WriteBufferOwnershipTest {
             expected.append(next);
             parts[i] = new byte[]{(byte) next};
         }
-        stream.writevFinal(parts);
+        SessionRuntimeTestSupport.queueWritevFinal(stream, parts);
         parts[0][0] = 'x';
 
         Object outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");

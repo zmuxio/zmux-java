@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 final class PriorityUpdateReaderRuntimeTest {
     private static StreamRuntime newTerminalLocalStream(SessionRuntime runtime) throws Exception {
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("body".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes(StandardCharsets.UTF_8));
         stream.closeWithError(41L, "");
         synchronized (runtime.lock()) {
             assertTrue(stream.fullyTerminalLocked(), "closeWithError should fully terminate the stream for this test");

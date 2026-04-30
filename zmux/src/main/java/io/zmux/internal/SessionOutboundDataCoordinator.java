@@ -36,7 +36,8 @@ final class SessionOutboundDataCoordinator {
                          int payloadOffset,
                          int payloadLength,
                          boolean fin,
-                         SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
+                         SessionRuntime.PayloadOwnership payloadOwnership,
+                         StreamWriteCompletion completion) throws IOException {
         int frameFlags = 0;
         if (fin) {
             frameFlags |= 0x40;
@@ -48,7 +49,8 @@ final class SessionOutboundDataCoordinator {
                 streamRuntime,
                 payloadLength,
                 false,
-                false
+                false,
+                completion
         );
         this.enqueueReservedDataLocked(streamRuntime, outboundFrame, payloadLength, fin);
     }
@@ -59,7 +61,8 @@ final class SessionOutboundDataCoordinator {
                          int partOffset,
                          int length,
                          boolean fin,
-                         SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
+                         SessionRuntime.PayloadOwnership payloadOwnership,
+                         StreamWriteCompletion completion) throws IOException {
         int flags = 0;
         if (fin) {
             flags |= 0x40;
@@ -74,7 +77,8 @@ final class SessionOutboundDataCoordinator {
                     streamRuntime,
                     length,
                     false,
-                    false
+                    false,
+                    completion
             );
         } else {
             outboundFrame = new SessionRuntime.OutboundFrame(
@@ -83,6 +87,7 @@ final class SessionOutboundDataCoordinator {
                     length,
                     false,
                     false,
+                    completion,
                     null,
                     null,
                     0,
@@ -226,6 +231,7 @@ final class SessionOutboundDataCoordinator {
             }
             iterator.remove();
             this.owner.onQueuedFrameDequeuedLocked(deque, outboundFrame);
+            this.owner.failWriteCompletionLocked(outboundFrame, null);
             this.releaseQueuedDataLocked(outboundFrame);
         }
     }
@@ -283,6 +289,7 @@ final class SessionOutboundDataCoordinator {
                 streamRuntime.markFinQueuedLocked();
             }
             this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
+            outboundFrame.retainWriteCompletion();
         } catch (IOException error) {
             this.releaseReservedSendLocked(streamRuntime, dataBytes);
             throw error;

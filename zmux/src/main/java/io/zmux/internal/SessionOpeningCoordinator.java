@@ -226,6 +226,7 @@ final class SessionOpeningCoordinator {
         SessionRuntime.OutboundFrame existingOpeningFrame = this.removeQueuedOpeningFrameLocked(streamRuntime);
         if (existingOpeningFrame != null) {
             if (replaceQueuedPayload) {
+                this.owner.failWriteCompletionLocked(existingOpeningFrame, null);
                 this.owner.releaseQueuedDataLocked(existingOpeningFrame);
                 SessionRuntime.OutboundFrame replacement = this.newOpeningFrameLocked(
                         streamRuntime,
@@ -273,7 +274,8 @@ final class SessionOpeningCoordinator {
                                 int payloadOffset,
                                 int payloadLength,
                                 boolean fin,
-                                SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
+                                SessionRuntime.PayloadOwnership payloadOwnership,
+                                StreamWriteCompletion completion) throws IOException {
         int frameFlags = this.prepareOpeningWriteFrameLocked(streamRuntime, openingPrefix, payloadLength, fin);
         byte[] retainedPayload = this.owner.retainPayload(payload, payloadOffset, payloadLength, payloadOwnership);
         SessionRuntime.OutboundFrame outboundFrame = new SessionRuntime.OutboundFrame(
@@ -282,6 +284,7 @@ final class SessionOpeningCoordinator {
                 payloadLength,
                 true,
                 false,
+                completion,
                 openingPrefix,
                 retainedPayload,
                 0,
@@ -332,7 +335,8 @@ final class SessionOpeningCoordinator {
                                 int partOffset,
                                 int length,
                                 boolean fin,
-                                SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
+                                SessionRuntime.PayloadOwnership payloadOwnership,
+                                StreamWriteCompletion completion) throws IOException {
         int flags = this.prepareOpeningWriteFrameLocked(streamRuntime, prefix, length, fin);
         byte[][] payloadParts = this.owner.retainPayloadParts(parts, partIndex, partOffset, length, payloadOwnership);
         SessionRuntime.OutboundFrame outboundFrame;
@@ -344,6 +348,7 @@ final class SessionOpeningCoordinator {
                     length,
                     true,
                     false,
+                    completion,
                     prefix,
                     payload,
                     0,
@@ -359,6 +364,7 @@ final class SessionOpeningCoordinator {
                     length,
                     true,
                     false,
+                    completion,
                     prefix,
                     null,
                     0,
@@ -471,6 +477,7 @@ final class SessionOpeningCoordinator {
                 streamRuntime.markFinQueuedLocked();
             }
             this.owner.enqueueQueuedOutboundLocked(this.owner.dataQueueInternal(), outboundFrame);
+            outboundFrame.retainWriteCompletion();
             queued = true;
             streamRuntime.markOpeningFramePendingLocked();
             this.owner.markLocalStreamOpeningCommittedLocked(streamRuntime);

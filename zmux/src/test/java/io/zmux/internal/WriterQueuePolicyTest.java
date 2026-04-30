@@ -480,7 +480,7 @@ final class WriterQueuePolicyTest {
             makePeerVisible(runtime, stream);
         }
         for (int i = 0; i < 5; ++i) {
-            stream.write(payload);
+            SessionRuntimeTestSupport.queueWrite(stream, payload);
         }
 
         synchronized (runtime.lock()) {
@@ -529,7 +529,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("data".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "data".getBytes());
 
         synchronized (runtime.lock()) {
             List<Object> batch = collectReadyBatch(runtime);
@@ -598,7 +598,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("body".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes());
 
         synchronized (runtime.lock()) {
             Object readyBatch = SessionRuntimeTestSupport.invokePrivate(
@@ -652,7 +652,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("body".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes());
 
         List<Object> staged;
         synchronized (runtime.lock()) {
@@ -702,7 +702,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("body".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes());
         stream.closeWrite();
         WriteClosedException closed = assertInstanceOf(
                 WriteClosedException.class,
@@ -780,7 +780,7 @@ final class WriterQueuePolicyTest {
     void droppedStagedOpeningFrameRequeuesOpeningAbortWithoutLeavingStaleData() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("x".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "x".getBytes());
 
         synchronized (runtime.lock()) {
             Object readyBatch = SessionRuntimeTestSupport.invokePrivate(
@@ -824,7 +824,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("body".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes());
         stream.closeWithError(ErrorCode.INTERNAL.code(), "boom");
 
         synchronized (runtime.lock()) {
@@ -848,7 +848,7 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write("body".getBytes());
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes());
 
         synchronized (runtime.lock()) {
             stream.abortFromPeerLocked(ErrorCode.CANCELLED.code(), "", 0L);
@@ -889,8 +889,8 @@ final class WriterQueuePolicyTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, first);
             makePeerVisible(runtime, second);
-            first.write("a".getBytes());
-            second.write("b".getBytes());
+            SessionRuntimeTestSupport.queueWrite(first, "a".getBytes());
+            SessionRuntimeTestSupport.queueWrite(second, "b".getBytes());
 
             @SuppressWarnings("unchecked")
             List<Object> batch = (List<Object>) SessionRuntimeTestSupport.invokePrivate(

@@ -97,11 +97,21 @@ final class StreamWriteCoordinator {
     }
 
     void write(byte[] src, int offset, int length, boolean fin) throws IOException {
+        this.write(src, offset, length, fin, true);
+    }
+
+    void queueWrite(byte[] src, int offset, int length, boolean fin) throws IOException {
+        this.write(src, offset, length, fin, false);
+    }
+
+    private void write(byte[] src, int offset, int length, boolean fin, boolean waitForTransportWrite) throws IOException {
         Objects.requireNonNull(src, "src");
         RangeChecks.checkFromIndexSize(offset, length, src.length);
         if (length == 0 && !fin) {
             return;
         }
+        StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
+        long completionWaitNanos = 0L;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -139,33 +149,49 @@ final class StreamWriteCoordinator {
                     }
 
                     if (openingPending) {
-                        this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, src, position, chunkSize, frameFin);
+                        this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, src, position, chunkSize, frameFin, completion);
                         openingPrefix = StreamRuntime.EMPTY_BYTES;
                         openingPending = false;
                     } else {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, src, position, chunkSize, frameFin);
+                        this.owner.sessionInternal().queueDataLocked(this.owner, src, position, chunkSize, frameFin, completion);
                     }
                     position += chunkSize;
                 }
 
                 if (fin && length == 0) {
-                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix);
+                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
                 }
                 this.owner.noteWritePayloadProgressLocked(length);
                 this.owner.notifyLockWaitersLocked();
+                if (completion != null && completion.hasFrames()) {
+                    completionWaitNanos = this.owner.remainingWriteDeadlineNanosLocked();
+                }
             }
         } finally {
             this.owner.emitPendingEvents();
         }
+        if (completion != null && completion.hasFrames()) {
+            this.awaitTransportWrite(completion, completionWaitNanos);
+        }
     }
 
     int writev(byte[][] parts, boolean fin) throws IOException {
+        return this.writev(parts, fin, true);
+    }
+
+    int queueWritev(byte[][] parts, boolean fin) throws IOException {
+        return this.writev(parts, fin, false);
+    }
+
+    private int writev(byte[][] parts, boolean fin, boolean waitForTransportWrite) throws IOException {
         Objects.requireNonNull(parts, "parts");
         int totalLength = StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
         if (totalLength == 0 && !fin) {
             return 0;
         }
 
+        StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
+        long completionWaitNanos = 0L;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -212,7 +238,7 @@ final class StreamWriteCoordinator {
                     boolean singleSegment = chunkSize <= currentAvailable;
                     if (openingPending) {
                         if (singleSegment) {
-                            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, current, partOffset, chunkSize, frameFin);
+                            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, current, partOffset, chunkSize, frameFin, completion);
                         } else {
                             this.owner.sessionInternal().queueOpeningDataLocked(
                                     this.owner,
@@ -222,13 +248,14 @@ final class StreamWriteCoordinator {
                                     partOffset,
                                     chunkSize,
                                     frameFin,
-                                    SessionRuntime.PayloadOwnership.BORROWED
+                                    SessionRuntime.PayloadOwnership.BORROWED,
+                                    completion
                             );
                         }
                         openingPrefix = StreamRuntime.EMPTY_BYTES;
                         openingPending = false;
                     } else if (singleSegment) {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, current, partOffset, chunkSize, frameFin);
+                        this.owner.sessionInternal().queueDataLocked(this.owner, current, partOffset, chunkSize, frameFin, completion);
                     } else {
                         this.owner.sessionInternal().queueDataLocked(
                                 this.owner,
@@ -237,7 +264,8 @@ final class StreamWriteCoordinator {
                                 partOffset,
                                 chunkSize,
                                 frameFin,
-                                SessionRuntime.PayloadOwnership.BORROWED
+                                SessionRuntime.PayloadOwnership.BORROWED,
+                                completion
                         );
                     }
 
@@ -256,15 +284,47 @@ final class StreamWriteCoordinator {
                 }
 
                 if (fin && totalLength == 0) {
-                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix);
+                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
                 }
                 this.owner.noteWritePayloadProgressLocked(totalLength);
                 this.owner.notifyLockWaitersLocked();
+                if (completion != null && completion.hasFrames()) {
+                    completionWaitNanos = this.owner.remainingWriteDeadlineNanosLocked();
+                }
             }
-            return totalLength;
         } finally {
             this.owner.emitPendingEvents();
         }
+        if (completion != null && completion.hasFrames()) {
+            this.awaitTransportWrite(completion, completionWaitNanos);
+        }
+        return totalLength;
+    }
+
+    private void awaitTransportWrite(StreamWriteCompletion completion, long remainingNanos) throws IOException {
+        WriteTimeoutException timeout = new WriteTimeoutException();
+        boolean written = completion.awaitWritten(remainingNanos);
+        if (written) {
+            return;
+        }
+        if (this.cancelQueuedWriteAfterTimeout(completion, timeout)) {
+            throw timeout;
+        }
+        completion.awaitWritten(0L);
+    }
+
+    private boolean cancelQueuedWriteAfterTimeout(StreamWriteCompletion completion, IOException timeout) {
+        synchronized (this.owner.lockInternal()) {
+            if (!this.owner.sessionInternal().cancelQueuedWriteCompletionLocked(completion)) {
+                return false;
+            }
+            if (!completion.completeFailureIfPending(timeout)) {
+                return false;
+            }
+            this.owner.notifyLockWaitersLocked();
+        }
+        this.owner.emitPendingEvents();
+        return true;
     }
 
     void ensureWritableLocked() throws IOException {
@@ -337,11 +397,13 @@ final class StreamWriteCoordinator {
         }
     }
 
-    private void queueEmptyFinalFrameLocked(boolean openingPending, byte[] openingPrefix) throws IOException {
+    private void queueEmptyFinalFrameLocked(boolean openingPending,
+                                           byte[] openingPrefix,
+                                           StreamWriteCompletion completion) throws IOException {
         if (openingPending) {
-            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true);
+            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true, completion);
         } else {
-            this.owner.sessionInternal().queueDataLocked(this.owner, StreamRuntime.EMPTY_BYTES, true);
+            this.owner.sessionInternal().queueDataLocked(this.owner, StreamRuntime.EMPTY_BYTES, true, completion);
         }
     }
 

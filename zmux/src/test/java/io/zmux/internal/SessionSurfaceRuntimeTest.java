@@ -1001,7 +1001,7 @@ class SessionSurfaceRuntimeTest {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("x".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "x".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             SessionRuntimeTestSupport.invokePrivate(runtime, "markPeerVisibleLocked", new Class<?>[]{StreamRuntime.class}, stream);

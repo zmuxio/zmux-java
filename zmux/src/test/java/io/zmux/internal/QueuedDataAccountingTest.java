@@ -43,7 +43,7 @@ final class QueuedDataAccountingTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
         }
-        stream.write(payload);
+        SessionRuntimeTestSupport.queueWrite(stream, payload);
 
         synchronized (runtime.lock()) {
             List<Object> batch = collectReadyBatch(runtime);

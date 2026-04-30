@@ -136,8 +136,8 @@ final class OrdinaryBatchOrderTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, low);
             makePeerVisible(runtime, high);
-            low.write("low".getBytes(StandardCharsets.UTF_8));
-            high.write("high".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(low, "low".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(high, "high".getBytes(StandardCharsets.UTF_8));
 
             List<Object> batch = collectReadyBatch(runtime);
             assertEquals(listOf(high.streamIdInternal(), low.streamIdInternal()), batchStreamIds(batch), "higher-priority stream should lead the ordinary batch even when queued later");
@@ -162,9 +162,9 @@ final class OrdinaryBatchOrderTest {
             makePeerVisible(runtime, firstGroupMember);
             makePeerVisible(runtime, secondGroupMember);
             makePeerVisible(runtime, otherGroup);
-            firstGroupMember.write("a".getBytes(StandardCharsets.UTF_8));
-            secondGroupMember.write("b".getBytes(StandardCharsets.UTF_8));
-            otherGroup.write("c".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(firstGroupMember, "a".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(secondGroupMember, "b".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(otherGroup, "c".getBytes(StandardCharsets.UTF_8));
 
             List<Object> batch = collectReadyBatch(runtime);
             assertEquals(
@@ -186,8 +186,8 @@ final class OrdinaryBatchOrderTest {
             makePeerVisible(runtime, first);
             makePeerVisible(runtime, second);
 
-            first.write("a".getBytes(StandardCharsets.UTF_8));
-            second.write("b".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(first, "a".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(second, "b".getBytes(StandardCharsets.UTF_8));
             List<Object> firstBatch = collectReadyBatch(runtime);
             assertEquals(
                     listOf(first.streamIdInternal(), second.streamIdInternal()),
@@ -195,8 +195,8 @@ final class OrdinaryBatchOrderTest {
                     "first flat batch should keep the initial head"
             );
 
-            first.write("c".getBytes(StandardCharsets.UTF_8));
-            second.write("d".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(first, "c".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(second, "d".getBytes(StandardCharsets.UTF_8));
             List<Object> secondBatch = collectReadyBatch(runtime);
             assertEquals(
                     listOf(second.streamIdInternal(), first.streamIdInternal()),
@@ -215,8 +215,8 @@ final class OrdinaryBatchOrderTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, first);
             makePeerVisible(runtime, second);
-            first.write("a".getBytes(StandardCharsets.UTF_8));
-            second.write("b".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(first, "a".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(second, "b".getBytes(StandardCharsets.UTF_8));
 
             Object readyBatch = SessionRuntimeTestSupport.invokePrivate(
                     runtime,
@@ -280,8 +280,8 @@ final class OrdinaryBatchOrderTest {
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, low);
             makePeerVisible(runtime, high);
-            low.write("low".getBytes(StandardCharsets.UTF_8));
-            high.write("high".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(low, "low".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(high, "high".getBytes(StandardCharsets.UTF_8));
 
             Object readyBatch = SessionRuntimeTestSupport.invokePrivate(
                     runtime,
@@ -354,10 +354,10 @@ final class OrdinaryBatchOrderTest {
             makePeerVisible(runtime, c);
             makePeerVisible(runtime, d);
 
-            a.write("a".getBytes(StandardCharsets.UTF_8));
-            b.write("b".getBytes(StandardCharsets.UTF_8));
-            c.write("c".getBytes(StandardCharsets.UTF_8));
-            d.write("d".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(a, "a".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(b, "b".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(c, "c".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(d, "d".getBytes(StandardCharsets.UTF_8));
             List<Object> firstBatch = collectReadyBatch(runtime);
             assertEquals(
                     listOf(a.streamIdInternal(), c.streamIdInternal(), b.streamIdInternal(), d.streamIdInternal()),
@@ -365,10 +365,10 @@ final class OrdinaryBatchOrderTest {
                     "first group_fair batch should interleave the two groups"
             );
 
-            a.write("e".getBytes(StandardCharsets.UTF_8));
-            b.write("f".getBytes(StandardCharsets.UTF_8));
-            c.write("g".getBytes(StandardCharsets.UTF_8));
-            d.write("h".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(a, "e".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(b, "f".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(c, "g".getBytes(StandardCharsets.UTF_8));
+            SessionRuntimeTestSupport.queueWrite(d, "h".getBytes(StandardCharsets.UTF_8));
             List<Object> secondBatch = collectReadyBatch(runtime);
             assertEquals(
                     listOf(d.streamIdInternal(), b.streamIdInternal(), c.streamIdInternal(), a.streamIdInternal()),

@@ -133,7 +133,7 @@ final class PriorityUpdateQueueTest {
 
         synchronized (runtime.lock()) {
             makePeerVisible(runtime, stream);
-            stream.write("payload".getBytes());
+            SessionRuntimeTestSupport.queueWrite(stream, "payload".getBytes());
             stream.updateMetadata(new MetadataUpdate(11L, null));
             assertQueueTypes(SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue"));
             assertEquals(listOf(), SessionRuntimeTestSupport.advisoryQueueStreamIds(runtime));
@@ -152,9 +152,9 @@ final class PriorityUpdateQueueTest {
             makePeerVisible(runtime, first);
             makePeerVisible(runtime, second);
             first.updateMetadata(new MetadataUpdate(5L, null));
-            first.write("one".getBytes());
+            SessionRuntimeTestSupport.queueWrite(first, "one".getBytes());
             second.updateMetadata(new MetadataUpdate(7L, null));
-            second.write("two".getBytes());
+            SessionRuntimeTestSupport.queueWrite(second, "two".getBytes());
             List<Object> batch = collectReadyBatch(runtime);
             assertEquals(FrameType.EXT, SessionRuntimeTestSupport.outboundFrame(batch.get(0)).type());
             assertPriorityUpdatePrecedesData(batch, first.streamIdInternal());

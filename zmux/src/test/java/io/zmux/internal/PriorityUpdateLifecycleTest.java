@@ -70,7 +70,7 @@ final class PriorityUpdateLifecycleTest {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("x".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "x".getBytes(StandardCharsets.UTF_8));
         stream.updateMetadata(new MetadataUpdate(9L, null));
 
         synchronized (runtime.lock()) {
@@ -91,7 +91,7 @@ final class PriorityUpdateLifecycleTest {
             assertTrue(stream.priorityUpdateQueuedLocked(), "peer-visible transition should queue the staged PRIORITY_UPDATE for later emission");
         }
 
-        stream.write("y".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "y".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             List<Object> secondBatch = collectReadyBatch(runtime);
@@ -106,7 +106,7 @@ final class PriorityUpdateLifecycleTest {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(capabilities, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();
-        stream.write("body".getBytes(StandardCharsets.UTF_8));
+        SessionRuntimeTestSupport.queueWrite(stream, "body".getBytes(StandardCharsets.UTF_8));
 
         synchronized (runtime.lock()) {
             SessionRuntimeTestSupport.invokePrivate(runtime, "markPeerVisibleLocked", new Class<?>[]{StreamRuntime.class}, stream);
