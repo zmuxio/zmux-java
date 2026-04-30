@@ -9,7 +9,7 @@ project:
   languages:
     java:
       groupId: io.github.zmuxio
-      version: 8
+      version: "8"
       multiProject: true
 
 signing:
