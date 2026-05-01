@@ -11,6 +11,7 @@ final class ByteArrayQueue {
     private ArrayDeque<Chunk> chunks = new ArrayDeque<>();
     private long size;
     private long storageBytes;
+    private long lastReadReleasedStorageBytes;
     private int removedChunksSinceDequeReset;
 
     private static void releaseChunk(long storageBytes, Runnable releaseAction) {
@@ -90,14 +91,32 @@ final class ByteArrayQueue {
     }
 
     public int read(byte[] dst, int offset, int length) {
-        return readDetailed(dst, offset, length).bytes();
+        return readInternal(dst, offset, length);
     }
 
     ReadResult readDetailed(byte[] dst, int offset, int length) {
+        int read = readInternal(dst, offset, length);
+        long releasedStorageBytes = lastReadReleasedStorageBytes;
+        if (read == 0 && releasedStorageBytes == 0L) {
+            return ReadResult.empty();
+        }
+        return new ReadResult(read, releasedStorageBytes);
+    }
+
+    int readAndTrackReleasedStorage(byte[] dst, int offset, int length) {
+        return readInternal(dst, offset, length);
+    }
+
+    long lastReadReleasedStorageBytes() {
+        return lastReadReleasedStorageBytes;
+    }
+
+    private int readInternal(byte[] dst, int offset, int length) {
         Objects.requireNonNull(dst, "dst");
         RangeChecks.checkFromIndexSize(offset, length, dst.length);
+        lastReadReleasedStorageBytes = 0L;
         if (length == 0) {
-            return ReadResult.empty();
+            return 0;
         }
         int remaining = (int) Math.min(length, size);
         int written = 0;
@@ -123,7 +142,8 @@ final class ByteArrayQueue {
             }
         }
         this.releaseEmptyChunkDequeStorage(removedChunks);
-        return new ReadResult(written, releasedStorageBytes);
+        lastReadReleasedStorageBytes = releasedStorageBytes;
+        return written;
     }
 
     private long tightenHeadStorage(Chunk head) {

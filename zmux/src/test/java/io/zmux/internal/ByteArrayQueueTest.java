@@ -71,6 +71,22 @@ final class ByteArrayQueueTest {
     }
 
     @Test
+    void readCanTrackReleasedStorageWithoutResultAllocation() {
+        ByteArrayQueue queue = new ByteArrayQueue();
+        byte[] source = new byte[1024];
+        source[1023] = 7;
+
+        queue.addRetained(source, 1023, 1, source.length, null);
+
+        byte[] dst = new byte[1];
+        assertEquals(1, queue.readAndTrackReleasedStorage(dst, 0, dst.length), "read should drain the queued slice");
+        assertEquals(7, dst[0], "queued slice payload mismatch");
+        assertEquals(source.length, queue.lastReadReleasedStorageBytes(),
+                "no-allocation read should expose released backing storage");
+        assertEquals(0L, queue.storageBytes(), "storage accounting should drop after the backing is released");
+    }
+
+    @Test
     void readAllReleasesOversizedChunkDequeStorage() throws Exception {
         ByteArrayQueue queue = new ByteArrayQueue();
         for (int i = 0; i < 1100; i++) {

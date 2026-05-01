@@ -24,9 +24,9 @@ final class StreamReadCoordinator {
             }
             while (true) {
                 if (!this.owner.readBufferInternal().isEmpty()) {
-                    ByteArrayQueue.ReadResult readResult = this.owner.readBufferInternal().readDetailed(dst, offset, length);
-                    int readBytes = readResult.bytes();
-                    this.owner.onReadBufferReleasedLocked(readBytes, readResult.releasedStorageBytes());
+                    ByteArrayQueue readBuffer = this.owner.readBufferInternal();
+                    int readBytes = readBuffer.readAndTrackReleasedStorage(dst, offset, length);
+                    this.owner.onReadBufferReleasedLocked(readBytes, readBuffer.lastReadReleasedStorageBytes());
                     this.owner.onReadDiscardLocked(this.owner.halfStateInternal().recvOpen());
                     this.owner.noteReadPayloadProgressLocked(readBytes);
                     this.owner.sessionInternal().maybeCompactStreamLocked(this.owner);
