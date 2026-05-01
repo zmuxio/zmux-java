@@ -97,29 +97,53 @@ final class StreamWriteCoordinator {
     }
 
     void write(byte[] src, int offset, int length, boolean fin) throws IOException {
-        this.write(src, offset, length, fin, true, SessionRuntime.PayloadOwnership.BORROWED);
+        StreamWriteCompletion completion = this.enqueueWrite(
+                src,
+                offset,
+                length,
+                fin,
+                true,
+                SessionRuntime.PayloadOwnership.BORROWED
+        );
+        if (completion != null) {
+            this.awaitTransportWrite(completion);
+        }
     }
 
     void writeOwned(byte[] src, int offset, int length, boolean fin) throws IOException {
-        this.write(src, offset, length, fin, true, SessionRuntime.PayloadOwnership.OWNED);
+        StreamWriteCompletion completion = this.enqueueWrite(
+                src,
+                offset,
+                length,
+                fin,
+                true,
+                SessionRuntime.PayloadOwnership.OWNED
+        );
+        if (completion != null) {
+            this.awaitTransportWrite(completion);
+        }
+    }
+
+    StreamWriteCompletion submitOwnedWrite(byte[] src, int offset, int length, boolean fin) throws IOException {
+        return this.enqueueWrite(src, offset, length, fin, true, SessionRuntime.PayloadOwnership.OWNED);
     }
 
     void queueWrite(byte[] src, int offset, int length, boolean fin) throws IOException {
-        this.write(src, offset, length, fin, false, SessionRuntime.PayloadOwnership.BORROWED);
+        this.enqueueWrite(src, offset, length, fin, false, SessionRuntime.PayloadOwnership.BORROWED);
     }
 
-    private void write(byte[] src,
-                       int offset,
-                       int length,
-                       boolean fin,
-                       boolean waitForTransportWrite,
-                       SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
+    private StreamWriteCompletion enqueueWrite(byte[] src,
+                                               int offset,
+                                               int length,
+                                               boolean fin,
+                                               boolean trackTransportWrite,
+                                               SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
         Objects.requireNonNull(src, "src");
         RangeChecks.checkFromIndexSize(offset, length, src.length);
         if (length == 0 && !fin) {
-            return;
+            return null;
         }
-        StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
+        StreamWriteCompletion completion = trackTransportWrite ? new StreamWriteCompletion() : null;
         boolean waitForCompletion = false;
         try {
             synchronized (this.owner.lockInternal()) {
@@ -197,9 +221,7 @@ final class StreamWriteCoordinator {
         } finally {
             this.owner.emitPendingEvents();
         }
-        if (waitForCompletion) {
-            this.awaitTransportWrite(completion);
-        }
+        return waitForCompletion ? completion : null;
     }
 
     int writev(byte[][] parts, boolean fin) throws IOException {

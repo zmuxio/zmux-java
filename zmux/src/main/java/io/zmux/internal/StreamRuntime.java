@@ -106,9 +106,10 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         this.writeCoordinator.queueWrite(src, offset, length, false);
     }
 
-    private void writeOwnedAsyncPayload(byte[] src, int offset, int length, boolean fin) throws IOException {
+    private StreamWriteCompletion submitOwnedAsyncPayload(byte[] src, int offset, int length, boolean fin)
+            throws IOException {
         this.awaitAsyncOperationPredecessors();
-        this.writeCoordinator.writeOwned(src, offset, length, fin);
+        return this.writeCoordinator.submitOwnedWrite(src, offset, length, fin);
     }
 
     @Override
@@ -408,7 +409,10 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             Throwable failure = null;
             ACTIVE_ASYNC_DRAIN.set(this);
             try {
-                operation.run(this);
+                if (operation.run(this)) {
+                    emitPendingEvents();
+                    return;
+                }
             } catch (Throwable error) {
                 failure = error;
             } finally {
@@ -428,6 +432,47 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             operation.complete(failure);
             emitPendingEvents();
         }
+    }
+
+    private boolean beginAsyncWriteCompletion(AsyncStreamOperation operation, StreamWriteCompletion completion) {
+        if (completion == null) {
+            return false;
+        }
+        synchronized (session.lock()) {
+            operation.markWaitingForWriteCompletion(completion);
+        }
+        completion.onComplete(() -> AsyncSupport.execute(() -> finishAsyncWriteOperation(operation, completion)));
+        synchronized (session.lock()) {
+            operation.scheduleDeadlineCheck(this, 0L);
+        }
+        return true;
+    }
+
+    private void finishAsyncWriteOperation(AsyncStreamOperation operation, StreamWriteCompletion completion) {
+        Throwable failure = null;
+        try {
+            completion.throwIfFailed();
+        } catch (Throwable error) {
+            failure = error;
+        }
+        synchronized (session.lock()) {
+            if (asyncOperations.peekFirst() == operation) {
+                asyncOperations.pollFirst();
+            } else {
+                asyncOperations.remove(operation);
+            }
+            operation.markDone();
+            unregisterWriteCompletionWaiterLocked(completion);
+            releaseAsyncOperationAdmissionLocked(operation);
+            notifyLockWaitersLocked();
+        }
+        operation.complete(failure);
+        synchronized (session.lock()) {
+            asyncOperationRunning = false;
+            notifyLockWaitersLocked();
+            scheduleAsyncOperationDrainLocked();
+        }
+        emitPendingEvents();
     }
 
     private void releaseAsyncOperationAdmissionLocked(AsyncStreamOperation operation) {
@@ -472,14 +517,18 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             return;
         }
         for (AsyncStreamOperation operation : asyncOperations) {
-            operation.scheduleDeadlineCheck(this, 0L);
+            if (operation.needsDeadlineCheck()) {
+                operation.scheduleDeadlineCheck(this, 0L);
+            }
         }
     }
 
     private void checkAsyncOperationDeadline(AsyncStreamOperation operation) {
         boolean removed = false;
+        StreamWriteCompletion completionToFail = null;
+        IOException timeout = null;
         synchronized (session.lock()) {
-            if (!operation.queued()) {
+            if (!operation.needsDeadlineCheck()) {
                 return;
             }
             long remainingNanos = remainingWriteDeadlineNanosLocked();
@@ -490,15 +539,27 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
                 operation.scheduleDeadlineCheck(this, remainingNanos);
                 return;
             }
-            removed = asyncOperations.remove(operation);
-            if (removed) {
-                operation.markDone();
-                releaseAsyncOperationAdmissionLocked(operation);
-                notifyLockWaitersLocked();
+            timeout = new WriteTimeoutException();
+            if (operation.queued()) {
+                removed = asyncOperations.remove(operation);
+                if (removed) {
+                    operation.markDone();
+                    releaseAsyncOperationAdmissionLocked(operation);
+                    notifyLockWaitersLocked();
+                }
+            } else if (operation.waitingForWriteCompletion()) {
+                operation.markWriteDeadlineCancellationAttempted();
+                StreamWriteCompletion completion = operation.writeCompletion();
+                if (session.cancelQueuedWriteCompletionLocked(completion)) {
+                    completionToFail = completion;
+                    notifyLockWaitersLocked();
+                }
             }
         }
         if (removed) {
-            operation.complete(new WriteTimeoutException());
+            operation.complete(timeout);
+            emitPendingEvents();
+        } else if (completionToFail != null && completionToFail.completeFailureIfPending(timeout)) {
             emitPendingEvents();
         }
     }
@@ -1444,6 +1505,8 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         private final long admissionBytes;
         private final CompletableFuture<Void> future = new CompletableFuture<>();
         private State state = State.QUEUED;
+        private StreamWriteCompletion writeCompletion;
+        private boolean writeDeadlineCancellationAttempted;
 
         private AsyncStreamOperation(Kind kind, byte[] payload, boolean fin, long code, String reason, long admissionBytes) {
             this.kind = kind;
@@ -1494,6 +1557,15 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             return state == State.QUEUED;
         }
 
+        boolean waitingForWriteCompletion() {
+            return state == State.WAITING_WRITE_COMPLETION;
+        }
+
+        boolean needsDeadlineCheck() {
+            return state == State.QUEUED
+                    || (state == State.WAITING_WRITE_COMPLETION && !writeDeadlineCancellationAttempted);
+        }
+
         boolean markRunning() {
             if (state != State.QUEUED) {
                 return false;
@@ -1506,33 +1578,51 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             state = State.DONE;
         }
 
+        void markWaitingForWriteCompletion(StreamWriteCompletion completion) {
+            if (state != State.RUNNING) {
+                return;
+            }
+            this.writeCompletion = Objects.requireNonNull(completion, "completion");
+            state = State.WAITING_WRITE_COMPLETION;
+        }
+
+        StreamWriteCompletion writeCompletion() {
+            return writeCompletion;
+        }
+
+        void markWriteDeadlineCancellationAttempted() {
+            writeDeadlineCancellationAttempted = true;
+        }
+
         void scheduleDeadlineCheck(StreamRuntime owner, long delayNanos) {
             AsyncSupport.schedule(() -> owner.checkAsyncOperationDeadline(this), delayNanos);
         }
 
-        void run(StreamRuntime owner) throws IOException {
+        boolean run(StreamRuntime owner) throws IOException {
             switch (kind) {
                 case WRITE:
-                    owner.writeOwnedAsyncPayload(payload, 0, payload.length, fin);
-                    return;
+                    return owner.beginAsyncWriteCompletion(
+                            this,
+                            owner.submitOwnedAsyncPayload(payload, 0, payload.length, fin)
+                    );
                 case CLOSE_WRITE:
                     owner.closeWrite();
-                    return;
+                    return false;
                 case CANCEL_WRITE:
                     owner.cancelWrite(code);
-                    return;
+                    return false;
                 case CLOSE_READ:
                     owner.closeRead();
-                    return;
+                    return false;
                 case CANCEL_READ:
                     owner.cancelRead(code);
-                    return;
+                    return false;
                 case CLOSE_WITH_ERROR:
                     owner.closeWithError(code, reason);
-                    return;
+                    return false;
                 case CLOSE_STREAM:
                     owner.close();
-                    return;
+                    return false;
                 default:
                     throw new IllegalStateException("unknown async stream operation: " + kind);
             }
@@ -1559,6 +1649,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         private enum State {
             QUEUED,
             RUNNING,
+            WAITING_WRITE_COMPLETION,
             DONE
         }
     }

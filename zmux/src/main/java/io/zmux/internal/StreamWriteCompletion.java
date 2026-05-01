@@ -11,6 +11,7 @@ final class StreamWriteCompletion {
     private boolean done;
     private IOException error;
     private boolean transportProgress;
+    private Runnable completionListener;
 
     synchronized void retainFrame() {
         if (done) {
@@ -23,27 +24,39 @@ final class StreamWriteCompletion {
         return remainingFrames > 0 || done;
     }
 
-    synchronized void completeFrameWritten() {
-        if (done) {
-            return;
+    void completeFrameWritten() {
+        Runnable listener = null;
+        synchronized (this) {
+            if (done) {
+                return;
+            }
+            transportProgress = true;
+            if (remainingFrames > 0) {
+                remainingFrames--;
+            }
+            if (remainingFrames == 0) {
+                done = true;
+                notifyAll();
+                listener = completionListener;
+                completionListener = null;
+            }
         }
-        transportProgress = true;
-        if (remainingFrames > 0) {
-            remainingFrames--;
-        }
-        if (remainingFrames == 0) {
-            done = true;
-            notifyAll();
-        }
+        runCompletionListener(listener);
     }
 
-    synchronized void completeFailure(IOException failure) {
-        if (done) {
-            return;
+    void completeFailure(IOException failure) {
+        Runnable listener;
+        synchronized (this) {
+            if (done) {
+                return;
+            }
+            error = failure;
+            done = true;
+            notifyAll();
+            listener = completionListener;
+            completionListener = null;
         }
-        error = failure;
-        done = true;
-        notifyAll();
+        runCompletionListener(listener);
     }
 
     synchronized boolean done() {
@@ -92,14 +105,44 @@ final class StreamWriteCompletion {
         return !done && !transportProgress && remainingFrames > 0 && queuedFrameCount == remainingFrames;
     }
 
-    synchronized boolean completeFailureIfPending(IOException failure) {
-        if (done) {
-            return false;
+    boolean completeFailureIfPending(IOException failure) {
+        Runnable listener;
+        synchronized (this) {
+            if (done) {
+                return false;
+            }
+            error = failure;
+            done = true;
+            notifyAll();
+            listener = completionListener;
+            completionListener = null;
         }
-        error = failure;
-        done = true;
-        notifyAll();
+        runCompletionListener(listener);
         return true;
+    }
+
+    void onComplete(Runnable listener) {
+        if (listener == null) {
+            return;
+        }
+        boolean runNow;
+        synchronized (this) {
+            if (done) {
+                runNow = true;
+            } else {
+                completionListener = listener;
+                runNow = false;
+            }
+        }
+        if (runNow) {
+            listener.run();
+        }
+    }
+
+    private static void runCompletionListener(Runnable listener) {
+        if (listener != null) {
+            listener.run();
+        }
     }
 
     private void throwIfFailedLocked() throws IOException {

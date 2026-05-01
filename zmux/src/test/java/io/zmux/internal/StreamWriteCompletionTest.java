@@ -13,8 +13,13 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -104,6 +109,98 @@ final class StreamWriteCompletionTest {
             write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
         } finally {
             closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void writeAsyncFutureCompletesBeforeFollowingAsyncOperationRuns() throws Exception {
+        BlockingOutputStream output = new BlockingOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = startWriter(runtime);
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            List<String> completions = Collections.synchronizedList(new ArrayList<>());
+
+            CompletionStage<Void> write = stream.writeAsync("async".getBytes(StandardCharsets.UTF_8));
+            write.whenComplete((ignored, error) -> completions.add("write"));
+
+            assertTrue(output.awaitWriteEntered(), "writer should reach the underlying transport");
+            CompletionStage<Void> close = stream.closeWriteAsync();
+            close.whenComplete((ignored, error) -> completions.add("close"));
+
+            assertFalse(close.toCompletableFuture().isDone(),
+                    "a following async operation must not run before the prior async write completes");
+            output.release();
+            write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+            close.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+            assertEquals(Arrays.asList("write", "close"), completions,
+                    "async write completion should be observable before later async operations complete");
+        } finally {
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void writeAsyncTimeoutAfterQueueAdmissionCancelsQueuedWriteBeforeWriterOwnsIt() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = null;
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            stream.setWriteTimeout(Duration.ofMillis(100L));
+
+            CompletionStage<Void> write = stream.writeAsync("x".getBytes(StandardCharsets.UTF_8));
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> write.toCompletableFuture().get(1L, TimeUnit.SECONDS),
+                    "writeAsync should complete with timeout while queued before writer ownership"
+            );
+            assertTrue(failure.getCause() instanceof WriteTimeoutException,
+                    "queued async write should surface the write timeout");
+            synchronized (runtime.lock()) {
+                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
+                assertFalse(stream.openingFramePendingLocked(), "canceled async opener should allow a later opener");
+                assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
+                assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
+            }
+            assertFalse(runtime.awaitTermination(Duration.ofMillis(50L)), "canceling queued async write should not fail the session");
+
+            stream.clearWriteDeadline();
+            writer = startWriter(runtime);
+            stream.write("y".getBytes(StandardCharsets.UTF_8));
+        } finally {
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void writeAsyncDeadlineShortenedAfterQueueAdmissionCancelsQueuedWrite() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            CompletionStage<Void> write = stream.writeAsync("x".getBytes(StandardCharsets.UTF_8));
+
+            waitUntilQueued(runtime);
+            assertFalse(write.toCompletableFuture().isDone(), "writeAsync should wait for transport completion");
+
+            stream.setWriteDeadline(Instant.now());
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> write.toCompletableFuture().get(1L, TimeUnit.SECONDS),
+                    "shortened deadline should cancel the queued async write"
+            );
+            assertTrue(failure.getCause() instanceof WriteTimeoutException,
+                    "queued async write should return the new timeout");
+            synchronized (runtime.lock()) {
+                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
+                assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
+                assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
+            }
+        } finally {
+            closeRuntime(runtime, null);
         }
     }
 
