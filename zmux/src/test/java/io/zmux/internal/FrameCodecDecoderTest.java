@@ -124,6 +124,20 @@ final class FrameCodecDecoderTest {
         assertEquals(3, input.reads(), "decoder must stop after the first stream_id byte");
     }
 
+    @Test
+    void directInputRejectsShortStreamIdBeforeConsumingNextFrameBytes() {
+        byte[] bytes = new byte[]{2, (byte) FrameType.DATA.code(), (byte) 0xc0, 99, 98, 97};
+        OneByteInputStream input = new OneByteInputStream(bytes);
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(input, Settings.defaults().limits())
+        );
+
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "short stream_id must fail as frame-size");
+        assertEquals(3, input.reads(), "direct frame read must stop after the first stream_id byte");
+    }
+
     private static final class CountingBurstInputStream extends InputStream {
         private final byte[] bytes;
         private int position;

@@ -88,12 +88,18 @@ final class SessionWriterBatchFilter {
             ++writeIndex;
         }
         if (writeIndex < size) {
-            batch.subList(writeIndex, size).clear();
+            removeTail(batch, writeIndex, size);
         }
         if (dataDropped) {
             this.owner.notifyLockWaiters();
         }
         return batch;
+    }
+
+    private static void removeTail(ArrayList<SessionRuntime.OutboundFrame> batch, int fromIndex, int size) {
+        for (int index = size - 1; index >= fromIndex; --index) {
+            batch.remove(index);
+        }
     }
 
     private FilterResult filterResultLocked(SessionRuntime.OutboundFrame outboundFrame) {
