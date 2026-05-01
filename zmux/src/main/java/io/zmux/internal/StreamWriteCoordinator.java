@@ -144,7 +144,7 @@ final class StreamWriteCoordinator {
             return null;
         }
         StreamWriteCompletion completion = trackTransportWrite ? new StreamWriteCompletion() : null;
-        StreamWriteCompletion completionToWait = null;
+        StreamWriteCompletion completionToWait;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -232,7 +232,7 @@ final class StreamWriteCoordinator {
         }
 
         StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
-        StreamWriteCompletion completionToWait = null;
+        StreamWriteCompletion completionToWait;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
