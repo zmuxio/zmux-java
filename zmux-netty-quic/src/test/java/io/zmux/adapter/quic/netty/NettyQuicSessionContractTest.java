@@ -304,6 +304,30 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void openAndSendHelpersRejectNullPayloads() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            assertThrows(NullPointerException.class, () -> pair.client.openAndSend((byte[]) null));
+            assertThrows(NullPointerException.class, () -> pair.client.openAndSend(OpenOptions.empty(), (byte[]) null));
+            assertThrows(NullPointerException.class, () -> pair.client.openAndSendWithTimeout(Duration.ofSeconds(1), (byte[]) null));
+            assertThrows(
+                    NullPointerException.class,
+                    () -> pair.client.openAndSendWithTimeout(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
+
+            assertThrows(NullPointerException.class, () -> pair.client.openUniAndSend((byte[]) null));
+            assertThrows(NullPointerException.class, () -> pair.client.openUniAndSend(OpenOptions.empty(), (byte[]) null));
+            assertThrows(
+                    NullPointerException.class,
+                    () -> pair.client.openUniAndSendWithTimeout(Duration.ofSeconds(1), (byte[]) null)
+            );
+            assertThrows(
+                    NullPointerException.class,
+                    () -> pair.client.openUniAndSendWithTimeout(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
+        }
+    }
+
+    @Test
     void writevFinalOnAdapterCombinesMultipartPayloadAndClosesStream() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));

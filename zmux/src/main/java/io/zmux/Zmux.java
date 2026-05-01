@@ -79,6 +79,12 @@ public final class Zmux {
 
     public static JoinedDuplexConnection join(InputStream input,
                                               OutputStream output,
+                                              GatheringByteChannel gatheringOutput) {
+        return ZmuxConnections.join(input, output, gatheringOutput);
+    }
+
+    public static JoinedDuplexConnection join(InputStream input,
+                                              OutputStream output,
                                               SocketAddress localAddress,
                                               SocketAddress remoteAddress) {
         return ZmuxConnections.join(input, output, localAddress, remoteAddress);

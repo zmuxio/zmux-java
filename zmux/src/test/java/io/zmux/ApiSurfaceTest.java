@@ -278,6 +278,10 @@ final class ApiSurfaceTest {
         try (SessionPair pair = SessionPair.open()) {
             ZmuxAsyncSession client = ZmuxAsync.session(pair.client());
             ZmuxAsyncSession server = ZmuxAsync.session(pair.server());
+            assertTrue(ZmuxAsync.supportsSession(pair.client()));
+            assertSame(client, ZmuxAsync.optionalSession(pair.client()).orElseThrow(AssertionError::new));
+            assertFalse(ZmuxAsync.supportsSession(Zmux.closedSession()));
+            assertFalse(ZmuxAsync.optionalSession(null).isPresent());
 
             java.util.concurrent.CompletableFuture<ZmuxAsyncStream> acceptedFuture =
                     server.acceptStreamAsync().toCompletableFuture();
@@ -286,6 +290,12 @@ final class ApiSurfaceTest {
                     .get(1, TimeUnit.SECONDS);
 
             assertTrue(outbound instanceof ZmuxNativeStream);
+            assertTrue(ZmuxAsync.supportsStream(outbound));
+            assertTrue(ZmuxAsync.supportsSendStream(outbound));
+            assertTrue(ZmuxAsync.supportsRecvStream(outbound));
+            assertSame(outbound, ZmuxAsync.optionalStream(outbound).orElseThrow(AssertionError::new));
+            assertSame(outbound, ZmuxAsync.optionalSendStream(outbound).orElseThrow(AssertionError::new));
+            assertSame(outbound, ZmuxAsync.optionalRecvStream(outbound).orElseThrow(AssertionError::new));
             outbound.writeAsync("async".getBytes(StandardCharsets.UTF_8)).toCompletableFuture().get(1, TimeUnit.SECONDS);
             outbound.closeWriteAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
 
@@ -296,6 +306,16 @@ final class ApiSurfaceTest {
             outbound.closeAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
             inbound.closeAsync().toCompletableFuture().get(1, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void asyncOptionalHelpersReturnEmptyForUnsupportedOrNullSurfaces() {
+        assertFalse(ZmuxAsync.optionalStream(null).isPresent());
+        assertFalse(ZmuxAsync.optionalSendStream(null).isPresent());
+        assertFalse(ZmuxAsync.optionalRecvStream(null).isPresent());
+        assertFalse(ZmuxAsync.supportsStream(null));
+        assertFalse(ZmuxAsync.supportsSendStream(null));
+        assertFalse(ZmuxAsync.supportsRecvStream(null));
     }
 
     @Test
@@ -422,6 +442,40 @@ final class ApiSurfaceTest {
             uni.close();
             timedBidi.close();
             timedUni.close();
+        }
+    }
+
+    @Test
+    void sessionSendHelpersRejectNullPayloadsConsistently() throws Exception {
+        try (SessionPair pair = SessionPair.open()) {
+            ZmuxSession session = pair.client();
+
+            assertThrows(NullPointerException.class, () -> session.openAndSend((byte[]) null));
+            assertThrows(NullPointerException.class, () -> session.openAndSend(OpenOptions.empty(), (byte[]) null));
+            assertThrows(NullPointerException.class, () -> session.openAndSendWithTimeout(Duration.ofSeconds(1), (byte[]) null));
+            assertThrows(
+                    NullPointerException.class,
+                    () -> session.openAndSendWithTimeout(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
+            assertThrows(
+                    NullPointerException.class,
+                    () -> session.openAndSend(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
+
+            assertThrows(NullPointerException.class, () -> session.openUniAndSend((byte[]) null));
+            assertThrows(NullPointerException.class, () -> session.openUniAndSend(OpenOptions.empty(), (byte[]) null));
+            assertThrows(
+                    NullPointerException.class,
+                    () -> session.openUniAndSendWithTimeout(Duration.ofSeconds(1), (byte[]) null)
+            );
+            assertThrows(
+                    NullPointerException.class,
+                    () -> session.openUniAndSendWithTimeout(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
+            assertThrows(
+                    NullPointerException.class,
+                    () -> session.openUniAndSend(OpenOptions.empty(), Duration.ofSeconds(1), (byte[]) null)
+            );
         }
     }
 

@@ -71,6 +71,9 @@ final class MetadataValueTypeTest {
         assertEquals(new MetadataUpdate(3L, null), MetadataUpdate.priority(3L));
         assertEquals(new MetadataUpdate(null, 5L), MetadataUpdate.group(5L));
         assertEquals(new MetadataUpdate(3L, 5L), MetadataUpdate.of(3L, 5L));
+        assertSame(MetadataUpdate.empty(), MetadataUpdate.empty());
+        assertSame(MetadataUpdate.empty(), MetadataUpdate.of(null, null));
+        assertSame(MetadataUpdate.empty(), MetadataUpdate.builder().build());
         assertTrue(built.hasPriority());
         assertTrue(built.hasGroup());
         assertFalse(built.isEmpty());
@@ -115,6 +118,7 @@ final class MetadataValueTypeTest {
 
         assertEquals(new StreamMetadata(3L, 11L, new byte[]{4, 5, 6}), metadata);
         assertEquals(new StreamMetadata(0L, null, new byte[]{7}), StreamMetadata.withOpenInfo(new byte[]{7}));
+        assertEquals(new StreamMetadata(0L, null, new byte[]{'x'}), StreamMetadata.withOpenInfo("x"));
         assertSame(StreamMetadata.empty(), StreamMetadata.of(0L, null, null));
         assertTrue(metadata.hasGroup());
         assertTrue(metadata.hasOpenInfo());

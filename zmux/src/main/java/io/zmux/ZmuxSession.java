@@ -169,9 +169,10 @@ public interface ZmuxSession extends Closeable {
 
     default ZmuxStream openAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         Instant deadline = DeadlineSupport.after(timeout);
         ZmuxStream stream = openStreamWithTimeout(options, timeout);
-        if (data == null || data.length == 0) {
+        if (data.length == 0) {
             return stream;
         }
         if (deadline != null) {
@@ -299,13 +300,14 @@ public interface ZmuxSession extends Closeable {
 
     default ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         Instant deadline = DeadlineSupport.after(timeout);
         ZmuxSendStream stream = openUniStreamWithTimeout(options, timeout);
         if (deadline != null) {
             stream.setWriteDeadline(deadline);
         }
         try {
-            stream.writeFinal(data == null ? DeadlineSupport.EMPTY_BYTES : data);
+            stream.writeFinal(data);
             return stream;
         } finally {
             if (deadline != null) {

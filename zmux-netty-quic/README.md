@@ -89,17 +89,18 @@ try (ZmuxSession session = NettyQuic.wrapSession(channel, options);
 Call blocking ZMux APIs from application or worker threads, not from the Netty
 event loop.
 
-Use the async surface when shared upper-layer code should not block the caller:
+Use the optional async surface when shared upper-layer code should not block the
+caller:
 
 ```java
 import io.zmux.ZmuxAsync;
-import io.zmux.ZmuxAsyncSession;
 
 import java.nio.charset.StandardCharsets;
 
-ZmuxAsyncSession async = ZmuxAsync.session(session);
-async.openStreamAsync()
-        .thenCompose(stream -> stream.writeFinalAsync("hello".getBytes(StandardCharsets.UTF_8)));
+ZmuxAsync.optionalSession(session).ifPresent(async -> {
+    async.openStreamAsync()
+            .thenCompose(stream -> stream.writeFinalAsync("hello".getBytes(StandardCharsets.UTF_8)));
+});
 ```
 
 `writeAsync(...)` completes when the Netty QUIC write primitive accepts or

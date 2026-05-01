@@ -390,8 +390,9 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
 
     @Override
     public ZmuxStream openAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         ZmuxStream stream = openBidiStream(options, TimeoutBudget.unbounded());
-        if (data != null && data.length > 0) {
+        if (data.length > 0) {
             stream.write(data);
         }
         return stream;
@@ -405,9 +406,10 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     @Override
     public ZmuxStream openAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         TimeoutBudget budget = TimeoutBudget.fromTimeout(timeout);
         NettyQuicBidiStream stream = openBidiStream(options, budget);
-        if (data == null || data.length == 0) {
+        if (data.length == 0) {
             return stream;
         }
         if (budget.bounded()) {
@@ -430,8 +432,9 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
 
     @Override
     public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         ZmuxSendStream stream = openUniSendStream(options, TimeoutBudget.unbounded());
-        stream.writeFinal(data == null ? EMPTY_BYTES : data);
+        stream.writeFinal(data);
         return stream;
     }
 
@@ -444,13 +447,14 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     @Override
     public ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
+        Objects.requireNonNull(data, "data");
         TimeoutBudget budget = TimeoutBudget.fromTimeout(timeout);
         NettyQuicSendStream stream = openUniSendStream(options, budget);
         if (budget.bounded()) {
             stream.state.setWriteDeadlineNanos(budget.deadlineNanos());
         }
         try {
-            stream.writeFinal(data == null ? EMPTY_BYTES : data);
+            stream.writeFinal(data);
             return stream;
         } finally {
             if (budget.bounded()) {

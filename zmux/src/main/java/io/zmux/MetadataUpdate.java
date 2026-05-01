@@ -3,6 +3,8 @@ package io.zmux;
 import java.util.Objects;
 
 public final class MetadataUpdate {
+    private static final MetadataUpdate EMPTY = new MetadataUpdate(null, null);
+
     private final Long priority;
     private final Long group;
 
@@ -13,7 +15,14 @@ public final class MetadataUpdate {
         this.group = group;
     }
 
+    public static MetadataUpdate empty() {
+        return EMPTY;
+    }
+
     public static MetadataUpdate of(Long priority, Long group) {
+        if (priority == null && group == null) {
+            return EMPTY;
+        }
         return new MetadataUpdate(priority, group);
     }
 
@@ -99,7 +108,7 @@ public final class MetadataUpdate {
         }
 
         public MetadataUpdate build() {
-            return new MetadataUpdate(priority, group);
+            return MetadataUpdate.of(priority, group);
         }
     }
 }

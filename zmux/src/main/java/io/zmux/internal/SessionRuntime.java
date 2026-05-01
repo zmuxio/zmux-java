@@ -995,11 +995,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     @Override
     public ZmuxNativeStream openAndSend(OpenOptions openOptions, byte[] payload) throws IOException {
+        Objects.requireNonNull(payload, "payload");
         StreamRuntime streamRuntime;
         synchronized (this.lock) {
             streamRuntime = this.newLocalStreamLocked(true, openOptions);
         }
-        if (payload != null && payload.length > 0) {
+        if (payload.length > 0) {
             streamRuntime.write(payload);
         }
         return streamRuntime;
@@ -1013,12 +1014,13 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     @Override
     public ZmuxNativeStream openAndSendWithTimeout(OpenOptions openOptions, Duration timeout, byte[] payload)
             throws IOException {
+        Objects.requireNonNull(payload, "payload");
         TimeoutBudget budget = TimeoutBudget.fromTimeout(timeout);
         StreamRuntime streamRuntime;
         synchronized (this.lock) {
             streamRuntime = this.newLocalStreamLocked(true, openOptions, budget);
         }
-        if (payload == null || payload.length == 0) {
+        if (payload.length == 0) {
             return streamRuntime;
         }
         if (budget.bounded()) {
@@ -1041,11 +1043,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     @Override
     public ZmuxNativeSendStream openUniAndSend(OpenOptions openOptions, byte[] payload) throws IOException {
+        Objects.requireNonNull(payload, "payload");
         StreamRuntime streamRuntime;
         synchronized (this.lock) {
             streamRuntime = this.newLocalStreamLocked(false, openOptions);
         }
-        streamRuntime.writeFinal(payload == null ? EMPTY_BYTES : payload);
+        streamRuntime.writeFinal(payload);
         return streamRuntime.sendView();
     }
 
@@ -1057,6 +1060,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     @Override
     public ZmuxNativeSendStream openUniAndSendWithTimeout(OpenOptions openOptions, Duration timeout, byte[] payload)
             throws IOException {
+        Objects.requireNonNull(payload, "payload");
         TimeoutBudget budget = TimeoutBudget.fromTimeout(timeout);
         StreamRuntime streamRuntime;
         synchronized (this.lock) {
@@ -1066,7 +1070,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             streamRuntime.setWriteDeadlineNanos(budget.deadlineNanos());
         }
         try {
-            streamRuntime.writeFinal(payload == null ? EMPTY_BYTES : payload);
+            streamRuntime.writeFinal(payload);
             return streamRuntime.sendView();
         } finally {
             if (budget.bounded()) {

@@ -92,6 +92,55 @@ final class ZmuxConnectionsTest {
     }
 
     @Test
+    void convenienceFactoriesSupportCloserAndGatheringOnlyJoin() throws Exception {
+        AtomicInteger closerCalls = new AtomicInteger();
+        RecordingInputStream input = new RecordingInputStream(new byte[0]);
+        RecordingOutputStream output = new RecordingOutputStream();
+
+        DuplexConnection connection = ZmuxConnections.of(input, output, () -> closerCalls.incrementAndGet());
+        connection.close();
+
+        assertEquals(1, closerCalls.get());
+        assertEquals(1, input.closeCalls());
+        assertEquals(1, output.closeCalls());
+
+        InetSocketAddress local = InetSocketAddress.createUnresolved("factory.local", 1001);
+        InetSocketAddress remote = InetSocketAddress.createUnresolved("factory.remote", 1002);
+        AtomicInteger addressedCloserCalls = new AtomicInteger();
+        DuplexConnection addressed = ZmuxConnections.of(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                () -> addressedCloserCalls.incrementAndGet(),
+                local,
+                remote
+        );
+
+        assertSame(local, addressed.localAddress());
+        assertSame(remote, addressed.remoteAddress());
+        addressed.close();
+        assertEquals(1, addressedCloserCalls.get());
+
+        RecordingByteChannel gathering = new RecordingByteChannel();
+        try (JoinedDuplexConnection joined = ZmuxConnections.join(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                gathering
+        )) {
+            assertNotNull(joined.gatheringOutput());
+            joined.gatheringOutput().write(ByteBuffer.wrap(new byte[]{5}));
+        }
+        assertArrayEquals(new byte[]{5}, gathering.writtenBytes());
+
+        try (JoinedDuplexConnection joined = Zmux.join(
+                new ByteArrayInputStream(new byte[0]),
+                new ByteArrayOutputStream(),
+                new RecordingByteChannel()
+        )) {
+            assertNotNull(joined.gatheringOutput());
+        }
+    }
+
+    @Test
     void bidiStreamAdapterExposesDuplexConnectionSurface() throws Exception {
         InetSocketAddress local = InetSocketAddress.createUnresolved("bidi.local", 2121);
         InetSocketAddress remote = InetSocketAddress.createUnresolved("bidi.remote", 3434);

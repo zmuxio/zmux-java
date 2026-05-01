@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -32,6 +33,10 @@ public final class StreamMetadata {
 
     public static StreamMetadata withOpenInfo(byte[] openInfo) {
         return of(0L, null, openInfo);
+    }
+
+    public static StreamMetadata withOpenInfo(String openInfo) {
+        return withOpenInfo(Objects.requireNonNull(openInfo, "openInfo").getBytes(StandardCharsets.UTF_8));
     }
 
     private static byte[] normalizeOpenInfo(byte[] openInfo) {

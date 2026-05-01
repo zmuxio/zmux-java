@@ -2,31 +2,22 @@
 
 Java implementation of the ZMux stream multiplexing protocol.
 
-Released artifacts are Java 8+ compatible. Core public APIs live under
-`io.zmux`; `io.zmux.internal` is implementation detail.
-
-It provides:
-
-- native ZMux sessions through `ZmuxNativeSession`
-- transport-agnostic stable interfaces: `ZmuxSession`, `ZmuxStream`,
-  `ZmuxSendStream`, and `ZmuxRecvStream`
-- optional transport-agnostic async interfaces: `ZmuxAsyncSession`,
-  `ZmuxAsyncStream`, `ZmuxAsyncSendStream`, and `ZmuxAsyncRecvStream`
-- an optional Netty QUIC adapter in
-  [`zmux-netty-quic`](zmux-netty-quic/README.md)
+The published artifacts are Java 8+ compatible. Public APIs live under
+`io.zmux`; `io.zmux.internal` is not public API.
 
 ## Installation
 
 Gradle:
 
 ```kts
+repositories {
+    mavenCentral()
+}
+
 dependencies {
     implementation("io.github.zmuxio:zmux:VERSION")
 }
 ```
-
-Use `mavenCentral()` in `repositories` and replace `VERSION` with a released
-version.
 
 Maven:
 
@@ -38,88 +29,27 @@ Maven:
 </dependency>
 ```
 
-For the optional Netty QUIC adapter, use
-[`zmux-netty-quic`](zmux-netty-quic/README.md).
+The Netty QUIC adapter is a separate optional module:
 
-## Constructors
-
-Use the stable constructors when the rest of your application should work with
-native ZMux and adapters through the same interfaces:
-
-```java
-ZmuxSession session = Zmux.openSession(socket);
-ZmuxSession client = Zmux.clientSession(socket);
-ZmuxSession server = Zmux.serverSession(socket);
+```kts
+implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
 ```
 
-Use `openSession(...)` when the underlying connection is already established
-and the application does not need to name one peer as client and the other as
-server. Both peers may call the same `openSession(...)` constructor; ZMux
-negotiates the initiator/responder role during establishment.
-
-Use `clientSession(...)` or `serverSession(...)` when an outer protocol already
-defines the side that must be the ZMux initiator or responder. Use the native
-constructors only when you need native-only controls:
-
-```java
-ZmuxNativeSession nativeSession = Zmux.open(socket);
-ZmuxNativeSession nativeClient = Zmux.client(socket);
-ZmuxNativeSession nativeServer = Zmux.server(socket);
+```xml
+<dependency>
+    <groupId>io.github.zmuxio</groupId>
+    <artifactId>zmux-netty-quic</artifactId>
+    <version>VERSION</version>
+</dependency>
 ```
 
-Every constructor family supports `Socket`, `InputStream` plus `OutputStream`,
-`ByteChannel`, `ReadableByteChannel` plus `WritableByteChannel`, and
-`DuplexConnection`, with optional `ZmuxConfig` overloads.
+Adapter usage and Netty runtime notes are in
+[`zmux-netty-quic/README.md`](zmux-netty-quic/README.md).
 
-<details>
-<summary>Constructor matrix</summary>
+## Start A Session
 
-Stable session constructors:
-
-```java
-Zmux.openSession(DuplexConnection connection);
-Zmux.openSession(DuplexConnection connection, ZmuxConfig config);
-Zmux.openSession(Socket socket);
-Zmux.openSession(Socket socket, ZmuxConfig config);
-Zmux.openSession(InputStream input, OutputStream output);
-Zmux.openSession(InputStream input, OutputStream output, ZmuxConfig config);
-Zmux.openSession(ByteChannel channel);
-Zmux.openSession(ByteChannel channel, ZmuxConfig config);
-Zmux.openSession(ReadableByteChannel input, WritableByteChannel output);
-Zmux.openSession(ReadableByteChannel input, WritableByteChannel output, ZmuxConfig config);
-
-Zmux.clientSession(...);
-Zmux.serverSession(...);
-```
-
-Native session constructors use the same transport and config overloads:
-
-```java
-Zmux.open(...);
-Zmux.client(...);
-Zmux.server(...);
-```
-
-Null-safe and adapter helpers:
-
-```java
-Zmux.closedSession();
-Zmux.closedNativeSession();
-Zmux.asSession(session);
-Zmux.asNativeSession(nativeSession);
-ZmuxAsync.session(session);
-ZmuxAsync.stream(stream);
-ZmuxAsync.sendStream(sendStream);
-ZmuxAsync.recvStream(recvStream);
-```
-
-</details>
-
-## Basic Use
-
-The examples assume the surrounding method declares `throws Exception`.
-
-### Auto-Role Session
+Use `ZmuxSession` for application code. Native ZMux sessions and adapters both
+implement this stable surface.
 
 ```java
 import io.zmux.Zmux;
@@ -133,72 +63,27 @@ try (Socket socket = new Socket("127.0.0.1", 9000);
      ZmuxSession session = Zmux.openSession(socket);
      ZmuxStream stream = session.openStream()) {
     stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-    String reply = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-}
-```
-
-### Fixed Client And Server
-
-```java
-try (Socket socket = new Socket("127.0.0.1", 9000);
-     ZmuxSession session = Zmux.clientSession(socket);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
     byte[] reply = stream.readAllBytes();
 }
 ```
 
-```java
-try (ServerSocket listener = new ServerSocket(9000);
-     Socket socket = listener.accept();
-     ZmuxSession session = Zmux.serverSession(socket);
-     ZmuxStream stream = session.acceptStream()) {
-    byte[] request = stream.readAllBytes();
-    stream.writeFinal(request);
-}
-```
+Constructor choice:
 
-### Transport-Agnostic Handler
+- `Zmux.openSession(...)`: both peers may use the same call on an already
+  established reliable connection; ZMux negotiates the wire role.
+- `Zmux.clientSession(...)` / `Zmux.serverSession(...)`: use these when an outer
+  protocol already defines initiator and responder.
+- `Zmux.open(...)`, `Zmux.client(...)`, `Zmux.server(...)`: native-only return
+  type (`ZmuxNativeSession`) for ping, go-away, preface, and negotiated native
+  details.
 
-Native sessions and the Netty QUIC adapter expose the same stable session and
-stream interfaces, so upper layers can share one handler:
-
-```java
-void handle(ZmuxSession session) throws Exception {
-    try (ZmuxStream stream = session.acceptStream()) {
-        byte[] request = stream.readAllBytes();
-        stream.writeFinal(request);
-    }
-}
-```
-
-The async surface is optional and transport-agnostic. Use `ZmuxAsync` helpers
-when shared upper-layer code wants async operations and should fail fast if an
-implementation does not expose them:
-
-```java
-import io.zmux.ZmuxAsync;
-import io.zmux.ZmuxAsyncSession;
-
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CompletionStage;
-
-CompletionStage<Void> sendAsync(ZmuxSession session) {
-    ZmuxAsyncSession async = ZmuxAsync.session(session);
-    return async.openStreamAsync()
-            .thenCompose(stream -> stream.writeFinalAsync(
-                    "hello".getBytes(StandardCharsets.UTF_8)));
-}
-```
-
-`writeAsync(...)` is the async form of `write(...)`: native ZMux completes after
-the writer writes and flushes to the underlying connection; transport adapters
-complete at their native write completion point. Neither form is a peer
-application acknowledgement.
+All constructor families accept `Socket`, `InputStream` plus `OutputStream`,
+`ByteChannel`, `ReadableByteChannel` plus `WritableByteChannel`, or
+`DuplexConnection`, with `ZmuxConfig` overloads.
 
 ## Streams
 
-Open and use a bidirectional stream:
+Bidirectional stream:
 
 ```java
 try (ZmuxStream stream = session.openStream()) {
@@ -209,226 +94,66 @@ try (ZmuxStream stream = session.openStream()) {
 }
 ```
 
-Use unidirectional streams when only one side writes:
+Unidirectional stream:
 
 ```java
-try (ZmuxSendStream send = session.openUniStream()) {
-    send.writeFinal("event".getBytes(StandardCharsets.UTF_8));
-}
+session.openUniAndSend("event".getBytes(StandardCharsets.UTF_8));
 
 try (ZmuxRecvStream recv = session.acceptUniStream()) {
     byte[] event = recv.readAllBytes();
 }
 ```
 
-Open a stream and send an initial payload in one call:
+Useful stream methods:
+
+- open: `openStream(...)`, `openUniStream(...)`, `acceptStream(...)`,
+  `acceptUniStream(...)`
+- open and write: `openAndSend(...)`, `openUniAndSend(...)`
+- write: `write(...)`, `writeFinal(...)`, `writevFinal(...)`
+- read: `read(...)`, `readAllBytes()`, `readAllBytes(maxBytes)`
+- Java IO views: `asInputStream()`, `asOutputStream()`
+- deadlines: `setReadTimeout(...)`, `setWriteTimeout(...)`,
+  `clearReadDeadline()`, `clearWriteDeadline()`
+- close/error: `closeRead()`, `closeWrite()`, `cancelRead(...)`,
+  `cancelWrite(...)`, `closeWithError(...)`
+
+`openAndSend(...)` leaves a bidirectional stream open for reading and further
+writes. `openUniAndSend(...)` writes the final payload for a unidirectional
+send stream.
+
+## Shared Code Across Native And Adapters
+
+Keep upper-layer code on `ZmuxSession`, `ZmuxStream`, `ZmuxSendStream`, and
+`ZmuxRecvStream` when it should work with both native ZMux and adapters.
 
 ```java
-ZmuxStream bidi = session.openAndSend("hello".getBytes(StandardCharsets.UTF_8));
-ZmuxSendStream uni = session.openUniAndSend(ByteBuffer.wrap(payload));
+void handle(ZmuxSession session) throws Exception {
+    try (ZmuxStream stream = session.acceptStream()) {
+        byte[] request = stream.readAllBytes();
+        stream.writeFinal(request);
+    }
+}
 ```
 
-`openAndSend(...)` leaves the bidirectional stream open. `openUniAndSend(...)`
-writes the final contents of a unidirectional stream.
-
-<details>
-<summary>Stable session methods</summary>
+The optional async surface is transport-agnostic too:
 
 ```java
-ZmuxStream acceptStream();
-ZmuxStream acceptStream(Duration timeout);
-ZmuxRecvStream acceptUniStream();
-ZmuxRecvStream acceptUniStream(Duration timeout);
+import io.zmux.ZmuxAsync;
+import io.zmux.ZmuxAsyncSession;
 
-ZmuxStream openStream();
-ZmuxStream openStream(OpenOptions options);
-ZmuxStream openStream(Duration timeout);
-ZmuxStream openStream(OpenOptions options, Duration timeout);
-ZmuxStream openStreamWithTimeout(Duration timeout);
-ZmuxStream openStreamWithTimeout(OpenOptions options, Duration timeout);
-
-ZmuxSendStream openUniStream();
-ZmuxSendStream openUniStream(OpenOptions options);
-ZmuxSendStream openUniStream(Duration timeout);
-ZmuxSendStream openUniStream(OpenOptions options, Duration timeout);
-ZmuxSendStream openUniStreamWithTimeout(Duration timeout);
-ZmuxSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout);
-
-ZmuxStream openAndSend(byte[] data);
-ZmuxStream openAndSend(OpenOptions options, byte[] data);
-ZmuxStream openAndSend(byte[] data, int offset, int length);
-ZmuxStream openAndSend(OpenOptions options, byte[] data, int offset, int length);
-ZmuxStream openAndSend(ByteBuffer data);
-ZmuxStream openAndSend(OpenOptions options, ByteBuffer data);
-ZmuxStream openAndSend(Duration timeout, byte[] data);
-ZmuxStream openAndSend(OpenOptions options, Duration timeout, byte[] data);
-ZmuxStream openAndSend(Duration timeout, byte[] data, int offset, int length);
-ZmuxStream openAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length);
-ZmuxStream openAndSend(Duration timeout, ByteBuffer data);
-ZmuxStream openAndSend(OpenOptions options, Duration timeout, ByteBuffer data);
-ZmuxStream openAndSendWithTimeout(Duration timeout, byte[] data);
-ZmuxStream openAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data);
-ZmuxStream openAndSendWithTimeout(Duration timeout, byte[] data, int offset, int length);
-ZmuxStream openAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data, int offset, int length);
-ZmuxStream openAndSendWithTimeout(Duration timeout, ByteBuffer data);
-ZmuxStream openAndSendWithTimeout(OpenOptions options, Duration timeout, ByteBuffer data);
-
-ZmuxSendStream openUniAndSend(byte[] data);
-ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data);
-ZmuxSendStream openUniAndSend(byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSend(ByteBuffer data);
-ZmuxSendStream openUniAndSend(OpenOptions options, ByteBuffer data);
-ZmuxSendStream openUniAndSend(Duration timeout, byte[] data);
-ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data);
-ZmuxSendStream openUniAndSend(Duration timeout, byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSend(Duration timeout, ByteBuffer data);
-ZmuxSendStream openUniAndSend(OpenOptions options, Duration timeout, ByteBuffer data);
-ZmuxSendStream openUniAndSendWithTimeout(Duration timeout, byte[] data);
-ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data);
-ZmuxSendStream openUniAndSendWithTimeout(Duration timeout, byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data, int offset, int length);
-ZmuxSendStream openUniAndSendWithTimeout(Duration timeout, ByteBuffer data);
-ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, ByteBuffer data);
-
-void closeWithError(long code, String reason);
-void closeWithError(ErrorCode code, String reason);
-void closeWithError(Throwable error);
-boolean awaitTermination();
-boolean awaitTermination(Duration timeout);
-Optional<IOException> awaitTerminationCause();
-Optional<IOException> awaitTerminationCause(Duration timeout);
-void awaitTerminationOrThrow();
-void awaitTerminationOrThrow(Duration timeout);
-Optional<IOException> terminationCause();
-boolean isClosed();
-SessionState state();
-SessionStats stats();
-void close();
+ZmuxAsync.optionalSession(session).ifPresent(async -> {
+    async.openStreamAsync()
+            .thenCompose(stream -> stream.writeFinalAsync(new byte[]{1, 2, 3}));
+});
 ```
 
-</details>
-
-<details>
-<summary>Stable stream methods</summary>
-
-Common stream information:
-
-```java
-long streamId();
-byte[] openInfo();
-int openInfoLength();
-boolean hasOpenInfo();
-StreamMetadata metadata();
-SocketAddress localAddress();
-SocketAddress remoteAddress();
-```
-
-Send-side methods on `ZmuxStream` and `ZmuxSendStream`:
-
-```java
-void write(byte[] src);
-void write(byte[] src, int offset, int length);
-int write(ByteBuffer src);
-int writeFinal(byte[] src);
-int writeFinal(byte[] src, int offset, int length);
-int writeFinal(ByteBuffer src);
-int writevFinal(byte[]... parts);
-OutputStream asOutputStream();
-void updateMetadata(MetadataUpdate update);
-void closeWrite();
-void cancelWrite(long code);
-void cancelWrite(ErrorCode code);
-void closeWithError(long code, String reason);
-void closeWithError(ErrorCode code, String reason);
-void setWriteDeadline(Instant deadline);
-void setWriteTimeout(Duration timeout);
-void clearWriteDeadline();
-void close();
-```
-
-Receive-side methods on `ZmuxStream` and `ZmuxRecvStream`:
-
-```java
-int read(byte[] dst);
-int read(byte[] dst, int offset, int length);
-int read(ByteBuffer dst);
-byte[] readAllBytes();
-byte[] readAllBytes(int maxBytes);
-InputStream asInputStream();
-void closeRead();
-void cancelRead(long code);
-void cancelRead(ErrorCode code);
-void closeWithError(long code, String reason);
-void closeWithError(ErrorCode code, String reason);
-void setReadDeadline(Instant deadline);
-void setReadTimeout(Duration timeout);
-void clearReadDeadline();
-void close();
-```
-
-`ZmuxStream` combines both halves and also exposes:
-
-```java
-void setDeadline(Instant deadline);
-void setTimeout(Duration timeout);
-void clearDeadline();
-```
-
-</details>
-
-<details>
-<summary>Async session and stream methods</summary>
-
-Async session methods:
-
-```java
-CompletionStage<ZmuxAsyncStream> openStreamAsync();
-CompletionStage<ZmuxAsyncStream> openStreamAsync(OpenOptions options);
-CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync();
-CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync(OpenOptions options);
-CompletionStage<ZmuxAsyncStream> acceptStreamAsync();
-CompletionStage<ZmuxAsyncRecvStream> acceptUniStreamAsync();
-CompletionStage<Void> closeAsync();
-CompletionStage<Void> closeWithErrorAsync(long code, String reason);
-CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
-```
-
-Async send-side methods:
-
-```java
-CompletionStage<Void> writeAsync(byte[] src);
-CompletionStage<Void> writeAsync(byte[] src, int offset, int length);
-CompletionStage<Void> writeFinalAsync(byte[] src);
-CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length);
-CompletionStage<Void> closeWriteAsync();
-CompletionStage<Void> cancelWriteAsync(long code);
-CompletionStage<Void> cancelWriteAsync(ErrorCode code);
-CompletionStage<Void> closeWithErrorAsync(long code, String reason);
-CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
-```
-
-Async receive-side methods:
-
-```java
-CompletionStage<Void> closeReadAsync();
-CompletionStage<Void> cancelReadAsync(long code);
-CompletionStage<Void> cancelReadAsync(ErrorCode code);
-CompletionStage<Void> closeWithErrorAsync(long code, String reason);
-CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
-```
-
-`CompletableFuture.cancel()` on a returned stage is not guaranteed to cancel the
-underlying write, close, open, or accept operation. Use stream/session close,
-deadlines, or `cancelReadAsync(...)` / `cancelWriteAsync(...)` for protocol
-state changes.
-
-</details>
+Use `ZmuxAsync.session(...)`, `stream(...)`, `sendStream(...)`, or
+`recvStream(...)` when lack of async support should fail fast. Use
+`supportsSession(...)` or `optionalSession(...)` when async support is optional.
 
 ## Metadata And Priority
 
-Both peers must enable the capabilities they use:
+Enable the capabilities before using open metadata or priority hints:
 
 ```java
 import io.zmux.MetadataUpdate;
@@ -451,175 +176,19 @@ OpenOptions options = OpenOptions.builder()
         .openInfo("rpc")
         .build();
 
-try (ZmuxStream stream = session.openStream(options)) {
-    stream.updateMetadata(MetadataUpdate.of(3L, 2L));
+try (ZmuxSession session = Zmux.openSession(socket, config);
+     ZmuxStream stream = session.openStream(options)) {
+    stream.updateMetadata(MetadataUpdate.priority(3L));
     stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
 }
 ```
 
-The accepting peer can read `stream.openInfo()` and `stream.metadata()`.
-
-Supported value helpers:
-
-```java
-OpenOptions.empty();
-OpenOptions.of(priority, group, openInfo);
-OpenOptions.priority(priority);
-OpenOptions.group(group);
-OpenOptions.withOpenInfo(openInfoBytes);
-OpenOptions.withOpenInfo(openInfoString);
-OpenOptions.builder().priority(priority).group(group).openInfo(openInfo).build();
-
-MetadataUpdate.of(priority, group);
-MetadataUpdate.priority(priority);
-MetadataUpdate.group(group);
-MetadataUpdate.builder().priority(priority).group(group).build();
-
-StreamMetadata.empty();
-StreamMetadata.of(priority, group, openInfo);
-StreamMetadata.withOpenInfo(openInfo);
-```
-
-## Timeouts, Closing, And Errors
-
-```java
-ZmuxStream stream = session.openStream(Duration.ofSeconds(2));
-stream.setReadTimeout(Duration.ofSeconds(5));
-stream.setWriteTimeout(Duration.ofSeconds(5));
-stream.clearReadDeadline();
-stream.clearWriteDeadline();
-```
-
-```java
-stream.closeWrite();                  // graceful write-half close
-stream.closeRead();                   // local read cancellation
-stream.close();                       // closes ordinary local use of both halves
-stream.closeWithError(0x100L, "bye"); // stream application error
-
-session.close();                      // graceful session close
-session.closeWithError(0x100L, "bye");
-session.awaitTerminationOrThrow(Duration.ofSeconds(5));
-```
-
-```java
-try {
-    stream.write(payload);
-} catch (IOException error) {
-    if (ZmuxErrors.sessionClosed(error)) {
-        // session is already gone
-    }
-    if (ZmuxErrors.writeClosed(error)) {
-        // write side is no longer available
-    }
-
-    ApplicationError app = ZmuxErrors.applicationError(error);
-    if (app != null && app.isCode(ErrorCode.PROTOCOL)) {
-        long code = app.applicationCode();
-        String reason = app.reason();
-    }
-}
-```
-
-Error helpers include `ZmuxErrors.find(...)`, `details(...)`,
-`applicationError(...)`, `hasCode(...)`, `code(...)`, `isCode(...)`,
-`operation(...)`, `reason(...)`, `scope(...)`, `source(...)`, `direction(...)`,
-`terminationKind(...)`, `timeout(...)`, `interrupted(...)`,
-`adapterUnsupported(...)`, `priorityUpdateUnavailable(...)`,
-`emptyMetadataUpdate(...)`, `openInfoUnavailable(...)`,
-`openMetadataTooLarge(...)`, `openLimited(...)`, `openExpired(...)`,
-`priorityUpdateTooLarge(...)`, `keepaliveTimeout(...)`, `sessionClosed(...)`,
-`readClosed(...)`, `writeClosed(...)`, `streamNotReadable(...)`,
-`streamNotWritable(...)`, and `gracefulCloseTimeout(...)`.
-
-## Native-Only API
-
-`ZmuxNativeSession` extends `ZmuxSession` and returns native stream types from
-open/accept methods. It adds native session controls:
-
-```java
-Duration ping();
-Duration ping(byte[] echo);
-Duration ping(byte[] echo, Duration timeout);
-void goAway(long lastAcceptedBidi, long lastAcceptedUni);
-void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason);
-void goAwayWithError(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason);
-void goAwayWithError(long lastAcceptedBidi, long lastAcceptedUni, ErrorCode code, String reason);
-ApplicationError peerGoAwayError();
-ApplicationError peerCloseError();
-Preface localPreface();
-Preface peerPreface();
-Negotiated negotiated();
-```
-
-Native streams add local/native state queries:
-
-```java
-boolean openedLocally();
-boolean bidirectional();
-boolean readClosed();   // native receive streams
-boolean writeClosed();  // native send streams
-```
-
-Adapters can implement only the stable synchronous interfaces, or also implement
-the `ZmuxAsync*` interfaces when they can expose async operations. Adapter-
-specific async extensions should live in adapter-specific interfaces rather
-than the core stable API.
-
-## Configuration
-
-Start from defaults or a builder:
-
-```java
-ZmuxConfig config = ZmuxConfig.builder()
-        .role(Role.AUTO)
-        .prefacePadding(true)
-        .pingPadding(true)
-        .keepaliveInterval(Duration.ofSeconds(30))
-        .keepaliveTimeout(Duration.ofSeconds(10))
-        .gracefulCloseDrainTimeout(Duration.ofMillis(100))
-        .eventHandler(event -> {
-            // observe stream/session lifecycle
-        })
-        .build();
-
-ZmuxSession session = Zmux.openSession(socket, config);
-```
-
-`ZmuxConfig.defaults()` returns the process-wide default template used by
-constructors called with `null` config. Configure that template during process
-initialization:
-
-```java
-ZmuxConfig.configureDefaultConfig(builder -> builder
-        .prefacePadding(true)
-        .pingPadding(true));
-
-ZmuxConfig.resetDefaultConfig();
-```
-
-Important config groups:
-
-- role and protocol negotiation: `role`, `tieBreakerNonce`, `minProto`,
-  `maxProto`, `capabilities`
-- limits and flow control: `settings`, `sessionMemoryCap`,
-  `perStreamQueuedDataHwm`, `sessionQueuedDataHwm`
-- liveness: `keepaliveInterval`, `keepaliveMaxPingInterval`,
-  `keepaliveTimeout`
-- padding: `prefacePadding`, `prefacePaddingMinBytes`,
-  `prefacePaddingMaxBytes`, `pingPadding`, `pingPaddingMinBytes`,
-  `pingPaddingMaxBytes`
-- close and abuse protection: `gracefulCloseDrainTimeout`,
-  `stopSendingGracefulDrainWindow`, control-frame budgets, tombstone budgets,
-  and retained reason/open-info budgets
-- diagnostics: `eventHandler`, `SessionStats`, and `ZmuxEvent`
-
-`Settings.builder()` controls negotiated stream data windows, incoming stream
-limits, max frame/control/extension payload sizes, idle timeout hints,
-keepalive hints, scheduler hints, and the ping padding key.
+The peer reads open metadata through `stream.openInfo()` or
+`stream.metadata()`.
 
 ## Custom Transports
 
-Wrap custom transports as `DuplexConnection`:
+Any reliable ordered byte transport can be wrapped as a `DuplexConnection`:
 
 ```java
 import io.zmux.DuplexConnection;
@@ -627,118 +196,113 @@ import io.zmux.ZmuxConnections;
 
 DuplexConnection connection = ZmuxConnections.builder(input, output)
         .closer(transport)
-        .gatheringOutput(gatheringOutput)
         .addresses(localAddress, remoteAddress)
+        .gatheringOutput(gatheringOutput)
         .build();
 
 ZmuxSession session = Zmux.openSession(connection);
 ```
 
-Transport helpers:
+Convenience factories:
 
 ```java
-ZmuxConnections.builder(input, output)
-        .closer(closer)
-        .localAddress(localAddress)
-        .remoteAddress(remoteAddress)
-        .addresses(localAddress, remoteAddress)
-        .gatheringOutput(gatheringOutput)
-        .build();
 ZmuxConnections.of(socket);
-ZmuxConnections.of(input, output);
-ZmuxConnections.of(input, output, localAddress, remoteAddress);
-ZmuxConnections.of(input, output, closer, localAddress, remoteAddress, gatheringOutput);
 ZmuxConnections.of(byteChannel);
 ZmuxConnections.of(readableChannel, writableChannel);
+ZmuxConnections.of(input, output);
+ZmuxConnections.of(input, output, closer);
+ZmuxConnections.of(input, output, localAddress, remoteAddress);
+ZmuxConnections.of(input, output, closer, localAddress, remoteAddress);
+ZmuxConnections.of(input, output, closer, localAddress, remoteAddress, gatheringOutput);
 ZmuxConnections.of(zmuxStream);
 ```
 
-If the transport can enforce blocking read or write deadlines, implement
-`supportsReadDeadline()` / `setReadDeadline(...)` and
-`supportsWriteDeadline()` / `setWriteDeadline(...)`.
-
-`ReadHalf` exposes `read(...)`, `read(ByteBuffer)`, `asInputStream()`,
-`closeRead()`, read deadline helpers, and optional addresses. `WriteHalf`
-exposes `write(...)`, `write(ByteBuffer)`, `asOutputStream()`, `closeWrite()`,
-write deadline helpers, optional gathering output, and optional addresses.
-
-Join directional halves when the underlying transport exposes read and write
-sides separately:
+When a transport exposes read and write halves separately, join them:
 
 ```java
-JoinedDuplexConnection connection = Zmux.join(readHalf, writeHalf);
-ZmuxSession nested = Zmux.openSession(connection);
+DuplexConnection connection = Zmux.join(readHalf, writeHalf);
+DuplexConnection streamConnection = Zmux.join(recvStream, sendStream);
+DuplexConnection ioConnection = Zmux.join(input, output);
 ```
 
-Supported join inputs:
+`ReadHalf` and `WriteHalf` are small interfaces for custom transports that can
+also expose deadlines, addresses, and gathering writes. `JoinedDuplexConnection`
+supports pause/resume handles when a caller needs to swap the active read or
+write half.
+
+## Closing And Errors
 
 ```java
-Zmux.join(ReadHalf input, WriteHalf output);
-Zmux.join(ZmuxRecvStream input, ZmuxSendStream output);
-Zmux.join(InputStream input, OutputStream output);
-Zmux.join(InputStream input, OutputStream output, SocketAddress local, SocketAddress remote);
-Zmux.join(InputStream input, OutputStream output, GatheringByteChannel gatheringOutput,
-          SocketAddress local, SocketAddress remote);
+stream.closeWrite();                  // graceful local send-half close
+stream.closeRead();                   // local read cancellation
+stream.closeWithError(0x100L, "bye"); // stream application error
+
+session.close();                      // graceful session close
+session.closeWithError(0x100L, "bye");
+session.awaitTerminationOrThrow();
 ```
 
-`JoinedDuplexConnection` exposes `inputHalf()`, `outputHalf()`, `readHalf()`,
-`writeHalf()`, `pauseInput(...)`, `pauseOutput(...)`, `pauseRead(...)`,
-`pauseWrite(...)`, `closeInput()`, `closeOutput()`, `closeRead()`,
-`closeWrite()`, deadline helpers, and pause handles for replacing the current
-read or write half.
-
-## Netty QUIC Adapter
-
-The optional Netty QUIC adapter is documented in
-[`zmux-netty-quic/README.md`](zmux-netty-quic/README.md).
-
-## Codec And Diagnostics
-
-`ZmuxCodec` is public for tests, proxies, diagnostics, and conformance tools:
+Use `ZmuxErrors` instead of matching exception text:
 
 ```java
-ZmuxCodec.varintLength(value);
-ZmuxCodec.writeVarint(output, value);
-ZmuxCodec.appendVarint(prefix, value);
-ZmuxCodec.encodeVarint(value);
-ZmuxCodec.parseVarint(bytes);
-ZmuxCodec.parseVarint(bytes, offset);
-ZmuxCodec.readVarint(input);
-ZmuxCodec.writeTlv(output, type, value);
-ZmuxCodec.appendTlv(prefix, type, value);
-ZmuxCodec.parseTlvs(bytes);
-ZmuxCodec.parseFrame(bytes, limits);
-ZmuxCodec.readFrame(input, limits);
-ZmuxCodec.writeFrame(output, frame, limits);
-ZmuxCodec.parsePreface(bytes);
-ZmuxCodec.readPreface(input);
-ZmuxCodec.writePreface(output, preface);
-ZmuxCodec.negotiatePrefaces(local, peer);
+try {
+    stream.write(payload);
+} catch (IOException error) {
+    if (ZmuxErrors.sessionClosed(error)) {
+        return;
+    }
+
+    ApplicationError app = ZmuxErrors.applicationError(error);
+    if (app != null) {
+        long code = app.applicationCode();
+        String reason = app.reason();
+    }
+}
 ```
 
-`ZmuxConformance` and `ZmuxCoreConformance` provide conformance support for
-implementation tests.
+Common helpers include `sessionClosed(...)`, `readClosed(...)`,
+`writeClosed(...)`, `timeout(...)`, `interrupted(...)`,
+`applicationError(...)`, `openLimited(...)`, `openExpired(...)`,
+`openInfoUnavailable(...)`, `priorityUpdateUnavailable(...)`, and
+`adapterUnsupported(...)`.
 
-`Protocol`, `Preface`, and `Negotiated` expose capability helpers such as
-`hasCapability(...)`, `supportsOpenMetadata()`, `supportsPriorityUpdate()`,
-`canCarryOpenInfo()`, and the priority/group metadata checks.
+## Configuration
 
-## Semantics Notes
+```java
+ZmuxConfig config = ZmuxConfig.builder()
+        .keepaliveInterval(Duration.ofSeconds(30))
+        .keepaliveTimeout(Duration.ofSeconds(10))
+        .eventHandler(event -> {
+            // observe stream/session lifecycle
+        })
+        .build();
+```
 
-- A successful `write(...)`, `writeFinal(...)`, `writevFinal(...)`,
-  `openAndSend(...)`, or `openUniAndSend(...)` means the backend accepted the
-  local write. Native ZMux waits for the writer to write and flush to the
-  underlying connection; transport adapters use their native write completion
-  point. It is not a peer application acknowledgement.
-- A successful `writeAsync(...)` or `writeFinalAsync(...)` has the same write
-  completion meaning as the synchronous write API, delivered through a
-  `CompletionStage`.
-- Payload buffers passed to write/open-and-send methods are not retained after
-  the call returns.
-- `closeWrite()` gracefully finishes only the local send half.
-- `closeRead()` stops local interest in inbound bytes and sends cancellation.
-- `closeWithError(code, reason)` carries a numeric application error and
-  optional diagnostic text.
-- `openInfo()` is peer-visible only when `OPEN_METADATA` is negotiated;
-  requests that require unavailable open metadata fail instead of silently
-  discarding it.
+`Settings.builder()` controls negotiated stream windows, incoming stream
+limits, frame payload limits, idle timeout hints, keepalive hints, scheduler
+hints, and ping padding keys.
+
+`ZmuxConfig.configureDefaultConfig(...)` can set the process-wide default
+template during startup; `ZmuxConfig.resetDefaultConfig()` restores built-in
+defaults.
+
+## Native And Diagnostics
+
+`ZmuxNativeSession` extends `ZmuxSession` with native protocol controls:
+`ping(...)`, `goAway(...)`, `peerGoAwayError()`, `peerCloseError()`,
+`localPreface()`, `peerPreface()`, and `negotiated()`.
+
+`ZmuxCodec`, `Protocol`, `Preface`, `Negotiated`, `ZmuxConformance`, and
+`ZmuxCoreConformance` are public for diagnostics, proxies, and conformance
+tests.
+
+## Semantics
+
+- Successful write calls mean the local implementation accepted and flushed the
+  write to its backend. They are not peer application acknowledgements.
+- Buffers passed to write/open-and-send methods are not retained after the call
+  returns.
+- `closeWrite()` finishes only the local send half.
+- `closeRead()` cancels local interest in inbound bytes.
+- Open metadata is sent only when negotiated; required but unavailable metadata
+  fails instead of being silently discarded.
