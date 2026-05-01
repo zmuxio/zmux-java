@@ -301,19 +301,7 @@ public interface ZmuxSession extends Closeable {
     default ZmuxSendStream openUniAndSendWithTimeout(OpenOptions options, Duration timeout, byte[] data)
             throws IOException, InterruptedException {
         Objects.requireNonNull(data, "data");
-        Instant deadline = DeadlineSupport.after(timeout);
-        ZmuxSendStream stream = openUniStreamWithTimeout(options, timeout);
-        if (deadline != null) {
-            stream.setWriteDeadline(deadline);
-        }
-        try {
-            stream.writeFinal(data);
-            return stream;
-        } finally {
-            if (deadline != null) {
-                stream.clearWriteDeadline();
-            }
-        }
+        return openUniAndSendWithTimeout(options, timeout, data, 0, data.length);
     }
 
     void closeWithError(long code, String reason) throws IOException;

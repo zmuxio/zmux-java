@@ -4,7 +4,6 @@ import io.zmux.ZmuxErrorDirection;
 import io.zmux.ZmuxErrorScope;
 
 import java.io.IOException;
-import java.util.concurrent.TimeUnit;
 
 final class StreamWriteCompletion {
     private int remainingFrames;
@@ -111,7 +110,7 @@ final class StreamWriteCompletion {
             throwIfFailedLocked();
             return true;
         }
-        return signalVersion != observedSignalVersion;
+        return true;
     }
 
     synchronized void notifyWaiters() {

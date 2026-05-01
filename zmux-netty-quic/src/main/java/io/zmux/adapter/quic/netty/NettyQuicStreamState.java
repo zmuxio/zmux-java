@@ -1769,58 +1769,28 @@ final class NettyQuicStreamState {
     }
 
     private void awaitReadChangeInterruptibly() throws InterruptedIOException {
-        long observedSignalVersion = readSignalVersion;
-        readWaiters++;
-        try {
-            while (readSignalVersion == observedSignalVersion) {
-                readChanged.await();
-            }
-        } catch (InterruptedException interrupted) {
-            throw NettyQuicSupport.interruptedIo(
-                    "waiting for stream state change",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.BOTH,
-                    interrupted
-            );
-        } finally {
-            readWaiters--;
-        }
+        awaitChangeInterruptibly(true);
     }
 
     private boolean awaitReadChangeNanosInterruptibly(long nanos) throws InterruptedIOException {
-        long observedSignalVersion = readSignalVersion;
-        long deadlineNanos = deadlineNanos(nanos);
-        readWaiters++;
-        try {
-            while (readSignalVersion == observedSignalVersion) {
-                long remainingNanos = remainingNanos(deadlineNanos);
-                if (remainingNanos <= 0L) {
-                    return true;
-                }
-                long remainingAfterWait = readChanged.awaitNanos(remainingNanos);
-                if (remainingAfterWait <= 0L && readSignalVersion == observedSignalVersion) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (InterruptedException interrupted) {
-            throw NettyQuicSupport.interruptedIo(
-                    "waiting for stream state change",
-                    ZmuxErrorScope.STREAM,
-                    ZmuxErrorDirection.BOTH,
-                    interrupted
-            );
-        } finally {
-            readWaiters--;
-        }
+        return awaitChangeNanosInterruptibly(true, nanos);
     }
 
     private void awaitWriteChangeInterruptibly() throws InterruptedIOException {
-        long observedSignalVersion = writeSignalVersion;
-        writeWaiters++;
+        awaitChangeInterruptibly(false);
+    }
+
+    private boolean awaitWriteChangeNanosInterruptibly(long nanos) throws InterruptedIOException {
+        return awaitChangeNanosInterruptibly(false, nanos);
+    }
+
+    private void awaitChangeInterruptibly(boolean readSide) throws InterruptedIOException {
+        Condition changed = readSide ? readChanged : writeChanged;
+        long observedSignalVersion = signalVersion(readSide);
+        incrementSignalWaiters(readSide);
         try {
-            while (writeSignalVersion == observedSignalVersion) {
-                writeChanged.await();
+            while (signalVersion(readSide) == observedSignalVersion) {
+                changed.await();
             }
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interruptedIo(
@@ -1830,22 +1800,23 @@ final class NettyQuicStreamState {
                     interrupted
             );
         } finally {
-            writeWaiters--;
+            decrementSignalWaiters(readSide);
         }
     }
 
-    private boolean awaitWriteChangeNanosInterruptibly(long nanos) throws InterruptedIOException {
-        long observedSignalVersion = writeSignalVersion;
+    private boolean awaitChangeNanosInterruptibly(boolean readSide, long nanos) throws InterruptedIOException {
+        Condition changed = readSide ? readChanged : writeChanged;
+        long observedSignalVersion = signalVersion(readSide);
         long deadlineNanos = deadlineNanos(nanos);
-        writeWaiters++;
+        incrementSignalWaiters(readSide);
         try {
-            while (writeSignalVersion == observedSignalVersion) {
+            while (signalVersion(readSide) == observedSignalVersion) {
                 long remainingNanos = remainingNanos(deadlineNanos);
                 if (remainingNanos <= 0L) {
                     return true;
                 }
-                long remainingAfterWait = writeChanged.awaitNanos(remainingNanos);
-                if (remainingAfterWait <= 0L && writeSignalVersion == observedSignalVersion) {
+                long remainingAfterWait = changed.awaitNanos(remainingNanos);
+                if (remainingAfterWait <= 0L && signalVersion(readSide) == observedSignalVersion) {
                     return true;
                 }
             }
@@ -1858,6 +1829,26 @@ final class NettyQuicStreamState {
                     interrupted
             );
         } finally {
+            decrementSignalWaiters(readSide);
+        }
+    }
+
+    private long signalVersion(boolean readSide) {
+        return readSide ? readSignalVersion : writeSignalVersion;
+    }
+
+    private void incrementSignalWaiters(boolean readSide) {
+        if (readSide) {
+            readWaiters++;
+        } else {
+            writeWaiters++;
+        }
+    }
+
+    private void decrementSignalWaiters(boolean readSide) {
+        if (readSide) {
+            readWaiters--;
+        } else {
             writeWaiters--;
         }
     }

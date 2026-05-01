@@ -866,7 +866,10 @@ final class NettyQuicSupport {
                         }
                         notEmptyWaiters++;
                         try {
-                            notEmpty.awaitNanos(nanos);
+                            long remainingAfterWait = notEmpty.awaitNanos(nanos);
+                            if (remainingAfterWait <= 0L && queue.isEmpty() && !closed) {
+                                return null;
+                            }
                         } finally {
                             notEmptyWaiters--;
                         }

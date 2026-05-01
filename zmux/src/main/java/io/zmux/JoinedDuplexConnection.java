@@ -660,26 +660,16 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     }
 
     private void awaitInput(PauseDeadline deadline, BooleanSupplier waiting) throws IOException, InterruptedException {
-        inputWaiters++;
-        try {
-            while (waiting.getAsBoolean()) {
-                long remainingNanos = deadline.remainingNanos();
-                if (deadline.bounded() && remainingNanos <= 0L) {
-                    throw pauseTimeout();
-                }
-                if (!deadline.bounded()) {
-                    inputChanged.await();
-                } else if (!inputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
-                    throw pauseTimeout();
-                }
-            }
-        } finally {
-            inputWaiters--;
-        }
+        awaitHalf(inputChanged, deadline, waiting, true);
     }
 
     private void awaitOutput(PauseDeadline deadline, BooleanSupplier waiting) throws IOException, InterruptedException {
-        outputWaiters++;
+        awaitHalf(outputChanged, deadline, waiting, false);
+    }
+
+    private void awaitHalf(Condition changed, PauseDeadline deadline, BooleanSupplier waiting, boolean inputSide)
+            throws IOException, InterruptedException {
+        incrementWaiters(inputSide);
         try {
             while (waiting.getAsBoolean()) {
                 long remainingNanos = deadline.remainingNanos();
@@ -687,12 +677,28 @@ public final class JoinedDuplexConnection implements DuplexConnection {
                     throw pauseTimeout();
                 }
                 if (!deadline.bounded()) {
-                    outputChanged.await();
-                } else if (!outputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    changed.await();
+                } else if (!changed.await(remainingNanos, TimeUnit.NANOSECONDS)) {
                     throw pauseTimeout();
                 }
             }
         } finally {
+            decrementWaiters(inputSide);
+        }
+    }
+
+    private void incrementWaiters(boolean inputSide) {
+        if (inputSide) {
+            inputWaiters++;
+        } else {
+            outputWaiters++;
+        }
+    }
+
+    private void decrementWaiters(boolean inputSide) {
+        if (inputSide) {
+            inputWaiters--;
+        } else {
             outputWaiters--;
         }
     }

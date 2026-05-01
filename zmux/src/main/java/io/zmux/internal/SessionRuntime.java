@@ -4852,7 +4852,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     void waitOnLockNanos(long waitNanos, LockWaitKind kind) throws InterruptedException {
-        long boundedNanos = waitNanos <= 0L ? TimeUnit.DAYS.toNanos(1L) : Math.max(1L, waitNanos);
+        long boundedNanos = waitNanos <= 0L ? TimeUnit.DAYS.toNanos(1L) : waitNanos;
         long millis = boundedNanos / 1_000_000L;
         int nanos = (int) (boundedNanos % 1_000_000L);
         this.incrementLockWaiters(kind);
@@ -5896,9 +5896,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 if (remainingNanos <= 0L) {
                     return;
                 }
-                long boundedNanos = Math.max(1L, remainingNanos);
-                long millis = boundedNanos / 1_000_000L;
-                int nanos = (int) (boundedNanos % 1_000_000L);
+                long millis = remainingNanos / 1_000_000L;
+                int nanos = (int) (remainingNanos % 1_000_000L);
                 this.waiters++;
                 try {
                     this.wait(millis, nanos);
