@@ -47,7 +47,9 @@ final class OrdinaryBatchCandidateSelector {
         long bulkBaseStreamWeight = 0L;
         long bulkStreamWeight = 0L;
         long groupVirtual = groupVirtualTime.getOrDefault(group.key(), 0L);
-        for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+        List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+        for (int i = 0; i < streams.size(); ++i) {
+            OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
             if (!stream.streamScoped()) {
                 continue;
             }
@@ -148,7 +150,9 @@ final class OrdinaryBatchCandidateSelector {
             if (group == null) {
                 continue;
             }
-            for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+            List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+            for (int i = 0; i < streams.size(); ++i) {
+                OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
                 if (stream != null) {
                     stream.clearSelection();
                 }
@@ -186,7 +190,9 @@ final class OrdinaryBatchCandidateSelector {
             if (group == null || group.key().kind() != 2) {
                 continue;
             }
-            for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+            List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+            for (int i = 0; i < streams.size(); ++i) {
+                OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
                 if (stream.entries().isEmpty()) {
                     continue;
                 }
@@ -210,13 +216,15 @@ final class OrdinaryBatchCandidateSelector {
     }
 
     static Long nextRealStreamHead(OrdinaryBatchOrderer.BatchGroup group, int selectedOrder) {
-        if (group == null || group.streams().size() < 2 || selectedOrder < 0) {
+        if (group == null || group.streamsInOrder().size() < 2 || selectedOrder < 0) {
             return null;
         }
-        int streamCount = group.streams().size();
+        List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+        int streamCount = streams.size();
         int bestOffset = Integer.MAX_VALUE;
         Long bestStreamKey = null;
-        for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+        for (int i = 0; i < streamCount; ++i) {
+            OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
             if (stream == null || !stream.streamScoped()) {
                 continue;
             }
@@ -274,7 +282,9 @@ final class OrdinaryBatchCandidateSelector {
         }
 
         long effectiveTotalBaseStreamWeight = Math.max(1L, chosen.totalBaseStreamWeight());
-        for (OrdinaryBatchOrderer.BatchStreamState stream : chosen.group().streams().values()) {
+        List<OrdinaryBatchOrderer.BatchStreamState> streams = chosen.group().streamsInOrder();
+        for (int i = 0; i < streams.size(); ++i) {
+            OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
             if (stream.trafficClass() != chosen.trafficClass()) {
                 continue;
             }

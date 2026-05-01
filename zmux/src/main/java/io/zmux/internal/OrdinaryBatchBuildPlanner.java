@@ -56,9 +56,9 @@ final class OrdinaryBatchBuildPlanner {
                         streamKey,
                         streamScoped,
                         frame.priority(),
-                        group.streams().size()
+                        group.streamsInOrder().size()
                 );
-                group.streams().put(streamKey, stream);
+                group.addStream(streamKey, stream);
             }
 
             long cost = OrdinaryBatchSchedulingPolicy.normalizeCost(frame.cost());

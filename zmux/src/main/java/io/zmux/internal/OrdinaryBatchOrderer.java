@@ -577,6 +577,7 @@ final class OrdinaryBatchOrderer {
 
     static final class BatchGroup {
         private final LinkedHashMap<Long, BatchStreamState> streams = new LinkedHashMap<>();
+        private final ArrayList<BatchStreamState> streamsInOrder = new ArrayList<>();
         private GroupKey key;
         private int order;
 
@@ -587,6 +588,7 @@ final class OrdinaryBatchOrderer {
             this.key = key;
             this.order = order;
             streams.clear();
+            streamsInOrder.clear();
             return this;
         }
 
@@ -594,6 +596,7 @@ final class OrdinaryBatchOrderer {
             this.key = null;
             this.order = 0;
             streams.clear();
+            streamsInOrder.clear();
         }
 
         GroupKey key() {
@@ -606,6 +609,15 @@ final class OrdinaryBatchOrderer {
 
         LinkedHashMap<Long, BatchStreamState> streams() {
             return streams;
+        }
+
+        ArrayList<BatchStreamState> streamsInOrder() {
+            return streamsInOrder;
+        }
+
+        void addStream(long streamKey, BatchStreamState stream) {
+            streams.put(streamKey, stream);
+            streamsInOrder.add(stream);
         }
     }
 

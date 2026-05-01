@@ -24,7 +24,9 @@ final class OrdinaryBatchClassStateTracker {
             if (group == null) {
                 continue;
             }
-            for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+            List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+            for (int i = 0; i < streams.size(); ++i) {
+                OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
                 if (!stream.streamScoped()) {
                     stream.setTrafficClass(OrdinaryBatchOrderer.TrafficClass.INTERACTIVE);
                     stream.setSmallBurstBonusArmed(false);
@@ -54,7 +56,9 @@ final class OrdinaryBatchClassStateTracker {
             if (group == null) {
                 continue;
             }
-            for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+            List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+            for (int i = 0; i < streams.size(); ++i) {
+                OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
                 if (!stream.streamScoped()) {
                     continue;
                 }
@@ -75,7 +79,9 @@ final class OrdinaryBatchClassStateTracker {
             if (group == null) {
                 continue;
             }
-            for (OrdinaryBatchOrderer.BatchStreamState stream : group.streams().values()) {
+            List<OrdinaryBatchOrderer.BatchStreamState> streams = group.streamsInOrder();
+            for (int i = 0; i < streams.size(); ++i) {
+                OrdinaryBatchOrderer.BatchStreamState stream = streams.get(i);
                 if (stream == null
                         || !stream.streamScoped()
                         || !stream.hasSelection()
