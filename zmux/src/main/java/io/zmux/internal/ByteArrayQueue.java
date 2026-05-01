@@ -14,13 +14,6 @@ final class ByteArrayQueue {
     private long lastReadReleasedStorageBytes;
     private int removedChunksSinceDequeReset;
 
-    private static void releaseChunk(long storageBytes, Runnable releaseAction) {
-        if (storageBytes <= 0 || releaseAction == null) {
-            return;
-        }
-        releaseAction.run();
-    }
-
     private static long saturatingAdd(long left, long right) {
         long result = left + right;
         return result < 0L || result < left ? Long.MAX_VALUE : result;
@@ -79,7 +72,9 @@ final class ByteArrayQueue {
         Objects.requireNonNull(data, "data");
         RangeChecks.checkFromIndexSize(offset, length, data.length);
         if (length == 0) {
-            releaseChunk(storageBytes, releaseAction);
+            if (storageBytes > 0 && releaseAction != null) {
+                releaseAction.run();
+            }
             return;
         }
         if (storageBytes < length) {
@@ -136,7 +131,9 @@ final class ByteArrayQueue {
                 removedChunks++;
                 this.storageBytes = Math.max(0L, this.storageBytes - head.storageBytes);
                 releasedStorageBytes = saturatingAdd(releasedStorageBytes, head.storageBytes);
-                releaseChunk(head.storageBytes, head.releaseAction);
+                if (head.storageBytes > 0 && head.releaseAction != null) {
+                    head.releaseAction.run();
+                }
             } else if (shouldTightenAfterConsume(head)) {
                 releasedStorageBytes = saturatingAdd(releasedStorageBytes, this.tightenHeadStorage(head));
             }
@@ -159,7 +156,9 @@ final class ByteArrayQueue {
 
         long releasedStorageBytes = Math.max(0, oldStorageBytes - head.storageBytes);
         storageBytes = Math.max(0L, storageBytes - releasedStorageBytes);
-        releaseChunk(oldStorageBytes, oldReleaseAction);
+        if (oldStorageBytes > 0 && oldReleaseAction != null) {
+            oldReleaseAction.run();
+        }
         return releasedStorageBytes;
     }
 
@@ -173,7 +172,9 @@ final class ByteArrayQueue {
         int removedChunks = chunks.size();
         while (!chunks.isEmpty()) {
             Chunk head = chunks.removeFirst();
-            releaseChunk(head.storageBytes, head.releaseAction);
+            if (head.storageBytes > 0 && head.releaseAction != null) {
+                head.releaseAction.run();
+            }
         }
         storageBytes = 0;
         size = 0;

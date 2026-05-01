@@ -83,7 +83,7 @@ final class SessionReaderCoordinator {
             return null;
         }
         try {
-            return FrameCodec.parseErrorPayload(frame.payload());
+            return FrameCodec.parseErrorPayload(frame.payloadBytes());
         } catch (IOException error) {
             if (this.ignorePeerNonCloseFrame(frame.type())) {
                 return null;
@@ -97,7 +97,7 @@ final class SessionReaderCoordinator {
             return null;
         }
         try {
-            return Varint62.decode(frame.payload(), 0);
+            return Varint62.decode(frame.payloadBytes(), 0);
         } catch (IOException error) {
             if (this.ignorePeerNonCloseFrame(frame.type())) {
                 return null;
@@ -111,7 +111,7 @@ final class SessionReaderCoordinator {
             return null;
         }
         try {
-            return FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+            return FrameCodec.parseDataPayloadView(frame.payloadBytes(), frame.flags());
         } catch (IOException error) {
             if (this.ignorePeerNonCloseFrame(frame.type())) {
                 return null;
@@ -226,7 +226,7 @@ final class SessionReaderCoordinator {
         }
         FrameCodec.GoAwayPayload goAwayPayload;
         try {
-            goAwayPayload = FrameCodec.parseGoAwayPayload(frame.payload());
+            goAwayPayload = FrameCodec.parseGoAwayPayload(frame.payloadBytes());
         } catch (IOException error) {
             if (this.ignorePeerNonCloseFrame(frame.type())) {
                 return;
@@ -453,7 +453,7 @@ final class SessionReaderCoordinator {
 
         Varint62.Decoded subtype;
         try {
-            subtype = Varint62.decode(frame.payload(), 0);
+            subtype = Varint62.decode(frame.payloadBytes(), 0);
         } catch (IOException error) {
             synchronized (this.owner.lock()) {
                 if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
@@ -477,7 +477,7 @@ final class SessionReaderCoordinator {
 
         ExtPriorityUpdateParse parse;
         try {
-            parse = this.parsePriorityUpdateFrame(frame.payload());
+            parse = this.parsePriorityUpdateFrame(frame.payloadBytes());
         } catch (IOException error) {
             synchronized (this.owner.lock()) {
                 if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
@@ -740,7 +740,7 @@ final class SessionReaderCoordinator {
             if (dataLength > 0) {
                 this.owner.setRecvSessionReceivedBytes(nextSessionReceived);
                 this.owner.addReceivedDataBytes(dataLength);
-                int storageBytes = retainedFrame == null ? frame.payload().length : retainedFrame.storageBytes();
+                int storageBytes = retainedFrame == null ? frame.payloadBytes().length : retainedFrame.storageBytes();
                 Runnable payloadRelease = retainedFrame == null ? null : retainedFrame.detachPayloadRelease();
                 streamRuntime.receiveDataLocked(
                         dataPayload.appDataBytes(),
@@ -849,7 +849,8 @@ final class SessionReaderCoordinator {
                 return;
             }
         }
-        if (frame.payload().length < 8) {
+        byte[] payload = frame.payloadBytes();
+        if (payload.length < 8) {
             synchronized (this.owner.lock()) {
                 if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
                     return;
@@ -858,7 +859,7 @@ final class SessionReaderCoordinator {
             throw FrameCodec.error(
                     ErrorCode.FRAME_SIZE,
                     "handle PING",
-                    "PING payload too short: " + frame.payload().length + " bytes"
+                    "PING payload too short: " + payload.length + " bytes"
             );
         }
         synchronized (this.owner.lock()) {
@@ -866,7 +867,7 @@ final class SessionReaderCoordinator {
                 return;
             }
             this.owner.recordInboundPingFloodLocked();
-            this.owner.enqueuePongLocked(frame.payload());
+            this.owner.enqueuePongLocked(payload);
             this.owner.notifyWriterWaiters();
         }
     }
@@ -877,7 +878,8 @@ final class SessionReaderCoordinator {
                 return;
             }
         }
-        if (frame.payload().length < 8) {
+        byte[] payload = frame.payloadBytes();
+        if (payload.length < 8) {
             synchronized (this.owner.lock()) {
                 if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
                     return;
@@ -886,7 +888,7 @@ final class SessionReaderCoordinator {
             throw FrameCodec.error(
                     ErrorCode.FRAME_SIZE,
                     "handle PONG",
-                    "PONG payload too short: " + frame.payload().length + " bytes"
+                    "PONG payload too short: " + payload.length + " bytes"
             );
         }
         synchronized (this.owner.lock()) {
@@ -894,7 +896,7 @@ final class SessionReaderCoordinator {
                 return;
             }
             long nowNanos = System.nanoTime();
-            if (!this.owner.handlePongLocked(frame.payload(), nowNanos)) {
+            if (!this.owner.handlePongLocked(payload, nowNanos)) {
                 this.owner.recordNoOpControlLocked("handle PONG");
                 return;
             }
@@ -961,7 +963,7 @@ final class SessionReaderCoordinator {
         }
         FrameCodec.ErrorPayload errorPayload;
         try {
-            errorPayload = FrameCodec.parseErrorPayload(frame.payload());
+            errorPayload = FrameCodec.parseErrorPayload(frame.payloadBytes());
         } catch (IOException error) {
             if (this.ignorePeerCloseFrame()) {
                 return;

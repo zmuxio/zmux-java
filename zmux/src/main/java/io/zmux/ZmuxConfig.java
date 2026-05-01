@@ -320,7 +320,7 @@ public final class ZmuxConfig {
 
     public static ZmuxConfig defaults() {
         synchronized (DEFAULT_LOCK) {
-            return defaultTemplate;
+            return defaultTemplate.toBuilder().build();
         }
     }
 

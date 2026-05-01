@@ -11,6 +11,7 @@ final class StreamWriteCompletion {
     private boolean done;
     private IOException error;
     private boolean transportProgress;
+    private long signalVersion;
     private Runnable completionListener;
 
     private static void runCompletionListener(Runnable listener) {
@@ -42,6 +43,7 @@ final class StreamWriteCompletion {
             }
             if (remainingFrames == 0) {
                 done = true;
+                signalVersion++;
                 notifyAll();
                 listener = completionListener;
                 completionListener = null;
@@ -58,6 +60,7 @@ final class StreamWriteCompletion {
             }
             error = failure;
             done = true;
+            signalVersion++;
             notifyAll();
             listener = completionListener;
             completionListener = null;
@@ -78,13 +81,21 @@ final class StreamWriteCompletion {
             throwIfFailedLocked();
             return true;
         }
+        long observedSignalVersion = signalVersion;
+        long deadlineNanos = deadlineNanos(waitNanos);
         try {
-            if (waitNanos == 0L) {
-                wait();
-            } else {
-                long millis = TimeUnit.NANOSECONDS.toMillis(waitNanos);
-                int nanos = (int) (waitNanos - TimeUnit.MILLISECONDS.toNanos(millis));
-                wait(millis, nanos);
+            while (!done && signalVersion == observedSignalVersion) {
+                if (waitNanos <= 0L) {
+                    wait();
+                } else {
+                    long remainingNanos = remainingNanos(deadlineNanos);
+                    if (remainingNanos <= 0L) {
+                        return false;
+                    }
+                    long millis = remainingNanos / 1_000_000L;
+                    int nanos = (int) (remainingNanos % 1_000_000L);
+                    wait(millis, nanos);
+                }
             }
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
@@ -100,10 +111,11 @@ final class StreamWriteCompletion {
             throwIfFailedLocked();
             return true;
         }
-        return false;
+        return signalVersion != observedSignalVersion;
     }
 
     synchronized void notifyWaiters() {
+        signalVersion++;
         notifyAll();
     }
 
@@ -119,6 +131,7 @@ final class StreamWriteCompletion {
             }
             error = failure;
             done = true;
+            signalVersion++;
             notifyAll();
             listener = completionListener;
             completionListener = null;
@@ -149,5 +162,22 @@ final class StreamWriteCompletion {
         if (error != null) {
             throw error;
         }
+    }
+
+    private static long deadlineNanos(long waitNanos) {
+        if (waitNanos <= 0L) {
+            return 0L;
+        }
+        long now = System.nanoTime();
+        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
+    }
+
+    private static long remainingNanos(long deadlineNanos) {
+        long now = System.nanoTime();
+        long remaining = deadlineNanos - now;
+        if (remaining <= 0L && deadlineNanos > now) {
+            return Long.MAX_VALUE;
+        }
+        return remaining;
     }
 }

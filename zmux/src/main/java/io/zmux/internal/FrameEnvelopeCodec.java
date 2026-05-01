@@ -100,7 +100,8 @@ final class FrameEnvelopeCodec {
     }
 
     static void writeFrame(OutputStream output, FrameCodec.Frame frame, Limits limits) throws IOException {
-        writeFrame(output, frame, null, frame.payload(), 0, frame.payload().length, limits);
+        byte[] payload = frame.payloadBytes();
+        writeFrame(output, frame, null, payload, 0, payload.length, limits);
     }
 
     static void writeFrame(OutputStream output,
@@ -159,7 +160,8 @@ final class FrameEnvelopeCodec {
     }
 
     static void writeFrame(GatheringByteChannel output, FrameCodec.Frame frame, Limits limits) throws IOException {
-        writeFrame(output, frame, null, frame.payload(), 0, frame.payload().length, limits);
+        byte[] payload = frame.payloadBytes();
+        writeFrame(output, frame, null, payload, 0, payload.length, limits);
     }
 
     static void writeFrame(GatheringByteChannel output,
@@ -426,8 +428,9 @@ final class FrameEnvelopeCodec {
     private static void validateFrame(FrameCodec.Frame frame, Limits limits, boolean inbound) throws IOException {
         validateFlags(frame.type(), frame.flags());
         validateFrameScope(frame);
+        byte[] payload = frame.payloadBytes();
         if (frame.type() == FrameType.DATA) {
-            if (inbound && frame.payload().length > limits.maxFramePayload()) {
+            if (inbound && payload.length > limits.maxFramePayload()) {
                 throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate DATA payload", "payload exceeds configured limit");
             }
             if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
@@ -435,7 +438,7 @@ final class FrameEnvelopeCodec {
             }
             return;
         }
-        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), frame.payload().length, false);
+        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), payload.length, false);
     }
 
     static long encodedPayloadLength(int prefixLength, int payloadLength) {
@@ -467,7 +470,7 @@ final class FrameEnvelopeCodec {
 
     private static void validateDataPayload(FrameCodec.Frame frame, String operation) throws IOException {
         try {
-            FrameCodec.parseDataPayloadView(frame.payload(), frame.flags());
+            FrameCodec.parseDataPayloadView(frame.payloadBytes(), frame.flags());
         } catch (IOException error) {
             throw frameSizePayloadError(operation, error);
         }
@@ -919,23 +922,24 @@ final class FrameEnvelopeCodec {
     }
 
     private static void validateNonDataFramePayload(FrameCodec.Frame frame) throws IOException {
+        byte[] payload = frame.payloadBytes();
         switch (frame.type()) {
             case MAX_DATA:
             case BLOCKED: {
                 Varint62.Decoded decoded;
                 try {
-                    decoded = Varint62.decode(frame.payload(), 0);
+                    decoded = Varint62.decode(payload, 0);
                 } catch (IOException error) {
                     throw frameSizePayloadError("validate " + frame.type(), error);
                 }
-                if (decoded.length() != frame.payload().length) {
+                if (decoded.length() != payload.length) {
                     throw FrameCodec.error(ErrorCode.PROTOCOL, "validate " + frame.type(), "unexpected trailing bytes");
                 }
                 break;
             }
             case PING:
             case PONG:
-                if (frame.payload().length < 8) {
+                if (payload.length < 8) {
                     throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate ping/pong", "frame too short");
                 }
                 break;
@@ -944,14 +948,14 @@ final class FrameEnvelopeCodec {
             case ABORT:
             case CLOSE:
                 try {
-                    FrameCodec.parseErrorPayload(frame.payload());
+                    FrameCodec.parseErrorPayload(payload);
                 } catch (IOException error) {
                     throw frameSizePayloadError("validate " + frame.type(), error);
                 }
                 break;
             case GOAWAY:
                 try {
-                    FrameCodec.parseGoAwayPayload(frame.payload());
+                    FrameCodec.parseGoAwayPayload(payload);
                 } catch (IOException error) {
                     throw frameSizePayloadError("validate GOAWAY payload", error);
                 }
@@ -959,7 +963,7 @@ final class FrameEnvelopeCodec {
             case EXT: {
                 long extType;
                 try {
-                    extType = Varint62.decode(frame.payload(), 0).value();
+                    extType = Varint62.decode(payload, 0).value();
                 } catch (IOException error) {
                     throw frameSizePayloadError("validate EXT payload", error);
                 }
@@ -968,7 +972,7 @@ final class FrameEnvelopeCodec {
                         throw FrameCodec.error(ErrorCode.PROTOCOL, "validate EXT payload", "PRIORITY_UPDATE requires non-zero stream_id");
                     }
                     try {
-                        FrameCodec.parsePriorityUpdatePayload(frame.payload());
+                        FrameCodec.parsePriorityUpdatePayload(payload);
                     } catch (IOException error) {
                         throw frameSizePayloadError("validate EXT payload", error);
                     }

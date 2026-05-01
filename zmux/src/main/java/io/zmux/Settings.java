@@ -1,22 +1,41 @@
 package io.zmux;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 import java.util.Objects;
 
+@SuppressFBWarnings(
+        value = "SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR",
+        justification = "defaults() returns a shared template for compatibility while public constructors remain part of the API."
+)
 public final class Settings {
+    private static final long DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED = 65_536L;
+    private static final long DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED = 65_536L;
+    private static final long DEFAULT_INITIAL_MAX_STREAM_DATA_UNI = 65_536L;
+    private static final long DEFAULT_INITIAL_MAX_DATA = 262_144L;
+    private static final long DEFAULT_MAX_INCOMING_STREAMS_BIDI = 256L;
+    private static final long DEFAULT_MAX_INCOMING_STREAMS_UNI = 256L;
+    private static final long DEFAULT_MAX_FRAME_PAYLOAD = 16_384L;
+    private static final long DEFAULT_IDLE_TIMEOUT_MILLIS = 0L;
+    private static final long DEFAULT_KEEPALIVE_HINT_MILLIS = 0L;
+    private static final long DEFAULT_MAX_CONTROL_PAYLOAD_BYTES = 4_096L;
+    private static final long DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES = 4_096L;
+    private static final SchedulerHint DEFAULT_SCHEDULER_HINTS = SchedulerHint.UNSPECIFIED_OR_BALANCED;
+    private static final long DEFAULT_PING_PADDING_KEY = 0L;
     private static final Settings DEFAULTS = new Settings(
-            65_536L,
-            65_536L,
-            65_536L,
-            262_144L,
-            256L,
-            256L,
-            16_384L,
-            0L,
-            0L,
-            4_096L,
-            4_096L,
-            SchedulerHint.UNSPECIFIED_OR_BALANCED,
-            0L
+            DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED,
+            DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED,
+            DEFAULT_INITIAL_MAX_STREAM_DATA_UNI,
+            DEFAULT_INITIAL_MAX_DATA,
+            DEFAULT_MAX_INCOMING_STREAMS_BIDI,
+            DEFAULT_MAX_INCOMING_STREAMS_UNI,
+            DEFAULT_MAX_FRAME_PAYLOAD,
+            DEFAULT_IDLE_TIMEOUT_MILLIS,
+            DEFAULT_KEEPALIVE_HINT_MILLIS,
+            DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+            DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES,
+            DEFAULT_SCHEDULER_HINTS,
+            DEFAULT_PING_PADDING_KEY
     );
 
     private final long initialMaxStreamDataBidiLocallyOpened;
@@ -256,19 +275,19 @@ public final class Settings {
     }
 
     public static final class Builder {
-        private long initialMaxStreamDataBidiLocallyOpened = DEFAULTS.initialMaxStreamDataBidiLocallyOpened();
-        private long initialMaxStreamDataBidiPeerOpened = DEFAULTS.initialMaxStreamDataBidiPeerOpened();
-        private long initialMaxStreamDataUni = DEFAULTS.initialMaxStreamDataUni();
-        private long initialMaxData = DEFAULTS.initialMaxData();
-        private long maxIncomingStreamsBidi = DEFAULTS.maxIncomingStreamsBidi();
-        private long maxIncomingStreamsUni = DEFAULTS.maxIncomingStreamsUni();
-        private long maxFramePayload = DEFAULTS.maxFramePayload();
-        private long idleTimeoutMillis = DEFAULTS.idleTimeoutMillis();
-        private long keepaliveHintMillis = DEFAULTS.keepaliveHintMillis();
-        private long maxControlPayloadBytes = DEFAULTS.maxControlPayloadBytes();
-        private long maxExtensionPayloadBytes = DEFAULTS.maxExtensionPayloadBytes();
-        private SchedulerHint schedulerHints = DEFAULTS.schedulerHints();
-        private long pingPaddingKey = DEFAULTS.pingPaddingKey();
+        private long initialMaxStreamDataBidiLocallyOpened = DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED;
+        private long initialMaxStreamDataBidiPeerOpened = DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED;
+        private long initialMaxStreamDataUni = DEFAULT_INITIAL_MAX_STREAM_DATA_UNI;
+        private long initialMaxData = DEFAULT_INITIAL_MAX_DATA;
+        private long maxIncomingStreamsBidi = DEFAULT_MAX_INCOMING_STREAMS_BIDI;
+        private long maxIncomingStreamsUni = DEFAULT_MAX_INCOMING_STREAMS_UNI;
+        private long maxFramePayload = DEFAULT_MAX_FRAME_PAYLOAD;
+        private long idleTimeoutMillis = DEFAULT_IDLE_TIMEOUT_MILLIS;
+        private long keepaliveHintMillis = DEFAULT_KEEPALIVE_HINT_MILLIS;
+        private long maxControlPayloadBytes = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES;
+        private long maxExtensionPayloadBytes = DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES;
+        private SchedulerHint schedulerHints = DEFAULT_SCHEDULER_HINTS;
+        private long pingPaddingKey = DEFAULT_PING_PADDING_KEY;
 
         public Builder initialMaxStreamDataBidiLocallyOpened(long value) {
             this.initialMaxStreamDataBidiLocallyOpened = value;

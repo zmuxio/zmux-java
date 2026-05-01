@@ -1,9 +1,15 @@
 package io.zmux;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Objects;
 
+@SuppressFBWarnings(
+        value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
+        justification = "Events intentionally expose the original IOException so callers can inspect its exact type and details."
+)
 public final class ZmuxEvent {
     private final ZmuxEventType type;
     private final SessionState sessionState;

@@ -1,5 +1,7 @@
 package io.zmux;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -9,6 +11,10 @@ import java.nio.channels.GatheringByteChannel;
 import java.util.IdentityHashMap;
 import java.util.Objects;
 
+@SuppressFBWarnings(
+        value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
+        justification = "This adapter intentionally exposes caller-owned transport streams/channels as the connection halves."
+)
 public final class BasicDuplexConnection implements DuplexConnection {
     private final InputStream input;
     private final OutputStream output;
@@ -140,6 +146,10 @@ public final class BasicDuplexConnection implements DuplexConnection {
         }
     }
 
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "The builder keeps caller-owned transport handles until build() creates the adapter."
+    )
     public static final class Builder {
         private final InputStream input;
         private final OutputStream output;

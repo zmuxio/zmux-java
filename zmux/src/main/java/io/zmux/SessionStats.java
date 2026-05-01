@@ -125,7 +125,7 @@ public final class SessionStats {
         this.flush = flush;
         this.blockedWriteTotalNanos = blockedWriteTotalNanos;
         this.lastOpenLatencyNanos = lastOpenLatencyNanos;
-        this.queues = queues;
+        this.queues = QueueStats.copyOf(queues);
         this.provisionals = provisionals;
         this.hiddenState = hiddenState;
         this.reasons = reasons;
@@ -244,7 +244,7 @@ public final class SessionStats {
     }
 
     public QueueStats queues() {
-        return queues;
+        return QueueStats.copyOf(queues);
     }
 
     public ProvisionalStats provisionals() {
@@ -724,6 +724,24 @@ public final class SessionStats {
             return new QueueStats(0, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
         }
 
+        private static QueueStats copyOf(QueueStats source) {
+            if (source == null) {
+                return null;
+            }
+            return new QueueStats(
+                    source.urgentFrames,
+                    source.advisoryStreams,
+                    source.dataFrames,
+                    source.queuedDataBytes,
+                    source.reservedSendBytes,
+                    source.urgentQueuedControlBytes,
+                    source.ordinaryQueuedControlBytes,
+                    source.pendingControlBytes,
+                    source.pendingPriorityBytes,
+                    source.writerHeldRetainedBytes
+            );
+        }
+
         public int urgentFrames() {
             return urgentFrames;
         }
@@ -1078,7 +1096,7 @@ public final class SessionStats {
         }
 
         public Map<Long, Long> reset() {
-            return reset;
+            return immutableMap(reset);
         }
 
         public long resetOverflow() {
@@ -1086,7 +1104,7 @@ public final class SessionStats {
         }
 
         public Map<Long, Long> abort() {
-            return abort;
+            return immutableMap(abort);
         }
 
         public long abortOverflow() {

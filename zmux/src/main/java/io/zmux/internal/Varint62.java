@@ -9,6 +9,9 @@ import java.io.OutputStream;
 import java.util.Objects;
 
 public final class Varint62 {
+    private static final ByteReader<InputStream> INPUT_STREAM_BYTE_READER = Varint62::readRequiredByte;
+    private static final ByteReader<FrameCodec.Decoder> DECODER_BYTE_READER = Varint62::readRequiredByte;
+
     private Varint62() {
     }
 
@@ -159,75 +162,45 @@ public final class Varint62 {
     }
 
     public static Decoded read(InputStream input) throws IOException {
+        Objects.requireNonNull(input, "input");
         int first = input.read();
         if (first < 0) {
             throw error("read varint62", "truncated varint62", null);
         }
-        int prefix = first >>> 6;
-        int length = 1 << prefix;
-        long value;
-        switch (length) {
-            case 1:
-                value = first & 0x3fL;
-                break;
-            case 2:
-                value = ((first & 0x3fL) << 8) | readRequiredByte(input);
-                break;
-            case 4:
-                value = ((first & 0x3fL) << 24)
-                        | ((long) readRequiredByte(input) << 16)
-                        | ((long) readRequiredByte(input) << 8)
-                        | readRequiredByte(input);
-                break;
-            case 8:
-                value = decodeEightByteValue(
-                        first,
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input)
-                );
-                break;
-            default:
-                throw error("read varint62", "truncated varint62", null);
-        }
-        if (length(value) != length) {
-            throw error("read varint62", "non-canonical varint62", null);
-        }
-        return new Decoded(value, length);
+        return readFromFirst(first, input, INPUT_STREAM_BYTE_READER);
     }
 
     static Decoded read(FrameCodec.Decoder input) throws IOException {
-        int first = readRequiredByte(input);
-        int prefix = first >>> 6;
-        int length = 1 << prefix;
+        Objects.requireNonNull(input, "input");
+        return readFromFirst(readRequiredByte(input), input, DECODER_BYTE_READER);
+    }
+
+    private static <T> Decoded readFromFirst(int first, T input, ByteReader<T> reader) throws IOException {
+        int length = 1 << (first >>> 6);
         long value;
         switch (length) {
             case 1:
                 value = first & 0x3fL;
                 break;
             case 2:
-                value = ((first & 0x3fL) << 8) | readRequiredByte(input);
+                value = ((first & 0x3fL) << 8) | reader.readByte(input);
                 break;
             case 4:
                 value = ((first & 0x3fL) << 24)
-                        | ((long) readRequiredByte(input) << 16)
-                        | ((long) readRequiredByte(input) << 8)
-                        | readRequiredByte(input);
+                        | ((long) reader.readByte(input) << 16)
+                        | ((long) reader.readByte(input) << 8)
+                        | reader.readByte(input);
                 break;
             case 8:
                 value = decodeEightByteValue(
                         first,
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input),
-                        readRequiredByte(input)
+                        reader.readByte(input),
+                        reader.readByte(input),
+                        reader.readByte(input),
+                        reader.readByte(input),
+                        reader.readByte(input),
+                        reader.readByte(input),
+                        reader.readByte(input)
                 );
                 break;
             default:
@@ -307,6 +280,10 @@ public final class Varint62 {
             return ZmuxErrorDirection.WRITE;
         }
         return ZmuxErrorDirection.BOTH;
+    }
+
+    private interface ByteReader<T> {
+        int readByte(T input) throws IOException;
     }
 
     public static final class Decoded {

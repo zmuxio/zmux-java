@@ -327,7 +327,7 @@ public final class FrameCodec {
             this.type = type;
             this.flags = flags;
             this.streamId = streamId;
-            this.payload = payload;
+            this.payload = payload == null || payload.length == 0 ? EMPTY_BYTES : Arrays.copyOf(payload, payload.length);
         }
 
         public FrameType type() {
@@ -343,6 +343,10 @@ public final class FrameCodec {
         }
 
         public byte[] payload() {
+            return payload.length == 0 ? EMPTY_BYTES : Arrays.copyOf(payload, payload.length);
+        }
+
+        byte[] payloadBytes() {
             return payload;
         }
     }
@@ -409,9 +413,6 @@ public final class FrameCodec {
         public byte[] appData() {
             if (appDataLength == 0) {
                 return EMPTY_BYTES;
-            }
-            if (appDataOffset == 0 && appDataLength == appData.length) {
-                return appData;
             }
             return Arrays.copyOfRange(appData, appDataOffset, appDataOffset + appDataLength);
         }

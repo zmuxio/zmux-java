@@ -293,17 +293,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return 1L + payloadBytes;
     }
 
-    private static long outboundBatchCost(List<OutboundFrame> outboundFrames) {
-        long total = 0L;
-        if (outboundFrames == null) {
-            return total;
-        }
-        for (OutboundFrame outboundFrame : outboundFrames) {
-            total = SessionRuntime.saturatingAdd(total, SessionRuntime.outboundBatchCost(outboundFrame));
-        }
-        return total;
-    }
-
     private static long retainedBatchBytes(List<OutboundFrame> outboundFrames) {
         long total = 0L;
         if (outboundFrames == null) {
@@ -1258,27 +1247,57 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     @Override
     public ApplicationError peerGoAwayError() {
-        return this.peerGoAwayError;
+        return copyApplicationError(this.peerGoAwayError);
     }
 
     @Override
     public ApplicationError peerCloseError() {
-        return this.peerCloseError;
+        return copyApplicationError(this.peerCloseError);
     }
 
     @Override
     public Preface localPreface() {
-        return this.localPreface;
+        return copyPreface(this.localPreface);
     }
 
     @Override
     public Preface peerPreface() {
-        return this.peerPreface;
+        return copyPreface(this.peerPreface);
     }
 
     @Override
     public Negotiated negotiated() {
         return this.negotiated;
+    }
+
+    private static ApplicationError copyApplicationError(ApplicationError error) {
+        if (error == null) {
+            return null;
+        }
+        return new ApplicationError(
+                error.code(),
+                error.reason(),
+                error.scope(),
+                error.source(),
+                error.direction(),
+                error.terminationKind(),
+                error.operation()
+        );
+    }
+
+    private static Preface copyPreface(Preface preface) {
+        if (preface == null) {
+            return null;
+        }
+        return new Preface(
+                preface.prefaceVersion(),
+                preface.role(),
+                preface.tieBreakerNonce(),
+                preface.minProto(),
+                preface.maxProto(),
+                preface.capabilities(),
+                preface.settings()
+        );
     }
 
     @Override
@@ -2799,7 +2818,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 }
                 if (!budget.bounded()) {
                     try {
-                        this.waitOnLock(LockWaitKind.ACCEPT);
+                        this.incrementLockWaiters(LockWaitKind.ACCEPT);
+                        try {
+                            this.lock.wait();
+                        } finally {
+                            this.decrementLockWaiters(LockWaitKind.ACCEPT);
+                        }
                     } catch (InterruptedException interrupted) {
                         throw interrupted(
                                 "zmux: interrupted while accepting stream",
@@ -3167,7 +3191,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                             && this.pendingAsyncSessionFailure == null
                             && !this.state.terminal()) {
                         try {
-                            this.waitOnLock(LockWaitKind.GENERAL);
+                            this.incrementLockWaiters(LockWaitKind.GENERAL);
+                            try {
+                                this.lock.wait();
+                            } finally {
+                                this.decrementLockWaiters(LockWaitKind.GENERAL);
+                            }
                         } catch (InterruptedException interrupted) {
                             Thread.currentThread().interrupt();
                             throw interruptedIo(
@@ -3243,7 +3272,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 this.notifyWriterWaitersLocked();
                 return;
             }
-            this.waitOnLock(LockWaitKind.GENERAL);
+            this.incrementLockWaiters(LockWaitKind.GENERAL);
+            try {
+                this.lock.wait();
+            } finally {
+                this.decrementLockWaiters(LockWaitKind.GENERAL);
+            }
         }
     }
 
@@ -3797,10 +3831,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         if (this.sessionMemoryWakeNeededLocked(previousTracked)) {
             this.notifyStreamWriteWaitersLocked();
         }
-    }
-
-    private OutboundFrame removeQueuedOpeningFrameLocked(StreamRuntime streamRuntime) {
-        return this.openingCoordinator.removeQueuedOpeningFrameLocked(streamRuntime);
     }
 
     private OutboundFrame removeQueuedOpeningFrameLocked(Deque<OutboundFrame> deque, StreamRuntime streamRuntime) {
@@ -4809,26 +4839,21 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         waitOnLockNanos(waitNanos, LockWaitKind.GENERAL);
     }
 
-    void waitOnLockNanos(long waitNanos, LockWaitKind kind) throws InterruptedException {
-        long boundedNanos = Math.max(1L, waitNanos);
-        long millis = TimeUnit.NANOSECONDS.toMillis(boundedNanos);
-        int nanos = (int) (boundedNanos - TimeUnit.MILLISECONDS.toNanos(millis));
-        this.incrementLockWaiters(kind);
-        try {
-            this.lock.wait(millis, nanos);
-        } finally {
-            this.decrementLockWaiters(kind);
-        }
-    }
-
     void waitOnLock() throws InterruptedException {
         waitOnLock(LockWaitKind.GENERAL);
     }
 
     void waitOnLock(LockWaitKind kind) throws InterruptedException {
+        waitOnLockNanos(0L, kind);
+    }
+
+    void waitOnLockNanos(long waitNanos, LockWaitKind kind) throws InterruptedException {
+        long boundedNanos = waitNanos <= 0L ? TimeUnit.DAYS.toNanos(1L) : Math.max(1L, waitNanos);
+        long millis = boundedNanos / 1_000_000L;
+        int nanos = (int) (boundedNanos % 1_000_000L);
         this.incrementLockWaiters(kind);
         try {
-            this.lock.wait();
+            this.lock.wait(millis, nanos);
         } finally {
             this.decrementLockWaiters(kind);
         }
@@ -4939,11 +4964,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     boolean flushPendingWindowUpdatesLocked(Long preferredStreamId) throws IOException {
         return this.flowControlCoordinator.flushPendingWindowUpdatesLocked(preferredStreamId);
-    }
-
-    private void appendPendingWindowUpdatesLocked(List<OutboundFrame> batch, int maxFrames, Long preferredStreamId)
-            throws IOException {
-        this.appendPendingWindowUpdatesLocked(batch, maxFrames, preferredStreamId, false);
     }
 
     void appendPendingWindowUpdatesLocked(
@@ -5860,35 +5880,27 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         synchronized void waitForCompletion(TimeoutBudget budget) throws InterruptedException {
             while (!this.done) {
                 if (!budget.bounded()) {
-                    this.waitUntilNotified();
+                    this.waiters++;
+                    try {
+                        this.wait();
+                    } finally {
+                        this.waiters--;
+                    }
                     continue;
                 }
                 long remainingNanos = budget.remainingNanos();
                 if (remainingNanos <= 0L) {
                     return;
                 }
-                this.waitUntilNotifiedNanos(remainingNanos);
-            }
-        }
-
-        private void waitUntilNotified() throws InterruptedException {
-            this.waiters++;
-            try {
-                this.wait();
-            } finally {
-                this.waiters--;
-            }
-        }
-
-        private void waitUntilNotifiedNanos(long waitNanos) throws InterruptedException {
-            long boundedNanos = Math.max(1L, waitNanos);
-            long millis = TimeUnit.NANOSECONDS.toMillis(boundedNanos);
-            int nanos = (int) (boundedNanos - TimeUnit.MILLISECONDS.toNanos(millis));
-            this.waiters++;
-            try {
-                this.wait(millis, nanos);
-            } finally {
-                this.waiters--;
+                long boundedNanos = Math.max(1L, remainingNanos);
+                long millis = boundedNanos / 1_000_000L;
+                int nanos = (int) (boundedNanos % 1_000_000L);
+                this.waiters++;
+                try {
+                    this.wait(millis, nanos);
+                } finally {
+                    this.waiters--;
+                }
             }
         }
 
@@ -6042,7 +6054,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                       boolean openingFrame,
                       boolean preserveAfterSendClose,
                       StreamWriteCompletion writeCompletion) {
-            this(frame, stream, dataBytes, openingFrame, preserveAfterSendClose, writeCompletion, null, frame.payload(), 0, frame.payload().length, null, 0, 0);
+            this(frame, stream, dataBytes, openingFrame, preserveAfterSendClose, writeCompletion, null, frame.payloadBytes(), 0, frame.payloadBytes().length, null, 0, 0);
         }
 
         FrameCodec.Frame frame() {

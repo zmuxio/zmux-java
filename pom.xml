@@ -65,6 +65,7 @@
         <maven.source.version>3.4.0</maven.source.version>
         <maven.javadoc.version>3.12.0</maven.javadoc.version>
         <jmh.version>1.37</jmh.version>
+        <spotbugs.annotations.version>4.8.6</spotbugs.annotations.version>
         <bouncycastle.version>1.84</bouncycastle.version>
         <surefire.forkCount>1</surefire.forkCount>
     </properties>

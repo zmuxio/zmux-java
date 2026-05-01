@@ -67,15 +67,15 @@ public final class ZmuxConformance {
     }
 
     public static List<ZmuxClaim> knownClaims() {
-        return KNOWN_CLAIMS;
+        return copyList(KNOWN_CLAIMS);
     }
 
     public static List<ZmuxImplementationProfile> knownImplementationProfiles() {
-        return KNOWN_IMPLEMENTATION_PROFILES;
+        return copyList(KNOWN_IMPLEMENTATION_PROFILES);
     }
 
     public static List<ZmuxConformanceSuite> knownConformanceSuites() {
-        return KNOWN_CONFORMANCE_SUITES;
+        return copyList(KNOWN_CONFORMANCE_SUITES);
     }
 
     public static List<ZmuxClaim> claims(ZmuxImplementationProfile profile) {
@@ -103,29 +103,29 @@ public final class ZmuxConformance {
     public static List<String> acceptanceChecklist(ZmuxClaim claim) {
         Objects.requireNonNull(claim, "claim");
         List<String> checklist = CLAIM_ACCEPTANCE_CHECKLIST.get(claim);
-        return checklist == null ? Collections.emptyList() : checklist;
+        return copyList(checklist);
     }
 
     public static List<String> acceptanceChecklist(ZmuxImplementationProfile profile) {
         Objects.requireNonNull(profile, "profile");
         List<String> checklist = PROFILE_ACCEPTANCE_CHECKLIST.get(profile);
-        return checklist == null ? Collections.emptyList() : checklist;
+        return copyList(checklist);
     }
 
     public static List<String> referenceProfileClaimGate() {
-        return REFERENCE_PROFILE_CLAIM_GATE;
+        return copyList(REFERENCE_PROFILE_CLAIM_GATE);
     }
 
     public static List<ZmuxConformanceSuite> requiredConformanceSuites(ZmuxClaim claim) {
         Objects.requireNonNull(claim, "claim");
         List<ZmuxConformanceSuite> suites = CLAIM_REQUIRED_SUITES.get(claim);
-        return suites == null ? Collections.emptyList() : suites;
+        return copyList(suites);
     }
 
     public static List<ZmuxConformanceSuite> requiredConformanceSuites(ZmuxImplementationProfile profile) {
         Objects.requireNonNull(profile, "profile");
         List<ZmuxConformanceSuite> suites = PROFILE_REQUIRED_SUITES.get(profile);
-        return suites == null ? Collections.emptyList() : suites;
+        return copyList(suites);
     }
 
     public static List<ZmuxConformanceSuite> releaseCertificationGate(ZmuxImplementationProfile profile) {
@@ -133,15 +133,15 @@ public final class ZmuxConformance {
     }
 
     public static List<ZmuxClaim> coreModuleTargetClaims() {
-        return CORE_MODULE_TARGET_CLAIMS;
+        return copyList(CORE_MODULE_TARGET_CLAIMS);
     }
 
     public static List<ZmuxImplementationProfile> coreModuleTargetImplementationProfiles() {
-        return CORE_MODULE_TARGET_IMPLEMENTATION_PROFILES;
+        return copyList(CORE_MODULE_TARGET_IMPLEMENTATION_PROFILES);
     }
 
     public static List<ZmuxConformanceSuite> coreModuleTargetSuites() {
-        return CORE_MODULE_TARGET_SUITES;
+        return copyList(CORE_MODULE_TARGET_SUITES);
     }
 
     static Optional<ZmuxClaim> claimByName(String claimName) {
@@ -324,6 +324,13 @@ public final class ZmuxConformance {
     @SafeVarargs
     private static <T> List<T> list(T... values) {
         return Collections.unmodifiableList(Arrays.asList(values));
+    }
+
+    private static <T> List<T> copyList(List<T> source) {
+        if (source == null || source.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(source));
     }
 
     private static <K, V> Map<K, V> immutableMap(Map<K, V> source) {

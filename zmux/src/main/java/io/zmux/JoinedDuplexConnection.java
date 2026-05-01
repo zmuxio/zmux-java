@@ -1,5 +1,6 @@
 package io.zmux;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.zmux.internal.StreamIoSupport;
 
 import java.io.IOException;
@@ -15,8 +16,13 @@ import java.util.IdentityHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 @SuppressWarnings("resource")
+@SuppressFBWarnings(
+        value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
+        justification = "Joined connections are transport views; exposing the active IO half is the public API."
+)
 public final class JoinedDuplexConnection implements DuplexConnection {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition inputChanged = lock.newCondition();
@@ -99,17 +105,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         return address != null ? address : (outputHalf == null ? null : outputHalf.localAddress());
     }
 
-    private static SocketAddress localAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
-        SocketAddress address = inputHalf == null ? null : inputHalf.localAddress();
-        return address != null ? address : (outputHalf == null ? null : outputHalf.localAddress());
-    }
-
     private static SocketAddress remoteAddress(ReadHalf inputHalf, WriteHalf outputHalf) {
-        SocketAddress address = inputHalf == null ? null : inputHalf.remoteAddress();
-        return address != null ? address : (outputHalf == null ? null : outputHalf.remoteAddress());
-    }
-
-    private static SocketAddress remoteAddress(ZmuxRecvStream inputHalf, ZmuxSendStream outputHalf) {
         SocketAddress address = inputHalf == null ? null : inputHalf.remoteAddress();
         return address != null ? address : (outputHalf == null ? null : outputHalf.remoteAddress());
     }
@@ -158,27 +154,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
         current.addSuppressed(next);
         return current;
-    }
-
-    private static boolean awaitUntilDeadline(Condition condition, Instant deadline) throws InterruptedException {
-        if (deadline == null) {
-            condition.await();
-            return true;
-        }
-        Instant now = Instant.now();
-        if (!deadline.isAfter(now)) {
-            return false;
-        }
-        long remainingNanos;
-        try {
-            remainingNanos = Duration.between(now, deadline).toNanos();
-        } catch (ArithmeticException overflow) {
-            remainingNanos = Long.MAX_VALUE;
-        }
-        if (remainingNanos <= 0L) {
-            return false;
-        }
-        return condition.await(remainingNanos, TimeUnit.NANOSECONDS);
     }
 
     private static SocketTimeoutException readDeadlineTimeout() {
@@ -306,16 +281,12 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         boolean ownsPause = false;
         try {
             PauseDeadline deadline = PauseDeadline.from(timeout);
-            while (inputPaused && !closed) {
-                awaitInput(deadline);
-            }
+            awaitInput(deadline, () -> inputPaused && !closed);
             ensureOpenLocked();
             inputPaused = true;
             ownsPause = true;
             signalInputChangedLocked();
-            while ((activeInputOperations > 0 || activeInputDeadlineOperations > 0) && !closed) {
-                awaitInput(deadline);
-            }
+            awaitInput(deadline, () -> (activeInputOperations > 0 || activeInputDeadlineOperations > 0) && !closed);
             ensureOpenLocked();
             InputStream current = inputHalf;
             inputHalf = null;
@@ -349,16 +320,12 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         boolean ownsPause = false;
         try {
             PauseDeadline deadline = PauseDeadline.from(timeout);
-            while (outputPaused && !closed) {
-                awaitOutput(deadline);
-            }
+            awaitOutput(deadline, () -> outputPaused && !closed);
             ensureOpenLocked();
             outputPaused = true;
             ownsPause = true;
             signalOutputChangedLocked();
-            while ((activeOutputOperations > 0 || activeOutputDeadlineOperations > 0) && !closed) {
-                awaitOutput(deadline);
-            }
+            awaitOutput(deadline, () -> (activeOutputOperations > 0 || activeOutputDeadlineOperations > 0) && !closed);
             ensureOpenLocked();
             OutputStream current = outputHalf;
             outputHalf = null;
@@ -549,9 +516,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private InputStream enterInput() throws IOException {
         lock.lock();
         try {
-            while (inputPaused && !closed) {
-                awaitInputUninterruptiblyAsIo();
-            }
+            awaitInputUninterruptiblyAsIo();
             ensureOpenLocked();
             activeInputOperations++;
             return inputHalf;
@@ -575,9 +540,7 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     private OutputStream enterOutput() throws IOException {
         lock.lock();
         try {
-            while (outputPaused && !closed) {
-                awaitOutputUninterruptiblyAsIo();
-            }
+            awaitOutputUninterruptiblyAsIo();
             ensureOpenLocked();
             activeOutputOperations++;
             return outputHalf;
@@ -696,22 +659,38 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    private void awaitInput(PauseDeadline deadline) throws IOException, InterruptedException {
+    private void awaitInput(PauseDeadline deadline, BooleanSupplier waiting) throws IOException, InterruptedException {
         inputWaiters++;
         try {
-            if (!deadline.await(inputChanged)) {
-                throw pauseTimeout();
+            while (waiting.getAsBoolean()) {
+                long remainingNanos = deadline.remainingNanos();
+                if (deadline.bounded() && remainingNanos <= 0L) {
+                    throw pauseTimeout();
+                }
+                if (!deadline.bounded()) {
+                    inputChanged.await();
+                } else if (!inputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    throw pauseTimeout();
+                }
             }
         } finally {
             inputWaiters--;
         }
     }
 
-    private void awaitOutput(PauseDeadline deadline) throws IOException, InterruptedException {
+    private void awaitOutput(PauseDeadline deadline, BooleanSupplier waiting) throws IOException, InterruptedException {
         outputWaiters++;
         try {
-            if (!deadline.await(outputChanged)) {
-                throw pauseTimeout();
+            while (waiting.getAsBoolean()) {
+                long remainingNanos = deadline.remainingNanos();
+                if (deadline.bounded() && remainingNanos <= 0L) {
+                    throw pauseTimeout();
+                }
+                if (!deadline.bounded()) {
+                    outputChanged.await();
+                } else if (!outputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    throw pauseTimeout();
+                }
             }
         } finally {
             outputWaiters--;
@@ -720,9 +699,18 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     private void awaitInputUninterruptiblyAsIo() throws IOException {
         inputWaiters++;
+        PauseDeadline deadline = PauseDeadline.from(readDeadline);
         try {
-            if (!awaitUntilDeadline(inputChanged, readDeadline)) {
-                throw readDeadlineTimeout();
+            while (inputPaused && !closed) {
+                long remainingNanos = deadline.remainingNanos();
+                if (deadline.bounded() && remainingNanos <= 0L) {
+                    throw readDeadlineTimeout();
+                }
+                if (!deadline.bounded()) {
+                    inputChanged.await();
+                } else if (!inputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    throw readDeadlineTimeout();
+                }
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -736,9 +724,18 @@ public final class JoinedDuplexConnection implements DuplexConnection {
 
     private void awaitOutputUninterruptiblyAsIo() throws IOException {
         outputWaiters++;
+        PauseDeadline deadline = PauseDeadline.from(writeDeadline);
         try {
-            if (!awaitUntilDeadline(outputChanged, writeDeadline)) {
-                throw writeDeadlineTimeout();
+            while (outputPaused && !closed) {
+                long remainingNanos = deadline.remainingNanos();
+                if (deadline.bounded() && remainingNanos <= 0L) {
+                    throw writeDeadlineTimeout();
+                }
+                if (!deadline.bounded()) {
+                    outputChanged.await();
+                } else if (!outputChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    throw writeDeadlineTimeout();
+                }
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -890,6 +887,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
+    @SuppressFBWarnings(
+            value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
+            justification = "Pause tokens expose and replace the caller-owned output half by design."
+    )
     public static final class PausedOutput implements ResumablePause {
         private final JoinedDuplexConnection owner;
         private final Object lock = new Object();
@@ -1004,20 +1005,39 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return new PauseDeadline(deadline, true);
         }
 
-        boolean await(Condition condition) throws InterruptedException {
+        static PauseDeadline from(Instant deadline) {
+            if (deadline == null) {
+                return new PauseDeadline(0L, false);
+            }
+            Instant now = Instant.now();
+            if (!deadline.isAfter(now)) {
+                return new PauseDeadline(System.nanoTime(), true);
+            }
+            long nanos;
+            try {
+                nanos = Duration.between(now, deadline).toNanos();
+            } catch (ArithmeticException overflow) {
+                nanos = Long.MAX_VALUE;
+            }
+            long current = System.nanoTime();
+            long deadlineNanos = current > Long.MAX_VALUE - nanos ? Long.MAX_VALUE : current + nanos;
+            return new PauseDeadline(deadlineNanos, true);
+        }
+
+        boolean bounded() {
+            return bounded;
+        }
+
+        long remainingNanos() {
             if (!bounded) {
-                condition.await();
-                return true;
+                return 0L;
             }
             long now = System.nanoTime();
             long remaining = deadlineNanos - now;
             if (remaining <= 0L && deadlineNanos > now) {
                 remaining = Long.MAX_VALUE;
             }
-            if (remaining <= 0L) {
-                return false;
-            }
-            return condition.await(remaining, TimeUnit.NANOSECONDS);
+            return remaining;
         }
     }
 

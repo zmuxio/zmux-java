@@ -9,6 +9,7 @@ import io.zmux.internal.TimeoutBudget;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
 import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -46,6 +47,7 @@ final class NettyQuicSupport {
     );
     private static final int MAX_ERROR_UNWRAP_DEPTH = 64;
     private static final AtomicLong PRELUDE_WORKER_SEQUENCE = new AtomicLong();
+    private static final Field QUIC_CLOSE_EVENT_REASON_FIELD = quicCloseEventReasonField();
     private static final int ACCEPTED_PRELUDE_WORKER_MAX = positiveIntegerProperty(
             "io.zmux.netty.acceptedPreludeWorkers",
             defaultAcceptedPreludeWorkerMax(),
@@ -589,12 +591,39 @@ final class NettyQuicSupport {
         return new UncheckedIOException("zmux-netty-quic: Netty operation failed", translateThrowable(cause));
     }
 
-    private static byte[] safeCloseReason(QuicConnectionCloseEvent event) {
+    private static Field quicCloseEventReasonField() {
         try {
-            return event.reason();
-        } catch (NullPointerException ignored) {
+            Field field = QuicConnectionCloseEvent.class.getDeclaredField("reason");
+            field.setAccessible(true);
+            return field;
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
             return null;
         }
+    }
+
+    private static byte[] safeCloseReason(QuicConnectionCloseEvent event) {
+        if (event == null) {
+            return null;
+        }
+        Field field = QUIC_CLOSE_EVENT_REASON_FIELD;
+        if (field != null) {
+            try {
+                return copyCloseReason((byte[]) field.get(event));
+            } catch (IllegalAccessException | ClassCastException ignored) {
+                return null;
+            }
+        }
+        return copyCloseReason(event.reason());
+    }
+
+    private static byte[] copyCloseReason(byte[] reason) {
+        if (reason == null) {
+            return null;
+        }
+        if (reason.length == 0) {
+            return EMPTY_BYTES;
+        }
+        return reason.clone();
     }
 
     static boolean isGracefulApplicationClose(QuicConnectionCloseEvent event) {
@@ -798,7 +827,12 @@ final class NettyQuicSupport {
             lock.lockInterruptibly();
             try {
                 while (!closed && queue.size() >= capacity) {
-                    awaitNotFull();
+                    notFullWaiters++;
+                    try {
+                        notFull.await();
+                    } finally {
+                        notFullWaiters--;
+                    }
                 }
                 if (closed) {
                     return false;
@@ -817,7 +851,12 @@ final class NettyQuicSupport {
             try {
                 if (!budget.bounded()) {
                     while (queue.isEmpty() && !closed) {
-                        awaitNotEmpty();
+                        notEmptyWaiters++;
+                        try {
+                            notEmpty.await();
+                        } finally {
+                            notEmptyWaiters--;
+                        }
                     }
                 } else {
                     while (queue.isEmpty() && !closed) {
@@ -825,7 +864,12 @@ final class NettyQuicSupport {
                         if (nanos <= 0L) {
                             return null;
                         }
-                        awaitNotEmpty(nanos);
+                        notEmptyWaiters++;
+                        try {
+                            notEmpty.awaitNanos(nanos);
+                        } finally {
+                            notEmptyWaiters--;
+                        }
                     }
                 }
                 if (!queue.isEmpty()) {
@@ -903,33 +947,6 @@ final class NettyQuicSupport {
                 return total;
             } finally {
                 lock.unlock();
-            }
-        }
-
-        private void awaitNotEmpty() throws InterruptedException {
-            notEmptyWaiters++;
-            try {
-                notEmpty.await();
-            } finally {
-                notEmptyWaiters--;
-            }
-        }
-
-        private boolean awaitNotEmpty(long nanos) throws InterruptedException {
-            notEmptyWaiters++;
-            try {
-                return notEmpty.awaitNanos(nanos) <= 0L;
-            } finally {
-                notEmptyWaiters--;
-            }
-        }
-
-        private void awaitNotFull() throws InterruptedException {
-            notFullWaiters++;
-            try {
-                notFull.await();
-            } finally {
-                notFullWaiters--;
             }
         }
 

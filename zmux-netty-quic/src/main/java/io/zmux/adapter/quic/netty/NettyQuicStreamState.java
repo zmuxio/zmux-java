@@ -53,6 +53,8 @@ final class NettyQuicStreamState {
     private long writeDeadlineNanos;
     private int readWaiters;
     private int writeWaiters;
+    private long readSignalVersion;
+    private long writeSignalVersion;
     private long bufferedInboundBytes;
     private boolean inboundAutoReadPaused;
     private ByteBuf inboundHead;
@@ -1767,9 +1769,12 @@ final class NettyQuicStreamState {
     }
 
     private void awaitReadChangeInterruptibly() throws InterruptedIOException {
+        long observedSignalVersion = readSignalVersion;
         readWaiters++;
         try {
-            readChanged.await();
+            while (readSignalVersion == observedSignalVersion) {
+                readChanged.await();
+            }
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interruptedIo(
                     "waiting for stream state change",
@@ -1783,9 +1788,21 @@ final class NettyQuicStreamState {
     }
 
     private boolean awaitReadChangeNanosInterruptibly(long nanos) throws InterruptedIOException {
+        long observedSignalVersion = readSignalVersion;
+        long deadlineNanos = deadlineNanos(nanos);
         readWaiters++;
         try {
-            return readChanged.awaitNanos(nanos) <= 0L;
+            while (readSignalVersion == observedSignalVersion) {
+                long remainingNanos = remainingNanos(deadlineNanos);
+                if (remainingNanos <= 0L) {
+                    return true;
+                }
+                long remainingAfterWait = readChanged.awaitNanos(remainingNanos);
+                if (remainingAfterWait <= 0L && readSignalVersion == observedSignalVersion) {
+                    return true;
+                }
+            }
+            return false;
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interruptedIo(
                     "waiting for stream state change",
@@ -1799,9 +1816,12 @@ final class NettyQuicStreamState {
     }
 
     private void awaitWriteChangeInterruptibly() throws InterruptedIOException {
+        long observedSignalVersion = writeSignalVersion;
         writeWaiters++;
         try {
-            writeChanged.await();
+            while (writeSignalVersion == observedSignalVersion) {
+                writeChanged.await();
+            }
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interruptedIo(
                     "waiting for stream state change",
@@ -1815,9 +1835,21 @@ final class NettyQuicStreamState {
     }
 
     private boolean awaitWriteChangeNanosInterruptibly(long nanos) throws InterruptedIOException {
+        long observedSignalVersion = writeSignalVersion;
+        long deadlineNanos = deadlineNanos(nanos);
         writeWaiters++;
         try {
-            return writeChanged.awaitNanos(nanos) <= 0L;
+            while (writeSignalVersion == observedSignalVersion) {
+                long remainingNanos = remainingNanos(deadlineNanos);
+                if (remainingNanos <= 0L) {
+                    return true;
+                }
+                long remainingAfterWait = writeChanged.awaitNanos(remainingNanos);
+                if (remainingAfterWait <= 0L && writeSignalVersion == observedSignalVersion) {
+                    return true;
+                }
+            }
+            return false;
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interruptedIo(
                     "waiting for stream state change",
@@ -1836,15 +1868,31 @@ final class NettyQuicStreamState {
     }
 
     private void signalReadChangedLocked() {
+        readSignalVersion++;
         if (readWaiters > 0) {
             readChanged.signalAll();
         }
     }
 
     private void signalWriteChangedLocked() {
+        writeSignalVersion++;
         if (writeWaiters > 0) {
             writeChanged.signalAll();
         }
+    }
+
+    private static long deadlineNanos(long waitNanos) {
+        long now = System.nanoTime();
+        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
+    }
+
+    private static long remainingNanos(long deadlineNanos) {
+        long now = System.nanoTime();
+        long remaining = deadlineNanos - now;
+        if (remaining <= 0L && deadlineNanos > now) {
+            return Long.MAX_VALUE;
+        }
+        return remaining;
     }
 
     private void dispatchControlFuture(ChannelFuture future) {

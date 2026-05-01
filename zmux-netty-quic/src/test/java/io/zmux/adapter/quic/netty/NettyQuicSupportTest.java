@@ -301,6 +301,28 @@ class NettyQuicSupportTest {
     }
 
     @Test
+    void remoteTransportCloseWithNullNettyReasonUsesErrorLabel() throws Exception {
+        ZmuxException error = assertInstanceOf(
+                ZmuxException.class,
+                NettyQuicSupport.connectionCloseError(
+                        newCloseEvent(false, (int) QuicTransportError.PROTOCOL_VIOLATION.code(), null),
+                        null
+                )
+        );
+
+        assertEquals(QuicTransportError.PROTOCOL_VIOLATION.code(), error.code());
+        assertEquals("PROTOCOL_VIOLATION", error.getMessage());
+    }
+
+    @Test
+    void gracefulApplicationCloseAllowsNullNettyReason() throws Exception {
+        QuicConnectionCloseEvent closeEvent = newCloseEvent(true, 0, null);
+
+        assertTrue(NettyQuicSupport.isGracefulApplicationClose(closeEvent));
+        assertNull(NettyQuicSupport.applicationCloseError(closeEvent));
+    }
+
+    @Test
     void quicTransportExceptionPreservesStructuredTransportMetadata() {
         ZmuxException error = assertInstanceOf(
                 ZmuxException.class,

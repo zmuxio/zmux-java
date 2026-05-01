@@ -196,14 +196,15 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     private static void noteReasonLocked(ConcurrentHashMap<Long, AtomicLong> counters,
                                          AtomicLong overflow,
                                          long code) {
-        AtomicLong counter = counters.get(code);
-        if (counter == null) {
+        AtomicLong counter = counters.computeIfAbsent(code, ignored -> {
             if (counters.size() >= SessionStats.ReasonStats.MAX_TRACKED_CODES) {
-                saturatingIncrement(overflow);
-                return;
+                return null;
             }
-            counter = new AtomicLong();
-            counters.put(code, counter);
+            return new AtomicLong();
+        });
+        if (counter == null) {
+            saturatingIncrement(overflow);
+            return;
         }
         saturatingIncrement(counter);
     }
@@ -1270,21 +1271,20 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     private void awaitOpenProgressOrClose(Future<?> future, TimeoutBudget budget) throws IOException, InterruptedException {
         lifecycleLock.lockInterruptibly();
         try {
-            if (!acceptingNewStreams()) {
-                throw sessionUnavailableError();
-            }
-            if (future != null && future.isDone()) {
-                return;
-            }
-            if (!budget.bounded()) {
-                awaitLifecycleChanged();
-            } else {
-                long remainingNanos = budget.remainingNanos();
-                if (remainingNanos <= 0L) {
-                    throw NettyQuicSupport.openTimedOut();
-                }
-                if (!awaitLifecycleChanged(remainingNanos)) {
-                    throw NettyQuicSupport.openTimedOut();
+            while (acceptingNewStreams() && (future == null || !future.isDone())) {
+                lifecycleWaiters++;
+                try {
+                    if (!budget.bounded()) {
+                        lifecycleChanged.await();
+                    } else {
+                        long remainingNanos = budget.remainingNanos();
+                        if (remainingNanos <= 0L
+                                || !lifecycleChanged.await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                            throw NettyQuicSupport.openTimedOut();
+                        }
+                    }
+                } finally {
+                    lifecycleWaiters--;
                 }
             }
             if (!acceptingNewStreams()) {
@@ -1292,24 +1292,6 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
             }
         } finally {
             lifecycleLock.unlock();
-        }
-    }
-
-    private void awaitLifecycleChanged() throws InterruptedException {
-        lifecycleWaiters++;
-        try {
-            lifecycleChanged.await();
-        } finally {
-            lifecycleWaiters--;
-        }
-    }
-
-    private boolean awaitLifecycleChanged(long remainingNanos) throws InterruptedException {
-        lifecycleWaiters++;
-        try {
-            return lifecycleChanged.await(remainingNanos, TimeUnit.NANOSECONDS);
-        } finally {
-            lifecycleWaiters--;
         }
     }
 
