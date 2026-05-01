@@ -82,15 +82,12 @@
                 <version>3.15.0</version>
                 <configuration>
                     <!--
-                      Keep the compiler plugin's source-change tracker enabled:
-                      disabling it in maven-compiler-plugin 3.x can leave
-                      target/classes as a partial snapshot after source edits.
-                      Use an external javac process as well; on Windows the
-                      in-process compiler can intermittently make class files
-                      unavailable between compile and testCompile in repeated
-                      local runs.
+                      Use a full forked javac compile by default. On Windows,
+                      maven-compiler-plugin's incremental source tracker has
+                      intermittently left target/classes with mismatched class
+                      file contents between compile and testCompile.
                      -->
-                    <useIncrementalCompilation>true</useIncrementalCompilation>
+                    <useIncrementalCompilation>false</useIncrementalCompilation>
                     <fork>true</fork>
                 </configuration>
             </plugin>
