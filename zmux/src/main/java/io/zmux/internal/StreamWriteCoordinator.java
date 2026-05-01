@@ -485,8 +485,8 @@ final class StreamWriteCoordinator {
     }
 
     private void queueEmptyFinalFrameLocked(boolean openingPending,
-                                           byte[] openingPrefix,
-                                           StreamWriteCompletion completion) throws IOException {
+                                            byte[] openingPrefix,
+                                            StreamWriteCompletion completion) throws IOException {
         if (openingPending) {
             this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, true, completion);
         } else {

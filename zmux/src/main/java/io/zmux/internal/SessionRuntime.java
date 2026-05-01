@@ -102,11 +102,11 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private final SessionReaderCoordinator readerRuntime;
     private final SessionWriterCoordinator writerRuntime;
     private final SessionStatsCollector statsCollector;
+    private final Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
+    private final Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
     private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
     private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
     private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
-    private final Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
-    private final Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
     private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private Map<Long, StreamRuntime> streams = new HashMap<>();
@@ -886,6 +886,36 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         }
     }
 
+    private static ApplicationError copyApplicationError(ApplicationError error) {
+        if (error == null) {
+            return null;
+        }
+        return new ApplicationError(
+                error.code(),
+                error.reason(),
+                error.scope(),
+                error.source(),
+                error.direction(),
+                error.terminationKind(),
+                error.operation()
+        );
+    }
+
+    private static Preface copyPreface(Preface preface) {
+        if (preface == null) {
+            return null;
+        }
+        return new Preface(
+                preface.prefaceVersion(),
+                preface.role(),
+                preface.tieBreakerNonce(),
+                preface.minProto(),
+                preface.maxProto(),
+                preface.capabilities(),
+                preface.settings()
+        );
+    }
+
     @Override
     public ZmuxNativeStream acceptStream() throws IOException, InterruptedException {
         return this.acceptStream(null);
@@ -1272,36 +1302,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     @Override
     public Negotiated negotiated() {
         return this.negotiated;
-    }
-
-    private static ApplicationError copyApplicationError(ApplicationError error) {
-        if (error == null) {
-            return null;
-        }
-        return new ApplicationError(
-                error.code(),
-                error.reason(),
-                error.scope(),
-                error.source(),
-                error.direction(),
-                error.terminationKind(),
-                error.operation()
-        );
-    }
-
-    private static Preface copyPreface(Preface preface) {
-        if (preface == null) {
-            return null;
-        }
-        return new Preface(
-                preface.prefaceVersion(),
-                preface.role(),
-                preface.tieBreakerNonce(),
-                preface.minProto(),
-                preface.maxProto(),
-                preface.capabilities(),
-                preface.settings()
-        );
     }
 
     @Override

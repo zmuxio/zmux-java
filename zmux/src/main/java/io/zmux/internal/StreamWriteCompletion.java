@@ -19,6 +19,23 @@ final class StreamWriteCompletion {
         }
     }
 
+    private static long deadlineNanos(long waitNanos) {
+        if (waitNanos <= 0L) {
+            return 0L;
+        }
+        long now = System.nanoTime();
+        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
+    }
+
+    private static long remainingNanos(long deadlineNanos) {
+        long now = System.nanoTime();
+        long remaining = deadlineNanos - now;
+        if (remaining <= 0L && deadlineNanos > now) {
+            return Long.MAX_VALUE;
+        }
+        return remaining;
+    }
+
     synchronized void retainFrame() {
         if (done) {
             return;
@@ -161,22 +178,5 @@ final class StreamWriteCompletion {
         if (error != null) {
             throw error;
         }
-    }
-
-    private static long deadlineNanos(long waitNanos) {
-        if (waitNanos <= 0L) {
-            return 0L;
-        }
-        long now = System.nanoTime();
-        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
-    }
-
-    private static long remainingNanos(long deadlineNanos) {
-        long now = System.nanoTime();
-        long remaining = deadlineNanos - now;
-        if (remaining <= 0L && deadlineNanos > now) {
-            return Long.MAX_VALUE;
-        }
-        return remaining;
     }
 }

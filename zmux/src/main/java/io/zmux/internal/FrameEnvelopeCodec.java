@@ -812,11 +812,6 @@ final class FrameEnvelopeCodec {
         }
     }
 
-    @FunctionalInterface
-    private interface FrameByteReader<T> {
-        int read(T input) throws IOException;
-    }
-
     private static int readRequiredFrameByte(FrameCodec.Decoder input) throws IOException {
         try {
             return input.readByte();
@@ -1053,6 +1048,11 @@ final class FrameEnvelopeCodec {
             return false;
         }
         return retainedCap > batchScratchRetainLimit(hint);
+    }
+
+    @FunctionalInterface
+    private interface FrameByteReader<T> {
+        int read(T input) throws IOException;
     }
 
     static final class GatherScratch {

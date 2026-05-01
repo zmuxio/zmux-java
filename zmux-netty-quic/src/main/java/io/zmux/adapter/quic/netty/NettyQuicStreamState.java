@@ -149,6 +149,20 @@ final class NettyQuicStreamState {
         return TimeoutBudget.remainingNanosUntil(deadlineNanos);
     }
 
+    private static long deadlineNanos(long waitNanos) {
+        long now = System.nanoTime();
+        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
+    }
+
+    private static long remainingNanos(long deadlineNanos) {
+        long now = System.nanoTime();
+        long remaining = deadlineNanos - now;
+        if (remaining <= 0L && deadlineNanos > now) {
+            return Long.MAX_VALUE;
+        }
+        return remaining;
+    }
+
     ChannelDuplexHandler newHandler() {
         return handler;
     }
@@ -1870,20 +1884,6 @@ final class NettyQuicStreamState {
         if (writeWaiters > 0) {
             writeChanged.signalAll();
         }
-    }
-
-    private static long deadlineNanos(long waitNanos) {
-        long now = System.nanoTime();
-        return now > Long.MAX_VALUE - waitNanos ? Long.MAX_VALUE : now + waitNanos;
-    }
-
-    private static long remainingNanos(long deadlineNanos) {
-        long now = System.nanoTime();
-        long remaining = deadlineNanos - now;
-        if (remaining <= 0L && deadlineNanos > now) {
-            return Long.MAX_VALUE;
-        }
-        return remaining;
     }
 
     private void dispatchControlFuture(ChannelFuture future) {
