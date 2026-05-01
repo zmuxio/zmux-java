@@ -727,21 +727,11 @@ final class FrameEnvelopeCodec {
     }
 
     private static Varint62.Decoded readStreamId(InputStream input, long frameLength) throws IOException {
-        return readStreamId(new FrameByteReader() {
-            @Override
-            public int readByte() throws IOException {
-                return readRequiredFrameByte(input);
-            }
-        }, frameLength);
+        return readStreamId(() -> readRequiredFrameByte(input), frameLength);
     }
 
     private static Varint62.Decoded readStreamId(FrameCodec.Decoder input, long frameLength) throws IOException {
-        return readStreamId(new FrameByteReader() {
-            @Override
-            public int readByte() throws IOException {
-                return readRequiredFrameByte(input);
-            }
-        }, frameLength);
+        return readStreamId(() -> readRequiredFrameByte(input), frameLength);
     }
 
     private static Varint62.Decoded readStreamId(FrameByteReader input, long frameLength) throws IOException {

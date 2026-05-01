@@ -6,12 +6,8 @@ import java.io.IOException;
 
 final class StreamApiSupport {
     private static final int TRANSIENT_BUFFER_CAPACITY = 8192;
-    private static final ThreadLocal<byte[]> TRANSIENT_BUFFER = new ThreadLocal<byte[]>() {
-        @Override
-        protected byte[] initialValue() {
-            return new byte[TRANSIENT_BUFFER_CAPACITY];
-        }
-    };
+    private static final ThreadLocal<byte[]> TRANSIENT_BUFFER =
+            ThreadLocal.withInitial(() -> new byte[TRANSIENT_BUFFER_CAPACITY]);
 
     private StreamApiSupport() {
     }
