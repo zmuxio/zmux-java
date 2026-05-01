@@ -1,7 +1,5 @@
 package io.zmux.internal;
 
-import io.zmux.MetadataUpdate;
-import io.zmux.StreamMetadata;
 import io.zmux.*;
 
 import java.io.IOException;

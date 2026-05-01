@@ -13,6 +13,12 @@ final class StreamWriteCompletion {
     private boolean transportProgress;
     private Runnable completionListener;
 
+    private static void runCompletionListener(Runnable listener) {
+        if (listener != null) {
+            listener.run();
+        }
+    }
+
     synchronized void retainFrame() {
         if (done) {
             return;
@@ -135,12 +141,6 @@ final class StreamWriteCompletion {
             }
         }
         if (runNow) {
-            listener.run();
-        }
-    }
-
-    private static void runCompletionListener(Runnable listener) {
-        if (listener != null) {
             listener.run();
         }
     }

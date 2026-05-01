@@ -208,15 +208,7 @@ final class StreamWriteCoordinator {
                     position += chunkSize;
                 }
 
-                if (fin && length == 0) {
-                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
-                }
-                this.owner.noteWritePayloadProgressLocked(length);
-                this.owner.notifyLockWaitersLocked();
-                if (completion != null && completion.hasFrames()) {
-                    this.owner.registerWriteCompletionWaiterLocked(completion);
-                    waitForCompletion = true;
-                }
+                waitForCompletion = this.finishQueuedWriteLocked(fin, length, openingPending, openingPrefix, completion);
             }
         } finally {
             this.owner.emitPendingEvents();
@@ -332,15 +324,7 @@ final class StreamWriteCoordinator {
                     remainingTotal -= chunkSize;
                 }
 
-                if (fin && totalLength == 0) {
-                    this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
-                }
-                this.owner.noteWritePayloadProgressLocked(totalLength);
-                this.owner.notifyLockWaitersLocked();
-                if (completion != null && completion.hasFrames()) {
-                    this.owner.registerWriteCompletionWaiterLocked(completion);
-                    waitForCompletion = true;
-                }
+                waitForCompletion = this.finishQueuedWriteLocked(fin, totalLength, openingPending, openingPrefix, completion);
             }
         } finally {
             this.owner.emitPendingEvents();
@@ -349,6 +333,23 @@ final class StreamWriteCoordinator {
             this.awaitTransportWrite(completion);
         }
         return totalLength;
+    }
+
+    private boolean finishQueuedWriteLocked(boolean fin,
+                                            int payloadLength,
+                                            boolean openingPending,
+                                            byte[] openingPrefix,
+                                            StreamWriteCompletion completion) throws IOException {
+        if (fin && payloadLength == 0) {
+            this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
+        }
+        this.owner.noteWritePayloadProgressLocked(payloadLength);
+        this.owner.notifyLockWaitersLocked();
+        if (completion == null || !completion.hasFrames()) {
+            return false;
+        }
+        this.owner.registerWriteCompletionWaiterLocked(completion);
+        return true;
     }
 
     private void awaitTransportWrite(StreamWriteCompletion completion) throws IOException {

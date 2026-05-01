@@ -1,10 +1,6 @@
 package io.zmux.internal;
 
-import io.zmux.BasicDuplexConnection;
-import io.zmux.Settings;
-import io.zmux.WriteTimeoutException;
-import io.zmux.ZmuxConfig;
-import io.zmux.ZmuxStream;
+import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -17,8 +13,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,6 +22,54 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class StreamWriteCompletionTest {
+    private static SessionRuntime newRuntime(OutputStream output) throws Exception {
+        return SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
+                ZmuxConfig.builder().role(io.zmux.Role.RESPONDER).build(),
+                0L,
+                Settings.defaults()
+        );
+    }
+
+    private static Thread startWriter(SessionRuntime runtime) {
+        Thread writer = new Thread(runtime.writerLoopTaskInternal(), "stream-write-completion-writer");
+        writer.setDaemon(true);
+        writer.start();
+        return writer;
+    }
+
+    private static void closeRuntime(SessionRuntime runtime, Thread writer) throws Exception {
+        runtime.closeWithError(0L, "");
+        if (writer != null) {
+            writer.join(1_000L);
+        }
+    }
+
+    private static void waitUntilQueued(SessionRuntime runtime) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            synchronized (runtime.lock()) {
+                if (!runtime.dataQueueInternal().isEmpty()) {
+                    return;
+                }
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("write did not enter the outbound queue");
+    }
+
+    private static boolean containsMessage(Throwable error, String expected) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && message.contains(expected)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     @Test
     void writeWaitsUntilWriterCompletesUnderlyingTransportWrite() throws Exception {
         BlockingOutputStream output = new BlockingOutputStream();
@@ -404,54 +448,6 @@ final class StreamWriteCompletionTest {
             output.release();
             closeRuntime(runtime, writer);
         }
-    }
-
-    private static SessionRuntime newRuntime(OutputStream output) throws Exception {
-        return SessionRuntimeTestSupport.newReadyRuntime(
-                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
-                ZmuxConfig.builder().role(io.zmux.Role.RESPONDER).build(),
-                0L,
-                Settings.defaults()
-        );
-    }
-
-    private static Thread startWriter(SessionRuntime runtime) {
-        Thread writer = new Thread(runtime.writerLoopTaskInternal(), "stream-write-completion-writer");
-        writer.setDaemon(true);
-        writer.start();
-        return writer;
-    }
-
-    private static void closeRuntime(SessionRuntime runtime, Thread writer) throws Exception {
-        runtime.closeWithError(0L, "");
-        if (writer != null) {
-            writer.join(1_000L);
-        }
-    }
-
-    private static void waitUntilQueued(SessionRuntime runtime) throws Exception {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-        while (System.nanoTime() < deadlineNanos) {
-            synchronized (runtime.lock()) {
-                if (!runtime.dataQueueInternal().isEmpty()) {
-                    return;
-                }
-            }
-            Thread.sleep(1L);
-        }
-        throw new AssertionError("write did not enter the outbound queue");
-    }
-
-    private static boolean containsMessage(Throwable error, String expected) {
-        Throwable current = error;
-        while (current != null) {
-            String message = current.getMessage();
-            if (message != null && message.contains(expected)) {
-                return true;
-            }
-            current = current.getCause();
-        }
-        return false;
     }
 
     private static final class BlockingOutputStream extends OutputStream {

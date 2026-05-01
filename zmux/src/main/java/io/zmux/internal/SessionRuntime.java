@@ -4100,14 +4100,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 return streamError;
             }
         }
-        IOException sessionError = this.currentErrorLocked();
-        if (sessionError != null) {
-            IOException operationError = this.sessionOperationErrorLocked("write", sessionError);
-            if (operationError != null) {
-                return operationError;
-            }
-        }
-        return new WriteClosedException(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.SESSION_TERMINATION);
+        return this.sessionOperationErrorLocked("write", this.currentErrorLocked());
     }
 
     void onReadDiscardLocked(StreamRuntime streamRuntime, boolean acceptQueuedStream) {

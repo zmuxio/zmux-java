@@ -29,6 +29,18 @@ final class WriteBufferOwnershipTest {
         return queue.size();
     }
 
+    private static Object awaitLastOutbound(SessionRuntime runtime, String name) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            Object outbound = SessionRuntimeTestSupport.outboundQueue(runtime, name).peekLast();
+            if (outbound != null) {
+                return outbound;
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("timed out waiting for outbound frame");
+    }
+
     @Test
     void openingWriteRetainsBorrowedPayloadBeforeReturn() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
@@ -134,17 +146,5 @@ final class WriteBufferOwnershipTest {
             assertEquals(dataQueuedBefore, queueSize(runtime, "dataQueue"), "ordinary empty writev must not enqueue data after closeWrite");
             assertEquals(urgentQueuedBefore, queueSize(runtime, "urgentQueue"), "ordinary empty writev must not enqueue urgent control after closeWrite");
         }
-    }
-
-    private static Object awaitLastOutbound(SessionRuntime runtime, String name) throws Exception {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-        while (System.nanoTime() < deadlineNanos) {
-            Object outbound = SessionRuntimeTestSupport.outboundQueue(runtime, name).peekLast();
-            if (outbound != null) {
-                return outbound;
-            }
-            Thread.sleep(1L);
-        }
-        throw new AssertionError("timed out waiting for outbound frame");
     }
 }

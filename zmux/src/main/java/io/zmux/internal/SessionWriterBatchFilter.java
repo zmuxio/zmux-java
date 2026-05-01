@@ -15,6 +15,12 @@ final class SessionWriterBatchFilter {
         this.owner = Objects.requireNonNull(owner, "owner");
     }
 
+    private static void removeTail(ArrayList<SessionRuntime.OutboundFrame> batch, int fromIndex, int size) {
+        for (int index = size - 1; index >= fromIndex; --index) {
+            batch.remove(index);
+        }
+    }
+
     List<SessionRuntime.OutboundFrame> filterWritableBatchLocked(List<SessionRuntime.OutboundFrame> batch) {
         if (batch == null || batch.isEmpty()) {
             return Collections.emptyList();
@@ -94,12 +100,6 @@ final class SessionWriterBatchFilter {
             this.owner.notifyLockWaiters();
         }
         return batch;
-    }
-
-    private static void removeTail(ArrayList<SessionRuntime.OutboundFrame> batch, int fromIndex, int size) {
-        for (int index = size - 1; index >= fromIndex; --index) {
-            batch.remove(index);
-        }
     }
 
     private FilterResult filterResultLocked(SessionRuntime.OutboundFrame outboundFrame) {

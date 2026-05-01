@@ -12,9 +12,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
-    private static final ThreadLocal<StreamRuntime> ACTIVE_ASYNC_DRAIN = new ThreadLocal<>();
     static final byte[] EMPTY_BYTES = new byte[0];
-
+    private static final ThreadLocal<StreamRuntime> ACTIVE_ASYNC_DRAIN = new ThreadLocal<>();
     private final SessionRuntime session;
     private final boolean openedLocally;
     private final boolean bidirectional;
@@ -1518,6 +1517,14 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         return halfState.sendFinQueued();
     }
 
+    enum PeerDataAction {
+        ACCEPT,
+        IGNORE,
+        IGNORE_AND_FIN,
+        ABORT_STREAM_STATE,
+        ABORT_STREAM_CLOSED
+    }
+
     private static final class AsyncStreamOperation {
         private final Kind kind;
         private final byte[] payload;
@@ -1698,13 +1705,5 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             WAITING_WRITE_COMPLETION,
             DONE
         }
-    }
-
-    enum PeerDataAction {
-        ACCEPT,
-        IGNORE,
-        IGNORE_AND_FIN,
-        ABORT_STREAM_STATE,
-        ABORT_STREAM_CLOSED
     }
 }

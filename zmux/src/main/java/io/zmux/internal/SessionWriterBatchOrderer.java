@@ -4,11 +4,7 @@ import io.zmux.FrameType;
 import io.zmux.Protocol;
 
 import java.io.IOException;
-import java.util.AbstractList;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.RandomAccess;
+import java.util.*;
 
 final class SessionWriterBatchOrderer {
     private final SessionWriterCoordinator.Owner owner;
@@ -69,13 +65,15 @@ final class SessionWriterBatchOrderer {
     }
 
     ArrayList<SessionRuntime.OutboundFrame> orderOrdinary(List<SessionRuntime.OutboundFrame> batch) {
-        if (batch == null || batch.size() < 2 || this.sameStreamOrdinaryBatchKeepsOrder(batch)) {
+        int size = batch == null ? 0 : batch.size();
+        if (size < 2 || this.sameStreamOrdinaryBatchKeepsOrder(batch, size)) {
             return reusableBatchList(batch);
         }
 
-        this.ordinaryOrderItems.ensureCapacity(batch.size());
+        this.ordinaryOrderItems.ensureCapacity(size);
         int batchIndex = 0;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+        for (int i = 0; i < size; ++i) {
+            SessionRuntime.OutboundFrame outboundFrame = batch.get(i);
             StreamRuntime streamRuntime = outboundFrame.stream();
             long streamId = outboundFrame.frame().streamId();
             boolean streamScoped = streamId != 0L;
@@ -115,7 +113,7 @@ final class SessionWriterBatchOrderer {
         if (order.isIdentity()) {
             return reusableBatchList(batch);
         }
-        boolean identity = order.size() == batch.size();
+        boolean identity = order.size() == size;
         for (int i = 0; i < order.size(); ++i) {
             if (order.indexAt(i) != i) {
                 identity = false;
@@ -130,7 +128,7 @@ final class SessionWriterBatchOrderer {
         this.orderedBatch.ensureCapacity(order.size());
         for (int i = 0; i < order.size(); ++i) {
             int index = order.indexAt(i);
-            if (index < 0 || index >= batch.size()) {
+            if (index < 0 || index >= size) {
                 return reusableBatchList(batch);
             }
             this.orderedBatch.add(batch.get(index));
@@ -140,20 +138,22 @@ final class SessionWriterBatchOrderer {
 
     void clearRetainedBatchRefs() {
         this.orderedBatch.clear();
-        for (OrdinaryBatchOrderer.BatchFrame item : this.ordinaryOrderItems) {
+        int size = this.ordinaryOrderItems.size();
+        for (int i = 0; i < size; ++i) {
+            OrdinaryBatchOrderer.BatchFrame item = this.ordinaryOrderItems.get(i);
             item.reset(0L, false, false, false, 0L, 0L, null);
         }
     }
 
-    private boolean sameStreamOrdinaryBatchKeepsOrder(List<SessionRuntime.OutboundFrame> batch) {
-        if (batch == null || batch.isEmpty()) {
+    private boolean sameStreamOrdinaryBatchKeepsOrder(List<SessionRuntime.OutboundFrame> batch, int size) {
+        if (batch == null || size == 0) {
             return false;
         }
         long streamId = this.ordinaryBatchStreamId(batch.get(0));
         if (streamId == 0L) {
             return false;
         }
-        for (int i = 1; i < batch.size(); ++i) {
+        for (int i = 1; i < size; ++i) {
             if (this.ordinaryBatchStreamId(batch.get(i)) != streamId) {
                 return false;
             }

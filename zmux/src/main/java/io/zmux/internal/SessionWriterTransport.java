@@ -55,11 +55,10 @@ final class SessionWriterTransport {
         return SessionRuntime.saturatingAdd(prefixLength, Math.max(0, outboundFrame.payloadLength()));
     }
 
-    private static long encodedFrameBytes(SessionRuntime.OutboundFrame outboundFrame) {
+    private static long encodedFrameBytes(SessionRuntime.OutboundFrame outboundFrame, long payloadLength) {
         if (outboundFrame == null) {
             return 0L;
         }
-        long payloadLength = SessionWriterTransport.outboundPayloadLength(outboundFrame);
         long frameLength = SessionRuntime.saturatingAdd(
                 1L + SessionWriterTransport.safeVarintLength(outboundFrame.frame().streamId()),
                 payloadLength
@@ -82,6 +81,22 @@ final class SessionWriterTransport {
         } catch (ZmuxException invalid) {
             return 8;
         }
+    }
+
+    private static int gatherSegmentCount(SessionRuntime.OutboundFrame outboundFrame) {
+        if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
+            return FrameEnvelopeCodec.gatherBufferCount(
+                    outboundFrame.payloadPrefix(),
+                    outboundFrame.payloadParts(),
+                    outboundFrame.payloadPartIndex(),
+                    outboundFrame.payloadPartOffset(),
+                    outboundFrame.payloadLength()
+            );
+        }
+        return FrameEnvelopeCodec.gatherBufferCount(
+                outboundFrame.payloadPrefix(),
+                outboundFrame.payloadLength()
+        );
     }
 
     long writeBatch(List<SessionRuntime.OutboundFrame> batch) throws IOException {
@@ -116,7 +131,9 @@ final class SessionWriterTransport {
         byte[] encoded = this.encodedBatchBuffer(metrics.encodedBytes);
         int cursor = 0;
         try {
-            for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            int size = batch.size();
+            for (int i = 0; i < size; ++i) {
+                SessionRuntime.OutboundFrame outboundFrame = batch.get(i);
                 if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
                     cursor += FrameEnvelopeCodec.appendFrame(
                             encoded,
@@ -160,10 +177,13 @@ final class SessionWriterTransport {
         long encodedBytes = 0L;
         long payloadBytes = 0L;
         int gatherSegments = 0;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+        int size = batch.size();
+        for (int i = 0; i < size; ++i) {
+            SessionRuntime.OutboundFrame outboundFrame = batch.get(i);
+            long payloadLength = SessionWriterTransport.outboundPayloadLength(outboundFrame);
             encodedBytes = SessionRuntime.saturatingAdd(
                     encodedBytes,
-                    SessionWriterTransport.encodedFrameBytes(outboundFrame)
+                    SessionWriterTransport.encodedFrameBytes(outboundFrame, payloadLength)
             );
             if (encodedBytes > Integer.MAX_VALUE) {
                 throw FrameCodec.error(
@@ -178,10 +198,7 @@ final class SessionWriterTransport {
             if (gatherSegments < 0) {
                 continue;
             }
-            payloadBytes = SessionRuntime.saturatingAdd(
-                    payloadBytes,
-                    SessionWriterTransport.outboundPayloadLength(outboundFrame)
-            );
+            payloadBytes = SessionRuntime.saturatingAdd(payloadBytes, payloadLength);
             int frameSegments = SessionWriterTransport.gatherSegmentCount(outboundFrame);
             if (frameSegments > MAX_GATHER_SEGMENTS - gatherSegments) {
                 gatherSegments = -1;
@@ -195,22 +212,6 @@ final class SessionWriterTransport {
         return metrics;
     }
 
-    private static int gatherSegmentCount(SessionRuntime.OutboundFrame outboundFrame) {
-        if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
-            return FrameEnvelopeCodec.gatherBufferCount(
-                    outboundFrame.payloadPrefix(),
-                    outboundFrame.payloadParts(),
-                    outboundFrame.payloadPartIndex(),
-                    outboundFrame.payloadPartOffset(),
-                    outboundFrame.payloadLength()
-            );
-        }
-        return FrameEnvelopeCodec.gatherBufferCount(
-                outboundFrame.payloadPrefix(),
-                outboundFrame.payloadLength()
-        );
-    }
-
     private long writeGatheredBatch(OutputStream output,
                                     GatheringByteChannel gatheringOutput,
                                     List<SessionRuntime.OutboundFrame> batch,
@@ -222,7 +223,9 @@ final class SessionWriterTransport {
         boolean handingOffScratch = false;
         try {
             long encoded = 0L;
-            for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            int size = batch.size();
+            for (int i = 0; i < size; ++i) {
+                SessionRuntime.OutboundFrame outboundFrame = batch.get(i);
                 if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
                     encoded = SessionRuntime.saturatingAdd(encoded, FrameEnvelopeCodec.appendFrame(
                             scratch,
@@ -280,6 +283,14 @@ final class SessionWriterTransport {
         return gatherScratch;
     }
 
+    interface Owner {
+        OutputStream output();
+
+        GatheringByteChannel gatheringOutput();
+
+        Limits limits();
+    }
+
     private static final class BatchMetrics {
         private int encodedBytes;
         private long payloadBytes;
@@ -290,13 +301,5 @@ final class SessionWriterTransport {
             payloadBytes = 0L;
             gatherSegments = 0;
         }
-    }
-
-    interface Owner {
-        OutputStream output();
-
-        GatheringByteChannel gatheringOutput();
-
-        Limits limits();
     }
 }
