@@ -97,14 +97,23 @@ final class StreamWriteCoordinator {
     }
 
     void write(byte[] src, int offset, int length, boolean fin) throws IOException {
-        this.write(src, offset, length, fin, true);
+        this.write(src, offset, length, fin, true, SessionRuntime.PayloadOwnership.BORROWED);
+    }
+
+    void writeOwned(byte[] src, int offset, int length, boolean fin) throws IOException {
+        this.write(src, offset, length, fin, true, SessionRuntime.PayloadOwnership.OWNED);
     }
 
     void queueWrite(byte[] src, int offset, int length, boolean fin) throws IOException {
-        this.write(src, offset, length, fin, false);
+        this.write(src, offset, length, fin, false, SessionRuntime.PayloadOwnership.BORROWED);
     }
 
-    private void write(byte[] src, int offset, int length, boolean fin, boolean waitForTransportWrite) throws IOException {
+    private void write(byte[] src,
+                       int offset,
+                       int length,
+                       boolean fin,
+                       boolean waitForTransportWrite,
+                       SessionRuntime.PayloadOwnership payloadOwnership) throws IOException {
         Objects.requireNonNull(src, "src");
         RangeChecks.checkFromIndexSize(offset, length, src.length);
         if (length == 0 && !fin) {
@@ -149,11 +158,28 @@ final class StreamWriteCoordinator {
                     }
 
                     if (openingPending) {
-                        this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, src, position, chunkSize, frameFin, completion);
+                        this.owner.sessionInternal().queueOpeningDataLocked(
+                                this.owner,
+                                openingPrefix,
+                                src,
+                                position,
+                                chunkSize,
+                                frameFin,
+                                payloadOwnership,
+                                completion
+                        );
                         openingPrefix = StreamRuntime.EMPTY_BYTES;
                         openingPending = false;
                     } else {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, src, position, chunkSize, frameFin, completion);
+                        this.owner.sessionInternal().queueDataLocked(
+                                this.owner,
+                                src,
+                                position,
+                                chunkSize,
+                                frameFin,
+                                payloadOwnership,
+                                completion
+                        );
                     }
                     position += chunkSize;
                 }

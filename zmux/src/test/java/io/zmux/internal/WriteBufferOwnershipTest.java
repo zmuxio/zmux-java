@@ -8,6 +8,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.Deque;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -53,6 +56,23 @@ final class WriteBufferOwnershipTest {
         Object outbound = SessionRuntimeTestSupport.pollLastOutboundQueue(runtime, "dataQueue");
         assertNotNull(outbound, "expected post-open DATA to be queued");
         assertEquals("later", new String(SessionRuntimeTestSupport.outboundPayload(outbound), StandardCharsets.UTF_8), "queued post-open payload must not alias the caller buffer");
+    }
+
+    @Test
+    void asyncWriteRetainsPayloadBeforeFutureCompletion() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime stream = (StreamRuntime) runtime.openStream();
+
+        byte[] payload = "async".getBytes(StandardCharsets.UTF_8);
+        CompletionStage<Void> write = stream.writeAsync(payload);
+        payload[0] = 'x';
+
+        Object outbound = awaitLastOutbound(runtime, "dataQueue");
+        assertEquals("async", new String(SessionRuntimeTestSupport.outboundPayload(outbound), StandardCharsets.UTF_8),
+                "async write must not alias the caller buffer before the future completes");
+
+        runtime.closeWithError(0L, "");
+        assertThrows(ExecutionException.class, () -> write.toCompletableFuture().get(1L, TimeUnit.SECONDS));
     }
 
     @Test
@@ -114,5 +134,17 @@ final class WriteBufferOwnershipTest {
             assertEquals(dataQueuedBefore, queueSize(runtime, "dataQueue"), "ordinary empty writev must not enqueue data after closeWrite");
             assertEquals(urgentQueuedBefore, queueSize(runtime, "urgentQueue"), "ordinary empty writev must not enqueue urgent control after closeWrite");
         }
+    }
+
+    private static Object awaitLastOutbound(SessionRuntime runtime, String name) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        while (System.nanoTime() < deadlineNanos) {
+            Object outbound = SessionRuntimeTestSupport.outboundQueue(runtime, name).peekLast();
+            if (outbound != null) {
+                return outbound;
+            }
+            Thread.sleep(1L);
+        }
+        throw new AssertionError("timed out waiting for outbound frame");
     }
 }

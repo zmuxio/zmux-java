@@ -106,6 +106,11 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         this.writeCoordinator.queueWrite(src, offset, length, false);
     }
 
+    private void writeOwnedAsyncPayload(byte[] src, int offset, int length, boolean fin) throws IOException {
+        this.awaitAsyncOperationPredecessors();
+        this.writeCoordinator.writeOwned(src, offset, length, fin);
+    }
+
     @Override
     public int writeFinal(byte[] src, int offset, int length) throws IOException {
         this.awaitAsyncOperationPredecessors();
@@ -1508,11 +1513,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         void run(StreamRuntime owner) throws IOException {
             switch (kind) {
                 case WRITE:
-                    if (fin) {
-                        owner.writeFinal(payload, 0, payload.length);
-                    } else {
-                        owner.write(payload, 0, payload.length);
-                    }
+                    owner.writeOwnedAsyncPayload(payload, 0, payload.length, fin);
                     return;
                 case CLOSE_WRITE:
                     owner.closeWrite();
