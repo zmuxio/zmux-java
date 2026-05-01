@@ -10,6 +10,8 @@ It provides:
 - native ZMux sessions through `ZmuxNativeSession`
 - transport-agnostic stable interfaces: `ZmuxSession`, `ZmuxStream`,
   `ZmuxSendStream`, and `ZmuxRecvStream`
+- optional transport-agnostic async interfaces: `ZmuxAsyncSession`,
+  `ZmuxAsyncStream`, `ZmuxAsyncSendStream`, and `ZmuxAsyncRecvStream`
 - an optional Netty QUIC adapter in
   [`zmux-netty-quic`](zmux-netty-quic/README.md)
 
@@ -105,6 +107,10 @@ Zmux.closedSession();
 Zmux.closedNativeSession();
 Zmux.asSession(session);
 Zmux.asNativeSession(nativeSession);
+ZmuxAsync.session(session);
+ZmuxAsync.stream(stream);
+ZmuxAsync.sendStream(sendStream);
+ZmuxAsync.recvStream(recvStream);
 ```
 
 </details>
@@ -165,6 +171,30 @@ void handle(ZmuxSession session) throws Exception {
     }
 }
 ```
+
+The async surface is optional and transport-agnostic. Use `ZmuxAsync` helpers
+when shared upper-layer code wants async operations and should fail fast if an
+implementation does not expose them:
+
+```java
+import io.zmux.ZmuxAsync;
+import io.zmux.ZmuxAsyncSession;
+
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletionStage;
+
+CompletionStage<Void> sendAsync(ZmuxSession session) {
+    ZmuxAsyncSession async = ZmuxAsync.session(session);
+    return async.openStreamAsync()
+            .thenCompose(stream -> stream.writeFinalAsync(
+                    "hello".getBytes(StandardCharsets.UTF_8)));
+}
+```
+
+`writeAsync(...)` is the async form of `write(...)`: native ZMux completes after
+the writer writes and flushes to the underlying connection; transport adapters
+complete at their native write completion point. Neither form is a peer
+application acknowledgement.
 
 ## Streams
 
@@ -348,6 +378,54 @@ void clearDeadline();
 
 </details>
 
+<details>
+<summary>Async session and stream methods</summary>
+
+Async session methods:
+
+```java
+CompletionStage<ZmuxAsyncStream> openStreamAsync();
+CompletionStage<ZmuxAsyncStream> openStreamAsync(OpenOptions options);
+CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync();
+CompletionStage<ZmuxAsyncSendStream> openUniStreamAsync(OpenOptions options);
+CompletionStage<ZmuxAsyncStream> acceptStreamAsync();
+CompletionStage<ZmuxAsyncRecvStream> acceptUniStreamAsync();
+CompletionStage<Void> closeAsync();
+CompletionStage<Void> closeWithErrorAsync(long code, String reason);
+CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
+```
+
+Async send-side methods:
+
+```java
+CompletionStage<Void> writeAsync(byte[] src);
+CompletionStage<Void> writeAsync(byte[] src, int offset, int length);
+CompletionStage<Void> writeFinalAsync(byte[] src);
+CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length);
+CompletionStage<Void> closeWriteAsync();
+CompletionStage<Void> cancelWriteAsync(long code);
+CompletionStage<Void> cancelWriteAsync(ErrorCode code);
+CompletionStage<Void> closeWithErrorAsync(long code, String reason);
+CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
+```
+
+Async receive-side methods:
+
+```java
+CompletionStage<Void> closeReadAsync();
+CompletionStage<Void> cancelReadAsync(long code);
+CompletionStage<Void> cancelReadAsync(ErrorCode code);
+CompletionStage<Void> closeWithErrorAsync(long code, String reason);
+CompletionStage<Void> closeWithErrorAsync(ErrorCode code, String reason);
+```
+
+`CompletableFuture.cancel()` on a returned stage is not guaranteed to cancel the
+underlying write, close, open, or accept operation. Use stream/session close,
+deadlines, or `cancelReadAsync(...)` / `cancelWriteAsync(...)` for protocol
+state changes.
+
+</details>
+
 ## Metadata And Priority
 
 Both peers must enable the capabilities they use:
@@ -482,7 +560,10 @@ boolean readClosed();   // native receive streams
 boolean writeClosed();  // native send streams
 ```
 
-Adapters only need to implement the stable interfaces.
+Adapters can implement only the stable synchronous interfaces, or also implement
+the `ZmuxAsync*` interfaces when they can expose async operations. Adapter-
+specific async extensions should live in adapter-specific interfaces rather
+than the core stable API.
 
 ## Configuration
 
@@ -645,8 +726,13 @@ implementation tests.
 ## Semantics Notes
 
 - A successful `write(...)`, `writeFinal(...)`, `writevFinal(...)`,
-  `openAndSend(...)`, or `openUniAndSend(...)` means the bytes entered the
-  local ZMux send path; it is not a peer application acknowledgement.
+  `openAndSend(...)`, or `openUniAndSend(...)` means the backend accepted the
+  local write. Native ZMux waits for the writer to write and flush to the
+  underlying connection; transport adapters use their native write completion
+  point. It is not a peer application acknowledgement.
+- A successful `writeAsync(...)` or `writeFinalAsync(...)` has the same write
+  completion meaning as the synchronous write API, delivered through a
+  `CompletionStage`.
 - Payload buffers passed to write/open-and-send methods are not retained after
   the call returns.
 - `closeWrite()` gracefully finishes only the local send half.

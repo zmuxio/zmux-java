@@ -1,7 +1,9 @@
 # zmux-netty-quic
 
 `zmux-netty-quic` wraps an established Netty QUIC `QuicChannel` behind the
-stable `ZmuxSession` API.
+stable `ZmuxSession` API. Wrapped sessions and streams also expose the
+transport-agnostic `ZmuxAsync*` interfaces plus Netty-specific async escape
+hatches.
 
 It is an adapter over QUIC streams. It does not create QUIC connections and it
 does not expose the native ZMux wire-session API such as `ZmuxNativeSession`,
@@ -87,6 +89,23 @@ try (ZmuxSession session = NettyQuic.wrapSession(channel, options);
 Call blocking ZMux APIs from application or worker threads, not from the Netty
 event loop.
 
+Use the async surface when shared upper-layer code should not block the caller:
+
+```java
+import io.zmux.ZmuxAsync;
+import io.zmux.ZmuxAsyncSession;
+
+import java.nio.charset.StandardCharsets;
+
+ZmuxAsyncSession async = ZmuxAsync.session(session);
+async.openStreamAsync()
+        .thenCompose(stream -> stream.writeFinalAsync("hello".getBytes(StandardCharsets.UTF_8)));
+```
+
+`writeAsync(...)` completes when the Netty QUIC write primitive accepts or
+rejects the data. It does not mean the peer received or acknowledged the
+stream bytes.
+
 ## Constructors
 
 ```java
@@ -156,6 +175,42 @@ Wrapped streams expose the stable `ZmuxStream`, `ZmuxSendStream`, and
 - `closeRead()`, `cancelRead(...)`, `closeWrite()`, `cancelWrite(...)`, and
   `closeWithError(...)`
 - read and write deadline helpers
+
+The same wrapped objects also implement the optional core async interfaces:
+
+- `ZmuxAsyncSession`: `openStreamAsync(...)`, `openUniStreamAsync(...)`,
+  `acceptStreamAsync()`, `acceptUniStreamAsync()`, `closeAsync()`, and
+  `closeWithErrorAsync(...)`
+- `ZmuxAsyncStream`, `ZmuxAsyncSendStream`, and `ZmuxAsyncRecvStream`:
+  async write, close, cancel, and stream-error operations
+
+Netty-specific async extensions are available through
+`NettyQuicAsyncSession`, `NettyQuicAsyncStream`, `NettyQuicAsyncSendStream`,
+and `NettyQuicAsyncRecvStream`:
+
+```java
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFuture;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.zmux.ZmuxAsync;
+import io.zmux.ZmuxAsyncStream;
+import io.zmux.adapter.quic.netty.NettyQuicAsyncSendStream;
+import io.zmux.adapter.quic.netty.NettyQuicAsyncSession;
+
+import java.nio.charset.StandardCharsets;
+
+NettyQuicAsyncSession nettySession = (NettyQuicAsyncSession) ZmuxAsync.session(session);
+QuicChannel rawChannel = nettySession.unsafeQuicChannel();
+
+ZmuxAsyncStream asyncStream = nettySession.openStreamAsync().toCompletableFuture().join();
+NettyQuicAsyncSendStream nettyStream = (NettyQuicAsyncSendStream) asyncStream;
+ByteBuf byteBuf = rawChannel.alloc().buffer().writeBytes("hello".getBytes(StandardCharsets.UTF_8));
+ChannelFuture future = nettyStream.writeNettyAsync(byteBuf);
+```
+
+`writeNettyAsync(...)` and `writeFinalNettyAsync(...)` still run through the
+adapter stream state, but return Netty `ChannelFuture` values. The `unsafe*`
+methods expose raw Netty channels for advanced integration.
 
 ## Mapping
 
