@@ -612,12 +612,9 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             if (currentHalf != null) {
                 currentHalf.setReadDeadline(snapshot.deadline);
             }
-            if (completeResume(paused, true, currentHalf != null, snapshot.generation, new ResumeCommit() {
-                @Override
-                public void commit() {
-                    inputHalf = paused.current;
-                    inputPaused = false;
-                }
+            if (completeResume(paused, true, currentHalf != null, snapshot.generation, () -> {
+                inputHalf = paused.current;
+                inputPaused = false;
             })) {
                 return;
             }
@@ -634,13 +631,10 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             if (currentHalf != null) {
                 currentHalf.setWriteDeadline(snapshot.deadline);
             }
-            if (completeResume(paused, false, currentHalf != null, snapshot.generation, new ResumeCommit() {
-                @Override
-                public void commit() {
-                    outputHalf = paused.current;
-                    gatheringOutput = paused.gathering;
-                    outputPaused = false;
-                }
+            if (completeResume(paused, false, currentHalf != null, snapshot.generation, () -> {
+                outputHalf = paused.current;
+                gatheringOutput = paused.gathering;
+                outputPaused = false;
             })) {
                 return;
             }
