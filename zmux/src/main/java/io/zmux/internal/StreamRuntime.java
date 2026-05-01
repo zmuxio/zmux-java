@@ -369,9 +369,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
                     return AsyncSupport.failed(admissionError);
                 }
                 asyncOperations.addLast(operation);
-                if (writeDeadlineNanos != 0L) {
-                    operation.scheduleDeadlineCheck(this, 0L);
-                }
+                scheduleAsyncDeadlineCheckLocked(operation);
                 scheduleAsyncOperationDrainLocked();
             }
         } catch (Throwable failure) {
@@ -443,7 +441,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         }
         completion.onComplete(() -> AsyncSupport.execute(() -> finishAsyncWriteOperation(operation, completion)));
         synchronized (session.lock()) {
-            operation.scheduleDeadlineCheck(this, 0L);
+            scheduleAsyncDeadlineCheckLocked(operation);
         }
         return true;
     }
@@ -516,10 +514,19 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             return;
         }
         for (AsyncStreamOperation operation : asyncOperations) {
-            if (operation.needsDeadlineCheck()) {
-                operation.scheduleDeadlineCheck(this, 0L);
-            }
+            scheduleAsyncDeadlineCheckLocked(operation);
         }
+    }
+
+    private void scheduleAsyncDeadlineCheckLocked(AsyncStreamOperation operation) {
+        if (!operation.needsDeadlineCheck()) {
+            return;
+        }
+        long remainingNanos = remainingWriteDeadlineNanosLocked();
+        if (remainingNanos == 0L) {
+            return;
+        }
+        operation.scheduleDeadlineCheck(this, Math.max(0L, remainingNanos));
     }
 
     private void checkAsyncOperationDeadline(AsyncStreamOperation operation, int scheduleGeneration) {

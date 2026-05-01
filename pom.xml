@@ -82,16 +82,16 @@
                 <version>3.15.0</version>
                 <configuration>
                     <!--
-                      Keep the compiler plugin's source-change tracker enabled.
-                      In maven-compiler-plugin 3.x, disabling it means "compile
-                      only sources newer than their class files", which can
-                      leave target/classes as a partial snapshot after single
-                      source edits. The enabled mode recompiles the module when
-                      sources were added, removed, or changed, which is the
-                      stable behavior this reactor needs on Windows.
+                      Keep the compiler plugin's source-change tracker enabled:
+                      disabling it in maven-compiler-plugin 3.x can leave
+                      target/classes as a partial snapshot after source edits.
+                      Use an external javac process as well; on Windows the
+                      in-process compiler can intermittently make class files
+                      unavailable between compile and testCompile in repeated
+                      local runs.
                      -->
                     <useIncrementalCompilation>true</useIncrementalCompilation>
-                    <fork>false</fork>
+                    <fork>true</fork>
                 </configuration>
             </plugin>
             <plugin>
@@ -100,13 +100,12 @@
                 <version>${maven.surefire.version}</version>
                 <configuration>
                     <!--
-                      Keep forked test isolation, but run tests from the fork
-                      process system classloader. The runtime starts reader /
-                      writer worker threads that lazily resolve nested helper
+                      Default to forked test isolation, but run tests from the
+                      fork process system classloader. The runtime starts reader
+                      / writer worker threads that lazily resolve nested helper
                       classes; Surefire's isolated loader is not stable enough
-                      for that on this Windows/JDK/Maven combination. Keep the
-                      manifest-only jar disabled so the fork still receives an
-                      explicit classpath.
+                      for that. Keep the manifest-only jar disabled so the fork
+                      still receives an explicit classpath.
                      -->
                     <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
                     <forkCount>${surefire.forkCount}</forkCount>
