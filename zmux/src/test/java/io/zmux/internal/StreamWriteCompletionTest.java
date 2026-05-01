@@ -205,6 +205,31 @@ final class StreamWriteCompletionTest {
     }
 
     @Test
+    void writeAsyncDeadlineExtendedAfterQueueAdmissionDoesNotUseStaleTimeout() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = null;
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            stream.setWriteTimeout(Duration.ofMillis(100L));
+
+            CompletionStage<Void> write = stream.writeAsync("x".getBytes(StandardCharsets.UTF_8));
+            waitUntilQueued(runtime);
+
+            stream.setWriteTimeout(Duration.ofSeconds(2L));
+
+            assertFalse(write.toCompletableFuture().isDone(), "writeAsync should still be waiting after deadline extension");
+            Thread.sleep(250L);
+            assertFalse(write.toCompletableFuture().isDone(), "old deadline check must not complete the async write");
+
+            writer = startWriter(runtime);
+            write.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+        } finally {
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
     void writeTimeoutAfterQueueAdmissionCancelsQueuedWriteBeforeWriterOwnsIt() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         SessionRuntime runtime = newRuntime(output);

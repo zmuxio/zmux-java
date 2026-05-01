@@ -523,11 +523,14 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         }
     }
 
-    private void checkAsyncOperationDeadline(AsyncStreamOperation operation) {
+    private void checkAsyncOperationDeadline(AsyncStreamOperation operation, int scheduleGeneration) {
         boolean removed = false;
         StreamWriteCompletion completionToFail = null;
         IOException timeout = null;
         synchronized (session.lock()) {
+            if (!operation.consumeScheduledDeadlineCheck(scheduleGeneration)) {
+                return;
+            }
             if (!operation.needsDeadlineCheck()) {
                 return;
             }
@@ -1507,6 +1510,9 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         private State state = State.QUEUED;
         private StreamWriteCompletion writeCompletion;
         private boolean writeDeadlineCancellationAttempted;
+        private boolean deadlineCheckScheduled;
+        private long scheduledDeadlineCheckNanos;
+        private int deadlineCheckGeneration;
 
         private AsyncStreamOperation(Kind kind, byte[] payload, boolean fin, long code, String reason, long admissionBytes) {
             this.kind = kind;
@@ -1576,6 +1582,8 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
 
         void markDone() {
             state = State.DONE;
+            deadlineCheckGeneration++;
+            deadlineCheckScheduled = false;
         }
 
         void markWaitingForWriteCompletion(StreamWriteCompletion completion) {
@@ -1595,7 +1603,26 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         }
 
         void scheduleDeadlineCheck(StreamRuntime owner, long delayNanos) {
-            AsyncSupport.schedule(() -> owner.checkAsyncOperationDeadline(this), delayNanos);
+            if (!needsDeadlineCheck()) {
+                return;
+            }
+            long normalizedDelay = Math.max(0L, delayNanos);
+            long scheduleNanos = SessionRuntime.saturatingAdd(System.nanoTime(), normalizedDelay);
+            if (deadlineCheckScheduled && scheduledDeadlineCheckNanos <= scheduleNanos) {
+                return;
+            }
+            deadlineCheckScheduled = true;
+            scheduledDeadlineCheckNanos = scheduleNanos;
+            int scheduleGeneration = ++deadlineCheckGeneration;
+            AsyncSupport.schedule(() -> owner.checkAsyncOperationDeadline(this, scheduleGeneration), normalizedDelay);
+        }
+
+        boolean consumeScheduledDeadlineCheck(int scheduleGeneration) {
+            if (scheduleGeneration != deadlineCheckGeneration) {
+                return false;
+            }
+            deadlineCheckScheduled = false;
+            return true;
         }
 
         boolean run(StreamRuntime owner) throws IOException {
