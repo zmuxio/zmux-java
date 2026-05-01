@@ -464,7 +464,6 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             operation.markDone();
             unregisterWriteCompletionWaiterLocked(completion);
             releaseAsyncOperationAdmissionLocked(operation);
-            notifyLockWaitersLocked();
         }
         operation.complete(failure);
         synchronized (session.lock()) {
