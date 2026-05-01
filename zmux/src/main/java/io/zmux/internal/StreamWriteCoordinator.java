@@ -226,6 +226,25 @@ final class StreamWriteCoordinator {
 
     private int writev(byte[][] parts, boolean fin, boolean waitForTransportWrite) throws IOException {
         Objects.requireNonNull(parts, "parts");
+        if (parts.length == 1) {
+            byte[] singlePart = Objects.requireNonNull(parts[0], "parts[0]");
+            if (singlePart.length == 0 && !fin) {
+                return 0;
+            }
+            StreamWriteCompletion completion = this.enqueueWrite(
+                    singlePart,
+                    0,
+                    singlePart.length,
+                    fin,
+                    waitForTransportWrite,
+                    SessionRuntime.PayloadOwnership.BORROWED
+            );
+            if (completion != null) {
+                this.awaitTransportWrite(completion);
+            }
+            return singlePart.length;
+        }
+
         int totalLength = StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
         if (totalLength == 0 && !fin) {
             return 0;

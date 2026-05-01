@@ -85,7 +85,10 @@ public final class StreamIoSupport {
         Objects.requireNonNull(parts, "parts");
         int total = 0;
         for (int i = 0; i < parts.length; i++) {
-            byte[] part = Objects.requireNonNull(parts[i], "parts[" + i + "]");
+            byte[] part = parts[i];
+            if (part == null) {
+                throw new NullPointerException("parts[" + i + "]");
+            }
             if (part.length > Integer.MAX_VALUE - total) {
                 throw multipartWriteTooLarge(operation);
             }

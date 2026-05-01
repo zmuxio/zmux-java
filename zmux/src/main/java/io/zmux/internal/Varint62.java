@@ -2,6 +2,7 @@ package io.zmux.internal;
 
 import io.zmux.*;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -200,7 +201,7 @@ public final class Varint62 {
     }
 
     static Decoded read(FrameCodec.Decoder input) throws IOException {
-        int first = input.readByte();
+        int first = readRequiredByte(input);
         int prefix = first >>> 6;
         int length = 1 << prefix;
         long value;
@@ -209,24 +210,24 @@ public final class Varint62 {
                 value = first & 0x3fL;
                 break;
             case 2:
-                value = ((first & 0x3fL) << 8) | input.readByte();
+                value = ((first & 0x3fL) << 8) | readRequiredByte(input);
                 break;
             case 4:
                 value = ((first & 0x3fL) << 24)
-                        | ((long) input.readByte() << 16)
-                        | ((long) input.readByte() << 8)
-                        | input.readByte();
+                        | ((long) readRequiredByte(input) << 16)
+                        | ((long) readRequiredByte(input) << 8)
+                        | readRequiredByte(input);
                 break;
             case 8:
                 value = decodeEightByteValue(
                         first,
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte(),
-                        input.readByte()
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input),
+                        readRequiredByte(input)
                 );
                 break;
             default:
@@ -244,6 +245,14 @@ public final class Varint62 {
             throw error("read varint62", "truncated varint62", null);
         }
         return next & 0xff;
+    }
+
+    private static int readRequiredByte(FrameCodec.Decoder input) throws IOException {
+        try {
+            return input.readByte();
+        } catch (EOFException eof) {
+            throw error("read varint62", "truncated varint62", eof);
+        }
     }
 
     static long decodeEightByteValue(int first, int b1, int b2, int b3, int b4, int b5, int b6, int b7) {

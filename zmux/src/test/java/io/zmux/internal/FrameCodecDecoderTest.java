@@ -67,6 +67,29 @@ final class FrameCodecDecoderTest {
     }
 
     @Test
+    void decoderPrefacePartialVarintSurfacesProtocolTruncation() {
+        byte[] bytes = new byte[]{
+                'Z',
+                'M',
+                'U',
+                'X',
+                Protocol.PREFACE_VERSION,
+                (byte) Role.INITIATOR.code(),
+                0x40
+        };
+        FrameCodec.Decoder decoder = FrameCodec.decoder(new ByteArrayInputStream(bytes));
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                decoder::readPreface
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "partial preface varint must be a protocol error");
+        assertEquals("truncated varint62", error.getMessage(), "partial preface varint message mismatch");
+        assertEquals(ZmuxErrorSource.REMOTE, error.source(), "partial preface varint source mismatch");
+        assertEquals(ZmuxErrorDirection.READ, error.direction(), "partial preface varint direction mismatch");
+    }
+
+    @Test
     void decoderTruncatedFrameBodySurfacesProtocolTruncation() throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         Varint62.write(bytes, 3L);

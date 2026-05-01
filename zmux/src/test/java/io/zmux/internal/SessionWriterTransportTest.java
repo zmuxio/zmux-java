@@ -1,9 +1,11 @@
 package io.zmux.internal;
 
+import io.zmux.ErrorCode;
 import io.zmux.FrameType;
 import io.zmux.Limits;
 import io.zmux.Protocol;
 import io.zmux.Settings;
+import io.zmux.ZmuxException;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -168,6 +170,35 @@ final class SessionWriterTransportTest {
         );
         assertEquals(FrameType.DATA, decoded.type(), "decoded frame type mismatch");
         assertEquals("hello", new String(decoded.payload(), StandardCharsets.UTF_8), "decoded payload mismatch");
+    }
+
+    @Test
+    void writeBatchRejectsNegativePayloadLengthBeforeEncoding() {
+        RecordingOutputStream output = new RecordingOutputStream();
+        SessionWriterTransport transport = new SessionWriterTransport(new TestOwner(output));
+        SessionRuntime.OutboundFrame outbound = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.DATA, 0, 1L, new byte[0]),
+                null,
+                0,
+                false,
+                false,
+                null,
+                new byte[0],
+                0,
+                -1,
+                null,
+                0,
+                0
+        );
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> transport.writeBatch(Collections.singletonList(outbound))
+        );
+
+        assertEquals(ErrorCode.INTERNAL.code(), error.code(), "invalid queued payload length must be an internal error");
+        assertEquals("negative outbound payload length", error.getMessage(), "invalid queued payload message mismatch");
+        assertEquals(0, output.size(), "invalid queued payload must not write partial bytes");
     }
 
     @Test

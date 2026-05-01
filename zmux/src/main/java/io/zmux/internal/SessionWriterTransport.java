@@ -47,23 +47,19 @@ final class SessionWriterTransport {
                 && outboundFrame.payloadLength() > 0;
     }
 
-    private static long outboundPayloadLength(SessionRuntime.OutboundFrame outboundFrame) {
-        if (outboundFrame == null) {
-            return 0L;
+    private static long outboundPayloadLength(SessionRuntime.OutboundFrame outboundFrame) throws IOException {
+        requireOutboundFrame(outboundFrame);
+        if (outboundFrame.payloadLength() < 0) {
+            throw FrameCodec.error(ErrorCode.INTERNAL, "write batch", "negative outbound payload length");
         }
         int prefixLength = outboundFrame.payloadPrefix() == null ? 0 : outboundFrame.payloadPrefix().length;
-        return SessionRuntime.saturatingAdd(prefixLength, Math.max(0, outboundFrame.payloadLength()));
+        return (long) prefixLength + outboundFrame.payloadLength();
     }
 
-    private static long encodedFrameBytes(SessionRuntime.OutboundFrame outboundFrame, long payloadLength) {
-        if (outboundFrame == null) {
-            return 0L;
-        }
-        long frameLength = SessionRuntime.saturatingAdd(
-                1L + SessionWriterTransport.safeVarintLength(outboundFrame.frame().streamId()),
-                payloadLength
-        );
-        return SessionRuntime.saturatingAdd(frameLength, SessionWriterTransport.safeVarintLength(frameLength));
+    private static long encodedFrameBytes(SessionRuntime.OutboundFrame outboundFrame, long payloadLength) throws IOException {
+        FrameCodec.Frame frame = requireOutboundFrame(outboundFrame);
+        long frameLength = FrameEnvelopeCodec.frameLength(frame.streamId(), payloadLength);
+        return frameLength + Varint62.length(frameLength);
     }
 
     private static boolean gatherSegmentDensityOk(long payloadBytes, int segmentCount) {
@@ -75,12 +71,11 @@ final class SessionWriterTransport {
                 && gatherSegmentDensityOk(payloadBytes, segmentCount);
     }
 
-    private static int safeVarintLength(long value) {
-        try {
-            return Varint62.length(value);
-        } catch (ZmuxException invalid) {
-            return 8;
+    private static FrameCodec.Frame requireOutboundFrame(SessionRuntime.OutboundFrame outboundFrame) throws IOException {
+        if (outboundFrame == null || outboundFrame.frame() == null) {
+            throw FrameCodec.error(ErrorCode.INTERNAL, "write batch", "queued outbound frame is missing");
         }
+        return outboundFrame.frame();
     }
 
     private static int gatherSegmentCount(SessionRuntime.OutboundFrame outboundFrame) {

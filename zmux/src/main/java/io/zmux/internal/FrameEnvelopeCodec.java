@@ -22,6 +22,10 @@ final class FrameEnvelopeCodec {
     private static final int MAX_RETAINED_GATHER_SCRATCH_BUFFERS = 2048;
     private static final int GATHER_INLINE_PREFIX_BYTES = 256;
     private static final int GATHER_INLINE_CONTROL_PAYLOAD_BYTES = 128;
+    private static final FrameByteReader<InputStream> INPUT_STREAM_FRAME_BYTE_READER =
+            FrameEnvelopeCodec::readRequiredFrameByte;
+    private static final FrameByteReader<FrameCodec.Decoder> DECODER_FRAME_BYTE_READER =
+            FrameEnvelopeCodec::readRequiredFrameByte;
 
     private FrameEnvelopeCodec() {
     }
@@ -729,38 +733,41 @@ final class FrameEnvelopeCodec {
     private static Varint62.Decoded readStreamId(InputStream input, long frameLength) throws IOException {
         int first = readRequiredFrameByte(input);
         int length = validatedStreamIdLength(first, frameLength);
-        long value = readStreamIdValue(input, false, first, length);
+        long value = readStreamIdValue(input, INPUT_STREAM_FRAME_BYTE_READER, first, length);
         return decodedStreamId(value, length);
     }
 
     private static Varint62.Decoded readStreamId(FrameCodec.Decoder input, long frameLength) throws IOException {
         int first = readRequiredFrameByte(input);
         int length = validatedStreamIdLength(first, frameLength);
-        long value = readStreamIdValue(input, true, first, length);
+        long value = readStreamIdValue(input, DECODER_FRAME_BYTE_READER, first, length);
         return decodedStreamId(value, length);
     }
 
-    private static long readStreamIdValue(Object input, boolean decoderInput, int first, int length) throws IOException {
+    private static <T> long readStreamIdValue(T input,
+                                              FrameByteReader<T> reader,
+                                              int first,
+                                              int length) throws IOException {
         switch (length) {
             case 1:
                 return first & 0x3fL;
             case 2:
-                return ((first & 0x3fL) << 8) | readRequiredFrameByte(input, decoderInput);
+                return ((first & 0x3fL) << 8) | reader.read(input);
             case 4:
                 return ((first & 0x3fL) << 24)
-                        | ((long) readRequiredFrameByte(input, decoderInput) << 16)
-                        | ((long) readRequiredFrameByte(input, decoderInput) << 8)
-                        | readRequiredFrameByte(input, decoderInput);
+                        | ((long) reader.read(input) << 16)
+                        | ((long) reader.read(input) << 8)
+                        | reader.read(input);
             case 8:
                 return Varint62.decodeEightByteValue(
                         first,
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput),
-                        readRequiredFrameByte(input, decoderInput)
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input)
                 );
             default:
                 throw new IllegalStateException("unsupported stream_id length " + length);
@@ -794,18 +801,17 @@ final class FrameEnvelopeCodec {
         return next & 0xff;
     }
 
-    private static int readRequiredFrameByte(Object input, boolean decoderInput) throws IOException {
-        return decoderInput
-                ? readRequiredFrameByte((FrameCodec.Decoder) input)
-                : readRequiredFrameByte((InputStream) input);
-    }
-
     private static int readRequiredVarintByte(FrameCodec.Decoder input) throws IOException {
         try {
             return input.readByte();
         } catch (EOFException eof) {
             throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "truncated varint62", eof);
         }
+    }
+
+    @FunctionalInterface
+    private interface FrameByteReader<T> {
+        int read(T input) throws IOException;
     }
 
     private static int readRequiredFrameByte(FrameCodec.Decoder input) throws IOException {

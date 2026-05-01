@@ -61,7 +61,11 @@ final class InboundPayloadPool {
             if (retainedBytes > maxRetainedBytes - length) {
                 return;
             }
-            ArrayDeque<byte[]> free = freeByLength.computeIfAbsent(length, ignored -> new ArrayDeque<>());
+            ArrayDeque<byte[]> free = freeByLength.get(length);
+            if (free == null) {
+                free = new ArrayDeque<>();
+                freeByLength.put(length, free);
+            }
             if (free.size() >= maxRetainedPerLength) {
                 return;
             }

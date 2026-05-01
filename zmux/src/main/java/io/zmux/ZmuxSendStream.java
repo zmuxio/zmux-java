@@ -78,6 +78,9 @@ public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
 
     default int writevFinal(byte[]... parts) throws IOException {
         Objects.requireNonNull(parts, "parts");
+        if (parts.length == 1) {
+            return writeFinal(Objects.requireNonNull(parts[0], "parts[0]"));
+        }
         if (parts.length == 0) {
             return writeFinal(DeadlineSupport.EMPTY_BYTES);
         }
