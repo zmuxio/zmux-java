@@ -205,6 +205,36 @@ final class StreamWriteCompletionTest {
     }
 
     @Test
+    void writeAsyncSetDeadlineShortenedAfterQueueAdmissionCancelsQueuedWrite() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            CompletionStage<Void> write = stream.writeAsync("x".getBytes(StandardCharsets.UTF_8));
+
+            waitUntilQueued(runtime);
+            assertFalse(write.toCompletableFuture().isDone(), "writeAsync should wait for transport completion");
+
+            stream.setDeadline(Instant.now());
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> write.toCompletableFuture().get(1L, TimeUnit.SECONDS),
+                    "shortened stream deadline should cancel the queued async write"
+            );
+            assertTrue(failure.getCause() instanceof WriteTimeoutException,
+                    "queued async write should return the new timeout");
+            synchronized (runtime.lock()) {
+                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
+                assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
+                assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
+            }
+        } finally {
+            closeRuntime(runtime, null);
+        }
+    }
+
+    @Test
     void writeAsyncDeadlineExtendedAfterQueueAdmissionDoesNotUseStaleTimeout() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         SessionRuntime runtime = newRuntime(output);

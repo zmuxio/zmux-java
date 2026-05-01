@@ -179,6 +179,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             }
             if (readChanged && writeChanged) {
                 notifyStreamWaitersOnlyLocked();
+                scheduleAsyncDeadlineChecksLocked();
             } else if (readChanged) {
                 notifyReadWaitersLocked();
             } else if (writeChanged) {
@@ -510,23 +511,35 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
     }
 
     private void scheduleAsyncDeadlineChecksLocked() {
-        if (asyncOperations.isEmpty()) {
-            return;
-        }
-        for (AsyncStreamOperation operation : asyncOperations) {
-            scheduleAsyncDeadlineCheckLocked(operation);
-        }
-    }
-
-    private void scheduleAsyncDeadlineCheckLocked(AsyncStreamOperation operation) {
-        if (!operation.needsDeadlineCheck()) {
+        if (asyncOperations.isEmpty() || writeDeadlineNanos == 0L) {
             return;
         }
         long remainingNanos = remainingWriteDeadlineNanosLocked();
         if (remainingNanos == 0L) {
             return;
         }
-        operation.scheduleDeadlineCheck(this, Math.max(0L, remainingNanos));
+        long delayNanos = Math.max(0L, remainingNanos);
+        for (AsyncStreamOperation operation : asyncOperations) {
+            scheduleAsyncDeadlineCheckLocked(operation, delayNanos);
+        }
+    }
+
+    private void scheduleAsyncDeadlineCheckLocked(AsyncStreamOperation operation) {
+        if (writeDeadlineNanos == 0L) {
+            return;
+        }
+        long remainingNanos = remainingWriteDeadlineNanosLocked();
+        if (remainingNanos == 0L) {
+            return;
+        }
+        scheduleAsyncDeadlineCheckLocked(operation, Math.max(0L, remainingNanos));
+    }
+
+    private void scheduleAsyncDeadlineCheckLocked(AsyncStreamOperation operation, long delayNanos) {
+        if (!operation.needsDeadlineCheck()) {
+            return;
+        }
+        operation.scheduleDeadlineCheck(this, delayNanos);
     }
 
     private void checkAsyncOperationDeadline(AsyncStreamOperation operation, int scheduleGeneration) {

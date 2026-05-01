@@ -17,6 +17,7 @@ final class SessionWriterTransport {
     private static final int MAX_RETAINED_ENCODED_BATCH_BYTES =
             (int) Math.min(Integer.MAX_VALUE, MAX_BATCH_FRAMES * Settings.defaults().maxFramePayload());
     private final Owner owner;
+    private final BatchMetrics batchMetrics = new BatchMetrics();
     private byte[] encodedBatchScratch = EMPTY_BYTES;
     private FrameEnvelopeCodec.GatherScratch gatherScratch;
 
@@ -66,58 +67,6 @@ final class SessionWriterTransport {
         return SessionRuntime.saturatingAdd(frameLength, SessionWriterTransport.safeVarintLength(frameLength));
     }
 
-    private static int encodedBatchBytes(List<SessionRuntime.OutboundFrame> batch) throws IOException {
-        long total = 0L;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-            total = SessionRuntime.saturatingAdd(total, SessionWriterTransport.encodedFrameBytes(outboundFrame));
-            if (total > Integer.MAX_VALUE) {
-                throw FrameCodec.error(
-                        ErrorCode.FRAME_SIZE,
-                        "write batch",
-                        "encoded batch exceeds Java implementation limit"
-                );
-            }
-        }
-        return (int) total;
-    }
-
-    private static long batchPayloadBytes(List<SessionRuntime.OutboundFrame> batch) {
-        long total = 0L;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-            total = SessionRuntime.saturatingAdd(total, SessionWriterTransport.outboundPayloadLength(outboundFrame));
-        }
-        return total;
-    }
-
-    private static int gatherSegmentCount(List<SessionRuntime.OutboundFrame> batch, int maxSegments) {
-        if (maxSegments < 0) {
-            return -1;
-        }
-        int segments = 0;
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-            int frameSegments;
-            if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
-                frameSegments = FrameEnvelopeCodec.gatherBufferCount(
-                        outboundFrame.payloadPrefix(),
-                        outboundFrame.payloadParts(),
-                        outboundFrame.payloadPartIndex(),
-                        outboundFrame.payloadPartOffset(),
-                        outboundFrame.payloadLength()
-                );
-            } else {
-                frameSegments = FrameEnvelopeCodec.gatherBufferCount(
-                        outboundFrame.payloadPrefix(),
-                        outboundFrame.payloadLength()
-                );
-            }
-            if (frameSegments > maxSegments - segments) {
-                return -1;
-            }
-            segments += frameSegments;
-        }
-        return segments;
-    }
-
     private static boolean gatherSegmentDensityOk(long payloadBytes, int segmentCount) {
         return segmentCount > 0 && payloadBytes / segmentCount >= MIN_GATHER_PAYLOAD_BYTES_PER_SEGMENT;
     }
@@ -155,18 +104,16 @@ final class SessionWriterTransport {
     private long writeEncodedBatch(OutputStream output,
                                    List<SessionRuntime.OutboundFrame> batch,
                                    Limits limits) throws IOException {
-        int batchBytes = SessionWriterTransport.encodedBatchBytes(batch);
         GatheringByteChannel gatheringOutput = this.owner.gatheringOutput();
-        if (gatheringOutput != null && gatheringOutput.isOpen()) {
-            int gatherSegments = SessionWriterTransport.gatherSegmentCount(batch, MAX_GATHER_SEGMENTS);
-            if (gatherSegments > 0 && SessionWriterTransport.useGatheredBatch(
-                    SessionWriterTransport.batchPayloadBytes(batch),
-                    gatherSegments
-            )) {
-                return this.writeGatheredBatch(output, gatheringOutput, batch, limits, batchBytes, gatherSegments);
+        boolean gatherCandidate = gatheringOutput != null && gatheringOutput.isOpen();
+        BatchMetrics metrics = this.batchMetrics(batch, gatherCandidate);
+        if (gatherCandidate) {
+            if (metrics.gatherSegments > 0
+                    && SessionWriterTransport.useGatheredBatch(metrics.payloadBytes, metrics.gatherSegments)) {
+                return this.writeGatheredBatch(output, gatheringOutput, batch, limits, metrics.encodedBytes, metrics.gatherSegments);
             }
         }
-        byte[] encoded = this.encodedBatchBuffer(batchBytes);
+        byte[] encoded = this.encodedBatchBuffer(metrics.encodedBytes);
         int cursor = 0;
         try {
             for (SessionRuntime.OutboundFrame outboundFrame : batch) {
@@ -195,7 +142,7 @@ final class SessionWriterTransport {
                     );
                 }
             }
-            if (cursor != batchBytes) {
+            if (cursor != metrics.encodedBytes) {
                 throw FrameCodec.error(ErrorCode.INTERNAL, "write batch", "encoded batch length mismatch");
             }
             output.write(encoded, 0, cursor);
@@ -203,7 +150,65 @@ final class SessionWriterTransport {
             this.trimEncodedBatchBuffer();
         }
         output.flush();
-        return batchBytes;
+        return metrics.encodedBytes;
+    }
+
+    private BatchMetrics batchMetrics(List<SessionRuntime.OutboundFrame> batch,
+                                      boolean gatherCandidate) throws IOException {
+        BatchMetrics metrics = this.batchMetrics;
+        metrics.reset();
+        long encodedBytes = 0L;
+        long payloadBytes = 0L;
+        int gatherSegments = 0;
+        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            encodedBytes = SessionRuntime.saturatingAdd(
+                    encodedBytes,
+                    SessionWriterTransport.encodedFrameBytes(outboundFrame)
+            );
+            if (encodedBytes > Integer.MAX_VALUE) {
+                throw FrameCodec.error(
+                        ErrorCode.FRAME_SIZE,
+                        "write batch",
+                        "encoded batch exceeds Java implementation limit"
+                );
+            }
+            if (!gatherCandidate) {
+                continue;
+            }
+            if (gatherSegments < 0) {
+                continue;
+            }
+            payloadBytes = SessionRuntime.saturatingAdd(
+                    payloadBytes,
+                    SessionWriterTransport.outboundPayloadLength(outboundFrame)
+            );
+            int frameSegments = SessionWriterTransport.gatherSegmentCount(outboundFrame);
+            if (frameSegments > MAX_GATHER_SEGMENTS - gatherSegments) {
+                gatherSegments = -1;
+            } else {
+                gatherSegments += frameSegments;
+            }
+        }
+        metrics.encodedBytes = (int) encodedBytes;
+        metrics.payloadBytes = payloadBytes;
+        metrics.gatherSegments = gatherSegments;
+        return metrics;
+    }
+
+    private static int gatherSegmentCount(SessionRuntime.OutboundFrame outboundFrame) {
+        if (SessionWriterTransport.hasPayloadParts(outboundFrame)) {
+            return FrameEnvelopeCodec.gatherBufferCount(
+                    outboundFrame.payloadPrefix(),
+                    outboundFrame.payloadParts(),
+                    outboundFrame.payloadPartIndex(),
+                    outboundFrame.payloadPartOffset(),
+                    outboundFrame.payloadLength()
+            );
+        }
+        return FrameEnvelopeCodec.gatherBufferCount(
+                outboundFrame.payloadPrefix(),
+                outboundFrame.payloadLength()
+        );
     }
 
     private long writeGatheredBatch(OutputStream output,
@@ -273,6 +278,18 @@ final class SessionWriterTransport {
             gatherScratch = new FrameEnvelopeCodec.GatherScratch();
         }
         return gatherScratch;
+    }
+
+    private static final class BatchMetrics {
+        private int encodedBytes;
+        private long payloadBytes;
+        private int gatherSegments;
+
+        private void reset() {
+            encodedBytes = 0;
+            payloadBytes = 0L;
+            gatherSegments = 0;
+        }
     }
 
     interface Owner {
