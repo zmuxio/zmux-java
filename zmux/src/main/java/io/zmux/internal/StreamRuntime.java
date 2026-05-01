@@ -447,6 +447,8 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
     }
 
     private void finishAsyncWriteOperation(AsyncStreamOperation operation, StreamWriteCompletion completion) {
+        Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(completion, "completion");
         Throwable failure = null;
         try {
             completion.throwIfFailed();
@@ -542,9 +544,11 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
     }
 
     private void checkAsyncOperationDeadline(AsyncStreamOperation operation, int scheduleGeneration) {
+        if (operation == null) {
+            return;
+        }
         boolean removed = false;
         StreamWriteCompletion completionToFail = null;
-        IOException timeout = null;
         synchronized (session.lock()) {
             if (!operation.consumeScheduledDeadlineCheck(scheduleGeneration)) {
                 return;
@@ -560,7 +564,6 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
                 operation.scheduleDeadlineCheck(this, remainingNanos);
                 return;
             }
-            timeout = new WriteTimeoutException();
             if (operation.queued()) {
                 removed = asyncOperations.remove(operation);
                 if (removed) {
@@ -578,9 +581,10 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
             }
         }
         if (removed) {
-            operation.complete(timeout);
+            operation.complete(new WriteTimeoutException());
             emitPendingEvents();
-        } else if (completionToFail != null && completionToFail.completeFailureIfPending(timeout)) {
+        } else if (completionToFail != null
+                && completionToFail.completeFailureIfPending(new WriteTimeoutException())) {
             emitPendingEvents();
         }
     }

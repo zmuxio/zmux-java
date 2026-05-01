@@ -570,12 +570,7 @@ final class NettyQuicStreamState {
         try {
             lock.lock();
             try {
-                if (writeHalf.localClosed()) {
-                    throw localWriteErrorOrDefault();
-                }
-                ensureSessionOpenForControlLocked();
-                writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
-                signalWriteChangedLocked();
+                closeLocalWriteGracefullyLocked();
             } finally {
                 lock.unlock();
             }
@@ -823,12 +818,7 @@ final class NettyQuicStreamState {
             ensureOpenPrelude(true);
             lock.lock();
             try {
-                if (writeHalf.localClosed()) {
-                    throw localWriteErrorOrDefault();
-                }
-                ensureSessionOpenForControlLocked();
-                writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
-                signalWriteChangedLocked();
+                closeLocalWriteGracefullyLocked();
             } finally {
                 lock.unlock();
             }
@@ -1554,6 +1544,15 @@ final class NettyQuicStreamState {
         if (currentSessionError != null) {
             throw currentSessionError;
         }
+    }
+
+    private void closeLocalWriteGracefullyLocked() throws IOException {
+        if (writeHalf.localClosed()) {
+            throw localWriteErrorOrDefault();
+        }
+        ensureSessionOpenForControlLocked();
+        writeHalf.closeLocal(NettyQuicSupport.writeClosedError(ZmuxErrorSource.LOCAL, ZmuxTerminationKind.GRACEFUL));
+        signalWriteChangedLocked();
     }
 
     private void closeReadWithStop(long code, String reason) throws IOException {

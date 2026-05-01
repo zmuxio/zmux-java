@@ -105,8 +105,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
     private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
     private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
-    private Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
-    private Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
+    private final Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
+    private final Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
     private ArrayDeque<ReadLoopProtocolTask> readLoopProtocolTasks =
             new ArrayDeque<>(MAX_PENDING_READ_LOOP_PROTOCOL_TASKS);
     private Map<Long, StreamRuntime> streams = new HashMap<>();

@@ -16,9 +16,7 @@ final class SessionWriterBatchFilter {
     }
 
     private static void removeTail(ArrayList<SessionRuntime.OutboundFrame> batch, int fromIndex, int size) {
-        for (int index = size - 1; index >= fromIndex; --index) {
-            batch.remove(index);
-        }
+        batch.subList(fromIndex, size).clear();
     }
 
     List<SessionRuntime.OutboundFrame> filterWritableBatchLocked(List<SessionRuntime.OutboundFrame> batch) {

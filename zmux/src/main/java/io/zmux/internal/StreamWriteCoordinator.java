@@ -144,7 +144,7 @@ final class StreamWriteCoordinator {
             return null;
         }
         StreamWriteCompletion completion = trackTransportWrite ? new StreamWriteCompletion() : null;
-        boolean waitForCompletion = false;
+        StreamWriteCompletion completionToWait = null;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -208,12 +208,12 @@ final class StreamWriteCoordinator {
                     position += chunkSize;
                 }
 
-                waitForCompletion = this.finishQueuedWriteLocked(fin, length, openingPending, openingPrefix, completion);
+                completionToWait = this.finishQueuedWriteLocked(fin, length, openingPending, openingPrefix, completion);
             }
         } finally {
             this.owner.emitPendingEvents();
         }
-        return waitForCompletion ? completion : null;
+        return completionToWait;
     }
 
     int writev(byte[][] parts, boolean fin) throws IOException {
@@ -232,7 +232,7 @@ final class StreamWriteCoordinator {
         }
 
         StreamWriteCompletion completion = waitForTransportWrite ? new StreamWriteCompletion() : null;
-        boolean waitForCompletion = false;
+        StreamWriteCompletion completionToWait = null;
         try {
             synchronized (this.owner.lockInternal()) {
                 this.ensureWritableLocked();
@@ -324,32 +324,32 @@ final class StreamWriteCoordinator {
                     remainingTotal -= chunkSize;
                 }
 
-                waitForCompletion = this.finishQueuedWriteLocked(fin, totalLength, openingPending, openingPrefix, completion);
+                completionToWait = this.finishQueuedWriteLocked(fin, totalLength, openingPending, openingPrefix, completion);
             }
         } finally {
             this.owner.emitPendingEvents();
         }
-        if (waitForCompletion) {
-            this.awaitTransportWrite(completion);
+        if (completionToWait != null) {
+            this.awaitTransportWrite(completionToWait);
         }
         return totalLength;
     }
 
-    private boolean finishQueuedWriteLocked(boolean fin,
-                                            int payloadLength,
-                                            boolean openingPending,
-                                            byte[] openingPrefix,
-                                            StreamWriteCompletion completion) throws IOException {
+    private StreamWriteCompletion finishQueuedWriteLocked(boolean fin,
+                                                          int payloadLength,
+                                                          boolean openingPending,
+                                                          byte[] openingPrefix,
+                                                          StreamWriteCompletion completion) throws IOException {
         if (fin && payloadLength == 0) {
             this.queueEmptyFinalFrameLocked(openingPending, openingPrefix, completion);
         }
         this.owner.noteWritePayloadProgressLocked(payloadLength);
         this.owner.notifyLockWaitersLocked();
         if (completion == null || !completion.hasFrames()) {
-            return false;
+            return null;
         }
         this.owner.registerWriteCompletionWaiterLocked(completion);
-        return true;
+        return completion;
     }
 
     private void awaitTransportWrite(StreamWriteCompletion completion) throws IOException {
