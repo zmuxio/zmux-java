@@ -32,6 +32,7 @@ final class OrdinaryBatchRoundPlanner {
         int interactiveActiveStreams = runState.activeSelectionCounts()[0];
         int bulkActiveStreams = runState.activeSelectionCounts()[1];
         OrdinaryBatchOrderer.GroupCandidatePair candidatePair = runState.candidatePair();
+        OrdinaryBatchCandidateSelector.TopCandidateScratch topCandidateScratch = runState.topCandidateScratch();
         for (OrdinaryBatchOrderer.BatchGroup group : groupsInOrder) {
             OrdinaryBatchCandidateSelector.topCandidates(
                     group,
@@ -50,7 +51,8 @@ final class OrdinaryBatchRoundPlanner {
                     interactiveActiveStreams,
                     bulkActiveStreams,
                     runState.bypassSelections(),
-                    candidatePair
+                    candidatePair,
+                    topCandidateScratch
             );
             OrdinaryBatchOrderer.GroupCandidate interactiveCandidate = candidatePair.interactive();
             if (interactiveCandidate != null) {

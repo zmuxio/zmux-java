@@ -28,17 +28,20 @@ final class OrdinaryBatchCandidateSelector {
                                                                  int interactiveActiveStreams,
                                                                  int bulkActiveStreams,
                                                                  LongIntCounterMap bypassSelections,
-                                                                 OrdinaryBatchOrderer.GroupCandidatePair out) {
+                                                                 OrdinaryBatchOrderer.GroupCandidatePair out,
+                                                                 TopCandidateScratch scratch) {
         if (out == null) {
             throw new NullPointerException("out");
         }
+        if (scratch == null) {
+            throw new NullPointerException("scratch");
+        }
         if (group == null) {
+            scratch.clearRetainedRefs();
             return out.clear();
         }
 
-        StreamCandidate interactiveTop = null;
-        StreamCandidate bulkTop = null;
-        StreamCandidate candidateScratch = new StreamCandidate();
+        scratch.reset();
         long interactiveBaseStreamWeight = 0L;
         long interactiveStreamWeight = 0L;
         long bulkBaseStreamWeight = 0L;
@@ -76,7 +79,7 @@ final class OrdinaryBatchCandidateSelector {
                     streamStart,
                     serviceTag(selected.cost(), Math.max(1L, effectiveWeight))
             );
-            StreamCandidate candidate = candidateScratch.reset(
+            StreamCandidate candidate = scratch.candidate.reset(
                     stream,
                     selected,
                     baseWeight,
@@ -90,29 +93,23 @@ final class OrdinaryBatchCandidateSelector {
             if (stream.trafficClass() == OrdinaryBatchOrderer.TrafficClass.BULK) {
                 bulkBaseStreamWeight = saturatingAdd(bulkBaseStreamWeight, baseWeight);
                 bulkStreamWeight = saturatingAdd(bulkStreamWeight, effectiveWeight);
-                if (betterStreamCandidate(preferredStreamHead, candidate, bulkTop)) {
-                    if (bulkTop == null) {
-                        bulkTop = new StreamCandidate();
-                    }
-                    bulkTop.copyFrom(candidate);
+                if (betterStreamCandidate(preferredStreamHead, candidate, scratch.bulkTop())) {
+                    scratch.markBulkTop(candidate);
                 }
                 continue;
             }
 
             interactiveBaseStreamWeight = saturatingAdd(interactiveBaseStreamWeight, baseWeight);
             interactiveStreamWeight = saturatingAdd(interactiveStreamWeight, effectiveWeight);
-            if (betterStreamCandidate(preferredStreamHead, candidate, interactiveTop)) {
-                if (interactiveTop == null) {
-                    interactiveTop = new StreamCandidate();
-                }
-                interactiveTop.copyFrom(candidate);
+            if (betterStreamCandidate(preferredStreamHead, candidate, scratch.interactiveTop())) {
+                scratch.markInteractiveTop(candidate);
             }
         }
 
         return out.reset(
                 buildGroupCandidate(
                         group,
-                        interactiveTop,
+                        scratch.interactiveTop(),
                         hint,
                         rootVirtualTime,
                         groupFinishTag,
@@ -124,7 +121,7 @@ final class OrdinaryBatchCandidateSelector {
                 ),
                 buildGroupCandidate(
                         group,
-                        bulkTop,
+                        scratch.bulkTop(),
                         hint,
                         rootVirtualTime,
                         groupFinishTag,
@@ -497,6 +494,45 @@ final class OrdinaryBatchCandidateSelector {
         return OrdinaryBatchSchedulingPolicy.saturatingAdd(left, right);
     }
 
+    static final class TopCandidateScratch {
+        private final StreamCandidate candidate = new StreamCandidate();
+        private final StreamCandidate interactiveTop = new StreamCandidate();
+        private final StreamCandidate bulkTop = new StreamCandidate();
+        private boolean hasInteractiveTop;
+        private boolean hasBulkTop;
+
+        private void reset() {
+            hasInteractiveTop = false;
+            hasBulkTop = false;
+        }
+
+        void clearRetainedRefs() {
+            candidate.clearRetainedRefs();
+            interactiveTop.clearRetainedRefs();
+            bulkTop.clearRetainedRefs();
+            hasInteractiveTop = false;
+            hasBulkTop = false;
+        }
+
+        private StreamCandidate interactiveTop() {
+            return hasInteractiveTop ? interactiveTop : null;
+        }
+
+        private StreamCandidate bulkTop() {
+            return hasBulkTop ? bulkTop : null;
+        }
+
+        private void markInteractiveTop(StreamCandidate source) {
+            interactiveTop.copyFrom(source);
+            hasInteractiveTop = true;
+        }
+
+        private void markBulkTop(StreamCandidate source) {
+            bulkTop.copyFrom(source);
+            hasBulkTop = true;
+        }
+    }
+
     private static final class StreamCandidate {
         private OrdinaryBatchOrderer.BatchStreamState stream;
         private OrdinaryBatchOrderer.BatchEntry entry;
@@ -527,6 +563,18 @@ final class OrdinaryBatchCandidateSelector {
             this.streamLastServed = streamLastServed;
             this.eligible = eligible;
             return this;
+        }
+
+        private void clearRetainedRefs() {
+            this.stream = null;
+            this.entry = null;
+            this.baseWeight = 0L;
+            this.weight = 0L;
+            this.queuePos = 0;
+            this.streamStart = 0L;
+            this.streamFinish = 0L;
+            this.streamLastServed = 0L;
+            this.eligible = false;
         }
 
         private void copyFrom(StreamCandidate source) {

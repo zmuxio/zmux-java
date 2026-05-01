@@ -100,6 +100,10 @@ final class OrdinaryBatchRunState {
         return workspace.candidatePair();
     }
 
+    OrdinaryBatchCandidateSelector.TopCandidateScratch topCandidateScratch() {
+        return workspace.topCandidateScratch();
+    }
+
     OrdinaryBatchRoundPlanner.RoundSelection roundSelection() {
         return workspace.roundSelection();
     }

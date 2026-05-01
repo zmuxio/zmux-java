@@ -199,6 +199,8 @@ final class OrdinaryBatchOrderer {
         private final ArrayList<GroupCandidate> interactiveCandidates = new ArrayList<>();
         private final ArrayList<GroupCandidate> bulkCandidates = new ArrayList<>();
         private final GroupCandidatePair candidatePair = new GroupCandidatePair();
+        private final OrdinaryBatchCandidateSelector.TopCandidateScratch topCandidateScratch =
+                new OrdinaryBatchCandidateSelector.TopCandidateScratch();
         private final OrdinaryBatchRoundPlanner.RoundSelection roundSelection =
                 new OrdinaryBatchRoundPlanner.RoundSelection();
         private final ArrayList<BatchGroup> batchGroupPool = new ArrayList<>();
@@ -309,6 +311,7 @@ final class OrdinaryBatchOrderer {
             recordedGroupHeads.clear();
             interactiveCandidates.clear();
             bulkCandidates.clear();
+            topCandidateScratch.clearRetainedRefs();
             Arrays.fill(activeSelectionCounts, 0);
             for (int i = 0; i < batchGroupCursor; ++i) {
                 batchGroupPool.get(i).clearRetainedRefs();
@@ -398,6 +401,10 @@ final class OrdinaryBatchOrderer {
 
         GroupCandidatePair candidatePair() {
             return candidatePair;
+        }
+
+        OrdinaryBatchCandidateSelector.TopCandidateScratch topCandidateScratch() {
+            return topCandidateScratch;
         }
 
         OrdinaryBatchRoundPlanner.RoundSelection roundSelection() {

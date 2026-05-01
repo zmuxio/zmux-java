@@ -261,10 +261,16 @@ final class OrdinaryBatchOrderTest {
                     batchOrderer.getClass().getDeclaredField("ordinaryOrderWorkspace");
             ordinaryOrderWorkspaceField.setAccessible(true);
             Object ordinaryOrderWorkspace = ordinaryOrderWorkspaceField.get(batchOrderer);
-            java.lang.reflect.Field candidatePairField = ordinaryOrderWorkspace.getClass().getDeclaredField("candidatePair");
+            java.lang.reflect.Field candidatePairField =
+                    ordinaryOrderWorkspace.getClass().getDeclaredField("candidatePair");
             candidatePairField.setAccessible(true);
             Object firstCandidatePair = candidatePairField.get(ordinaryOrderWorkspace);
-            java.lang.reflect.Field roundSelectionField = ordinaryOrderWorkspace.getClass().getDeclaredField("roundSelection");
+            java.lang.reflect.Field topCandidateScratchField =
+                    ordinaryOrderWorkspace.getClass().getDeclaredField("topCandidateScratch");
+            topCandidateScratchField.setAccessible(true);
+            Object firstTopCandidateScratch = topCandidateScratchField.get(ordinaryOrderWorkspace);
+            java.lang.reflect.Field roundSelectionField =
+                    ordinaryOrderWorkspace.getClass().getDeclaredField("roundSelection");
             roundSelectionField.setAccessible(true);
             Object firstRoundSelection = roundSelectionField.get(ordinaryOrderWorkspace);
 
@@ -283,6 +289,8 @@ final class OrdinaryBatchOrderTest {
                     "ordinary batch scratch should reuse its bounded order input view");
             assertSame(firstCandidatePair, candidatePairField.get(ordinaryOrderWorkspace),
                     "ordinary batch scratch should reuse its candidate pair object");
+            assertSame(firstTopCandidateScratch, topCandidateScratchField.get(ordinaryOrderWorkspace),
+                    "ordinary batch scratch should reuse its top-candidate scratch object");
             assertSame(firstRoundSelection, roundSelectionField.get(ordinaryOrderWorkspace),
                     "ordinary batch scratch should reuse its round selection object");
         }
