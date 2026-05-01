@@ -18,6 +18,7 @@ final class OrdinaryBatchBuildPlanner {
         if (batch == null) {
             batch = Collections.emptyList();
         }
+        int batchSize = batch.size();
         LinkedHashMap<OrdinaryBatchOrderer.GroupKey, OrdinaryBatchOrderer.BatchGroup> groups = workspace.groups();
         groups.clear();
         List<OrdinaryBatchOrderer.BatchGroup> groupsInOrder = workspace.groupsInOrder();
@@ -27,7 +28,7 @@ final class OrdinaryBatchBuildPlanner {
         boolean hasRealStreamScoped = false;
         boolean hasPriorityUpdate = false;
         long syntheticStreamKey = Long.MIN_VALUE;
-        for (int index = 0; index < batch.size(); ++index) {
+        for (int index = 0; index < batchSize; ++index) {
             OrdinaryBatchOrderer.BatchFrame frame = batch.get(index);
             boolean streamScoped = frame.streamScoped() && frame.streamId() != 0L;
             if (streamScoped) {

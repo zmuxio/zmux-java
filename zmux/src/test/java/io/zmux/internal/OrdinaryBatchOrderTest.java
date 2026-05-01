@@ -253,6 +253,20 @@ final class OrdinaryBatchOrderTest {
             List<Object> firstItems = (List<Object>) ordinaryOrderItemsField.get(batchOrderer);
             Object firstBatchFrame0 = firstItems.get(0);
             Object firstBatchFrame1 = firstItems.get(1);
+            java.lang.reflect.Field ordinaryOrderWindowField =
+                    batchOrderer.getClass().getDeclaredField("ordinaryOrderWindow");
+            ordinaryOrderWindowField.setAccessible(true);
+            Object firstOrderWindow = ordinaryOrderWindowField.get(batchOrderer);
+            java.lang.reflect.Field ordinaryOrderWorkspaceField =
+                    batchOrderer.getClass().getDeclaredField("ordinaryOrderWorkspace");
+            ordinaryOrderWorkspaceField.setAccessible(true);
+            Object ordinaryOrderWorkspace = ordinaryOrderWorkspaceField.get(batchOrderer);
+            java.lang.reflect.Field candidatePairField = ordinaryOrderWorkspace.getClass().getDeclaredField("candidatePair");
+            candidatePairField.setAccessible(true);
+            Object firstCandidatePair = candidatePairField.get(ordinaryOrderWorkspace);
+            java.lang.reflect.Field roundSelectionField = ordinaryOrderWorkspace.getClass().getDeclaredField("roundSelection");
+            roundSelectionField.setAccessible(true);
+            Object firstRoundSelection = roundSelectionField.get(ordinaryOrderWorkspace);
 
             SessionRuntimeTestSupport.invokePrivate(
                     writerRuntime,
@@ -265,6 +279,12 @@ final class OrdinaryBatchOrderTest {
             List<Object> secondItems = (List<Object>) ordinaryOrderItemsField.get(batchOrderer);
             assertSame(firstBatchFrame0, secondItems.get(0), "ordinary batch scratch should reuse the first BatchFrame object");
             assertSame(firstBatchFrame1, secondItems.get(1), "ordinary batch scratch should reuse the second BatchFrame object");
+            assertSame(firstOrderWindow, ordinaryOrderWindowField.get(batchOrderer),
+                    "ordinary batch scratch should reuse its bounded order input view");
+            assertSame(firstCandidatePair, candidatePairField.get(ordinaryOrderWorkspace),
+                    "ordinary batch scratch should reuse its candidate pair object");
+            assertSame(firstRoundSelection, roundSelectionField.get(ordinaryOrderWorkspace),
+                    "ordinary batch scratch should reuse its round selection object");
         }
     }
 

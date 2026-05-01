@@ -96,6 +96,14 @@ final class OrdinaryBatchRunState {
         return bulkCandidates;
     }
 
+    OrdinaryBatchOrderer.GroupCandidatePair candidatePair() {
+        return workspace.candidatePair();
+    }
+
+    OrdinaryBatchRoundPlanner.RoundSelection roundSelection() {
+        return workspace.roundSelection();
+    }
+
     OrdinaryBatchOrderer.GroupKey nextPreferredGroupHead() {
         return nextPreferredGroupHead;
     }

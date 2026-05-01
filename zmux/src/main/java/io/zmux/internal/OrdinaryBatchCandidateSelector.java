@@ -27,9 +27,13 @@ final class OrdinaryBatchCandidateSelector {
                                                                  long feedbackWindow,
                                                                  int interactiveActiveStreams,
                                                                  int bulkActiveStreams,
-                                                                 LongIntCounterMap bypassSelections) {
+                                                                 LongIntCounterMap bypassSelections,
+                                                                 OrdinaryBatchOrderer.GroupCandidatePair out) {
+        if (out == null) {
+            throw new NullPointerException("out");
+        }
         if (group == null) {
-            return OrdinaryBatchOrderer.GroupCandidatePair.empty();
+            return out.clear();
         }
 
         StreamCandidate interactiveTop = null;
@@ -105,7 +109,7 @@ final class OrdinaryBatchCandidateSelector {
             }
         }
 
-        return new OrdinaryBatchOrderer.GroupCandidatePair(
+        return out.reset(
                 buildGroupCandidate(
                         group,
                         interactiveTop,

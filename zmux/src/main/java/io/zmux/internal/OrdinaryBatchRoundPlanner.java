@@ -31,8 +31,9 @@ final class OrdinaryBatchRoundPlanner {
         );
         int interactiveActiveStreams = runState.activeSelectionCounts()[0];
         int bulkActiveStreams = runState.activeSelectionCounts()[1];
+        OrdinaryBatchOrderer.GroupCandidatePair candidatePair = runState.candidatePair();
         for (OrdinaryBatchOrderer.BatchGroup group : groupsInOrder) {
-            OrdinaryBatchOrderer.GroupCandidatePair candidatePair = OrdinaryBatchCandidateSelector.topCandidates(
+            OrdinaryBatchCandidateSelector.topCandidates(
                     group,
                     hint,
                     quantum,
@@ -48,7 +49,8 @@ final class OrdinaryBatchRoundPlanner {
                     feedbackWindow,
                     interactiveActiveStreams,
                     bulkActiveStreams,
-                    runState.bypassSelections()
+                    runState.bypassSelections(),
+                    candidatePair
             );
             OrdinaryBatchOrderer.GroupCandidate interactiveCandidate = candidatePair.interactive();
             if (interactiveCandidate != null) {
@@ -69,7 +71,7 @@ final class OrdinaryBatchRoundPlanner {
         }
 
         if (interactiveCandidates.isEmpty() && bulkCandidates.isEmpty()) {
-            return RoundSelection.empty();
+            return runState.roundSelection().reset(null, Collections.emptyList(), 0L, false);
         }
 
         OrdinaryBatchOrderer.GroupCandidate interactiveBest =
@@ -100,16 +102,11 @@ final class OrdinaryBatchRoundPlanner {
             totalGroupWeight = bulkGroupWeight;
         }
         boolean bothClassesActive = interactiveBest != null && bulkBest != null;
-        OrdinaryBatchOrderer.GroupCandidate best = null;
-        for (OrdinaryBatchOrderer.GroupCandidate candidate : candidates) {
-            if (OrdinaryBatchCandidateComparator.betterGroupCandidate(retainedState.preferredGroupHead, candidate, best)) {
-                best = candidate;
-            }
-        }
+        OrdinaryBatchOrderer.GroupCandidate chosen = selectedClass == OrdinaryBatchOrderer.TrafficClass.INTERACTIVE
+                ? interactiveBest
+                : bulkBest;
 
-        OrdinaryBatchOrderer.GroupCandidate chosen = best;
-
-        return new RoundSelection(chosen, candidates, totalGroupWeight, bothClassesActive);
+        return runState.roundSelection().reset(chosen, candidates, totalGroupWeight, bothClassesActive);
     }
 
     private static long preferredStreamHead(Map<OrdinaryBatchOrderer.GroupKey, Long> preferredStreamHeads,
@@ -122,23 +119,20 @@ final class OrdinaryBatchRoundPlanner {
     }
 
     static final class RoundSelection {
-        private final OrdinaryBatchOrderer.GroupCandidate chosen;
-        private final List<OrdinaryBatchOrderer.GroupCandidate> candidates;
-        private final long totalGroupWeight;
-        private final boolean bothClassesActive;
+        private OrdinaryBatchOrderer.GroupCandidate chosen;
+        private List<OrdinaryBatchOrderer.GroupCandidate> candidates = Collections.emptyList();
+        private long totalGroupWeight;
+        private boolean bothClassesActive;
 
-        RoundSelection(OrdinaryBatchOrderer.GroupCandidate chosen,
-                       List<OrdinaryBatchOrderer.GroupCandidate> candidates,
-                       long totalGroupWeight,
-                       boolean bothClassesActive) {
+        RoundSelection reset(OrdinaryBatchOrderer.GroupCandidate chosen,
+                             List<OrdinaryBatchOrderer.GroupCandidate> candidates,
+                             long totalGroupWeight,
+                             boolean bothClassesActive) {
             this.chosen = chosen;
             this.candidates = candidates;
             this.totalGroupWeight = totalGroupWeight;
             this.bothClassesActive = bothClassesActive;
-        }
-
-        static RoundSelection empty() {
-            return new RoundSelection(null, Collections.emptyList(), 0L, false);
+            return this;
         }
 
         OrdinaryBatchOrderer.GroupCandidate chosen() {

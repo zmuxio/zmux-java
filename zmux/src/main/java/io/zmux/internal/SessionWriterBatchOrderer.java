@@ -4,9 +4,11 @@ import io.zmux.FrameType;
 import io.zmux.Protocol;
 
 import java.io.IOException;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.RandomAccess;
 
 final class SessionWriterBatchOrderer {
     private final SessionWriterCoordinator.Owner owner;
@@ -14,6 +16,7 @@ final class SessionWriterBatchOrderer {
     private final OrdinaryBatchOrderer.Workspace ordinaryOrderWorkspace = new OrdinaryBatchOrderer.Workspace();
     @SuppressWarnings("FieldCanBeLocal")
     private final ArrayList<OrdinaryBatchOrderer.BatchFrame> ordinaryOrderItems;
+    private final BatchFrameWindow ordinaryOrderWindow = new BatchFrameWindow();
     @SuppressWarnings("FieldCanBeLocal")
     private final ArrayList<SessionRuntime.OutboundFrame> orderedBatch;
 
@@ -103,7 +106,7 @@ final class SessionWriterBatchOrderer {
         }
 
         OrdinaryBatchOrderer.OrderView order = OrdinaryBatchOrderer.orderView(
-                this.ordinaryOrderItems.subList(0, batchIndex),
+                this.ordinaryOrderWindow.reset(this.ordinaryOrderItems, batchIndex),
                 this.owner.peerSettings().schedulerHints(),
                 this.owner.peerSettings().maxFramePayload(),
                 this.owner.ordinaryBatchBias(),
@@ -163,5 +166,31 @@ final class SessionWriterBatchOrderer {
             return 0L;
         }
         return outboundFrame.frame().streamId();
+    }
+
+    private static final class BatchFrameWindow
+            extends AbstractList<OrdinaryBatchOrderer.BatchFrame>
+            implements RandomAccess {
+        private ArrayList<OrdinaryBatchOrderer.BatchFrame> source;
+        private int size;
+
+        private BatchFrameWindow reset(ArrayList<OrdinaryBatchOrderer.BatchFrame> source, int size) {
+            this.source = Objects.requireNonNull(source, "source");
+            this.size = size;
+            return this;
+        }
+
+        @Override
+        public OrdinaryBatchOrderer.BatchFrame get(int index) {
+            if (index < 0 || index >= size) {
+                throw new IndexOutOfBoundsException("index " + index + " size " + size);
+            }
+            return source.get(index);
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
     }
 }

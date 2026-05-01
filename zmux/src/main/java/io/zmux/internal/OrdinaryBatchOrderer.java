@@ -34,7 +34,7 @@ final class OrdinaryBatchOrderer {
                                RetainedBias retainedBias,
                                Workspace workspace) {
         int size = batch == null ? 0 : batch.size();
-        if (retainedBias == null && (size < 2 || sameStreamBurstKeepsOrder(batch))) {
+        if (retainedBias == null && (size < 2 || sameStreamBurstKeepsOrder(batch, size))) {
             if (workspace != null) {
                 workspace.clearRetainedBatchRefs();
             }
@@ -57,8 +57,8 @@ final class OrdinaryBatchOrderer {
         return OrdinaryBatchBuildPlanner.build(batch, hint, workspace);
     }
 
-    private static boolean sameStreamBurstKeepsOrder(List<BatchFrame> batch) {
-        if (batch == null || batch.isEmpty()) {
+    private static boolean sameStreamBurstKeepsOrder(List<BatchFrame> batch, int size) {
+        if (batch == null || size == 0) {
             return false;
         }
         BatchFrame first = batch.get(0);
@@ -66,7 +66,7 @@ final class OrdinaryBatchOrderer {
             return false;
         }
         long streamId = first.streamId();
-        for (int i = 1; i < batch.size(); ++i) {
+        for (int i = 1; i < size; ++i) {
             BatchFrame frame = batch.get(i);
             if (!frame.streamScoped() || frame.priorityUpdate() || frame.streamId() != streamId) {
                 return false;
@@ -198,6 +198,9 @@ final class OrdinaryBatchOrderer {
         private final int[] activeSelectionCounts = new int[2];
         private final ArrayList<GroupCandidate> interactiveCandidates = new ArrayList<>();
         private final ArrayList<GroupCandidate> bulkCandidates = new ArrayList<>();
+        private final GroupCandidatePair candidatePair = new GroupCandidatePair();
+        private final OrdinaryBatchRoundPlanner.RoundSelection roundSelection =
+                new OrdinaryBatchRoundPlanner.RoundSelection();
         private final ArrayList<BatchGroup> batchGroupPool = new ArrayList<>();
         private final ArrayList<BatchStreamState> batchStreamPool = new ArrayList<>();
         private final ArrayList<BatchEntry> batchEntryPool = new ArrayList<>();
@@ -307,15 +310,18 @@ final class OrdinaryBatchOrderer {
             interactiveCandidates.clear();
             bulkCandidates.clear();
             Arrays.fill(activeSelectionCounts, 0);
-            for (BatchGroup group : batchGroupPool) {
-                group.clearRetainedRefs();
+            for (int i = 0; i < batchGroupCursor; ++i) {
+                batchGroupPool.get(i).clearRetainedRefs();
             }
-            for (BatchStreamState stream : batchStreamPool) {
-                stream.clearRetainedRefs();
+            for (int i = 0; i < batchStreamCursor; ++i) {
+                batchStreamPool.get(i).clearRetainedRefs();
             }
-            for (BatchEntry entry : batchEntryPool) {
-                entry.clearRetainedRefs();
+            for (int i = 0; i < batchEntryCursor; ++i) {
+                batchEntryPool.get(i).clearRetainedRefs();
             }
+            batchGroupCursor = 0;
+            batchStreamCursor = 0;
+            batchEntryCursor = 0;
         }
 
         BatchGroup nextBatchGroup(GroupKey key, int order) {
@@ -388,6 +394,14 @@ final class OrdinaryBatchOrderer {
 
         ArrayList<GroupCandidate> bulkCandidates() {
             return bulkCandidates;
+        }
+
+        GroupCandidatePair candidatePair() {
+            return candidatePair;
+        }
+
+        OrdinaryBatchRoundPlanner.RoundSelection roundSelection() {
+            return roundSelection;
         }
     }
 
@@ -750,16 +764,20 @@ final class OrdinaryBatchOrderer {
     }
 
     static final class GroupCandidatePair {
-        private final GroupCandidate interactive;
-        private final GroupCandidate bulk;
+        private GroupCandidate interactive;
+        private GroupCandidate bulk;
 
-        GroupCandidatePair(GroupCandidate interactive, GroupCandidate bulk) {
-            this.interactive = interactive;
-            this.bulk = bulk;
+        private GroupCandidatePair() {
         }
 
-        static GroupCandidatePair empty() {
-            return new GroupCandidatePair(null, null);
+        GroupCandidatePair reset(GroupCandidate interactive, GroupCandidate bulk) {
+            this.interactive = interactive;
+            this.bulk = bulk;
+            return this;
+        }
+
+        GroupCandidatePair clear() {
+            return reset(null, null);
         }
 
         GroupCandidate interactive() {
