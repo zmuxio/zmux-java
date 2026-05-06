@@ -1,6 +1,5 @@
 package io.zmux;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.zmux.internal.StreamIoSupport;
 
 import java.io.IOException;
@@ -19,10 +18,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
 @SuppressWarnings("resource")
-@SuppressFBWarnings(
-        value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
-        justification = "Joined connections are transport views; exposing the active IO half is the public API."
-)
 public final class JoinedDuplexConnection implements DuplexConnection {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition inputChanged = lock.newCondition();
@@ -893,10 +888,6 @@ public final class JoinedDuplexConnection implements DuplexConnection {
         }
     }
 
-    @SuppressFBWarnings(
-            value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
-            justification = "Pause tokens expose and replace the caller-owned output half by design."
-    )
     public static final class PausedOutput implements ResumablePause {
         private final JoinedDuplexConnection owner;
         private final Object lock = new Object();

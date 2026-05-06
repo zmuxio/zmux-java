@@ -1,13 +1,7 @@
 package io.zmux;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-
 import java.util.Objects;
 
-@SuppressFBWarnings(
-        value = "SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR",
-        justification = "defaults() returns a shared template for compatibility while public constructors remain part of the API."
-)
 public final class Settings {
     private static final long DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED = 65_536L;
     private static final long DEFAULT_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED = 65_536L;
