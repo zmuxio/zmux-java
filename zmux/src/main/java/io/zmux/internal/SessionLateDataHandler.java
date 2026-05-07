@@ -29,7 +29,7 @@ final class SessionLateDataHandler {
             );
         }
         if (appDataLength > 0) {
-            this.discardLatePeerDataLocked(null, appDataLength, disposition.cause());
+            this.discardTerminalLatePeerDataLocked(frame.streamId(), appDataLength, disposition.cause());
         }
         switch (disposition.action()) {
             case ABORT_CLOSED:
@@ -74,6 +74,28 @@ final class SessionLateDataHandler {
         if (length <= 0) {
             return;
         }
+        this.discardLatePeerDataForSessionLocked(length, cause);
+        if (streamRuntime != null) {
+            if (!streamRuntime.applicationVisible()) {
+                this.owner.onHiddenUnreadBytesDiscardedLocked(length);
+            }
+            streamRuntime.recordLateDataReceivedLocked(length);
+            streamRuntime.clearRecvPendingLocked();
+        }
+        this.throwIfLateDataCapExceededLocked(
+                streamRuntime != null && streamRuntime.lateDataReceivedLocked() > this.owner.lateDataPerStreamCap(streamRuntime)
+        );
+    }
+
+    private void discardTerminalLatePeerDataLocked(long streamId, int length, LateDataCause cause) throws IOException {
+        if (length <= 0) {
+            return;
+        }
+        this.discardLatePeerDataForSessionLocked(length, cause);
+        this.throwIfLateDataCapExceededLocked(this.owner.recordTerminalLateDataLocked(streamId, length));
+    }
+
+    private void discardLatePeerDataForSessionLocked(int length, LateDataCause cause) throws IOException {
         if (RuntimeFlow.receiveWindowExceeded(
                 this.owner.recvSessionReceivedBytes(),
                 this.owner.recvSessionAdvertised(),
@@ -102,13 +124,9 @@ final class SessionLateDataHandler {
         }
         this.owner.setAggregateLateDataReceived(RuntimeFlow.saturatingAdd(this.owner.aggregateLateDataReceived(), length));
         this.owner.noteLateDataDiscardLocked(length, cause);
-        if (streamRuntime != null) {
-            if (!streamRuntime.applicationVisible()) {
-                this.owner.onHiddenUnreadBytesDiscardedLocked(length);
-            }
-            streamRuntime.recordLateDataReceivedLocked(length);
-            streamRuntime.clearRecvPendingLocked();
-        }
+    }
+
+    private void throwIfLateDataCapExceededLocked(boolean perStreamCapExceeded) throws IOException {
         if (this.owner.aggregateLateDataReceived() > this.owner.aggregateLateDataCap()) {
             throw this.owner.sessionError(
                     ErrorCode.PROTOCOL,
@@ -118,7 +136,7 @@ final class SessionLateDataHandler {
                     ZmuxErrorDirection.READ
             );
         }
-        if (streamRuntime != null && streamRuntime.lateDataReceivedLocked() > this.owner.lateDataPerStreamCap(streamRuntime)) {
+        if (perStreamCapExceeded) {
             throw this.owner.sessionError(
                     ErrorCode.PROTOCOL,
                     "handle DATA",

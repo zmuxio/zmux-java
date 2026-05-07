@@ -4277,7 +4277,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                         streamRuntime.terminalReasonLocked(),
                         streamRuntime.lateDataCauseLocked(),
                         hidden,
-                        nowNanos
+                        nowNanos,
+                        streamRuntime.lateDataReceivedLocked(),
+                        this.lateDataPerStreamCap(streamRuntime),
+                        streamRuntime.localReceive()
                 )
         );
         this.streamBookkeeping.onStreamFullyClosedLocked(streamRuntime);
@@ -5224,6 +5227,15 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             return this.config.aggregateLateDataCap();
         }
         return RuntimeFlow.aggregateLateDataCap(this.localSettings().maxFramePayload());
+    }
+
+    boolean recordTerminalLateDataLocked(long streamId, int length) {
+        SessionTerminalBookkeeping.TerminalLateDataResult result =
+                this.terminalBookkeeping.recordTerminalLateDataLocked(streamId, length);
+        if (result.hidden()) {
+            this.onHiddenUnreadBytesDiscardedLocked(length);
+        }
+        return result.capExceeded();
     }
 
     long lateDataPerStreamCap(StreamRuntime streamRuntime) {

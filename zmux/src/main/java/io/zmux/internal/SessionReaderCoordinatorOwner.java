@@ -404,6 +404,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
+    public boolean recordTerminalLateDataLocked(long streamId, int length) {
+        return this.owner.recordTerminalLateDataLocked(streamId, length);
+    }
+
+    @Override
     public long aggregateLateDataCap() {
         return this.owner.aggregateLateDataCap();
     }

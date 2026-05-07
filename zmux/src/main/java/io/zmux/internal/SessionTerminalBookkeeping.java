@@ -130,6 +130,18 @@ final class SessionTerminalBookkeeping {
         return this.markerRangeDispositionForLocked(streamId);
     }
 
+    TerminalLateDataResult recordTerminalLateDataLocked(long streamId, int length) {
+        if (length <= 0) {
+            return TerminalLateDataResult.NONE;
+        }
+        Tombstone tombstone = this.tombstones.get(streamId);
+        if (tombstone == null) {
+            return TerminalLateDataResult.NONE;
+        }
+        boolean capExceeded = tombstone.recordLateDataReceived(length);
+        return TerminalLateDataResult.of(tombstone.hidden(), capExceeded);
+    }
+
     boolean hasTerminalMarkerLocked(long streamId) {
         return this.terminalDataDispositionForLocked(streamId) != null;
     }
@@ -514,6 +526,36 @@ final class SessionTerminalBookkeeping {
         }
     }
 
+    static final class TerminalLateDataResult {
+        private static final TerminalLateDataResult NONE = new TerminalLateDataResult(false, false);
+        private static final TerminalLateDataResult VISIBLE_CAP_EXCEEDED = new TerminalLateDataResult(false, true);
+        private static final TerminalLateDataResult HIDDEN = new TerminalLateDataResult(true, false);
+        private static final TerminalLateDataResult HIDDEN_CAP_EXCEEDED = new TerminalLateDataResult(true, true);
+
+        private final boolean hidden;
+        private final boolean capExceeded;
+
+        private TerminalLateDataResult(boolean hidden, boolean capExceeded) {
+            this.hidden = hidden;
+            this.capExceeded = capExceeded;
+        }
+
+        private static TerminalLateDataResult of(boolean hidden, boolean capExceeded) {
+            if (hidden) {
+                return capExceeded ? HIDDEN_CAP_EXCEEDED : HIDDEN;
+            }
+            return capExceeded ? VISIBLE_CAP_EXCEEDED : NONE;
+        }
+
+        boolean hidden() {
+            return hidden;
+        }
+
+        boolean capExceeded() {
+            return capExceeded;
+        }
+    }
+
     private static final class MarkerRange {
         private final long start;
         private final TerminalDataDisposition disposition;
@@ -553,6 +595,9 @@ final class SessionTerminalBookkeeping {
         private final LateDataCause lateDataCause;
         private final boolean hidden;
         private final long createdAtNanos;
+        private final long lateDataCap;
+        private final boolean lateDataCapEnabled;
+        private long lateDataReceived;
 
         Tombstone(boolean hasReceiveHalf,
                   boolean gracefulReceiveClosed,
@@ -561,13 +606,40 @@ final class SessionTerminalBookkeeping {
                   LateDataCause lateDataCause,
                   boolean hidden,
                   long createdAtNanos) {
+            this(
+                    hasReceiveHalf,
+                    gracefulReceiveClosed,
+                    terminalCode,
+                    terminalReason,
+                    lateDataCause,
+                    hidden,
+                    createdAtNanos,
+                    0L,
+                    Long.MAX_VALUE,
+                    false
+            );
+        }
+
+        Tombstone(boolean hasReceiveHalf,
+                  boolean gracefulReceiveClosed,
+                  long terminalCode,
+                  String terminalReason,
+                  LateDataCause lateDataCause,
+                  boolean hidden,
+                  long createdAtNanos,
+                  long lateDataReceived,
+                  long lateDataCap,
+                  boolean lateDataCapEnabled) {
             this.hasReceiveHalf = hasReceiveHalf;
             this.gracefulReceiveClosed = gracefulReceiveClosed;
             this.terminalCode = terminalCode;
             this.terminalReason = "";
-            this.lateDataCause = lateDataCause;
+            this.lateDataCause = lateDataCause == null ? LateDataCause.NONE : lateDataCause;
             this.hidden = hidden;
             this.createdAtNanos = createdAtNanos;
+            this.lateDataReceived = Math.max(0L, lateDataReceived);
+            this.lateDataCap = Math.max(0L, lateDataCap);
+            this.lateDataCapEnabled = lateDataCapEnabled;
         }
 
         Tombstone(boolean hasReceiveHalf,
@@ -625,6 +697,15 @@ final class SessionTerminalBookkeeping {
 
         LateDataCause lateDataCause() {
             return lateDataCause;
+        }
+
+        long lateDataReceived() {
+            return lateDataReceived;
+        }
+
+        private boolean recordLateDataReceived(int length) {
+            this.lateDataReceived = saturatingAdd(this.lateDataReceived, length);
+            return this.lateDataCapEnabled && this.lateDataReceived > this.lateDataCap;
         }
 
         boolean hidden() {

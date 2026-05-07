@@ -1250,6 +1250,8 @@ final class SessionReaderCoordinator {
 
         void onHiddenUnreadBytesDiscardedLocked(long bytes);
 
+        boolean recordTerminalLateDataLocked(long streamId, int length);
+
         long aggregateLateDataCap();
 
         long lateDataPerStreamCap(StreamRuntime streamRuntime);

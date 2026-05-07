@@ -486,7 +486,7 @@ final class SessionDiagnosticsRuntimeTest {
         SessionStats stats = runtime.stats();
         assertEquals(Long.valueOf(1L), stats.reasons().abort().get(9L), "peer ABORT reason count mismatch");
         assertEquals(1L, stats.hiddenState().reaped(), "hidden stream reaped count mismatch");
-        assertEquals(6L, stats.hiddenState().unreadBytesDiscarded(), "hidden unread discard bytes mismatch");
+        assertEquals(11L, stats.hiddenState().unreadBytesDiscarded(), "hidden unread discard bytes mismatch");
         assertEquals(
                 1L,
                 stats.pressure().retainedStateBreakdown().hiddenControl().count(),

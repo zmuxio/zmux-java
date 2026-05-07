@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -45,6 +46,19 @@ final class FlowControlVisibilityRuntimeTest {
     private static StreamRuntime createPeerOpenedBidi(SessionRuntime runtime) {
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
         return runtime.createPeerOpenedStreamLocked(streamId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static SessionTerminalBookkeeping.Tombstone terminalTombstone(SessionRuntime runtime, long streamId)
+            throws Exception {
+        Field bookkeepingField = SessionRuntime.class.getDeclaredField("terminalBookkeeping");
+        bookkeepingField.setAccessible(true);
+        Object bookkeeping = bookkeepingField.get(runtime);
+        Field tombstonesField = bookkeeping.getClass().getDeclaredField("tombstones");
+        tombstonesField.setAccessible(true);
+        Map<Long, SessionTerminalBookkeeping.Tombstone> tombstones =
+                (Map<Long, SessionTerminalBookkeeping.Tombstone>) tombstonesField.get(bookkeeping);
+        return tombstones.get(streamId);
     }
 
     private static ReplenishExpectations seedReceiveReplenishPending(SessionRuntime runtime, StreamRuntime stream)
@@ -666,6 +680,49 @@ final class FlowControlVisibilityRuntimeTest {
         synchronized (runtime.lock()) {
             assertEquals(10L, runtime.recvSessionReceivedBytesInternal(),
                     "flow-control rejected late tombstone DATA must not advance received bytes");
+        }
+    }
+
+    @Test
+    void lateDataOnTerminalTombstoneCountsPerStreamCap() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "putTombstoneLocked",
+                    new Class<?>[]{long.class, SessionTerminalBookkeeping.Tombstone.class},
+                    streamId,
+                    new SessionTerminalBookkeeping.Tombstone(
+                            true,
+                            true,
+                            0L,
+                            "",
+                            LateDataCause.NONE,
+                            false,
+                            0L,
+                            0L,
+                            1L,
+                            true
+                    )
+            );
+            runtime.setRecvSessionAdvertisedInternal(10L);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1}));
+        IOException error = assertThrows(
+                IOException.class,
+                () -> handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{2}))
+        );
+
+        assertEquals(ErrorCode.PROTOCOL.code(), ZmuxErrors.code(error, -1L),
+                "late DATA beyond terminal tombstone per-stream cap should fail with PROTOCOL");
+        synchronized (runtime.lock()) {
+            assertEquals(2L, terminalTombstone(runtime, streamId).lateDataReceived(),
+                    "terminal tombstone should retain its own late-data counter");
+            assertEquals(2L, runtime.aggregateLateDataReceivedInternal(),
+                    "terminal tombstone late DATA should also count against the aggregate cap");
         }
     }
 
