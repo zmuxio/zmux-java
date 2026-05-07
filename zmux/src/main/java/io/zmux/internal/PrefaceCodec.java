@@ -496,15 +496,19 @@ final class PrefaceCodec {
             maxPayload = remaining;
         }
         int typeLength = Varint62.length(Protocol.SETTING_PREFACE_PADDING);
-        while (maxPayload > 0L) {
-            int lengthLength = Varint62.length(maxPayload);
+        long low = 0L;
+        long high = maxPayload;
+        while (low < high) {
+            long candidate = low + (high - low + 1L) / 2L;
+            int lengthLength = Varint62.length(candidate);
             long overhead = typeLength + (long) lengthLength;
-            if (overhead <= remaining && maxPayload <= remaining - overhead) {
-                return maxPayload;
+            if (overhead <= remaining && candidate <= remaining - overhead) {
+                low = candidate;
+            } else {
+                high = candidate - 1L;
             }
-            maxPayload--;
         }
-        return 0L;
+        return low;
     }
 
     private static long randomLongBounded(long bound) {

@@ -381,11 +381,15 @@ public final class JoinedDuplexConnection implements DuplexConnection {
     @Override
     public void setReadDeadline(Instant deadline) throws IOException {
         ReadHalf half;
+        Instant previousDeadline;
+        long deadlineGeneration;
         lock.lock();
         try {
             ensureOpenLocked();
+            previousDeadline = readDeadline;
             readDeadline = deadline;
             readDeadlineGeneration++;
+            deadlineGeneration = readDeadlineGeneration;
             half = typedReadHalf(inputHalf);
             if (half != null) {
                 activeInputDeadlineOperations++;
@@ -399,29 +403,43 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return;
         }
 
+        IOException failure = null;
         try {
             half.setReadDeadline(deadline);
+        } catch (IOException error) {
+            failure = error;
         } finally {
             lock.lock();
             try {
                 if (activeInputDeadlineOperations > 0) {
                     activeInputDeadlineOperations--;
                 }
+                if (failure != null && readDeadlineGeneration == deadlineGeneration) {
+                    readDeadline = previousDeadline;
+                    readDeadlineGeneration++;
+                }
                 signalInputChangedLocked();
             } finally {
                 lock.unlock();
             }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
     @Override
     public void setWriteDeadline(Instant deadline) throws IOException {
         WriteHalf half;
+        Instant previousDeadline;
+        long deadlineGeneration;
         lock.lock();
         try {
             ensureOpenLocked();
+            previousDeadline = writeDeadline;
             writeDeadline = deadline;
             writeDeadlineGeneration++;
+            deadlineGeneration = writeDeadlineGeneration;
             half = typedWriteHalf(outputHalf);
             if (half != null) {
                 activeOutputDeadlineOperations++;
@@ -435,18 +453,28 @@ public final class JoinedDuplexConnection implements DuplexConnection {
             return;
         }
 
+        IOException failure = null;
         try {
             half.setWriteDeadline(deadline);
+        } catch (IOException error) {
+            failure = error;
         } finally {
             lock.lock();
             try {
                 if (activeOutputDeadlineOperations > 0) {
                     activeOutputDeadlineOperations--;
                 }
+                if (failure != null && writeDeadlineGeneration == deadlineGeneration) {
+                    writeDeadline = previousDeadline;
+                    writeDeadlineGeneration++;
+                }
                 signalOutputChangedLocked();
             } finally {
                 lock.unlock();
             }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
