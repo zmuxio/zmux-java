@@ -132,6 +132,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long localGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long localGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
     private boolean localGoAwayIssued;
+    private long sentLocalGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
+    private long sentLocalGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
+    private boolean localGoAwaySent;
+    private final ArrayList<LocalGoAwayWaiter> localGoAwayWaiters = new ArrayList<>(2);
     private long peerGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long peerGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
     private long sessionSendLimit;
@@ -382,21 +386,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 && outboundFrame.dataBytes > 0;
     }
 
-    private static boolean urgentOutboundPrecedes(OutboundFrame candidate, OutboundFrame currentBest) {
-        int candidateRank = urgentFrameRank(candidate);
-        int currentRank = urgentFrameRank(currentBest);
-        if (candidateRank != currentRank) {
-            return candidateRank < currentRank;
-        }
-
-        boolean candidateScoped = candidate.frame().streamId() != 0L;
-        boolean currentScoped = currentBest.frame().streamId() != 0L;
-        if (candidateScoped != currentScoped) {
-            return candidateScoped;
-        }
-        return candidateScoped && candidate.frame().streamId() < currentBest.frame().streamId();
-    }
-
     private static int countRetainedPayloadSegments(byte[][] parts, int partIndex, int partOffset, int length) {
         int index = partIndex;
         int offset = partOffset;
@@ -575,34 +564,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             return left + (right - left) / 2L;
         }
         return right + (left - right) / 2L;
-    }
-
-    private static int urgentFrameRank(OutboundFrame outboundFrame) {
-        if (outboundFrame == null) {
-            return Integer.MAX_VALUE;
-        }
-        switch (outboundFrame.frame().type()) {
-            case CLOSE:
-                return 0;
-            case GOAWAY:
-                return 1;
-            case ABORT:
-                return 2;
-            case RESET:
-                return 3;
-            case STOP_SENDING:
-                return 4;
-            case MAX_DATA:
-                return 5;
-            case BLOCKED:
-                return 6;
-            case PONG:
-                return 7;
-            case PING:
-                return 8;
-            default:
-                return 100;
-        }
     }
 
     private static SessionState publicState(SessionState state) {
@@ -1229,54 +1190,11 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     @Override
     public void goAway(long bidiWatermark, long uniWatermark, long errorCode, String reason) throws IOException {
+        LocalGoAwayWaiter waiter;
         synchronized (this.lock) {
-            if (this.shouldFailSessionOperationsLocked()) {
-                throw this.sessionOperationErrorLocked("goAway", this.currentErrorLocked());
-            }
-            this.validateOutgoingGoAwayWatermarkLocked(bidiWatermark, true);
-            this.validateOutgoingGoAwayWatermarkLocked(uniWatermark, false);
-            if (bidiWatermark > this.localGoAwayBidi || uniWatermark > this.localGoAwayUni) {
-                if (this.localGoAwayIssued
-                        && this.localGoAwayBidi <= bidiWatermark
-                        && this.localGoAwayUni <= uniWatermark) {
-                    return;
-                }
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "goAway",
-                        "GOAWAY watermarks must be non-increasing",
-                        ZmuxErrorSource.LOCAL,
-                        ZmuxErrorDirection.WRITE
-                );
-            }
-            if (this.localGoAwayIssued
-                    && bidiWatermark == this.localGoAwayBidi
-                    && uniWatermark == this.localGoAwayUni) {
-                return;
-            }
-            byte[] payload = FrameCodec.buildGoAwayPayload(
-                    bidiWatermark,
-                    uniWatermark,
-                    errorCode,
-                    reason,
-                    this.controlPayloadLimitLocked()
-            );
-            OutboundFrame outboundFrame = new OutboundFrame(
-                    new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, payload),
-                    null,
-                    0,
-                    false,
-                    false
-            );
-            this.enqueueReplacingQueuedGoAwayLocked(outboundFrame);
-            this.localGoAwayBidi = bidiWatermark;
-            this.localGoAwayUni = uniWatermark;
-            this.localGoAwayIssued = true;
-            if (this.state == SessionState.READY) {
-                this.state = SessionState.DRAINING;
-            }
-            this.notifyLockWaitersLocked();
+            waiter = this.enqueueLocalGoAwayLocked(bidiWatermark, uniWatermark, errorCode, reason, true);
         }
+        this.awaitLocalGoAwaySent(waiter);
     }
 
     @Override
@@ -1412,7 +1330,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     private boolean trySendGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
         try {
-            this.enqueueGracefulGoAway(bidiWatermark, uniWatermark);
+            LocalGoAwayWaiter waiter = this.enqueueGracefulGoAway(bidiWatermark, uniWatermark);
+            this.awaitLocalGoAwaySent(waiter);
             return true;
         } catch (IOException error) {
             synchronized (this.lock) {
@@ -1424,47 +1343,94 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         }
     }
 
-    private void enqueueGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
+    private LocalGoAwayWaiter enqueueGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
         synchronized (this.lock) {
-            if (this.shouldFailSessionOperationsLocked()) {
-                throw this.sessionOperationErrorLocked("goAway", this.currentErrorLocked());
-            }
-            this.validateOutgoingGoAwayWatermarkLocked(bidiWatermark, true);
-            this.validateOutgoingGoAwayWatermarkLocked(uniWatermark, false);
-            if (bidiWatermark > this.localGoAwayBidi || uniWatermark > this.localGoAwayUni) {
-                if (this.localGoAwayIssued
-                        && this.localGoAwayBidi <= bidiWatermark
-                        && this.localGoAwayUni <= uniWatermark) {
-                    return;
-                }
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "goAway",
-                        "GOAWAY watermarks must be non-increasing",
-                        ZmuxErrorSource.LOCAL,
-                        ZmuxErrorDirection.WRITE
-                );
-            }
-            if (this.localGoAwayIssued
-                    && bidiWatermark == this.localGoAwayBidi
-                    && uniWatermark == this.localGoAwayUni) {
-                return;
-            }
-            byte[] payload = FrameCodec.buildGoAwayPayload(
+            return this.enqueueLocalGoAwayLocked(
                     bidiWatermark,
                     uniWatermark,
                     ErrorCode.NO_ERROR.code(),
                     "",
-                    this.controlPayloadLimitLocked()
+                    false
             );
-            this.enqueueControlLocked(new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, payload));
-            this.localGoAwayBidi = bidiWatermark;
-            this.localGoAwayUni = uniWatermark;
-            this.localGoAwayIssued = true;
-            if (this.state == SessionState.READY) {
-                this.state = SessionState.DRAINING;
+        }
+    }
+
+    private LocalGoAwayWaiter enqueueLocalGoAwayLocked(long bidiWatermark,
+                                                       long uniWatermark,
+                                                       long errorCode,
+                                                       String reason,
+                                                       boolean replaceQueuedGoAway) throws IOException {
+        if (this.shouldFailSessionOperationsLocked()) {
+            throw this.sessionOperationErrorLocked("goAway", this.currentErrorLocked());
+        }
+        this.validateOutgoingGoAwayWatermarkLocked(bidiWatermark, true);
+        this.validateOutgoingGoAwayWatermarkLocked(uniWatermark, false);
+        if (bidiWatermark > this.localGoAwayBidi || uniWatermark > this.localGoAwayUni) {
+            if (this.localGoAwayIssued
+                    && this.localGoAwayBidi <= bidiWatermark
+                    && this.localGoAwayUni <= uniWatermark) {
+                return this.localGoAwayWaiterLocked(bidiWatermark, uniWatermark);
             }
-            this.notifyLockWaitersLocked();
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "goAway",
+                    "GOAWAY watermarks must be non-increasing",
+                    ZmuxErrorSource.LOCAL,
+                    ZmuxErrorDirection.WRITE
+            );
+        }
+        if (this.localGoAwayIssued
+                && bidiWatermark == this.localGoAwayBidi
+                && uniWatermark == this.localGoAwayUni) {
+            return this.localGoAwayWaiterLocked(bidiWatermark, uniWatermark);
+        }
+        byte[] payload = FrameCodec.buildGoAwayPayload(
+                bidiWatermark,
+                uniWatermark,
+                errorCode,
+                reason,
+                this.controlPayloadLimitLocked()
+        );
+        OutboundFrame outboundFrame = new OutboundFrame(
+                new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, payload),
+                null,
+                0,
+                false,
+                false
+        );
+        if (replaceQueuedGoAway) {
+            this.enqueueReplacingQueuedGoAwayLocked(outboundFrame);
+        } else {
+            this.enqueueQueuedOutboundLocked(this.urgentQueue, outboundFrame);
+        }
+        this.localGoAwayBidi = bidiWatermark;
+        this.localGoAwayUni = uniWatermark;
+        this.localGoAwayIssued = true;
+        if (this.state == SessionState.READY) {
+            this.state = SessionState.DRAINING;
+        }
+        this.notifyLockWaitersLocked();
+        return this.localGoAwayWaiterLocked(bidiWatermark, uniWatermark);
+    }
+
+    private LocalGoAwayWaiter localGoAwayWaiterLocked(long bidiWatermark, long uniWatermark) {
+        if (this.localGoAwaySentCoversLocked(bidiWatermark, uniWatermark)) {
+            return null;
+        }
+        LocalGoAwayWaiter waiter = new LocalGoAwayWaiter(bidiWatermark, uniWatermark);
+        this.localGoAwayWaiters.add(waiter);
+        return waiter;
+    }
+
+    private boolean localGoAwaySentCoversLocked(long bidiWatermark, long uniWatermark) {
+        return this.localGoAwaySent
+                && this.sentLocalGoAwayBidi <= bidiWatermark
+                && this.sentLocalGoAwayUni <= uniWatermark;
+    }
+
+    private void awaitLocalGoAwaySent(LocalGoAwayWaiter waiter) throws IOException {
+        if (waiter != null) {
+            waiter.await();
         }
     }
 
@@ -3140,11 +3106,44 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     void finishSessionLocked(IOException error, SessionState sessionState) {
         this.lifecycleRuntime.finishSessionLocked(error, sessionState);
+        this.failLocalGoAwayWaitersLocked(this.localGoAwayFailureLocked(error));
         this.failPendingAsyncAcceptsLocked(error);
     }
 
     private void beginSessionTerminationLocked(IOException error, SessionState sessionState) {
         this.lifecycleRuntime.beginSessionTerminationLocked(error, sessionState);
+        if (sessionState != SessionState.CLOSING) {
+            this.failLocalGoAwayWaitersLocked(this.localGoAwayFailureLocked(error));
+        }
+    }
+
+    private IOException localGoAwayFailureLocked(IOException error) {
+        IOException source = error != null ? error : this.currentErrorLocked();
+        IOException operationError = this.sessionOperationErrorLocked("goAway", source);
+        return operationError != null
+                ? operationError
+                : new SessionClosedException(ZmuxErrorSource.UNKNOWN, null, "goAway");
+    }
+
+    private void failLocalGoAwayWaitersLocked(IOException error) {
+        if (!this.localGoAwayWaiters.isEmpty()) {
+            this.completeLocalGoAwayWaitersLocked(error == null ? this.localGoAwayFailureLocked(null) : error);
+        }
+    }
+
+    private void completeLocalGoAwayWaitersLocked(IOException error) {
+        if (this.localGoAwayWaiters.isEmpty()) {
+            return;
+        }
+        Iterator<LocalGoAwayWaiter> iterator = this.localGoAwayWaiters.iterator();
+        while (iterator.hasNext()) {
+            LocalGoAwayWaiter waiter = iterator.next();
+            if (error == null && !this.localGoAwaySentCoversLocked(waiter.bidiWatermark(), waiter.uniWatermark())) {
+                continue;
+            }
+            iterator.remove();
+            waiter.complete(error);
+        }
     }
 
     void closeTransport() {
@@ -5003,12 +5002,28 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 }
                 maybeCompactStreamLocked(outboundFrame.stream);
             }
+            if (outboundFrame.frame().type() == FrameType.GOAWAY) {
+                this.noteLocalGoAwayWrittenLocked(outboundFrame);
+            }
             outboundFrame.completeWriteSuccess();
             if (outboundFrame.frame().type() == FrameType.CLOSE) {
                 finishSessionLocked(null, state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED);
                 return;
             }
         }
+    }
+
+    private void noteLocalGoAwayWrittenLocked(OutboundFrame outboundFrame) throws IOException {
+        FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(outboundFrame.frame().payload());
+        if (this.localGoAwaySent) {
+            this.sentLocalGoAwayBidi = Math.min(this.sentLocalGoAwayBidi, payload.lastAcceptedBidi());
+            this.sentLocalGoAwayUni = Math.min(this.sentLocalGoAwayUni, payload.lastAcceptedUni());
+        } else {
+            this.sentLocalGoAwayBidi = payload.lastAcceptedBidi();
+            this.sentLocalGoAwayUni = payload.lastAcceptedUni();
+            this.localGoAwaySent = true;
+        }
+        this.completeLocalGoAwayWaitersLocked(null);
     }
 
     void flushPendingPriorityUpdateLocked(StreamRuntime streamRuntime) throws IOException {
@@ -5972,6 +5987,55 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
         private long replacedBytes() {
             return replacedBytes;
+        }
+    }
+
+    private static final class LocalGoAwayWaiter {
+        private final long bidiWatermark;
+        private final long uniWatermark;
+        private boolean done;
+        private IOException error;
+
+        LocalGoAwayWaiter(long bidiWatermark, long uniWatermark) {
+            this.bidiWatermark = bidiWatermark;
+            this.uniWatermark = uniWatermark;
+        }
+
+        long bidiWatermark() {
+            return this.bidiWatermark;
+        }
+
+        long uniWatermark() {
+            return this.uniWatermark;
+        }
+
+        synchronized void complete(IOException error) {
+            if (this.done) {
+                return;
+            }
+            this.error = error;
+            this.done = true;
+            notifyAll();
+        }
+
+        synchronized void await() throws IOException {
+            while (!this.done) {
+                try {
+                    wait();
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    throw SessionRuntime.interruptedIo(
+                            "zmux: interrupted while waiting for GOAWAY send",
+                            "goAway",
+                            ZmuxErrorScope.SESSION,
+                            ZmuxErrorDirection.WRITE,
+                            interruptedException
+                    );
+                }
+            }
+            if (this.error != null) {
+                throw this.error;
+            }
         }
     }
 

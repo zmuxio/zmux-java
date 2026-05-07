@@ -3,11 +3,15 @@ package io.zmux.internal;
 import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.util.Deque;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -127,6 +131,63 @@ final class GoAwayRuntimeTest {
         return writer;
     }
 
+    private static Thread startGoAway(SessionRuntime runtime,
+                                      long lastAcceptedBidi,
+                                      long lastAcceptedUni,
+                                      long code,
+                                      String reason,
+                                      AtomicReference<Throwable> failure,
+                                      String name) {
+        Thread thread = new Thread(() -> {
+            try {
+                runtime.goAway(lastAcceptedBidi, lastAcceptedUni, code, reason);
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, name);
+        thread.start();
+        return thread;
+    }
+
+    private static void joinThread(Thread thread, String message) throws InterruptedException {
+        thread.join(1_000L);
+        assertFalse(thread.isAlive(), message);
+    }
+
+    private static void assertNoThreadFailure(AtomicReference<Throwable> failure, String message) {
+        Throwable throwable = failure.get();
+        if (throwable != null) {
+            fail(message + ": " + throwable);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int localGoAwayWaiterCount(SessionRuntime runtime) throws Exception {
+        Field field = SessionRuntime.class.getDeclaredField("localGoAwayWaiters");
+        field.setAccessible(true);
+        synchronized (runtime.lock()) {
+            return ((List<Object>) field.get(runtime)).size();
+        }
+    }
+
+    private static boolean hasCause(Throwable error, Throwable expectedCause) {
+        Throwable current = error;
+        while (current != null) {
+            if (current == expectedCause) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static Thread flushAndStop(SessionRuntime runtime,
+                                       AtomicReference<Throwable> writerFailure,
+                                       String name) throws Exception {
+        runtime.closeWithError(ErrorCode.NO_ERROR.code(), "");
+        return startWriterLoop(runtime, writerFailure, name);
+    }
+
     @Test
     void duplicatePeerGoAwayCountsAsNoOpControl() throws Exception {
         SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
@@ -223,8 +284,25 @@ final class GoAwayRuntimeTest {
     void duplicateLocalGoAwayDoesNotQueueDuplicateControlFrames() throws Exception {
         SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
 
-        runtime.goAway(0L, 0L, ErrorCode.NO_ERROR.code(), "first");
-        runtime.goAway(0L, 0L, ErrorCode.INTERNAL.code(), "second");
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread first = startGoAway(runtime, 0L, 0L, ErrorCode.NO_ERROR.code(), "first", firstFailure, "goaway-first");
+        awaitCondition(() -> {
+            try {
+                return SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size() == 1;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "first GOAWAY should be queued");
+        Thread second = startGoAway(runtime, 0L, 0L, ErrorCode.INTERNAL.code(), "second", secondFailure, "goaway-second");
+        awaitCondition(() -> {
+            try {
+                return localGoAwayWaiterCount(runtime) == 2;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "duplicate GOAWAY should wait for the already queued covering frame");
 
         Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
         assertEquals(1, urgentQueue.size(), "duplicate local GOAWAY should not grow the urgent queue");
@@ -232,6 +310,14 @@ final class GoAwayRuntimeTest {
                 SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst()).payload()
         );
         assertEquals("first", payload.reason(), "duplicate local GOAWAY should keep the already queued payload");
+
+        Thread writer = flushAndStop(runtime, writerFailure, "duplicate-goaway-writer");
+        joinThread(first, "first GOAWAY should finish after writer sends the queued frame");
+        joinThread(second, "duplicate GOAWAY should finish after writer sends the covering frame");
+        joinThread(writer, "writer should stop after CLOSE");
+        assertNoThreadFailure(firstFailure, "first GOAWAY failure mismatch");
+        assertNoThreadFailure(secondFailure, "duplicate GOAWAY failure mismatch");
+        assertNoThreadFailure(writerFailure, "writer failure mismatch");
     }
 
     @Test
@@ -241,8 +327,32 @@ final class GoAwayRuntimeTest {
         long highUni = peerGoAwayWatermark(false, 2);
         long lowerBidi = highBidi - 4L;
 
-        runtime.goAway(highBidi, highUni, ErrorCode.NO_ERROR.code(), "old");
-        runtime.goAway(lowerBidi, highUni, ErrorCode.INTERNAL.code(), "new");
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread first = startGoAway(runtime, highBidi, highUni, ErrorCode.NO_ERROR.code(), "old", firstFailure, "goaway-old");
+        awaitCondition(() -> {
+            try {
+                return SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size() == 1;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "initial GOAWAY should be queued");
+        Thread second = startGoAway(runtime, lowerBidi, highUni, ErrorCode.INTERNAL.code(), "new", secondFailure, "goaway-new");
+        awaitCondition(() -> {
+            try {
+                Deque<Object> queue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+                if (queue.size() != 1) {
+                    return false;
+                }
+                FrameCodec.GoAwayPayload queued = FrameCodec.parseGoAwayPayload(
+                        SessionRuntimeTestSupport.outboundFrame(queue.peekFirst()).payload()
+                );
+                return "new".equals(queued.reason());
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "stricter GOAWAY should replace the queued older GOAWAY");
 
         Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
         assertEquals(1, urgentQueue.size(), "stricter local GOAWAY should replace an unsent older GOAWAY");
@@ -253,6 +363,14 @@ final class GoAwayRuntimeTest {
         assertEquals(highUni, payload.lastAcceptedUni(), "queued GOAWAY should preserve the unchanged uni watermark");
         assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "queued GOAWAY should carry the replacement code");
         assertEquals("new", payload.reason(), "queued GOAWAY should carry the replacement reason");
+
+        Thread writer = flushAndStop(runtime, writerFailure, "replace-goaway-writer");
+        joinThread(first, "replaced GOAWAY caller should finish when stricter GOAWAY is sent");
+        joinThread(second, "stricter GOAWAY caller should finish when its frame is sent");
+        joinThread(writer, "writer should stop after CLOSE");
+        assertNoThreadFailure(firstFailure, "replaced GOAWAY failure mismatch");
+        assertNoThreadFailure(secondFailure, "stricter GOAWAY failure mismatch");
+        assertNoThreadFailure(writerFailure, "writer failure mismatch");
     }
 
     @Test
@@ -263,8 +381,25 @@ final class GoAwayRuntimeTest {
         long lowerBidi = highBidi - 4L;
         long lowerUni = highUni - 4L;
 
-        runtime.goAway(lowerBidi, lowerUni, ErrorCode.NO_ERROR.code(), "strict");
-        runtime.goAway(highBidi, highUni, ErrorCode.INTERNAL.code(), "covered");
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread first = startGoAway(runtime, lowerBidi, lowerUni, ErrorCode.NO_ERROR.code(), "strict", firstFailure, "goaway-strict");
+        awaitCondition(() -> {
+            try {
+                return SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size() == 1;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "strict GOAWAY should be queued");
+        Thread second = startGoAway(runtime, highBidi, highUni, ErrorCode.INTERNAL.code(), "covered", secondFailure, "goaway-covered");
+        awaitCondition(() -> {
+            try {
+                return localGoAwayWaiterCount(runtime) == 2;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "covered weaker GOAWAY should wait for the already queued stricter frame");
 
         Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
         assertEquals(1, urgentQueue.size(), "covered weaker GOAWAY should not enqueue a second control frame");
@@ -275,6 +410,76 @@ final class GoAwayRuntimeTest {
         assertEquals(lowerUni, payload.lastAcceptedUni(), "covered weaker GOAWAY must keep the stricter uni watermark");
         assertEquals(ErrorCode.NO_ERROR.code(), payload.code(), "covered weaker GOAWAY must keep the original payload");
         assertEquals("strict", payload.reason(), "covered weaker GOAWAY must keep the original reason");
+
+        Thread writer = flushAndStop(runtime, writerFailure, "covered-goaway-writer");
+        joinThread(first, "strict GOAWAY caller should finish when its frame is sent");
+        joinThread(second, "covered GOAWAY caller should finish when covering frame is sent");
+        joinThread(writer, "writer should stop after CLOSE");
+        assertNoThreadFailure(firstFailure, "strict GOAWAY failure mismatch");
+        assertNoThreadFailure(secondFailure, "covered GOAWAY failure mismatch");
+        assertNoThreadFailure(writerFailure, "writer failure mismatch");
+    }
+
+    @Test
+    void localGoAwayReturnsAfterFrameIsWritten() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), output),
+                ZmuxConfig.builder().role(Role.RESPONDER).build(),
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread writer = startWriterLoop(runtime, writerFailure, "goaway-written-writer");
+
+        runtime.goAway(0L, 0L, ErrorCode.NO_ERROR.code(), "written");
+
+        FrameCodec.Frame written = FrameCodec.readFrame(
+                new ByteArrayInputStream(output.toByteArray()),
+                Settings.defaults().limits()
+        );
+        assertEquals(FrameType.GOAWAY, written.type(), "GOAWAY should be written before goAway returns");
+        assertEquals("written", FrameCodec.parseGoAwayPayload(written.payload()).reason(), "written GOAWAY reason mismatch");
+
+        runtime.closeWithError(ErrorCode.NO_ERROR.code(), "");
+        joinThread(writer, "writer should stop after CLOSE");
+        assertNoThreadFailure(writerFailure, "writer failure mismatch");
+    }
+
+    @Test
+    void localGoAwayReportsWriterFailure() throws Exception {
+        IOException writeFailure = new IOException("forced GOAWAY write failure");
+        OutputStream failingOutput = new OutputStream() {
+            @Override
+            public void write(int value) throws IOException {
+                throw writeFailure;
+            }
+
+            @Override
+            public void write(byte[] buffer, int offset, int length) throws IOException {
+                throw writeFailure;
+            }
+        };
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                new BasicDuplexConnection(SessionRuntimeTestSupport.emptyInput(), failingOutput),
+                ZmuxConfig.builder().role(Role.RESPONDER).build(),
+                0L,
+                Settings.defaults()
+        );
+        AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+        Thread writer = startWriterLoop(runtime, writerFailure, "goaway-failure-writer");
+
+        IOException error = assertThrows(
+                IOException.class,
+                () -> runtime.goAway(0L, 0L, ErrorCode.NO_ERROR.code(), "fail"),
+                "GOAWAY should surface writer failure"
+        );
+
+        assertEquals("goAway", ZmuxErrors.operation(error), "GOAWAY failure should retain the caller operation");
+        assertTrue(hasCause(error, writeFailure), "GOAWAY failure should retain the transport writer error");
+        joinThread(writer, "writer should stop after write failure");
+        assertEquals(SessionState.FAILED, runtime.state(), "writer failure should fail the session");
+        assertNoThreadFailure(writerFailure, "writer loop should handle transport write failure internally");
     }
 
     @Test
@@ -354,7 +559,23 @@ final class GoAwayRuntimeTest {
             SessionRuntimeTestSupport.setLongField(runtime, "lastAcceptedPeerBidi", refinedBidi);
             SessionRuntimeTestSupport.setLongField(runtime, "lastAcceptedPeerUni", refinedUni);
         }
-        runtime.goAway(initialBidi, initialUni, ErrorCode.NO_ERROR.code(), "prior");
+        AtomicReference<Throwable> goAwayFailure = new AtomicReference<>();
+        Thread goAwayThread = startGoAway(
+                runtime,
+                initialBidi,
+                initialUni,
+                ErrorCode.NO_ERROR.code(),
+                "prior",
+                goAwayFailure,
+                "prior-goaway"
+        );
+        awaitCondition(() -> {
+            try {
+                return SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue").size() == 1;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }, "prior GOAWAY should be queued");
 
         AtomicReference<Throwable> closeFailure = new AtomicReference<>();
         AtomicReference<Throwable> writerFailure = new AtomicReference<>();
@@ -375,20 +596,20 @@ final class GoAwayRuntimeTest {
                         Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
                         Object last = urgentQueue.peekLast();
                         return last != null
-                                && SessionRuntimeTestSupport.outboundFrame(last).type() == FrameType.CLOSE;
+                                && urgentQueue.size() == 2
+                                && SessionRuntimeTestSupport.outboundFrame(last).type() == FrameType.GOAWAY;
                     } catch (Exception exception) {
                         throw new RuntimeException(exception);
                     }
                 }
-            }, "close should queue CLOSE after graceful drain");
+            }, "close should queue the refined GOAWAY and wait for it to be sent");
 
             synchronized (runtime.lock()) {
                 Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
-                assertEquals(3, urgentQueue.size(), "close after a queued prior GOAWAY should retain both GOAWAY frames before CLOSE");
+                assertEquals(2, urgentQueue.size(), "close after a queued prior GOAWAY should retain both GOAWAY frames before flushing");
                 Object[] frames = urgentQueue.toArray();
                 assertEquals(FrameType.GOAWAY, SessionRuntimeTestSupport.outboundFrame(frames[0]).type(), "first queued control frame mismatch");
                 assertEquals(FrameType.GOAWAY, SessionRuntimeTestSupport.outboundFrame(frames[1]).type(), "second queued control frame mismatch");
-                assertEquals(FrameType.CLOSE, SessionRuntimeTestSupport.outboundFrame(frames[2]).type(), "third queued control frame mismatch");
 
                 FrameCodec.GoAwayPayload initial = FrameCodec.parseGoAwayPayload(
                         SessionRuntimeTestSupport.outboundFrame(frames[0]).payload()
@@ -405,11 +626,14 @@ final class GoAwayRuntimeTest {
             writer = startWriterLoop(runtime, writerFailure, "close-after-prior-goaway-writer");
             writer.join(1_000L);
             closeThread.join(1_000L);
+            goAwayThread.join(1_000L);
         }
 
         assertFalse(writer.isAlive(), "writer loop should terminate after flushing queued close frames");
         assertFalse(closeThread.isAlive(), "close should finish once the writer flushes the queued frames");
+        assertFalse(goAwayThread.isAlive(), "prior GOAWAY should finish once a covering GOAWAY is sent");
         assertNull(writerFailure.get(), "writer loop failure mismatch");
         assertNull(closeFailure.get(), "close failure mismatch");
+        assertNull(goAwayFailure.get(), "prior GOAWAY failure mismatch");
     }
 }

@@ -133,9 +133,9 @@ final class SessionWriterBatchPolicy {
             return Integer.MAX_VALUE;
         }
         switch (outboundFrame.frame().type()) {
-            case CLOSE:
-                return 0;
             case GOAWAY:
+                return 0;
+            case CLOSE:
                 return 1;
             case ABORT:
                 return 2;
