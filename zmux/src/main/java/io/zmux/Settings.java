@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.protocol.Limits;
+import io.zmux.protocol.Protocol;
 import java.util.Objects;
 
 public final class Settings {

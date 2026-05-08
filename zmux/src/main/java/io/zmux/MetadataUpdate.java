@@ -1,5 +1,6 @@
 package io.zmux;
 
+import io.zmux.protocol.Protocol;
 import java.util.Objects;
 
 public final class MetadataUpdate {

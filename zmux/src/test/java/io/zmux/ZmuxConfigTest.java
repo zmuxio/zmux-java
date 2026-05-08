@@ -1,8 +1,10 @@
 package io.zmux;
 
-import org.junit.jupiter.api.Test;
-
+import io.zmux.protocol.Negotiated;
+import io.zmux.protocol.Preface;
+import io.zmux.protocol.Protocol;
 import java.time.Duration;
+import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

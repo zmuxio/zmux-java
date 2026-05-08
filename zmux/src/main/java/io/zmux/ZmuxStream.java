@@ -1,5 +1,6 @@
 package io.zmux;
 
+import io.zmux.support.DeadlineSupport;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;

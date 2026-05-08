@@ -1,10 +1,15 @@
 package io.zmux.benchmarks;
 
 import io.zmux.MetadataUpdate;
-import io.zmux.ReadHalf;
 import io.zmux.StreamMetadata;
-import io.zmux.WriteHalf;
 import io.zmux.ZmuxSendStream;
+import io.zmux.transport.ReadHalf;
+import io.zmux.transport.WriteHalf;
+import java.io.IOException;
+import java.net.SocketAddress;
+import java.nio.ByteBuffer;
+import java.time.Instant;
+import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -17,12 +22,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-
-import java.io.IOException;
-import java.net.SocketAddress;
-import java.nio.ByteBuffer;
-import java.time.Instant;
-import java.util.concurrent.TimeUnit;
 
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)

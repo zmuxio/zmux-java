@@ -1,6 +1,13 @@
 package io.zmux;
 
-
+import io.zmux.protocol.Negotiated;
+import io.zmux.protocol.Preface;
+import io.zmux.runtime.SessionRuntime;
+import io.zmux.transport.DuplexConnection;
+import io.zmux.transport.JoinedDuplexConnection;
+import io.zmux.transport.ReadHalf;
+import io.zmux.transport.WriteHalf;
+import io.zmux.transport.ZmuxConnections;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;

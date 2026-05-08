@@ -4,8 +4,28 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.quic.*;
 import io.netty.util.concurrent.Future;
-import io.zmux.*;
-
+import io.zmux.AcceptTimeoutException;
+import io.zmux.AdapterUnsupportedException;
+import io.zmux.ApplicationError;
+import io.zmux.EmptyMetadataUpdateException;
+import io.zmux.ErrorCode;
+import io.zmux.OpenLimitedException;
+import io.zmux.OpenOptions;
+import io.zmux.OpenTimeoutException;
+import io.zmux.ReadClosedException;
+import io.zmux.SessionClosedException;
+import io.zmux.WriteClosedException;
+import io.zmux.Zmux;
+import io.zmux.ZmuxErrorDirection;
+import io.zmux.ZmuxErrorScope;
+import io.zmux.ZmuxErrorSource;
+import io.zmux.ZmuxErrors;
+import io.zmux.ZmuxException;
+import io.zmux.ZmuxInterruptedException;
+import io.zmux.ZmuxInterruptedIOException;
+import io.zmux.ZmuxSession;
+import io.zmux.ZmuxTerminationKind;
+import io.zmux.protocol.Protocol;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
@@ -26,9 +46,9 @@ import java.util.function.Supplier;
 final class NettyQuicSupport {
     static final byte[] EMPTY_BYTES = new byte[0];
     static final long OPEN_CAPABILITIES =
-            io.zmux.Protocol.CAPABILITY_OPEN_METADATA
-                    | io.zmux.Protocol.CAPABILITY_PRIORITY_HINTS
-                    | io.zmux.Protocol.CAPABILITY_STREAM_GROUPS;
+            Protocol.CAPABILITY_OPEN_METADATA
+                    | Protocol.CAPABILITY_PRIORITY_HINTS
+                    | Protocol.CAPABILITY_STREAM_GROUPS;
     static final int ACCEPT_RESULT_QUEUE_CAPACITY = 32;
     static final int ACCEPT_PRELUDE_PENDING_MIN_CAPACITY = ACCEPT_RESULT_QUEUE_CAPACITY * 2;
     static final int ACCEPT_PRELUDE_PENDING_MAX_CAPACITY = 4096;

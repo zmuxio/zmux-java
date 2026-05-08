@@ -1,5 +1,9 @@
 package io.zmux;
 
+import io.zmux.support.DeadlineSupport;
+import io.zmux.support.RangeChecks;
+import io.zmux.support.StreamApiSupport;
+import io.zmux.transport.WriteHalf;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.SocketAddress;

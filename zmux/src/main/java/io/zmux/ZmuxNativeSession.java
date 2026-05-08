@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.protocol.Negotiated;
+import io.zmux.protocol.Preface;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;

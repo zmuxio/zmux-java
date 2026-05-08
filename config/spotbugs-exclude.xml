@@ -1,20 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <FindBugsFilter>
+    <!-- Protocol internals intentionally expose buffers on zero-copy frame paths. -->
+    <Match>
+        <Class name="io.zmux.protocol.FrameCodec$Frame"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="io.zmux.protocol.FrameCodec$DataPayload"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="io.zmux.protocol.FrameEnvelopeCodec$GatherScratch"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="io.zmux.protocol.FrameEnvelopeCodec$InboundFrame"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="io.zmux.protocol.InboundPayloadPool$Handle"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
     <!-- Public adapters keep caller-owned transport handles. -->
     <Match>
-        <Class name="io.zmux.BasicDuplexConnection"/>
+        <Class name="io.zmux.transport.BasicDuplexConnection"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
     <Match>
-        <Class name="io.zmux.BasicDuplexConnection$Builder"/>
+        <Class name="io.zmux.transport.BasicDuplexConnection$Builder"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
-        <Class name="io.zmux.JoinedDuplexConnection"/>
+        <Class name="io.zmux.transport.JoinedDuplexConnection"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
     <Match>
-        <Class name="io.zmux.JoinedDuplexConnection$PausedOutput"/>
+        <Class name="io.zmux.transport.JoinedDuplexConnection$PausedOutput"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 

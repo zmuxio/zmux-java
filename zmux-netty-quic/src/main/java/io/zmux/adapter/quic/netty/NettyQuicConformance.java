@@ -3,7 +3,6 @@ package io.zmux.adapter.quic.netty;
 import io.zmux.ZmuxClaim;
 import io.zmux.ZmuxConformanceSuite;
 import io.zmux.ZmuxImplementationProfile;
-
 import java.util.Collections;
 import java.util.List;
 

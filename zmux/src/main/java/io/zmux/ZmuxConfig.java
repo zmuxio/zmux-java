@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.protocol.Preface;
+import io.zmux.protocol.Protocol;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Objects;

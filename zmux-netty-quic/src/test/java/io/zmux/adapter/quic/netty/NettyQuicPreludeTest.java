@@ -1,10 +1,18 @@
 package io.zmux.adapter.quic.netty;
 
-import io.zmux.*;
-import org.junit.jupiter.api.Test;
-
+import io.zmux.ErrorCode;
+import io.zmux.OpenOptions;
+import io.zmux.StreamMetadata;
+import io.zmux.ZmuxErrorDirection;
+import io.zmux.ZmuxErrorScope;
+import io.zmux.ZmuxErrorSource;
+import io.zmux.ZmuxException;
+import io.zmux.protocol.DecodedVarint;
+import io.zmux.protocol.Protocol;
+import io.zmux.protocol.ZmuxCodec;
 import java.io.IOException;
 import java.util.Arrays;
+import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

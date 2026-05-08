@@ -1,15 +1,18 @@
 package io.zmux.benchmarks;
 
-import io.zmux.DecodedVarint;
-import io.zmux.Frame;
-import io.zmux.FrameType;
-import io.zmux.Limits;
 import io.zmux.MetadataUpdate;
-import io.zmux.Preface;
-import io.zmux.Protocol;
 import io.zmux.Role;
 import io.zmux.Settings;
-import io.zmux.ZmuxCodec;
+import io.zmux.protocol.DecodedVarint;
+import io.zmux.protocol.Frame;
+import io.zmux.protocol.FrameType;
+import io.zmux.protocol.Limits;
+import io.zmux.protocol.Preface;
+import io.zmux.protocol.Protocol;
+import io.zmux.protocol.ZmuxCodec;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -22,10 +25,6 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
-
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.TimeUnit;
 
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)

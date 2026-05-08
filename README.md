@@ -2,7 +2,9 @@
 
 Java implementation of the ZMux stream multiplexing protocol.
 
-The published artifacts are Java 8+ compatible. Supported APIs live under `io.zmux`.
+The published artifacts are Java 8+ compatible. Core session and stream APIs
+start in `io.zmux`; transport helpers live in `io.zmux.transport`, and protocol
+diagnostic helpers live in `io.zmux.protocol`.
 
 ## Installation
 
@@ -78,7 +80,7 @@ Constructor choice:
 
 All constructor families accept `Socket`, `InputStream` plus `OutputStream`,
 `ByteChannel`, `ReadableByteChannel` plus `WritableByteChannel`, or
-`DuplexConnection`, with `ZmuxConfig` overloads.
+`io.zmux.transport.DuplexConnection`, with `ZmuxConfig` overloads.
 
 ## Streams
 
@@ -157,8 +159,8 @@ Enable the capabilities before using open metadata or priority hints:
 ```java
 import io.zmux.MetadataUpdate;
 import io.zmux.OpenOptions;
-import io.zmux.Protocol;
 import io.zmux.ZmuxConfig;
+import io.zmux.protocol.Protocol;
 
 long capabilities = Protocol.CAPABILITY_OPEN_METADATA
         | Protocol.CAPABILITY_PRIORITY_HINTS
@@ -190,8 +192,8 @@ The peer reads open metadata through `stream.openInfo()` or
 Any reliable ordered byte transport can be wrapped as a `DuplexConnection`:
 
 ```java
-import io.zmux.DuplexConnection;
-import io.zmux.ZmuxConnections;
+import io.zmux.transport.DuplexConnection;
+import io.zmux.transport.ZmuxConnections;
 
 DuplexConnection connection = ZmuxConnections.builder(input, output)
         .closer(transport)
@@ -291,9 +293,9 @@ defaults.
 `ping(...)`, `goAway(...)`, `peerGoAwayError()`, `peerCloseError()`,
 `localPreface()`, `peerPreface()`, and `negotiated()`.
 
-`ZmuxCodec`, `Protocol`, `Preface`, `Negotiated`, `ZmuxConformance`, and
-`ZmuxCoreConformance` are public for diagnostics, proxies, and conformance
-tests.
+`io.zmux.protocol.ZmuxCodec`, `Protocol`, `Preface`, and `Negotiated` are
+public for diagnostics, proxies, and conformance tests. `ZmuxConformance` and
+`ZmuxCoreConformance` describe the implementation's conformance surface.
 
 ## Semantics
 
