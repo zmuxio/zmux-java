@@ -38,7 +38,6 @@ final class GoInteropSmokeTest {
                 return Duration.ofSeconds(seconds);
             }
         } catch (NumberFormatException ignored) {
-            // Fall back to the default below.
         }
         return Duration.ofSeconds(20);
     }

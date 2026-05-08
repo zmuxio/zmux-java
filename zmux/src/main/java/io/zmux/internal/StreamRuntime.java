@@ -148,6 +148,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
 
     @Override
     public int writevFinal(byte[]... parts) throws IOException {
+        this.awaitAsyncOperationPredecessors();
         return this.writeCoordinator.writev(parts, true);
     }
 

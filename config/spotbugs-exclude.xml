@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <FindBugsFilter>
-    <!-- Adapter classes intentionally keep caller-owned transport handles as their public API. -->
+    <!-- Public adapters keep caller-owned transport handles. -->
     <Match>
         <Class name="io.zmux.BasicDuplexConnection"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
@@ -18,13 +18,13 @@
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 
-    <!-- Events expose the original IOException so callers can inspect exact transport details. -->
+    <!-- Events expose original IOExceptions. -->
     <Match>
         <Class name="io.zmux.ZmuxEvent"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 
-    <!-- defaults() is a shared template; public constructors remain part of the API. -->
+    <!-- Public constructors remain part of the API. -->
     <Match>
         <Class name="io.zmux.Settings"/>
         <Bug pattern="SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR"/>

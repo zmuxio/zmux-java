@@ -141,7 +141,7 @@ final class NettyQuicStreamState {
                 NettyQuicSupport.executeOnEventLoop(target, update);
             }
         } catch (RuntimeException ignored) {
-            // Auto-read is best-effort backpressure; stream/session close paths must not fail on it.
+            // Auto-read failures are non-fatal.
         }
     }
 
@@ -559,9 +559,13 @@ final class NettyQuicStreamState {
             ChannelPromise result = channel.newPromise();
             ChannelFuture writeFuture = submitWrite(data);
             submitAsyncWriteFuture(writeFuture, bytes, startedAtNanos);
+            closeLocalWriteForSubmittedFinal(result);
+            if (result.isDone()) {
+                return result;
+            }
             writeFuture.addListener(ignored -> {
                 if (writeFuture.isSuccess()) {
-                    ChannelFuture closeFuture = closeWriteNettyAsync();
+                    ChannelFuture closeFuture = submitOutputShutdownNettyAsync();
                     closeFuture.addListener(closeIgnored -> {
                         if (closeFuture.isSuccess()) {
                             result.setSuccess();
@@ -590,6 +594,27 @@ final class NettyQuicStreamState {
             } finally {
                 lock.unlock();
             }
+            return submitOutputShutdownNettyAsync();
+        } catch (Throwable failure) {
+            return channel.newFailedFuture(failure);
+        }
+    }
+
+    private void closeLocalWriteForSubmittedFinal(ChannelPromise result) {
+        try {
+            lock.lock();
+            try {
+                closeLocalWriteGracefullyLocked();
+            } finally {
+                lock.unlock();
+            }
+        } catch (Throwable failure) {
+            result.setFailure(failure);
+        }
+    }
+
+    private ChannelFuture submitOutputShutdownNettyAsync() {
+        try {
             ChannelFuture future = channel.shutdownOutput();
             submitWriteSideControlFuture(future, System.nanoTime());
             return future;
@@ -967,12 +992,12 @@ final class NettyQuicStreamState {
                 dispatchControlFuture(current.shutdownInput(quicCode));
             }
         } catch (IOException | RuntimeException ignored) {
-            // The stream is already being discarded locally.
+            // Already discarding locally.
         } finally {
             try {
                 current.close();
             } catch (RuntimeException ignored) {
-                // The parent event loop may already be shutting down.
+                // Parent event loop may be shutting down.
             }
         }
     }

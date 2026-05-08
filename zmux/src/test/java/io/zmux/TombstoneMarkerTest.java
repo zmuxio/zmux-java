@@ -264,8 +264,7 @@ final class TombstoneMarkerTest {
             try {
                 acceptEmptyUni(peer.session());
             } catch (IOException ignored) {
-                // A local hard-cap breach may surface to the blocked accept call directly
-                // before the CLOSE frame is observed by the raw peer.
+                // Accept may fail before the raw peer observes CLOSE.
             }
 
             await(Duration.ofSeconds(1), () -> peer.session().state().terminal(), "session failure after marker-only cap breach");

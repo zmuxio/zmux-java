@@ -3,42 +3,37 @@ package io.zmux;
 /**
  * Public session lifecycle state.
  *
- * <p>The public state intentionally hides internal runtime substates. It is
- * stable for callers, statistics, and lifecycle events, but it is not a
- * promise that an operation will succeed without checking the operation's own
- * flow-control, deadline, or terminal conditions.
+ * <p>This hides internal runtime substates and is stable for callers, stats,
+ * and lifecycle events.
  */
 public enum SessionState {
     /**
-     * The session is not usable as a negotiated zmux session.
+     * Not usable as a negotiated zmux session.
      */
     INVALID,
 
     /**
-     * The session is negotiated and not currently draining or closing.
+     * Negotiated and not draining or closing.
      */
     READY,
 
     /**
-     * A graceful drain has started. Existing accepted or opened streams may
-     * still finish, but new work can be refused by GOAWAY or close admission.
+     * Graceful drain started; new work may be refused.
      */
     DRAINING,
 
     /**
-     * A terminal close has started and the runtime is flushing or observing
-     * final transport state.
+     * Terminal close started.
      */
     CLOSING,
 
     /**
-     * The session terminated gracefully.
+     * Terminated gracefully.
      */
     CLOSED,
 
     /**
-     * The session terminated with a protocol, transport, local, or application
-     * failure.
+     * Terminated with a failure.
      */
     FAILED;
 

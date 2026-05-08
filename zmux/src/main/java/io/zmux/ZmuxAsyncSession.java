@@ -5,8 +5,7 @@ import java.util.concurrent.CompletionStage;
 
 public interface ZmuxAsyncSession extends ZmuxSession {
     /**
-     * Async operations complete through the returned stages. Cancelling a returned stage is not
-     * guaranteed to cancel the underlying stream or session operation.
+     * Cancelling returned stages may not cancel the underlying operation.
      */
     default CompletionStage<ZmuxAsyncStream> openStreamAsync() {
         return openStreamAsync(OpenOptions.empty());

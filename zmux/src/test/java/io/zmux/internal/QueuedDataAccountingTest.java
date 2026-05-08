@@ -53,7 +53,7 @@ final class QueuedDataAccountingTest {
             int dataBytes = SessionRuntimeTestSupport.outboundDataBytes(outbound);
             assertEquals(payload.length, dataBytes, "queued DATA frame size mismatch");
 
-            // Add a synthetic tail so the completed frame should leave one frame's worth of queued/reserved bytes behind.
+            // Synthetic tail keeps one frame queued after completion.
             stream.reserveQueuedDataBytesLocked(dataBytes);
             stream.reserveSendBytesLocked(dataBytes);
             SessionRuntimeTestSupport.setLongField(

@@ -247,7 +247,11 @@ class SessionSurfaceRuntimeTest {
 
     @Test
     void pingNonceUsesSplitMixStateAndKeepsEchoSuffix() throws Exception {
-        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .pingPadding(false)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
 
         synchronized (runtime.lock()) {
             SessionRuntimeTestSupport.setLongField(runtime, "pingNonceState", 1L);

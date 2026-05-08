@@ -160,9 +160,12 @@ final class PingSemanticsTest {
 
             echo[0] = (byte) 'X';
             byte[] queuedPayload = pingFrame.payload();
-            assertEquals(8 + expectedSuffix.length, queuedPayload.length, "PING frame should include nonce plus caller echo");
-            byte[] queuedSuffix = java.util.Arrays.copyOfRange(queuedPayload, 8, queuedPayload.length);
-            assertArrayEquals(expectedSuffix, queuedSuffix, "queued PING should preserve the caller payload snapshot");
+            assertTrue(
+                    queuedPayload.length >= 16 + expectedSuffix.length,
+                    "default padded PING should include nonce, padding tag, caller echo, and optional random padding"
+            );
+            byte[] queuedEcho = java.util.Arrays.copyOfRange(queuedPayload, 16, 16 + expectedSuffix.length);
+            assertArrayEquals(expectedSuffix, queuedEcho, "queued PING should preserve the caller payload snapshot");
 
             peer.send(new FrameCodec.Frame(FrameType.PONG, 0, 0L, pingFrame.payload()));
             ping.join(Duration.ofSeconds(2).toMillis());

@@ -185,6 +185,46 @@ final class StreamWriteCompletionTest {
     }
 
     @Test
+    void writevFinalWaitsForPriorAsyncWriteCompletionBeforeQueueing() throws Exception {
+        BlockingOutputStream output = new BlockingOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = startWriter(runtime);
+        try {
+            StreamRuntime stream = (StreamRuntime) runtime.openStream();
+            CompletionStage<Void> first = stream.writeAsync("async".getBytes(StandardCharsets.UTF_8));
+            assertTrue(output.awaitWriteEntered(), "writer should reach the underlying transport");
+
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            CountDownLatch writevReturned = new CountDownLatch(1);
+            Thread caller = new Thread(() -> {
+                try {
+                    stream.writevFinal("tail".getBytes(StandardCharsets.UTF_8));
+                } catch (Throwable throwable) {
+                    failure.set(throwable);
+                } finally {
+                    writevReturned.countDown();
+                }
+            }, "stream-writev-final-after-async-caller");
+            caller.start();
+
+            assertFalse(writevReturned.await(100L, TimeUnit.MILLISECONDS),
+                    "writevFinal must wait for the prior async write");
+            synchronized (runtime.lock()) {
+                assertTrue(runtime.dataQueueInternal().isEmpty(),
+                        "writevFinal must not enqueue behind an unfinished async write");
+            }
+
+            output.release();
+            first.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+            assertTrue(writevReturned.await(1L, TimeUnit.SECONDS), "writevFinal should finish after the async write");
+            assertNull(failure.get(), "writevFinal should complete successfully");
+        } finally {
+            output.release();
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
     void writeAsyncTimeoutAfterQueueAdmissionCancelsQueuedWriteBeforeWriterOwnsIt() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         SessionRuntime runtime = newRuntime(output);

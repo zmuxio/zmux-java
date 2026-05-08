@@ -7,14 +7,12 @@ import io.zmux.ZmuxAsyncSendStream;
 
 public interface NettyQuicAsyncSendStream extends ZmuxAsyncSendStream {
     /**
-     * Returns Netty's write-and-flush future for this stream. Completion means Netty/native QUIC
-     * accepted or rejected the outbound write, not that the peer received it.
+     * Returns Netty's write-and-flush future; not a peer acknowledgement.
      */
     ChannelFuture writeNettyAsync(ByteBuf data);
 
     /**
-     * Returns a future that completes after Netty/native QUIC accepts or rejects the final data
-     * write and local output shutdown, not after peer receipt.
+     * Returns the final write and local output shutdown future.
      */
     ChannelFuture writeFinalNettyAsync(ByteBuf data);
 

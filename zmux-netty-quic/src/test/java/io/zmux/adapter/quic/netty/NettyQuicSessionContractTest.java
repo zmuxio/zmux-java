@@ -350,6 +350,38 @@ class NettyQuicSessionContractTest {
     }
 
     @Test
+    void asyncFinalWriteClosesAdapterSendSideBeforeTransportCompletion() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));
+            NettyQuicAsyncSendStream send = (NettyQuicAsyncSendStream) pair.client.openUniStream();
+            CountDownLatch blocked = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            pair.rawClient.eventLoop().execute(() -> stallEventLoopUntilReleased(blocked, release));
+            assertTrue(blocked.await(5L, TimeUnit.SECONDS), "client event loop should be stalled");
+
+            try {
+                ChannelFuture finalWrite = send.writeFinalNettyAsync(Unpooled.wrappedBuffer(utf8("final")));
+                assertFalse(finalWrite.isDone(), "final write future should wait for the stalled event loop");
+
+                ChannelFuture lateWrite = send.writeNettyAsync(Unpooled.wrappedBuffer(utf8("late")));
+                assertTrue(lateWrite.isDone(), "late write should be rejected immediately");
+                assertFalse(lateWrite.isSuccess(), "late write must fail after final write submission");
+                assertTrue(lateWrite.cause() instanceof WriteClosedException,
+                        "late write should observe the locally closed send side");
+
+                release.countDown();
+                NettyQuicSupport.awaitChannelFuture(finalWrite);
+                ZmuxRecvStream accepted = await(acceptedFuture);
+                assertArrayEquals(utf8("final"), readAll(accepted));
+                accepted.close();
+                send.close();
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
     void largeWritevFinalOnAdapterKeepsPayloadAndCloseSemantics() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             CompletableFuture<ZmuxRecvStream> acceptedFuture = async(() -> pair.server.acceptUniStream(Duration.ofSeconds(5)));

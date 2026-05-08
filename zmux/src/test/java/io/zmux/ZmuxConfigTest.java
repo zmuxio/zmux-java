@@ -99,8 +99,8 @@ final class ZmuxConfigTest {
         assertEquals(Duration.ofMinutes(1), defaults.keepaliveInterval());
         assertEquals(Duration.ofMinutes(5), defaults.keepaliveMaxPingInterval());
         assertEquals(Duration.ZERO, defaults.gracefulCloseDrainTimeout());
-        assertFalse(defaults.prefacePadding());
-        assertFalse(defaults.pingPadding());
+        assertTrue(defaults.prefacePadding());
+        assertTrue(defaults.pingPadding());
     }
 
     @Test
@@ -196,7 +196,9 @@ final class ZmuxConfigTest {
         assertEquals(Settings.defaults().maxFramePayload(), config.settings().maxFramePayload());
         assertEquals(Settings.defaults().maxControlPayloadBytes(), config.settings().maxControlPayloadBytes());
         assertEquals(Settings.defaults().maxExtensionPayloadBytes(), config.settings().maxExtensionPayloadBytes());
-        assertEquals(config.settings(), config.localPreface().settings());
+        Settings prefaceSettings = config.localPreface().settings();
+        assertNotEquals(0L, prefaceSettings.pingPaddingKey());
+        assertEquals(config.settings(), prefaceSettings.toBuilder().pingPaddingKey(0L).build());
     }
 
     @Test

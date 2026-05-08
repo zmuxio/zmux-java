@@ -2192,16 +2192,28 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return configured > 0 ? configured : DEFAULT_INBOUND_CONTROL_FRAME_BUDGET;
     }
 
+    private static long inboundByteBudget(long maxPayload, long minBudget) {
+        return Math.max(minBudget, SessionRuntime.saturatingMultiply(maxPayload, 64L));
+    }
+
+    private static long inboundConfiguredByteBudget(long override,
+                                                    long configuredMaxPayload,
+                                                    long defaultMaxPayload,
+                                                    long minBudget) {
+        if (override > 0L) {
+            return override;
+        }
+        long maxPayload = configuredMaxPayload > 0L ? configuredMaxPayload : defaultMaxPayload;
+        return inboundByteBudget(maxPayload, minBudget);
+    }
+
     private long inboundControlBytesBudgetLocked() {
-        long configured = this.config.inboundControlBytesBudget();
-        if (configured > 0L) {
-            return configured;
-        }
-        long maxPayload = this.localSettings().maxControlPayloadBytes();
-        if (maxPayload <= 0L) {
-            maxPayload = Settings.defaults().maxControlPayloadBytes();
-        }
-        return Math.max(MIN_INBOUND_CONTROL_BYTES_BUDGET, SessionRuntime.saturatingMultiply(maxPayload, 64L));
+        return inboundConfiguredByteBudget(
+                this.config.inboundControlBytesBudget(),
+                this.localSettings().maxControlPayloadBytes(),
+                Settings.defaults().maxControlPayloadBytes(),
+                MIN_INBOUND_CONTROL_BYTES_BUDGET
+        );
     }
 
     private int inboundExtFrameBudgetLocked() {
@@ -2210,15 +2222,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     private long inboundExtBytesBudgetLocked() {
-        long configured = this.config.inboundExtBytesBudget();
-        if (configured > 0L) {
-            return configured;
-        }
-        long maxPayload = this.localSettings().maxExtensionPayloadBytes();
-        if (maxPayload <= 0L) {
-            maxPayload = Settings.defaults().maxExtensionPayloadBytes();
-        }
-        return Math.max(MIN_INBOUND_EXT_BYTES_BUDGET, SessionRuntime.saturatingMultiply(maxPayload, 64L));
+        return inboundConfiguredByteBudget(
+                this.config.inboundExtBytesBudget(),
+                this.localSettings().maxExtensionPayloadBytes(),
+                Settings.defaults().maxExtensionPayloadBytes(),
+                MIN_INBOUND_EXT_BYTES_BUDGET
+        );
     }
 
     private int inboundMixedFrameBudgetLocked() {
@@ -5613,7 +5622,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     void notifyLockWaitersLocked() {
-        // Generic state transitions can unblock any wait class; hot paths use kind-specific notifiers.
+        // Generic transitions may wake any waiter.
         if (this.lockWaiters > 0) {
             this.lock.notifyAll();
         }

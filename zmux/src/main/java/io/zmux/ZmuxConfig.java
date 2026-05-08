@@ -848,13 +848,13 @@ public final class ZmuxConfig {
         private long maxProto = Protocol.PROTO_VERSION;
         private long capabilities;
         private Settings settings = Settings.defaults();
-        private boolean prefacePadding;
+        private boolean prefacePadding = true;
         private long prefacePaddingMinBytes;
         private long prefacePaddingMaxBytes;
         private Duration keepaliveInterval = DEFAULT_IDLE_KEEPALIVE_INTERVAL;
         private Duration keepaliveMaxPingInterval = DEFAULT_KEEPALIVE_MAX_PING_INTERVAL;
         private Duration keepaliveTimeout = Duration.ZERO;
-        private boolean pingPadding;
+        private boolean pingPadding = true;
         private long pingPaddingMinBytes;
         private long pingPaddingMaxBytes;
         private long sessionMemoryCap;

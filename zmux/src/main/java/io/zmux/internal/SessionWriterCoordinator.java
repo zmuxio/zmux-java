@@ -58,8 +58,7 @@ final class SessionWriterCoordinator {
                     }
                 }
                 if (pollResult.keepaliveTimeout()) {
-                    // Keep CLOSE emission out of the synchronized section to avoid
-                    // re-entering close/event machinery while still holding the session monitor.
+                    // Emit CLOSE outside the monitor to avoid re-entry.
                     this.owner.emitKeepaliveTimeoutClose();
                     continue;
                 }

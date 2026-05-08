@@ -5,11 +5,7 @@ import java.util.concurrent.CompletionStage;
 
 public interface ZmuxAsyncSendStream extends ZmuxSendStream {
     /**
-     * Returns a stage that completes when this write reaches the backend's write completion point.
-     * Native zmux streams complete after the writer has written and flushed the bytes to the
-     * underlying connection. Native transport adapters complete when their native write primitive
-     * accepts or rejects the data. Completion does not imply peer receipt or acknowledgement.
-     * Cancelling the returned stage is not guaranteed to cancel the underlying write.
+     * Completes when the backend accepts or rejects the write; not on peer acknowledgement.
      */
     CompletionStage<Void> writeAsync(byte[] src, int offset, int length);
 
@@ -19,8 +15,7 @@ public interface ZmuxAsyncSendStream extends ZmuxSendStream {
     }
 
     /**
-     * Writes the final payload and closes the local send side asynchronously.
-     * Cancelling the returned stage is not guaranteed to cancel the underlying write.
+     * Writes the final payload and closes the local send side.
      */
     CompletionStage<Void> writeFinalAsync(byte[] src, int offset, int length);
 
