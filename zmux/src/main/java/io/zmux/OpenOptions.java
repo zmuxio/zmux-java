@@ -1,6 +1,7 @@
 package io.zmux;
 
 import io.zmux.protocol.Protocol;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;

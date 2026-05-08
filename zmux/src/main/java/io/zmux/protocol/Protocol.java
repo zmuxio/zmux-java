@@ -12,8 +12,6 @@ public final class Protocol {
 
     public static final long CAPABILITY_PRIORITY_HINTS = 1L;
     public static final long CAPABILITY_STREAM_GROUPS = 1L << 1;
-    public static final long CAPABILITY_MULTILINK_BASIC_RETIRED = 1L << 2;
-    public static final long CAPABILITY_MULTILINK_BASIC = CAPABILITY_MULTILINK_BASIC_RETIRED;
     public static final long CAPABILITY_PRIORITY_UPDATE = 1L << 3;
     public static final long CAPABILITY_OPEN_METADATA = 1L << 4;
 
@@ -24,8 +22,6 @@ public final class Protocol {
     public static final long SETTING_MAX_INCOMING_STREAMS_BIDI = 5;
     public static final long SETTING_MAX_INCOMING_STREAMS_UNI = 6;
     public static final long SETTING_MAX_FRAME_PAYLOAD = 7;
-    public static final long SETTING_IDLE_TIMEOUT_MILLIS = 8;
-    public static final long SETTING_KEEPALIVE_HINT_MILLIS = 9;
     public static final long SETTING_MAX_CONTROL_PAYLOAD_BYTES = 10;
     public static final long SETTING_MAX_EXTENSION_PAYLOAD_BYTES = 11;
     public static final long SETTING_SCHEDULER_HINTS = 12;
@@ -42,11 +38,6 @@ public final class Protocol {
     public static final long DIAG_OFFENDING_FRAME_TYPE = 4;
 
     public static final long EXT_PRIORITY_UPDATE = 1;
-    public static final long EXT_ML_READY_RETIRED = 2;
-    public static final long EXT_ML_ATTACH_RETIRED = 3;
-    public static final long EXT_ML_ATTACH_ACK_RETIRED = 4;
-    public static final long EXT_ML_DRAIN_REQ_RETIRED = 5;
-    public static final long EXT_ML_DRAIN_ACK_RETIRED = 6;
 
     private Protocol() {
     }

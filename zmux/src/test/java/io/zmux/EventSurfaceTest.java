@@ -2,6 +2,8 @@ package io.zmux;
 
 import io.zmux.protocol.Protocol;
 import io.zmux.transport.BasicDuplexConnection;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -12,7 +14,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

@@ -2,8 +2,7 @@ package io.zmux.runtime;
 
 import io.zmux.SessionState;
 import io.zmux.Settings;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorScope;
+
 import java.io.IOException;
 import java.util.*;
 

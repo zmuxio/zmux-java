@@ -3,11 +3,8 @@ package io.zmux;
 import io.zmux.protocol.Negotiated;
 import io.zmux.protocol.Preface;
 import io.zmux.runtime.SessionRuntime;
-import io.zmux.transport.DuplexConnection;
-import io.zmux.transport.JoinedDuplexConnection;
-import io.zmux.transport.ReadHalf;
-import io.zmux.transport.WriteHalf;
-import io.zmux.transport.ZmuxConnections;
+import io.zmux.transport.*;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -21,8 +18,6 @@ import java.time.Duration;
 
 public final class Zmux {
     private static final Settings ZERO_SETTINGS = new Settings(
-            0L,
-            0L,
             0L,
             0L,
             0L,

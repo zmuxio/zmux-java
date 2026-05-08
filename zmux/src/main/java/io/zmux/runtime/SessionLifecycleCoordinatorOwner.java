@@ -2,9 +2,9 @@ package io.zmux.runtime;
 
 import io.zmux.ApplicationError;
 import io.zmux.SessionState;
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
+
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;

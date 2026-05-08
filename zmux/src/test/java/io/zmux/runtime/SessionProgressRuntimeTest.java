@@ -3,11 +3,12 @@ package io.zmux.runtime;
 import io.zmux.Role;
 import io.zmux.SessionStats;
 import io.zmux.Settings;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

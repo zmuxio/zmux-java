@@ -2,6 +2,8 @@ package io.zmux.runtime;
 
 import io.zmux.Settings;
 import io.zmux.ZmuxStream;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -9,7 +11,6 @@ import java.util.Deque;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

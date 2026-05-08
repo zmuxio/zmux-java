@@ -5,12 +5,13 @@ import io.zmux.SchedulerHint;
 import io.zmux.Settings;
 import io.zmux.WriteTimeoutException;
 import io.zmux.protocol.Protocol;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
 
 import static io.zmux.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.*;

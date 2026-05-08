@@ -1,12 +1,8 @@
 package io.zmux.transport;
 
-import io.zmux.ErrorCode;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorScope;
-import io.zmux.ZmuxErrorSource;
-import io.zmux.ZmuxErrors;
-import io.zmux.ZmuxException;
-import io.zmux.ZmuxTerminationKind;
+import io.zmux.*;
+import org.junit.jupiter.api.Test;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,7 +11,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.GatheringByteChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

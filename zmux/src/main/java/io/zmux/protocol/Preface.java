@@ -2,6 +2,7 @@ package io.zmux.protocol;
 
 import io.zmux.Role;
 import io.zmux.Settings;
+
 import java.util.Objects;
 
 public final class Preface {

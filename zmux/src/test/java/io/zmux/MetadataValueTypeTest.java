@@ -1,8 +1,9 @@
 package io.zmux;
 
 import io.zmux.protocol.Protocol;
-import java.net.InetSocketAddress;
 import org.junit.jupiter.api.Test;
+
+import java.net.InetSocketAddress;
 
 import static org.junit.jupiter.api.Assertions.*;
 

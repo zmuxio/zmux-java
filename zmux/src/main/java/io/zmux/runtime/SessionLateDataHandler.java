@@ -3,9 +3,9 @@ package io.zmux.runtime;
 import io.zmux.ErrorCode;
 import io.zmux.ZmuxErrorDirection;
 import io.zmux.ZmuxErrorSource;
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
+
 import java.io.IOException;
 import java.util.Objects;
 

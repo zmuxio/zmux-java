@@ -2,6 +2,7 @@ package io.zmux.runtime;
 
 import io.zmux.StreamMetadata;
 import io.zmux.ZmuxStreamInfo;
+
 import java.net.SocketAddress;
 
 final class ImmutableStreamInfoSnapshot implements ZmuxStreamInfo {

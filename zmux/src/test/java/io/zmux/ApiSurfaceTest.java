@@ -1,20 +1,9 @@
 package io.zmux;
 
-import io.zmux.protocol.DecodedVarint;
-import io.zmux.protocol.Frame;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.Negotiated;
-import io.zmux.protocol.ParsedFrame;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-import io.zmux.protocol.Tlv;
-import io.zmux.protocol.ZmuxCodec;
-import io.zmux.transport.DuplexConnection;
-import io.zmux.transport.JoinedDuplexConnection;
-import io.zmux.transport.ReadHalf;
-import io.zmux.transport.WriteHalf;
-import io.zmux.transport.ZmuxConnections;
-import io.zmux.transport.ZmuxSocketAddress;
+import io.zmux.protocol.*;
+import io.zmux.transport.*;
+import org.junit.jupiter.api.Test;
+
 import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
@@ -24,7 +13,6 @@ import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -147,6 +135,20 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void defaultSessionsCarryRequestedOpenMetadata() throws Exception {
+        byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
+        try (SessionPair pair = SessionPair.open();
+             ZmuxStream outbound = pair.client().openStream(OpenOptions.withOpenInfo("rpc"))) {
+            outbound.writeFinal(payload);
+
+            try (ZmuxStream inbound = pair.server().acceptStream(Duration.ofSeconds(1))) {
+                assertEquals("rpc", new String(inbound.openInfo(), StandardCharsets.UTF_8));
+                assertArrayEquals(payload, inbound.readAllBytes());
+            }
+        }
+    }
+
+    @Test
     void asSessionNullReturnsClosedSafeStableSession() throws Exception {
         ZmuxSession session = Zmux.closedSession();
 
@@ -168,8 +170,6 @@ final class ApiSurfaceTest {
     void asNativeSessionNullReturnsClosedSafeNativeSession() throws Exception {
         ZmuxNativeSession session = Zmux.closedNativeSession();
         Settings zeroSettings = new Settings(
-                0L,
-                0L,
                 0L,
                 0L,
                 0L,
@@ -1439,10 +1439,6 @@ final class ApiSurfaceTest {
         long updatePriority = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         long openGroup = Protocol.CAPABILITY_OPEN_METADATA | Protocol.CAPABILITY_STREAM_GROUPS;
         long updateGroup = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_STREAM_GROUPS;
-
-        assertEquals(Protocol.CAPABILITY_MULTILINK_BASIC_RETIRED, Protocol.CAPABILITY_MULTILINK_BASIC);
-        assertEquals(2L, Protocol.EXT_ML_READY_RETIRED);
-        assertEquals(6L, Protocol.EXT_ML_DRAIN_ACK_RETIRED);
 
         assertTrue(Protocol.hasPeerVisiblePrioritySemantics(openPriority));
         assertTrue(Protocol.hasPeerVisiblePrioritySemantics(updatePriority));

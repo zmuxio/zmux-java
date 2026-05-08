@@ -3,11 +3,8 @@ package io.zmux.adapter.quic.netty;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.quic.QuicStreamChannel;
-import io.zmux.MetadataUpdate;
-import io.zmux.StreamMetadata;
-import io.zmux.ZmuxNativeRecvStream;
-import io.zmux.ZmuxNativeSendStream;
-import io.zmux.ZmuxNativeStream;
+import io.zmux.*;
+
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.time.Instant;

@@ -1,10 +1,7 @@
 package io.zmux.protocol;
 
-import io.zmux.ErrorCode;
-import io.zmux.Role;
-import io.zmux.SchedulerHint;
-import io.zmux.Settings;
-import io.zmux.ZmuxConfig;
+import io.zmux.*;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -163,8 +160,6 @@ final class PrefaceCodec {
         appendSetting(output, Protocol.SETTING_MAX_INCOMING_STREAMS_BIDI, settings.maxIncomingStreamsBidi(), defaults.maxIncomingStreamsBidi());
         appendSetting(output, Protocol.SETTING_MAX_INCOMING_STREAMS_UNI, settings.maxIncomingStreamsUni(), defaults.maxIncomingStreamsUni());
         appendSetting(output, Protocol.SETTING_MAX_FRAME_PAYLOAD, settings.maxFramePayload(), defaults.maxFramePayload());
-        appendSetting(output, Protocol.SETTING_IDLE_TIMEOUT_MILLIS, settings.idleTimeoutMillis(), defaults.idleTimeoutMillis());
-        appendSetting(output, Protocol.SETTING_KEEPALIVE_HINT_MILLIS, settings.keepaliveHintMillis(), defaults.keepaliveHintMillis());
         appendSetting(output, Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES, settings.maxControlPayloadBytes(), defaults.maxControlPayloadBytes());
         appendSetting(output, Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES, settings.maxExtensionPayloadBytes(), defaults.maxExtensionPayloadBytes());
         appendSetting(output, Protocol.SETTING_SCHEDULER_HINTS, settings.schedulerHints().code(), defaults.schedulerHints().code());
@@ -248,10 +243,6 @@ final class PrefaceCodec {
                 builder.maxIncomingStreamsUni(value);
             } else if (type == Protocol.SETTING_MAX_FRAME_PAYLOAD) {
                 builder.maxFramePayload(value);
-            } else if (type == Protocol.SETTING_IDLE_TIMEOUT_MILLIS) {
-                builder.idleTimeoutMillis(value);
-            } else if (type == Protocol.SETTING_KEEPALIVE_HINT_MILLIS) {
-                builder.keepaliveHintMillis(value);
             } else if (type == Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES) {
                 builder.maxControlPayloadBytes(value);
             } else if (type == Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES) {
@@ -300,26 +291,20 @@ final class PrefaceCodec {
         if (type == Protocol.SETTING_MAX_FRAME_PAYLOAD) {
             return 1 << 6;
         }
-        if (type == Protocol.SETTING_IDLE_TIMEOUT_MILLIS) {
+        if (type == Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES) {
             return 1 << 7;
         }
-        if (type == Protocol.SETTING_KEEPALIVE_HINT_MILLIS) {
+        if (type == Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES) {
             return 1 << 8;
         }
-        if (type == Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES) {
+        if (type == Protocol.SETTING_SCHEDULER_HINTS) {
             return 1 << 9;
         }
-        if (type == Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES) {
+        if (type == Protocol.SETTING_PING_PADDING_KEY) {
             return 1 << 10;
         }
-        if (type == Protocol.SETTING_SCHEDULER_HINTS) {
-            return 1 << 11;
-        }
-        if (type == Protocol.SETTING_PING_PADDING_KEY) {
-            return 1 << 12;
-        }
         if (type == Protocol.SETTING_PREFACE_PADDING) {
-            return 1 << 13;
+            return 1 << 11;
         }
         return 0;
     }
@@ -431,8 +416,6 @@ final class PrefaceCodec {
         total += settingEncodedSize(Protocol.SETTING_MAX_INCOMING_STREAMS_BIDI, settings.maxIncomingStreamsBidi(), defaults.maxIncomingStreamsBidi());
         total += settingEncodedSize(Protocol.SETTING_MAX_INCOMING_STREAMS_UNI, settings.maxIncomingStreamsUni(), defaults.maxIncomingStreamsUni());
         total += settingEncodedSize(Protocol.SETTING_MAX_FRAME_PAYLOAD, settings.maxFramePayload(), defaults.maxFramePayload());
-        total += settingEncodedSize(Protocol.SETTING_IDLE_TIMEOUT_MILLIS, settings.idleTimeoutMillis(), defaults.idleTimeoutMillis());
-        total += settingEncodedSize(Protocol.SETTING_KEEPALIVE_HINT_MILLIS, settings.keepaliveHintMillis(), defaults.keepaliveHintMillis());
         total += settingEncodedSize(Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES, settings.maxControlPayloadBytes(), defaults.maxControlPayloadBytes());
         total += settingEncodedSize(Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES, settings.maxExtensionPayloadBytes(), defaults.maxExtensionPayloadBytes());
         total += settingEncodedSize(Protocol.SETTING_SCHEDULER_HINTS, settings.schedulerHints().code(), defaults.schedulerHints().code());

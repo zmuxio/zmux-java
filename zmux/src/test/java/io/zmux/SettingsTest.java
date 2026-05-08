@@ -53,8 +53,6 @@ final class SettingsTest {
                 settings.maxIncomingStreamsBidi(),
                 settings.maxIncomingStreamsUni(),
                 settings.maxFramePayload(),
-                settings.idleTimeoutMillis(),
-                settings.keepaliveHintMillis(),
                 settings.maxControlPayloadBytes(),
                 settings.maxExtensionPayloadBytes(),
                 settings.schedulerHints(),

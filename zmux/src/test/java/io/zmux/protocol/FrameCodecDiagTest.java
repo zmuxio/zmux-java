@@ -1,9 +1,9 @@
 package io.zmux.protocol;
 
 import io.zmux.ErrorCode;
-import io.zmux.ZmuxException;
-import java.io.ByteArrayOutputStream;
 import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;

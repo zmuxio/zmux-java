@@ -4,10 +4,11 @@ import io.zmux.ErrorCode;
 import io.zmux.Role;
 import io.zmux.Settings;
 import io.zmux.ZmuxException;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Deque;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

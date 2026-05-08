@@ -1,10 +1,11 @@
 package io.zmux.runtime;
 
 import io.zmux.Settings;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;

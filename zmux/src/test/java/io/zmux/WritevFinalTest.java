@@ -1,11 +1,12 @@
 package io.zmux;
 
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
 import io.zmux.protocol.Preface;
 import io.zmux.protocol.Protocol;
 import io.zmux.transport.BasicDuplexConnection;
+import org.junit.jupiter.api.Test;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -17,7 +18,6 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -76,6 +76,25 @@ final class WritevFinalTest {
             assertTrue((frame.flags() & Protocol.FRAME_FLAG_FIN) != 0, "empty final write should carry FIN");
             assertEquals(0, frame.payload().length, "empty final write should not carry app payload");
             assertEquals(1L, frame.streamId(), "unexpected local stream id");
+        }
+    }
+
+    @Test
+    void defaultOpenMetadataCapabilityDoesNotForcePlainOpensToCarryMetadata() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(
+                ZmuxConfig.builder().build(),
+                ZmuxConfig.DEFAULT_CAPABILITIES,
+                Settings.defaults()
+        )) {
+            ZmuxStream stream = peer.session().openStream();
+            stream.write("x".getBytes(StandardCharsets.UTF_8));
+
+            FrameCodec.Frame frame = peer.readFrame(Duration.ofSeconds(1));
+            assertEquals(FrameType.DATA, frame.type(), "plain open should emit DATA");
+            assertFalse((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0,
+                    "plain open should not carry OPEN_METADATA");
+            assertArrayEquals("x".getBytes(StandardCharsets.UTF_8), frame.payload(), "plain open payload mismatch");
+            peer.assertNoFrame(Duration.ofMillis(200));
         }
     }
 

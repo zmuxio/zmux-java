@@ -12,8 +12,6 @@ public final class Settings {
     private static final long DEFAULT_MAX_INCOMING_STREAMS_BIDI = 256L;
     private static final long DEFAULT_MAX_INCOMING_STREAMS_UNI = 256L;
     private static final long DEFAULT_MAX_FRAME_PAYLOAD = 16_384L;
-    private static final long DEFAULT_IDLE_TIMEOUT_MILLIS = 0L;
-    private static final long DEFAULT_KEEPALIVE_HINT_MILLIS = 0L;
     private static final long DEFAULT_MAX_CONTROL_PAYLOAD_BYTES = 4_096L;
     private static final long DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES = 4_096L;
     private static final SchedulerHint DEFAULT_SCHEDULER_HINTS = SchedulerHint.UNSPECIFIED_OR_BALANCED;
@@ -26,8 +24,6 @@ public final class Settings {
             DEFAULT_MAX_INCOMING_STREAMS_BIDI,
             DEFAULT_MAX_INCOMING_STREAMS_UNI,
             DEFAULT_MAX_FRAME_PAYLOAD,
-            DEFAULT_IDLE_TIMEOUT_MILLIS,
-            DEFAULT_KEEPALIVE_HINT_MILLIS,
             DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
             DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES,
             DEFAULT_SCHEDULER_HINTS,
@@ -41,8 +37,6 @@ public final class Settings {
     private final long maxIncomingStreamsBidi;
     private final long maxIncomingStreamsUni;
     private final long maxFramePayload;
-    private final long idleTimeoutMillis;
-    private final long keepaliveHintMillis;
     private final long maxControlPayloadBytes;
     private final long maxExtensionPayloadBytes;
     private final SchedulerHint schedulerHints;
@@ -56,8 +50,6 @@ public final class Settings {
                     long maxIncomingStreamsBidi,
                     long maxIncomingStreamsUni,
                     long maxFramePayload,
-                    long idleTimeoutMillis,
-                    long keepaliveHintMillis,
                     long maxControlPayloadBytes,
                     long maxExtensionPayloadBytes,
                     SchedulerHint schedulerHints) {
@@ -69,8 +61,6 @@ public final class Settings {
                 maxIncomingStreamsBidi,
                 maxIncomingStreamsUni,
                 maxFramePayload,
-                idleTimeoutMillis,
-                keepaliveHintMillis,
                 maxControlPayloadBytes,
                 maxExtensionPayloadBytes,
                 schedulerHints,
@@ -85,8 +75,6 @@ public final class Settings {
                     long maxIncomingStreamsBidi,
                     long maxIncomingStreamsUni,
                     long maxFramePayload,
-                    long idleTimeoutMillis,
-                    long keepaliveHintMillis,
                     long maxControlPayloadBytes,
                     long maxExtensionPayloadBytes,
                     SchedulerHint schedulerHints,
@@ -98,8 +86,6 @@ public final class Settings {
         requireVarint62(maxIncomingStreamsBidi, "maxIncomingStreamsBidi");
         requireVarint62(maxIncomingStreamsUni, "maxIncomingStreamsUni");
         requireVarint62(maxFramePayload, "maxFramePayload");
-        requireVarint62(idleTimeoutMillis, "idleTimeoutMillis");
-        requireVarint62(keepaliveHintMillis, "keepaliveHintMillis");
         requireVarint62(maxControlPayloadBytes, "maxControlPayloadBytes");
         requireVarint62(maxExtensionPayloadBytes, "maxExtensionPayloadBytes");
         requireVarint62(pingPaddingKey, "pingPaddingKey");
@@ -110,8 +96,6 @@ public final class Settings {
         this.maxIncomingStreamsBidi = maxIncomingStreamsBidi;
         this.maxIncomingStreamsUni = maxIncomingStreamsUni;
         this.maxFramePayload = maxFramePayload;
-        this.idleTimeoutMillis = idleTimeoutMillis;
-        this.keepaliveHintMillis = keepaliveHintMillis;
         this.maxControlPayloadBytes = maxControlPayloadBytes;
         this.maxExtensionPayloadBytes = maxExtensionPayloadBytes;
         this.schedulerHints = schedulerHints == null ? SchedulerHint.UNSPECIFIED_OR_BALANCED : schedulerHints;
@@ -145,8 +129,6 @@ public final class Settings {
                 .maxIncomingStreamsBidi(maxIncomingStreamsBidi)
                 .maxIncomingStreamsUni(maxIncomingStreamsUni)
                 .maxFramePayload(maxFramePayload)
-                .idleTimeoutMillis(idleTimeoutMillis)
-                .keepaliveHintMillis(keepaliveHintMillis)
                 .maxControlPayloadBytes(maxControlPayloadBytes)
                 .maxExtensionPayloadBytes(maxExtensionPayloadBytes)
                 .schedulerHints(schedulerHints)
@@ -185,14 +167,6 @@ public final class Settings {
         return maxFramePayload;
     }
 
-    public long idleTimeoutMillis() {
-        return idleTimeoutMillis;
-    }
-
-    public long keepaliveHintMillis() {
-        return keepaliveHintMillis;
-    }
-
     public long maxControlPayloadBytes() {
         return maxControlPayloadBytes;
     }
@@ -225,8 +199,6 @@ public final class Settings {
                 && maxIncomingStreamsBidi == that.maxIncomingStreamsBidi
                 && maxIncomingStreamsUni == that.maxIncomingStreamsUni
                 && maxFramePayload == that.maxFramePayload
-                && idleTimeoutMillis == that.idleTimeoutMillis
-                && keepaliveHintMillis == that.keepaliveHintMillis
                 && maxControlPayloadBytes == that.maxControlPayloadBytes
                 && maxExtensionPayloadBytes == that.maxExtensionPayloadBytes
                 && pingPaddingKey == that.pingPaddingKey
@@ -243,8 +215,6 @@ public final class Settings {
                 maxIncomingStreamsBidi,
                 maxIncomingStreamsUni,
                 maxFramePayload,
-                idleTimeoutMillis,
-                keepaliveHintMillis,
                 maxControlPayloadBytes,
                 maxExtensionPayloadBytes,
                 schedulerHints,
@@ -261,8 +231,6 @@ public final class Settings {
                 + ", maxIncomingStreamsBidi=" + maxIncomingStreamsBidi
                 + ", maxIncomingStreamsUni=" + maxIncomingStreamsUni
                 + ", maxFramePayload=" + maxFramePayload
-                + ", idleTimeoutMillis=" + idleTimeoutMillis
-                + ", keepaliveHintMillis=" + keepaliveHintMillis
                 + ", maxControlPayloadBytes=" + maxControlPayloadBytes
                 + ", maxExtensionPayloadBytes=" + maxExtensionPayloadBytes
                 + ", schedulerHints=" + schedulerHints
@@ -278,8 +246,6 @@ public final class Settings {
         private long maxIncomingStreamsBidi = DEFAULT_MAX_INCOMING_STREAMS_BIDI;
         private long maxIncomingStreamsUni = DEFAULT_MAX_INCOMING_STREAMS_UNI;
         private long maxFramePayload = DEFAULT_MAX_FRAME_PAYLOAD;
-        private long idleTimeoutMillis = DEFAULT_IDLE_TIMEOUT_MILLIS;
-        private long keepaliveHintMillis = DEFAULT_KEEPALIVE_HINT_MILLIS;
         private long maxControlPayloadBytes = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES;
         private long maxExtensionPayloadBytes = DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES;
         private SchedulerHint schedulerHints = DEFAULT_SCHEDULER_HINTS;
@@ -320,16 +286,6 @@ public final class Settings {
             return this;
         }
 
-        public Builder idleTimeoutMillis(long value) {
-            this.idleTimeoutMillis = value;
-            return this;
-        }
-
-        public Builder keepaliveHintMillis(long value) {
-            this.keepaliveHintMillis = value;
-            return this;
-        }
-
         public Builder maxControlPayloadBytes(long value) {
             this.maxControlPayloadBytes = value;
             return this;
@@ -359,8 +315,6 @@ public final class Settings {
                     maxIncomingStreamsBidi,
                     maxIncomingStreamsUni,
                     maxFramePayload,
-                    idleTimeoutMillis,
-                    keepaliveHintMillis,
                     maxControlPayloadBytes,
                     maxExtensionPayloadBytes,
                     schedulerHints,

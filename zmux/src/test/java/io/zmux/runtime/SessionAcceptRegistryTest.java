@@ -5,9 +5,10 @@ import io.zmux.Role;
 import io.zmux.Settings;
 import io.zmux.ZmuxNativeStream;
 import io.zmux.protocol.Protocol;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

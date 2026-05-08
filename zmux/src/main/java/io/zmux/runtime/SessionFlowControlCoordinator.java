@@ -1,8 +1,8 @@
 package io.zmux.runtime;
 
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;

@@ -3,12 +3,13 @@ package io.zmux.runtime;
 import io.zmux.SessionStats;
 import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Deque;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

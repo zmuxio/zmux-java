@@ -3,8 +3,10 @@ package io.zmux;
 import io.zmux.protocol.Negotiated;
 import io.zmux.protocol.Preface;
 import io.zmux.protocol.Protocol;
-import java.time.Duration;
+import io.zmux.protocol.ZmuxCodec;
 import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,8 +17,6 @@ final class ZmuxConfigTest {
                 .maxIncomingStreamsBidi(17L)
                 .maxIncomingStreamsUni(19L)
                 .maxFramePayload(32_768L)
-                .idleTimeoutMillis(9_000L)
-                .keepaliveHintMillis(1_500L)
                 .maxControlPayloadBytes(8_192L)
                 .maxExtensionPayloadBytes(8_192L)
                 .schedulerHints(SchedulerHint.LATENCY)
@@ -103,6 +103,49 @@ final class ZmuxConfigTest {
         assertEquals(Duration.ZERO, defaults.gracefulCloseDrainTimeout());
         assertTrue(defaults.prefacePadding());
         assertTrue(defaults.pingPadding());
+        assertEquals(ZmuxConfig.DEFAULT_CAPABILITIES, defaults.capabilities());
+        assertTrue(Protocol.canCarryOpenInfo(defaults.capabilities()));
+        assertTrue(Protocol.canCarryPriorityOnOpen(defaults.capabilities()));
+        assertTrue(Protocol.canCarryGroupOnOpen(defaults.capabilities()));
+        assertTrue(Protocol.canCarryPriorityInUpdate(defaults.capabilities()));
+        assertTrue(Protocol.canCarryGroupInUpdate(defaults.capabilities()));
+    }
+
+    @Test
+    void zeroCapabilitiesUseDefaultCapabilitySet() {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .capabilities(0L)
+                .build();
+
+        assertFalse(config.disableCapabilities());
+        assertEquals(ZmuxConfig.DEFAULT_CAPABILITIES, config.capabilities());
+        assertEquals(ZmuxConfig.DEFAULT_CAPABILITIES, config.localPreface().capabilities());
+    }
+
+    @Test
+    void disableCapabilitiesOverridesDefaultCapabilitySet() {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .capabilities(Protocol.CAPABILITY_OPEN_METADATA)
+                .disableCapabilities()
+                .build();
+
+        assertTrue(config.disableCapabilities());
+        assertEquals(0L, config.capabilities());
+        assertEquals(0L, config.localPreface().capabilities());
+    }
+
+    @Test
+    void defaultCapabilitiesNegotiateWithDefaultPeer() throws Exception {
+        ZmuxConfig localConfig = ZmuxConfig.defaults().withRole(Role.INITIATOR);
+        ZmuxConfig peerConfig = ZmuxConfig.defaults().withRole(Role.RESPONDER);
+
+        Negotiated negotiated = ZmuxCodec.negotiatePrefaces(
+                localConfig.localPreface(),
+                peerConfig.localPreface()
+        );
+
+        assertEquals(ZmuxConfig.DEFAULT_CAPABILITIES, negotiated.capabilities());
     }
 
     @Test

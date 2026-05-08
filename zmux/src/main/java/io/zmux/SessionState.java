@@ -1,7 +1,5 @@
 package io.zmux;
 
-import io.zmux.protocol.Negotiated;
-
 /**
  * Public session lifecycle state.
  *

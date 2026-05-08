@@ -1,44 +1,9 @@
 package io.zmux.runtime;
 
-import io.zmux.AcceptTimeoutException;
-import io.zmux.ApplicationError;
-import io.zmux.ErrorCode;
-import io.zmux.GracefulCloseTimeoutException;
-import io.zmux.OpenOptions;
-import io.zmux.Role;
-import io.zmux.SchedulerHint;
-import io.zmux.SessionClosedException;
-import io.zmux.SessionState;
-import io.zmux.SessionStats;
-import io.zmux.Settings;
-import io.zmux.ZmuxAsyncRecvStream;
-import io.zmux.ZmuxAsyncSendStream;
-import io.zmux.ZmuxAsyncSession;
-import io.zmux.ZmuxAsyncStream;
-import io.zmux.ZmuxConfig;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorScope;
-import io.zmux.ZmuxErrorSource;
-import io.zmux.ZmuxErrors;
-import io.zmux.ZmuxEventType;
-import io.zmux.ZmuxException;
-import io.zmux.ZmuxInterruptedException;
-import io.zmux.ZmuxInterruptedIOException;
-import io.zmux.ZmuxNativeRecvStream;
-import io.zmux.ZmuxNativeSendStream;
-import io.zmux.ZmuxNativeSession;
-import io.zmux.ZmuxNativeStream;
-import io.zmux.ZmuxTerminationKind;
-import io.zmux.protocol.Frame;
-import io.zmux.protocol.FrameCodec;
-import io.zmux.protocol.FrameEnvelopeCodec;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.InboundPayloadPool;
-import io.zmux.protocol.Negotiated;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-import io.zmux.protocol.Varint62;
+import io.zmux.*;
+import io.zmux.protocol.*;
 import io.zmux.transport.DuplexConnection;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
@@ -141,6 +106,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private final SessionStatsCollector statsCollector;
     private final Deque<CompletableFuture<ZmuxAsyncStream>> pendingAsyncBidiAccepts = new ArrayDeque<>();
     private final Deque<CompletableFuture<ZmuxAsyncRecvStream>> pendingAsyncUniAccepts = new ArrayDeque<>();
+    private final ArrayList<LocalGoAwayWaiter> localGoAwayWaiters = new ArrayList<>(2);
     private Deque<OutboundFrame> urgentQueue = new ArrayDeque<>();
     private Deque<StreamRuntime> advisoryQueue = new ArrayDeque<>();
     private Deque<OutboundFrame> dataQueue = new ArrayDeque<>();
@@ -172,7 +138,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long sentLocalGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long sentLocalGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
     private boolean localGoAwaySent;
-    private final ArrayList<LocalGoAwayWaiter> localGoAwayWaiters = new ArrayList<>(2);
     private long peerGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long peerGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
     private long sessionSendLimit;
@@ -912,6 +877,21 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 preface.capabilities(),
                 preface.settings()
         );
+    }
+
+    private static long inboundByteBudget(long maxPayload, long minBudget) {
+        return Math.max(minBudget, SessionRuntime.saturatingMultiply(maxPayload, 64L));
+    }
+
+    private static long inboundConfiguredByteBudget(long override,
+                                                    long configuredMaxPayload,
+                                                    long defaultMaxPayload,
+                                                    long minBudget) {
+        if (override > 0L) {
+            return override;
+        }
+        long maxPayload = configuredMaxPayload > 0L ? configuredMaxPayload : defaultMaxPayload;
+        return inboundByteBudget(maxPayload, minBudget);
     }
 
     @Override
@@ -2227,21 +2207,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private int inboundControlFrameBudgetLocked() {
         int configured = this.config.inboundControlFrameBudget();
         return configured > 0 ? configured : DEFAULT_INBOUND_CONTROL_FRAME_BUDGET;
-    }
-
-    private static long inboundByteBudget(long maxPayload, long minBudget) {
-        return Math.max(minBudget, SessionRuntime.saturatingMultiply(maxPayload, 64L));
-    }
-
-    private static long inboundConfiguredByteBudget(long override,
-                                                    long configuredMaxPayload,
-                                                    long defaultMaxPayload,
-                                                    long minBudget) {
-        if (override > 0L) {
-            return override;
-        }
-        long maxPayload = configuredMaxPayload > 0L ? configuredMaxPayload : defaultMaxPayload;
-        return inboundByteBudget(maxPayload, minBudget);
     }
 
     private long inboundControlBytesBudgetLocked() {

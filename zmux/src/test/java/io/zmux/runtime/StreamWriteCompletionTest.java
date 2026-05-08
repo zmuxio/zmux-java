@@ -1,11 +1,12 @@
 package io.zmux.runtime;
 
-import io.zmux.Role;
 import io.zmux.Settings;
 import io.zmux.WriteTimeoutException;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxStream;
 import io.zmux.transport.BasicDuplexConnection;
+import org.junit.jupiter.api.Test;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -21,7 +22,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

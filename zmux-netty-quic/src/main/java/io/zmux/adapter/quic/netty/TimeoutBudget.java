@@ -41,6 +41,14 @@ final class TimeoutBudget {
         return saturatingSubtract(deadlineNanos, nowNanos);
     }
 
+    private static long saturatingSubtract(long left, long right) {
+        long result = left - right;
+        if (((left ^ right) & (left ^ result)) >= 0L) {
+            return result;
+        }
+        return left < right ? Long.MIN_VALUE : Long.MAX_VALUE;
+    }
+
     boolean bounded() {
         return bounded;
     }
@@ -58,13 +66,5 @@ final class TimeoutBudget {
 
     boolean expired() {
         return bounded && remainingNanos() <= 0L;
-    }
-
-    private static long saturatingSubtract(long left, long right) {
-        long result = left - right;
-        if (((left ^ right) & (left ^ result)) >= 0L) {
-            return result;
-        }
-        return left < right ? Long.MIN_VALUE : Long.MAX_VALUE;
     }
 }

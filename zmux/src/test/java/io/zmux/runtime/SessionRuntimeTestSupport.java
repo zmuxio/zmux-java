@@ -4,14 +4,10 @@ import io.zmux.Role;
 import io.zmux.SessionState;
 import io.zmux.Settings;
 import io.zmux.ZmuxConfig;
-import io.zmux.protocol.Frame;
-import io.zmux.protocol.FrameCodec;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.Negotiated;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
+import io.zmux.protocol.*;
 import io.zmux.transport.BasicDuplexConnection;
 import io.zmux.transport.DuplexConnection;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;

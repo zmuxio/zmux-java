@@ -1,15 +1,14 @@
 package io.zmux.runtime;
 
 import io.zmux.OpenMetadataTooLargeException;
-import io.zmux.OpenOptions;
 import io.zmux.Settings;
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
 import io.zmux.protocol.Protocol;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

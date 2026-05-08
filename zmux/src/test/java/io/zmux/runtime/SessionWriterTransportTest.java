@@ -3,11 +3,12 @@ package io.zmux.runtime;
 import io.zmux.ErrorCode;
 import io.zmux.Settings;
 import io.zmux.ZmuxException;
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
 import io.zmux.protocol.Limits;
 import io.zmux.protocol.Protocol;
+import org.junit.jupiter.api.Test;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -17,7 +18,6 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.GatheringByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

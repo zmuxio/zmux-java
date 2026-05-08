@@ -1,12 +1,13 @@
 package io.zmux.runtime;
 
 import io.zmux.SchedulerHint;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.junit.jupiter.api.Test;
 
 import static io.zmux.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.*;

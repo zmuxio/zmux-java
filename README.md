@@ -154,22 +154,12 @@ Use `ZmuxAsync.session(...)`, `stream(...)`, `sendStream(...)`, or
 
 ## Metadata And Priority
 
-Enable the capabilities before using open metadata or priority hints:
+Default sessions advertise the implemented metadata capabilities. Use
+`OpenOptions` when a new stream should carry opener metadata:
 
 ```java
 import io.zmux.MetadataUpdate;
 import io.zmux.OpenOptions;
-import io.zmux.ZmuxConfig;
-import io.zmux.protocol.Protocol;
-
-long capabilities = Protocol.CAPABILITY_OPEN_METADATA
-        | Protocol.CAPABILITY_PRIORITY_HINTS
-        | Protocol.CAPABILITY_STREAM_GROUPS
-        | Protocol.CAPABILITY_PRIORITY_UPDATE;
-
-ZmuxConfig config = ZmuxConfig.builder()
-        .capabilities(capabilities)
-        .build();
 
 OpenOptions options = OpenOptions.builder()
         .priority(7L)
@@ -177,7 +167,7 @@ OpenOptions options = OpenOptions.builder()
         .openInfo("rpc")
         .build();
 
-try (ZmuxSession session = Zmux.openSession(socket, config);
+try (ZmuxSession session = Zmux.openSession(socket);
      ZmuxStream stream = session.openStream(options)) {
     stream.updateMetadata(MetadataUpdate.priority(3L));
     stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
@@ -280,12 +270,15 @@ ZmuxConfig config = ZmuxConfig.builder()
 ```
 
 `Settings.builder()` controls negotiated stream windows, incoming stream
-limits, frame payload limits, idle timeout hints, keepalive hints, scheduler
-hints, and ping padding keys.
+limits, frame payload limits, scheduler hints, and ping padding keys.
 
 `ZmuxConfig.configureDefaultConfig(...)` can set the process-wide default
 template during startup; `ZmuxConfig.resetDefaultConfig()` restores built-in
 defaults.
+
+Built-in defaults enable metadata capabilities and keepalive PINGs. Use
+`disableCapabilities()` when a deployment needs to advertise no optional
+protocol features.
 
 ## Native And Diagnostics
 

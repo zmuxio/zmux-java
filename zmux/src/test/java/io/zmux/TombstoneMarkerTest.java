@@ -1,12 +1,9 @@
 package io.zmux;
 
-import io.zmux.protocol.Frame;
-import io.zmux.protocol.FrameCodec;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-import io.zmux.protocol.Varint62;
+import io.zmux.protocol.*;
 import io.zmux.transport.BasicDuplexConnection;
+import org.junit.jupiter.api.Test;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -20,7 +17,6 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

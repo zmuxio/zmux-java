@@ -1,12 +1,8 @@
 package io.zmux.runtime;
 
-import io.zmux.Role;
-import io.zmux.SessionState;
-import io.zmux.Settings;
-import io.zmux.ZmuxConfig;
-import io.zmux.ZmuxEvent;
-import io.zmux.ZmuxEventType;
-import io.zmux.ZmuxNativeStream;
+import io.zmux.*;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,7 +10,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

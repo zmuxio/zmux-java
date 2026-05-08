@@ -2,10 +2,11 @@ package io.zmux.protocol;
 
 import io.zmux.ErrorCode;
 import io.zmux.ZmuxErrors;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.GatheringByteChannel;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

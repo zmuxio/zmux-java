@@ -2,6 +2,7 @@ package io.zmux.runtime;
 
 import io.zmux.ZmuxErrorDirection;
 import io.zmux.ZmuxErrorScope;
+
 import java.io.IOException;
 
 final class StreamWriteCompletion {

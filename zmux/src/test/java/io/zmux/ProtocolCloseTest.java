@@ -1,12 +1,9 @@
 package io.zmux;
 
-import io.zmux.protocol.Frame;
-import io.zmux.protocol.FrameCodec;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-import io.zmux.protocol.Varint62;
+import io.zmux.protocol.*;
 import io.zmux.transport.BasicDuplexConnection;
+import org.junit.jupiter.api.Test;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -18,7 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,7 +56,7 @@ final class ProtocolCloseTest {
     @Test
     void fatalReadProtocolErrorEmitsClose() throws Exception {
         try (RawPeerSession peer = RawPeerSession.open(
-                ZmuxConfig.builder().build(),
+                ZmuxConfig.builder().disableCapabilities().build(),
                 Protocol.CAPABILITY_OPEN_METADATA
         )) {
             byte[] prefix = FrameCodec.buildOpenMetadataPrefix(

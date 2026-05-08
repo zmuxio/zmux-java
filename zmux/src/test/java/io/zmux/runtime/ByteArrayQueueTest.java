@@ -1,9 +1,10 @@
 package io.zmux.runtime;
 
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 

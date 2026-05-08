@@ -1,13 +1,9 @@
 package io.zmux.protocol;
 
-import io.zmux.ErrorCode;
-import io.zmux.Role;
-import io.zmux.Settings;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorSource;
-import io.zmux.ZmuxException;
-import java.io.*;
+import io.zmux.*;
 import org.junit.jupiter.api.Test;
+
+import java.io.*;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;

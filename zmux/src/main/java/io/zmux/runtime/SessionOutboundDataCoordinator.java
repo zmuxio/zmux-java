@@ -2,11 +2,9 @@ package io.zmux.runtime;
 
 import io.zmux.Settings;
 import io.zmux.WriteTimeoutException;
-import io.zmux.ZmuxErrorDirection;
-import io.zmux.ZmuxErrorScope;
-import io.zmux.protocol.Frame;
 import io.zmux.protocol.FrameCodec;
 import io.zmux.protocol.FrameType;
+
 import java.io.IOException;
 import java.util.Deque;
 import java.util.Iterator;

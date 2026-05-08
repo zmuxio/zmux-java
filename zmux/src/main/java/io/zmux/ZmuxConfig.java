@@ -2,6 +2,7 @@ package io.zmux;
 
 import io.zmux.protocol.Preface;
 import io.zmux.protocol.Protocol;
+
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Objects;
@@ -12,6 +13,11 @@ public final class ZmuxConfig {
     public static final long DEFAULT_PREFACE_PADDING_MAX_BYTES = 256L;
     public static final long DEFAULT_PING_PADDING_MIN_BYTES = 16L;
     public static final long DEFAULT_PING_PADDING_MAX_BYTES = 64L;
+    public static final long DEFAULT_CAPABILITIES =
+            Protocol.CAPABILITY_OPEN_METADATA
+                    | Protocol.CAPABILITY_PRIORITY_HINTS
+                    | Protocol.CAPABILITY_STREAM_GROUPS
+                    | Protocol.CAPABILITY_PRIORITY_UPDATE;
     private static final Duration DEFAULT_IDLE_KEEPALIVE_INTERVAL = Duration.ofMinutes(1);
     private static final Duration DEFAULT_KEEPALIVE_MAX_PING_INTERVAL = Duration.ofMinutes(5);
     private static final SecureRandom NONCE_RANDOM = new SecureRandom();
@@ -24,6 +30,7 @@ public final class ZmuxConfig {
     private final long minProto;
     private final long maxProto;
     private final long capabilities;
+    private final boolean disableCapabilities;
     private final Settings settings;
     private final boolean prefacePadding;
     private final long prefacePaddingMinBytes;
@@ -120,6 +127,7 @@ public final class ZmuxConfig {
                 minProto,
                 maxProto,
                 capabilities,
+                false,
                 settings,
                 false,
                 0L,
@@ -173,6 +181,7 @@ public final class ZmuxConfig {
                       long minProto,
                       long maxProto,
                       long capabilities,
+                      boolean disableCapabilities,
                       Settings settings,
                       boolean prefacePadding,
                       long prefacePaddingMinBytes,
@@ -226,6 +235,11 @@ public final class ZmuxConfig {
             throw new IllegalArgumentException("zmux config minProto must be <= maxProto");
         }
         requireVarint62(capabilities, "capabilities");
+        if (disableCapabilities) {
+            capabilities = 0L;
+        } else if (capabilities == 0L) {
+            capabilities = DEFAULT_CAPABILITIES;
+        }
         settings = normalizeConfigSettings(settings);
         requireNonNegative(prefacePaddingMinBytes, "prefacePaddingMinBytes");
         requireNonNegative(prefacePaddingMaxBytes, "prefacePaddingMaxBytes");
@@ -273,6 +287,7 @@ public final class ZmuxConfig {
         this.minProto = minProto;
         this.maxProto = maxProto;
         this.capabilities = capabilities;
+        this.disableCapabilities = disableCapabilities;
         this.settings = settings;
         this.prefacePadding = prefacePadding;
         this.prefacePaddingMinBytes = prefacePaddingMinBytes;
@@ -440,6 +455,7 @@ public final class ZmuxConfig {
                 .minProto(minProto)
                 .maxProto(maxProto)
                 .capabilities(capabilities)
+                .disableCapabilities(disableCapabilities)
                 .settings(settings)
                 .prefacePadding(prefacePadding)
                 .prefacePaddingMinBytes(prefacePaddingMinBytes)
@@ -544,6 +560,10 @@ public final class ZmuxConfig {
 
     public long capabilities() {
         return capabilities;
+    }
+
+    public boolean disableCapabilities() {
+        return disableCapabilities;
     }
 
     public Settings settings() {
@@ -739,6 +759,7 @@ public final class ZmuxConfig {
                 && minProto == that.minProto
                 && maxProto == that.maxProto
                 && capabilities == that.capabilities
+                && disableCapabilities == that.disableCapabilities
                 && prefacePadding == that.prefacePadding
                 && prefacePaddingMinBytes == that.prefacePaddingMinBytes
                 && prefacePaddingMaxBytes == that.prefacePaddingMaxBytes
@@ -795,6 +816,7 @@ public final class ZmuxConfig {
                 minProto,
                 maxProto,
                 capabilities,
+                disableCapabilities,
                 settings,
                 prefacePadding,
                 prefacePaddingMinBytes,
@@ -849,6 +871,7 @@ public final class ZmuxConfig {
         private long minProto = Protocol.PROTO_VERSION;
         private long maxProto = Protocol.PROTO_VERSION;
         private long capabilities;
+        private boolean disableCapabilities;
         private Settings settings = Settings.defaults();
         private boolean prefacePadding = true;
         private long prefacePaddingMinBytes;
@@ -918,6 +941,15 @@ public final class ZmuxConfig {
         public Builder capabilities(long value) {
             this.capabilities = value;
             return this;
+        }
+
+        public Builder disableCapabilities(boolean value) {
+            this.disableCapabilities = value;
+            return this;
+        }
+
+        public Builder disableCapabilities() {
+            return disableCapabilities(true);
         }
 
         public Builder settings(Settings value) {
@@ -1152,6 +1184,7 @@ public final class ZmuxConfig {
                     minProto,
                     maxProto,
                     capabilities,
+                    disableCapabilities,
                     settings,
                     prefacePadding,
                     prefacePaddingMinBytes,

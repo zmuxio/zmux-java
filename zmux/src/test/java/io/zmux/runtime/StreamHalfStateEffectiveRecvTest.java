@@ -1,8 +1,6 @@
 package io.zmux.runtime;
 
-import io.zmux.ApplicationError;
 import io.zmux.ErrorCode;
-import io.zmux.ZmuxTerminationKind;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
