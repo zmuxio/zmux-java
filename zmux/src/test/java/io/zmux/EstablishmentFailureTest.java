@@ -1,6 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.FrameCodec;
 import org.junit.jupiter.api.Test;
 
 import java.io.*;

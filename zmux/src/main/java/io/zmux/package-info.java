@@ -1,7 +1,7 @@
 /**
  * Public API for the zmux v1 stream multiplexer.
  *
- * <p>Use this package for supported session, stream, configuration, and
- * diagnostic types. {@code io.zmux.internal} is not public API.
+ * <p>Use public types in this package for supported session, stream,
+ * configuration, and diagnostic APIs.
  */
 package io.zmux;

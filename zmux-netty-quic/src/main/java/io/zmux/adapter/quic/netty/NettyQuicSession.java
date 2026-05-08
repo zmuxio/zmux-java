@@ -8,7 +8,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.quic.*;
 import io.netty.util.concurrent.Future;
 import io.zmux.*;
-import io.zmux.internal.TimeoutBudget;
 
 import java.io.IOException;
 import java.time.Duration;

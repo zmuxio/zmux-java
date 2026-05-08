@@ -1,0 +1,1186 @@
+package io.zmux;
+
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.GatheringByteChannel;
+import java.util.Arrays;
+import java.util.Objects;
+
+final class FrameEnvelopeCodec {
+    private static final byte[] EMPTY_BYTES = new byte[0];
+    private static final long MAX_INBOUND_FRAME_HEADER_OVERHEAD = 9L;
+    private static final int GATHER_SCRATCH_RETAIN_FACTOR = 4;
+    private static final int MIN_GATHER_SCRATCH_HINT = 32;
+    private static final int MAX_RETAINED_GATHER_SCRATCH_BUFFERS = 2048;
+    private static final int GATHER_INLINE_PREFIX_BYTES = 256;
+    private static final int GATHER_INLINE_CONTROL_PAYLOAD_BYTES = 128;
+    private static final FrameByteReader<InputStream> INPUT_STREAM_FRAME_BYTE_READER =
+            FrameEnvelopeCodec::readRequiredFrameByte;
+    private static final FrameByteReader<FrameCodec.Decoder> DECODER_FRAME_BYTE_READER =
+            FrameEnvelopeCodec::readRequiredFrameByte;
+
+    private FrameEnvelopeCodec() {
+    }
+
+    static FrameCodec.Frame readFrame(InputStream input, Limits limits) throws IOException {
+        Limits normalized = limits.normalize();
+        Varint62.Decoded frameLength = readValidatedFrameLength(input, normalized);
+        int code = input.read();
+        if (code < 0) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame");
+        }
+        FrameType type = parseFrameType(code & 0x1f);
+        int flags = code & 0xe0;
+        Varint62.Decoded streamIdDecoded = readStreamId(input, frameLength.value());
+        long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), streamIdDecoded.length());
+        byte[] payload = FrameCodec.readInputBytes(input, FrameCodec.checkedLength(
+                payloadLength,
+                ErrorCode.FRAME_SIZE,
+                "read frame",
+                "payload exceeds Java implementation limit"
+        ));
+        if (payload.length != payloadLength) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame payload");
+        }
+        FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
+        validateFrame(frame, normalized, true);
+        return frame;
+    }
+
+    static FrameCodec.Frame readFrame(FrameCodec.Decoder input, Limits limits) throws IOException {
+        return readInboundFrame(input, limits, null).asFrame();
+    }
+
+    static InboundFrame readInboundFrame(FrameCodec.Decoder input,
+                                         Limits limits,
+                                         InboundPayloadPool payloadPool) throws IOException {
+        Limits normalized = limits.normalize();
+        Varint62.Decoded frameLength = readValidatedFrameLength(input, normalized);
+        int code = readRequiredFrameByte(input);
+        FrameType type = parseFrameType(code & 0x1f);
+        int flags = code & 0xe0;
+        Varint62.Decoded streamIdDecoded = readStreamId(input, frameLength.value());
+        long payloadLength = validatedPayloadLength(normalized, type, frameLength.value(), streamIdDecoded.length());
+        int payloadLengthInt = FrameCodec.checkedLength(
+                payloadLength,
+                ErrorCode.FRAME_SIZE,
+                "read frame",
+                "payload exceeds Java implementation limit"
+        );
+        InboundPayloadPool.Handle handle = type == FrameType.DATA && payloadPool != null
+                ? payloadPool.acquire(payloadLengthInt)
+                : null;
+        byte[] payload = payloadLengthInt == 0
+                ? EMPTY_BYTES
+                : handle == null ? new byte[payloadLengthInt] : handle.bytes();
+        boolean success = false;
+        try {
+            try {
+                input.readFully(payload, 0, payloadLengthInt);
+            } catch (EOFException eof) {
+                throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame", eof);
+            }
+            FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
+            validateFrame(frame, normalized, true);
+            success = true;
+            return new InboundFrame(type, flags, streamIdDecoded.value(), payload, handle);
+        } finally {
+            if (!success && handle != null) {
+                handle.release();
+            }
+        }
+    }
+
+    static void writeFrame(OutputStream output, FrameCodec.Frame frame, Limits limits) throws IOException {
+        byte[] payload = frame.payloadBytes();
+        writeFrame(output, frame, null, payload, 0, payload.length, limits);
+    }
+
+    static void writeFrame(OutputStream output,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[] payloadBytes,
+                           int payloadOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
+        Varint62.write(output, frameLength);
+        output.write(frame.type().code() | frame.flags());
+        Varint62.write(output, frame.streamId());
+        if (prefix.length > 0) {
+            output.write(prefix);
+        }
+        if (payloadLength > 0) {
+            output.write(payload, payloadOffset, payloadLength);
+        }
+    }
+
+    static void writeFrame(OutputStream output,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[][] payloadParts,
+                           int payloadPartIndex,
+                           int payloadPartOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        long frameLength = validatedPartsPayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payloadParts,
+                payloadPartIndex,
+                payloadPartOffset,
+                payloadLength
+        );
+        Varint62.write(output, frameLength);
+        output.write(frame.type().code() | frame.flags());
+        Varint62.write(output, frame.streamId());
+        if (prefix.length > 0) {
+            output.write(prefix);
+        }
+        writePayloadParts(output, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+    }
+
+    static void writeFrame(GatheringByteChannel output, FrameCodec.Frame frame, Limits limits) throws IOException {
+        byte[] payload = frame.payloadBytes();
+        writeFrame(output, frame, null, payload, 0, payload.length, limits);
+    }
+
+    static void writeFrame(GatheringByteChannel output,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[] payloadBytes,
+                           int payloadOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        GatherScratch scratch = new GatherScratch();
+        appendFrame(scratch, frame, payloadPrefix, payloadBytes, payloadOffset, payloadLength, limits);
+        writeGatheredBuffers(output, scratch);
+    }
+
+    static void writeFrame(GatheringByteChannel output,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[][] payloadParts,
+                           int payloadPartIndex,
+                           int payloadPartOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        GatherScratch scratch = new GatherScratch();
+        appendFrame(scratch, frame, payloadPrefix, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength, limits);
+        writeGatheredBuffers(output, scratch);
+    }
+
+    static int gatherHeaderBytes(long frameLength, long streamId) throws IOException {
+        return Varint62.length(frameLength) + 1 + Varint62.length(streamId);
+    }
+
+    static int gatherBufferCount(byte[] payloadPrefix, int payloadLength) {
+        int count = 1;
+        if (payloadPrefix != null && payloadPrefix.length > 0) {
+            count++;
+        }
+        if (payloadLength > 0) {
+            count++;
+        }
+        return count;
+    }
+
+    static int gatherBufferCount(byte[] payloadPrefix,
+                                 byte[][] payloadParts,
+                                 int payloadPartIndex,
+                                 int payloadPartOffset,
+                                 int payloadLength) {
+        return 1
+                + ((payloadPrefix != null && payloadPrefix.length > 0) ? 1 : 0)
+                + countPayloadPartBuffers(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+    }
+
+    static int gatherInlineBytes(FrameCodec.Frame frame, byte[] payloadPrefix, int payloadLength) {
+        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
+        int inlinePrefixLength = inlinePrefixLength(prefix);
+        return inlinePrefixLength + inlinePayloadLength(frame, prefix.length, inlinePrefixLength, payloadLength);
+    }
+
+    static long appendFrame(GatherScratch scratch,
+                            FrameCodec.Frame frame,
+                            byte[] payloadPrefix,
+                            byte[] payloadBytes,
+                            int payloadOffset,
+                            int payloadLength,
+                            Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
+        int headerBytes = gatherHeaderBytes(frameLength, frame.streamId());
+        int inlinePrefixLength = inlinePrefixLength(prefix);
+        int inlinePayloadLength = inlinePayloadLength(frame, prefix.length, inlinePrefixLength, payloadLength);
+        int leadingBytes = headerBytes + inlinePrefixLength + inlinePayloadLength;
+        scratch.ensureCapacity(
+                leadingBytes,
+                1 + (prefix.length > inlinePrefixLength ? 1 : 0)
+                        + (payloadLength > inlinePayloadLength ? 1 : 0)
+        );
+        appendGatherHeaderAndInline(
+                scratch,
+                frame,
+                frameLength,
+                headerBytes,
+                prefix,
+                inlinePrefixLength,
+                payload,
+                payloadOffset,
+                inlinePayloadLength
+        );
+        if (prefix.length > inlinePrefixLength) {
+            scratch.addBuffer(ByteBuffer.wrap(prefix));
+        }
+        if (payloadLength > inlinePayloadLength) {
+            scratch.addBuffer(ByteBuffer.wrap(
+                    payload,
+                    payloadOffset + inlinePayloadLength,
+                    payloadLength - inlinePayloadLength
+            ));
+        }
+        return frameLength + Varint62.length(frameLength);
+    }
+
+    static int appendFrame(byte[] target,
+                           int offset,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[] payloadBytes,
+                           int payloadOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        byte[] payload = normalizePayload(payloadBytes);
+        long frameLength = validatedBytePayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payload,
+                payloadOffset,
+                payloadLength
+        );
+        int cursor = appendFrameHeaderAndPrefix(target, offset, frame, prefix, frameLength);
+        if (payloadLength > 0) {
+            System.arraycopy(payload, payloadOffset, target, cursor, payloadLength);
+            cursor += payloadLength;
+        }
+        return cursor - offset;
+    }
+
+    static long appendFrame(GatherScratch scratch,
+                            FrameCodec.Frame frame,
+                            byte[] payloadPrefix,
+                            byte[][] payloadParts,
+                            int payloadPartIndex,
+                            int payloadPartOffset,
+                            int payloadLength,
+                            Limits limits) throws IOException {
+        Limits normalized = limits.normalize();
+        byte[] prefix = payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
+        int payloadBufferCount = validatePayloadPartsAndCountBuffers(
+                payloadParts,
+                payloadPartIndex,
+                payloadPartOffset,
+                payloadLength
+        );
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
+        long frameLength = frameLength(frame.streamId(), encodedPayloadLength);
+        int headerBytes = gatherHeaderBytes(frameLength, frame.streamId());
+        int inlinePrefixLength = inlinePrefixLength(prefix);
+        int leadingBytes = headerBytes + inlinePrefixLength;
+        scratch.ensureCapacity(
+                leadingBytes,
+                1 + (prefix.length > inlinePrefixLength ? 1 : 0) + payloadBufferCount
+        );
+        appendGatherHeaderAndInline(
+                scratch,
+                frame,
+                frameLength,
+                headerBytes,
+                prefix,
+                inlinePrefixLength,
+                EMPTY_BYTES,
+                0,
+                0
+        );
+        if (prefix.length > inlinePrefixLength) {
+            scratch.addBuffer(ByteBuffer.wrap(prefix));
+        }
+        appendPayloadPartBuffers(scratch, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        return frameLength + Varint62.length(frameLength);
+    }
+
+    static int appendFrame(byte[] target,
+                           int offset,
+                           FrameCodec.Frame frame,
+                           byte[] payloadPrefix,
+                           byte[][] payloadParts,
+                           int payloadPartIndex,
+                           int payloadPartOffset,
+                           int payloadLength,
+                           Limits limits) throws IOException {
+        byte[] prefix = normalizePrefix(payloadPrefix);
+        long frameLength = validatedPartsPayloadFrameLength(
+                frame,
+                limits,
+                prefix,
+                payloadParts,
+                payloadPartIndex,
+                payloadPartOffset,
+                payloadLength
+        );
+        int cursor = appendFrameHeaderAndPrefix(target, offset, frame, prefix, frameLength);
+        cursor = appendPayloadParts(target, cursor, payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        return cursor - offset;
+    }
+
+    static void writeGatheredBuffers(GatheringByteChannel output, GatherScratch scratch) throws IOException {
+        if (scratch == null || scratch.bufferCount() == 0) {
+            return;
+        }
+        try {
+            long remaining = remainingBytes(scratch.buffers(), scratch.bufferCount());
+            while (remaining > 0L) {
+                long wrote = output.write(scratch.buffers(), 0, scratch.bufferCount());
+                if (wrote <= 0L) {
+                    throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write made no progress");
+                }
+                if (wrote > remaining) {
+                    throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "gathering frame write reported invalid progress");
+                }
+                remaining -= wrote;
+            }
+        } finally {
+            scratch.clear();
+        }
+    }
+
+    private static long inboundPayloadLimit(FrameType frameType, Limits limits) {
+        switch (frameType) {
+            case DATA:
+                return limits.maxFramePayload();
+            case MAX_DATA:
+            case STOP_SENDING:
+            case PING:
+            case PONG:
+            case BLOCKED:
+            case RESET:
+            case ABORT:
+            case GOAWAY:
+            case CLOSE:
+                return limits.maxControlPayloadBytes();
+            case EXT:
+                return limits.maxExtensionPayloadBytes();
+            default:
+                throw new IllegalStateException("unexpected frame type: " + frameType);
+        }
+    }
+
+    private static long maxInboundFrameLength(Limits limits) {
+        long maxPayload = Math.max(
+                limits.maxFramePayload(),
+                Math.max(limits.maxControlPayloadBytes(), limits.maxExtensionPayloadBytes())
+        );
+        if (maxPayload > Protocol.MAX_VARINT62 - MAX_INBOUND_FRAME_HEADER_OVERHEAD) {
+            return Protocol.MAX_VARINT62;
+        }
+        return maxPayload + MAX_INBOUND_FRAME_HEADER_OVERHEAD;
+    }
+
+    private static FrameType parseFrameType(int code) throws IOException {
+        try {
+            return FrameType.fromCode(code);
+        } catch (IllegalArgumentException error) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "invalid frame type: " + code, error);
+        }
+    }
+
+    private static void validateFrame(FrameCodec.Frame frame, Limits limits, boolean inbound) throws IOException {
+        validateFlags(frame.type(), frame.flags());
+        validateFrameScope(frame);
+        byte[] payload = frame.payloadBytes();
+        if (frame.type() == FrameType.DATA) {
+            if (inbound && payload.length > limits.maxFramePayload()) {
+                throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate DATA payload", "payload exceeds configured limit");
+            }
+            if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
+                validateDataPayload(frame, "parse DATA payload");
+            }
+            return;
+        }
+        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), payload.length, false);
+    }
+
+    static long encodedPayloadLength(int prefixLength, int payloadLength) {
+        return Math.max(0L, prefixLength) + Math.max(0L, payloadLength);
+    }
+
+    static long frameLength(long streamId, long encodedPayloadLength) throws IOException {
+        long overhead = 1L + Varint62.length(streamId);
+        if (encodedPayloadLength > Protocol.MAX_VARINT62 - overhead) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "write frame", "frame exceeds varint62 length limit");
+        }
+        return overhead + encodedPayloadLength;
+    }
+
+    private static void validateOutboundFrame(FrameCodec.Frame frame, Limits limits, long encodedPayloadLength, boolean segmented) throws IOException {
+        validateFlags(frame.type(), frame.flags());
+        validateFrameScope(frame);
+        if (frame.type() == FrameType.DATA) {
+            if (encodedPayloadLength > limits.maxFramePayload()) {
+                throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate DATA payload", "payload exceeds configured limit");
+            }
+            if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
+                validateDataPayload(frame, "write DATA payload");
+            }
+            return;
+        }
+        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), encodedPayloadLength, segmented);
+    }
+
+    private static void validateDataPayload(FrameCodec.Frame frame, String operation) throws IOException {
+        try {
+            FrameCodec.parseDataPayloadView(frame.payloadBytes(), frame.flags());
+        } catch (IOException error) {
+            throw frameSizePayloadError(operation, error);
+        }
+    }
+
+    private static void validatePayloadParts(byte[][] payloadParts,
+                                             int payloadPartIndex,
+                                             int payloadPartOffset,
+                                             int payloadLength) {
+        validatePayloadPartsAndCountBuffers(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+    }
+
+    private static int validatePayloadPartsAndCountBuffers(byte[][] payloadParts,
+                                                           int payloadPartIndex,
+                                                           int payloadPartOffset,
+                                                           int payloadLength) {
+        if (payloadLength < 0) {
+            throw new IndexOutOfBoundsException("payloadLength < 0");
+        }
+        if (payloadLength == 0) {
+            return 0;
+        }
+        Objects.requireNonNull(payloadParts, "payloadParts");
+        if (payloadPartIndex < 0 || payloadPartIndex >= payloadParts.length) {
+            throw new IndexOutOfBoundsException("payloadPartIndex");
+        }
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        int count = 0;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = Objects.requireNonNull(payloadParts[index], "payloadParts[" + index + "]");
+            RangeChecks.checkFromIndexSize(offset, 0, part.length);
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            remaining -= take;
+            count++;
+            index++;
+            offset = 0;
+        }
+        if (remaining != 0) {
+            throw new IndexOutOfBoundsException("payload parts underrun");
+        }
+        return count;
+    }
+
+    private static void writePayloadParts(OutputStream output,
+                                          byte[][] payloadParts,
+                                          int payloadPartIndex,
+                                          int payloadPartOffset,
+                                          int payloadLength) throws IOException {
+        if (payloadLength <= 0) {
+            return;
+        }
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = payloadParts[index];
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            output.write(part, offset, take);
+            remaining -= take;
+            index++;
+            offset = 0;
+        }
+        if (remaining != 0) {
+            throw new IndexOutOfBoundsException("payload parts underrun");
+        }
+    }
+
+    private static int appendPayloadParts(byte[] target,
+                                          int cursor,
+                                          byte[][] payloadParts,
+                                          int payloadPartIndex,
+                                          int payloadPartOffset,
+                                          int payloadLength) {
+        if (payloadLength <= 0) {
+            return cursor;
+        }
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = payloadParts[index];
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            System.arraycopy(part, offset, target, cursor, take);
+            cursor += take;
+            remaining -= take;
+            index++;
+            offset = 0;
+        }
+        if (remaining != 0) {
+            throw new IndexOutOfBoundsException("payload parts underrun");
+        }
+        return cursor;
+    }
+
+    private static int countPayloadPartBuffers(byte[][] payloadParts,
+                                               int payloadPartIndex,
+                                               int payloadPartOffset,
+                                               int payloadLength) {
+        if (payloadLength <= 0) {
+            return 0;
+        }
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        int count = 0;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = payloadParts[index];
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            if (take > 0) {
+                count++;
+                remaining -= take;
+            }
+            index++;
+            offset = 0;
+        }
+        return count;
+    }
+
+    private static void appendPayloadPartBuffers(GatherScratch scratch,
+                                                 byte[][] payloadParts,
+                                                 int payloadPartIndex,
+                                                 int payloadPartOffset,
+                                                 int payloadLength) {
+        int index = payloadPartIndex;
+        int offset = payloadPartOffset;
+        int remaining = payloadLength;
+        while (remaining > 0 && index < payloadParts.length) {
+            byte[] part = payloadParts[index];
+            if (offset >= part.length) {
+                index++;
+                offset = 0;
+                continue;
+            }
+            int take = Math.min(part.length - offset, remaining);
+            if (take > 0) {
+                scratch.addBuffer(ByteBuffer.wrap(part, offset, take));
+                remaining -= take;
+            }
+            index++;
+            offset = 0;
+        }
+        if (remaining != 0) {
+            throw new IndexOutOfBoundsException("payload parts underrun");
+        }
+    }
+
+    private static void appendGatherHeaderAndInline(GatherScratch scratch,
+                                                    FrameCodec.Frame frame,
+                                                    long frameLength,
+                                                    int headerBytes,
+                                                    byte[] prefix,
+                                                    int inlinePrefixLength,
+                                                    byte[] payload,
+                                                    int payloadOffset,
+                                                    int inlinePayloadLength) throws IOException {
+        int leadingBytes = headerBytes + inlinePrefixLength + inlinePayloadLength;
+        int headerOffset = scratch.reserveHeader(leadingBytes);
+        int cursor = headerOffset;
+        byte[] headerArena = scratch.headerArena();
+        cursor += Varint62.write(headerArena, cursor, frameLength);
+        headerArena[cursor] = (byte) (frame.type().code() | frame.flags());
+        cursor += 1;
+        cursor += Varint62.write(headerArena, cursor, frame.streamId());
+        if (inlinePrefixLength > 0) {
+            System.arraycopy(prefix, 0, headerArena, cursor, inlinePrefixLength);
+            cursor += inlinePrefixLength;
+        }
+        if (inlinePayloadLength > 0) {
+            System.arraycopy(payload, payloadOffset, headerArena, cursor, inlinePayloadLength);
+        }
+        scratch.addBuffer(ByteBuffer.wrap(headerArena, headerOffset, leadingBytes));
+    }
+
+    private static int inlinePrefixLength(byte[] prefix) {
+        int prefixLength = prefix == null ? 0 : prefix.length;
+        return prefixLength <= GATHER_INLINE_PREFIX_BYTES ? prefixLength : 0;
+    }
+
+    private static int inlinePayloadLength(FrameCodec.Frame frame,
+                                           int prefixLength,
+                                           int inlinePrefixLength,
+                                           int payloadLength) {
+        if (payloadLength <= 0 || payloadLength > GATHER_INLINE_CONTROL_PAYLOAD_BYTES) {
+            return 0;
+        }
+        if (prefixLength > 0 && inlinePrefixLength != prefixLength) {
+            return 0;
+        }
+        return frame.type() == FrameType.DATA ? 0 : payloadLength;
+    }
+
+    private static Varint62.Decoded readValidatedFrameLength(InputStream input, Limits normalized) throws IOException {
+        return validateFrameLength(Varint62.read(input), normalized);
+    }
+
+    private static Varint62.Decoded readValidatedFrameLength(FrameCodec.Decoder input, Limits normalized) throws IOException {
+        return validateFrameLength(readDecoderFrameLength(input), normalized);
+    }
+
+    private static Varint62.Decoded readDecoderFrameLength(FrameCodec.Decoder input) throws IOException {
+        int first = input.readByteOrEof();
+        if (first < 0) {
+            throw new EOFException();
+        }
+        int length = 1 << (first >>> 6);
+        long value;
+        switch (length) {
+            case 1:
+                value = first & 0x3fL;
+                break;
+            case 2:
+                value = ((first & 0x3fL) << 8) | readRequiredVarintByte(input);
+                break;
+            case 4:
+                value = ((first & 0x3fL) << 24)
+                        | ((long) readRequiredVarintByte(input) << 16)
+                        | ((long) readRequiredVarintByte(input) << 8)
+                        | readRequiredVarintByte(input);
+                break;
+            case 8:
+                value = Varint62.decodeEightByteValue(
+                        first,
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input),
+                        readRequiredVarintByte(input)
+                );
+                break;
+            default:
+                throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "truncated varint62");
+        }
+        if (Varint62.length(value) != length) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "non-canonical varint62");
+        }
+        return new Varint62.Decoded(value, length);
+    }
+
+    private static Varint62.Decoded readStreamId(InputStream input, long frameLength) throws IOException {
+        int first = readRequiredFrameByte(input);
+        int length = validatedStreamIdLength(first, frameLength);
+        long value = readStreamIdValue(input, INPUT_STREAM_FRAME_BYTE_READER, first, length);
+        return decodedStreamId(value, length);
+    }
+
+    private static Varint62.Decoded readStreamId(FrameCodec.Decoder input, long frameLength) throws IOException {
+        int first = readRequiredFrameByte(input);
+        int length = validatedStreamIdLength(first, frameLength);
+        long value = readStreamIdValue(input, DECODER_FRAME_BYTE_READER, first, length);
+        return decodedStreamId(value, length);
+    }
+
+    private static <T> long readStreamIdValue(T input,
+                                              FrameByteReader<T> reader,
+                                              int first,
+                                              int length) throws IOException {
+        switch (length) {
+            case 1:
+                return first & 0x3fL;
+            case 2:
+                return ((first & 0x3fL) << 8) | reader.read(input);
+            case 4:
+                return ((first & 0x3fL) << 24)
+                        | ((long) reader.read(input) << 16)
+                        | ((long) reader.read(input) << 8)
+                        | reader.read(input);
+            case 8:
+                return Varint62.decodeEightByteValue(
+                        first,
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input),
+                        reader.read(input)
+                );
+            default:
+                throw new IllegalStateException("unsupported stream_id length " + length);
+        }
+    }
+
+    private static Varint62.Decoded decodedStreamId(long value, int length) throws IOException {
+        validateStreamIdCanonical(value, length);
+        return new Varint62.Decoded(value, length);
+    }
+
+    private static int validatedStreamIdLength(int first, long frameLength) throws IOException {
+        int length = 1 << (first >>> 6);
+        if (frameLength < 1L + length) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame too short");
+        }
+        return length;
+    }
+
+    private static void validateStreamIdCanonical(long value, int length) throws IOException {
+        if (Varint62.length(value) != length) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "non-canonical stream_id");
+        }
+    }
+
+    private static int readRequiredFrameByte(InputStream input) throws IOException {
+        int next = input.read();
+        if (next < 0) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame");
+        }
+        return next & 0xff;
+    }
+
+    private static int readRequiredVarintByte(FrameCodec.Decoder input) throws IOException {
+        try {
+            return input.readByte();
+        } catch (EOFException eof) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read varint62", "truncated varint62", eof);
+        }
+    }
+
+    private static int readRequiredFrameByte(FrameCodec.Decoder input) throws IOException {
+        try {
+            return input.readByte();
+        } catch (EOFException eof) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame", eof);
+        }
+    }
+
+    private static Varint62.Decoded validateFrameLength(Varint62.Decoded frameLength, Limits normalized) throws IOException {
+        if (frameLength.value() < 2) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame too short");
+        }
+        if (frameLength.value() > maxInboundFrameLength(normalized)) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame exceeds configured limit");
+        }
+        return frameLength;
+    }
+
+    private static long validatedPayloadLength(Limits normalized,
+                                               FrameType type,
+                                               long frameLength,
+                                               int streamIdLength) throws IOException {
+        long payloadLength = frameLength - 1 - streamIdLength;
+        if (payloadLength < 0) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "frame too short");
+        }
+        long payloadLimit = inboundPayloadLimit(type, normalized);
+        if (payloadLength > payloadLimit) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "read frame", "payload exceeds configured limit");
+        }
+        return payloadLength;
+    }
+
+    private static byte[] normalizePrefix(byte[] payloadPrefix) {
+        return payloadPrefix == null ? EMPTY_BYTES : payloadPrefix;
+    }
+
+    private static byte[] normalizePayload(byte[] payloadBytes) {
+        return payloadBytes == null ? EMPTY_BYTES : payloadBytes;
+    }
+
+    private static int appendFrameHeaderAndPrefix(byte[] target,
+                                                  int offset,
+                                                  FrameCodec.Frame frame,
+                                                  byte[] prefix,
+                                                  long frameLength) throws IOException {
+        int encodedBytes = FrameCodec.checkedLength(
+                frameLength + Varint62.length(frameLength),
+                ErrorCode.FRAME_SIZE,
+                "write frame",
+                "encoded frame exceeds Java implementation limit"
+        );
+        RangeChecks.checkFromIndexSize(offset, encodedBytes, target.length);
+        int cursor = offset;
+        cursor += Varint62.write(target, cursor, frameLength);
+        target[cursor++] = (byte) (frame.type().code() | frame.flags());
+        cursor += Varint62.write(target, cursor, frame.streamId());
+        if (prefix.length > 0) {
+            System.arraycopy(prefix, 0, target, cursor, prefix.length);
+            cursor += prefix.length;
+        }
+        return cursor;
+    }
+
+    private static long validatedBytePayloadFrameLength(FrameCodec.Frame frame,
+                                                        Limits limits,
+                                                        byte[] prefix,
+                                                        byte[] payload,
+                                                        int payloadOffset,
+                                                        int payloadLength) throws IOException {
+        Limits normalized = limits.normalize();
+        RangeChecks.checkFromIndexSize(payloadOffset, payloadLength, payload.length);
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0);
+        return frameLength(frame.streamId(), encodedPayloadLength);
+    }
+
+    private static long validatedPartsPayloadFrameLength(FrameCodec.Frame frame,
+                                                         Limits limits,
+                                                         byte[] prefix,
+                                                         byte[][] payloadParts,
+                                                         int payloadPartIndex,
+                                                         int payloadPartOffset,
+                                                         int payloadLength) throws IOException {
+        Limits normalized = limits.normalize();
+        validatePayloadParts(payloadParts, payloadPartIndex, payloadPartOffset, payloadLength);
+        long encodedPayloadLength = encodedPayloadLength(prefix.length, payloadLength);
+        validateOutboundFrame(frame, normalized, encodedPayloadLength, prefix.length > 0 || payloadLength > 0);
+        return frameLength(frame.streamId(), encodedPayloadLength);
+    }
+
+    private static void validateNonDataFrame(FrameCodec.Frame frame,
+                                             long payloadLimit,
+                                             long actualPayloadLength,
+                                             boolean segmented) throws IOException {
+        if (segmented) {
+            throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "segmented payloads are only supported for DATA");
+        }
+        if (actualPayloadLength > payloadLimit) {
+            throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate payload", "payload exceeds configured limit");
+        }
+        validateNonDataFramePayload(frame);
+    }
+
+    private static void validateNonDataFramePayload(FrameCodec.Frame frame) throws IOException {
+        byte[] payload = frame.payloadBytes();
+        switch (frame.type()) {
+            case MAX_DATA:
+            case BLOCKED: {
+                Varint62.Decoded decoded;
+                try {
+                    decoded = Varint62.decode(payload, 0);
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate " + frame.type(), error);
+                }
+                if (decoded.length() != payload.length) {
+                    throw FrameCodec.error(ErrorCode.PROTOCOL, "validate " + frame.type(), "unexpected trailing bytes");
+                }
+                break;
+            }
+            case PING:
+            case PONG:
+                if (payload.length < 8) {
+                    throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate ping/pong", "frame too short");
+                }
+                break;
+            case STOP_SENDING:
+            case RESET:
+            case ABORT:
+            case CLOSE:
+                try {
+                    FrameCodec.parseErrorPayload(payload);
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate " + frame.type(), error);
+                }
+                break;
+            case GOAWAY:
+                try {
+                    FrameCodec.parseGoAwayPayload(payload);
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate GOAWAY payload", error);
+                }
+                break;
+            case EXT: {
+                long extType;
+                try {
+                    extType = Varint62.decode(payload, 0).value();
+                } catch (IOException error) {
+                    throw frameSizePayloadError("validate EXT payload", error);
+                }
+                if (extType == Protocol.EXT_PRIORITY_UPDATE) {
+                    if (frame.streamId() == 0L) {
+                        throw FrameCodec.error(ErrorCode.PROTOCOL, "validate EXT payload", "PRIORITY_UPDATE requires non-zero stream_id");
+                    }
+                    try {
+                        FrameCodec.parsePriorityUpdatePayload(payload);
+                    } catch (IOException error) {
+                        throw frameSizePayloadError("validate EXT payload", error);
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    private static IOException frameSizePayloadError(String operation, IOException cause) {
+        return FrameCodec.error(
+                ErrorCode.FRAME_SIZE,
+                operation,
+                cause.getMessage() == null ? "invalid frame payload" : cause.getMessage(),
+                cause
+        );
+    }
+
+    private static long remainingBytes(ByteBuffer[] buffers, int length) {
+        long remainingBytes = 0L;
+        for (int i = 0; i < length; ++i) {
+            ByteBuffer buffer = buffers[i];
+            if (buffer != null && buffer.hasRemaining()) {
+                remainingBytes += buffer.remaining();
+            }
+        }
+        return remainingBytes;
+    }
+
+    private static void validateFlags(FrameType type, int flags) throws IOException {
+        if (type == FrameType.DATA) {
+            int allowed = Protocol.FRAME_FLAG_OPEN_METADATA | Protocol.FRAME_FLAG_FIN;
+            if ((flags & ~allowed) != 0) {
+                throw FrameCodec.error(ErrorCode.PROTOCOL, "validate flags", "invalid flags for frame type");
+            }
+            return;
+        }
+        if (flags != 0) {
+            throw FrameCodec.error(ErrorCode.PROTOCOL, "validate flags", "invalid flags for frame type");
+        }
+    }
+
+    private static void validateFrameScope(FrameCodec.Frame frame) throws IOException {
+        switch (frame.type()) {
+            case DATA:
+            case STOP_SENDING:
+            case RESET:
+            case ABORT:
+                if (frame.streamId() == 0L) {
+                    throw FrameCodec.error(ErrorCode.PROTOCOL, "validate frame scope", frame.type() + " requires non-zero stream_id");
+                }
+                break;
+            case PING:
+            case PONG:
+            case GOAWAY:
+            case CLOSE:
+                if (frame.streamId() != 0L) {
+                    throw FrameCodec.error(ErrorCode.PROTOCOL, "validate frame scope", frame.type() + " requires stream_id = 0");
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static int batchScratchRetainLimit(int hint) {
+        int normalizedHint = Math.max(MIN_GATHER_SCRATCH_HINT, hint);
+        if (normalizedHint > Integer.MAX_VALUE / GATHER_SCRATCH_RETAIN_FACTOR) {
+            return Integer.MAX_VALUE;
+        }
+        return normalizedHint * GATHER_SCRATCH_RETAIN_FACTOR;
+    }
+
+    private static boolean batchScratchOversized(int retainedCap, int hint) {
+        if (retainedCap <= 0) {
+            return false;
+        }
+        return retainedCap > batchScratchRetainLimit(hint);
+    }
+
+    @FunctionalInterface
+    private interface FrameByteReader<T> {
+        int read(T input) throws IOException;
+    }
+
+    static final class GatherScratch {
+        private byte[] headerArena = EMPTY_BYTES;
+        private ByteBuffer[] buffers = new ByteBuffer[0];
+        private int headerUsed;
+        private int bufferCount;
+
+        void reset(int headerCapHint, int bufferCapHint) {
+            if (batchScratchOversized(headerArena.length, headerCapHint)) {
+                headerArena = EMPTY_BYTES;
+            }
+            if (batchScratchOversized(buffers.length, bufferCapHint)) {
+                buffers = new ByteBuffer[0];
+            }
+            clear();
+        }
+
+        void ensureCapacity(int additionalHeaderBytes, int additionalBuffers) {
+            ensureHeaderCapacity(headerUsed + Math.max(0, additionalHeaderBytes));
+            ensureBufferCapacity(bufferCount + Math.max(0, additionalBuffers));
+        }
+
+        int reserveHeader(int length) {
+            int offset = headerUsed;
+            headerUsed += Math.max(0, length);
+            return offset;
+        }
+
+        void addBuffer(ByteBuffer buffer) {
+            buffers[bufferCount++] = buffer;
+        }
+
+        ByteBuffer[] buffers() {
+            return buffers;
+        }
+
+        int bufferCount() {
+            return bufferCount;
+        }
+
+        byte[] headerArena() {
+            return headerArena;
+        }
+
+        void clear() {
+            if (bufferCount > 0) {
+                Arrays.fill(buffers, 0, bufferCount, null);
+            }
+            headerUsed = 0;
+            bufferCount = 0;
+            if (buffers.length > MAX_RETAINED_GATHER_SCRATCH_BUFFERS) {
+                buffers = new ByteBuffer[0];
+            }
+        }
+
+        private void ensureHeaderCapacity(int required) {
+            if (headerArena.length >= required) {
+                return;
+            }
+            int newCapacity = Math.max(required, Math.max(32, headerArena.length * 2));
+            headerArena = Arrays.copyOf(headerArena, newCapacity);
+        }
+
+        private void ensureBufferCapacity(int required) {
+            if (buffers.length >= required) {
+                return;
+            }
+            int newCapacity = Math.max(required, Math.max(16, buffers.length * 2));
+            buffers = Arrays.copyOf(buffers, newCapacity);
+        }
+    }
+
+    static final class InboundFrame {
+        private final FrameType type;
+        private final int flags;
+        private final long streamId;
+        private final byte[] payload;
+        private InboundPayloadPool.Handle payloadHandle;
+
+        private InboundFrame(FrameType type,
+                             int flags,
+                             long streamId,
+                             byte[] payload,
+                             InboundPayloadPool.Handle payloadHandle) {
+            this.type = type;
+            this.flags = flags;
+            this.streamId = streamId;
+            this.payload = payload;
+            this.payloadHandle = payloadHandle;
+        }
+
+        FrameType type() {
+            return type;
+        }
+
+        int flags() {
+            return flags;
+        }
+
+        long streamId() {
+            return streamId;
+        }
+
+        byte[] payload() {
+            return payload;
+        }
+
+        int storageBytes() {
+            return payloadHandle == null ? payload.length : payloadHandle.storageBytes();
+        }
+
+        Runnable detachPayloadRelease() {
+            if (payloadHandle == null) {
+                return null;
+            }
+            InboundPayloadPool.Handle detached = payloadHandle;
+            payloadHandle = null;
+            return detached::release;
+        }
+
+        FrameCodec.Frame asFrame() {
+            return new FrameCodec.Frame(type, flags, streamId, payload);
+        }
+
+        void release() {
+            if (payloadHandle == null) {
+                return;
+            }
+            InboundPayloadPool.Handle handle = payloadHandle;
+            payloadHandle = null;
+            handle.release();
+        }
+    }
+}

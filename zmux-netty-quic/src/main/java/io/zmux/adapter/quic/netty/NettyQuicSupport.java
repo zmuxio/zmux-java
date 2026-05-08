@@ -5,11 +5,11 @@ import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.quic.*;
 import io.netty.util.concurrent.Future;
 import io.zmux.*;
-import io.zmux.internal.TimeoutBudget;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
+import java.math.BigInteger;
 import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -208,7 +208,56 @@ final class NettyQuicSupport {
     }
 
     static long saturatingMulDivFloor(long value, long multiplier, long divisor) {
-        return io.zmux.internal.RuntimeFlow.saturatingMulDivFloor(value, multiplier, divisor);
+        if (value <= 0L || multiplier <= 0L) {
+            return 0L;
+        }
+        if (divisor <= 0L) {
+            return Long.MAX_VALUE;
+        }
+        long quotient = value / divisor;
+        long remainder = value - quotient * divisor;
+        if (quotient > 0L && multiplier > Long.MAX_VALUE / quotient) {
+            return Long.MAX_VALUE;
+        }
+        long high = quotient * multiplier;
+        long low = multiplyRemainderDivFloor(remainder, multiplier, divisor);
+        return high > Long.MAX_VALUE - low ? Long.MAX_VALUE : high + low;
+    }
+
+    private static long multiplyRemainderDivFloor(long value, long multiplier, long divisor) {
+        try {
+            return Math.multiplyExact(value, multiplier) / divisor;
+        } catch (ArithmeticException overflow) {
+            return BigInteger.valueOf(value)
+                    .multiply(BigInteger.valueOf(multiplier))
+                    .divide(BigInteger.valueOf(divisor))
+                    .min(BigInteger.valueOf(Long.MAX_VALUE))
+                    .longValue();
+        }
+    }
+
+    static int checkedWritevTotalLength(byte[][] parts, String operation) throws IOException {
+        Objects.requireNonNull(parts, "parts");
+        int total = 0;
+        for (int i = 0; i < parts.length; i++) {
+            byte[] part = parts[i];
+            if (part == null) {
+                throw new NullPointerException("parts[" + i + "]");
+            }
+            if (part.length > Integer.MAX_VALUE - total) {
+                throw new ZmuxException(
+                        ErrorCode.FRAME_SIZE.code(),
+                        operation,
+                        "multipart write exceeds maximum supported size",
+                        ZmuxErrorScope.STREAM,
+                        ZmuxErrorSource.LOCAL,
+                        ZmuxErrorDirection.WRITE,
+                        ZmuxTerminationKind.UNKNOWN
+                );
+            }
+            total += part.length;
+        }
+        return total;
     }
 
     static ApplicationError sessionApplicationError(long code,

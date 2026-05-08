@@ -1,6 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.StreamIoSupport;
 
 import java.io.IOException;
 

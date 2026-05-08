@@ -1,0 +1,156 @@
+package io.zmux;
+
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+
+final class SessionWriterBatchCollector {
+    private final SessionWriterCoordinator.Owner owner;
+    private final SessionWriterBatchOrderer batchOrderer;
+    private final ArrayList<SessionRuntime.OutboundFrame> collectBatch;
+    private final int maxBatchFrames;
+
+    SessionWriterBatchCollector(SessionWriterCoordinator.Owner owner,
+                                SessionWriterBatchOrderer batchOrderer,
+                                ArrayList<SessionRuntime.OutboundFrame> collectBatch,
+                                int maxBatchFrames) {
+        this.owner = Objects.requireNonNull(owner, "owner");
+        this.batchOrderer = Objects.requireNonNull(batchOrderer, "batchOrderer");
+        this.collectBatch = Objects.requireNonNull(collectBatch, "collectBatch");
+        this.maxBatchFrames = maxBatchFrames;
+    }
+
+    SessionRuntime.ReadyBatch collectReadyBatchStateLocked(boolean orderOrdinary, boolean trackWriterHeld)
+            throws IOException {
+        this.owner.expireStopSendingGracefulDrainsLocked();
+
+        this.collectBatch.clear();
+        this.drainUrgentBatchLocked(this.collectBatch, trackWriterHeld);
+        if (!this.collectBatch.isEmpty()) {
+            return new SessionRuntime.ReadyBatch(this.collectBatch, false, 0L, 0L);
+        }
+
+        long costLimit = this.ordinaryBatchCostLimitLocked();
+        long batchCost = this.drainOrdinaryBatchLocked(this.collectBatch, costLimit, 0L, trackWriterHeld);
+        List<SessionRuntime.OutboundFrame> batch = orderOrdinary
+                ? this.batchOrderer.orderOrdinary(this.collectBatch)
+                : this.collectBatch;
+        return new SessionRuntime.ReadyBatch(batch, !batch.isEmpty(), batchCost, costLimit);
+    }
+
+    long drainOrdinaryBatchLocked(List<SessionRuntime.OutboundFrame> batch,
+                                  long costLimit,
+                                  long batchCost,
+                                  boolean trackWriterHeld) throws IOException {
+        long effectiveCostLimit = costLimit > 0L ? costLimit : Long.MAX_VALUE;
+        while (batch.size() < this.maxBatchFrames && batchCost < effectiveCostLimit) {
+            boolean progressed = false;
+
+            int advisoryBeforeSize = batch.size();
+            batchCost = this.drainAdvisoryOutboundLocked(batch, batchCost, trackWriterHeld);
+            if (batch.size() != advisoryBeforeSize) {
+                progressed = true;
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit)) {
+                    return batchCost;
+                }
+            }
+
+            SessionRuntime.OutboundFrame data = this.owner.pollQueuedOutboundLocked(this.owner.dataQueue());
+            if (data != null) {
+                this.owner.addBatchFrameLocked(batch, data, trackWriterHeld);
+                batchCost = SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(data));
+                progressed = true;
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit, data)) {
+                    return batchCost;
+                }
+            }
+
+            int advisoryAfterSize = batch.size();
+            batchCost = this.drainAdvisoryOutboundLocked(batch, batchCost, trackWriterHeld);
+            if (batch.size() != advisoryAfterSize) {
+                progressed = true;
+                if (this.batchTerminalLocked(batch, batchCost, effectiveCostLimit)) {
+                    return batchCost;
+                }
+            }
+
+            if (!progressed) {
+                return batchCost;
+            }
+        }
+        return batchCost;
+    }
+
+    void clearRetainedBatchRefs() {
+        this.collectBatch.clear();
+        this.batchOrderer.clearRetainedBatchRefs();
+    }
+
+    private void drainUrgentBatchLocked(ArrayList<SessionRuntime.OutboundFrame> batch, boolean trackWriterHeld) {
+        while (batch.size() < this.maxBatchFrames) {
+            SessionRuntime.OutboundFrame outboundFrame = this.owner.pollQueuedOutboundLocked(this.owner.urgentQueue());
+            if (outboundFrame == null) {
+                break;
+            }
+            this.owner.addBatchFrameLocked(batch, outboundFrame, trackWriterHeld);
+        }
+        this.batchOrderer.orderUrgent(batch);
+    }
+
+    private long ordinaryBatchCostLimitLocked() {
+        return SessionWriterBatchPolicy.ordinaryBatchCostLimit(
+                this.owner.peerSettings(),
+                this.owner.sendRateEstimateLocked(),
+                this.maxBatchFrames
+        );
+    }
+
+    private long drainAdvisoryOutboundLocked(List<SessionRuntime.OutboundFrame> batch,
+                                             long batchCost,
+                                             boolean trackWriterHeld) throws IOException {
+        SessionRuntime.OutboundFrame advisory = this.pollAdvisoryOutboundLocked();
+        if (advisory == null) {
+            return batchCost;
+        }
+        this.owner.addBatchFrameLocked(batch, advisory, trackWriterHeld);
+        return SessionRuntime.saturatingAdd(batchCost, SessionWriterBatchPolicy.outboundBatchCost(advisory));
+    }
+
+    private boolean batchTerminalLocked(List<SessionRuntime.OutboundFrame> batch,
+                                        long batchCost,
+                                        long effectiveCostLimit) {
+        return batch.size() >= this.maxBatchFrames || batchCost >= effectiveCostLimit;
+    }
+
+    private boolean batchTerminalLocked(List<SessionRuntime.OutboundFrame> batch,
+                                        long batchCost,
+                                        long effectiveCostLimit,
+                                        SessionRuntime.OutboundFrame outboundFrame) {
+        return outboundFrame.frame().type() == FrameType.CLOSE
+                || this.batchTerminalLocked(batch, batchCost, effectiveCostLimit);
+    }
+
+    private SessionRuntime.OutboundFrame pollAdvisoryOutboundLocked() throws IOException {
+        while (true) {
+            StreamRuntime streamRuntime = this.owner.advisoryQueue().pollFirst();
+            if (streamRuntime == null) {
+                return null;
+            }
+            if (this.owner.advisoryQueue().isEmpty()) {
+                this.owner.releaseEmptyAdvisoryQueueStorageLocked();
+            }
+
+            streamRuntime.clearPriorityUpdateQueuedLocked();
+            if (!streamRuntime.hasPendingPriorityUpdateLocked()) {
+                continue;
+            }
+            SessionRuntime.OutboundFrame outboundFrame = this.owner.takePendingPriorityUpdateForBatchLocked(streamRuntime);
+            if (outboundFrame != null) {
+                return outboundFrame;
+            }
+        }
+    }
+
+}

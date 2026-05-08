@@ -1,7 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.FrameCodec;
-import io.zmux.internal.Varint62;
 import org.junit.jupiter.api.Test;
 
 import java.io.BufferedInputStream;

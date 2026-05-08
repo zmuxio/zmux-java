@@ -1,5 +1,5 @@
 param(
-    [string] $Includes = "io.zmux.benchmarks.CodecBenchmark|io.zmux.internal.OrdinaryBatchOrdererBenchmark|io.zmux.internal.FlowControlRegistryBenchmark",
+    [string] $Includes = "io.zmux.benchmarks.CodecBenchmark|io.zmux.OrdinaryBatchOrdererBenchmark|io.zmux.FlowControlRegistryBenchmark",
     [switch] $Quick,
     [string] $ResultFile = "zmux-benchmarks/target/jmh-result.json"
 )

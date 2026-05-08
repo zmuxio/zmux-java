@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-includes='io.zmux.benchmarks.CodecBenchmark|io.zmux.internal.OrdinaryBatchOrdererBenchmark|io.zmux.internal.FlowControlRegistryBenchmark'
+includes='io.zmux.benchmarks.CodecBenchmark|io.zmux.OrdinaryBatchOrdererBenchmark|io.zmux.FlowControlRegistryBenchmark'
 quick=0
 result_file='zmux-benchmarks/target/jmh-result.json'
 

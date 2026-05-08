@@ -1,6 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.SessionRuntime;
 
 import java.io.IOException;
 import java.io.InputStream;

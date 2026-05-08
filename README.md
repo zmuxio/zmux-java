@@ -2,8 +2,7 @@
 
 Java implementation of the ZMux stream multiplexing protocol.
 
-The published artifacts are Java 8+ compatible. Public APIs live under
-`io.zmux`; `io.zmux.internal` is not public API.
+The published artifacts are Java 8+ compatible. Supported APIs live under `io.zmux`.
 
 ## Installation
 

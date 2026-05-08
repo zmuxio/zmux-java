@@ -1,8 +1,5 @@
 package io.zmux;
 
-import io.zmux.internal.FrameCodec;
-import io.zmux.internal.Varint62;
-
 import java.io.*;
 import java.util.Collections;
 import java.util.List;
@@ -116,6 +113,22 @@ public final class ZmuxCodec {
 
     public static Negotiated negotiatePrefaces(Preface local, Preface peer) throws IOException {
         return FrameCodec.negotiate(Objects.requireNonNull(local, "local"), Objects.requireNonNull(peer, "peer"));
+    }
+
+    public static byte[] buildOpenMetadataPrefix(long capabilities,
+                                                 Long priority,
+                                                 Long group,
+                                                 byte[] openInfo,
+                                                 long maxFramePayload) throws IOException {
+        return FrameCodec.buildOpenMetadataPrefix(capabilities, priority, group, openInfo == null ? EMPTY_BYTES : openInfo, maxFramePayload);
+    }
+
+    public static StreamMetadata parseStreamMetadata(byte[] metadataBytes) throws IOException {
+        FrameCodec.ParsedMetadata parsed = FrameCodec.parseStreamMetadata(metadataBytes == null ? EMPTY_BYTES : metadataBytes);
+        if (!parsed.valid()) {
+            return StreamMetadata.empty();
+        }
+        return StreamMetadata.of(parsed.priority(), parsed.group(), parsed.openInfo());
     }
 
     private static Limits effectiveLimits(Limits limits) {

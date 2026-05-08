@@ -1,7 +1,6 @@
 package io.zmux.adapter.quic.netty;
 
 import io.zmux.*;
-import io.zmux.internal.Varint62;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -20,7 +19,7 @@ class NettyQuicPreludeTest {
         byte[] openInfo = new byte[]{1, 2, 3, 4};
         byte[] prelude = NettyQuicPrelude.encode(new OpenOptions(7L, 11L, openInfo));
 
-        Varint62.Decoded decoded = Varint62.decode(prelude, 0);
+        DecodedVarint decoded = ZmuxCodec.parseVarint(prelude, 0);
         byte[] metadataBytes = Arrays.copyOfRange(prelude, decoded.length(), prelude.length);
         StreamMetadata metadata = NettyQuicPrelude.decode(metadataBytes);
 

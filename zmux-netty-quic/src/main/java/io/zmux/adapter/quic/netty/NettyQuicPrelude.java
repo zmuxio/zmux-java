@@ -1,7 +1,6 @@
 package io.zmux.adapter.quic.netty;
 
 import io.zmux.*;
-import io.zmux.internal.FrameCodec;
 
 import java.io.IOException;
 
@@ -21,7 +20,7 @@ final class NettyQuicPrelude {
     }
 
     static byte[] encode(Long priority, Long group, byte[] openInfo) throws IOException {
-        byte[] prefix = FrameCodec.buildOpenMetadataPrefix(
+        byte[] prefix = ZmuxCodec.buildOpenMetadataPrefix(
                 NettyQuicSupport.OPEN_CAPABILITIES,
                 priority,
                 group,
@@ -39,13 +38,13 @@ final class NettyQuicPrelude {
         if (metadataBytes == null || metadataBytes.length == 0) {
             return DecodedMetadata.empty();
         }
-        FrameCodec.ParsedMetadata parsed;
+        StreamMetadata parsed;
         try {
-            parsed = FrameCodec.parseStreamMetadataView(metadataBytes);
+            parsed = ZmuxCodec.parseStreamMetadata(metadataBytes);
         } catch (IOException parseError) {
             throw invalidPreludeMetadata(parseError);
         }
-        if (!parsed.valid()) {
+        if (parsed.isEmpty()) {
             return DecodedMetadata.empty();
         }
         return new DecodedMetadata(parsed.priority(), parsed.group(), parsed.openInfo());

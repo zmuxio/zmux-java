@@ -9,7 +9,6 @@ import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.concurrent.DefaultPromise;
 import io.netty.util.concurrent.Future;
 import io.zmux.*;
-import io.zmux.internal.TimeoutBudget;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;

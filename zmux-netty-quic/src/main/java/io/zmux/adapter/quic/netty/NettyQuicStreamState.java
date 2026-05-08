@@ -10,9 +10,6 @@ import io.netty.channel.socket.DuplexChannelConfig;
 import io.netty.handler.codec.quic.QuicChannelOption;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.zmux.*;
-import io.zmux.internal.StreamIoSupport;
-import io.zmux.internal.TimeoutBudget;
-import io.zmux.internal.Varint62;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -216,7 +213,7 @@ final class NettyQuicStreamState {
         if (prefixLength > 1) {
             readExactly(preludeLengthScratch, 1, prefixLength - 1, timeout, "read stream prelude length");
         }
-        Varint62.Decoded decoded = Varint62.decode(preludeLengthScratch, 0);
+        DecodedVarint decoded = ZmuxCodec.parseVarint(preludeLengthScratch, 0);
         long metadataLength = decoded.value();
         if (metadataLength == 0L) {
             session.noteControlProgress();
@@ -418,7 +415,7 @@ final class NettyQuicStreamState {
     int writevFinal(byte[]... parts) throws IOException {
         Objects.requireNonNull(parts, "parts");
 
-        int totalLength = StreamIoSupport.checkedWritevTotalLength(parts, "writevFinal");
+        int totalLength = NettyQuicSupport.checkedWritevTotalLength(parts, "writevFinal");
         if (totalLength == 0) {
             closeWrite();
             return 0;
