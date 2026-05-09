@@ -74,6 +74,55 @@ class NettyQuicSessionContractTest {
         throw new AssertionError("timed out waiting for session stats predicate");
     }
 
+    private static void awaitAcceptedPreludeSlotsInUse(NettyQuicSession session,
+                                                       int maxConcurrent,
+                                                       int expectedInUse,
+                                                       Duration timeout) throws Exception {
+        Semaphore prepareSlots = (Semaphore) getField(session, "prepareSlots");
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadlineNanos) {
+            if (maxConcurrent - prepareSlots.availablePermits() == expectedInUse) {
+                return;
+            }
+            Thread.sleep(10L);
+        }
+        fail("timed out waiting for accepted prelude prepare slots in use");
+    }
+
+    private static void assertSessionCloseWaitsForStalledAcceptedPreludePreparations(boolean asyncClose) throws Exception {
+        int maxConcurrent = 2;
+        NettyQuicSessionOptions serverOptions = new NettyQuicSessionOptions(Duration.ofMillis(-1L), maxConcurrent);
+        try (NettyQuicTestSupport.SessionPair pair = openPair(NettyQuicSessionOptions.defaults(), serverOptions)) {
+            NettyQuicSession server = (NettyQuicSession) pair.server;
+            QuicStreamChannel first = openRawBidiStream(pair);
+            QuicStreamChannel second = openRawBidiStream(pair);
+            try {
+                writeRaw(first, new byte[]{0x40});
+                writeRaw(second, new byte[]{0x40});
+                awaitAcceptedPreludeSlotsInUse(server, maxConcurrent, maxConcurrent, Duration.ofSeconds(5));
+
+                if (asyncClose) {
+                    server.closeAsync().toCompletableFuture().get(5L, TimeUnit.SECONDS);
+                } else {
+                    CompletableFuture<Void> closeDone = async(() -> {
+                        server.close();
+                        return null;
+                    });
+                    await(closeDone);
+                }
+
+                assertEquals(
+                        maxConcurrent,
+                        ((Semaphore) getField(server, "prepareSlots")).availablePermits(),
+                        "close should wait until stalled accepted prelude preparations release their slots"
+                );
+            } finally {
+                first.close().syncUninterruptibly();
+                second.close().syncUninterruptibly();
+            }
+        }
+    }
+
     private static void stallEventLoopUntilReleased(CountDownLatch blocked, CountDownLatch release) {
         blocked.countDown();
         try {
@@ -2825,6 +2874,16 @@ class NettyQuicSessionContractTest {
                 stalled.close().syncUninterruptibly();
             }
         }
+    }
+
+    @Test
+    void closeWaitsForStalledAcceptedPreludePreparations() throws Exception {
+        assertSessionCloseWaitsForStalledAcceptedPreludePreparations(false);
+    }
+
+    @Test
+    void closeAsyncWaitsForStalledAcceptedPreludePreparations() throws Exception {
+        assertSessionCloseWaitsForStalledAcceptedPreludePreparations(true);
     }
 
     @Test

@@ -29,6 +29,7 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     private final Semaphore prepareSlots;
     private final int pendingPrepareCapacity;
     private final ReentrantLock prepareLock = new ReentrantLock();
+    private final Object internalTaskLock = new Object();
     private final ReentrantLock lifecycleLock = new ReentrantLock();
     private final Condition lifecycleChanged = lifecycleLock.newCondition();
     private final NettyQuicSupport.AcceptQueue<NettyQuicBidiStream> bidiAcceptQueue =
@@ -74,6 +75,8 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     private volatile int lastFlushFrames;
     private volatile long lastFlushBytes;
     private volatile long lastOpenLatencyNanos;
+    private CompletableFuture<Void> internalTasksDone = NettyQuicSupport.completedVoid();
+    private int internalTaskCount;
 
     NettyQuicSession(QuicChannel channel, NettyQuicSessionOptions options) {
         this.channel = Objects.requireNonNull(channel, "channel");
@@ -522,15 +525,7 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         NettyQuicSupport.ensureOffEventLoop(channel, "awaitTermination");
         TimeoutBudget budget = TimeoutBudget.fromTimeout(timeout);
         try {
-            if (!budget.bounded()) {
-                channel.closeFuture().await();
-                return true;
-            }
-            long timeoutNanos = budget.remainingNanos();
-            if (timeoutNanos <= 0L) {
-                return channel.closeFuture().isDone();
-            }
-            return channel.closeFuture().await(timeoutNanos, TimeUnit.NANOSECONDS);
+            return awaitChannelClosed(budget) && awaitInternalTasks(budget);
         } catch (InterruptedException interrupted) {
             throw NettyQuicSupport.interrupted(
                     "zmux-netty-quic: interrupted while waiting for session termination",
@@ -721,28 +716,39 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
 
     @Override
     public void close() throws IOException {
-        if (closed.get()) {
-            return;
-        }
         NettyQuicSupport.ensureOffEventLoop(channel, "close");
-        beginClosing(NettyQuicSupport.sessionClosedError(ZmuxErrorSource.LOCAL));
-        NettyQuicSupport.awaitChannelFuture(channel.close(true, 0, Unpooled.EMPTY_BUFFER));
-        noteControlProgress();
+        IOException closeFailure = null;
+        if (!closed.get()) {
+            beginClosing(NettyQuicSupport.sessionClosedError(ZmuxErrorSource.LOCAL));
+            try {
+                NettyQuicSupport.awaitChannelFuture(channel.close(true, 0, Unpooled.EMPTY_BUFFER));
+                noteControlProgress();
+            } catch (IOException error) {
+                closeFailure = error;
+            }
+        }
+        awaitInternalTasksAfterClose(closeFailure);
     }
 
     @Override
     public CompletionStage<Void> closeAsync() {
+        CompletableFuture<Void> completion = new CompletableFuture<>();
         if (closed.get()) {
-            return NettyQuicSupport.completedVoid();
+            completeAfterInternalTasksAsync(completion, null);
+            return completion;
         }
         beginClosing(NettyQuicSupport.sessionClosedError(ZmuxErrorSource.LOCAL));
         ChannelFuture future = channel.close(true, 0, Unpooled.EMPTY_BUFFER);
         future.addListener(ignored -> {
+            IOException closeFailure = null;
             if (future.isSuccess()) {
                 noteControlProgress();
+            } else {
+                closeFailure = NettyQuicSupport.translateThrowable(future.cause());
             }
+            completeAfterInternalTasksAsync(completion, closeFailure);
         });
-        return NettyQuicSupport.completionStageFromChannelFuture(future);
+        return completion;
     }
 
     @Override
@@ -1097,7 +1103,10 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
             drainedAny = true;
             preparingStreams.add(state);
             try {
-                NettyQuicSupport.executeAcceptedPreludeTask(() -> prepareAcceptedStream(state));
+                if (!startInternalTask(() -> prepareAcceptedStream(state))) {
+                    prepareSlots.release();
+                    cleanupRejectedAcceptedPreparation(state, ErrorCode.CANCELLED.code());
+                }
             } catch (RejectedExecutionException ignored) {
                 prepareSlots.release();
                 cleanupRejectedAcceptedPreparation(state, ErrorCode.REFUSED_STREAM.code());
@@ -1105,6 +1114,134 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         }
         if (drainedAny && pendingPrepare.isEmpty()) {
             pendingPrepare = new ArrayDeque<>();
+        }
+    }
+
+    private boolean awaitChannelClosed(TimeoutBudget budget) throws InterruptedException {
+        if (!budget.bounded()) {
+            channel.closeFuture().await();
+            return true;
+        }
+        long timeoutNanos = budget.remainingNanos();
+        if (timeoutNanos <= 0L) {
+            return channel.closeFuture().isDone();
+        }
+        return channel.closeFuture().await(timeoutNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private boolean startInternalTask(Runnable task) {
+        if (task == null) {
+            return false;
+        }
+        if (!beginInternalTask()) {
+            return false;
+        }
+        boolean submitted = false;
+        try {
+            NettyQuicSupport.executeAcceptedPreludeTask(() -> {
+                try {
+                    task.run();
+                } finally {
+                    finishInternalTask();
+                }
+            });
+            submitted = true;
+            return true;
+        } finally {
+            if (!submitted) {
+                finishInternalTask();
+            }
+        }
+    }
+
+    private boolean beginInternalTask() {
+        synchronized (internalTaskLock) {
+            if (!acceptingNewStreams()) {
+                return false;
+            }
+            if (internalTaskCount == 0) {
+                internalTasksDone = new CompletableFuture<>();
+            }
+            internalTaskCount++;
+            return true;
+        }
+    }
+
+    private void finishInternalTask() {
+        CompletableFuture<Void> finished = null;
+        synchronized (internalTaskLock) {
+            if (internalTaskCount > 0) {
+                internalTaskCount--;
+            }
+            if (internalTaskCount == 0) {
+                finished = internalTasksDone;
+                internalTasksDone = NettyQuicSupport.completedVoid();
+            }
+        }
+        if (finished != null) {
+            finished.complete(null);
+        }
+    }
+
+    private void awaitInternalTasksAfterClose(IOException closeFailure) throws IOException {
+        try {
+            awaitInternalTasks(TimeoutBudget.unbounded());
+        } catch (InterruptedException interrupted) {
+            IOException waitFailure = NettyQuicSupport.interruptedIo(
+                    "waiting for accepted stream preparation",
+                    ZmuxErrorScope.SESSION,
+                    ZmuxErrorDirection.BOTH,
+                    interrupted
+            );
+            if (closeFailure != null) {
+                closeFailure.addSuppressed(waitFailure);
+            } else {
+                throw waitFailure;
+            }
+        }
+        if (closeFailure != null) {
+            throw closeFailure;
+        }
+    }
+
+    private void completeAfterInternalTasksAsync(CompletableFuture<Void> completion, IOException closeFailure) {
+        internalTasksDoneSnapshot().whenComplete((ignored, failure) -> completeCloseAsync(completion, closeFailure));
+    }
+
+    private static void completeCloseAsync(CompletableFuture<Void> completion, IOException failure) {
+        if (failure == null) {
+            completion.complete(null);
+        } else {
+            completion.completeExceptionally(failure);
+        }
+    }
+
+    private boolean awaitInternalTasks(TimeoutBudget budget) throws InterruptedException {
+        CompletableFuture<Void> done = internalTasksDoneSnapshot();
+        if (done.isDone()) {
+            return true;
+        }
+        try {
+            if (!budget.bounded()) {
+                done.get();
+                return true;
+            }
+            long remainingNanos = budget.remainingNanos();
+            if (remainingNanos <= 0L) {
+                return done.isDone();
+            }
+            done.get(remainingNanos, TimeUnit.NANOSECONDS);
+            return true;
+        } catch (ExecutionException ignored) {
+            return true;
+        } catch (TimeoutException ignored) {
+            return false;
+        }
+    }
+
+    private CompletableFuture<Void> internalTasksDoneSnapshot() {
+        synchronized (internalTaskLock) {
+            return internalTasksDone;
         }
     }
 
