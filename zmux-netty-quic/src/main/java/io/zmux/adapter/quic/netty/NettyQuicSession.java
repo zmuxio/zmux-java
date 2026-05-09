@@ -303,6 +303,14 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         return false;
     }
 
+    private static void completeCloseAsync(CompletableFuture<Void> completion, IOException failure) {
+        if (failure == null) {
+            completion.complete(null);
+        } else {
+            completion.completeExceptionally(failure);
+        }
+    }
+
     @Override
     public ZmuxStream acceptStream() throws IOException, InterruptedException {
         return acceptStream(null);
@@ -1206,14 +1214,6 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
 
     private void completeAfterInternalTasksAsync(CompletableFuture<Void> completion, IOException closeFailure) {
         internalTasksDoneSnapshot().whenComplete((ignored, failure) -> completeCloseAsync(completion, closeFailure));
-    }
-
-    private static void completeCloseAsync(CompletableFuture<Void> completion, IOException failure) {
-        if (failure == null) {
-            completion.complete(null);
-        } else {
-            completion.completeExceptionally(failure);
-        }
     }
 
     private boolean awaitInternalTasks(TimeoutBudget budget) throws InterruptedException {

@@ -1,6 +1,7 @@
 package io.zmux.runtime;
 
 import io.zmux.Settings;
+import io.zmux.support.MathSupport;
 
 import java.math.BigInteger;
 
@@ -56,23 +57,7 @@ final class RuntimeFlow {
     }
 
     public static long saturatingMulDivFloor(long value, long multiplier, long divisor) {
-        if (value <= 0L || multiplier <= 0L) {
-            return 0L;
-        }
-        if (divisor <= 0L) {
-            return Long.MAX_VALUE;
-        }
-        long quotient = value / divisor;
-        long remainder = value - quotient * divisor;
-        if (quotient > 0L && multiplier > Long.MAX_VALUE / quotient) {
-            return Long.MAX_VALUE;
-        }
-        long high = quotient * multiplier;
-        long low = multiplyRemainderDivFloor(remainder, multiplier, divisor);
-        if (high > Long.MAX_VALUE - low) {
-            return Long.MAX_VALUE;
-        }
-        return high + low;
+        return MathSupport.saturatingMulDivFloor(value, multiplier, divisor);
     }
 
     static long saturatingMulDivCeil(long value, long multiplier, long divisor) {
@@ -92,18 +77,6 @@ final class RuntimeFlow {
                     .divideAndRemainder(BigInteger.valueOf(divisor));
             BigInteger quotient = divRem[1].signum() == 0 ? divRem[0] : divRem[0].add(BigInteger.ONE);
             return quotient.min(BigInteger.valueOf(Long.MAX_VALUE)).longValue();
-        }
-    }
-
-    private static long multiplyRemainderDivFloor(long value, long multiplier, long divisor) {
-        try {
-            return Math.multiplyExact(value, multiplier) / divisor;
-        } catch (ArithmeticException overflow) {
-            return BigInteger.valueOf(value)
-                    .multiply(BigInteger.valueOf(multiplier))
-                    .divide(BigInteger.valueOf(divisor))
-                    .min(BigInteger.valueOf(Long.MAX_VALUE))
-                    .longValue();
         }
     }
 
