@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.zmuxio</groupId>
         <artifactId>zmux-parent</artifactId>
-        <version>1.0.3</version>
+        <version>1.0.4</version>
     </parent>
 
     <artifactId>zmux-netty-quic</artifactId>
@@ -15,7 +15,7 @@
     <url>https://github.com/zmuxio/zmux-java/tree/main/zmux-netty-quic</url>
 
     <properties>
-        <netty.version>4.2.12.Final</netty.version>
+        <netty.version>4.2.13.Final</netty.version>
     </properties>
 
     <dependencies>
