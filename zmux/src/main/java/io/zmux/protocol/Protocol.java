@@ -10,10 +10,10 @@ public final class Protocol {
     public static final int FRAME_FLAG_OPEN_METADATA = 0x20;
     public static final int FRAME_FLAG_FIN = 0x40;
 
-    public static final long CAPABILITY_PRIORITY_HINTS = 1L;
-    public static final long CAPABILITY_STREAM_GROUPS = 1L << 1;
+    public static final long CAPABILITY_OPEN_METADATA = 1L;
+    public static final long CAPABILITY_PRIORITY_HINTS = 1L << 1;
+    public static final long CAPABILITY_STREAM_GROUPS = 1L << 2;
     public static final long CAPABILITY_PRIORITY_UPDATE = 1L << 3;
-    public static final long CAPABILITY_OPEN_METADATA = 1L << 4;
 
     public static final long SETTING_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED = 1;
     public static final long SETTING_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED = 2;
@@ -22,11 +22,11 @@ public final class Protocol {
     public static final long SETTING_MAX_INCOMING_STREAMS_BIDI = 5;
     public static final long SETTING_MAX_INCOMING_STREAMS_UNI = 6;
     public static final long SETTING_MAX_FRAME_PAYLOAD = 7;
-    public static final long SETTING_MAX_CONTROL_PAYLOAD_BYTES = 10;
-    public static final long SETTING_MAX_EXTENSION_PAYLOAD_BYTES = 11;
-    public static final long SETTING_SCHEDULER_HINTS = 12;
-    public static final long SETTING_PING_PADDING_KEY = 13;
-    public static final long SETTING_PREFACE_PADDING = 63;
+    public static final long SETTING_MAX_CONTROL_PAYLOAD_BYTES = 8;
+    public static final long SETTING_MAX_EXTENSION_PAYLOAD_BYTES = 9;
+    public static final long SETTING_SCHEDULER_HINTS = 10;
+    public static final long SETTING_PING_PADDING_KEY = 11;
+    public static final long SETTING_PREFACE_PADDING = 12;
 
     public static final long METADATA_STREAM_PRIORITY = 1;
     public static final long METADATA_STREAM_GROUP = 2;

@@ -1450,6 +1450,27 @@ final class ApiSurfaceTest {
     }
 
     @Test
+    void protocolRegistryMatchesWireSpecification() {
+        assertEquals(1L, Protocol.CAPABILITY_OPEN_METADATA);
+        assertEquals(1L << 1, Protocol.CAPABILITY_PRIORITY_HINTS);
+        assertEquals(1L << 2, Protocol.CAPABILITY_STREAM_GROUPS);
+        assertEquals(1L << 3, Protocol.CAPABILITY_PRIORITY_UPDATE);
+
+        assertEquals(1L, Protocol.SETTING_INITIAL_MAX_STREAM_DATA_BIDI_LOCALLY_OPENED);
+        assertEquals(2L, Protocol.SETTING_INITIAL_MAX_STREAM_DATA_BIDI_PEER_OPENED);
+        assertEquals(3L, Protocol.SETTING_INITIAL_MAX_STREAM_DATA_UNI);
+        assertEquals(4L, Protocol.SETTING_INITIAL_MAX_DATA);
+        assertEquals(5L, Protocol.SETTING_MAX_INCOMING_STREAMS_BIDI);
+        assertEquals(6L, Protocol.SETTING_MAX_INCOMING_STREAMS_UNI);
+        assertEquals(7L, Protocol.SETTING_MAX_FRAME_PAYLOAD);
+        assertEquals(8L, Protocol.SETTING_MAX_CONTROL_PAYLOAD_BYTES);
+        assertEquals(9L, Protocol.SETTING_MAX_EXTENSION_PAYLOAD_BYTES);
+        assertEquals(10L, Protocol.SETTING_SCHEDULER_HINTS);
+        assertEquals(11L, Protocol.SETTING_PING_PADDING_KEY);
+        assertEquals(12L, Protocol.SETTING_PREFACE_PADDING);
+    }
+
+    @Test
     void publicCodecFacadeRoundTripsVarintsTlvsFramesAndPreface() throws Exception {
         byte[] varint = ZmuxCodec.encodeVarint(16_384L);
         DecodedVarint decoded = ZmuxCodec.parseVarint(varint);
