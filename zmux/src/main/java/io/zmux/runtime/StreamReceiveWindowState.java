@@ -4,6 +4,7 @@ final class StreamReceiveWindowState {
     private long recvAdvertisedLimit;
     private long initialReceiveWindow;
     private long recvReceivedBytes;
+    private boolean creditGrantedSinceBlocked;
 
     long recvAdvertisedLimit() {
         return recvAdvertisedLimit;
@@ -31,6 +32,15 @@ final class StreamReceiveWindowState {
     }
 
     void raiseRecvAdvertisedLimit(long value) {
-        recvAdvertisedLimit = Math.max(recvAdvertisedLimit, value);
+        if (value > recvAdvertisedLimit) {
+            recvAdvertisedLimit = value;
+            creditGrantedSinceBlocked = true;
+        }
+    }
+
+    boolean takeCreditGrantedSinceBlocked() {
+        boolean granted = creditGrantedSinceBlocked;
+        creditGrantedSinceBlocked = false;
+        return granted;
     }
 }

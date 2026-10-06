@@ -281,11 +281,16 @@ final class SessionLocalOpenTracker {
         this.unseenLocalUniPeakSize = 0;
     }
 
+    /**
+     * Only idle provisional time counts: time the stream spends waiting for its commit turn behind an earlier
+     * same-class opener does not, whether that opener then opens or is abandoned.
+     */
     private boolean provisionalExpired(StreamRuntime streamRuntime, long nowNanos, long provisionalOpenMaxAgeNanos) {
-        long createdAtNanos = streamRuntime.provisionalCreatedAtNanos();
-        return createdAtNanos != 0L
+        long originNanos = streamRuntime.provisionalAgeOriginNanos();
+        return originNanos != 0L
                 && provisionalOpenMaxAgeNanos > 0L
-                && RuntimeFlow.elapsedExceeds(nowNanos, createdAtNanos, provisionalOpenMaxAgeNanos);
+                && !streamRuntime.provisionalCommitWaitingLocked()
+                && RuntimeFlow.elapsedExceeds(nowNanos, originNanos, provisionalOpenMaxAgeNanos);
     }
 
     private void reclaimUnseenLocalStreamsLocked(Deque<StreamRuntime> deque,

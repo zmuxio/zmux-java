@@ -3,6 +3,7 @@ package io.zmux.runtime;
 final class StreamReceiveAccountingState {
     private long recvPending;
     private long lateDataReceived;
+    private long lateDataOutstandingCredit;
 
     long recvPending() {
         return recvPending;
@@ -28,5 +29,13 @@ final class StreamReceiveAccountingState {
             return;
         }
         lateDataReceived = SessionRuntime.saturatingAdd(lateDataReceived, value);
+    }
+
+    long lateDataOutstandingCredit() {
+        return lateDataOutstandingCredit;
+    }
+
+    void captureLateDataOutstandingCredit(long value) {
+        lateDataOutstandingCredit = Math.max(lateDataOutstandingCredit, value);
     }
 }

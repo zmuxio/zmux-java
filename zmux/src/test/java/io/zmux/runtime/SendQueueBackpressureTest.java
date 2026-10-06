@@ -38,7 +38,7 @@ final class SendQueueBackpressureTest {
 
     private static void reserveSend(SessionRuntime runtime, StreamRuntime stream, int bytes) throws Exception {
         synchronized (runtime.lock()) {
-            runtime.reserveSendLocked(stream, bytes);
+            assertEquals(bytes, runtime.reserveSendUpToLocked(stream, bytes, 0), "ample credit should admit the whole write");
         }
     }
 

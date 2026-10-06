@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -97,6 +98,88 @@ final class SessionTerminationTest {
     }
 
     @Test
+    void peerNoErrorCloseFailsUnfinishedReceiveHalvesInsteadOfEof() throws Exception {
+        // SPEC 6.10: CLOSE fails all remaining open streams whatever its code; only a real peer FIN reads as EOF.
+        try (RawPeerSession peer = RawPeerSession.open(defaultConfig(), 0L)) {
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 4L, "partial".getBytes(StandardCharsets.UTF_8)));
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 8L, "unread".getBytes(StandardCharsets.UTF_8)));
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 12L, new byte[0]));
+            ZmuxStream drained = peer.session().acceptStream(Duration.ofSeconds(1));
+            ZmuxStream buffered = peer.session().acceptStream(Duration.ofSeconds(1));
+            ZmuxStream blocked = peer.session().acceptStream(Duration.ofSeconds(1));
+            byte[] body = new byte[16];
+            assertEquals(7, drained.read(body), "first stream body should be readable before the close");
+
+            AtomicReference<Throwable> blockedResult = new AtomicReference<>();
+            CountDownLatch blockedDone = new CountDownLatch(1);
+            Thread blockedReader = new Thread(() -> {
+                try {
+                    blockedResult.set(new AssertionError("blocked read returned " + blocked.read(new byte[8])));
+                } catch (Throwable error) {
+                    blockedResult.set(error);
+                } finally {
+                    blockedDone.countDown();
+                }
+            }, "session-termination-blocked-read");
+            blockedReader.start();
+            Thread.sleep(50L);
+
+            peer.send(closeFrame(ErrorCode.NO_ERROR.code(), ""));
+            assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "peer close should terminate the session");
+
+            assertTrue(blockedDone.await(1, java.util.concurrent.TimeUnit.SECONDS), "blocked read should be woken by the close");
+            assertInstanceOf(SessionClosedException.class, blockedResult.get(), "a read blocked at CLOSE(NO_ERROR) must fail, not see EOF");
+            SessionClosedException later = assertThrows(SessionClosedException.class, () -> drained.read(body));
+            assertEquals("read", later.operation(), "later read should report the read operation");
+            assertThrows(
+                    SessionClosedException.class,
+                    () -> buffered.read(body),
+                    "discarded unread data must not be reported as a complete body"
+            );
+            assertThrows(SessionClosedException.class, () -> drained.write(new byte[]{1}), "writes after the close fail too");
+        }
+    }
+
+    @Test
+    void sessionCloseAfterPeerFinKeepsEofOnlyWhenNothingWasDiscarded() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(defaultConfig(), 0L)) {
+            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 4L, "done".getBytes(StandardCharsets.UTF_8)));
+            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 8L, "unread".getBytes(StandardCharsets.UTF_8)));
+            ZmuxStream complete = peer.session().acceptStream(Duration.ofSeconds(1));
+            ZmuxStream unread = peer.session().acceptStream(Duration.ofSeconds(1));
+            byte[] body = new byte[16];
+            assertEquals(4, complete.read(body), "complete body should be readable");
+
+            peer.send(closeFrame(ErrorCode.NO_ERROR.code(), ""));
+            assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "peer close should terminate the session");
+
+            assertEquals(-1, complete.read(body), "a peer FIN whose data was fully delivered still reads as EOF");
+            assertThrows(
+                    SessionClosedException.class,
+                    () -> unread.read(body),
+                    "SPEC 9.2: EOF only after all buffered data was delivered; discarded data must surface an error"
+            );
+        }
+    }
+
+    @Test
+    void localGracefulCloseFailsUnfinishedReceiveHalves() throws Exception {
+        try (SessionPair pair = SessionPair.open(defaultConfig(), defaultConfig())) {
+            ZmuxStream clientStream = pair.client().openStream();
+            clientStream.write("partial".getBytes(StandardCharsets.UTF_8));
+            ZmuxStream accepted = pair.server().acceptStream(Duration.ofSeconds(1));
+            byte[] body = new byte[16];
+            assertEquals(7, accepted.read(body), "body prefix should be readable");
+
+            pair.server().closeWithError(ErrorCode.NO_ERROR.code(), "");
+            assertTrue(pair.server().awaitTermination(Duration.ofSeconds(2)), "local close should terminate the session");
+            assertThrows(SessionClosedException.class, () -> accepted.read(body), "local close(0) must not turn an unfinished body into EOF");
+            assertTrue(pair.client().awaitTermination(Duration.ofSeconds(2)), "peer should see the CLOSE");
+            assertThrows(SessionClosedException.class, () -> clientStream.read(body), "peer CLOSE(NO_ERROR) must not read as EOF either");
+        }
+    }
+
+    @Test
     void peerCloseClearsAcceptedBacklog() throws Exception {
         try (RawPeerSession peer = RawPeerSession.open(defaultConfig(), 0L)) {
             peer.send(new FrameCodec.Frame(
@@ -123,8 +206,12 @@ final class SessionTerminationTest {
                 .initialMaxStreamDataBidiPeerOpened(1L)
                 .initialMaxStreamDataBidiLocallyOpened(1L)
                 .build();
+        // Small receive HWMs disable standing window growth, so the 1-byte windows stay a hard cap even when the
+        // blocked writer's BLOCKED reaches the server (a forced replenish may only grow an exhausted window).
         ZmuxConfig serverConfig = ZmuxConfig.builder()
                 .settings(limitedServerSettings)
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
 
         try (SessionPair pair = SessionPair.open(defaultConfig(), serverConfig)) {
@@ -173,8 +260,12 @@ final class SessionTerminationTest {
                 .initialMaxStreamDataBidiPeerOpened(1L)
                 .initialMaxStreamDataBidiLocallyOpened(1L)
                 .build();
+        // Small receive HWMs disable standing window growth, so the 1-byte windows stay a hard cap even when the
+        // blocked writer's BLOCKED reaches the server (a forced replenish may only grow an exhausted window).
         ZmuxConfig serverConfig = ZmuxConfig.builder()
                 .settings(limitedServerSettings)
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
 
         try (SessionPair pair = SessionPair.open(defaultConfig(), serverConfig)) {
@@ -232,7 +323,7 @@ final class SessionTerminationTest {
         }
 
         static SessionPair open(ZmuxConfig clientConfig, ZmuxConfig serverConfig) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket leftSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket rightSocket = listener.accept();
             listener.close();
@@ -325,7 +416,7 @@ final class SessionTerminationTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();

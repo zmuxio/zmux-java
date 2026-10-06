@@ -18,6 +18,11 @@ public final class ZmuxConfig {
                     | Protocol.CAPABILITY_PRIORITY_HINTS
                     | Protocol.CAPABILITY_STREAM_GROUPS
                     | Protocol.CAPABILITY_PRIORITY_UPDATE;
+    /**
+     * Repository-default bound on session establishment (local preface write, peer preface read and
+     * negotiation). See {@link Builder#establishmentTimeout(Duration)}.
+     */
+    public static final Duration DEFAULT_ESTABLISHMENT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration DEFAULT_IDLE_KEEPALIVE_INTERVAL = Duration.ofMinutes(1);
     private static final Duration DEFAULT_KEEPALIVE_MAX_PING_INTERVAL = Duration.ofMinutes(5);
     private static final SecureRandom NONCE_RANDOM = new SecureRandom();
@@ -76,6 +81,8 @@ public final class ZmuxConfig {
     private final long retainedPeerReasonBytesBudget;
     private final long aggregateLateDataCap;
     private final ZmuxEventHandler eventHandler;
+    private final Duration establishmentTimeout;
+    private final boolean disableEstablishmentTimeout;
 
     public ZmuxConfig(Role role,
                       long tieBreakerNonce,
@@ -227,6 +234,116 @@ public final class ZmuxConfig {
                       long retainedPeerReasonBytesBudget,
                       long aggregateLateDataCap,
                       ZmuxEventHandler eventHandler) {
+        this(
+                role,
+                tieBreakerNonce,
+                minProto,
+                maxProto,
+                capabilities,
+                disableCapabilities,
+                settings,
+                prefacePadding,
+                prefacePaddingMinBytes,
+                prefacePaddingMaxBytes,
+                keepaliveInterval,
+                keepaliveMaxPingInterval,
+                keepaliveTimeout,
+                pingPadding,
+                pingPaddingMinBytes,
+                pingPaddingMaxBytes,
+                sessionMemoryCap,
+                perStreamQueuedDataHwm,
+                sessionQueuedDataHwm,
+                urgentQueuedBytesCap,
+                pendingControlBytesBudget,
+                pendingPriorityBytesBudget,
+                abuseWindow,
+                gracefulCloseDrainTimeout,
+                stopSendingGracefulDrainWindow,
+                stopSendingGracefulTailCap,
+                hiddenAbortChurnWindow,
+                hiddenAbortChurnThreshold,
+                visibleTerminalChurnWindow,
+                visibleTerminalChurnThreshold,
+                inboundControlFrameBudget,
+                inboundControlBytesBudget,
+                inboundExtFrameBudget,
+                inboundExtBytesBudget,
+                inboundMixedFrameBudget,
+                inboundMixedBytesBudget,
+                noOpControlFloodThreshold,
+                noOpMaxDataFloodThreshold,
+                noOpBlockedFloodThreshold,
+                noOpZeroDataFloodThreshold,
+                noOpPriorityUpdateFloodThreshold,
+                groupRebucketChurnThreshold,
+                inboundPingFloodThreshold,
+                acceptBacklogLimit,
+                acceptBacklogBytesLimit,
+                tombstoneLimit,
+                markerOnlyUsedStreamLimit,
+                retainedOpenInfoBytesBudget,
+                retainedPeerReasonBytesBudget,
+                aggregateLateDataCap,
+                eventHandler,
+                null,
+                false
+        );
+    }
+
+    private ZmuxConfig(Role role,
+                       long tieBreakerNonce,
+                       long minProto,
+                       long maxProto,
+                       long capabilities,
+                       boolean disableCapabilities,
+                       Settings settings,
+                       boolean prefacePadding,
+                       long prefacePaddingMinBytes,
+                       long prefacePaddingMaxBytes,
+                       Duration keepaliveInterval,
+                       Duration keepaliveMaxPingInterval,
+                       Duration keepaliveTimeout,
+                       boolean pingPadding,
+                       long pingPaddingMinBytes,
+                       long pingPaddingMaxBytes,
+                       long sessionMemoryCap,
+                       long perStreamQueuedDataHwm,
+                       long sessionQueuedDataHwm,
+                       long urgentQueuedBytesCap,
+                       long pendingControlBytesBudget,
+                       long pendingPriorityBytesBudget,
+                       Duration abuseWindow,
+                       Duration gracefulCloseDrainTimeout,
+                       Duration stopSendingGracefulDrainWindow,
+                       long stopSendingGracefulTailCap,
+                       Duration hiddenAbortChurnWindow,
+                       int hiddenAbortChurnThreshold,
+                       Duration visibleTerminalChurnWindow,
+                       int visibleTerminalChurnThreshold,
+                       int inboundControlFrameBudget,
+                       long inboundControlBytesBudget,
+                       int inboundExtFrameBudget,
+                       long inboundExtBytesBudget,
+                       int inboundMixedFrameBudget,
+                       long inboundMixedBytesBudget,
+                       int noOpControlFloodThreshold,
+                       int noOpMaxDataFloodThreshold,
+                       int noOpBlockedFloodThreshold,
+                       int noOpZeroDataFloodThreshold,
+                       int noOpPriorityUpdateFloodThreshold,
+                       int groupRebucketChurnThreshold,
+                       int inboundPingFloodThreshold,
+                       int acceptBacklogLimit,
+                       long acceptBacklogBytesLimit,
+                       int tombstoneLimit,
+                       int markerOnlyUsedStreamLimit,
+                       long retainedOpenInfoBytesBudget,
+                       long retainedPeerReasonBytesBudget,
+                       long aggregateLateDataCap,
+                       ZmuxEventHandler eventHandler,
+                       Duration establishmentTimeout,
+                       boolean disableEstablishmentTimeout) {
         role = role == null ? Role.AUTO : role;
         requireVarint62(tieBreakerNonce, "tieBreakerNonce");
         minProto = normalizeProtocolVersion(minProto, "minProto");
@@ -282,6 +399,12 @@ public final class ZmuxConfig {
         requireNonNegative(retainedOpenInfoBytesBudget, "retainedOpenInfoBytesBudget");
         requireNonNegative(retainedPeerReasonBytesBudget, "retainedPeerReasonBytesBudget");
         requireNonNegative(aggregateLateDataCap, "aggregateLateDataCap");
+        establishmentTimeout = normalizeOptionalDuration(establishmentTimeout, "establishmentTimeout");
+        if (disableEstablishmentTimeout) {
+            establishmentTimeout = Duration.ZERO;
+        } else if (establishmentTimeout.isZero()) {
+            establishmentTimeout = DEFAULT_ESTABLISHMENT_TIMEOUT;
+        }
         this.role = role;
         this.tieBreakerNonce = tieBreakerNonce;
         this.minProto = minProto;
@@ -333,6 +456,8 @@ public final class ZmuxConfig {
         this.retainedPeerReasonBytesBudget = retainedPeerReasonBytesBudget;
         this.aggregateLateDataCap = aggregateLateDataCap;
         this.eventHandler = eventHandler;
+        this.establishmentTimeout = establishmentTimeout;
+        this.disableEstablishmentTimeout = disableEstablishmentTimeout;
     }
 
     public static ZmuxConfig defaults() {
@@ -500,7 +625,9 @@ public final class ZmuxConfig {
                 .retainedOpenInfoBytesBudget(retainedOpenInfoBytesBudget)
                 .retainedPeerReasonBytesBudget(retainedPeerReasonBytesBudget)
                 .aggregateLateDataCap(aggregateLateDataCap)
-                .eventHandler(eventHandler);
+                .eventHandler(eventHandler)
+                .establishmentTimeout(establishmentTimeout)
+                .disableEstablishmentTimeout(disableEstablishmentTimeout);
     }
 
     public ZmuxConfig withRole(Role role) {
@@ -738,12 +865,27 @@ public final class ZmuxConfig {
         return retainedPeerReasonBytesBudget;
     }
 
+    /**
+     * Advisory session-wide bound on retained late-data accounting; see {@link Builder#aggregateLateDataCap(long)}.
+     */
     public long aggregateLateDataCap() {
         return aggregateLateDataCap;
     }
 
     public ZmuxEventHandler eventHandler() {
         return eventHandler;
+    }
+
+    /**
+     * Returns the effective establishment bound: the configured value, {@link #DEFAULT_ESTABLISHMENT_TIMEOUT} when
+     * none was configured, or {@link Duration#ZERO} when the bound is disabled.
+     */
+    public Duration establishmentTimeout() {
+        return establishmentTimeout;
+    }
+
+    public boolean disableEstablishmentTimeout() {
+        return disableEstablishmentTimeout;
     }
 
     @Override
@@ -795,6 +937,7 @@ public final class ZmuxConfig {
                 && retainedOpenInfoBytesBudget == that.retainedOpenInfoBytesBudget
                 && retainedPeerReasonBytesBudget == that.retainedPeerReasonBytesBudget
                 && aggregateLateDataCap == that.aggregateLateDataCap
+                && disableEstablishmentTimeout == that.disableEstablishmentTimeout
                 && role == that.role
                 && Objects.equals(settings, that.settings)
                 && Objects.equals(keepaliveInterval, that.keepaliveInterval)
@@ -805,6 +948,7 @@ public final class ZmuxConfig {
                 && Objects.equals(stopSendingGracefulDrainWindow, that.stopSendingGracefulDrainWindow)
                 && Objects.equals(hiddenAbortChurnWindow, that.hiddenAbortChurnWindow)
                 && Objects.equals(visibleTerminalChurnWindow, that.visibleTerminalChurnWindow)
+                && Objects.equals(establishmentTimeout, that.establishmentTimeout)
                 && Objects.equals(eventHandler, that.eventHandler);
     }
 
@@ -861,7 +1005,9 @@ public final class ZmuxConfig {
                 retainedOpenInfoBytesBudget,
                 retainedPeerReasonBytesBudget,
                 aggregateLateDataCap,
-                eventHandler
+                eventHandler,
+                establishmentTimeout,
+                disableEstablishmentTimeout
         );
     }
 
@@ -917,6 +1063,8 @@ public final class ZmuxConfig {
         private long retainedPeerReasonBytesBudget;
         private long aggregateLateDataCap;
         private ZmuxEventHandler eventHandler;
+        private Duration establishmentTimeout = Duration.ZERO;
+        private boolean disableEstablishmentTimeout;
 
         public Builder role(Role value) {
             this.role = value;
@@ -1167,6 +1315,12 @@ public final class ZmuxConfig {
             return this;
         }
 
+        /**
+         * Overrides the session-wide late-data aggregate (late bytes still accounted to stopped or aborted streams and
+         * their tombstones). Zero uses the default. The value is advisory: late bytes are never buffered, and exceeding
+         * the aggregate never fails the session; further late bytes keep being discarded with their session credit
+         * released (API_SEMANTICS 3). Per-stream late-data allowances are enforced independently of this value.
+         */
         public Builder aggregateLateDataCap(long value) {
             this.aggregateLateDataCap = value;
             return this;
@@ -1175,6 +1329,27 @@ public final class ZmuxConfig {
         public Builder eventHandler(ZmuxEventHandler value) {
             this.eventHandler = value;
             return this;
+        }
+
+        /**
+         * Bounds session establishment: the local preface write, the peer preface read and negotiation. A
+         * {@code null} or zero value selects {@link ZmuxConfig#DEFAULT_ESTABLISHMENT_TIMEOUT}. The bound applies to
+         * transports that expose read/write deadlines (for example sockets); on expiry establishment fails with
+         * {@code INTERNAL} and a best-effort establishment {@code CLOSE}. Use {@link #disableEstablishmentTimeout()}
+         * to wait without a bound.
+         */
+        public Builder establishmentTimeout(Duration value) {
+            this.establishmentTimeout = value;
+            return this;
+        }
+
+        public Builder disableEstablishmentTimeout(boolean value) {
+            this.disableEstablishmentTimeout = value;
+            return this;
+        }
+
+        public Builder disableEstablishmentTimeout() {
+            return disableEstablishmentTimeout(true);
         }
 
         public ZmuxConfig build() {
@@ -1229,7 +1404,9 @@ public final class ZmuxConfig {
                     retainedOpenInfoBytesBudget,
                     retainedPeerReasonBytesBudget,
                     aggregateLateDataCap,
-                    eventHandler
+                    eventHandler,
+                    establishmentTimeout,
+                    disableEstablishmentTimeout
             );
         }
     }

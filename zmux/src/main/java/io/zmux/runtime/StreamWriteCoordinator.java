@@ -155,12 +155,9 @@ final class StreamWriteCoordinator {
                 int position = offset;
                 int end = offset + length;
 
-                if (openingPending && length > 0 && this.owner.initialPeerSendLimitForPendingOpenLocked() == 0L) {
-                    this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, false);
-                    openingPrefix = StreamRuntime.EMPTY_BYTES;
-                    openingPending = false;
-                }
-
+                // Each DATA frame is capped to the credit available when it is queued (the queue helpers
+                // return how many bytes they took), so a window smaller than one fragment still makes
+                // progress and the opener is never held back waiting for credit.
                 while (position < end) {
                     int prefixBudget = openingPending ? openingPrefix.length : 0;
                     int chunkLimit = this.fragmentChunkLimitLocked(prefixBudget);
@@ -183,8 +180,9 @@ final class StreamWriteCoordinator {
                         continue;
                     }
 
+                    int queued;
                     if (openingPending) {
-                        this.owner.sessionInternal().queueOpeningDataLocked(
+                        queued = this.owner.sessionInternal().queueOpeningDataLocked(
                                 this.owner,
                                 openingPrefix,
                                 src,
@@ -197,7 +195,7 @@ final class StreamWriteCoordinator {
                         openingPrefix = StreamRuntime.EMPTY_BYTES;
                         openingPending = false;
                     } else {
-                        this.owner.sessionInternal().queueDataLocked(
+                        queued = this.owner.sessionInternal().queueDataLocked(
                                 this.owner,
                                 src,
                                 position,
@@ -207,7 +205,7 @@ final class StreamWriteCoordinator {
                                 completion
                         );
                     }
-                    position += chunkSize;
+                    position += queued;
                 }
 
                 completionToWait = this.finishQueuedWriteLocked(fin, length, openingPending, openingPrefix, completion);
@@ -263,12 +261,6 @@ final class StreamWriteCoordinator {
                 int partOffset = 0;
                 int remainingTotal = totalLength;
 
-                if (openingPending && totalLength > 0 && this.owner.initialPeerSendLimitForPendingOpenLocked() == 0L) {
-                    this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, StreamRuntime.EMPTY_BYTES, false);
-                    openingPrefix = StreamRuntime.EMPTY_BYTES;
-                    openingPending = false;
-                }
-
                 while (remainingTotal > 0) {
                     while (partIndex < parts.length && partOffset >= parts[partIndex].length) {
                         partIndex++;
@@ -298,11 +290,12 @@ final class StreamWriteCoordinator {
                     byte[] current = parts[partIndex];
                     int currentAvailable = current.length - partOffset;
                     boolean singleSegment = chunkSize <= currentAvailable;
+                    int queued;
                     if (openingPending) {
                         if (singleSegment) {
-                            this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, current, partOffset, chunkSize, frameFin, completion);
+                            queued = this.owner.sessionInternal().queueOpeningDataLocked(this.owner, openingPrefix, current, partOffset, chunkSize, frameFin, completion);
                         } else {
-                            this.owner.sessionInternal().queueOpeningDataLocked(
+                            queued = this.owner.sessionInternal().queueOpeningDataLocked(
                                     this.owner,
                                     openingPrefix,
                                     parts,
@@ -317,9 +310,9 @@ final class StreamWriteCoordinator {
                         openingPrefix = StreamRuntime.EMPTY_BYTES;
                         openingPending = false;
                     } else if (singleSegment) {
-                        this.owner.sessionInternal().queueDataLocked(this.owner, current, partOffset, chunkSize, frameFin, completion);
+                        queued = this.owner.sessionInternal().queueDataLocked(this.owner, current, partOffset, chunkSize, frameFin, completion);
                     } else {
-                        this.owner.sessionInternal().queueDataLocked(
+                        queued = this.owner.sessionInternal().queueDataLocked(
                                 this.owner,
                                 parts,
                                 partIndex,
@@ -331,7 +324,7 @@ final class StreamWriteCoordinator {
                         );
                     }
 
-                    int toAdvance = chunkSize;
+                    int toAdvance = queued;
                     while (toAdvance > 0 && partIndex < parts.length) {
                         int available = parts[partIndex].length - partOffset;
                         int step = Math.min(available, toAdvance);
@@ -342,7 +335,7 @@ final class StreamWriteCoordinator {
                             partOffset = 0;
                         }
                     }
-                    remainingTotal -= chunkSize;
+                    remainingTotal -= queued;
                 }
 
                 completionToWait = this.finishQueuedWriteLocked(fin, totalLength, openingPending, openingPrefix, completion);

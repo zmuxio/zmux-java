@@ -944,6 +944,22 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         return lifecycleState.provisionalCreatedAtNanos();
     }
 
+    long provisionalAgeOriginNanos() {
+        return lifecycleState.provisionalAgeOriginNanos();
+    }
+
+    boolean provisionalCommitWaitingLocked() {
+        return lifecycleState.provisionalCommitWaiting();
+    }
+
+    void beginProvisionalCommitWaitLocked(long nowNanos) {
+        lifecycleState.beginProvisionalCommitWait(nowNanos);
+    }
+
+    void endProvisionalCommitWaitLocked(long nowNanos) {
+        lifecycleState.endProvisionalCommitWait(nowNanos);
+    }
+
     void setUnseenLocalTrackedLocked(boolean value) {
         lifecycleState.setUnseenLocalTracked(value);
     }
@@ -1303,12 +1319,15 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
                 metadataState.priority(),
                 session.peerSettings().schedulerHints()
         );
-        return WritePolicy.rateLimitedFragmentCap(
+        long cap = WritePolicy.rateLimitedFragmentCap(
                 baseCap,
                 session.sendRateEstimateLocked(),
                 metadataState.priority(),
                 session.peerSettings().schedulerHints()
         );
+        // A fragment larger than the queued-data watermarks could never be admitted, even into an empty
+        // queue (the peer's max_frame_payload may exceed the local per-stream/session HWM).
+        return Math.min(cap, session.queuedDataFragmentCapLocked());
     }
 
     void raisePeerSendLimitLocked(long value) {
@@ -1317,6 +1336,10 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
 
     void raiseRecvAdvertisedLimitLocked(long value) {
         receiveWindowState.raiseRecvAdvertisedLimit(value);
+    }
+
+    boolean takeCreditGrantedSinceBlockedLocked() {
+        return receiveWindowState.takeCreditGrantedSinceBlocked();
     }
 
     void addRecvPendingLocked(long value) {
@@ -1333,6 +1356,29 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
 
     void recordLateDataReceivedLocked(int value) {
         receiveAccountingState.recordLateDataReceived(value);
+    }
+
+    long lateDataOutstandingCreditLocked() {
+        return receiveAccountingState.lateDataOutstandingCredit();
+    }
+
+    void captureLateDataOutstandingCreditLocked() {
+        // A compliant peer may still have all stream credit it was granted before it processes the local
+        // STOP_SENDING/ABORT in flight; the late-data allowance must never be smaller than that.
+        if (!localReceive || !(halfState.recvOpen() || halfState.recvStopSent())) {
+            return;
+        }
+        receiveAccountingState.captureLateDataOutstandingCredit(
+                RuntimeFlow.windowRemaining(receiveWindowState.recvAdvertisedLimit(), receiveWindowState.recvReceivedBytes())
+        );
+    }
+
+    boolean enforcesStoppedReceiveWindowLocked() {
+        return localReceive && halfState.localReadStopTailOpen();
+    }
+
+    void recordDiscardedReceiveBytesLocked(int length) {
+        receiveWindowState.recordReceivedBytes(length);
     }
 
     boolean recvStoppedOrTerminal() {
@@ -1482,18 +1528,6 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
         this.writeCoordinator.ensureWritableLocked();
     }
 
-    long initialPeerSendLimitForPendingOpenLocked() {
-        if (lifecycleState.idAssigned()) {
-            return sendAccountingState.peerSendLimit();
-        }
-        if (!openedLocally || !localSend) {
-            return sendAccountingState.peerSendLimit();
-        }
-        return bidirectional
-                ? session.peerSettings().initialMaxStreamDataBidiPeerOpened()
-                : session.peerSettings().initialMaxStreamDataUni();
-    }
-
     void discardReadBufferLocked() {
         ByteArrayQueue.DiscardResult discardResult = readBuffer.discardAllDetailed();
         long discarded = discardResult.bytes();
@@ -1504,6 +1538,7 @@ final class StreamRuntime implements ZmuxNativeStream, ZmuxAsyncStream {
     }
 
     void commitLocalReadStopLocked(long code) {
+        captureLateDataOutstandingCreditLocked();
         halfState.markLocalReadStop();
         discardReadBufferLocked();
         terminalState.recordLocalReadStop(code);

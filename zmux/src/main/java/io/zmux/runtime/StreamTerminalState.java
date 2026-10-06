@@ -169,6 +169,12 @@ final class StreamTerminalState {
         setTerminal(error.code(), error.reason());
     }
 
+    void recordSessionClosedRead(IOException error) {
+        if (error != null && recvCloseError == null) {
+            recvCloseError = error;
+        }
+    }
+
     WriteClosedException peerStopWriteClosed() {
         return new WriteClosedException(
                 ZmuxErrorSource.REMOTE,

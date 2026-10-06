@@ -961,6 +961,21 @@ final class NettyQuicStreamState {
         }
     }
 
+    // A local open that failed after its stream was created (e.g. the open prelude timed out after
+    // partial submission) is reset with CANCELLED; a plain Netty close would FIN a truncated prelude.
+    void abortFailedLocalOpen() {
+        QuicStreamChannel current = channel;
+        if (current == null || !locallyCreated) {
+            return;
+        }
+        int quicCode = (int) ErrorCode.CANCELLED.code();
+        try {
+            dispatchControlFuture(readAllowed ? current.shutdown(quicCode) : current.shutdownOutput(quicCode));
+        } catch (RuntimeException ignored) {
+            // Best effort: the raw stream is closed next either way.
+        }
+    }
+
     void rejectAcceptedPrelude() {
         rejectAcceptedPrelude(ErrorCode.PROTOCOL.code());
     }

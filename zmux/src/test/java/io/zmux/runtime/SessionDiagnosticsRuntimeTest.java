@@ -549,7 +549,51 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
-    void goAwayRefusedOpeningDataDoesNotParseMalformedOpenMetadata() throws Exception {
+    void goAwayRefusedOpeningDataDoesNotApplyOpenMetadataTlvs() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
+                Protocol.CAPABILITY_OPEN_METADATA,
+                Settings.defaults()
+        );
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        SessionRuntimeTestSupport.setLongField(runtime, "localGoAwayBidi", 0L);
+        // metadata_len = 9 covers an unknown TLV and a duplicated priority TLV; the three trailing bytes are
+        // application data. A session reader only gets here after envelope validation has accepted the block's TLV
+        // structure (a truncated TLV is CLOSE(FRAME_SIZE) first, see RefusedStreamAccountingTest).
+        byte[] payload = new byte[]{0x09, 0x10, 0x01, 'z', 0x01, 0x01, 0x05, 0x01, 0x01, 0x06, 'a', 'b', 'c'};
+        assertDoesNotThrow(() -> FrameCodec.parseDataPayloadView(payload, Protocol.FRAME_FLAG_OPEN_METADATA),
+                "the opening metadata block must be structurally valid");
+
+        assertDoesNotThrow(() -> handleReaderFrame(runtime, "handleDataFrame", new FrameCodec.Frame(
+                FrameType.DATA,
+                Protocol.FRAME_FLAG_OPEN_METADATA,
+                streamId,
+                payload
+        )));
+
+        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
+        FrameCodec.Frame refused = null;
+        for (Object outbound : urgentQueue) {
+            FrameCodec.Frame frame = SessionRuntimeTestSupport.outboundFrame(outbound);
+            if (frame.type() == FrameType.ABORT) {
+                assertNull(refused, "GOAWAY-refused DATA should queue exactly one ABORT");
+                refused = frame;
+            }
+        }
+        assertNotNull(refused, "refused opening DATA should be answered with ABORT");
+        assertEquals(streamId, refused.streamId(), "refused stream id mismatch");
+        assertEquals(
+                ErrorCode.REFUSED_STREAM.code(),
+                FrameCodec.parseErrorPayload(refused.payload()).code(),
+                "refused opening DATA should use REFUSED_STREAM"
+        );
+        synchronized (runtime.lock()) {
+            assertEquals(3L, runtime.recvSessionReceivedBytesInternal(),
+                    "only the application bytes after the OPEN_METADATA prefix count toward the session window");
+        }
+    }
+
+    @Test
+    void goAwayRefusedOpeningDataWithMalformedMetadataLengthFailsFrameSize() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 Protocol.CAPABILITY_OPEN_METADATA,
                 Settings.defaults()
@@ -557,23 +601,22 @@ final class SessionDiagnosticsRuntimeTest {
         long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
         SessionRuntimeTestSupport.setLongField(runtime, "localGoAwayBidi", 0L);
 
-        assertDoesNotThrow(() -> handleReaderFrame(runtime, "handleDataFrame", new FrameCodec.Frame(
-                FrameType.DATA,
-                Protocol.FRAME_FLAG_OPEN_METADATA,
-                streamId,
-                new byte[0]
-        )));
-
-        Deque<Object> urgentQueue = SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue");
-        assertEquals(1, urgentQueue.size(), "GOAWAY-refused DATA should queue one ABORT without parsing payload");
-        FrameCodec.Frame refused = SessionRuntimeTestSupport.outboundFrame(urgentQueue.peekFirst());
-        assertEquals(FrameType.ABORT, refused.type(), "refused opening DATA should be answered with ABORT");
-        assertEquals(streamId, refused.streamId(), "refused stream id mismatch");
-        assertEquals(
-                ErrorCode.REFUSED_STREAM.code(),
-                FrameCodec.parseErrorPayload(refused.payload()).code(),
-                "refused opening DATA should use REFUSED_STREAM"
-        );
+        for (byte[] payload : new byte[][]{new byte[0], new byte[]{0x05, 'a'}}) {
+            java.lang.reflect.InvocationTargetException failure = assertThrows(
+                    java.lang.reflect.InvocationTargetException.class,
+                    () -> handleReaderFrame(runtime, "handleDataFrame", new FrameCodec.Frame(
+                            FrameType.DATA,
+                            Protocol.FRAME_FLAG_OPEN_METADATA,
+                            streamId,
+                            payload
+                    ))
+            );
+            assertEquals(
+                    ErrorCode.FRAME_SIZE.code(),
+                    ZmuxErrors.code(failure.getCause(), -1L),
+                    "a missing or overrunning metadata_len on a refused opener is a FRAME_SIZE error"
+            );
+        }
     }
 
     @Test
@@ -1113,7 +1156,9 @@ final class SessionDiagnosticsRuntimeTest {
     }
 
     @Test
-    void closeCompletionTimeoutTracksDiagnostic() throws Exception {
+    void closeWithStalledCloseWriteIsBoundedByCloseFrameDeadline() throws Exception {
+        // IMPLEMENTATION 8 "close bounding": a CLOSE stuck behind a stalled transport write no longer makes close()
+        // time out; the close-frame send timeout (100ms without an RTT sample) finishes the session instead.
         CountDownLatch releaseWrites = new CountDownLatch(1);
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(
                 blockingOutputConnection(releaseWrites),
@@ -1127,17 +1172,21 @@ final class SessionDiagnosticsRuntimeTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
 
         Thread writer = startWriterLoop(runtime, failure, "session-close-completion-timeout");
-        assertThrows(GracefulCloseTimeoutException.class, runtime::close, "close() should surface a timeout when termination does not finish within the close wait budget");
-        assertEquals(1L, runtime.stats().diagnostics().closeCompletionTimeouts(), "close completion timeout should increment diagnostics");
-        assertEquals(0L, runtime.stats().diagnostics().gracefulCloseTimeouts(), "close completion timeout should not increment graceful-drain diagnostics");
-        assertEquals(0L, runtime.stats().diagnostics().keepaliveTimeouts(), "close completion timeout should not increment keepalive diagnostics");
+        long startedAtNanos = System.nanoTime();
+        runtime.close();
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+        assertTrue(elapsedMillis < 1_000L, "close() should be bounded by the close-frame send timeout, took " + elapsedMillis + "ms");
+        assertTrue(runtime.awaitTermination(Duration.ZERO), "the session should be finished when close() returns");
+        assertEquals(1L, runtime.stats().diagnostics().closeFrameFlushTimeouts(), "close-frame flush timeout should increment diagnostics");
+        assertEquals(0L, runtime.stats().diagnostics().closeCompletionTimeouts(), "the bounded close should finish within the close wait budget");
+        assertEquals(0L, runtime.stats().diagnostics().gracefulCloseTimeouts(), "close-frame timeout should not increment graceful-drain diagnostics");
+        assertEquals(0L, runtime.stats().diagnostics().keepaliveTimeouts(), "close-frame timeout should not increment keepalive diagnostics");
 
         releaseWrites.countDown();
         writer.join(1_000L);
 
         assertFalse(writer.isAlive(), "writer loop should terminate after the blocked close write is released");
         assertNull(failure.get(), "writer loop should not surface the synthetic close stall as an uncaught test failure");
-        assertTrue(runtime.awaitTermination(Duration.ofSeconds(1)), "runtime should still terminate once the blocked close write is released");
     }
 
     @Test

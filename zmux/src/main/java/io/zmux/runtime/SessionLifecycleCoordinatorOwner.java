@@ -133,6 +133,16 @@ final class SessionLifecycleCoordinatorOwner implements SessionLifecycleCoordina
     }
 
     @Override
+    public void armCloseFrameDeadlineLocked() {
+        this.owner.armCloseFrameDeadlineLocked();
+    }
+
+    @Override
+    public boolean forceFinishSession(boolean closeFrameTimedOut) {
+        return this.owner.forceFinishSession(closeFrameTimedOut);
+    }
+
+    @Override
     public void enqueueSessionClosedEventLocked(IOException error) {
         this.owner.enqueueSessionClosedEventLocked(error);
     }
@@ -158,8 +168,8 @@ final class SessionLifecycleCoordinatorOwner implements SessionLifecycleCoordina
     }
 
     @Override
-    public void closeConnection() throws IOException {
-        this.owner.connection().close();
+    public void releaseTransport() {
+        this.owner.releaseTransport();
     }
 
     @Override

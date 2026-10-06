@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
@@ -134,7 +134,7 @@ final class PeerReasonBudgetTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -190,12 +190,7 @@ final class PeerReasonBudgetTest {
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         @Override

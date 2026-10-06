@@ -30,7 +30,13 @@ final class SessionLateDataHandler {
             );
         }
         if (appDataLength > 0) {
-            this.discardTerminalLatePeerDataLocked(frame.streamId(), appDataLength, disposition.cause());
+            if (disposition.action() == SessionTerminalBookkeeping.LateDataAction.IGNORE) {
+                this.discardTerminalLatePeerDataLocked(frame.streamId(), appDataLength, disposition.cause());
+            } else {
+                // DATA rejected with ABORT (after an observed FIN, or on a missing receive half) is not late tail
+                // data: it only goes through the session discard-and-release path.
+                this.discardRejectedPeerDataLocked(appDataLength);
+            }
         }
         switch (disposition.action()) {
             case ABORT_CLOSED:
@@ -67,36 +73,42 @@ final class SessionLateDataHandler {
     }
 
     void discardLatePeerDataLocked(StreamRuntime streamRuntime, int length) throws IOException {
-        LateDataCause cause = streamRuntime == null ? LateDataCause.NONE : streamRuntime.lateDataCauseLocked();
-        this.discardLatePeerDataLocked(streamRuntime, length, cause);
-    }
-
-    void discardLatePeerDataLocked(StreamRuntime streamRuntime, int length, LateDataCause cause) throws IOException {
         if (length <= 0) {
             return;
         }
-        this.discardLatePeerDataForSessionLocked(length, cause);
-        if (streamRuntime != null) {
-            if (!streamRuntime.applicationVisible()) {
-                this.owner.onHiddenUnreadBytesDiscardedLocked(length);
-            }
-            streamRuntime.recordLateDataReceivedLocked(length);
-            streamRuntime.clearRecvPendingLocked();
+        this.discardPeerDataForSessionLocked(length);
+        if (streamRuntime == null) {
+            return;
         }
+        this.owner.noteLateDataDiscardLocked(length, streamRuntime.lateDataCauseLocked());
+        if (!streamRuntime.applicationVisible()) {
+            this.owner.onHiddenUnreadBytesDiscardedLocked(length);
+        }
+        streamRuntime.recordLateDataReceivedLocked(length);
+        streamRuntime.clearRecvPendingLocked();
+        this.owner.addRetainedLateDataLocked(length);
         this.throwIfLateDataCapExceededLocked(
-                streamRuntime != null && streamRuntime.lateDataReceivedLocked() > this.owner.lateDataPerStreamCap(streamRuntime)
+                streamRuntime.lateDataReceivedLocked() > this.owner.lateDataPerStreamCap(streamRuntime)
         );
+    }
+
+    void discardRejectedPeerDataLocked(int length) throws IOException {
+        if (length <= 0) {
+            return;
+        }
+        this.discardPeerDataForSessionLocked(length);
     }
 
     private void discardTerminalLatePeerDataLocked(long streamId, int length, LateDataCause cause) throws IOException {
         if (length <= 0) {
             return;
         }
-        this.discardLatePeerDataForSessionLocked(length, cause);
+        this.discardPeerDataForSessionLocked(length);
+        this.owner.noteLateDataDiscardLocked(length, cause);
         this.throwIfLateDataCapExceededLocked(this.owner.recordTerminalLateDataLocked(streamId, length));
     }
 
-    private void discardLatePeerDataForSessionLocked(int length, LateDataCause cause) throws IOException {
+    private void discardPeerDataForSessionLocked(int length) throws IOException {
         if (RuntimeFlow.receiveWindowExceeded(
                 this.owner.recvSessionReceivedBytes(),
                 this.owner.recvSessionAdvertised(),
@@ -123,20 +135,13 @@ final class SessionLateDataHandler {
             this.owner.setRecvSessionPending(SessionRuntime.saturatingAdd(this.owner.recvSessionPending(), length));
             this.owner.setReceiveReplenishRetryLocked(true);
         }
-        this.owner.setAggregateLateDataReceived(RuntimeFlow.saturatingAdd(this.owner.aggregateLateDataReceived(), length));
-        this.owner.noteLateDataDiscardLocked(length, cause);
     }
 
     private void throwIfLateDataCapExceededLocked(boolean perStreamCapExceeded) throws IOException {
-        if (this.owner.aggregateLateDataReceived() > this.owner.aggregateLateDataCap()) {
-            throw this.owner.sessionError(
-                    ErrorCode.PROTOCOL,
-                    "handle DATA",
-                    "late-data cap exceeded",
-                    ZmuxErrorSource.REMOTE,
-                    ZmuxErrorDirection.READ
-            );
-        }
+        // The per-direction allowance already covers all stream credit outstanding when the local stop or abort
+        // committed, so only a peer that ignored flow control can exceed it. The session-wide aggregate only tracks
+        // retained late-tail accounting: late bytes are always discarded with session credit released, so exceeding
+        // it is never a reason to fail the session.
         if (perStreamCapExceeded) {
             throw this.owner.sessionError(
                     ErrorCode.PROTOCOL,

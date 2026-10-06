@@ -58,6 +58,41 @@ final class NettyQuicTestSupport {
 
     static SessionPair openPair(NettyQuicSessionOptions clientOptions,
                                 NettyQuicSessionOptions serverOptions) throws Exception {
+        return openPair(clientOptions, serverOptions, true, MAX_DATA, MAX_DATA, new QuietChannelHandler());
+    }
+
+    /**
+     * Opens a wrapped client against a raw (unwrapped) server peer that never reads stream data, so
+     * it only ever grants the initial {@code serverMaxData} / {@code serverStreamWindow} credit.
+     * {@link SessionPair#server} is {@code null}.
+     */
+    static SessionPair openPairWithNonReadingRawServer(long serverMaxData, long serverStreamWindow) throws Exception {
+        return openPairWithNonReadingRawServer(serverMaxData, serverStreamWindow, new QuietChannelHandler());
+    }
+
+    /**
+     * Like {@link #openPairWithNonReadingRawServer(long, long)}, with a caller-supplied (sharable) handler
+     * installed on every stream the raw server accepts.
+     */
+    static SessionPair openPairWithNonReadingRawServer(long serverMaxData,
+                                                       long serverStreamWindow,
+                                                       ChannelHandler rawServerStreamHandler) throws Exception {
+        return openPair(
+                NettyQuicSessionOptions.defaults(),
+                null,
+                false,
+                serverMaxData,
+                serverStreamWindow,
+                rawServerStreamHandler
+        );
+    }
+
+    private static SessionPair openPair(NettyQuicSessionOptions clientOptions,
+                                        NettyQuicSessionOptions serverOptions,
+                                        boolean wrapServer,
+                                        long serverMaxData,
+                                        long serverStreamWindow,
+                                        ChannelHandler serverStreamHandler) throws Exception {
         GeneratedCertificate certificate = sharedCertificate();
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel serverDatagram = null;
@@ -76,22 +111,25 @@ final class NettyQuicTestSupport {
                     .build();
 
             CompletableFuture<QuicChannel> acceptedServer = new CompletableFuture<>();
+            QuicServerCodecBuilder serverCodec = new QuicServerCodecBuilder()
+                    .sslContext(serverSsl)
+                    .tokenHandler(InsecureQuicTokenHandler.INSTANCE)
+                    .handler(new AcceptedChannelRecorder(acceptedServer))
+                    .streamHandler(serverStreamHandler)
+                    .maxIdleTimeout(QUIC_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .initialMaxData(serverMaxData)
+                    .initialMaxStreamDataBidirectionalLocal(MAX_DATA)
+                    .initialMaxStreamDataBidirectionalRemote(serverStreamWindow)
+                    .initialMaxStreamDataUnidirectional(serverStreamWindow)
+                    .initialMaxStreamsBidirectional(64)
+                    .initialMaxStreamsUnidirectional(64);
+            if (!wrapServer) {
+                serverCodec.streamOption(ChannelOption.AUTO_READ, false);
+            }
             serverDatagram = new Bootstrap()
                     .group(group)
                     .channel(NioDatagramChannel.class)
-                    .handler(new QuicServerCodecBuilder()
-                            .sslContext(serverSsl)
-                            .tokenHandler(InsecureQuicTokenHandler.INSTANCE)
-                            .handler(new AcceptedChannelRecorder(acceptedServer))
-                            .streamHandler(new QuietChannelHandler())
-                            .maxIdleTimeout(QUIC_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                            .initialMaxData(MAX_DATA)
-                            .initialMaxStreamDataBidirectionalLocal(MAX_DATA)
-                            .initialMaxStreamDataBidirectionalRemote(MAX_DATA)
-                            .initialMaxStreamDataUnidirectional(MAX_DATA)
-                            .initialMaxStreamsBidirectional(64)
-                            .initialMaxStreamsUnidirectional(64)
-                            .build())
+                    .handler(serverCodec.build())
                     .bind(new InetSocketAddress("127.0.0.1", 0))
                     .syncUninterruptibly()
                     .channel();
@@ -130,7 +168,7 @@ final class NettyQuicTestSupport {
                     rawClient,
                     rawServer,
                     NettyQuic.wrapSession(rawClient, clientOptions),
-                    NettyQuic.wrapSession(rawServer, serverOptions)
+                    wrapServer ? NettyQuic.wrapSession(rawServer, serverOptions) : null
             );
         } catch (Throwable failure) {
             closeQuietly(rawClient);
@@ -394,6 +432,8 @@ final class NettyQuicTestSupport {
         }
     }
 
+    // Stateless; shared across the stream channels a raw (unwrapped) peer accepts.
+    @ChannelHandler.Sharable
     private static final class QuietChannelHandler extends ChannelInboundHandlerAdapter {
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {

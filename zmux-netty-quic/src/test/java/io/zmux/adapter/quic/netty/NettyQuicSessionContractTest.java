@@ -3,9 +3,15 @@ package io.zmux.adapter.quic.netty;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.socket.ChannelInputShutdownReadComplete;
 import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
 import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamResetException;
 import io.netty.handler.codec.quic.QuicStreamType;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.DefaultPromise;
 import io.netty.util.concurrent.Future;
 import io.zmux.*;
@@ -29,6 +35,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -72,6 +79,29 @@ class NettyQuicSessionContractTest {
             Thread.sleep(10L);
         }
         throw new AssertionError("timed out waiting for session stats predicate");
+    }
+
+    private static void assertSignExtendedCodeRejected(AdapterUnsupportedException error,
+                                                       String operation,
+                                                       ZmuxErrorScope scope,
+                                                       ZmuxErrorDirection direction) {
+        assertTrue(error.getMessage().contains("31-bit"), error.getMessage());
+        assertEquals(operation, error.operation());
+        assertEquals(scope, error.scope());
+        assertEquals(direction, error.direction());
+    }
+
+    private static void assertOpenTimesOutPromptly(NettyQuicTestSupport.ThrowingSupplier<?> open) throws Exception {
+        long startedAtNanos = System.nanoTime();
+        CompletableFuture<?> outcome = async(open);
+        java.util.concurrent.ExecutionException failure = assertThrows(
+                java.util.concurrent.ExecutionException.class,
+                () -> outcome.get(3L, TimeUnit.SECONDS),
+                "timed open must fail instead of blocking on the open prelude write"
+        );
+        assertInstanceOf(OpenTimeoutException.class, failure.getCause());
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+        assertTrue(elapsedMillis < 2_000L, "open timeout took " + elapsedMillis + " ms");
     }
 
     private static void awaitAcceptedPreludeSlotsInUse(NettyQuicSession session,
@@ -1647,7 +1677,7 @@ class NettyQuicSessionContractTest {
                     AdapterUnsupportedException.class,
                     () -> clientStream.cancelWrite(0x1_0000_0000L)
             );
-            assertTrue(error.getMessage().contains("32-bit"));
+            assertTrue(error.getMessage().contains("31-bit"));
             assertEquals("write", error.operation());
             assertEquals(ZmuxErrorScope.STREAM, error.scope());
             assertEquals(ZmuxErrorDirection.WRITE, error.direction());
@@ -1672,7 +1702,7 @@ class NettyQuicSessionContractTest {
                     AdapterUnsupportedException.class,
                     () -> clientStream.closeWithError(0x1_0000_0000L, "too-wide")
             );
-            assertTrue(error.getMessage().contains("32-bit"));
+            assertTrue(error.getMessage().contains("31-bit"));
             assertEquals("close", error.operation());
             assertEquals(ZmuxErrorScope.STREAM, error.scope());
             assertEquals(ZmuxErrorDirection.BOTH, error.direction());
@@ -1682,6 +1712,90 @@ class NettyQuicSessionContractTest {
             ZmuxStream accepted = await(acceptedFuture);
             assertArrayEquals(utf8("y"), readExactly(accepted, 1));
             assertEquals(-1, accepted.read(new byte[1]));
+            accepted.close();
+            clientStream.close();
+        }
+    }
+
+    @Test
+    void streamErrorControlsRejectCodesNettyWouldSignExtendWithoutClosingStream() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+            ZmuxStream clientStream = pair.client.openStream();
+            clientStream.write(utf8("a"));
+            ZmuxStream accepted = await(acceptedFuture);
+            assertArrayEquals(utf8("a"), readExactly(accepted, 1));
+            accepted.write(utf8("b"));
+            NettyQuicAsyncStream asyncClientStream = (NettyQuicAsyncStream) clientStream;
+
+            // Netty hands these codes to quiche sign-extended (above varint62), which used to abort the JVM.
+            for (long code : new long[]{0x8000_0000L, 3_000_000_000L, 0xffff_ffffL}) {
+                assertSignExtendedCodeRejected(
+                        assertThrows(AdapterUnsupportedException.class, () -> clientStream.cancelWrite(code)),
+                        "write", ZmuxErrorScope.STREAM, ZmuxErrorDirection.WRITE);
+                assertSignExtendedCodeRejected(
+                        assertThrows(AdapterUnsupportedException.class, () -> clientStream.cancelRead(code)),
+                        "read", ZmuxErrorScope.STREAM, ZmuxErrorDirection.READ);
+                assertSignExtendedCodeRejected(
+                        assertThrows(AdapterUnsupportedException.class, () -> clientStream.closeWithError(code, "too-wide")),
+                        "close", ZmuxErrorScope.STREAM, ZmuxErrorDirection.BOTH);
+                assertSignExtendedCodeRejected(
+                        assertThrows(AdapterUnsupportedException.class, () -> accepted.cancelRead(code)),
+                        "read", ZmuxErrorScope.STREAM, ZmuxErrorDirection.READ);
+                assertSignExtendedCodeRejected(
+                        assertThrows(
+                                AdapterUnsupportedException.class,
+                                () -> await(asyncClientStream.cancelWriteAsync(code).toCompletableFuture())
+                        ),
+                        "write", ZmuxErrorScope.STREAM, ZmuxErrorDirection.WRITE);
+            }
+
+            assertArrayEquals(utf8("b"), readExactly(clientStream, 1), "rejected cancelRead must not drop buffered data");
+            clientStream.write(utf8("x"));
+            clientStream.closeWrite();
+            assertArrayEquals(utf8("x"), readExactly(accepted, 1));
+            assertEquals(-1, accepted.read(new byte[1]));
+            assertEquals(SessionState.READY, pair.client.state());
+            accepted.close();
+            clientStream.close();
+        }
+    }
+
+    @Test
+    void largestThirtyOneBitStreamCodesReachThePeer() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+            ZmuxStream clientStream = pair.client.openStream();
+
+            clientStream.cancelWrite(0x7fff_ffffL);
+            ZmuxStream accepted = await(acceptedFuture);
+
+            ApplicationError reset = assertInstanceOf(
+                    ApplicationError.class,
+                    assertThrows(IOException.class, () -> accepted.read(new byte[1]))
+            );
+            assertEquals(0x7fff_ffffL, reset.code());
+            assertEquals(ZmuxTerminationKind.RESET, reset.terminationKind());
+
+            CompletableFuture<ZmuxStream> stoppedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+            ZmuxStream stoppedWriter = pair.client.openStream();
+            stoppedWriter.write(utf8("p"));
+            ZmuxStream stoppedReader = await(stoppedFuture);
+            assertArrayEquals(utf8("p"), readExactly(stoppedReader, 1));
+            stoppedReader.cancelRead(0x7fff_ffffL);
+            IOException writeFailure = waitForWriteFailure(stoppedWriter, utf8("x"), Duration.ofSeconds(3));
+            assertNotNull(writeFailure, "peer writer never observed STOP_SENDING");
+            ZmuxErrorDetails details = ZmuxErrors.details(writeFailure);
+            assertNotNull(details, () -> "unexpected write failure: " + writeFailure);
+            assertEquals(ZmuxTerminationKind.STOPPED, details.terminationKind());
+            if (details instanceof ApplicationError) {
+                assertEquals(0x7fff_ffffL, ((ApplicationError) details).code());
+            }
+
+            assertEquals(SessionState.READY, pair.client.state());
+            assertEquals(SessionState.READY, pair.server.state());
+            stoppedReader.close();
+            stoppedWriter.close();
             accepted.close();
             clientStream.close();
         }
@@ -1755,7 +1869,7 @@ class NettyQuicSessionContractTest {
                     AdapterUnsupportedException.class,
                     () -> accepted.cancelRead(0x1_0000_0000L)
             );
-            assertTrue(error.getMessage().contains("32-bit"));
+            assertTrue(error.getMessage().contains("31-bit"));
             assertEquals("read", error.operation());
             assertEquals(ZmuxErrorScope.STREAM, error.scope());
             assertEquals(ZmuxErrorDirection.READ, error.direction());
@@ -1825,7 +1939,7 @@ class NettyQuicSessionContractTest {
                     AdapterUnsupportedException.class,
                     () -> accepted.closeWithError(0x1_0000_0000L, "too-wide")
             );
-            assertTrue(error.getMessage().contains("32-bit"));
+            assertTrue(error.getMessage().contains("31-bit"));
             assertEquals("read", error.operation());
             assertEquals(ZmuxErrorScope.STREAM, error.scope());
             assertEquals(ZmuxErrorDirection.READ, error.direction());
@@ -2468,10 +2582,140 @@ class NettyQuicSessionContractTest {
                     AdapterUnsupportedException.class,
                     () -> pair.client.closeWithError(0x1_0000_0000L, "too-wide")
             );
-            assertTrue(error.getMessage().contains("32-bit"));
+            assertTrue(error.getMessage().contains("31-bit"));
             assertEquals("close", error.operation());
             assertEquals(ZmuxErrorScope.SESSION, error.scope());
             assertEquals(ZmuxErrorDirection.BOTH, error.direction());
+        }
+    }
+
+    @Test
+    void sessionAbortRejectsCodesNettyWouldSignExtendAndStaysOpen() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            NettyQuicSession client = (NettyQuicSession) pair.client;
+
+            // Netty hands these codes to quiche sign-extended (above varint62), which used to abort the JVM.
+            assertSignExtendedCodeRejected(
+                    assertThrows(AdapterUnsupportedException.class, () -> client.closeWithError(0x8000_0001L, "too-wide")),
+                    "close", ZmuxErrorScope.SESSION, ZmuxErrorDirection.BOTH);
+            assertSignExtendedCodeRejected(
+                    assertThrows(
+                            AdapterUnsupportedException.class,
+                            () -> await(client.closeWithErrorAsync(0xffff_ffffL, "too-wide").toCompletableFuture())
+                    ),
+                    "close", ZmuxErrorScope.SESSION, ZmuxErrorDirection.BOTH);
+
+            assertEquals(SessionState.READY, client.state());
+            CompletableFuture<ZmuxStream> acceptedFuture = async(() -> pair.server.acceptStream(Duration.ofSeconds(5)));
+            ZmuxStream clientStream = client.openStream();
+            clientStream.write(utf8("z"));
+            ZmuxStream accepted = await(acceptedFuture);
+            assertArrayEquals(utf8("z"), readExactly(accepted, 1));
+            accepted.close();
+            clientStream.close();
+        }
+    }
+
+    @Test
+    void sessionAbortCarriesLargestThirtyOneBitCodeToPeer() throws Exception {
+        try (NettyQuicTestSupport.SessionPair pair = openPair()) {
+            CompletableFuture<Boolean> serverWait = async(() -> pair.server.awaitTermination(Duration.ofSeconds(5)));
+
+            pair.client.closeWithError(0x7fff_ffffL, "max-31-bit");
+
+            assertTrue(await(serverWait));
+            ApplicationError serverOpenFailure = assertInstanceOf(
+                    ApplicationError.class,
+                    assertThrows(IOException.class, () -> pair.server.openStream())
+            );
+            assertEquals(0x7fff_ffffL, serverOpenFailure.code());
+            assertEquals("max-31-bit", serverOpenFailure.reason());
+        }
+    }
+
+    @Test
+    void timedOpensBoundTheOpenPreludeWriteByTheOpenTimeout() throws Exception {
+        OpenOptions options = OpenOptions.withOpenInfo(new byte[8 << 10]);
+        Duration timeout = Duration.ofMillis(200);
+        // {server initial_max_data, server per-stream window}: the 8 KiB prelude cannot fit either way and the raw
+        // server never reads, so no further credit arrives.
+        for (long[] windows : new long[][]{{1L << 20, 1024L}, {16L, 1L << 20}}) {
+            try (NettyQuicTestSupport.SessionPair pair = openPairWithNonReadingRawServer(windows[0], windows[1])) {
+                NettyQuicSession client = (NettyQuicSession) pair.client;
+
+                assertOpenTimesOutPromptly(() -> client.openStreamWithTimeout(options, timeout));
+                assertOpenTimesOutPromptly(() -> client.openUniStreamWithTimeout(options, timeout));
+                assertOpenTimesOutPromptly(() -> client.openAndSendWithTimeout(options, timeout, utf8("x")));
+                assertOpenTimesOutPromptly(() -> client.openUniAndSendWithTimeout(options, timeout, utf8("x")));
+
+                assertEquals(0L, client.stats().activeStreams().total(), "timed-out opens must not leak active streams");
+                assertEquals(SessionState.READY, client.state());
+            }
+        }
+
+        try (NettyQuicTestSupport.SessionPair pair = openPairWithNonReadingRawServer(1L << 20, 1L << 20)) {
+            ZmuxStream stream = pair.client.openStreamWithTimeout(options, Duration.ofSeconds(5));
+            assertArrayEquals(new byte[8 << 10], stream.metadata().openInfo());
+            stream.close();
+        }
+    }
+
+    @Test
+    void timedOutOpenPreludeResetsTheStreamInsteadOfFinishingATruncatedPrelude() throws Exception {
+        OpenOptions options = OpenOptions.withOpenInfo(new byte[8 << 10]);
+        RawStreamRecorder recorder = new RawStreamRecorder();
+        try (NettyQuicTestSupport.SessionPair pair = openPairWithNonReadingRawServer(1L << 20, 1024L, recorder)) {
+            NettyQuicSession client = (NettyQuicSession) pair.client;
+
+            assertOpenTimesOutPromptly(() -> client.openStreamWithTimeout(options, Duration.ofMillis(200)));
+            assertOpenTimesOutPromptly(() -> client.openUniStreamWithTimeout(options, Duration.ofMillis(200)));
+
+            for (int i = 0; i < 2; i++) {
+                QuicStreamChannel rawStream = recorder.streams.poll(5L, TimeUnit.SECONDS);
+                assertNotNull(rawStream, "raw server never saw the partially written prelude");
+                rawStream.config().setAutoRead(true);
+                rawStream.read();
+            }
+            for (int i = 0; i < 2; i++) {
+                String outcome = recorder.outcomes.poll(5L, TimeUnit.SECONDS);
+                assertEquals(
+                        "reset:" + ErrorCode.CANCELLED.code(),
+                        outcome,
+                        "a timed-out open must reset its stream, not FIN a truncated prelude"
+                );
+            }
+        }
+    }
+
+    @ChannelHandler.Sharable
+    private static final class RawStreamRecorder extends ChannelInboundHandlerAdapter {
+        private final LinkedBlockingQueue<QuicStreamChannel> streams = new LinkedBlockingQueue<>();
+        private final LinkedBlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+            streams.add((QuicStreamChannel) ctx.channel());
+            super.channelActive(ctx);
+        }
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            ReferenceCountUtil.release(msg);
+        }
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+            if (evt == ChannelInputShutdownReadComplete.INSTANCE) {
+                outcomes.add("fin");
+            }
+            super.userEventTriggered(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            outcomes.add(cause instanceof QuicStreamResetException
+                    ? "reset:" + ((QuicStreamResetException) cause).applicationProtocolCode()
+                    : "error:" + cause);
         }
     }
 
@@ -2549,7 +2793,8 @@ class NettyQuicSessionContractTest {
                     ZmuxException.class,
                     assertThrows(IOException.class, server::openStream)
             );
-            assertEquals(7L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("transport-close"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);
@@ -2619,7 +2864,8 @@ class NettyQuicSessionContractTest {
 
             Object outcome = await(acceptedFuture);
             ZmuxException error = assertInstanceOf(ZmuxException.class, outcome);
-            assertEquals(11L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("blocked-accept-close"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);
@@ -2662,7 +2908,8 @@ class NettyQuicSessionContractTest {
                     failure.getCause(),
                     "open wait should prefer the structured session close error once close has started"
             );
-            assertEquals(17L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("open-close-race"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);
@@ -2708,7 +2955,8 @@ class NettyQuicSessionContractTest {
                     failure.getCause(),
                     "write wait should prefer the structured session close error once close has started"
             );
-            assertEquals(19L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("write-close-race"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);
@@ -2753,7 +3001,8 @@ class NettyQuicSessionContractTest {
                     failure.getCause(),
                     "write-side terminal wait should prefer the structured session close error once close has started"
             );
-            assertEquals(23L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("write-side-close-race"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);
@@ -2805,7 +3054,8 @@ class NettyQuicSessionContractTest {
                     failure.getCause(),
                     "prelude read should prefer the structured session close error once close has started"
             );
-            assertEquals(31L, error.code());
+            assertFalse(ZmuxErrors.hasCode(error), "QUIC transport close codes are not zmux error codes");
+            assertEquals(-1L, error.code());
             assertTrue(error.getMessage().contains("prelude-close-race"));
             ZmuxErrorDetails details = ZmuxErrors.details(error);
             assertNotNull(details);

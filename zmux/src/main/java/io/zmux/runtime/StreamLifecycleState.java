@@ -12,6 +12,12 @@ final class StreamLifecycleState {
     private boolean provisionalTracked;
     private boolean unseenLocalTracked;
     private long provisionalCreatedAtNanos;
+    // Commit-turn waits in progress, the start of the current waiting stretch, and the total of completed
+    // stretches. Waiting behind an earlier same-class opener is not idle provisional time, so it does not age
+    // the stream, even when that opener is later abandoned.
+    private int provisionalCommitWaiters;
+    private long provisionalCommitWaitStartedAtNanos;
+    private long provisionalCommitWaitedNanos;
     private long streamId;
     private long visibilitySequence;
 
@@ -62,6 +68,32 @@ final class StreamLifecycleState {
 
     void setProvisionalCreatedAtNanos(long value) {
         provisionalCreatedAtNanos = value;
+    }
+
+    /** Creation time shifted past completed commit-turn waits; 0 when not provisional. */
+    long provisionalAgeOriginNanos() {
+        if (provisionalCreatedAtNanos == 0L) {
+            return 0L;
+        }
+        return provisionalCreatedAtNanos + provisionalCommitWaitedNanos;
+    }
+
+    boolean provisionalCommitWaiting() {
+        return provisionalCommitWaiters > 0;
+    }
+
+    void beginProvisionalCommitWait(long nowNanos) {
+        if (provisionalCommitWaiters++ == 0) {
+            provisionalCommitWaitStartedAtNanos = nowNanos;
+        }
+    }
+
+    void endProvisionalCommitWait(long nowNanos) {
+        if (provisionalCommitWaiters == 0 || --provisionalCommitWaiters > 0) {
+            return;
+        }
+        provisionalCommitWaitedNanos += Math.max(0L, nowNanos - provisionalCommitWaitStartedAtNanos);
+        provisionalCommitWaitStartedAtNanos = 0L;
     }
 
     boolean acceptQueued() {

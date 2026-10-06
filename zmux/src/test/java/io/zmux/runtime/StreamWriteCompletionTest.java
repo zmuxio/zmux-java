@@ -4,9 +4,12 @@ import io.zmux.Settings;
 import io.zmux.WriteTimeoutException;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxStream;
+import io.zmux.protocol.FrameCodec;
+import io.zmux.protocol.FrameType;
 import io.zmux.transport.BasicDuplexConnection;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -60,6 +63,20 @@ final class StreamWriteCompletionTest {
             Thread.sleep(1L);
         }
         throw new AssertionError("write did not enter the outbound queue");
+    }
+
+    /**
+     * A timed-out first write cancels its payload, but the stream ID is already committed, so its opener
+     * stays queued in place as a zero-length DATA frame (SPEC §3.1: no peer-visible stream-ID gaps).
+     */
+    private static void assertOnlyZeroLengthOpenerQueued(SessionRuntime runtime, StreamRuntime stream) throws Exception {
+        assertEquals(1, runtime.dataQueueInternal().size(), "timed-out first write should leave only its opener queued");
+        Object opener = runtime.dataQueueInternal().peekFirst();
+        assertTrue(SessionRuntimeTestSupport.outboundOpeningFrame(opener), "remaining queued frame should be the stream opener");
+        assertEquals(stream.streamIdInternal(), SessionRuntimeTestSupport.outboundStreamId(opener), "opener stream id mismatch");
+        assertEquals(0, SessionRuntimeTestSupport.outboundDataBytes(opener), "timed-out payload should be cut from the opener");
+        assertEquals(0, SessionRuntimeTestSupport.outboundPayload(opener).length, "opener should carry no application data");
+        assertTrue(stream.openingFramePendingLocked(), "the committed stream should keep its opener pending");
     }
 
     private static boolean containsMessage(Throwable error, String expected) {
@@ -247,8 +264,7 @@ final class StreamWriteCompletionTest {
             assertTrue(failure.getCause() instanceof WriteTimeoutException,
                     "queued async write should surface the write timeout");
             synchronized (runtime.lock()) {
-                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
-                assertFalse(stream.openingFramePendingLocked(), "canceled async opener should allow a later opener");
+                assertOnlyZeroLengthOpenerQueued(runtime, stream);
                 assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
                 assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
             }
@@ -283,7 +299,7 @@ final class StreamWriteCompletionTest {
             assertTrue(failure.getCause() instanceof WriteTimeoutException,
                     "queued async write should return the new timeout");
             synchronized (runtime.lock()) {
-                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
+                assertOnlyZeroLengthOpenerQueued(runtime, stream);
                 assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
                 assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
             }
@@ -313,7 +329,7 @@ final class StreamWriteCompletionTest {
             assertTrue(failure.getCause() instanceof WriteTimeoutException,
                     "queued async write should return the new timeout");
             synchronized (runtime.lock()) {
-                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out async write should be removed");
+                assertOnlyZeroLengthOpenerQueued(runtime, stream);
                 assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out async write should release accounting");
                 assertEquals(0L, stream.reservedSendBytes(), "timed-out async write should release send reservations");
             }
@@ -363,8 +379,7 @@ final class StreamWriteCompletionTest {
             );
 
             synchronized (runtime.lock()) {
-                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out queued write should be removed before writer ownership");
-                assertFalse(stream.openingFramePendingLocked(), "canceled opening write should allow a later opener to be emitted");
+                assertOnlyZeroLengthOpenerQueued(runtime, stream);
                 assertEquals(0L, stream.queuedDataBytesLocked(), "canceled write should release queued-data accounting");
                 assertEquals(0L, stream.reservedSendBytes(), "canceled write should release flow-control reservations");
             }
@@ -407,7 +422,7 @@ final class StreamWriteCompletionTest {
             assertTrue(writeReturned.await(1L, TimeUnit.SECONDS), "shortened deadline should wake the waiting write");
             assertTrue(failure.get() instanceof WriteTimeoutException, "queued write should return the new timeout");
             synchronized (runtime.lock()) {
-                assertTrue(runtime.dataQueueInternal().isEmpty(), "timed-out queued write should be removed");
+                assertOnlyZeroLengthOpenerQueued(runtime, stream);
                 assertEquals(0L, stream.queuedDataBytesLocked(), "timed-out queued write should release accounting");
                 assertEquals(0L, stream.reservedSendBytes(), "timed-out queued write should release send reservations");
             }
@@ -490,6 +505,38 @@ final class StreamWriteCompletionTest {
             assertFalse(runtime.awaitTermination(Duration.ofMillis(50L)), "the completed inflight write should not fail the session");
         } finally {
             output.release();
+            closeRuntime(runtime, writer);
+        }
+    }
+
+    @Test
+    void timedOutFirstWriteStillOpensItsStreamBeforeLaterOpeners() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        SessionRuntime runtime = newRuntime(output);
+        Thread writer = null;
+        try {
+            StreamRuntime first = (StreamRuntime) runtime.openStream();
+            first.setWriteTimeout(Duration.ofMillis(50L));
+            assertThrows(
+                    WriteTimeoutException.class,
+                    () -> first.write("x".getBytes(StandardCharsets.UTF_8)),
+                    "first write should time out before the writer runs"
+            );
+
+            StreamRuntime second = (StreamRuntime) runtime.openStream();
+            CompletionStage<Void> later = second.writeAsync("y".getBytes(StandardCharsets.UTF_8));
+            writer = startWriter(runtime);
+            later.toCompletableFuture().get(1L, TimeUnit.SECONDS);
+
+            ByteArrayInputStream written = new ByteArrayInputStream(output.toByteArray());
+            FrameCodec.Frame firstFrame = FrameCodec.readFrame(written, Settings.defaults().limits());
+            FrameCodec.Frame secondFrame = FrameCodec.readFrame(written, Settings.defaults().limits());
+            assertEquals(FrameType.DATA, firstFrame.type(), "timed-out stream should still open with DATA");
+            assertEquals(first.streamIdInternal(), firstFrame.streamId(), "the lower stream ID must reach the wire first");
+            assertEquals(0, firstFrame.payload().length, "timed-out payload must not be sent");
+            assertEquals(second.streamIdInternal(), secondFrame.streamId(), "the later stream opens after the earlier one");
+            assertEquals("y", new String(secondFrame.payload(), StandardCharsets.UTF_8), "later stream payload mismatch");
+        } finally {
             closeRuntime(runtime, writer);
         }
     }

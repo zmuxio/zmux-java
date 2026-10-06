@@ -4,16 +4,20 @@ import io.zmux.ZmuxRecvStream;
 import io.zmux.ZmuxSendStream;
 import io.zmux.ZmuxStream;
 
+import javax.net.ssl.SSLSocket;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketAddress;
+import java.net.SocketException;
 import java.nio.channels.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.IdentityHashMap;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ZmuxConnections {
     private ZmuxConnections() {
@@ -187,11 +191,19 @@ public final class ZmuxConnections {
         private final InputStream input;
         private final OutputStream output;
         private final GatheringByteChannel gatheringOutput;
+        // Writes currently inside the socket's output stream; only tracked for TLS sockets (see close()).
+        private final AtomicInteger writesInProgress;
 
         private SocketDuplexConnection(Socket socket) throws IOException {
             this.socket = Objects.requireNonNull(socket, "socket");
             this.input = socket.getInputStream();
-            this.output = socket.getOutputStream();
+            if (socket instanceof SSLSocket) {
+                this.writesInProgress = new AtomicInteger();
+                this.output = new WriteTrackingOutputStream(socket.getOutputStream(), this.writesInProgress);
+            } else {
+                this.writesInProgress = null;
+                this.output = socket.getOutputStream();
+            }
             this.gatheringOutput = socket.getChannel();
         }
 
@@ -230,9 +242,68 @@ public final class ZmuxConnections {
             socket.setSoTimeout(socketReadTimeoutMillis(deadline));
         }
 
+        /**
+         * Closes the socket. A plain socket close never waits for a blocked write (the write fails instead), but an
+         * orderly TLS close sends close_notify under the record lock that an in-progress write holds, so it would
+         * wait for that write, forever if the peer stopped reading. A close that races a write is being used to
+         * break it (session teardown, a missed close-frame deadline, a keepalive timeout), so a TLS socket is then
+         * reset instead: SO_LINGER 0 makes the close skip close_notify and abort the connection.
+         */
         @Override
         public void close() throws IOException {
+            if (writesInProgress != null && writesInProgress.get() > 0) {
+                try {
+                    socket.setSoLinger(true, 0);
+                } catch (SocketException ignored) {
+                    // Already closed: there is nothing left to abort.
+                }
+            }
             socket.close();
+        }
+    }
+
+    /** Counts writes in progress so {@link SocketDuplexConnection#close()} can tell when a write would block it. */
+    private static final class WriteTrackingOutputStream extends FilterOutputStream {
+        private final AtomicInteger writesInProgress;
+
+        private WriteTrackingOutputStream(OutputStream output, AtomicInteger writesInProgress) {
+            super(output);
+            this.writesInProgress = writesInProgress;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            writesInProgress.incrementAndGet();
+            try {
+                out.write(b);
+            } finally {
+                writesInProgress.decrementAndGet();
+            }
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            writesInProgress.incrementAndGet();
+            try {
+                out.write(b, off, len);
+            } finally {
+                writesInProgress.decrementAndGet();
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            writesInProgress.incrementAndGet();
+            try {
+                out.flush();
+            } finally {
+                writesInProgress.decrementAndGet();
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            out.close();
         }
     }
 

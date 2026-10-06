@@ -15,8 +15,27 @@ final class SessionReceiveWindowUpdater {
         return sessionQueued || streamQueued;
     }
 
+    boolean maybeReplenishExhaustedReceiveLocked(StreamRuntime streamRuntime) {
+        boolean sessionQueued = false;
+        if (RuntimeFlow.windowRemaining(this.owner.recvSessionAdvertised(), this.owner.recvSessionReceivedBytes()) == 0L) {
+            sessionQueued = this.maybeReplenishSessionLocked(true);
+        }
+        boolean streamQueued = false;
+        if (streamRuntime != null
+                && RuntimeFlow.windowRemaining(streamRuntime.recvAdvertisedLimit(), streamRuntime.recvReceivedBytes()) == 0L) {
+            streamQueued = this.maybeReplenishStreamLocked(streamRuntime, true);
+        }
+        return sessionQueued || streamQueued;
+    }
+
     boolean maybeReplenishSessionLocked(boolean force) {
-        if (this.owner.recvSessionPending() == 0L) {
+        if (this.owner.recvSessionPending() == 0L
+                && !(force && RuntimeFlow.windowRemaining(
+                this.owner.recvSessionAdvertised(),
+                this.owner.recvSessionReceivedBytes()
+        ) == 0L)) {
+            // Credit normally comes from consumed or discarded bytes; only a forced replenish of an exhausted
+            // window (for example a zero initial window) may grant standing credit with nothing pending.
             return false;
         }
         long target = this.owner.sessionWindowTargetLocked();
@@ -34,7 +53,14 @@ final class SessionReceiveWindowUpdater {
     }
 
     boolean maybeReplenishStreamLocked(StreamRuntime streamRuntime, boolean force) {
-        if (streamRuntime == null || streamRuntime.recvPendingLocked() == 0L) {
+        if (streamRuntime == null) {
+            return false;
+        }
+        if (streamRuntime.recvPendingLocked() == 0L
+                && !(force && RuntimeFlow.windowRemaining(
+                streamRuntime.recvAdvertisedLimit(),
+                streamRuntime.recvReceivedBytes()
+        ) == 0L)) {
             return false;
         }
         if (streamRuntime.streamIdInternal() <= 0L
@@ -87,6 +113,10 @@ final class SessionReceiveWindowUpdater {
             }
         }
         desired = SessionRuntime.clampVarint62(desired);
+        if (desired <= this.owner.recvSessionAdvertised()) {
+            this.owner.setRecvSessionPending(0L);
+            return false;
+        }
         if (!this.owner.queueSessionMaxDataLocked(desired)) {
             this.owner.setReceiveReplenishRetryLocked(true);
             return false;
@@ -105,6 +135,10 @@ final class SessionReceiveWindowUpdater {
             }
         }
         desired = SessionRuntime.clampVarint62(desired);
+        if (desired <= streamRuntime.recvAdvertisedLimit()) {
+            streamRuntime.clearRecvPendingLocked();
+            return false;
+        }
         if (!this.owner.queueStreamMaxDataLocked(streamRuntime.streamIdInternal(), desired)) {
             this.owner.setReceiveReplenishRetryLocked(true);
             return false;

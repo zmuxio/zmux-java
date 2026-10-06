@@ -58,6 +58,7 @@ final class StreamReadCoordinator {
                             this.owner.sessionInternal().currentErrorLocked()
                     );
                 }
+                this.owner.sessionInternal().onReadBlockedLocked(this.owner);
                 try {
                     long remainingNanos = StreamRuntime.remainingDeadlineNanosLocked(this.owner.readDeadlineNanosInternal());
                     if (remainingNanos < 0L) {

@@ -2,6 +2,7 @@ package io.zmux;
 
 import io.zmux.support.DeadlineSupport;
 import io.zmux.support.RangeChecks;
+import io.zmux.support.StreamApiSupport;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -68,7 +69,12 @@ public interface ZmuxSession extends Closeable {
         if (length == 0) {
             return stream;
         }
-        stream.write(data, offset, length);
+        try {
+            stream.write(data, offset, length);
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
+        }
         return stream;
     }
 
@@ -82,7 +88,12 @@ public interface ZmuxSession extends Closeable {
         if (!data.hasRemaining()) {
             return stream;
         }
-        stream.write(data);
+        try {
+            stream.write(data);
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
+        }
         return stream;
     }
 
@@ -138,6 +149,9 @@ public interface ZmuxSession extends Closeable {
         try {
             stream.write(data, offset, length);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
         } finally {
             if (deadline != null) {
                 stream.clearWriteDeadline();
@@ -163,6 +177,9 @@ public interface ZmuxSession extends Closeable {
         try {
             stream.write(data);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
         } finally {
             if (deadline != null) {
                 stream.clearWriteDeadline();
@@ -184,6 +201,9 @@ public interface ZmuxSession extends Closeable {
         try {
             stream.write(data);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
         } finally {
             if (deadline != null) {
                 stream.clearWriteDeadline();
@@ -204,7 +224,12 @@ public interface ZmuxSession extends Closeable {
         Objects.requireNonNull(data, "data");
         RangeChecks.checkFromIndexSize(offset, length, data.length);
         ZmuxSendStream stream = openUniStream(options);
-        stream.writeFinal(data, offset, length);
+        try {
+            stream.writeFinal(data, offset, length);
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
+        }
         return stream;
     }
 
@@ -215,7 +240,12 @@ public interface ZmuxSession extends Closeable {
     default ZmuxSendStream openUniAndSend(OpenOptions options, ByteBuffer data) throws IOException, InterruptedException {
         Objects.requireNonNull(data, "data");
         ZmuxSendStream stream = openUniStream(options);
-        stream.writeFinal(data);
+        try {
+            stream.writeFinal(data);
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
+        }
         return stream;
     }
 
@@ -271,6 +301,9 @@ public interface ZmuxSession extends Closeable {
         try {
             stream.writeFinal(data, offset, length);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
         } finally {
             if (deadline != null) {
                 stream.clearWriteDeadline();
@@ -294,6 +327,9 @@ public interface ZmuxSession extends Closeable {
         try {
             stream.writeFinal(data);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
         } finally {
             if (deadline != null) {
                 stream.clearWriteDeadline();

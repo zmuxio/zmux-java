@@ -390,7 +390,7 @@ final class SessionStatsCollector {
                 diagnosticsSnapshot.coalescedTerminalSignals(),
                 diagnosticsSnapshot.supersededTerminalSignals(),
                 0L,
-                0L,
+                this.runtime.closeFrameFlushTimeoutCountLocked(),
                 this.runtime.markerOnlyRangeCountLocked()
         );
         SessionStats.RetainedStateBreakdownStats retainedStateBreakdown = new SessionStats.RetainedStateBreakdownStats(

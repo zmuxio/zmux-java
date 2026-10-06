@@ -161,6 +161,21 @@ final class SessionWriterCoordinatorOwner implements SessionWriterCoordinator.Ow
     }
 
     @Override
+    public void pullEarlierOpeningFramesLocked(List<SessionRuntime.OutboundFrame> batch, boolean trackWriterHeld) {
+        this.owner.pullEarlierOpeningFramesLocked(batch, trackWriterHeld);
+    }
+
+    @Override
+    public void setStagedOrdinaryBatchLocked(List<SessionRuntime.OutboundFrame> batch) {
+        this.owner.setStagedOrdinaryBatchInternal(batch);
+    }
+
+    @Override
+    public SessionRuntime.OutboundFrame zeroLengthOpenerReplacementLocked(SessionRuntime.OutboundFrame openingFrame) {
+        return this.owner.zeroLengthOpenerReplacementLocked(openingFrame);
+    }
+
+    @Override
     public void releaseEmptyAdvisoryQueueStorageLocked() {
         this.owner.releaseEmptyAdvisoryQueueStorageLocked();
     }

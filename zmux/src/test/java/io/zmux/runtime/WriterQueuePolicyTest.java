@@ -204,6 +204,68 @@ final class WriterQueuePolicyTest {
     }
 
     @Test
+    void noErrorCloseOrdersCloseAheadOfRetainedGoAwayAndCompletesBoth() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        Object goAwayWaiter = SessionRuntimeTestSupport.invokePrivate(
+                runtime,
+                "enqueueGracefulGoAway",
+                new Class<?>[]{long.class, long.class},
+                0L,
+                0L
+        );
+        assertNotNull(goAwayWaiter, "queued GOAWAY should have a pending waiter");
+        runtime.closeWithError(ErrorCode.NO_ERROR.code(), "");
+
+        synchronized (runtime.lock()) {
+            assertEquals(SessionState.CLOSING, runtime.state(), "NO_ERROR local close should keep the queued GOAWAY while CLOSING");
+            List<Object> batch = collectReadyBatch(runtime);
+            assertEquals(
+                    listOf(FrameType.CLOSE, FrameType.GOAWAY),
+                    batchTypes(batch),
+                    "urgent batch should follow the repository-default CLOSE, GOAWAY order (IMPLEMENTATION 2.3)"
+            );
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "afterWriteBatchLocked",
+                    new Class<?>[]{List.class, long.class, long.class, long.class},
+                    batch,
+                    0L,
+                    System.nanoTime(),
+                    System.nanoTime()
+            );
+        }
+
+        assertTrue(runtime.awaitTermination(java.time.Duration.ofSeconds(1)), "written CLOSE should finish the session");
+        assertEquals(SessionState.CLOSED, runtime.state(), "NO_ERROR close should end CLOSED");
+        java.lang.reflect.Field done = goAwayWaiter.getClass().getDeclaredField("done");
+        java.lang.reflect.Field error = goAwayWaiter.getClass().getDeclaredField("error");
+        done.setAccessible(true);
+        error.setAccessible(true);
+        assertTrue((Boolean) done.get(goAwayWaiter), "GOAWAY written after CLOSE in the same batch should complete its waiter");
+        assertNull(error.get(goAwayWaiter), "GOAWAY written after CLOSE in the same batch should complete successfully");
+    }
+
+    @Test
+    void urgentRankPutsCloseAheadOfGoAway() throws Exception {
+        SessionRuntime.OutboundFrame close = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.CLOSE, 0, 0L, FrameCodec.buildErrorPayload(ErrorCode.NO_ERROR.code(), "", 4096L)),
+                null,
+                0,
+                false,
+                false
+        );
+        SessionRuntime.OutboundFrame goAway = new SessionRuntime.OutboundFrame(
+                new FrameCodec.Frame(FrameType.GOAWAY, 0, 0L, FrameCodec.buildGoAwayPayload(0L, 0L, ErrorCode.NO_ERROR.code(), "")),
+                null,
+                0,
+                false,
+                false
+        );
+        assertTrue(SessionWriterBatchPolicy.urgentOutboundPrecedes(close, goAway), "CLOSE should precede GOAWAY");
+        assertFalse(SessionWriterBatchPolicy.urgentOutboundPrecedes(goAway, close), "GOAWAY should not precede CLOSE");
+    }
+
+    @Test
     void urgentBatchKeepsOpeningDataBeforeSameStreamStopSending() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime stream = (StreamRuntime) runtime.openStream();

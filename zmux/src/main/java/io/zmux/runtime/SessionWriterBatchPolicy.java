@@ -132,10 +132,13 @@ final class SessionWriterBatchPolicy {
         if (outboundFrame == null) {
             return Integer.MAX_VALUE;
         }
+        // Repository-default urgent order (IMPLEMENTATION 2.3): CLOSE, GOAWAY, ABORT, RESET, STOP_SENDING,
+        // MAX_DATA, BLOCKED, PONG, PING. A GOAWAY retained by a NO_ERROR close therefore follows its CLOSE in
+        // the same batch; afterWriteBatchLocked still completes it before the session finishes.
         switch (outboundFrame.frame().type()) {
-            case GOAWAY:
-                return 0;
             case CLOSE:
+                return 0;
+            case GOAWAY:
                 return 1;
             case ABORT:
                 return 2;

@@ -151,13 +151,17 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     private static void handleDataFrame(SessionRuntime runtime, FrameCodec.Frame frame) throws Exception {
+        handleReaderFrame(runtime, "handleDataFrame", frame);
+    }
+
+    private static void handleReaderFrame(SessionRuntime runtime, String handler, FrameCodec.Frame frame) throws Exception {
         Field field = SessionRuntime.class.getDeclaredField("readerRuntime");
         field.setAccessible(true);
         Object readerRuntime = field.get(runtime);
         try {
             SessionRuntimeTestSupport.invokePrivate(
                     readerRuntime,
-                    "handleDataFrame",
+                    handler,
                     new Class<?>[]{FrameCodec.Frame.class},
                     frame
             );
@@ -170,6 +174,53 @@ final class FlowControlVisibilityRuntimeTest {
                 throw (Error) cause;
             }
             throw error;
+        }
+    }
+
+    @Test
+    void zeroWindowBlockedGrantsStandingCreditUnlessMemoryPressureIsHigh() throws Exception {
+        Settings localSettings = Settings.defaults().toBuilder()
+                .initialMaxStreamDataBidiPeerOpened(0L)
+                .build();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        byte[] blockedAtZero = new byte[]{0};
+
+        SessionRuntime runtime = newRuntimeWithLocalSettings(localSettings);
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[0]));
+        handleReaderFrame(runtime, "handleBlockedFrame", new FrameCodec.Frame(FrameType.BLOCKED, 0, streamId, blockedAtZero));
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = runtime.liveStreamLocked(streamId);
+            long target = runtime.streamWindowTargetLocked(stream);
+            assertTrue(target > 0L, "repository standing target should be non-zero with a zero initial window");
+            assertEquals(target, stream.recvAdvertisedLimit(),
+                    "BLOCKED on an exhausted zero window should grant up to the standing target");
+        }
+
+        SessionRuntime pressured = newRuntimeWithLocalSettings(localSettings);
+        handleDataFrame(pressured, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[0]));
+        synchronized (pressured.lock()) {
+            SessionRuntimeTestSupport.setLongField(
+                    pressured,
+                    "bufferedReceiveStorageBytes",
+                    pressured.sessionMemoryHardCapLocked()
+            );
+        }
+        handleReaderFrame(pressured, "handleBlockedFrame", new FrameCodec.Frame(FrameType.BLOCKED, 0, streamId, blockedAtZero));
+        synchronized (pressured.lock()) {
+            assertEquals(0L, pressured.liveStreamLocked(streamId).recvAdvertisedLimit(),
+                    "no credit should be advertised under memory pressure");
+        }
+    }
+
+    @Test
+    void blockedWithCreditRemainingDoesNotForceStandingGrowth() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1}));
+        handleReaderFrame(runtime, "handleBlockedFrame", new FrameCodec.Frame(FrameType.BLOCKED, 0, streamId, new byte[]{1}));
+        synchronized (runtime.lock()) {
+            assertEquals(65_536L, runtime.liveStreamLocked(streamId).recvAdvertisedLimit(),
+                    "BLOCKED while advertised credit remains and nothing is pending must not grant credit");
         }
     }
 
@@ -621,7 +672,7 @@ final class FlowControlVisibilityRuntimeTest {
     }
 
     @Test
-    void lateDataOnFullyTerminalLiveStreamSkipsPerStreamLateCounter() throws Exception {
+    void dataAfterFinOnFullyTerminalLiveStreamAbortsAndReleasesSessionCredit() throws Exception {
         SessionRuntime runtime = newReceiveReplenishRuntime();
         StreamRuntime stream;
         long streamId;
@@ -642,13 +693,97 @@ final class FlowControlVisibilityRuntimeTest {
         handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1, 2, 3, 4}));
 
         synchronized (runtime.lock()) {
+            assertEquals(ErrorCode.STREAM_CLOSED.code(), stream.terminalCodeLocked(),
+                    "DATA after peer FIN on a fully terminal live stream should abort with STREAM_CLOSED");
+            assertEquals(Long.valueOf(1L), runtime.stats().reasons().abort().get(ErrorCode.STREAM_CLOSED.code()),
+                    "DATA after peer FIN should queue one ABORT(STREAM_CLOSED)");
             assertEquals(beforeLateData, stream.lateDataReceivedLocked(),
-                    "fully terminal live stream should not consume the per-stream late-data budget");
-            assertEquals(4L, runtime.aggregateLateDataReceivedInternal(),
-                    "fully terminal late DATA should still count against the aggregate cap");
+                    "DATA after peer FIN is not late tail data and must not consume the per-stream allowance");
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "DATA after peer FIN is not late tail data and must not count toward the aggregate");
             assertEquals(4L, runtime.recvSessionReceivedBytesInternal(),
-                    "fully terminal late DATA should still consume session receive credit");
-            assertNull(runtime.liveStreamLocked(streamId), "fully terminal stream should compact after late DATA");
+                    "rejected DATA should still consume session receive credit");
+            assertEquals(1028L, runtime.recvSessionAdvertisedInternal(),
+                    "rejected DATA should be released back to the session window");
+            assertNull(runtime.liveStreamLocked(streamId), "aborted stream should compact");
+        }
+    }
+
+    @Test
+    void dataAfterFinOnHalfOpenLiveStreamChecksSessionWindow() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId;
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = createPeerOpenedBidi(runtime);
+            streamId = stream.streamIdInternal();
+            runtime.markPeerVisibleLocked(stream);
+            stream.finishReceiveLocked();
+            runtime.setRecvSessionAdvertisedInternal(10L);
+            runtime.setRecvSessionReceivedBytesInternal(10L);
+        }
+
+        IOException error = assertThrows(
+                IOException.class,
+                () -> handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1}))
+        );
+
+        assertEquals(ErrorCode.FLOW_CONTROL.code(), ZmuxErrors.code(error, -1L),
+                "DATA after FIN that overruns the session window should fail the session with FLOW_CONTROL");
+    }
+
+    @Test
+    void wrongDirectionDataReleasesSessionCreditWithoutLateAccounting() throws Exception {
+        Settings peerSettings = Settings.defaults();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, peerSettings);
+        StreamRuntime stream = ((AbstractNativeStreamView) runtime.openUniStream()).runtime;
+        long streamId;
+        long advertised;
+        synchronized (runtime.lock()) {
+            runtime.beginLocalOpenForWriteLocked(stream);
+            runtime.markLocalStreamOpeningCommittedLocked(stream);
+            runtime.markPeerVisibleLocked(stream);
+            streamId = stream.streamIdInternal();
+            advertised = runtime.recvSessionAdvertisedInternal();
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1, 2, 3}));
+
+        synchronized (runtime.lock()) {
+            assertEquals(ErrorCode.STREAM_STATE.code(), stream.terminalCodeLocked(),
+                    "DATA on a locally send-only stream should abort with STREAM_STATE");
+            assertEquals(3L, runtime.recvSessionReceivedBytesInternal(),
+                    "wrong-direction DATA should still consume session receive credit");
+            assertEquals(advertised + 3L, runtime.recvSessionAdvertisedInternal(),
+                    "wrong-direction DATA should be released back to the session window");
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "wrong-direction DATA is not late tail data");
+        }
+    }
+
+    @Test
+    void streamFlowControlOverrunReleasesSessionCredit() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        StreamRuntime stream;
+        long streamId;
+        synchronized (runtime.lock()) {
+            stream = createPeerOpenedBidi(runtime);
+            streamId = stream.streamIdInternal();
+            runtime.markPeerVisibleLocked(stream);
+            runtime.setRecvSessionAdvertisedInternal(1L << 20);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[65_537]));
+
+        synchronized (runtime.lock()) {
+            assertEquals(ErrorCode.FLOW_CONTROL.code(), stream.terminalCodeLocked(),
+                    "stream window overrun should abort the stream with FLOW_CONTROL");
+            assertEquals(65_537L, runtime.recvSessionReceivedBytesInternal(),
+                    "stream-overrun DATA should still consume session receive credit");
+            assertEquals((1L << 20) + 65_537L, runtime.recvSessionAdvertisedInternal(),
+                    "stream-overrun DATA should be released back to the session window");
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "stream-overrun DATA is not late tail data");
         }
     }
 
@@ -699,10 +834,10 @@ final class FlowControlVisibilityRuntimeTest {
                     streamId,
                     new SessionTerminalBookkeeping.Tombstone(
                             true,
-                            true,
-                            0L,
+                            false,
+                            ErrorCode.CANCELLED.code(),
                             "",
-                            LateDataCause.NONE,
+                            LateDataCause.RESET,
                             false,
                             0L,
                             0L,
@@ -726,7 +861,144 @@ final class FlowControlVisibilityRuntimeTest {
             assertEquals(2L, terminalTombstone(runtime, streamId).lateDataReceived(),
                     "terminal tombstone should retain its own late-data counter");
             assertEquals(2L, runtime.aggregateLateDataReceivedInternal(),
-                    "terminal tombstone late DATA should also count against the aggregate cap");
+                    "terminal tombstone late DATA should also count toward the retained aggregate");
+        }
+    }
+
+    @Test
+    void dataAfterFinOnGracefulTombstoneSkipsLateDataCaps() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "putTombstoneLocked",
+                    new Class<?>[]{long.class, SessionTerminalBookkeeping.Tombstone.class},
+                    streamId,
+                    new SessionTerminalBookkeeping.Tombstone(
+                            true,
+                            true,
+                            0L,
+                            "",
+                            LateDataCause.NONE,
+                            false,
+                            0L,
+                            0L,
+                            1L,
+                            true
+                    )
+            );
+            runtime.setRecvSessionAdvertisedInternal(10L);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{1}));
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[]{2, 3}));
+
+        synchronized (runtime.lock()) {
+            assertEquals(0L, terminalTombstone(runtime, streamId).lateDataReceived(),
+                    "DATA after peer FIN is not late tail data and must not consume the tombstone allowance");
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "DATA after peer FIN must not count toward the late-data aggregate");
+            assertEquals(3L, runtime.recvSessionReceivedBytesInternal(),
+                    "rejected tombstone DATA should still consume session receive credit");
+            assertEquals(13L, runtime.recvSessionAdvertisedInternal(),
+                    "rejected tombstone DATA should be released back to the session window");
+            int aborts = 0;
+            for (Object outbound : SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue")) {
+                FrameCodec.Frame frame = SessionRuntimeTestSupport.outboundFrame(outbound);
+                if (frame.type() == FrameType.ABORT && frame.streamId() == streamId) {
+                    assertEquals(ErrorCode.STREAM_CLOSED.code(), FrameCodec.parseErrorPayload(frame.payload()).code());
+                    aborts++;
+                }
+            }
+            assertTrue(aborts >= 1, "DATA after peer FIN on the tombstone should be answered with ABORT(STREAM_CLOSED)");
+        }
+    }
+
+    @Test
+    void aggregateLateDataOverflowKeepsDiscardingWithoutFailingSession() throws Exception {
+        Settings localSettings = Settings.defaults().toBuilder()
+                .initialMaxData(262_144L)
+                .build();
+        ZmuxConfig config = ZmuxConfig.builder()
+                .role(Role.RESPONDER)
+                .settings(localSettings)
+                .aggregateLateDataCap(4L)
+                .build();
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(config, 0L, Settings.defaults());
+        long streamId;
+        synchronized (runtime.lock()) {
+            StreamRuntime stream = createPeerOpenedBidi(runtime);
+            streamId = stream.streamIdInternal();
+            runtime.markPeerVisibleLocked(stream);
+            stream.resetFromPeerLocked(ErrorCode.CANCELLED.code(), "", 0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[10]));
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[10]));
+
+        synchronized (runtime.lock()) {
+            assertTrue(runtime.aggregateLateDataReceivedInternal() > runtime.aggregateLateDataCap(),
+                    "test requires the retained aggregate to exceed its cap");
+            assertEquals(20L, runtime.recvSessionReceivedBytesInternal(), "late bytes should still consume session credit");
+            assertEquals(262_144L + 20L, runtime.recvSessionAdvertisedInternal(),
+                    "late bytes beyond the aggregate should still be released to the session window");
+            assertFalse(runtime.state().terminal(), "aggregate late-data overflow must not fail the session");
+        }
+    }
+
+    @Test
+    void reapedTombstoneReleasesRetainedLateDataAggregate() throws Exception {
+        SessionRuntime runtime = newReceiveReplenishRuntime();
+        long streamId = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        synchronized (runtime.lock()) {
+            SessionRuntimeTestSupport.invokePrivate(
+                    runtime,
+                    "putTombstoneLocked",
+                    new Class<?>[]{long.class, SessionTerminalBookkeeping.Tombstone.class},
+                    streamId,
+                    new SessionTerminalBookkeeping.Tombstone(
+                            true,
+                            false,
+                            ErrorCode.CANCELLED.code(),
+                            "",
+                            LateDataCause.CLOSE_READ,
+                            false,
+                            0L,
+                            0L,
+                            1024L,
+                            true
+                    )
+            );
+            runtime.setRecvSessionAdvertisedInternal(1024L);
+            runtime.setRecvSessionReceivedBytesInternal(0L);
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[100]));
+
+        synchronized (runtime.lock()) {
+            assertEquals(100L, runtime.aggregateLateDataReceivedInternal(), "tombstone late DATA should be retained");
+            Field bookkeepingField = SessionRuntime.class.getDeclaredField("terminalBookkeeping");
+            bookkeepingField.setAccessible(true);
+            Object bookkeeping = bookkeepingField.get(runtime);
+            SessionRuntimeTestSupport.invokePrivate(
+                    bookkeeping,
+                    "reapTombstoneLocked",
+                    new Class<?>[]{long.class},
+                    streamId
+            );
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "reaping the tombstone should release its retained late-data accounting");
+        }
+
+        handleDataFrame(runtime, new FrameCodec.Frame(FrameType.DATA, 0, streamId, new byte[100]));
+
+        synchronized (runtime.lock()) {
+            assertEquals(0L, runtime.aggregateLateDataReceivedInternal(),
+                    "marker-only late DATA has no owner and must not grow the retained aggregate");
+            assertEquals(200L, runtime.recvSessionReceivedBytesInternal(),
+                    "marker-only late DATA should still consume session receive credit");
         }
     }
 

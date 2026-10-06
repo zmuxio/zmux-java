@@ -292,12 +292,13 @@ class NettyQuicSupportTest {
                 )
         );
         ZmuxErrorDetails details = requireDetails(error);
-        assertEquals(QuicTransportError.PROTOCOL_VIOLATION.code(), details.code());
+        assertFalse(details.hasCode(), "QUIC transport codes must not occupy the zmux code slot");
+        assertNull(ZmuxErrors.code(error));
         assertEquals(io.zmux.ZmuxErrorScope.SESSION, details.scope());
         assertEquals(io.zmux.ZmuxErrorSource.REMOTE, details.source());
         assertEquals(io.zmux.ZmuxErrorDirection.BOTH, details.direction());
         assertEquals(io.zmux.ZmuxTerminationKind.SESSION_TERMINATION, details.terminationKind());
-        assertEquals("bad", error.getMessage());
+        assertEquals("QUIC transport error PROTOCOL_VIOLATION (0xa): bad", error.getMessage());
     }
 
     @Test
@@ -310,8 +311,9 @@ class NettyQuicSupportTest {
                 )
         );
 
-        assertEquals(QuicTransportError.PROTOCOL_VIOLATION.code(), error.code());
-        assertEquals("PROTOCOL_VIOLATION", error.getMessage());
+        assertEquals(-1L, error.code());
+        assertFalse(ZmuxErrors.hasCode(error));
+        assertEquals("QUIC transport error PROTOCOL_VIOLATION (0xa)", error.getMessage());
     }
 
     @Test
@@ -330,12 +332,113 @@ class NettyQuicSupportTest {
         );
 
         ZmuxErrorDetails details = requireDetails(error);
-        assertEquals(QuicTransportError.FLOW_CONTROL_ERROR.code(), details.code());
+        assertFalse(details.hasCode(), "QUIC transport codes must not occupy the zmux code slot");
+        assertFalse(ZmuxErrors.isCode(error, ErrorCode.STREAM_LIMIT));
         assertEquals(io.zmux.ZmuxErrorScope.SESSION, details.scope());
         assertEquals(io.zmux.ZmuxErrorSource.TRANSPORT, details.source());
         assertEquals(io.zmux.ZmuxErrorDirection.BOTH, details.direction());
         assertEquals(io.zmux.ZmuxTerminationKind.SESSION_TERMINATION, details.terminationKind());
         assertTrue(error.getMessage().contains("FLOW_CONTROL_ERROR"));
+    }
+
+    @Test
+    void quicTransportCloseCodesDoNotAliasZmuxErrorCodes() throws Exception {
+        // QUIC INTERNAL_ERROR(0x1) / FLOW_CONTROL_ERROR(0x3) / PROTOCOL_VIOLATION(0xa) share numbers with
+        // zmux PROTOCOL / STREAM_LIMIT / FRAME_SIZE; TLS alerts (0x100+) look like application codes.
+        Object[][] cases = {
+                {QuicTransportError.INTERNAL_ERROR.code(), ErrorCode.PROTOCOL, "INTERNAL_ERROR (0x1)"},
+                {QuicTransportError.FLOW_CONTROL_ERROR.code(), ErrorCode.STREAM_LIMIT, "FLOW_CONTROL_ERROR (0x3)"},
+                {QuicTransportError.PROTOCOL_VIOLATION.code(), ErrorCode.FRAME_SIZE, "PROTOCOL_VIOLATION (0xa)"},
+                {0x128L, null, "CRYPTO_ERROR (0x128)"},
+        };
+        for (Object[] testCase : cases) {
+            long quicCode = (Long) testCase[0];
+            ErrorCode aliased = (ErrorCode) testCase[1];
+            String label = (String) testCase[2];
+            for (IOException error : listOf(
+                    NettyQuicSupport.connectionCloseError(newCloseEvent(false, (int) quicCode, null), null),
+                    NettyQuicSupport.translateThrowable(newClosedChannelException(newCloseEvent(false, (int) quicCode, null)))
+            )) {
+                ZmuxException transport = assertInstanceOf(ZmuxException.class, error, label);
+                assertFalse(ZmuxErrors.hasCode(transport), label);
+                assertNull(ZmuxErrors.code(transport), label);
+                assertEquals(-1L, ZmuxErrors.code(transport, -1L), label);
+                if (aliased != null) {
+                    assertFalse(ZmuxErrors.isCode(transport, aliased), label);
+                }
+                assertNull(ZmuxErrors.applicationError(transport), label);
+                assertEquals(ZmuxErrorSource.REMOTE, transport.source(), label);
+                assertEquals(ZmuxErrorScope.SESSION, transport.scope(), label);
+                assertEquals(ZmuxTerminationKind.SESSION_TERMINATION, transport.terminationKind(), label);
+                assertTrue(transport.getMessage().contains(label), transport.getMessage());
+            }
+        }
+
+        ApplicationError application = assertInstanceOf(
+                ApplicationError.class,
+                NettyQuicSupport.connectionCloseError(newCloseEvent(true, 0x128, null), null)
+        );
+        assertEquals(0x128L, application.code(), "peer application close codes keep the zmux code slot");
+    }
+
+    @Test
+    void quicTransportExceptionCodesDoNotAliasZmuxErrorCodes() {
+        for (QuicTransportError transportError : listOf(
+                QuicTransportError.INTERNAL_ERROR,
+                QuicTransportError.FLOW_CONTROL_ERROR,
+                QuicTransportError.PROTOCOL_VIOLATION
+        )) {
+            IOException error = NettyQuicSupport.translateThrowable(new QuicException(transportError));
+
+            assertFalse(ZmuxErrors.hasCode(error), transportError.name());
+            assertNull(ZmuxErrors.code(error), transportError.name());
+            assertNull(ZmuxErrors.applicationError(error), transportError.name());
+            assertEquals(ZmuxErrorSource.TRANSPORT, ZmuxErrors.source(error));
+            assertTrue(error.getMessage().contains(transportError.name()), error.getMessage());
+        }
+    }
+
+    @Test
+    void sessionOperationErrorKeepsCodeLessTransportErrorsCodeLess() throws Exception {
+        IOException transport = NettyQuicSupport.connectionCloseError(
+                newCloseEvent(false, (int) QuicTransportError.INTERNAL_ERROR.code(), "peer-bug".getBytes()),
+                null
+        );
+
+        IOException read = NettyQuicSupport.sessionOperationError("read", transport);
+
+        assertFalse(ZmuxErrors.hasCode(read), "a code-less transport close must not be rewrapped as zmux INTERNAL");
+        assertNull(ZmuxErrors.code(read));
+        assertEquals("read", ZmuxErrors.operation(read));
+        assertEquals(ZmuxErrorSource.REMOTE, ZmuxErrors.source(read));
+        assertTrue(ZmuxErrors.reason(read).contains("peer-bug"));
+
+        IOException coded = NettyQuicSupport.sessionOperationError(
+                "write",
+                NettyQuicSupport.translateThrowable(new RuntimeException("adapter-runtime-failure"))
+        );
+        assertEquals(ErrorCode.INTERNAL, ZmuxErrors.code(coded));
+    }
+
+    @Test
+    void quicApplicationCodeIsLimitedToNonNegativeJavaInt() throws Exception {
+        assertEquals(0, NettyQuicSupport.requireQuicApplicationCode(0L, "write", ZmuxErrorScope.STREAM, ZmuxErrorDirection.WRITE));
+        assertEquals(
+                Integer.MAX_VALUE,
+                NettyQuicSupport.requireQuicApplicationCode(0x7fff_ffffL, "write", ZmuxErrorScope.STREAM, ZmuxErrorDirection.WRITE)
+        );
+        // Netty sign-extends the int it is given, so 2^31.. would reach quiche above varint62 and abort the JVM.
+        for (long code : new long[]{-1L, 0x8000_0000L, 0xffff_ffffL, 0x1_0000_0000L, Long.MAX_VALUE}) {
+            AdapterUnsupportedException error = assertThrows(
+                    AdapterUnsupportedException.class,
+                    () -> NettyQuicSupport.requireQuicApplicationCode(code, "close", ZmuxErrorScope.SESSION, ZmuxErrorDirection.BOTH),
+                    Long.toHexString(code)
+            );
+            assertTrue(error.getMessage().contains("31-bit"), error.getMessage());
+            assertEquals("close", error.operation());
+            assertEquals(ZmuxErrorScope.SESSION, error.scope());
+            assertEquals(ZmuxErrorDirection.BOTH, error.direction());
+        }
     }
 
     @Test

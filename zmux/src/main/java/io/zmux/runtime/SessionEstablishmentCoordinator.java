@@ -25,16 +25,20 @@ final class SessionEstablishmentCoordinator {
 
     private final Owner owner;
     private final Duration failureWriteWait;
-    private final Duration successWriteWait;
+    private final Duration establishmentTimeout;
     private final Duration closeDrainDelay;
 
+    /**
+     * @param establishmentTimeout bound on the local preface write, the peer preface read and the writer-carrier
+     *                             hand-off ({@code null} waits without a bound)
+     */
     SessionEstablishmentCoordinator(Owner owner,
                                     Duration failureWriteWait,
-                                    Duration successWriteWait,
+                                    Duration establishmentTimeout,
                                     Duration closeDrainDelay) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.failureWriteWait = failureWriteWait;
-        this.successWriteWait = successWriteWait;
+        this.establishmentTimeout = establishmentTimeout;
         this.closeDrainDelay = closeDrainDelay;
     }
 
@@ -96,6 +100,13 @@ final class SessionEstablishmentCoordinator {
         return SessionRuntime.durationToPositiveNanosSaturated(duration);
     }
 
+    private static Duration remaining(TimeoutBudget budget) {
+        if (!budget.bounded()) {
+            return null;
+        }
+        return Duration.ofNanos(Math.max(0L, budget.remainingNanos()));
+    }
+
     private static Instant deadlineAfter(Duration duration) {
         if (SessionEstablishmentCoordinator.durationToPositiveNanosSaturated(duration) <= 0L) {
             return null;
@@ -113,8 +124,9 @@ final class SessionEstablishmentCoordinator {
         AtomicBoolean runWriterLoop = new AtomicBoolean();
         AtomicInteger writerCarrierState = new AtomicInteger(WRITER_CARRIER_WAITING);
         AtomicReference<IOException> prefaceWriteError = new AtomicReference<>();
-        EstablishmentDeadline writeDeadline = this.beginEstablishmentWriteDeadline(this.successWriteWait);
-        EstablishmentDeadline readDeadline = this.beginEstablishmentReadDeadline(this.successWriteWait);
+        TimeoutBudget establishmentBudget = TimeoutBudget.fromTimeout(this.establishmentTimeout);
+        EstablishmentDeadline writeDeadline = this.beginEstablishmentWriteDeadline(this.establishmentTimeout);
+        EstablishmentDeadline readDeadline = this.beginEstablishmentReadDeadline(this.establishmentTimeout);
         Thread writerThread = SessionEstablishmentCoordinator.newDaemonThread("zmux-writer", () -> {
             try {
                 FrameCodec.writePreface(this.owner.output(), this.owner.localPreface(), this.owner.config());
@@ -125,7 +137,7 @@ final class SessionEstablishmentCoordinator {
                 prefaceWriteDone.countDown();
             }
             try {
-                if (!SessionEstablishmentCoordinator.awaitLatch(writerLoopDecision, this.successWriteWait)) {
+                if (!SessionEstablishmentCoordinator.awaitLatch(writerLoopDecision, this.establishmentTimeout)) {
                     if (writerCarrierState.compareAndSet(WRITER_CARRIER_WAITING, WRITER_CARRIER_EXPIRED)) {
                         return;
                     }
@@ -153,7 +165,14 @@ final class SessionEstablishmentCoordinator {
                 );
             }
             Negotiated negotiated = FrameCodec.negotiate(this.owner.localPreface(), remotePreface);
-            this.awaitPrefaceWrite(prefaceWriteDone, prefaceWriteError, this.successWriteWait, writeDeadline, true);
+            // The establishment bound covers the whole exchange, so the local preface write only gets what is left.
+            this.awaitPrefaceWrite(
+                    prefaceWriteDone,
+                    prefaceWriteError,
+                    SessionEstablishmentCoordinator.remaining(establishmentBudget),
+                    writeDeadline,
+                    true
+            );
             IOException clearDeadlineError = writeDeadline.clear();
             if (clearDeadlineError != null) {
                 throw SessionEstablishmentCoordinator.transportFailure(

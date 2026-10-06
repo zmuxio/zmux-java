@@ -97,6 +97,7 @@ final class SessionWriterBatchCollector {
             }
             this.owner.addBatchFrameLocked(batch, outboundFrame, trackWriterHeld);
         }
+        this.owner.pullEarlierOpeningFramesLocked(batch, trackWriterHeld);
         this.batchOrderer.orderUrgent(batch);
     }
 

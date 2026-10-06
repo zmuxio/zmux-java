@@ -194,6 +194,39 @@ final class GoAwayRuntimeTest {
     }
 
     @Test
+    void localStreamIdExhaustionQueuesOneGoAwayWithoutTighteningWatermarks() throws Exception {
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        SessionRuntimeTestSupport.setLongField(runtime, "nextLocalBidi", maxLocalGoAwayWatermark(true) + 4L);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            OpenLimitedException limited = assertThrows(OpenLimitedException.class, runtime::openStream);
+            assertEquals(ErrorCode.STREAM_LIMIT.code(), ZmuxErrors.code(limited.getCause(), -1L),
+                    "local ID exhaustion is an open-limited error, not a PROTOCOL violation");
+        }
+
+        FrameCodec.Frame goAway = null;
+        for (Object outbound : SessionRuntimeTestSupport.outboundQueue(runtime, "urgentQueue")) {
+            FrameCodec.Frame frame = SessionRuntimeTestSupport.outboundFrame(outbound);
+            assertNotEquals(FrameType.DATA, frame.type(), "an exhausted open must not reach the wire");
+            if (frame.type() == FrameType.GOAWAY) {
+                assertNull(goAway, "exhaustion should queue exactly one GOAWAY");
+                goAway = frame;
+            }
+        }
+        assertNotNull(goAway, "exhaustion should start graceful replacement with GOAWAY");
+        FrameCodec.GoAwayPayload payload = FrameCodec.parseGoAwayPayload(goAway.payload());
+        long firstPeerBidi = SessionRuntime.firstPeerStreamId(Role.RESPONDER, true);
+        long firstPeerUni = SessionRuntime.firstPeerStreamId(Role.RESPONDER, false);
+        assertEquals(firstPeerBidi + (Protocol.MAX_VARINT62 - firstPeerBidi) / 4L * 4L, payload.lastAcceptedBidi(),
+                "the exhaustion GOAWAY must not tighten the bidi watermark");
+        assertEquals(firstPeerUni + (Protocol.MAX_VARINT62 - firstPeerUni) / 4L * 4L, payload.lastAcceptedUni(),
+                "the exhaustion GOAWAY must not tighten the uni watermark");
+        assertEquals(ErrorCode.NO_ERROR.code(), payload.code());
+        assertEquals(SessionState.DRAINING, runtime.state(), "exhaustion should move READY to DRAINING");
+        assertDoesNotThrow(() -> runtime.openUniStream(), "the other stream class can still open");
+    }
+
+    @Test
     void duplicatePeerGoAwayCountsAsNoOpControl() throws Exception {
         SessionRuntime runtime = newRuntimeWithNoOpThreshold(1);
         long maxBidi = maxLocalGoAwayWatermark(true);

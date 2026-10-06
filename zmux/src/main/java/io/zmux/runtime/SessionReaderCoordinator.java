@@ -124,7 +124,7 @@ final class SessionReaderCoordinator {
     void run() {
         try {
             while (this.shouldContinueReadLoop()) {
-                FrameEnvelopeCodec.InboundFrame frame = FrameEnvelopeCodec.readInboundFrame(
+                FrameEnvelopeCodec.InboundFrame frame = FrameEnvelopeCodec.readInboundSessionFrame(
                         this.owner.input(),
                         this.owner.limits(),
                         this.owner.inboundPayloadPool()
@@ -290,6 +290,14 @@ final class SessionReaderCoordinator {
         }
     }
 
+    void onReadBlockedLocked(StreamRuntime streamRuntime) {
+        // A reader about to block on an exhausted window (for example a zero initial window) would otherwise wait
+        // forever: nothing can arrive, so nothing is ever consumed and released.
+        if (this.receiveWindowUpdater.maybeReplenishExhaustedReceiveLocked(streamRuntime)) {
+            this.owner.notifyWriterWaiters();
+        }
+    }
+
     void retryReceiveReplenishLocked() {
         this.receiveWindowUpdater.retryReceiveReplenishLocked();
     }
@@ -398,7 +406,7 @@ final class SessionReaderCoordinator {
                 }
                 this.validatePeerOpeningStreamIdLocked(frame.streamId(), "handle ABORT");
                 if (this.peerOpenRefusedByLocalGoAwayLocked(frame.streamId())) {
-                    this.owner.refusePeerOpeningStreamLocked(frame.streamId(), false, true);
+                    this.owner.refusePeerOpeningPastGoAwayLocked(frame.streamId(), true);
                     return;
                 }
                 this.validatePeerStreamSequenceLocked(frame.streamId());
@@ -471,8 +479,18 @@ final class SessionReaderCoordinator {
             if (this.owner.ignorePeerNonCloseFrameLocked(frame.type())) {
                 return;
             }
+            // SPEC 7.6: an unnegotiated PRIORITY_UPDATE is ignored without interpreting its payload or scope.
             if (!Protocol.supportsPriorityUpdate(this.owner.capabilities())) {
                 return;
+            }
+            if (frame.streamId() == 0L) {
+                throw this.owner.sessionError(
+                        ErrorCode.PROTOCOL,
+                        "handle PRIORITY_UPDATE",
+                        "PRIORITY_UPDATE requires non-zero stream_id",
+                        ZmuxErrorSource.REMOTE,
+                        ZmuxErrorDirection.READ
+                );
             }
         }
 
@@ -618,10 +636,6 @@ final class SessionReaderCoordinator {
 
             if (streamRuntime == null) {
                 this.validatePeerOpeningStreamIdLocked(frame.streamId(), "handle DATA");
-                if (this.peerOpenRefusedByLocalGoAwayLocked(frame.streamId())) {
-                    this.owner.refusePeerOpeningStreamLocked(frame.streamId(), false, false);
-                    return;
-                }
                 if (openingMetadata && !Protocol.supportsOpenMetadata(this.owner.capabilities())) {
                     throw this.owner.sessionError(
                             ErrorCode.PROTOCOL,
@@ -631,8 +645,15 @@ final class SessionReaderCoordinator {
                             ZmuxErrorDirection.READ
                     );
                 }
+                if (this.peerOpenRefusedByLocalGoAwayLocked(frame.streamId())) {
+                    // Known-absent refused ID (SPEC 3.1): every DATA on it is discarded, the ID stays unconsumed.
+                    this.discardRefusedOpeningDataLocked(frame);
+                    this.owner.refusePeerOpeningPastGoAwayLocked(frame.streamId(), false);
+                    return;
+                }
                 this.validatePeerStreamSequenceLocked(frame.streamId());
                 if (!this.peerStreamWithinLimitLocked(SessionRuntime.streamIsBidi(frame.streamId()))) {
+                    this.discardRefusedOpeningDataLocked(frame);
                     this.owner.refusePeerOpeningStreamLocked(frame.streamId(), true, false);
                     return;
                 }
@@ -664,6 +685,20 @@ final class SessionReaderCoordinator {
                             return;
                         }
                         int ignoredDataLength = ignoredDataPayload.appDataLength();
+                        if (ignoredDataLength > 0 && streamRuntime.enforcesStoppedReceiveWindowLocked()) {
+                            // A locally read-stopped direction still enforces the stream credit it advertised
+                            // before the stop; only a peer that ignored that credit can exceed it.
+                            if (RuntimeFlow.receiveWindowExceeded(
+                                    streamRuntime.recvReceivedBytes(),
+                                    streamRuntime.recvAdvertisedLimit(),
+                                    ignoredDataLength
+                            )) {
+                                this.lateDataHandler.discardRejectedPeerDataLocked(ignoredDataLength);
+                                this.abortStreamFlowControlLocked(streamRuntime);
+                                return;
+                            }
+                            streamRuntime.recordDiscardedReceiveBytesLocked(ignoredDataLength);
+                        }
                         StreamRuntime lateDataStream = streamRuntime.tracksLatePeerDataLocked() ? streamRuntime : null;
                         this.lateDataHandler.discardLatePeerDataLocked(lateDataStream, ignoredDataLength);
                         if (peerDataAction == StreamRuntime.PeerDataAction.IGNORE_AND_FIN) {
@@ -673,9 +708,20 @@ final class SessionReaderCoordinator {
                         this.owner.notifyLockWaiters();
                         return;
                     case ABORT_STREAM_STATE:
-                        this.abortStreamStateLocked(streamRuntime);
-                        return;
                     case ABORT_STREAM_CLOSED:
+                        FrameCodec.DataPayload rejectedDataPayload = dataPayload != null
+                                ? dataPayload
+                                : this.parseDataPayloadForPeerNonCloseFrame(frame);
+                        if (rejectedDataPayload == null) {
+                            return;
+                        }
+                        // Payload rejected with a stream-local ABORT still counts toward and is released from the
+                        // session window (SPEC 8); it is not late tail data.
+                        this.lateDataHandler.discardRejectedPeerDataLocked(rejectedDataPayload.appDataLength());
+                        if (peerDataAction == StreamRuntime.PeerDataAction.ABORT_STREAM_STATE) {
+                            this.abortStreamStateLocked(streamRuntime);
+                            return;
+                        }
                         byte[] abortPayload = this.owner.buildControlErrorPayloadLocked(ErrorCode.STREAM_CLOSED.code(), "");
                         streamRuntime.abortFromLocalLocked(ErrorCode.STREAM_CLOSED.code(), "");
                         this.owner.enqueueReadLoopAbortLocked(streamRuntime, ErrorCode.STREAM_CLOSED.code(), abortPayload);
@@ -725,14 +771,8 @@ final class SessionReaderCoordinator {
                         streamRuntime.recvAdvertisedLimit(),
                         dataLength
                 )) {
-                    byte[] abortPayload = this.owner.buildControlErrorPayloadLocked(ErrorCode.FLOW_CONTROL.code(), "");
-                    if (!streamRuntime.openedLocally()) {
-                        this.owner.markPeerVisibleLocked(streamRuntime);
-                    }
-                    streamRuntime.abortFromLocalLocked(ErrorCode.FLOW_CONTROL.code(), "");
-                    this.owner.recordLocalAbortTerminalChurnLocked(streamRuntime);
-                    this.owner.enqueueReadLoopAbortLocked(streamRuntime, ErrorCode.FLOW_CONTROL.code(), abortPayload);
-                    this.owner.maybeCompactStreamLocked(streamRuntime);
+                    this.lateDataHandler.discardRejectedPeerDataLocked(dataLength);
+                    this.abortStreamFlowControlLocked(streamRuntime);
                     return;
                 }
             }
@@ -809,6 +849,7 @@ final class SessionReaderCoordinator {
             } else {
                 StreamRuntime streamRuntime = this.owner.liveStreamLocked(frame.streamId());
                 if (streamRuntime == null) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
                     if (this.owner.hasTerminalMarkerLocked(frame.streamId())) {
                         return;
                     }
@@ -818,11 +859,13 @@ final class SessionReaderCoordinator {
                     return;
                 }
                 if (streamRuntime.shouldIgnorePeerMaxDataLocked()) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
                     this.owner.recordNoOpMaxDataLocked();
                     this.owner.maybeCompactStreamLocked(streamRuntime);
                     return;
                 }
                 if (!streamRuntime.localSend()) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
                     this.abortStreamStateLocked(streamRuntime);
                     return;
                 }
@@ -839,6 +882,7 @@ final class SessionReaderCoordinator {
                 this.owner.notifyStreamWriteWaiters();
                 this.owner.notifyWriterWaiters();
             } else {
+                this.recordNonAdvancingFlowControlFrameLocked(frame);
                 this.owner.recordNoOpMaxDataLocked();
             }
         }
@@ -914,6 +958,9 @@ final class SessionReaderCoordinator {
                 return;
             }
             if (frame.streamId() != 0L) {
+                if (this.owner.liveStreamLocked(frame.streamId()) == null) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
+                }
                 if (this.owner.hasTerminalMarkerLocked(frame.streamId())) {
                     return;
                 }
@@ -923,39 +970,53 @@ final class SessionReaderCoordinator {
                     return;
                 }
                 if (streamRuntime.shouldIgnorePeerBlockedLocked()) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
                     this.owner.recordNoOpBlockedLocked();
                     this.owner.maybeCompactStreamLocked(streamRuntime);
                     this.owner.notifyLockWaiters();
                     return;
                 }
                 if (!streamRuntime.localReceive()) {
+                    this.recordNonAdvancingFlowControlFrameLocked(frame);
                     this.abortStreamStateLocked(streamRuntime);
                     return;
                 }
                 this.owner.markPeerVisibleLocked(streamRuntime);
-                if (this.owner.recvSessionPending() != 0L || streamRuntime.recvPendingLocked() != 0L) {
-                    this.owner.clearNoOpBlockedLocked();
-                } else {
-                    this.owner.recordNoOpBlockedLocked();
-                }
+                boolean creditPending = this.owner.recvSessionPending() != 0L || streamRuntime.recvPendingLocked() != 0L;
+                boolean grantRaced = streamRuntime.takeCreditGrantedSinceBlockedLocked();
                 boolean windowUpdateQueued = this.receiveWindowUpdater.maybeReplenishReceiveLocked(streamRuntime, true);
+                this.recordBlockedOutcomeLocked(frame, creditPending || grantRaced || windowUpdateQueued);
                 boolean windowUpdateFlushed = this.owner.flushPendingWindowUpdatesLocked(streamRuntime.streamIdInternal());
                 if (windowUpdateQueued || windowUpdateFlushed) {
                     this.owner.notifyWriterWaiters();
                 }
             } else {
-                if (this.owner.recvSessionPending() != 0L) {
-                    this.owner.clearNoOpBlockedLocked();
-                } else {
-                    this.owner.recordNoOpBlockedLocked();
-                }
+                boolean creditPending = this.owner.recvSessionPending() != 0L;
+                boolean grantRaced = this.owner.takeSessionCreditGrantedSinceBlockedLocked();
                 boolean windowUpdateQueued = this.receiveWindowUpdater.maybeReplenishSessionLocked(true);
+                this.recordBlockedOutcomeLocked(frame, creditPending || grantRaced || windowUpdateQueued);
                 boolean windowUpdateFlushed = this.owner.flushPendingWindowUpdatesLocked(null);
                 if (windowUpdateQueued || windowUpdateFlushed) {
                     this.owner.notifyWriterWaiters();
                 }
             }
         }
+    }
+
+    private void recordBlockedOutcomeLocked(FrameCodec.Frame frame, boolean advancedCredit) throws IOException {
+        // A BLOCKED that coincides with pending credit, causes a grant, or follows a grant the peer had not yet
+        // observed when it blocked (a compliant sender blocks at most once per limit we advertised) is not a
+        // no-op. Only a repeat with no flow-control progress since the previous BLOCKED is.
+        if (advancedCredit) {
+            this.owner.clearNoOpBlockedLocked();
+            return;
+        }
+        this.recordNonAdvancingFlowControlFrameLocked(frame);
+        this.owner.recordNoOpBlockedLocked();
+    }
+
+    private void recordNonAdvancingFlowControlFrameLocked(FrameCodec.Frame frame) throws IOException {
+        this.owner.recordNonAdvancingFlowControlFrameLocked(frame.type(), frame.payloadBytes().length);
     }
 
     private void handleCloseFrame(FrameCodec.Frame frame) throws IOException {
@@ -997,7 +1058,19 @@ final class SessionReaderCoordinator {
         if (subtype.value() != Protocol.EXT_PRIORITY_UPDATE) {
             return ExtPriorityUpdateParse.ignoredResult();
         }
-        FrameCodec.ParsedPriorityUpdate parsedPriorityUpdate = FrameCodec.parsePriorityUpdatePayload(payload);
+        FrameCodec.ParsedPriorityUpdate parsedPriorityUpdate;
+        try {
+            parsedPriorityUpdate = FrameCodec.parsePriorityUpdatePayload(payload);
+        } catch (IOException error) {
+            // Container-structural TLV errors in a parsed PRIORITY_UPDATE are FRAME_SIZE (SPEC 7.2, 7.6).
+            throw this.owner.sessionError(
+                    ErrorCode.FRAME_SIZE,
+                    "handle PRIORITY_UPDATE",
+                    error.getMessage() == null ? "malformed PRIORITY_UPDATE payload" : error.getMessage(),
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
         if (!parsedPriorityUpdate.valid()) {
             return ExtPriorityUpdateParse.droppedResult();
         }
@@ -1007,7 +1080,8 @@ final class SessionReaderCoordinator {
     private StreamRuntime requireLiveStreamLocked(long streamId, String operation) throws IOException {
         StreamRuntime streamRuntime = this.owner.liveStreamLocked(streamId);
         if (streamRuntime == null) {
-            if (this.owner.hasTerminalMarkerLocked(streamId)) {
+            // Non-opening frames on a terminal stream or on a known-absent refused ID are ignored (SPEC 3.1, 9.5).
+            if (this.owner.hasTerminalMarkerLocked(streamId) || this.knownRefusedPeerStreamLocked(streamId)) {
                 return null;
             }
             throw this.owner.sessionError(
@@ -1019,6 +1093,17 @@ final class SessionReaderCoordinator {
             );
         }
         return streamRuntime;
+    }
+
+    private void abortStreamFlowControlLocked(StreamRuntime streamRuntime) throws IOException {
+        byte[] abortPayload = this.owner.buildControlErrorPayloadLocked(ErrorCode.FLOW_CONTROL.code(), "");
+        if (!streamRuntime.openedLocally()) {
+            this.owner.markPeerVisibleLocked(streamRuntime);
+        }
+        streamRuntime.abortFromLocalLocked(ErrorCode.FLOW_CONTROL.code(), "");
+        this.owner.recordLocalAbortTerminalChurnLocked(streamRuntime);
+        this.owner.enqueueReadLoopAbortLocked(streamRuntime, ErrorCode.FLOW_CONTROL.code(), abortPayload);
+        this.owner.maybeCompactStreamLocked(streamRuntime);
     }
 
     private void abortStreamStateLocked(StreamRuntime streamRuntime) throws IOException {
@@ -1071,6 +1156,41 @@ final class SessionReaderCoordinator {
                 : streamId > this.owner.localGoAwayUni();
     }
 
+    /**
+     * Local GOAWAY watermarks never increase, so a peer-owned ID above the watermark of its class without stream or
+     * terminal state can never be opened again: frames the peer sent on it before seeing the refusal are expected.
+     */
+    private boolean knownRefusedPeerStreamLocked(long streamId) {
+        return streamId != 0L
+                && !SessionRuntime.streamIsLocal(this.owner.localRole(), streamId)
+                && this.peerOpenRefusedByLocalGoAwayLocked(streamId);
+    }
+
+    /**
+     * The application bytes of a refused opening DATA count toward and are released from the session window (SPEC 8);
+     * they are not late data. On the session read path envelope validation has already walked the metadata block and
+     * accepted its TLV structure (a truncated or overrunning TLV is CLOSE(FRAME_SIZE) before this runs). The refusal
+     * only uses metadata_len to skip the prefix: no stream is created, so priority, group and open_info are never
+     * applied, and unknown or duplicate TLV types have no effect.
+     */
+    private void discardRefusedOpeningDataLocked(FrameCodec.Frame frame) throws IOException {
+        byte[] payload = frame.payloadBytes();
+        int appDataLength = payload.length;
+        if ((frame.flags() & Protocol.FRAME_FLAG_OPEN_METADATA) != 0) {
+            Varint62.Decoded metadataLength;
+            try {
+                metadataLength = Varint62.decode(payload, 0);
+            } catch (IOException error) {
+                throw FrameCodec.error(ErrorCode.FRAME_SIZE, "handle DATA", "invalid open metadata length", error);
+            }
+            if (metadataLength.value() > payload.length - metadataLength.length()) {
+                throw FrameCodec.error(ErrorCode.FRAME_SIZE, "handle DATA", "open metadata overruns data payload");
+            }
+            appDataLength = payload.length - metadataLength.length() - (int) metadataLength.value();
+        }
+        this.lateDataHandler.discardRejectedPeerDataLocked(appDataLength);
+    }
+
     private boolean peerStreamWithinLimitLocked(boolean bidirectional) {
         return this.owner.peerStreamWithinLimitLocked(bidirectional);
     }
@@ -1111,6 +1231,8 @@ final class SessionReaderCoordinator {
 
         void recordInboundBudgetsLocked(FrameEnvelopeCodec.InboundFrame frame) throws IOException;
 
+        void recordNonAdvancingFlowControlFrameLocked(FrameType frameType, int payloadBytes) throws IOException;
+
         void recordInboundPingFloodLocked() throws IOException;
 
         void noteInboundFrameLocked(long nowNanos);
@@ -1144,6 +1266,8 @@ final class SessionReaderCoordinator {
         SessionTerminalBookkeeping.TerminalDataDisposition terminalDataDispositionForLocked(long streamId);
 
         void refusePeerOpeningStreamLocked(long streamId, boolean recordTombstone, boolean hidden) throws IOException;
+
+        void refusePeerOpeningPastGoAwayLocked(long streamId, boolean hidden) throws IOException;
 
         StreamRuntime createPeerOpenedStreamLocked(long streamId);
 
@@ -1253,7 +1377,7 @@ final class SessionReaderCoordinator {
 
         boolean recordTerminalLateDataLocked(long streamId, int length);
 
-        long aggregateLateDataCap();
+        void addRetainedLateDataLocked(long bytes);
 
         long lateDataPerStreamCap(StreamRuntime streamRuntime);
 
@@ -1272,6 +1396,8 @@ final class SessionReaderCoordinator {
         long recvSessionAdvertised();
 
         void setRecvSessionAdvertised(long value);
+
+        boolean takeSessionCreditGrantedSinceBlockedLocked();
 
         long recvSessionPending();
 
@@ -1320,10 +1446,6 @@ final class SessionReaderCoordinator {
         long bufferedReceiveStorageBytes();
 
         void setBufferedReceiveStorageBytes(long value);
-
-        long aggregateLateDataReceived();
-
-        void setAggregateLateDataReceived(long value);
 
         long trackedSessionMemoryLocked();
 

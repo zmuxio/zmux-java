@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -82,7 +83,7 @@ final class StopSendingConvergenceTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -140,17 +141,11 @@ final class StopSendingConvergenceTest {
         }
 
         FrameCodec.Frame readFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            return FrameCodec.readFrame(input, Settings.defaults().limits());
+            return RawFrameReads.readFrame(socket, input, timeout);
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (java.net.SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         @Override

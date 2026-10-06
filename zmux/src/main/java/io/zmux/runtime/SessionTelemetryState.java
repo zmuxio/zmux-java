@@ -20,7 +20,8 @@ final class SessionTelemetryState {
     private static final int PING_NONCE_BYTES = Long.BYTES;
     private static final long PING_PAYLOAD_HASH_OFFSET = 0xcbf29ce484222325L;
     private static final long PING_PAYLOAD_HASH_PRIME = 0x100000001b3L;
-    private static final AtomicLong KEEPALIVE_JITTER_COUNTER = new AtomicLong();
+    // Last-resort fallback only (markReadyLocked seeds from the CSPRNG); not identical in every process.
+    private static final AtomicLong KEEPALIVE_JITTER_COUNTER = new AtomicLong(SessionRuntime.randomSessionSeed());
     private static final String KEEPALIVE_TIMEOUT_REASON = "zmux: keepalive timeout";
     private final Owner owner;
     private final ZmuxConfig config;

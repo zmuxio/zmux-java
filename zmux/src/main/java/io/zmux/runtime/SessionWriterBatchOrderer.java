@@ -48,6 +48,112 @@ final class SessionWriterBatchOrderer {
         }
     }
 
+    private static boolean localOpeningFrame(SessionRuntime.OutboundFrame outboundFrame) {
+        return outboundFrame != null
+                && outboundFrame.openingFrame()
+                && outboundFrame.stream() != null
+                && outboundFrame.frame().streamId() != 0L;
+    }
+
+    /**
+     * Within one stream class the peer must observe new stream IDs in assignment order (SPEC §3.1), so no
+     * reordering stage (urgent ranking, WFQ) may put a stream's opening frame ahead of a lower-ID opener of
+     * the same class. This restores that order in place with minimal movement: an opener that would jump
+     * ahead, and every later frame of its stream, is held back until the lower opener has been placed.
+     */
+    static void keepOpeningFramesInStreamIdOrder(List<SessionRuntime.OutboundFrame> batch) {
+        if (batch == null || batch.size() < 2 || openingFramesInStreamIdOrder(batch)) {
+            return;
+        }
+        Map<Long, ArrayDeque<Long>> pendingOpenersByClass = new HashMap<>();
+        Set<Long> pendingOpenerStreams = new HashSet<>();
+        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            if (localOpeningFrame(outboundFrame) && pendingOpenerStreams.add(outboundFrame.frame().streamId())) {
+                pendingOpenersByClass
+                        .computeIfAbsent(outboundFrame.frame().streamId() & 3L, ignored -> new ArrayDeque<>())
+                        .add(outboundFrame.frame().streamId());
+            }
+        }
+        for (ArrayDeque<Long> openers : pendingOpenersByClass.values()) {
+            ArrayList<Long> sorted = new ArrayList<>(openers);
+            Collections.sort(sorted);
+            openers.clear();
+            openers.addAll(sorted);
+        }
+
+        ArrayList<SessionRuntime.OutboundFrame> source = new ArrayList<>(batch);
+        ArrayList<SessionRuntime.OutboundFrame> held = new ArrayList<>();
+        batch.clear();
+        for (SessionRuntime.OutboundFrame outboundFrame : source) {
+            if (heldForOpeningOrder(outboundFrame, pendingOpenersByClass, pendingOpenerStreams)) {
+                held.add(outboundFrame);
+                continue;
+            }
+            emitInOpeningOrder(batch, outboundFrame, pendingOpenersByClass, pendingOpenerStreams);
+            boolean progressed = true;
+            while (progressed && !held.isEmpty()) {
+                progressed = false;
+                for (int i = 0; i < held.size(); ++i) {
+                    SessionRuntime.OutboundFrame candidate = held.get(i);
+                    if (!heldForOpeningOrder(candidate, pendingOpenersByClass, pendingOpenerStreams)) {
+                        held.remove(i);
+                        emitInOpeningOrder(batch, candidate, pendingOpenersByClass, pendingOpenerStreams);
+                        progressed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        batch.addAll(held);
+    }
+
+    private static boolean openingFramesInStreamIdOrder(List<SessionRuntime.OutboundFrame> batch) {
+        long[] lastOpenerByClass = null;
+        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            if (!localOpeningFrame(outboundFrame)) {
+                continue;
+            }
+            long streamId = outboundFrame.frame().streamId();
+            int streamClass = (int) (streamId & 3L);
+            if (lastOpenerByClass == null) {
+                lastOpenerByClass = new long[]{-1L, -1L, -1L, -1L};
+            }
+            if (streamId < lastOpenerByClass[streamClass]) {
+                return false;
+            }
+            lastOpenerByClass[streamClass] = streamId;
+        }
+        return true;
+    }
+
+    private static boolean heldForOpeningOrder(SessionRuntime.OutboundFrame outboundFrame,
+                                               Map<Long, ArrayDeque<Long>> pendingOpenersByClass,
+                                               Set<Long> pendingOpenerStreams) {
+        long streamId = outboundFrame.frame().streamId();
+        if (streamId == 0L || !pendingOpenerStreams.contains(streamId)) {
+            return false;
+        }
+        if (!localOpeningFrame(outboundFrame)) {
+            return true;
+        }
+        ArrayDeque<Long> openers = pendingOpenersByClass.get(streamId & 3L);
+        return openers == null || openers.isEmpty() || openers.peekFirst() != streamId;
+    }
+
+    private static void emitInOpeningOrder(List<SessionRuntime.OutboundFrame> batch,
+                                           SessionRuntime.OutboundFrame outboundFrame,
+                                           Map<Long, ArrayDeque<Long>> pendingOpenersByClass,
+                                           Set<Long> pendingOpenerStreams) {
+        batch.add(outboundFrame);
+        long streamId = outboundFrame.frame().streamId();
+        if (localOpeningFrame(outboundFrame) && pendingOpenerStreams.remove(streamId)) {
+            ArrayDeque<Long> openers = pendingOpenersByClass.get(streamId & 3L);
+            if (openers != null) {
+                openers.remove(streamId);
+            }
+        }
+    }
+
     void orderUrgent(ArrayList<SessionRuntime.OutboundFrame> batch) {
         if (batch == null || batch.size() < 2) {
             return;
@@ -63,9 +169,16 @@ final class SessionWriterBatchOrderer {
                 batch.set(insert, current);
             }
         }
+        keepOpeningFramesInStreamIdOrder(batch);
     }
 
     ArrayList<SessionRuntime.OutboundFrame> orderOrdinary(List<SessionRuntime.OutboundFrame> batch) {
+        ArrayList<SessionRuntime.OutboundFrame> ordered = this.orderOrdinaryByScheduler(batch);
+        keepOpeningFramesInStreamIdOrder(ordered);
+        return ordered;
+    }
+
+    private ArrayList<SessionRuntime.OutboundFrame> orderOrdinaryByScheduler(List<SessionRuntime.OutboundFrame> batch) {
         int size = batch == null ? 0 : batch.size();
         if (size < 2 || this.sameStreamOrdinaryBatchKeepsOrder(batch, size)) {
             return reusableBatchList(batch);

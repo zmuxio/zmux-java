@@ -48,6 +48,7 @@ final class StreamTerminalCoordinator {
     }
 
     void abortFromLocalLocked(long code, String reason) {
+        this.owner.captureLateDataOutstandingCreditLocked();
         this.owner.terminalStateInternal().recordLocalAbort(code, reason);
         this.abortBothAndDiscardLocked();
     }
@@ -73,12 +74,23 @@ final class StreamTerminalCoordinator {
         StreamHalfState.SendState previousSendState = this.owner.halfStateInternal().sendState();
         boolean closeWriteHalf = this.owner.localSend() && !sendTerminal && !this.owner.halfStateInternal().sendAbsent();
         boolean closeReadHalf = this.owner.localReceive() && !recvTerminal && !this.owner.halfStateInternal().recvAbsent();
+        // Unread inbound bytes are discarded below (clearSessionPendingStateLocked). Reporting EOF afterwards would
+        // present a truncated body as complete even after a peer FIN (SPEC 9.2), so such reads fail too.
+        boolean failReadHalf = closeReadHalf || (this.owner.localReceive() && !this.owner.readBufferInternal().isEmpty());
         this.owner.clearWriteAdvisoryLocked();
         if (error == null) {
             this.owner.halfStateInternal().closeForSession(this.owner.localSend(), this.owner.localReceive(), true);
+            if (failReadHalf) {
+                // A benign close (CLOSE(NO_ERROR), local graceful close) still fails the remaining receive halves
+                // (SPEC 6.10): only a real peer FIN reads as EOF, everything else reads the session-closed error.
+                SessionRuntime session = this.owner.sessionInternal();
+                this.owner.terminalStateInternal().recordSessionClosedRead(
+                        session.sessionOperationErrorLocked("read", session.currentErrorLocked())
+                );
+            }
         } else {
             this.owner.halfStateInternal().closeForSession(this.owner.localSend(), this.owner.localReceive(), false);
-            this.owner.terminalStateInternal().recordSessionClose(error, closeWriteHalf, closeReadHalf);
+            this.owner.terminalStateInternal().recordSessionClose(error, closeWriteHalf, failReadHalf);
         }
         this.owner.notifySendTerminalTransitionLocked(previousSendState);
         this.clearSessionPendingStateLocked();

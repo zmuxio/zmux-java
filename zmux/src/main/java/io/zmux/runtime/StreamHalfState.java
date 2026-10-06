@@ -260,7 +260,13 @@ final class StreamHalfState {
     }
 
     boolean receiveGraceful() {
-        return effectiveRecvState() == EffectiveRecvState.FIN;
+        // Peer FIN was observed on this direction. A local read-stop only changes local read errors, not how later
+        // peer DATA on the concluded direction is answered (SPEC 9.2/9.6), so the raw state is used here.
+        return recvState == RecvState.FIN;
+    }
+
+    boolean localReadStopTailOpen() {
+        return localReadStop && recvState == RecvState.STOP_SENT;
     }
 
     void finishReceiveIfActive() {
@@ -307,6 +313,11 @@ final class StreamHalfState {
         if (!localReceive) {
             return fullyTerminal ? StreamRuntime.PeerDataAction.IGNORE : StreamRuntime.PeerDataAction.ABORT_STREAM_STATE;
         }
+        if (recvState == RecvState.FIN) {
+            // DATA after an observed peer FIN is a stream-state violation whether or not the stream is already fully
+            // terminal or locally read-stopped; compacted tombstones answer the same frame identically.
+            return StreamRuntime.PeerDataAction.ABORT_STREAM_CLOSED;
+        }
         switch (effectiveRecvState()) {
             case RESET:
             case ABORTED:
@@ -314,7 +325,7 @@ final class StreamHalfState {
             case STOPPED:
                 return fin ? StreamRuntime.PeerDataAction.IGNORE_AND_FIN : StreamRuntime.PeerDataAction.IGNORE;
             case FIN:
-                return fullyTerminal ? StreamRuntime.PeerDataAction.IGNORE : StreamRuntime.PeerDataAction.ABORT_STREAM_CLOSED;
+                return StreamRuntime.PeerDataAction.ABORT_STREAM_CLOSED;
             case OPEN:
                 return fullyTerminal ? StreamRuntime.PeerDataAction.IGNORE : StreamRuntime.PeerDataAction.ACCEPT;
             case ABSENT:

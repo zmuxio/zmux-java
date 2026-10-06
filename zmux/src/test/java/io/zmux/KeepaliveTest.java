@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -127,7 +127,7 @@ final class KeepaliveTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -183,12 +183,7 @@ final class KeepaliveTest {
         }
 
         FrameCodec.Frame readFrame(Duration timeout) throws Exception {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                throw new AssertionError("timed out waiting for frame", e);
-            }
+            return RawFrameReads.readFrame(socket, input, timeout);
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
@@ -196,12 +191,7 @@ final class KeepaliveTest {
             if (pending != null) {
                 return pending;
             }
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         void prependFrames(List<FrameCodec.Frame> frames) {

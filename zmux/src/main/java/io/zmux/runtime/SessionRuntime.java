@@ -2,17 +2,20 @@ package io.zmux.runtime;
 
 import io.zmux.*;
 import io.zmux.protocol.*;
+import io.zmux.support.StreamApiSupport;
 import io.zmux.transport.DuplexConnection;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -32,10 +35,17 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private static final Duration DEFAULT_GRACEFUL_CLOSE_DRAIN_TIMEOUT_MAX = Duration.ofSeconds(5L);
     private static final long DEFAULT_GRACEFUL_CLOSE_RTT_ADAPTIVE_SLACK_NANOS = TimeUnit.MILLISECONDS.toNanos(100L);
     private static final long STOP_SENDING_ADAPTIVE_DRAIN_WINDOW_MAX_NANOS = TimeUnit.SECONDS.toNanos(2L);
+    // Repository-default bound on delivering the final CLOSE before the transport is closed anyway (Go's
+    // closeFrameSendTimeout): 100ms, widened to 4 * RTT + 50ms when an RTT sample exists, capped at 2s.
+    private static final long CLOSE_FRAME_SEND_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100L);
+    private static final long CLOSE_FRAME_SEND_TIMEOUT_MAX_NANOS = TimeUnit.SECONDS.toNanos(2L);
+    private static final long CLOSE_FRAME_SEND_RTT_ADAPTIVE_SLACK_NANOS = TimeUnit.MILLISECONDS.toNanos(50L);
+    private static final long TRANSPORT_CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250L);
     private static final long SESSION_NONCE_GAMMA = -7046029254386353131L;
-    private static final AtomicLong SESSION_NONCE_SEED_COUNTER = new AtomicLong();
+    private static final SecureRandom SESSION_SEED_RANDOM = new SecureRandom();
+    // Last-resort fallback only; seeded from the CSPRNG so it is not identical in every process.
+    private static final AtomicLong SESSION_NONCE_SEED_COUNTER = new AtomicLong(SESSION_SEED_RANDOM.nextLong());
     private static final Duration ESTABLISHMENT_FAILURE_WRITE_WAIT = Duration.ofMillis(250L);
-    private static final Duration ESTABLISHMENT_SUCCESS_WRITE_WAIT = Duration.ofSeconds(1L);
     private static final Duration ESTABLISHMENT_CLOSE_DRAIN_DELAY = Duration.ofMillis(10L);
     private static final long DEFAULT_ABUSE_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(5L);
     private static final int DEFAULT_INBOUND_CONTROL_FRAME_BUDGET = 2048;
@@ -82,6 +92,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private final SessionEventDispatcher eventDispatcher;
     private final SessionTelemetryState telemetry;
     private final CountDownLatch terminated = new CountDownLatch(1);
+    private final CountDownLatch transportCloseDone = new CountDownLatch(1);
     private final SessionAcceptRegistry acceptRegistry;
     private final SessionOutboundQueueBookkeeping outboundQueueBookkeeping;
     private final SessionPriorityUpdateCoordinator priorityUpdateCoordinator;
@@ -120,6 +131,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long resetReasonOverflowCount;
     private long abortReasonOverflowCount;
     private List<OutboundFrame> inflightBatch = Collections.emptyList();
+    // Ordinary batch the writer holds (outside the queues) while it releases the monitor to coalesce.
+    private List<OutboundFrame> stagedOrdinaryBatch = Collections.emptyList();
     private volatile Preface peerPreface;
     private volatile Negotiated negotiated;
     private volatile SessionState state = SessionState.INVALID;
@@ -134,7 +147,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long lastAcceptedPeerUni;
     private long localGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long localGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
+    private long highestRefusedPeerBidi;
+    private long highestRefusedPeerUni;
     private boolean localGoAwayIssued;
+    private boolean localStreamIdExhaustionHandled;
     private long sentLocalGoAwayBidi = 0x3FFFFFFFFFFFFFFFL;
     private long sentLocalGoAwayUni = 0x3FFFFFFFFFFFFFFFL;
     private boolean localGoAwaySent;
@@ -148,6 +164,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long bufferedReceiveBytes;
     private long bufferedReceiveStorageBytes;
     private long recvSessionAdvertised;
+    private boolean sessionCreditGrantedSinceBlocked;
     private long recvSessionReceivedBytes;
     private long recvSessionPending;
     private boolean receiveReplenishRetry;
@@ -186,6 +203,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long supersededTerminalSignalsCount;
     private long skippedCloseOnDeadIoCount;
     private long closeFrameFlushErrorCount;
+    private long closeFrameFlushTimeoutCount;
+    private boolean closeFrameDeadlineArmed;
+    private volatile boolean writerLoopStarted;
+    private ScheduledFuture<?> keepaliveTimerFuture;
+    private long keepaliveTimerDueAtNanos;
+    private long keepaliveTimerGeneration;
     private long hiddenAbortChurnWindowStartedAtNanos;
     private int hiddenAbortChurnCount;
     private long visibleTerminalChurnEventCount;
@@ -204,6 +227,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     private long provisionalOpenExpiredCount;
     private boolean closeFrameQueued;
     private boolean closedTransport;
+    private volatile boolean transportCloseStarted;
+    private long transportCloseWaitDeadlineNanos;
     private boolean gracefulCloseActive;
     private boolean terminalCleanupApplied;
     private boolean readLoopProtocolWorkerStarted;
@@ -243,7 +268,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.establishmentCoordinator = new SessionEstablishmentCoordinator(
                 new SessionEstablishmentCoordinatorOwner(this),
                 ESTABLISHMENT_FAILURE_WRITE_WAIT,
-                ESTABLISHMENT_SUCCESS_WRITE_WAIT,
+                config.disableEstablishmentTimeout() ? null : config.establishmentTimeout(),
                 ESTABLISHMENT_CLOSE_DRAIN_DELAY
         );
         this.readerRuntime = new SessionReaderCoordinator(new SessionReaderCoordinatorOwner(this));
@@ -379,6 +404,19 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     private static long initSessionNonceState(long seed) {
         return seed != 0L ? seed : SESSION_NONCE_SEED_COUNTER.addAndGet(SESSION_NONCE_GAMMA);
+    }
+
+    /**
+     * Per-session seed for the keepalive-jitter and PING token/padding generators. It comes from the CSPRNG, never
+     * from the preface tie-breaker nonces (zero for explicit roles and visible to the peer) or a process-global
+     * counter, so independent sessions and processes do not draw the same jitter, tokens or padding.
+     */
+    static long randomSessionSeed() {
+        long seed;
+        do {
+            seed = SESSION_SEED_RANDOM.nextLong();
+        } while (seed == 0L);
+        return seed;
     }
 
     private static boolean countsQueuedData(OutboundFrame outboundFrame) {
@@ -1009,7 +1047,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             streamRuntime = this.newLocalStreamLocked(true, openOptions);
         }
         if (payload.length > 0) {
-            streamRuntime.write(payload);
+            try {
+                streamRuntime.write(payload);
+            } catch (IOException | RuntimeException error) {
+                StreamApiSupport.abortUnreturnedStream(streamRuntime, error, "open_and_send failed");
+                throw error;
+            }
         }
         return streamRuntime;
     }
@@ -1037,6 +1080,9 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         try {
             streamRuntime.write(payload);
             return streamRuntime;
+        } catch (IOException | RuntimeException error) {
+            StreamApiSupport.abortUnreturnedStream(streamRuntime, error, "open_and_send failed");
+            throw error;
         } finally {
             if (budget.bounded()) {
                 streamRuntime.setWriteDeadlineNanos(0L);
@@ -1056,7 +1102,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         synchronized (this.lock) {
             streamRuntime = this.newLocalStreamLocked(false, openOptions);
         }
-        streamRuntime.writeFinal(payload);
+        try {
+            streamRuntime.writeFinal(payload);
+        } catch (IOException | RuntimeException error) {
+            StreamApiSupport.abortUnreturnedStream(streamRuntime, error, "open_uni_and_send failed");
+            throw error;
+        }
         return streamRuntime.sendView();
     }
 
@@ -1080,6 +1131,9 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         try {
             streamRuntime.writeFinal(payload);
             return streamRuntime.sendView();
+        } catch (IOException | RuntimeException error) {
+            StreamApiSupport.abortUnreturnedStream(streamRuntime, error, "open_uni_and_send failed");
+            throw error;
         } finally {
             if (budget.bounded()) {
                 streamRuntime.setWriteDeadlineNanos(0L);
@@ -1113,6 +1167,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                     this.finishSessionLocked(queueError, this.terminalStateForSessionError(queueError));
                     throw queueError;
                 }
+                this.armCloseFrameDeadlineLocked();
                 this.notifyLockWaitersLocked();
             }
         } finally {
@@ -1133,11 +1188,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     @Override
     public boolean awaitTermination(Duration duration) throws InterruptedException {
         try {
-            if (duration == null) {
-                this.terminated.await();
-                return true;
+            TimeoutBudget budget = TimeoutBudget.fromTimeout(duration);
+            if (!awaitLatch(this.terminated, duration)) {
+                return false;
             }
-            return awaitLatch(this.terminated, duration);
+            this.awaitTransportClosed(budget.bounded() ? budget.remainingNanos() : Long.MAX_VALUE);
+            return true;
         } catch (InterruptedException interrupted) {
             throw interrupted(
                     "zmux: interrupted while waiting for session termination",
@@ -1249,11 +1305,15 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             long initialBidiWatermark;
             long initialUniWatermark;
             synchronized (this.lock) {
-                if (this.state.terminal()) {
+                if (this.state.terminal() && this.terminated.getCount() == 0L) {
                     return;
                 }
                 drainTimeout = this.gracefulCloseDrainTimeout();
-                if (this.closeFrameQueued || this.state == SessionState.CLOSING || this.gracefulCloseActive) {
+                if (this.state.terminal()
+                        || this.closeFrameQueued
+                        || this.state == SessionState.CLOSING
+                        || this.gracefulCloseActive) {
+                    // Another close is in progress, or the final CLOSE is still being flushed: wait for it, bounded.
                     gracefulDrain = false;
                     awaitExistingClose = true;
                     sendInitialGoAway = false;
@@ -1286,13 +1346,16 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 return;
             }
             IOException closeError = null;
-            if (gracefulDrain) {
-                if (sendInitialGoAway) {
-                    if (!this.trySendGracefulGoAway(initialBidiWatermark, initialUniWatermark)) {
-                        this.awaitCloseCompletion(drainTimeout.plusSeconds(1L));
-                        return;
-                    }
+            boolean goAwayStalled = false;
+            if (gracefulDrain && sendInitialGoAway) {
+                GracefulGoAwayResult result = this.trySendGracefulGoAway(initialBidiWatermark, initialUniWatermark, drainTimeout);
+                if (result == GracefulGoAwayResult.SESSION_CLOSING) {
+                    this.awaitCloseCompletion(drainTimeout.plusSeconds(1L));
+                    return;
                 }
+                goAwayStalled = result == GracefulGoAwayResult.STALLED;
+            }
+            if (gracefulDrain && !goAwayStalled) {
                 this.awaitGoAwayDrainInterval();
                 boolean sendRefinedGoAway;
                 long refinedBidiWatermark;
@@ -1306,20 +1369,31 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                     sendRefinedGoAway = refinedBidiWatermark < this.localGoAwayBidi || refinedUniWatermark < this.localGoAwayUni;
                 }
                 if (sendRefinedGoAway) {
-                    if (!this.trySendGracefulGoAway(refinedBidiWatermark, refinedUniWatermark)) {
+                    GracefulGoAwayResult result = this.trySendGracefulGoAway(refinedBidiWatermark, refinedUniWatermark, drainTimeout);
+                    if (result == GracefulGoAwayResult.SESSION_CLOSING) {
                         this.awaitCloseCompletion(drainTimeout.plusSeconds(1L));
                         return;
                     }
+                    goAwayStalled = result == GracefulGoAwayResult.STALLED;
                 }
-                synchronized (this.lock) {
-                    this.reclaimGracefulCloseLocalStreamsLocked();
-                }
-                if (!this.waitForGracefulCloseDrain(drainTimeout)) {
+                if (!goAwayStalled) {
                     synchronized (this.lock) {
-                        this.recordGracefulCloseTimeoutLocked();
+                        this.reclaimGracefulCloseLocalStreamsLocked();
                     }
-                    closeError = new GracefulCloseTimeoutException();
+                    if (!this.waitForGracefulCloseDrain(drainTimeout)) {
+                        synchronized (this.lock) {
+                            this.recordGracefulCloseTimeoutLocked();
+                        }
+                        closeError = new GracefulCloseTimeoutException();
+                    }
                 }
+            }
+            if (goAwayStalled) {
+                // The writer could not even flush a GOAWAY: skip the drain and close now (bounded below).
+                synchronized (this.lock) {
+                    this.recordGracefulCloseTimeoutLocked();
+                }
+                closeError = new GracefulCloseTimeoutException();
             }
             this.closeWithError(ErrorCode.NO_ERROR.code(), "");
             this.awaitCloseCompletion(drainTimeout.plusSeconds(1L));
@@ -1328,6 +1402,9 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             }
         } finally {
             this.emitPendingEvents();
+            if (this.terminated.getCount() == 0L) {
+                this.awaitTransportClosed(Long.MAX_VALUE);
+            }
         }
     }
 
@@ -1345,19 +1422,33 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return future;
     }
 
-    private boolean trySendGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
+    /**
+     * Queues a graceful-close GOAWAY and waits at most {@code sendTimeout} for it to be written, so a writer blocked
+     * on a peer that stopped reading cannot hold close() forever (IMPLEMENTATION 8 "close bounding").
+     */
+    private GracefulGoAwayResult trySendGracefulGoAway(long bidiWatermark,
+                                                       long uniWatermark,
+                                                       Duration sendTimeout) throws IOException {
         try {
             LocalGoAwayWaiter waiter = this.enqueueGracefulGoAway(bidiWatermark, uniWatermark);
-            this.awaitLocalGoAwaySent(waiter);
-            return true;
+            if (waiter != null && !waiter.await(Math.max(1L, SessionRuntime.positiveNanos(sendTimeout)))) {
+                return GracefulGoAwayResult.STALLED;
+            }
+            return GracefulGoAwayResult.SENT;
         } catch (IOException error) {
             synchronized (this.lock) {
                 if (this.state.terminal() || this.closeFrameQueued || this.state == SessionState.CLOSING) {
-                    return false;
+                    return GracefulGoAwayResult.SESSION_CLOSING;
                 }
             }
             throw error;
         }
+    }
+
+    private enum GracefulGoAwayResult {
+        SENT,
+        SESSION_CLOSING,
+        STALLED
     }
 
     private LocalGoAwayWaiter enqueueGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
@@ -1560,6 +1651,13 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return RuntimeFlow.repoDefaultSessionDataHighWatermark(this.perStreamQueuedDataHighWatermarkLocked());
     }
 
+    long queuedDataFragmentCapLocked() {
+        return Math.max(1L, Math.min(
+                this.perStreamQueuedDataHighWatermarkLocked(),
+                this.sessionQueuedDataHighWatermarkLocked()
+        ));
+    }
+
     private long perStreamQueuedDataLowWatermarkLocked() {
         return RuntimeFlow.lowWatermark(this.perStreamQueuedDataHighWatermarkLocked());
     }
@@ -1627,15 +1725,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     int markerOnlyUsedStreamHardCapLocked() {
+        // Retained markers count toward tracked session memory, so they may never take more than a quarter of the
+        // session memory hard cap; past the budget they are coarsened instead of failing or write-stalling the session.
+        long memoryBound = this.sessionMemoryHardCapLocked() / 4L / MIN_COMPACT_TERMINAL_STATE_UNIT;
+        int budget = memoryBound <= 1L ? 1 : memoryBound >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) memoryBound;
         int configured = this.config.markerOnlyUsedStreamLimit();
-        if (configured > 0) {
-            return configured;
-        }
-        long derived = this.sessionMemoryHardCapLocked() / MIN_COMPACT_TERMINAL_STATE_UNIT;
-        if (derived <= 1L) {
-            return 1;
-        }
-        return derived >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) derived;
+        return configured > 0 ? Math.min(configured, budget) : budget;
     }
 
     long retainedStateUnitLocked() {
@@ -1777,7 +1872,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     boolean hasTerminalMarkerLocked(long streamId) {
-        return this.terminalBookkeeping.hasTerminalMarkerLocked(streamId);
+        return this.terminalDataDispositionForLocked(streamId) != null;
     }
 
     IOException urgentControlWriterBatchMemoryErrorLocked(long retainedBytes) {
@@ -2313,35 +2408,15 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         } else if (this.ignorePeerNonCloseFrameLocked(frameType)) {
             return;
         }
+        if (SessionRuntime.chargesInboundRateBudgetAfterHandling(frameType)) {
+            // Charged by the frame handler only when the frame turns out not to advance flow-control state.
+            return;
+        }
         long nowNanos = System.nanoTime();
         boolean control = frameType != FrameType.DATA && frameType != FrameType.EXT;
         boolean ext = frameType == FrameType.EXT;
         if (control) {
-            if (this.abuseWindowExpiredLocked(this.inboundControlBudgetWindowStartedAtNanos, nowNanos)) {
-                this.inboundControlBudgetWindowStartedAtNanos = nowNanos;
-                this.inboundControlFrameCount = 0;
-                this.inboundControlBytes = 0L;
-            }
-            this.inboundControlFrameCount = SessionRuntime.saturatingIncrement(this.inboundControlFrameCount);
-            this.inboundControlBytes = SessionRuntime.saturatingAdd(this.inboundControlBytes, payloadBytes);
-            if (this.inboundControlFrameCount > this.inboundControlFrameBudgetLocked()) {
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "handle " + frameType,
-                        "inbound control-frame budget exceeded",
-                        ZmuxErrorSource.REMOTE,
-                        ZmuxErrorDirection.READ
-                );
-            }
-            if (this.inboundControlBytes > this.inboundControlBytesBudgetLocked()) {
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "handle " + frameType,
-                        "inbound control-byte budget exceeded",
-                        ZmuxErrorSource.REMOTE,
-                        ZmuxErrorDirection.READ
-                );
-            }
+            this.recordInboundControlBudgetLocked(frameType, payloadBytes, nowNanos);
         }
         if (ext) {
             if (this.abuseWindowExpiredLocked(this.inboundExtBudgetWindowStartedAtNanos, nowNanos)) {
@@ -2371,31 +2446,82 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             }
         }
         if (control || ext) {
-            if (this.abuseWindowExpiredLocked(this.inboundMixedBudgetWindowStartedAtNanos, nowNanos)) {
-                this.inboundMixedBudgetWindowStartedAtNanos = nowNanos;
-                this.inboundMixedFrameCount = 0;
-                this.inboundMixedBytes = 0L;
-            }
-            this.inboundMixedFrameCount = SessionRuntime.saturatingIncrement(this.inboundMixedFrameCount);
-            this.inboundMixedBytes = SessionRuntime.saturatingAdd(this.inboundMixedBytes, payloadBytes);
-            if (this.inboundMixedFrameCount > this.inboundMixedFrameBudgetLocked()) {
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "handle " + frameType,
-                        "inbound mixed-frame budget exceeded",
-                        ZmuxErrorSource.REMOTE,
-                        ZmuxErrorDirection.READ
-                );
-            }
-            if (this.inboundMixedBytes > this.inboundMixedBytesBudgetLocked()) {
-                throw sessionError(
-                        ErrorCode.PROTOCOL,
-                        "handle " + frameType,
-                        "inbound mixed-byte budget exceeded",
-                        ZmuxErrorSource.REMOTE,
-                        ZmuxErrorDirection.READ
-                );
-            }
+            this.recordInboundMixedBudgetLocked(frameType, payloadBytes, nowNanos);
+        }
+    }
+
+    /**
+     * MAX_DATA and BLOCKED are mandatory flow-control progress whenever they raise a limit or coincide with a
+     * credit grant, so they skip the pre-dispatch control/mixed rate budgets and are charged only when they turn
+     * out not to advance state (SPEC 11/13 target redundant control traffic, not repository-default
+     * replenishment cadence).
+     */
+    static boolean chargesInboundRateBudgetAfterHandling(FrameType frameType) {
+        return frameType == FrameType.MAX_DATA || frameType == FrameType.BLOCKED;
+    }
+
+    void recordNonAdvancingFlowControlFrameLocked(FrameType frameType, int payloadBytes) throws IOException {
+        if (this.ignorePeerNonCloseFrameLocked(frameType)) {
+            return;
+        }
+        long nowNanos = System.nanoTime();
+        this.recordInboundControlBudgetLocked(frameType, payloadBytes, nowNanos);
+        this.recordInboundMixedBudgetLocked(frameType, payloadBytes, nowNanos);
+    }
+
+    private void recordInboundControlBudgetLocked(FrameType frameType, int payloadBytes, long nowNanos) throws IOException {
+        if (this.abuseWindowExpiredLocked(this.inboundControlBudgetWindowStartedAtNanos, nowNanos)) {
+            this.inboundControlBudgetWindowStartedAtNanos = nowNanos;
+            this.inboundControlFrameCount = 0;
+            this.inboundControlBytes = 0L;
+        }
+        this.inboundControlFrameCount = SessionRuntime.saturatingIncrement(this.inboundControlFrameCount);
+        this.inboundControlBytes = SessionRuntime.saturatingAdd(this.inboundControlBytes, payloadBytes);
+        if (this.inboundControlFrameCount > this.inboundControlFrameBudgetLocked()) {
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle " + frameType,
+                    "inbound control-frame budget exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+        if (this.inboundControlBytes > this.inboundControlBytesBudgetLocked()) {
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle " + frameType,
+                    "inbound control-byte budget exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+    }
+
+    private void recordInboundMixedBudgetLocked(FrameType frameType, int payloadBytes, long nowNanos) throws IOException {
+        if (this.abuseWindowExpiredLocked(this.inboundMixedBudgetWindowStartedAtNanos, nowNanos)) {
+            this.inboundMixedBudgetWindowStartedAtNanos = nowNanos;
+            this.inboundMixedFrameCount = 0;
+            this.inboundMixedBytes = 0L;
+        }
+        this.inboundMixedFrameCount = SessionRuntime.saturatingIncrement(this.inboundMixedFrameCount);
+        this.inboundMixedBytes = SessionRuntime.saturatingAdd(this.inboundMixedBytes, payloadBytes);
+        if (this.inboundMixedFrameCount > this.inboundMixedFrameBudgetLocked()) {
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle " + frameType,
+                    "inbound mixed-frame budget exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
+        }
+        if (this.inboundMixedBytes > this.inboundMixedBytesBudgetLocked()) {
+            throw sessionError(
+                    ErrorCode.PROTOCOL,
+                    "handle " + frameType,
+                    "inbound mixed-byte budget exceeded",
+                    ZmuxErrorSource.REMOTE,
+                    ZmuxErrorDirection.READ
+            );
         }
     }
 
@@ -2569,6 +2695,67 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     void recordCloseCompletionTimeoutLocked() {
         this.telemetry.recordCloseCompletionTimeoutLocked();
+    }
+
+    long closeFrameFlushTimeoutCountLocked() {
+        return this.closeFrameFlushTimeoutCount;
+    }
+
+    long closeFrameSendTimeoutNanosLocked() {
+        return SessionRuntime.adaptiveRttTimeout(
+                this.telemetry.lastPingRttNanos(),
+                CLOSE_FRAME_SEND_TIMEOUT_NANOS,
+                CLOSE_FRAME_SEND_TIMEOUT_MAX_NANOS,
+                4,
+                CLOSE_FRAME_SEND_RTT_ADAPTIVE_SLACK_NANOS
+        );
+    }
+
+    /**
+     * Bounds the delivery of a queued final CLOSE (IMPLEMENTATION 8 "close bounding"): if the session has not
+     * finished when the close-frame send timeout expires, typically because the writer is blocked on a peer that
+     * stopped reading, the session is finished anyway. That closes the transport off the session lock (see
+     * {@link #releaseTransport()}), which also releases the blocked writer; the committed terminal cause is kept.
+     */
+    void armCloseFrameDeadlineLocked() {
+        // Only a running writer can stall on the CLOSE; before it starts (or in writer-less runtime tests) the
+        // close-completion wait in close() is the backstop.
+        if (!this.writerLoopStarted || this.closeFrameDeadlineArmed || this.terminated.getCount() == 0L) {
+            return;
+        }
+        this.closeFrameDeadlineArmed = true;
+        SessionLivenessTimer.schedule(this::onCloseFrameDeadline, this.closeFrameSendTimeoutNanosLocked());
+    }
+
+    private void onCloseFrameDeadline() {
+        if (this.terminated.getCount() == 0L) {
+            return;
+        }
+        SessionLivenessTimer.runDetached("zmux-close-deadline", () -> this.forceFinishSession(true));
+    }
+
+    /**
+     * Finishes a terminal (or CLOSING) session whose final CLOSE did not complete in time, closing the transport.
+     * Returns whether this call finished it.
+     */
+    boolean forceFinishSession(boolean closeFrameTimedOut) {
+        try {
+            synchronized (this.lock) {
+                if (this.terminated.getCount() == 0L) {
+                    return false;
+                }
+                if (!this.state.terminal() && this.state != SessionState.CLOSING && !this.closeFrameQueued) {
+                    return false;
+                }
+                if (closeFrameTimedOut) {
+                    this.closeFrameFlushTimeoutCount = SessionRuntime.saturatingAdd(this.closeFrameFlushTimeoutCount, 1L);
+                }
+                this.finishSessionLocked(null, this.state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED);
+                return true;
+            }
+        } finally {
+            this.emitPendingEvents();
+        }
     }
 
     private void recordGracefulCloseTimeoutLocked() {
@@ -2797,6 +2984,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                 if (this.shouldFailSessionOperationsLocked()) {
                     throw this.sessionOperationErrorLocked("accept", this.currentErrorLocked());
                 }
+                this.readerRuntime.onReadBlockedLocked(null);
                 if (!budget.bounded()) {
                     try {
                         this.incrementLockWaiters(LockWaitKind.ACCEPT);
@@ -2986,6 +3174,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     private void writerLoop() {
+        synchronized (this.lock) {
+            this.writerLoopStarted = true;
+            if (this.closeFrameQueued) {
+                this.armCloseFrameDeadlineLocked();
+            }
+        }
         this.writerRuntime.run();
     }
 
@@ -3042,13 +3236,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         int bytes = SessionRuntime.retainedQueueBytes(outboundFrame);
         this.outboundQueueBookkeeping.noteUrgentFrameEnqueuedLocked(bytes);
         this.urgentQueue.offerLast(outboundFrame);
-    }
-
-    void enqueueExistingOrdinaryOutboundLocked(OutboundFrame outboundFrame) {
-        if (outboundFrame == null) {
-            return;
-        }
-        this.enqueueOrdinaryFrameLocked(outboundFrame);
     }
 
     OutboundFrame pollQueuedOutboundLocked(Deque<OutboundFrame> deque) {
@@ -3159,6 +3346,48 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     void closeTransport() {
         this.lifecycleRuntime.closeTransport();
+    }
+
+    /**
+     * Closes the transport without holding the session lock. A transport close can block: an orderly TLS close
+     * waits for the record lock that a stalled write holds, and a caller-supplied connection may flush. Under the
+     * lock that would wedge every session operation and liveness check behind it, so a close requested with the
+     * lock held (finishing the session) runs on a detached thread. close() and awaitTermination() wait for it, but
+     * only until {@link #TRANSPORT_CLOSE_WAIT_NANOS} after it started.
+     */
+    void releaseTransport() {
+        this.transportCloseWaitDeadlineNanos = System.nanoTime() + TRANSPORT_CLOSE_WAIT_NANOS;
+        this.transportCloseStarted = true;
+        if (Thread.holdsLock(this.lock)) {
+            SessionLivenessTimer.runDetached("zmux-transport-close", this::closeConnectionNow);
+            return;
+        }
+        this.closeConnectionNow();
+    }
+
+    private void closeConnectionNow() {
+        try {
+            this.connection.close();
+        } catch (IOException | RuntimeException ignored) {
+            // Transport is already terminating.
+        } finally {
+            this.transportCloseDone.countDown();
+        }
+    }
+
+    private void awaitTransportClosed(long maxWaitNanos) {
+        if (!this.transportCloseStarted || this.transportCloseDone.getCount() == 0L) {
+            return;
+        }
+        long waitNanos = Math.min(maxWaitNanos, this.transportCloseWaitDeadlineNanos - System.nanoTime());
+        if (waitNanos <= 0L) {
+            return;
+        }
+        try {
+            this.transportCloseDone.await(waitNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     void enqueueControlLocked(FrameCodec.Frame frame) throws IOException {
@@ -3380,18 +3609,18 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return this.openingCoordinator.beginLocalOpenForCloseLocked(streamRuntime);
     }
 
-    void queueOpeningDataLocked(StreamRuntime streamRuntime, byte[] openingPrefix, byte[] payload, boolean fin)
+    int queueOpeningDataLocked(StreamRuntime streamRuntime, byte[] openingPrefix, byte[] payload, boolean fin)
             throws IOException {
-        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, fin, null);
+        return this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, fin, null);
     }
 
-    void queueOpeningDataLocked(StreamRuntime streamRuntime,
-                                byte[] openingPrefix,
-                                byte[] payload,
-                                boolean fin,
-                                StreamWriteCompletion completion)
+    int queueOpeningDataLocked(StreamRuntime streamRuntime,
+                               byte[] openingPrefix,
+                               byte[] payload,
+                               boolean fin,
+                               StreamWriteCompletion completion)
             throws IOException {
-        this.queueOpeningDataLocked(
+        return this.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
                 payload,
@@ -3403,7 +3632,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         );
     }
 
-    void queueOpeningDataLocked(
+    int queueOpeningDataLocked(
             StreamRuntime streamRuntime,
             byte[] openingPrefix,
             byte[] payload,
@@ -3411,10 +3640,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             int payloadLength,
             boolean fin
     ) throws IOException {
-        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
+        return this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
     }
 
-    void queueOpeningDataLocked(
+    int queueOpeningDataLocked(
             StreamRuntime streamRuntime,
             byte[] openingPrefix,
             byte[] payload,
@@ -3423,7 +3652,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             boolean fin,
             StreamWriteCompletion completion
     ) throws IOException {
-        this.queueOpeningDataLocked(
+        return this.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
                 payload,
@@ -3435,7 +3664,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         );
     }
 
-    void queueOpeningDataLocked(
+    int queueOpeningDataLocked(
             StreamRuntime streamRuntime,
             byte[] openingPrefix,
             byte[] payload,
@@ -3444,10 +3673,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             boolean fin,
             PayloadOwnership payloadOwnership
     ) throws IOException {
-        this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
+        return this.queueOpeningDataLocked(streamRuntime, openingPrefix, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
     }
 
-    void queueOpeningDataLocked(
+    int queueOpeningDataLocked(
             StreamRuntime streamRuntime,
             byte[] openingPrefix,
             byte[] payload,
@@ -3457,7 +3686,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             PayloadOwnership payloadOwnership,
             StreamWriteCompletion completion
     ) throws IOException {
-        this.openingCoordinator.queueOpeningDataLocked(
+        return this.openingCoordinator.queueOpeningDataLocked(
                 streamRuntime,
                 openingPrefix,
                 payload,
@@ -3473,27 +3702,27 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.openingCoordinator.queueOpeningFinLocked(streamRuntime, openingPrefix);
     }
 
-    void queueOpeningDataLocked(StreamRuntime streamRuntime,
-                                byte[] prefix,
-                                byte[][] parts,
-                                int partIndex,
-                                int partOffset,
-                                int length,
-                                boolean fin,
-                                PayloadOwnership payloadOwnership) throws IOException {
-        this.queueOpeningDataLocked(streamRuntime, prefix, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
+    int queueOpeningDataLocked(StreamRuntime streamRuntime,
+                               byte[] prefix,
+                               byte[][] parts,
+                               int partIndex,
+                               int partOffset,
+                               int length,
+                               boolean fin,
+                               PayloadOwnership payloadOwnership) throws IOException {
+        return this.queueOpeningDataLocked(streamRuntime, prefix, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
     }
 
-    void queueOpeningDataLocked(StreamRuntime streamRuntime,
-                                byte[] prefix,
-                                byte[][] parts,
-                                int partIndex,
-                                int partOffset,
-                                int length,
-                                boolean fin,
-                                PayloadOwnership payloadOwnership,
-                                StreamWriteCompletion completion) throws IOException {
-        this.openingCoordinator.queueOpeningDataLocked(
+    int queueOpeningDataLocked(StreamRuntime streamRuntime,
+                               byte[] prefix,
+                               byte[][] parts,
+                               int partIndex,
+                               int partOffset,
+                               int length,
+                               boolean fin,
+                               PayloadOwnership payloadOwnership,
+                               StreamWriteCompletion completion) throws IOException {
+        return this.openingCoordinator.queueOpeningDataLocked(
                 streamRuntime,
                 prefix,
                 parts,
@@ -3506,33 +3735,33 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         );
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime, byte[] payload, boolean fin) throws IOException {
-        this.queueDataLocked(streamRuntime, payload, fin, null);
+    int queueDataLocked(StreamRuntime streamRuntime, byte[] payload, boolean fin) throws IOException {
+        return this.queueDataLocked(streamRuntime, payload, fin, null);
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime,
-                         byte[] payload,
-                         boolean fin,
-                         StreamWriteCompletion completion) throws IOException {
-        this.queueDataLocked(streamRuntime, payload, 0, payload.length, fin, PayloadOwnership.BORROWED, completion);
+    int queueDataLocked(StreamRuntime streamRuntime,
+                        byte[] payload,
+                        boolean fin,
+                        StreamWriteCompletion completion) throws IOException {
+        return this.queueDataLocked(streamRuntime, payload, 0, payload.length, fin, PayloadOwnership.BORROWED, completion);
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime, byte[] payload, int payloadOffset, int payloadLength, boolean fin)
+    int queueDataLocked(StreamRuntime streamRuntime, byte[] payload, int payloadOffset, int payloadLength, boolean fin)
             throws IOException {
-        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
+        return this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, (StreamWriteCompletion) null);
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime,
-                         byte[] payload,
-                         int payloadOffset,
-                         int payloadLength,
-                         boolean fin,
-                         StreamWriteCompletion completion)
+    int queueDataLocked(StreamRuntime streamRuntime,
+                        byte[] payload,
+                        int payloadOffset,
+                        int payloadLength,
+                        boolean fin,
+                        StreamWriteCompletion completion)
             throws IOException {
-        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, PayloadOwnership.BORROWED, completion);
+        return this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, PayloadOwnership.BORROWED, completion);
     }
 
-    void queueDataLocked(
+    int queueDataLocked(
             StreamRuntime streamRuntime,
             byte[] payload,
             int payloadOffset,
@@ -3540,10 +3769,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             boolean fin,
             PayloadOwnership payloadOwnership
     ) throws IOException {
-        this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
+        return this.queueDataLocked(streamRuntime, payload, payloadOffset, payloadLength, fin, payloadOwnership, null);
     }
 
-    void queueDataLocked(
+    int queueDataLocked(
             StreamRuntime streamRuntime,
             byte[] payload,
             int payloadOffset,
@@ -3552,7 +3781,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             PayloadOwnership payloadOwnership,
             StreamWriteCompletion completion
     ) throws IOException {
-        this.outboundDataCoordinator.queueDataLocked(
+        return this.outboundDataCoordinator.queueDataLocked(
                 streamRuntime,
                 payload,
                 payloadOffset,
@@ -3563,25 +3792,25 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         );
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime,
-                         byte[][] parts,
-                         int partIndex,
-                         int partOffset,
-                         int length,
-                         boolean fin,
-                         PayloadOwnership payloadOwnership) throws IOException {
-        this.queueDataLocked(streamRuntime, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
+    int queueDataLocked(StreamRuntime streamRuntime,
+                        byte[][] parts,
+                        int partIndex,
+                        int partOffset,
+                        int length,
+                        boolean fin,
+                        PayloadOwnership payloadOwnership) throws IOException {
+        return this.queueDataLocked(streamRuntime, parts, partIndex, partOffset, length, fin, payloadOwnership, null);
     }
 
-    void queueDataLocked(StreamRuntime streamRuntime,
-                         byte[][] parts,
-                         int partIndex,
-                         int partOffset,
-                         int length,
-                         boolean fin,
-                         PayloadOwnership payloadOwnership,
-                         StreamWriteCompletion completion) throws IOException {
-        this.outboundDataCoordinator.queueDataLocked(
+    int queueDataLocked(StreamRuntime streamRuntime,
+                        byte[][] parts,
+                        int partIndex,
+                        int partOffset,
+                        int length,
+                        boolean fin,
+                        PayloadOwnership payloadOwnership,
+                        StreamWriteCompletion completion) throws IOException {
+        return this.outboundDataCoordinator.queueDataLocked(
                 streamRuntime,
                 parts,
                 partIndex,
@@ -3792,12 +4021,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.priorityUpdateCoordinator.discardPendingPriorityQueueLocked();
     }
 
-    void reserveSendLocked(StreamRuntime streamRuntime, int bytes) throws IOException {
-        this.outboundDataCoordinator.reserveSendLocked(streamRuntime, bytes);
+    int reserveSendUpToLocked(StreamRuntime streamRuntime, int maxBytes, int retainedOverhead) throws IOException {
+        return this.outboundDataCoordinator.reserveSendUpToLocked(streamRuntime, maxBytes, retainedOverhead);
     }
 
-    void reserveSendLocked(StreamRuntime streamRuntime, int bytes, long trackedAdditional) throws IOException {
-        this.outboundDataCoordinator.reserveSendLocked(streamRuntime, bytes, trackedAdditional);
+    int reserveOpeningSendLocked(StreamRuntime streamRuntime, int maxBytes, int retainedOverhead) throws IOException {
+        return this.outboundDataCoordinator.reserveOpeningSendLocked(streamRuntime, maxBytes, retainedOverhead);
     }
 
     private boolean withinQueuedDataWatermarkLocked(StreamRuntime streamRuntime, int bytes) {
@@ -4032,7 +4261,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         if (completion == null) {
             return false;
         }
-        if (this.hasWriteCompletionLocked(this.inflightBatch, completion)) {
+        if (this.hasWriteCompletionLocked(this.inflightBatch, completion)
+                || this.hasWriteCompletionLocked(this.stagedOrdinaryBatch, completion)) {
             return false;
         }
         int queuedFrames = this.writeCompletionFrameCountLocked(this.urgentQueue, completion)
@@ -4072,10 +4302,17 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
                                                       Set<StreamRuntime> finStreams,
                                                       Set<StreamRuntime> touchedStreams) {
         boolean removed = false;
+        OutboundFrame committedOpener = null;
         Iterator<OutboundFrame> iterator = deque.iterator();
         while (iterator.hasNext()) {
             OutboundFrame outboundFrame = iterator.next();
             if (!outboundFrame.writeCompletionIs(completion)) {
+                continue;
+            }
+            if (outboundFrame.openingFrame
+                    && outboundFrame.stream != null
+                    && !outboundFrame.stream.peerVisibleLocked()) {
+                committedOpener = outboundFrame;
                 continue;
             }
             iterator.remove();
@@ -4092,7 +4329,40 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             }
             removed = true;
         }
+        if (committedOpener != null) {
+            // The opener's stream ID is already committed: dropping it would let later openers of the same
+            // class reach the peer first (SPEC §3.1). Only its payload is cancelled; the stream still opens
+            // in place with a zero-length opener.
+            this.replaceQueuedFrameLocked(
+                    deque,
+                    committedOpener,
+                    this.openingCoordinator.zeroLengthOpeningFrameLocked(committedOpener, false)
+            );
+            touchedStreams.add(committedOpener.stream);
+            if (committedOpener.finFrame()) {
+                finStreams.add(committedOpener.stream);
+            }
+            removed = true;
+        }
         return removed;
+    }
+
+    private void replaceQueuedFrameLocked(Deque<OutboundFrame> deque, OutboundFrame existing, OutboundFrame replacement) {
+        int size = deque.size();
+        for (int i = 0; i < size; ++i) {
+            OutboundFrame outboundFrame = deque.pollFirst();
+            deque.offerLast(outboundFrame == existing ? replacement : outboundFrame);
+        }
+        int existingBytes = SessionRuntime.retainedQueueBytes(existing);
+        int replacementBytes = SessionRuntime.retainedQueueBytes(replacement);
+        if (deque == this.urgentQueue) {
+            this.outboundQueueBookkeeping.noteUrgentFrameDequeuedLocked(existingBytes);
+            this.outboundQueueBookkeeping.noteUrgentFrameEnqueuedLocked(replacementBytes);
+        } else if (deque == this.dataQueue) {
+            this.outboundQueueBookkeeping.noteOrdinaryFrameDequeuedLocked(existingBytes);
+            this.outboundQueueBookkeeping.noteOrdinaryFrameEnqueuedLocked(replacementBytes);
+        }
+        this.releaseQueuedDataLocked(existing);
     }
 
     private int writeCompletionFrameCountLocked(Deque<OutboundFrame> deque, StreamWriteCompletion completion) {
@@ -4122,7 +4392,8 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     private boolean hasInflightFinFrameLocked(StreamRuntime streamRuntime) {
-        return this.hasFinFrameLocked(this.inflightBatch, streamRuntime);
+        return this.hasFinFrameLocked(this.inflightBatch, streamRuntime)
+                || this.hasFinFrameLocked(this.stagedOrdinaryBatch, streamRuntime);
     }
 
     private boolean hasFinFrameLocked(Collection<OutboundFrame> outboundFrames, StreamRuntime streamRuntime) {
@@ -4149,6 +4420,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     void onReadDiscardLocked(StreamRuntime streamRuntime, boolean acceptQueuedStream) {
         this.readerRuntime.onReadDiscardLocked(streamRuntime, acceptQueuedStream);
+    }
+
+    void onReadBlockedLocked(StreamRuntime streamRuntime) {
+        this.readerRuntime.onReadBlockedLocked(streamRuntime);
     }
 
     void retryReceiveReplenishLocked() {
@@ -4370,6 +4645,57 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.notifyLockWaitersLocked();
     }
 
+    /**
+     * Refuses a peer-owned stream ID above the local GOAWAY watermark. Such an ID is not consumed (SPEC 3.1) and keeps
+     * no per-ID state; peers open the IDs of one class in increasing order, so remembering the highest refused ID per
+     * class is enough to send ABORT(REFUSED_STREAM) at most once per ID while frames racing the refusal arrive.
+     */
+    void refusePeerOpeningPastGoAwayLocked(long streamId, boolean hidden) throws IOException {
+        boolean bidirectional = SessionRuntime.streamIsBidi(streamId);
+        if (streamId <= (bidirectional ? this.highestRefusedPeerBidi : this.highestRefusedPeerUni)) {
+            return;
+        }
+        if (bidirectional) {
+            this.highestRefusedPeerBidi = streamId;
+        } else {
+            this.highestRefusedPeerUni = streamId;
+        }
+        this.refusePeerOpeningStreamLocked(streamId, false, hidden);
+    }
+
+    /**
+     * Local stream IDs are never wrapped or reused (SPEC 3.1). The first time a class runs out, the session begins
+     * graceful replacement with one GOAWAY that keeps the current watermarks; opens of the other class still work.
+     */
+    void onLocalStreamIdsExhaustedLocked() {
+        if (this.localStreamIdExhaustionHandled) {
+            return;
+        }
+        this.localStreamIdExhaustionHandled = true;
+        if (this.localGoAwayIssued
+                || this.gracefulCloseActive
+                || this.closeFrameQueued
+                || this.state == SessionState.CLOSING
+                || this.shouldFailSessionOperationsLocked()) {
+            return;
+        }
+        try {
+            LocalGoAwayWaiter waiter = this.enqueueLocalGoAwayLocked(
+                    this.effectiveGoAwaySendWatermarkLocked(true),
+                    this.effectiveGoAwaySendWatermarkLocked(false),
+                    ErrorCode.NO_ERROR.code(),
+                    "",
+                    false
+            );
+            if (waiter != null) {
+                // Nobody waits for this GOAWAY to reach the transport.
+                this.localGoAwayWaiters.remove(waiter);
+            }
+        } catch (IOException ignored) {
+            // A session that cannot queue GOAWAY any more is already terminating.
+        }
+    }
+
     void failProvisionalLocalAbortLocked(StreamRuntime streamRuntime, long code, String reason) {
         this.localOpenTracker.failProvisionalLocalAbortLocked(streamRuntime, code, reason);
     }
@@ -4436,6 +4762,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.stopSendingGracefulCoordinator.clear();
         this.streams = new HashMap<>();
         this.terminalBookkeeping.clear();
+        this.aggregateLateDataReceived = 0L;
         this.clearAcceptQueuesLocked();
         this.localOpenTracker.clear();
         this.flowControlUpdateRegistry.clear();
@@ -5002,6 +5329,9 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         }
         inflightBatch = Collections.emptyList();
 
+        // Every frame in the batch reached the transport, including any that the urgent order placed after CLOSE
+        // (a retained GOAWAY), so complete them all before the CLOSE finishes the session.
+        boolean closeWritten = false;
         for (OutboundFrame outboundFrame : list) {
             this.sentFrames = SessionRuntime.saturatingAdd(this.sentFrames, 1L);
             if (outboundFrame.dataBytes > 0) {
@@ -5021,9 +5351,11 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             }
             outboundFrame.completeWriteSuccess();
             if (outboundFrame.frame().type() == FrameType.CLOSE) {
-                finishSessionLocked(null, state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED);
-                return;
+                closeWritten = true;
             }
+        }
+        if (closeWritten) {
+            finishSessionLocked(null, state == SessionState.FAILED ? SessionState.FAILED : SessionState.CLOSED);
         }
     }
 
@@ -5129,6 +5461,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     SessionTerminalBookkeeping.TerminalDataDisposition terminalDataDispositionForLocked(long streamId) {
+        // A live stream has no terminal bookkeeping of its own, but a coarsened marker prefix may span its ID.
+        if (this.streams.containsKey(streamId)) {
+            return null;
+        }
         return this.terminalBookkeeping.terminalDataDispositionForLocked(streamId);
     }
 
@@ -5233,6 +5569,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         }
     }
 
+    // Advisory bound on retained late-tail accounting (configured value, else the repository default). Late bytes are
+    // never buffered here, so no runtime path enforces it: exceeding it only means further late bytes keep being
+    // discarded with session credit released; it never fails the session (API_SEMANTICS 3). Kept as the reference
+    // value the aggregate accounting is checked against in tests.
     long aggregateLateDataCap() {
         if (this.config.aggregateLateDataCap() > 0L) {
             return this.config.aggregateLateDataCap();
@@ -5243,17 +5583,36 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     boolean recordTerminalLateDataLocked(long streamId, int length) {
         SessionTerminalBookkeeping.TerminalLateDataResult result =
                 this.terminalBookkeeping.recordTerminalLateDataLocked(streamId, length);
+        if (result.tracked()) {
+            this.addRetainedLateDataLocked(length);
+        }
         if (result.hidden()) {
             this.onHiddenUnreadBytesDiscardedLocked(length);
         }
         return result.capExceeded();
     }
 
+    void addRetainedLateDataLocked(long bytes) {
+        this.aggregateLateDataReceived = SessionRuntime.saturatingAdd(this.aggregateLateDataReceived, bytes);
+    }
+
+    void releaseRetainedLateDataLocked(long bytes) {
+        if (bytes <= 0L) {
+            return;
+        }
+        this.aggregateLateDataReceived = Math.max(0L, this.aggregateLateDataReceived - bytes);
+    }
+
     long lateDataPerStreamCap(StreamRuntime streamRuntime) {
         if (streamRuntime == null || !streamRuntime.localReceive()) {
             return Long.MAX_VALUE;
         }
-        return RuntimeFlow.lateDataPerStreamCap(streamRuntime.initialReceiveWindow(), this.localSettings().maxFramePayload());
+        // The repository floor applies to tails after peer RESET/ABORT; after a local read-stop or ABORT the
+        // allowance also covers the stream credit that was still outstanding when the stop committed.
+        return Math.max(
+                RuntimeFlow.lateDataPerStreamCap(streamRuntime.initialReceiveWindow(), this.localSettings().maxFramePayload()),
+                streamRuntime.lateDataOutstandingCreditLocked()
+        );
     }
 
     long recvSessionReceivedBytesInternal() {
@@ -5269,7 +5628,16 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
     }
 
     void setRecvSessionAdvertisedInternal(long value) {
+        if (value > this.recvSessionAdvertised) {
+            this.sessionCreditGrantedSinceBlocked = true;
+        }
         this.recvSessionAdvertised = value;
+    }
+
+    boolean takeSessionCreditGrantedSinceBlockedLocked() {
+        boolean granted = this.sessionCreditGrantedSinceBlocked;
+        this.sessionCreditGrantedSinceBlocked = false;
+        return granted;
     }
 
     long recvSessionPendingInternal() {
@@ -5390,6 +5758,22 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     List<OutboundFrame> inflightBatchInternal() {
         return this.inflightBatch;
+    }
+
+    List<OutboundFrame> stagedOrdinaryBatchInternal() {
+        return this.stagedOrdinaryBatch;
+    }
+
+    void setStagedOrdinaryBatchInternal(List<OutboundFrame> batch) {
+        this.stagedOrdinaryBatch = batch == null ? Collections.emptyList() : batch;
+    }
+
+    void pullEarlierOpeningFramesLocked(List<OutboundFrame> batch, boolean trackWriterHeld) {
+        this.openingCoordinator.pullEarlierOpeningFramesLocked(batch, trackWriterHeld);
+    }
+
+    OutboundFrame zeroLengthOpenerReplacementLocked(OutboundFrame openingFrame) {
+        return this.openingCoordinator.zeroLengthOpenerReplacementLocked(openingFrame);
     }
 
     void setInflightBatchInternal(List<OutboundFrame> batch) {
@@ -5524,6 +5908,77 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     void clearKeepaliveSchedulesLockedInternal() {
         this.telemetry.clearKeepaliveSchedulesLocked();
+        this.cancelKeepaliveTimerLocked();
+    }
+
+    /**
+     * Keeps a timer armed for the next keepalive deadline so the keepalive PING and its timeout are evaluated even
+     * while the writer thread is blocked in a transport write (IMPLEMENTATION 4). The writer still evaluates the
+     * same deadlines while idle; both run under the session lock. The timer is re-armed lazily: when it fires
+     * before anything is due (activity moved the deadline), it just schedules itself for the new deadline.
+     */
+    void rescheduleKeepaliveTimerLocked(long nowNanos) {
+        long waitNanos = this.telemetry.nextKeepaliveWakeNanosLocked(nowNanos);
+        if (waitNanos <= 0L) {
+            this.cancelKeepaliveTimerLocked();
+            return;
+        }
+        long dueAtNanos = SessionRuntime.saturatingAdd(nowNanos, waitNanos);
+        if (this.keepaliveTimerFuture != null
+                && !this.keepaliveTimerFuture.isDone()
+                && this.keepaliveTimerDueAtNanos - dueAtNanos <= 0L) {
+            return;
+        }
+        this.cancelKeepaliveTimerLocked();
+        this.keepaliveTimerDueAtNanos = dueAtNanos;
+        long generation = this.keepaliveTimerGeneration;
+        this.keepaliveTimerFuture = SessionLivenessTimer.schedule(() -> this.onKeepaliveTimer(generation), waitNanos);
+    }
+
+    private void cancelKeepaliveTimerLocked() {
+        ScheduledFuture<?> future = this.keepaliveTimerFuture;
+        this.keepaliveTimerFuture = null;
+        // A timer task that already fired may still be waiting for the lock: the new generation makes it a no-op.
+        this.keepaliveTimerGeneration++;
+        if (future != null) {
+            future.cancel(false);
+        }
+    }
+
+    private void onKeepaliveTimer(long generation) {
+        boolean timedOut = false;
+        IOException failure = null;
+        synchronized (this.lock) {
+            if (generation != this.keepaliveTimerGeneration) {
+                return;
+            }
+            this.keepaliveTimerFuture = null;
+            long nowNanos = System.nanoTime();
+            try {
+                timedOut = this.telemetry.processKeepaliveScheduledWorkLocked(nowNanos);
+            } catch (IOException error) {
+                failure = error;
+            }
+            if (!timedOut && failure == null) {
+                this.rescheduleKeepaliveTimerLocked(nowNanos);
+            }
+        }
+        if (timedOut) {
+            // CLOSE(IDLE_TIMEOUT) is only queued here; its bounded delivery (armCloseFrameDeadlineLocked) closes the
+            // transport if the writer stays blocked.
+            SessionLivenessTimer.runDetached("zmux-keepalive-timeout", () -> {
+                try {
+                    this.emitKeepaliveTimeoutClose();
+                } catch (IOException ignored) {
+                    // The session is already terminating.
+                } finally {
+                    this.emitPendingEvents();
+                }
+            });
+        } else if (failure != null) {
+            IOException keepaliveFailure = failure;
+            SessionLivenessTimer.runDetached("zmux-keepalive-failure", () -> this.failSession(keepaliveFailure));
+        }
     }
 
     boolean hasActivePingLockedInternal() {
@@ -5714,11 +6169,10 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         this.nextPeerUni = SessionRuntime.firstPeerStreamId(negotiated.localRole(), false);
         this.sessionSendLimit = negotiated.peerSettings().initialMaxData();
         this.recvSessionAdvertised = this.config.settings().initialMaxData();
-        this.pingNonceState = SessionRuntime.initSessionNonceState(
-                (this.localPreface.tieBreakerNonce() << 1) ^ remotePreface.tieBreakerNonce()
-        );
-        this.telemetry.markReadyLocked(this.localPreface.tieBreakerNonce() ^ remotePreface.tieBreakerNonce(), readyAtNanos);
+        this.pingNonceState = SessionRuntime.initSessionNonceState(SessionRuntime.randomSessionSeed());
+        this.telemetry.markReadyLocked(SessionRuntime.randomSessionSeed(), readyAtNanos);
         this.state = SessionState.READY;
+        this.rescheduleKeepaliveTimerLocked(readyAtNanos);
     }
 
     private long nextPingNonceLocked() {
@@ -6042,9 +6496,26 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         }
 
         synchronized void await() throws IOException {
+            this.await(0L);
+        }
+
+        /**
+         * Waits for the GOAWAY to be written or failed; {@code timeoutNanos <= 0} waits without a bound. Returns
+         * false when the bound expired first.
+         */
+        synchronized boolean await(long timeoutNanos) throws IOException {
+            long deadlineNanos = timeoutNanos > 0L ? SessionRuntime.saturatingAdd(System.nanoTime(), timeoutNanos) : 0L;
             while (!this.done) {
                 try {
-                    wait();
+                    if (deadlineNanos == 0L) {
+                        wait();
+                    } else {
+                        long remainingNanos = deadlineNanos - System.nanoTime();
+                        if (remainingNanos <= 0L) {
+                            return false;
+                        }
+                        TimeUnit.NANOSECONDS.timedWait(this, remainingNanos);
+                    }
                 } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
                     throw SessionRuntime.interruptedIo(
@@ -6059,6 +6530,7 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             if (this.error != null) {
                 throw this.error;
             }
+            return true;
         }
     }
 

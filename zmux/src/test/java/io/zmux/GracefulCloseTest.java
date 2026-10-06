@@ -4,6 +4,7 @@ import io.zmux.transport.BasicDuplexConnection;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -230,7 +231,7 @@ final class GracefulCloseTest {
         }
 
         static SessionPair open(ZmuxConfig clientConfig, ZmuxConfig serverConfig) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket leftSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket rightSocket = listener.accept();
             listener.close();

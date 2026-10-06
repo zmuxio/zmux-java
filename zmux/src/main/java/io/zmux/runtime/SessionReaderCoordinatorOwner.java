@@ -54,6 +54,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
+    public void recordNonAdvancingFlowControlFrameLocked(FrameType frameType, int payloadBytes) throws IOException {
+        this.owner.recordNonAdvancingFlowControlFrameLocked(frameType, payloadBytes);
+    }
+
+    @Override
     public void recordInboundPingFloodLocked() throws IOException {
         this.owner.recordInboundPingFloodLocked();
     }
@@ -137,6 +142,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     public void refusePeerOpeningStreamLocked(long streamId, boolean recordTombstone, boolean hidden)
             throws IOException {
         this.owner.refusePeerOpeningStreamLocked(streamId, recordTombstone, hidden);
+    }
+
+    @Override
+    public void refusePeerOpeningPastGoAwayLocked(long streamId, boolean hidden) throws IOException {
+        this.owner.refusePeerOpeningPastGoAwayLocked(streamId, hidden);
     }
 
     @Override
@@ -410,8 +420,8 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     }
 
     @Override
-    public long aggregateLateDataCap() {
-        return this.owner.aggregateLateDataCap();
+    public void addRetainedLateDataLocked(long bytes) {
+        this.owner.addRetainedLateDataLocked(bytes);
     }
 
     @Override
@@ -451,6 +461,11 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     @Override
     public void setRecvSessionAdvertised(long value) {
         this.owner.setRecvSessionAdvertisedInternal(value);
+    }
+
+    @Override
+    public boolean takeSessionCreditGrantedSinceBlockedLocked() {
+        return this.owner.takeSessionCreditGrantedSinceBlockedLocked();
     }
 
     @Override
@@ -571,16 +586,6 @@ final class SessionReaderCoordinatorOwner implements SessionReaderCoordinator.Ow
     @Override
     public void setBufferedReceiveStorageBytes(long value) {
         this.owner.setBufferedReceiveStorageBytesInternal(value);
-    }
-
-    @Override
-    public long aggregateLateDataReceived() {
-        return this.owner.aggregateLateDataReceivedInternal();
-    }
-
-    @Override
-    public void setAggregateLateDataReceived(long value) {
-        this.owner.setAggregateLateDataReceivedInternal(value);
     }
 
     @Override

@@ -56,11 +56,6 @@ final class SessionTerminalBookkeepingOwner implements SessionTerminalBookkeepin
     }
 
     @Override
-    public IOException sessionInternalError(String operation, String message) {
-        return SessionRuntime.sessionInternalError(operation, message);
-    }
-
-    @Override
     public IOException sessionMemoryCapErrorLocked(String operation) {
         return this.owner.sessionMemoryCapErrorLocked(operation);
     }
@@ -73,5 +68,10 @@ final class SessionTerminalBookkeepingOwner implements SessionTerminalBookkeepin
     @Override
     public void failSessionAsync(IOException error) {
         this.owner.failSessionAsync(error);
+    }
+
+    @Override
+    public void releaseRetainedLateDataLocked(long bytes) {
+        this.owner.releaseRetainedLateDataLocked(bytes);
     }
 }

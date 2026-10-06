@@ -8,6 +8,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.quic.*;
 import io.netty.util.concurrent.Future;
 import io.zmux.*;
+import io.zmux.support.StreamApiSupport;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -403,7 +404,12 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         Objects.requireNonNull(data, "data");
         ZmuxStream stream = openBidiStream(options, TimeoutBudget.unbounded());
         if (data.length > 0) {
-            stream.write(data);
+            try {
+                stream.write(data);
+            } catch (IOException | RuntimeException | Error failure) {
+                StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+                throw failure;
+            }
         }
         return stream;
     }
@@ -428,6 +434,9 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         try {
             stream.write(data);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_and_send failed");
+            throw failure;
         } finally {
             if (budget.bounded()) {
                 stream.state.setWriteDeadlineNanos(0L);
@@ -444,7 +453,12 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
     public ZmuxSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException, InterruptedException {
         Objects.requireNonNull(data, "data");
         ZmuxSendStream stream = openUniSendStream(options, TimeoutBudget.unbounded());
-        stream.writeFinal(data);
+        try {
+            stream.writeFinal(data);
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
+        }
         return stream;
     }
 
@@ -466,6 +480,9 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         try {
             stream.writeFinal(data);
             return stream;
+        } catch (IOException | RuntimeException | Error failure) {
+            StreamApiSupport.abortUnreturnedStream(stream, failure, "open_uni_and_send failed");
+            throw failure;
         } finally {
             if (budget.bounded()) {
                 stream.state.setWriteDeadlineNanos(0L);
@@ -1340,7 +1357,7 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         try {
             future = channel.createStream(streamType, state.newHandler());
             state.attachChannel(awaitStreamFuture(future, budget));
-            state.maybeSendOpenPreludeOnOpen();
+            sendOpenPreludeWithinBudget(state, budget);
             noteOpenLatency(startedAtNanos, System.nanoTime());
             return stream;
         } catch (InterruptedException interrupted) {
@@ -1361,11 +1378,30 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         }
     }
 
+    // The eager open prelude (open_info / priority / group) is part of the open, so a timed open
+    // bounds it with the same budget and reports expiry as an open timeout.
+    private static void sendOpenPreludeWithinBudget(NettyQuicStreamState state, TimeoutBudget budget)
+            throws IOException {
+        if (!budget.bounded()) {
+            state.maybeSendOpenPreludeOnOpen();
+            return;
+        }
+        state.setWriteDeadlineNanos(budget.deadlineNanos());
+        try {
+            state.maybeSendOpenPreludeOnOpen();
+        } catch (WriteTimeoutException timeout) {
+            throw NettyQuicSupport.openTimedOut();
+        } finally {
+            state.setWriteDeadlineNanos(0L);
+        }
+    }
+
     private void cleanupFailedLocalOpen(NettyQuicStreamState state, Future<QuicStreamChannel> future) {
         if (future != null) {
             future.cancel(true);
         }
         activeStreams.remove(state);
+        state.abortFailedLocalOpen();
         state.closeRaw();
     }
 

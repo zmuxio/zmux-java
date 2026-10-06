@@ -528,6 +528,9 @@ final class ApiSurfaceTest {
                         .initialMaxStreamDataBidiPeerOpened(1L)
                         .initialMaxStreamDataBidiLocallyOpened(1L)
                         .build())
+                // Small receive HWMs disable standing window growth so the 1-byte windows stay a hard cap.
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
         try (SessionPair pair = SessionPair.open(config)) {
             ZmuxStream outbound = pair.client().openStream();
@@ -578,6 +581,9 @@ final class ApiSurfaceTest {
                         .initialMaxData(1L)
                         .initialMaxStreamDataUni(1L)
                         .build())
+                // Small receive HWMs disable standing window growth so the 1-byte windows stay a hard cap.
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
         try (SessionPair pair = SessionPair.open(config)) {
             WriteTimeoutException timeout = assertThrows(
@@ -599,6 +605,9 @@ final class ApiSurfaceTest {
                         .initialMaxStreamDataBidiPeerOpened(1L)
                         .initialMaxStreamDataBidiLocallyOpened(1L)
                         .build())
+                // Small receive HWMs disable standing window growth so the 1-byte windows stay a hard cap.
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
         try (SessionPair pair = SessionPair.open(config)) {
             WriteTimeoutException timeout = assertThrows(
@@ -609,6 +618,81 @@ final class ApiSurfaceTest {
             assertNotNull(details);
             assertEquals("write", details.operation());
             assertTrue(details.timeout());
+        }
+    }
+
+    @FunctionalInterface
+    private interface FailingOpenAndSend {
+        Object run(ZmuxNativeSession client) throws Exception;
+    }
+
+    private static IOException drainUntilFailure(ZmuxRecvStream inbound) throws IOException {
+        inbound.setReadTimeout(Duration.ofSeconds(2));
+        byte[] buffer = new byte[64];
+        try {
+            while (inbound.read(buffer) >= 0) {
+                // Discard the bytes the failed helper managed to send before it aborted.
+            }
+        } catch (IOException error) {
+            return error;
+        }
+        throw new AssertionError("peer stream ended gracefully instead of being aborted");
+    }
+
+    @Test
+    void openAndSendHelpersAbortTheUnreturnedStreamWhenTheFirstWriteFails() throws Exception {
+        ZmuxConfig config = ZmuxConfig.builder()
+                .settings(Settings.builder()
+                        .initialMaxStreamDataBidiPeerOpened(4L)
+                        .initialMaxStreamDataBidiLocallyOpened(4L)
+                        .initialMaxStreamDataUni(4L)
+                        .build())
+                // Small receive HWMs disable standing window growth so the 4-byte windows stay a hard cap.
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
+                .build();
+        byte[] payload = "abcdefgh".getBytes(StandardCharsets.UTF_8);
+        Duration timeout = Duration.ofMillis(100);
+        String[] names = {
+                "openAndSendWithTimeout(Duration, byte[])",
+                "openAndSendWithTimeout(Duration, ByteBuffer)",
+                "openAndSendWithTimeout(OpenOptions, Duration, byte[], int, int)",
+                "openUniAndSendWithTimeout(Duration, ByteBuffer)",
+                "openUniAndSendWithTimeout(Duration, byte[], int, int)",
+        };
+        FailingOpenAndSend[] calls = {
+                client -> client.openAndSendWithTimeout(timeout, payload),
+                client -> client.openAndSendWithTimeout(timeout, ByteBuffer.wrap(payload)),
+                client -> client.openAndSendWithTimeout(OpenOptions.empty(), timeout, payload, 0, payload.length),
+                client -> client.openUniAndSendWithTimeout(timeout, ByteBuffer.wrap(payload)),
+                client -> client.openUniAndSendWithTimeout(timeout, payload, 0, payload.length),
+        };
+        for (int i = 0; i < calls.length; i++) {
+            String name = names[i];
+            boolean uni = name.startsWith("openUni");
+            FailingOpenAndSend call = calls[i];
+            try (SessionPair pair = SessionPair.open(config)) {
+                assertThrows(WriteTimeoutException.class, () -> call.run(pair.client()), name + " should time out");
+
+                ZmuxRecvStream inbound = uni
+                        ? pair.server().acceptUniStream(Duration.ofSeconds(2))
+                        : pair.server().acceptStream(Duration.ofSeconds(2));
+                IOException readError = drainUntilFailure(inbound);
+                assertEquals(
+                        ErrorCode.CANCELLED.code(),
+                        ZmuxErrors.code(readError, -1L),
+                        name + ": the peer should see the unreturned stream aborted with CANCELLED, got " + readError
+                );
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                while (System.nanoTime() < deadline
+                        && pair.client().stats().activeStreams().localBidi()
+                        + pair.client().stats().activeStreams().localUni() != 0L) {
+                    Thread.sleep(10L);
+                }
+                assertEquals(0L, pair.client().stats().activeStreams().localBidi(), name + ": no local bidi stream may leak");
+                assertEquals(0L, pair.client().stats().activeStreams().localUni(), name + ": no local uni stream may leak");
+                assertEquals(SessionState.READY, pair.client().state(), name + ": the session should stay usable");
+            }
         }
     }
 
@@ -676,6 +760,9 @@ final class ApiSurfaceTest {
                         .initialMaxStreamDataBidiPeerOpened(1L)
                         .initialMaxStreamDataBidiLocallyOpened(1L)
                         .build())
+                // Small receive HWMs disable standing window growth so the 1-byte windows stay a hard cap.
+                .perStreamQueuedDataHwm(1L)
+                .sessionQueuedDataHwm(1L)
                 .build();
         try (SessionPair pair = SessionPair.open(config)) {
             ZmuxStream outbound = pair.client().openStream();
@@ -1533,7 +1620,7 @@ final class ApiSurfaceTest {
 
     @Test
     void joinedDuplexConnectionCanServeAsSessionTransport() throws Exception {
-        ServerSocket listener = new ServerSocket(0);
+        ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
         Socket clientSocket = new Socket("127.0.0.1", listener.getLocalPort());
         Socket serverSocket = listener.accept();
         listener.close();
@@ -2101,7 +2188,7 @@ final class ApiSurfaceTest {
         }
 
         private static SessionPair open(ZmuxConfig config, boolean omitAddresses) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket clientSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket serverSocket = listener.accept();
             listener.close();

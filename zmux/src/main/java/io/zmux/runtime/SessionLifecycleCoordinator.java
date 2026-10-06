@@ -154,6 +154,7 @@ final class SessionLifecycleCoordinator {
                 this.owner.setCloseFrameQueued(true);
                 try {
                     this.owner.enqueueCloseFrameLocked(this.owner.buildControlErrorPayloadLocked(code, reason));
+                    this.owner.armCloseFrameDeadlineLocked();
                 } catch (IOException ignored) {
                     this.finishSessionLocked(terminalError, SessionState.FAILED);
                 }
@@ -214,11 +215,8 @@ final class SessionLifecycleCoordinator {
             return;
         }
         this.owner.setClosedTransport(true);
-        try {
-            this.owner.closeConnection();
-        } catch (IOException ignored) {
-            // Transport is already terminating.
-        }
+        // Never closes under the session lock: a blocking transport close must not wedge the session.
+        this.owner.releaseTransport();
     }
 
     SessionState terminalStateForSessionError(IOException error) {
@@ -297,6 +295,9 @@ final class SessionLifecycleCoordinator {
             synchronized (this.owner.lock()) {
                 this.owner.recordCloseCompletionTimeoutLocked();
             }
+            // Never return with the transport still open behind a stalled writer (IMPLEMENTATION 8 "close
+            // bounding"): finish the session now, keeping its committed cause.
+            this.owner.forceFinishSession(true);
             throw new GracefulCloseTimeoutException();
         }
     }
@@ -348,6 +349,10 @@ final class SessionLifecycleCoordinator {
 
         void enqueueCloseFrameLocked(byte[] payload) throws IOException;
 
+        void armCloseFrameDeadlineLocked();
+
+        boolean forceFinishSession(boolean closeFrameTimedOut);
+
         void enqueueSessionClosedEventLocked(IOException error);
 
         void notifyLockWaiters();
@@ -358,7 +363,7 @@ final class SessionLifecycleCoordinator {
 
         void setClosedTransport(boolean value);
 
-        void closeConnection() throws IOException;
+        void releaseTransport();
 
         boolean hasGracefulClosePendingWorkLocked();
 

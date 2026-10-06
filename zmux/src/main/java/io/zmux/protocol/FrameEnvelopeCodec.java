@@ -49,7 +49,7 @@ public final class FrameEnvelopeCodec {
             throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame payload");
         }
         FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
-        validateFrame(frame, normalized, true);
+        validateFrame(frame, normalized, true, true);
         return frame;
     }
 
@@ -60,6 +60,31 @@ public final class FrameEnvelopeCodec {
     public static InboundFrame readInboundFrame(FrameCodec.Decoder input,
                                                 Limits limits,
                                                 InboundPayloadPool payloadPool) throws IOException {
+        return readInboundFrame(input, limits, payloadPool, true);
+    }
+
+    /**
+     * Reads one inbound frame for a session reader.
+     *
+     * <p>This is {@link #readInboundFrame(FrameCodec.Decoder, Limits, InboundPayloadPool)} without the
+     * extension-subtype checks: only the generic EXT envelope (a parseable {@code ext_type}) is validated here.
+     * Subtype rules such as PRIORITY_UPDATE's stream scope and TLV structure are left to the session, which must
+     * first check whether the extension was negotiated (SPEC 7.6: receivers MUST ignore an unnegotiated
+     * PRIORITY_UPDATE).
+     *
+     * <p>Internal to the native session reader; it is not part of the stable API and may change without notice.
+     * Proxies and conformance tools should use the strict readers.
+     */
+    public static InboundFrame readInboundSessionFrame(FrameCodec.Decoder input,
+                                                       Limits limits,
+                                                       InboundPayloadPool payloadPool) throws IOException {
+        return readInboundFrame(input, limits, payloadPool, false);
+    }
+
+    private static InboundFrame readInboundFrame(FrameCodec.Decoder input,
+                                                 Limits limits,
+                                                 InboundPayloadPool payloadPool,
+                                                 boolean validateExtSubtype) throws IOException {
         Limits normalized = limits.normalize();
         Varint62.Decoded frameLength = readValidatedFrameLength(input, normalized);
         int code = readRequiredFrameByte(input);
@@ -87,7 +112,7 @@ public final class FrameEnvelopeCodec {
                 throw FrameCodec.error(ErrorCode.PROTOCOL, "read frame", "truncated frame", eof);
             }
             FrameCodec.Frame frame = new FrameCodec.Frame(type, flags, streamIdDecoded.value(), payload);
-            validateFrame(frame, normalized, true);
+            validateFrame(frame, normalized, true, validateExtSubtype);
             success = true;
             return new InboundFrame(type, flags, streamIdDecoded.value(), payload, handle);
         } finally {
@@ -423,7 +448,10 @@ public final class FrameEnvelopeCodec {
         }
     }
 
-    private static void validateFrame(FrameCodec.Frame frame, Limits limits, boolean inbound) throws IOException {
+    private static void validateFrame(FrameCodec.Frame frame,
+                                      Limits limits,
+                                      boolean inbound,
+                                      boolean validateExtSubtype) throws IOException {
         validateFlags(frame.type(), frame.flags());
         validateFrameScope(frame);
         byte[] payload = frame.payloadBytes();
@@ -436,7 +464,7 @@ public final class FrameEnvelopeCodec {
             }
             return;
         }
-        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), payload.length, false);
+        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), payload.length, false, validateExtSubtype);
     }
 
     public static long encodedPayloadLength(int prefixLength, int payloadLength) {
@@ -463,7 +491,7 @@ public final class FrameEnvelopeCodec {
             }
             return;
         }
-        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), encodedPayloadLength, segmented);
+        validateNonDataFrame(frame, inboundPayloadLimit(frame.type(), limits), encodedPayloadLength, segmented, true);
     }
 
     private static void validateDataPayload(FrameCodec.Frame frame, String operation) throws IOException {
@@ -904,17 +932,18 @@ public final class FrameEnvelopeCodec {
     private static void validateNonDataFrame(FrameCodec.Frame frame,
                                              long payloadLimit,
                                              long actualPayloadLength,
-                                             boolean segmented) throws IOException {
+                                             boolean segmented,
+                                             boolean validateExtSubtype) throws IOException {
         if (segmented) {
             throw FrameCodec.error(ErrorCode.INTERNAL, "write frame", "segmented payloads are only supported for DATA");
         }
         if (actualPayloadLength > payloadLimit) {
             throw FrameCodec.error(ErrorCode.FRAME_SIZE, "validate payload", "payload exceeds configured limit");
         }
-        validateNonDataFramePayload(frame);
+        validateNonDataFramePayload(frame, validateExtSubtype);
     }
 
-    private static void validateNonDataFramePayload(FrameCodec.Frame frame) throws IOException {
+    private static void validateNonDataFramePayload(FrameCodec.Frame frame, boolean validateExtSubtype) throws IOException {
         byte[] payload = frame.payloadBytes();
         switch (frame.type()) {
             case MAX_DATA:
@@ -958,9 +987,16 @@ public final class FrameEnvelopeCodec {
                 try {
                     extType = Varint62.decode(payload, 0).value();
                 } catch (IOException error) {
-                    throw frameSizePayloadError("validate EXT payload", error);
+                    // SPEC 6.11: a payload too short for (or otherwise unable to carry) its ext_type is a
+                    // frame-specific session PROTOCOL error, not the generic FRAME_SIZE of 4.3.
+                    throw FrameCodec.error(
+                            ErrorCode.PROTOCOL,
+                            "validate EXT payload",
+                            error.getMessage() == null ? "invalid ext_type" : error.getMessage(),
+                            error
+                    );
                 }
-                if (extType == Protocol.EXT_PRIORITY_UPDATE) {
+                if (validateExtSubtype && extType == Protocol.EXT_PRIORITY_UPDATE) {
                     if (frame.streamId() == 0L) {
                         throw FrameCodec.error(ErrorCode.PROTOCOL, "validate EXT payload", "PRIORITY_UPDATE requires non-zero stream_id");
                     }

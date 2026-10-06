@@ -111,9 +111,11 @@ final class CloseReadRuntimeTest {
             );
             assertEquals(ZmuxErrorSource.LOCAL, readClosed.source(), "read-after-FIN source should remain local");
             assertEquals(ZmuxTerminationKind.STOPPED, readClosed.terminationKind(), "read-after-FIN termination kind should remain stopped");
-            assertFalse(stream.receiveGracefulLocked(), "local CloseRead should prevent recv tombstones from becoming graceful after peer FIN");
-            assertEquals(StreamRuntime.PeerDataAction.IGNORE, stream.peerDataActionLocked(false), "late DATA after CloseRead + peer FIN should remain on the discard path");
-            assertEquals(StreamRuntime.PeerDataAction.IGNORE_AND_FIN, stream.peerDataActionLocked(true), "late DATA|FIN after CloseRead + peer FIN should keep STOP_SENT semantics");
+            // Read-stop precedence only selects local read errors; peer DATA after the observed FIN is a
+            // stream-state violation on the live stream and on its tombstone alike (SPEC 9.2/9.6).
+            assertTrue(stream.receiveGracefulLocked(), "peer FIN after local CloseRead should make the recv tombstone graceful");
+            assertEquals(StreamRuntime.PeerDataAction.ABORT_STREAM_CLOSED, stream.peerDataActionLocked(false), "DATA after CloseRead + peer FIN should abort with STREAM_CLOSED");
+            assertEquals(StreamRuntime.PeerDataAction.ABORT_STREAM_CLOSED, stream.peerDataActionLocked(true), "DATA|FIN after CloseRead + peer FIN should abort with STREAM_CLOSED");
 
             ApplicationError operationError = assertInstanceOf(
                     ApplicationError.class,

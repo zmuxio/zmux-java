@@ -39,6 +39,8 @@ final class NettyQuicSupport {
             STREAM_INBOUND_AUTO_READ_HIGH_WATERMARK >>> 1;
     static final byte[] EMPTY_STREAM_PRELUDE = new byte[]{0};
     static final ZmuxSession CLOSED_SESSION = Zmux.closedSession();
+    // ZmuxErrorDetails.hasCode() is false for negative codes.
+    private static final long NO_ZMUX_CODE = -1L;
     private static final int ACCEPTED_PRELUDE_WORKER_MAX_CAP = NettyQuic.MAX_ACCEPTED_PRELUDE_MAX_CONCURRENT;
     private static final int ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY_CAP = ACCEPT_PRELUDE_PENDING_MAX_CAPACITY * 16;
     private static final int ACCEPTED_PRELUDE_WORKER_QUEUE_CAPACITY = positiveIntegerProperty(
@@ -282,9 +284,12 @@ final class NettyQuicSupport {
                                           String operation,
                                           ZmuxErrorScope scope,
                                           ZmuxErrorDirection direction) throws IOException {
-        if (code < 0 || code > 0xffff_ffffL) {
+        // Netty's QUIC API carries application codes as a Java int and sign-extends it before
+        // handing it to quiche, so a value of 2^31 or more would reach the native encoder as a
+        // code above the varint62 range and abort the process instead of failing here.
+        if (code < 0 || code > Integer.MAX_VALUE) {
             throw new AdapterUnsupportedException(
-                    "zmux: Netty QUIC adapter supports only 32-bit application error codes",
+                    "zmux: Netty QUIC adapter supports only 31-bit application error codes",
                     operation,
                     scope,
                     direction
@@ -467,8 +472,13 @@ final class NettyQuicSupport {
                     operation
             );
         }
+        // Keep a structured but code-less error (e.g. a QUIC transport close) code-less instead of
+        // inventing zmux INTERNAL for it.
+        long code = ZmuxErrors.details(error) != null && !ZmuxErrors.hasCode(error)
+                ? NO_ZMUX_CODE
+                : ZmuxErrors.code(error, ErrorCode.INTERNAL.code());
         return new ZmuxException(
-                ZmuxErrors.code(error, ErrorCode.INTERNAL.code()),
+                code,
                 operation,
                 ZmuxErrors.reason(error),
                 error,
@@ -669,9 +679,9 @@ final class NettyQuicSupport {
             return sessionClosedError(ZmuxErrorSource.REMOTE, cause);
         }
         return new ZmuxException(
-                code,
+                NO_ZMUX_CODE,
                 "netty quic",
-                reason.isEmpty() ? transportErrorLabel(code, event.isTlsError()) : reason,
+                transportErrorMessage(code, event.isTlsError(), reason),
                 cause,
                 ZmuxErrorScope.SESSION,
                 ZmuxErrorSource.REMOTE,
@@ -681,11 +691,10 @@ final class NettyQuicSupport {
     }
 
     private static IOException transportError(QuicTransportError error, Throwable cause) {
-        long code = error.code();
         return new ZmuxException(
-                code,
+                NO_ZMUX_CODE,
                 "netty quic",
-                transportErrorLabel(code, error.isCryptoError()),
+                transportErrorMessage(error.code(), error.isCryptoError(), ""),
                 cause,
                 ZmuxErrorScope.SESSION,
                 ZmuxErrorSource.TRANSPORT,
@@ -694,14 +703,22 @@ final class NettyQuicSupport {
         );
     }
 
+    // QUIC transport error codes (CONNECTION_CLOSE 0x1c, TLS alerts) are a different namespace from
+    // zmux/application error codes, so they only appear in the message and never as the zmux code.
+    private static String transportErrorMessage(long code, boolean cryptoError, String reason) {
+        String label = "QUIC transport error " + transportErrorLabel(code, cryptoError)
+                + " (0x" + Long.toHexString(code) + ")";
+        return reason == null || reason.isEmpty() ? label : label + ": " + reason;
+    }
+
     private static String transportErrorLabel(long code, boolean cryptoError) {
         if (cryptoError) {
-            return "CRYPTO_ERROR(" + code + ")";
+            return "CRYPTO_ERROR";
         }
         try {
             return QuicTransportError.valueOf(code).name();
         } catch (IllegalArgumentException ignored) {
-            return "TRANSPORT_ERROR(" + code + ")";
+            return "TRANSPORT_ERROR";
         }
     }
 

@@ -7,9 +7,9 @@ import org.junit.jupiter.api.Test;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
@@ -112,7 +112,7 @@ final class ControlPayloadLimitTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities, Settings rawSettings) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -163,12 +163,7 @@ final class ControlPayloadLimitTest {
         }
 
         FrameCodec.Frame readFrame(Duration timeout) throws Exception {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, readLimits);
-            } catch (SocketTimeoutException e) {
-                throw new AssertionError("timed out waiting for frame", e);
-            }
+            return RawFrameReads.readFrame(socket, input, timeout, readLimits);
         }
 
         @Override

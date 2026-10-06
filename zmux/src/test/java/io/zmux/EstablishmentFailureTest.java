@@ -9,9 +9,10 @@ import io.zmux.transport.DuplexConnection;
 import org.junit.jupiter.api.Test;
 
 import java.io.*;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,12 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 final class EstablishmentFailureTest {
     private static FrameCodec.Frame readFrame(BufferedInputStream input, Socket socket, int timeoutMillis) throws Exception {
-        socket.setSoTimeout(timeoutMillis);
-        try {
-            return FrameCodec.readFrame(input, Settings.defaults().limits());
-        } catch (SocketTimeoutException e) {
-            throw new AssertionError("timed out waiting for frame", e);
-        }
+        return RawFrameReads.readFrame(socket, input, Duration.ofMillis(timeoutMillis));
     }
 
     private static byte[] prefaceBytes(Role role) throws IOException {
@@ -73,7 +69,7 @@ final class EstablishmentFailureTest {
 
     @Test
     void sameRoleConflictEmitsFatalCloseDuringEstablishment() throws Exception {
-        ServerSocket listener = new ServerSocket(0);
+        ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
         Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
         Socket sessionSocket = listener.accept();
         listener.close();

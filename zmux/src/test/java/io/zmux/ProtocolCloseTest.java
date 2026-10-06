@@ -8,9 +8,9 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
@@ -85,6 +85,30 @@ final class ProtocolCloseTest {
 
             assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate after emitting CLOSE");
             assertEquals(SessionState.FAILED, peer.session().state(), "fatal protocol error should leave the session in FAILED");
+        }
+    }
+
+    @Test
+    void extPayloadShorterThanExtTypeEmitsCloseProtocol() throws Exception {
+        byte[][] frames = {
+                {0x02, 0x0b, 0x00},
+                {0x03, 0x0b, 0x00, 0x40},
+                {0x04, 0x0b, 0x00, 0x40, 0x01},
+        };
+        for (byte[] raw : frames) {
+            try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+                peer.sendRaw(raw);
+
+                FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+                FrameCodec.ErrorPayload closePayload = FrameCodec.parseErrorPayload(close.payload());
+                assertEquals(
+                        ErrorCode.PROTOCOL.code(),
+                        closePayload.code(),
+                        "EXT payload without a complete canonical ext_type must emit CLOSE(PROTOCOL) (SPEC 6.11)"
+                );
+                assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate after emitting CLOSE");
+                assertEquals(SessionState.FAILED, peer.session().state(), "EXT underflow should fail the session");
+            }
         }
     }
 
@@ -232,7 +256,7 @@ final class ProtocolCloseTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities, Settings rawSettings) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -287,13 +311,13 @@ final class ProtocolCloseTest {
             output.flush();
         }
 
+        void sendRaw(byte[] bytes) throws IOException {
+            output.write(bytes);
+            output.flush();
+        }
+
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         FrameCodec.Frame awaitFrameType(FrameType expected, Duration timeout) throws Exception {

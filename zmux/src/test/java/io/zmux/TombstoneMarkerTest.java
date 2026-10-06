@@ -9,9 +9,9 @@ import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -142,7 +142,7 @@ final class TombstoneMarkerTest {
     }
 
     @Test
-    void lateDataOnReapedGracefulTombstoneCountsAggregateCap() throws Exception {
+    void dataAfterFinOnReapedGracefulTombstoneNeverFailsSessionOnLateDataCaps() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .tombstoneLimit(1)
                 .aggregateLateDataCap(1)
@@ -155,17 +155,15 @@ final class TombstoneMarkerTest {
 
             await(Duration.ofSeconds(1), () -> tombstoneReaped(peer.session(), 2L, 1), "graceful tombstone reap");
 
-            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{1}));
-            FrameCodec.Frame abort = peer.awaitFrameType(FrameType.ABORT, Duration.ofSeconds(1));
-            assertEquals(2L, abort.streamId(), "first late DATA should still emit STREAM_CLOSED abort");
-
-            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{2}));
-            await(Duration.ofSeconds(1), () -> peer.session().state().terminal(), "session failure after tombstone late-data cap breach");
-            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
-            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
-            assertEquals(ErrorCode.PROTOCOL.code(), payload.code(), "late tombstone DATA cap breach should fail with PROTOCOL");
-            assertTrue(payload.reason().contains("late-data cap exceeded"),
-                    "close reason should expose the late-data cap breach");
+            // DATA after an observed peer FIN is a stream-state violation answered with ABORT(STREAM_CLOSED); it
+            // is not late tail data, so neither the per-stream nor the aggregate late-data cap applies.
+            for (int i = 0; i < 3; i++) {
+                peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{(byte) i, 1}));
+                FrameCodec.Frame abort = peer.awaitFrameType(FrameType.ABORT, Duration.ofSeconds(1));
+                assertEquals(2L, abort.streamId(), "DATA after FIN should still target the original stream");
+                assertEquals(ErrorCode.STREAM_CLOSED.code(), FrameCodec.parseErrorPayload(abort.payload()).code());
+            }
+            assertFalse(peer.session().state().terminal(), "DATA after FIN on a reaped tombstone must not fail the session");
         }
     }
 
@@ -247,31 +245,62 @@ final class TombstoneMarkerTest {
     }
 
     @Test
-    void markerOnlyUsedStreamLimitFailureClosesSession() throws Exception {
+    void markerOnlyUsedStreamBudgetCoarsensInsteadOfFailingSession() throws Exception {
+        int budget = 4;
         ZmuxConfig config = ZmuxConfig.builder()
                 .tombstoneLimit(1)
-                .markerOnlyUsedStreamLimit(1)
+                .markerOnlyUsedStreamLimit(budget)
                 .build();
         try (RawPeerSession peer = RawPeerSession.open(config, 0L)) {
-            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 2L, new byte[0]));
-            acceptEmptyUni(peer.session());
-            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 4L, new byte[0]));
-            acceptEmptyBidi(peer.session());
-
-            await(Duration.ofSeconds(1), () -> tombstoneReaped(peer.session(), 2L, 1), "first marker-only reap");
-
-            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 6L, new byte[0]));
-            try {
+            // Interleave two stream classes and alternate graceful / aborted bidi closes, which leaves one marker range
+            // per bidi stream until the budget forces coarsening.
+            for (int i = 0; i < 64; i++) {
+                long bidi = 4L + 4L * i;
+                long uni = 2L + 4L * i;
+                peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, bidi, new byte[0]));
+                ZmuxStream stream = peer.session().acceptStream(Duration.ofSeconds(1));
+                if (i % 2 == 0) {
+                    assertEquals(-1, stream.read(new byte[1]));
+                    stream.close();
+                } else {
+                    stream.closeWithError(8L, "");
+                }
+                peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, uni, new byte[0]));
                 acceptEmptyUni(peer.session());
-            } catch (IOException ignored) {
-                // Accept may fail before the raw peer observes CLOSE.
+            }
+            await(
+                    Duration.ofSeconds(2),
+                    () -> tombstoneReaped(peer.session(), 4L + 4L * 62, 1),
+                    "tombstones reaped to marker-only state"
+            );
+            while (peer.pollFrame(Duration.ofMillis(150)) != null) {
+                // drain FIN / ABORT frames of the closed streams
             }
 
-            await(Duration.ofSeconds(1), () -> peer.session().state().terminal(), "session failure after marker-only cap breach");
-            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
-            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
-            assertEquals(ErrorCode.INTERNAL.code(), payload.code(), "marker-only cap breach should fail the session with INTERNAL");
-            assertTrue(payload.reason().contains("marker-only used-stream cap exceeded"), "close reason should expose the marker-only cap breach");
+            assertFalse(peer.session().state().terminal(), "exceeding the marker budget must not fail the session");
+            assertTrue(
+                    peer.session().stats().diagnostics().markerOnlyRangeCount() <= budget,
+                    "marker ranges must stay within the budget: " + peer.session().stats().diagnostics().markerOnlyRangeCount()
+            );
+
+            // The oldest stream was coarsened: late control is ignored and late DATA is discarded with the session
+            // credit released, without the per-stream ABORT(STREAM_CLOSED) of its original graceful marker.
+            peer.send(new FrameCodec.Frame(FrameType.RESET, 0, 4L, controlErrorPayload()));
+            peer.send(new FrameCodec.Frame(FrameType.STOP_SENDING, 0, 4L, controlErrorPayload()));
+            peer.send(new FrameCodec.Frame(FrameType.MAX_DATA, 0, 4L, varintPayload(32L)));
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 4L, new byte[]{1}));
+            long released = 0L;
+            FrameCodec.Frame frame;
+            while ((frame = peer.pollFrame(Duration.ofMillis(200))) != null) {
+                assertEquals(FrameType.MAX_DATA, frame.type(), "coarsened marker frames must only release session credit");
+                assertEquals(0L, frame.streamId(), "discarded late DATA should only release session credit");
+                released = Varint62.decode(frame.payload(), 0).value();
+            }
+            assertEquals(Settings.defaults().initialMaxData() + 1L, released, "late DATA should be released to the session window");
+            assertFalse(peer.session().state().terminal(), "frames on coarsened markers must not fail the session");
+
+            peer.send(new FrameCodec.Frame(FrameType.DATA, Protocol.FRAME_FLAG_FIN, 4L + 4L * 64, new byte[0]));
+            acceptEmptyBidi(peer.session());
         }
     }
 
@@ -298,7 +327,7 @@ final class TombstoneMarkerTest {
     }
 
     @Test
-    void aggregateLateDataCapOverrideAppliesToDiscardedLateData() throws Exception {
+    void aggregateLateDataCapOverflowDiscardsWithoutFailingSession() throws Exception {
         ZmuxConfig config = ZmuxConfig.builder()
                 .aggregateLateDataCap(1)
                 .build();
@@ -311,12 +340,24 @@ final class TombstoneMarkerTest {
             ));
 
             peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{1, 2}));
+            peer.send(new FrameCodec.Frame(FrameType.DATA, 0, 2L, new byte[]{3, 4, 5}));
 
-            await(Duration.ofSeconds(1), () -> peer.session().state().terminal(), "session failure after aggregate late-data cap breach");
-            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
-            FrameCodec.ErrorPayload payload = FrameCodec.parseErrorPayload(close.payload());
-            assertEquals(ErrorCode.PROTOCOL.code(), payload.code(), "late-data cap breach should fail the session with PROTOCOL");
-            assertTrue(payload.reason().contains("late-data cap exceeded"), "close reason should expose the aggregate late-data cap breach");
+            // Exceeding the aggregate late-data allowance discards the tail and still releases session credit.
+            long released = 0L;
+            long deadline = System.nanoTime() + Duration.ofSeconds(1).toNanos();
+            while (released < Settings.defaults().initialMaxData() + 5L && System.nanoTime() < deadline) {
+                FrameCodec.Frame frame = peer.pollFrame(Duration.ofMillis(50));
+                if (frame == null) {
+                    continue;
+                }
+                assertNotEquals(FrameType.CLOSE, frame.type(), "aggregate late-data overflow must not close the session");
+                if (frame.type() == FrameType.MAX_DATA && frame.streamId() == 0L) {
+                    released = Math.max(released, Varint62.decode(frame.payload(), 0).value());
+                }
+            }
+            assertEquals(Settings.defaults().initialMaxData() + 5L, released,
+                    "discarded late bytes should be released back to the session window");
+            assertFalse(peer.session().state().terminal(), "aggregate late-data overflow must not fail the session");
         }
     }
 
@@ -357,7 +398,7 @@ final class TombstoneMarkerTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -413,12 +454,7 @@ final class TombstoneMarkerTest {
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         FrameCodec.Frame awaitFrameType(FrameType expected, Duration timeout) throws Exception {

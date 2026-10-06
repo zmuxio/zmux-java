@@ -127,7 +127,14 @@ final class SessionWriterCoordinator {
             throws IOException, InterruptedException {
         long coalesceNanos = this.ordinaryBatchCoalesceNanosLocked(batch, batchCost, costLimit);
         if (coalesceNanos > 0L) {
-            this.waitForWriterWorkLocked(coalesceNanos);
+            // The staged frames are in neither the queues nor the inflight batch while the monitor is
+            // released; publish them so opener lookups (e.g. a concurrent cancelWrite) still find them.
+            this.owner.setStagedOrdinaryBatchLocked(batch);
+            try {
+                this.waitForWriterWorkLocked(coalesceNanos);
+            } finally {
+                this.owner.setStagedOrdinaryBatchLocked(null);
+            }
             this.owner.expireStopSendingGracefulDrainsLocked();
             if (this.shouldDiscardStagedOrdinaryBatchLocked()) {
                 this.discardCollectedBatchLocked(batch);
@@ -388,6 +395,12 @@ final class SessionWriterCoordinator {
         void retryReceiveReplenishLocked();
 
         SessionRuntime.OutboundFrame pollQueuedOutboundLocked(Deque<SessionRuntime.OutboundFrame> deque);
+
+        void pullEarlierOpeningFramesLocked(List<SessionRuntime.OutboundFrame> batch, boolean trackWriterHeld);
+
+        void setStagedOrdinaryBatchLocked(List<SessionRuntime.OutboundFrame> batch);
+
+        SessionRuntime.OutboundFrame zeroLengthOpenerReplacementLocked(SessionRuntime.OutboundFrame openingFrame);
 
         void releaseEmptyAdvisoryQueueStorageLocked();
 

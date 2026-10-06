@@ -427,11 +427,6 @@ final class TombstoneMemoryPressureTest {
         }
 
         @Override
-        public IOException sessionInternalError(String operation, String message) {
-            return new IOException(message);
-        }
-
-        @Override
         public IOException sessionMemoryCapErrorLocked(String operation) {
             return null;
         }
@@ -442,6 +437,10 @@ final class TombstoneMemoryPressureTest {
 
         @Override
         public void failSessionAsync(IOException error) {
+        }
+
+        @Override
+        public void releaseRetainedLateDataLocked(long bytes) {
         }
     }
 }

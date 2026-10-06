@@ -234,8 +234,10 @@ methods expose raw Netty channels for advanced integration.
 - `closeWithError(code, reason)` is best-effort at stream scope: bidirectional
   streams close both local directions; unidirectional streams close the locally
   meaningful direction QUIC exposes.
-- QUIC application error codes are 32-bit. Codes outside that range fail with
-  `AdapterUnsupportedException`.
+- Outbound QUIC application error codes are limited to 31 bits
+  (`0..0x7fff_ffff`). Netty passes the code as a Java `int` and sign-extends
+  it, so larger codes fail with `AdapterUnsupportedException` before anything
+  reaches QUIC.
 
 Fresh write-side reset or abort visibility is not a portable adapter guarantee
 because QUIC can discard previously written but unacknowledged stream data,
@@ -244,11 +246,17 @@ including a just-submitted metadata prelude.
 ## Errors
 
 - QUIC connection application closes are normalized to `ApplicationError`.
+  Netty reports the peer's connection-close code as a Java `int`, so codes up
+  to `0xffff_ffff` arrive unchanged, but a larger code from a non-Netty peer
+  cannot be represented and is truncated by Netty rather than rejected.
 - QUIC stream reset/cancel codes are surfaced as `ApplicationError` where Netty
   exposes the numeric code.
 - QUIC stream-limit failures are normalized to `OpenLimitedException`.
 - QUIC transport or channel closure is normalized into the stable ZMux error
-  surface.
+  surface. QUIC transport error codes, including TLS alerts, are not ZMux error
+  codes: they surface as a session-scoped `ZmuxException` without a ZMux code
+  (`ZmuxErrors.hasCode(...)` is false), with the QUIC error name and value in
+  the message.
 
 Use `ZmuxErrors` helpers such as `applicationError(...)`, `openLimited(...)`,
 `adapterUnsupported(...)`, `priorityUpdateUnavailable(...)`,

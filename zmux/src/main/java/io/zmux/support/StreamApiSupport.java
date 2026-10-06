@@ -12,6 +12,30 @@ public final class StreamApiSupport {
     private StreamApiSupport() {
     }
 
+    /**
+     * Best-effort abort of a stream that an open-and-send helper created but will not return because its initial
+     * write failed. The caller never receives the handle, so without this the stream (whose opener may already be
+     * peer-visible) would stay open on both sides until the session ends, or its committed ID would be left unused.
+     * The abort uses the failure's wire code when it has one and {@code CANCELLED} otherwise; a secondary failure is
+     * attached to {@code failure} as suppressed.
+     *
+     * <p>Internal helper for the {@link ZmuxSession} open-and-send default methods and transport adapters; it is not
+     * part of the stable API and may change without notice.
+     */
+    public static void abortUnreturnedStream(ZmuxSendStream stream, Throwable failure, String reason) {
+        if (stream == null) {
+            return;
+        }
+        long code = ZmuxErrors.code(failure, ErrorCode.CANCELLED.code());
+        try {
+            stream.closeWithError(code, reason);
+        } catch (Throwable secondary) {
+            if (failure != null && secondary != failure) {
+                failure.addSuppressed(secondary);
+            }
+        }
+    }
+
     public static int transientBufferSize(int remaining) {
         return Math.min(remaining, TRANSIENT_BUFFER_CAPACITY);
     }

@@ -875,6 +875,38 @@ class SessionSurfaceRuntimeTest {
     }
 
     @Test
+    void provisionalWaiterDoesNotAgeBehindAbandonedHead() throws Exception {
+        // Two streams opened at the same instant; the first is abandoned and about to expire. The second
+        // waits behind it to commit: that wait is not idle provisional time, so it opens once the head
+        // expires instead of expiring with it.
+        SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
+        StreamRuntime abandoned = (StreamRuntime) runtime.openStream();
+        StreamRuntime writer = (StreamRuntime) runtime.openStream();
+        synchronized (runtime.lock()) {
+            long createdAtNanos = System.nanoTime()
+                    - runtime.provisionalOpenMaxAgeNanosLocked()
+                    + Duration.ofMillis(200).toNanos();
+            abandoned.setProvisionalCreatedAtNanosLocked(createdAtNanos);
+            writer.setProvisionalCreatedAtNanosLocked(createdAtNanos);
+        }
+
+        SessionRuntimeTestSupport.queueWrite(writer, "w".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(
+                SessionRuntime.firstLocalStreamId(Role.RESPONDER, true),
+                writer.streamIdInternal(),
+                "waiter should take the first local stream id"
+        );
+        ApplicationError expired = assertInstanceOf(
+                ApplicationError.class,
+                assertThrows(IOException.class, () -> abandoned.write("late".getBytes(StandardCharsets.UTF_8))),
+                "abandoned head should expire"
+        );
+        assertEquals(OpenExpiredException.MESSAGE, expired.reason(), "abandoned head expiry reason mismatch");
+        assertEquals(1L, runtime.stats().provisionals().expired(), "only the abandoned head should expire");
+    }
+
+    @Test
     void interruptWhileWaitingForOpenTurnFailsAndReclaimsProvisionalSlot() throws Exception {
         SessionRuntime runtime = SessionRuntimeTestSupport.newReadyRuntime(0L, Settings.defaults());
         StreamRuntime first = (StreamRuntime) runtime.openStream();

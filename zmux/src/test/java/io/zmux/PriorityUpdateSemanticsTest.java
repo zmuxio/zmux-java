@@ -8,9 +8,9 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
@@ -332,6 +332,79 @@ final class PriorityUpdateSemanticsTest {
     }
 
     @Test
+    void unnegotiatedMalformedPriorityUpdateIsIgnoredWithoutParsing() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L)) {
+            peer.send(new FrameCodec.Frame(
+                    FrameType.DATA,
+                    0,
+                    4L,
+                    "body".getBytes(StandardCharsets.UTF_8)
+            ));
+            ZmuxStream accepted = peer.session().acceptStream(Duration.ofSeconds(1));
+            assertEquals("body", readUtf8(accepted), "accepted payload mismatch");
+
+            // SPEC 7.6: receivers MUST ignore PRIORITY_UPDATE when the capability was not negotiated, so neither a
+            // truncated TLV, an overrunning TLV nor stream_id 0 may fail the session.
+            peer.sendRaw(new byte[]{0x04, 0x0b, 0x04, 0x01, 0x01});
+            peer.sendRaw(new byte[]{0x06, 0x0b, 0x04, 0x01, 0x01, 0x05, 0x02});
+            peer.sendRaw(new byte[]{0x06, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x02});
+
+            byte[] ping = "12345678".getBytes(StandardCharsets.UTF_8);
+            peer.send(new FrameCodec.Frame(FrameType.PING, 0, 0L, ping));
+            FrameCodec.Frame pong = peer.awaitFrameType(FrameType.PONG, Duration.ofSeconds(1));
+            assertArrayEquals(ping, pong.payload(), "PING after ignored PRIORITY_UPDATE frames should be answered");
+            assertEquals(SessionState.READY, peer.session().state(), "unnegotiated PRIORITY_UPDATE must not fail the session");
+            assertEquals(0L, accepted.metadata().priority(), "ignored PRIORITY_UPDATE must not mutate stream metadata");
+        }
+    }
+
+    @Test
+    void negotiatedPriorityUpdateOnStreamZeroFailsWithProtocol() throws Exception {
+        long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().capabilities(capabilities).build(), capabilities)) {
+            peer.sendRaw(new byte[]{0x06, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x02});
+
+            FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+            assertEquals(
+                    ErrorCode.PROTOCOL.code(),
+                    FrameCodec.parseErrorPayload(close.payload()).code(),
+                    "negotiated PRIORITY_UPDATE on stream_id 0 must emit CLOSE(PROTOCOL)"
+            );
+            assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate");
+            assertEquals(SessionState.FAILED, peer.session().state(), "stream-0 PRIORITY_UPDATE should fail the session");
+        }
+    }
+
+    @Test
+    void negotiatedStructurallyMalformedPriorityUpdateFailsWithFrameSize() throws Exception {
+        long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
+        byte[][] frames = {
+                {0x04, 0x0b, 0x04, 0x01, 0x01},
+                {0x06, 0x0b, 0x04, 0x01, 0x01, 0x05, 0x02},
+        };
+        for (byte[] raw : frames) {
+            try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().capabilities(capabilities).build(), capabilities)) {
+                peer.send(new FrameCodec.Frame(
+                        FrameType.DATA,
+                        0,
+                        4L,
+                        "body".getBytes(StandardCharsets.UTF_8)
+                ));
+                peer.session().acceptStream(Duration.ofSeconds(1));
+                peer.sendRaw(raw);
+
+                FrameCodec.Frame close = peer.awaitFrameType(FrameType.CLOSE, Duration.ofSeconds(1));
+                assertEquals(
+                        ErrorCode.FRAME_SIZE.code(),
+                        FrameCodec.parseErrorPayload(close.payload()).code(),
+                        "negotiated PRIORITY_UPDATE with a structural TLV error must emit CLOSE(FRAME_SIZE)"
+                );
+                assertTrue(peer.session().awaitTermination(Duration.ofSeconds(1)), "session should terminate");
+            }
+        }
+    }
+
+    @Test
     void invalidPriorityUpdateIncrementsDroppedDiagnostic() throws Exception {
         long capabilities = Protocol.CAPABILITY_PRIORITY_UPDATE | Protocol.CAPABILITY_PRIORITY_HINTS;
         ZmuxConfig config = ZmuxConfig.builder()
@@ -608,7 +681,7 @@ final class PriorityUpdateSemanticsTest {
         }
 
         static RawPeerSession open(ZmuxConfig sessionConfig, long rawCapabilities, Settings rawSettings) throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket peerSocket = new Socket("127.0.0.1", listener.getLocalPort());
             Socket sessionSocket = listener.accept();
             listener.close();
@@ -663,22 +736,17 @@ final class PriorityUpdateSemanticsTest {
             output.flush();
         }
 
+        void sendRaw(byte[] bytes) throws IOException {
+            output.write(bytes);
+            output.flush();
+        }
+
         FrameCodec.Frame readFrame(Duration timeout) throws Exception {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                throw new AssertionError("timed out waiting for frame", e);
-            }
+            return RawFrameReads.readFrame(socket, input, timeout);
         }
 
         FrameCodec.Frame pollFrame(Duration timeout) throws IOException {
-            socket.setSoTimeout((int) timeout.toMillis());
-            try {
-                return FrameCodec.readFrame(input, Settings.defaults().limits());
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
+            return RawFrameReads.readFrameIfStarted(socket, input, timeout);
         }
 
         FrameCodec.Frame awaitFrameType(FrameType expected, Duration timeout) throws Exception {

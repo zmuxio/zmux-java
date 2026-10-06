@@ -4,6 +4,7 @@ import io.zmux.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -126,7 +127,7 @@ final class SessionPolymorphismTest {
         }
 
         private static NativePair open() throws Exception {
-            ServerSocket listener = new ServerSocket(0);
+            ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
             Socket clientSocket = null;
             Socket serverSocket = null;
             try {

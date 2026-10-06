@@ -66,7 +66,7 @@ final class FrameCodecScopeTest {
     }
 
     @Test
-    void readFrameRejectsEmptyExtPayloadWithFrameSize() throws Exception {
+    void readFrameRejectsEmptyExtPayloadWithProtocol() throws Exception {
         ZmuxException error = assertThrows(
                 ZmuxException.class,
                 () -> FrameCodec.readFrame(
@@ -74,11 +74,11 @@ final class FrameCodecScopeTest {
                         Settings.defaults().limits()
                 )
         );
-        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "empty EXT payload must fail with FRAME_SIZE");
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "empty EXT payload must fail with PROTOCOL (SPEC 6.11)");
     }
 
     @Test
-    void readFrameRejectsTruncatedExtSubtypeWithFrameSize() throws Exception {
+    void readFrameRejectsTruncatedExtSubtypeWithProtocol() throws Exception {
         ZmuxException error = assertThrows(
                 ZmuxException.class,
                 () -> FrameCodec.readFrame(
@@ -86,7 +86,60 @@ final class FrameCodecScopeTest {
                         Settings.defaults().limits()
                 )
         );
-        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "truncated EXT subtype must fail with FRAME_SIZE");
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "truncated EXT subtype must fail with PROTOCOL (SPEC 6.11)");
+    }
+
+    @Test
+    void readFrameRejectsNonCanonicalExtSubtypeWithProtocol() throws Exception {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(
+                        new ByteArrayInputStream(encodeFrame(FrameType.EXT, 0, 4L, new byte[]{0x40, 0x01})),
+                        Settings.defaults().limits()
+                )
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "non-canonical EXT subtype must fail with PROTOCOL (SPEC 6.11)");
+    }
+
+    @Test
+    void readFrameKeepsFrameSizeForTruncatedPriorityUpdateTlv() throws Exception {
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameCodec.readFrame(
+                        new ByteArrayInputStream(encodeFrame(FrameType.EXT, 0, 4L, new byte[]{0x01, 0x01})),
+                        Settings.defaults().limits()
+                )
+        );
+        assertEquals(ErrorCode.FRAME_SIZE.code(), error.code(), "truncated PRIORITY_UPDATE TLV must fail with FRAME_SIZE");
+    }
+
+    @Test
+    void sessionFrameReadDefersPriorityUpdateSubtypeValidation() throws Exception {
+        byte[] streamZero = encodeFrame(FrameType.EXT, 0, 0L, new byte[]{0x01, 0x01, 0x01, 0x02});
+        byte[] truncatedTlv = encodeFrame(FrameType.EXT, 0, 4L, new byte[]{0x01, 0x01});
+        for (byte[] encoded : new byte[][]{streamZero, truncatedTlv}) {
+            FrameEnvelopeCodec.InboundFrame frame = FrameEnvelopeCodec.readInboundSessionFrame(
+                    FrameCodec.decoder(new ByteArrayInputStream(encoded)),
+                    Settings.defaults().limits(),
+                    null
+            );
+            assertEquals(FrameType.EXT, frame.type(), "session read should return the EXT frame for the session to judge");
+            assertThrows(
+                    ZmuxException.class,
+                    () -> FrameCodec.readFrame(new ByteArrayInputStream(encoded), Settings.defaults().limits()),
+                    "the public codec read stays strict"
+            );
+        }
+
+        ZmuxException error = assertThrows(
+                ZmuxException.class,
+                () -> FrameEnvelopeCodec.readInboundSessionFrame(
+                        FrameCodec.decoder(new ByteArrayInputStream(encodeFrame(FrameType.EXT, 0, 4L, new byte[0]))),
+                        Settings.defaults().limits(),
+                        null
+                )
+        );
+        assertEquals(ErrorCode.PROTOCOL.code(), error.code(), "session read still rejects an EXT payload without ext_type");
     }
 
     @Test

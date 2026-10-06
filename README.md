@@ -280,6 +280,34 @@ Built-in defaults enable metadata capabilities and keepalive PINGs. Use
 `disableCapabilities()` when a deployment needs to advertise no optional
 protocol features.
 
+`aggregateLateDataCap(...)` is advisory: late DATA after a local `closeRead()`
+or abort is always discarded with its session credit released, and exceeding
+the session-wide aggregate never fails the session. Only a peer that exceeds a
+stream's own late-data allowance (the larger of a small floor and the credit
+the stream had outstanding when it stopped) is treated as a protocol
+violation.
+
+`establishmentTimeout(...)` bounds session establishment (local preface write,
+peer preface read and negotiation) on transports that expose read/write
+deadlines, such as sockets. The default is
+`ZmuxConfig.DEFAULT_ESTABLISHMENT_TIMEOUT` (10s); zero or `null` selects the
+default and `disableEstablishmentTimeout()` removes the bound. On expiry
+establishment fails with `INTERNAL`.
+
+Keepalive deadlines are evaluated independently of the session writer, so a
+peer that stops reading cannot postpone the keepalive timeout. Session close
+paths never wait indefinitely for a stalled writer: once the final `CLOSE`
+cannot be flushed within a short bound (100ms, adapted to the measured RTT,
+at most 2s) the session finishes with its original cause and the transport is
+closed. The transport is always closed outside the session lock, and `close()`
+and `awaitTermination(...)` wait at most 250ms for that close to complete, so a
+transport whose `close()` blocks cannot hold the session. For sockets passed as
+`Socket`, a plain socket close also fails the blocked write; a TLS socket
+(`SSLSocket`) closed while a write is still in progress is reset (SO_LINGER 0,
+no close_notify), because an orderly TLS close would wait for that write.
+A caller-supplied `DuplexConnection` should make `close()` release a blocked
+write in the same way.
+
 ## Native And Diagnostics
 
 `ZmuxNativeSession` extends `ZmuxSession` with native protocol controls:

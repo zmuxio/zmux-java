@@ -4,13 +4,21 @@ import java.io.IOException;
 import java.util.*;
 
 final class SessionTerminalBookkeeping {
+    private static final int STREAM_ID_CLASSES = 4;
+    // Disposition of a coarsened prefix of old markers: late DATA is ignored and only released to the session window.
+    private static final TerminalDataDisposition COARSENED_MARKER_DISPOSITION =
+            new TerminalDataDisposition(LateDataAction.IGNORE, LateDataCause.NONE);
+
     private final Owner owner;
     private final long compactTerminalStateUnit;
     private final long hiddenControlRetainedMaxAgeNanos;
     private Map<Long, Tombstone> tombstones = new HashMap<>();
     private Deque<Long> tombstoneOrder = new ArrayDeque<>();
     private Map<Long, TerminalDataDisposition> markerOnlyUsedStreams = new HashMap<>();
+    // Ordered by (stream ID class, start) so merges, splits and lookups only ever compare ranges of one class.
     private ArrayList<MarkerRange> markerOnlyRanges = new ArrayList<>();
+    // Per stream ID class, every ID at or below the floor is covered by one coarsened prefix range.
+    private long[] coarsenedMarkerFloors = new long[STREAM_ID_CLASSES];
     private Deque<Long> hiddenTombstones = new ArrayDeque<>();
     private boolean markerOnlyRangeMode;
     private boolean asyncFailureScheduled;
@@ -94,6 +102,8 @@ final class SessionTerminalBookkeeping {
         Tombstone previous = this.tombstones.get(streamId);
         if (previous == null) {
             this.tombstoneOrder.addLast(streamId);
+        } else {
+            this.owner.releaseRetainedLateDataLocked(previous.lateDataReceived());
         }
         this.tombstones.put(streamId, tombstone);
         if (tombstone.hidden()) {
@@ -139,11 +149,7 @@ final class SessionTerminalBookkeeping {
             return TerminalLateDataResult.NONE;
         }
         boolean capExceeded = tombstone.recordLateDataReceived(length);
-        return TerminalLateDataResult.of(tombstone.hidden(), capExceeded);
-    }
-
-    boolean hasTerminalMarkerLocked(long streamId) {
-        return this.terminalDataDispositionForLocked(streamId) != null;
+        return TerminalLateDataResult.tracked(tombstone.hidden(), capExceeded);
     }
 
     void clear() {
@@ -151,6 +157,7 @@ final class SessionTerminalBookkeeping {
         this.tombstoneOrder = new ArrayDeque<>();
         this.markerOnlyUsedStreams = new HashMap<>();
         this.markerOnlyRanges = new ArrayList<>();
+        this.coarsenedMarkerFloors = new long[STREAM_ID_CLASSES];
         this.hiddenTombstones = new ArrayDeque<>();
         this.markerOnlyRangeMode = false;
         this.asyncFailureScheduled = false;
@@ -171,7 +178,9 @@ final class SessionTerminalBookkeeping {
             return;
         }
         if (this.markerOnlyRangeMode) {
-            this.upsertMarkerRangeLocked(streamId, disposition);
+            if (!this.coveredByCoarsenedMarkersLocked(streamId)) {
+                this.upsertMarkerRangeLocked(streamId, disposition);
+            }
             this.dropMarkerOnlyMapEntryLocked(streamId);
             this.enforceMarkerOnlyUsedStreamLimitLocked();
             return;
@@ -224,7 +233,7 @@ final class SessionTerminalBookkeeping {
         Collections.sort(streamIds);
         for (Long streamId : streamIds) {
             TerminalDataDisposition disposition = this.markerOnlyUsedStreams.get(streamId);
-            if (disposition != null) {
+            if (disposition != null && !this.coveredByCoarsenedMarkersLocked(streamId)) {
                 this.upsertMarkerRangeLocked(streamId, disposition);
             }
             this.dropMarkerOnlyMapEntryLocked(streamId);
@@ -234,15 +243,68 @@ final class SessionTerminalBookkeeping {
     }
 
     private void enforceMarkerOnlyUsedStreamLimitLocked() {
-        int cap = this.owner.markerOnlyUsedStreamHardCapLocked();
-        int count = this.markerOnlyRetainedLocked();
-        if (count <= cap) {
+        int budget = this.owner.markerOnlyUsedStreamHardCapLocked();
+        if (this.markerOnlyRetainedLocked() <= budget) {
             return;
         }
-        this.requestAsyncSessionFailureLocked(this.owner.sessionInternalError(
-                "compact terminal state",
-                "marker-only used-stream cap exceeded: count=" + count + " cap=" + cap
-        ));
+        // Exceeding the marker budget never fails or stalls the session. The oldest ranges of the most fragmented
+        // stream ID classes are folded into one conservative prefix per class instead; no-reuse still holds because
+        // a prefix never reaches past a used ID. Coarsening to half the budget keeps a long run of distinct
+        // dispositions from coarsening again on every reap.
+        this.compactMarkerOnlyRangesLocked();
+        this.coarsenMarkerOnlyRangesLocked(Math.max(1, budget / 2));
+    }
+
+    private void coarsenMarkerOnlyRangesLocked(int target) {
+        while (this.markerOnlyRetainedLocked() > target) {
+            int foldClass = -1;
+            int foldStart = 0;
+            int foldCount = 1;
+            for (int streamClass = 0; streamClass < STREAM_ID_CLASSES; streamClass++) {
+                int start = this.firstMarkerRangeIndexOfClass(streamClass);
+                int count = this.firstMarkerRangeIndexOfClass(streamClass + 1) - start;
+                if (count > foldCount) {
+                    foldClass = streamClass;
+                    foldStart = start;
+                    foldCount = count;
+                }
+            }
+            if (foldClass < 0) {
+                // At most one (coarsened) range per class is left.
+                return;
+            }
+            int excess = this.markerOnlyRetainedLocked() - target;
+            this.foldOldestMarkerRangesLocked(foldClass, foldStart, Math.min(foldCount, excess + 1));
+        }
+    }
+
+    private void foldOldestMarkerRangesLocked(int streamClass, int classStart, int count) {
+        long floor = Math.max(
+                this.coarsenedMarkerFloors[streamClass],
+                this.markerOnlyRanges.get(classStart + count - 1).end
+        );
+        // Every ID of the class up to a reaped ID is used, so the prefix may start at the first ID of the class.
+        // Live streams and retained tombstones inside it still take precedence over the coarsened disposition.
+        this.markerOnlyRanges.subList(classStart, classStart + count).clear();
+        this.markerOnlyRanges.add(
+                classStart,
+                new MarkerRange(firstStreamIdOfClass(streamClass), floor, COARSENED_MARKER_DISPOSITION)
+        );
+        this.coarsenedMarkerFloors[streamClass] = floor;
+        this.mergeMarkerRangesAroundLocked(classStart);
+    }
+
+    private boolean coveredByCoarsenedMarkersLocked(long streamId) {
+        return streamId <= this.coarsenedMarkerFloors[streamIdClass(streamId)];
+    }
+
+    private static int streamIdClass(long streamId) {
+        return (int) (streamId & 3L);
+    }
+
+    private static long firstStreamIdOfClass(int streamClass) {
+        // Stream ID 0 is the session itself.
+        return streamClass == 0 ? 4L : streamClass;
     }
 
     private TerminalDataDisposition markerRangeDispositionForLocked(long streamId) {
@@ -255,11 +317,28 @@ final class SessionTerminalBookkeeping {
     }
 
     private int firstMarkerRangeStartingAfter(long streamId) {
+        int streamClass = streamIdClass(streamId);
         int low = 0;
         int high = this.markerOnlyRanges.size();
         while (low < high) {
             int mid = (low + high) >>> 1;
-            if (this.markerOnlyRanges.get(mid).start > streamId) {
+            MarkerRange range = this.markerOnlyRanges.get(mid);
+            int rangeClass = streamIdClass(range.start);
+            if (rangeClass > streamClass || (rangeClass == streamClass && range.start > streamId)) {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        return low;
+    }
+
+    private int firstMarkerRangeIndexOfClass(int streamClass) {
+        int low = 0;
+        int high = this.markerOnlyRanges.size();
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (streamIdClass(this.markerOnlyRanges.get(mid).start) >= streamClass) {
                 high = mid;
             } else {
                 low = mid + 1;
@@ -409,6 +488,9 @@ final class SessionTerminalBookkeeping {
         }
         boolean orderChanged = this.tombstoneOrder.removeFirstOccurrence(streamId);
         boolean hiddenChanged = this.hiddenTombstones.removeFirstOccurrence(streamId);
+        // Late bytes carried by the tombstone stop counting toward the retained aggregate once it is forgotten;
+        // marker-only state keeps no per-stream late-data accounting.
+        this.owner.releaseRetainedLateDataLocked(removed.lateDataReceived());
         this.retainMarkerOnlyUsedStreamLocked(streamId, removed);
         this.releaseEmptyQueueStorageLocked(orderChanged, hiddenChanged);
         this.notifyMemoryReleasedLocked(previousTracked);
@@ -495,13 +577,13 @@ final class SessionTerminalBookkeeping {
 
         boolean sessionTerminalLocked();
 
-        IOException sessionInternalError(String operation, String message);
-
         IOException sessionMemoryCapErrorLocked(String operation);
 
         void failSession(IOException error);
 
         void failSessionAsync(IOException error);
+
+        void releaseRetainedLateDataLocked(long bytes);
     }
 
     static final class TerminalDataDisposition {
@@ -527,24 +609,31 @@ final class SessionTerminalBookkeeping {
     }
 
     static final class TerminalLateDataResult {
-        private static final TerminalLateDataResult NONE = new TerminalLateDataResult(false, false);
-        private static final TerminalLateDataResult VISIBLE_CAP_EXCEEDED = new TerminalLateDataResult(false, true);
-        private static final TerminalLateDataResult HIDDEN = new TerminalLateDataResult(true, false);
-        private static final TerminalLateDataResult HIDDEN_CAP_EXCEEDED = new TerminalLateDataResult(true, true);
+        private static final TerminalLateDataResult NONE = new TerminalLateDataResult(false, false, false);
+        private static final TerminalLateDataResult VISIBLE = new TerminalLateDataResult(true, false, false);
+        private static final TerminalLateDataResult VISIBLE_CAP_EXCEEDED = new TerminalLateDataResult(true, false, true);
+        private static final TerminalLateDataResult HIDDEN = new TerminalLateDataResult(true, true, false);
+        private static final TerminalLateDataResult HIDDEN_CAP_EXCEEDED = new TerminalLateDataResult(true, true, true);
 
+        private final boolean tracked;
         private final boolean hidden;
         private final boolean capExceeded;
 
-        private TerminalLateDataResult(boolean hidden, boolean capExceeded) {
+        private TerminalLateDataResult(boolean tracked, boolean hidden, boolean capExceeded) {
+            this.tracked = tracked;
             this.hidden = hidden;
             this.capExceeded = capExceeded;
         }
 
-        private static TerminalLateDataResult of(boolean hidden, boolean capExceeded) {
+        private static TerminalLateDataResult tracked(boolean hidden, boolean capExceeded) {
             if (hidden) {
                 return capExceeded ? HIDDEN_CAP_EXCEEDED : HIDDEN;
             }
-            return capExceeded ? VISIBLE_CAP_EXCEEDED : NONE;
+            return capExceeded ? VISIBLE_CAP_EXCEEDED : VISIBLE;
+        }
+
+        boolean tracked() {
+            return tracked;
         }
 
         boolean hidden() {
