@@ -145,13 +145,25 @@ final class GoQuicInteropSmokeTest {
         );
     }
 
-    private static String firstOutputLine(BufferedReader output) throws Exception {
+    /**
+     * Returns the first output line starting with {@code prefix}. Earlier lines are log noise from the merged stderr,
+     * such as quic-go's UDP buffer-size notice on hosts with low limits; they are kept for the failure message.
+     */
+    private static String firstOutputLine(BufferedReader output, String prefix) throws Exception {
         CompletableFuture<String> line = CompletableFuture.supplyAsync(() -> {
+            StringBuilder skipped = new StringBuilder();
             try {
-                return output.readLine();
+                String next;
+                while ((next = output.readLine()) != null) {
+                    if (next.startsWith(prefix)) {
+                        return next;
+                    }
+                    skipped.append(next).append('\n');
+                }
             } catch (IOException error) {
                 throw new RuntimeException(error);
             }
+            return skipped.toString();
         });
         return line.get(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
@@ -561,7 +573,7 @@ final class GoQuicInteropSmokeTest {
                 .redirectErrorStream(true)
                 .start();
         try (BufferedReader output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String address = firstOutputLine(output);
+            String address = firstOutputLine(output, "ADDR ");
             assertTrue(address.startsWith("ADDR "), "unexpected go helper output: " + address);
             runJavaClient(address.substring("ADDR ".length()));
             process.getOutputStream().write(1);
