@@ -113,6 +113,8 @@ final class RefusedStreamAccountingTest {
             peer.send(control(FrameType.ABORT, 12L));
 
             assertSessionLimitReaches(peer, SESSION_WINDOW + 4000L);
+            // The refusal of 12 answers the last frame sent, so it can trail the final MAX_DATA.
+            peer.await(frameOn(FrameType.ABORT, 12L), Duration.ofSeconds(2));
             List<FrameCodec.Frame> aborts = peer.seen(frame -> frame.type() == FrameType.ABORT);
             assertEquals(3, aborts.size(), "one ABORT per refused stream ID: " + aborts.size());
             for (FrameCodec.Frame abort : aborts) {

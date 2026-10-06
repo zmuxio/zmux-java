@@ -121,8 +121,10 @@ final class OpenerOrderTest {
         // Leave room for every writer to hold a provisional open at once, and for streams of earlier
         // rounds that are still draining.
         ZmuxConfig clientConfig = ZmuxConfig.builder().acceptBacklogLimit(4 * THREADS).build();
+        // The server backlog covers every stream of the test, so a slow acceptor on a busy machine never turns
+        // into backlog refusals; only stream-ID ordering is under test here.
         ZmuxConfig serverConfig = ZmuxConfig.builder()
-                .acceptBacklogLimit(4 * THREADS)
+                .acceptBacklogLimit(THREADS * ROUNDS)
                 .settings(serverSettings.toBuilder().maxIncomingStreamsBidi(4L * THREADS * ROUNDS).build())
                 .build();
         try (SessionPair pair = SessionPair.open(clientConfig, serverConfig)) {

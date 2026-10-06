@@ -122,7 +122,12 @@ final class GoInteropSmokeTest {
             }
             assertEquals("go->java", payload.toString(StandardCharsets.UTF_8.name()));
             stream.writeFinal("java:go->java".getBytes(StandardCharsets.UTF_8));
-            stream.close();
+            try {
+                stream.close();
+            } catch (SessionClosedException closedByPeer) {
+                // Both halves are already finished; the Go client may close the session as soon as it has read
+                // the reply, before this redundant close runs.
+            }
 
             session.close();
             session.awaitTerminationOrThrow(Duration.ofSeconds(5));

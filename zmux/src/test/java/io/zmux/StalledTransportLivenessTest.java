@@ -713,6 +713,10 @@ final class StalledTransportLivenessTest {
                 stableSince = System.nanoTime();
             } else if (sent > 0L && System.nanoTime() - stableSince > TimeUnit.MILLISECONDS.toNanos(500)) {
                 return;
+            } else if (System.nanoTime() - stableSince > TimeUnit.MILLISECONDS.toNanos(1500)) {
+                // With small kernel socket buffers (Linux) the first DATA batch can block before it completes,
+                // so the counter never leaves zero even though the writer is already stalled in the socket.
+                return;
             }
             Thread.sleep(20L);
         }
