@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'releases/*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [21, 25]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B verify
+
+  java8-compat:
+    name: Java 8 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 21
+          cache: maven
+
+      - name: Build and test with --release 8
+        run: mvn -B -Pjava8-compat verify
+
+      - name: Verify release profile build
+        run: mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
+
+  interop:
+    name: Interop (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout zmux-java
+        uses: actions/checkout@v5
+        with:
+          path: zmux-java
+
+      - name: Checkout zmux-go
+        uses: actions/checkout@v5
+        with:
+          repository: zmuxio/zmux-go
+          path: zmux-go
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: zmux-go/go.mod
+          cache-dependency-path: zmux-go/adapter/quicmux/go.sum
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 21
+          cache: maven
+          cache-dependency-path: zmux-java/**/pom.xml
+
+      - name: Run Go interop smoke tests
+        working-directory: zmux-java
+        env:
+          ZMUX_INTEROP: '1'
+          ZMUX_GO_ROOT: ${{ github.workspace }}/zmux-go
+        run: mvn -B test -Dtest='GoInteropSmokeTest,GoQuicInteropSmokeTest' -Dsurefire.failIfNoSpecifiedTests=false
