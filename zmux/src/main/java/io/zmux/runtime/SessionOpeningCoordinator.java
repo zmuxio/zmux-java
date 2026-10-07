@@ -40,6 +40,23 @@ final class SessionOpeningCoordinator {
         );
     }
 
+    private static boolean hasOpeningFrameLocked(List<SessionRuntime.OutboundFrame> batch, StreamRuntime streamRuntime) {
+        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
+            if (outboundFrame.stream() == streamRuntime && outboundFrame.openingFrame()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int openingFrameFlags(byte[] openingPrefix, boolean fin) {
+        int frameFlags = openingPrefix.length == 0 ? 0 : 0x20;
+        if (fin) {
+            frameFlags |= 0x40;
+        }
+        return frameFlags;
+    }
+
     StreamRuntime newLocalStreamLocked(boolean bidirectional, OpenOptions openOptions) throws IOException {
         return this.newLocalStreamLocked(bidirectional, openOptions, TimeoutBudget.unbounded());
     }
@@ -462,15 +479,6 @@ final class SessionOpeningCoordinator {
                 || hasOpeningFrameLocked(this.owner.stagedOrdinaryBatchInternal(), streamRuntime);
     }
 
-    private static boolean hasOpeningFrameLocked(List<SessionRuntime.OutboundFrame> batch, StreamRuntime streamRuntime) {
-        for (SessionRuntime.OutboundFrame outboundFrame : batch) {
-            if (outboundFrame.stream() == streamRuntime && outboundFrame.openingFrame()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
      * An urgent batch may carry a stream's opening frame (moved ahead of its BLOCKED or RESET, or an opening
      * ABORT) while lower-ID openers of the same class still wait in the queues. Those openers are pulled into
@@ -532,7 +540,7 @@ final class SessionOpeningCoordinator {
     }
 
     SessionRuntime.OutboundFrame zeroLengthOpeningFrameLocked(SessionRuntime.OutboundFrame openingFrame,
-                                                             boolean preserveAfterSendClose) {
+                                                              boolean preserveAfterSendClose) {
         byte[] prefix = openingFrame.payloadPrefix() == null ? StreamRuntime.EMPTY_BYTES : openingFrame.payloadPrefix();
         return this.newOpeningFrameLocked(openingFrame.stream(), prefix, false, 0, preserveAfterSendClose);
     }
@@ -596,14 +604,6 @@ final class SessionOpeningCoordinator {
         }
         // The ID is committed from here on, so the opener must be queued without waiting.
         return this.owner.reserveOpeningSendLocked(streamRuntime, payloadLength, openingPrefix.length + 1);
-    }
-
-    private static int openingFrameFlags(byte[] openingPrefix, boolean fin) {
-        int frameFlags = openingPrefix.length == 0 ? 0 : 0x20;
-        if (fin) {
-            frameFlags |= 0x40;
-        }
-        return frameFlags;
     }
 
     private void checkLocalOpenPossibleLocked(boolean bidirectional, int openInfoBytes) throws IOException {

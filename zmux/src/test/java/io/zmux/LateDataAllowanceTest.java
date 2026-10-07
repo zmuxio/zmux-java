@@ -104,7 +104,9 @@ final class LateDataAllowanceTest {
         return frame -> frame.type() == type && frame.streamId() == streamId;
     }
 
-    /** Sends late DATA totalling {@code total} bytes in frames no larger than the max frame payload. */
+    /**
+     * Sends late DATA totalling {@code total} bytes in frames no larger than the max frame payload.
+     */
     private static void sendLateTail(RawPeerSession peer, long streamId, int total) throws IOException {
         int remaining = total;
         while (remaining > 0) {
@@ -134,6 +136,14 @@ final class LateDataAllowanceTest {
         }
         assertEquals("ping", new String(buffer, StandardCharsets.UTF_8));
         assertEquals(-1, next.read(new byte[1]));
+    }
+
+    private static long varintUnchecked(FrameCodec.Frame frame) {
+        try {
+            return varint(frame);
+        } catch (IOException e) {
+            throw new AssertionError("malformed varint frame", e);
+        }
     }
 
     @Test
@@ -389,14 +399,6 @@ final class LateDataAllowanceTest {
         }
     }
 
-    private static long varintUnchecked(FrameCodec.Frame frame) {
-        try {
-            return varint(frame);
-        } catch (IOException e) {
-            throw new AssertionError("malformed varint frame", e);
-        }
-    }
-
     static final class RawPeerSession implements AutoCloseable {
         private final ZmuxSession session;
         private final Socket socket;
@@ -475,7 +477,9 @@ final class LateDataAllowanceTest {
             return frame;
         }
 
-        /** Returns the first frame (already seen or newly read) matching {@code predicate}. */
+        /**
+         * Returns the first frame (already seen or newly read) matching {@code predicate}.
+         */
         FrameCodec.Frame await(Predicate<FrameCodec.Frame> predicate, Duration timeout) throws Exception {
             for (FrameCodec.Frame frame : seen) {
                 if (predicate.test(frame)) {

@@ -12,11 +12,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 @SuppressWarnings("resource")
@@ -932,6 +928,16 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         return inboundByteBudget(maxPayload, minBudget);
     }
 
+    /**
+     * MAX_DATA and BLOCKED are mandatory flow-control progress whenever they raise a limit or coincide with a
+     * credit grant, so they skip the pre-dispatch control/mixed rate budgets and are charged only when they turn
+     * out not to advance state (SPEC 11/13 target redundant control traffic, not repository-default
+     * replenishment cadence).
+     */
+    static boolean chargesInboundRateBudgetAfterHandling(FrameType frameType) {
+        return frameType == FrameType.MAX_DATA || frameType == FrameType.BLOCKED;
+    }
+
     @Override
     public ZmuxNativeStream acceptStream() throws IOException, InterruptedException {
         return this.acceptStream(null);
@@ -1443,12 +1449,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
             }
             throw error;
         }
-    }
-
-    private enum GracefulGoAwayResult {
-        SENT,
-        SESSION_CLOSING,
-        STALLED
     }
 
     private LocalGoAwayWaiter enqueueGracefulGoAway(long bidiWatermark, long uniWatermark) throws IOException {
@@ -2448,16 +2448,6 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
         if (control || ext) {
             this.recordInboundMixedBudgetLocked(frameType, payloadBytes, nowNanos);
         }
-    }
-
-    /**
-     * MAX_DATA and BLOCKED are mandatory flow-control progress whenever they raise a limit or coincide with a
-     * credit grant, so they skip the pre-dispatch control/mixed rate budgets and are charged only when they turn
-     * out not to advance state (SPEC 11/13 target redundant control traffic, not repository-default
-     * replenishment cadence).
-     */
-    static boolean chargesInboundRateBudgetAfterHandling(FrameType frameType) {
-        return frameType == FrameType.MAX_DATA || frameType == FrameType.BLOCKED;
     }
 
     void recordNonAdvancingFlowControlFrameLocked(FrameType frameType, int payloadBytes) throws IOException {
@@ -6204,6 +6194,12 @@ public final class SessionRuntime implements ZmuxNativeSession, ZmuxAsyncSession
 
     private void establish() throws IOException {
         this.establishmentCoordinator.establish();
+    }
+
+    private enum GracefulGoAwayResult {
+        SENT,
+        SESSION_CLOSING,
+        STALLED
     }
 
     enum LockWaitKind {

@@ -234,8 +234,8 @@ methods expose raw Netty channels for advanced integration.
 - `closeWithError(code, reason)` is best-effort at stream scope: bidirectional
   streams close both local directions; unidirectional streams close the locally
   meaningful direction QUIC exposes.
-- Outbound QUIC application error codes are limited to 31 bits
-  (`0..0x7fff_ffff`). Netty passes the code as a Java `int` and sign-extends
+- Outbound QUIC application error codes are limited to 31 bits (`0..0x7fff_ffff`). Netty passes the code as a Java `int`
+  and sign-extends
   it, so larger codes fail with `AdapterUnsupportedException` before anything
   reaches QUIC.
 
@@ -254,8 +254,8 @@ including a just-submitted metadata prelude.
 - QUIC stream-limit failures are normalized to `OpenLimitedException`.
 - QUIC transport or channel closure is normalized into the stable ZMux error
   surface. QUIC transport error codes, including TLS alerts, are not ZMux error
-  codes: they surface as a session-scoped `ZmuxException` without a ZMux code
-  (`ZmuxErrors.hasCode(...)` is false), with the QUIC error name and value in
+  codes: they surface as a session-scoped `ZmuxException` without a ZMux code (`ZmuxErrors.hasCode(...)` is false), with
+  the QUIC error name and value in
   the message.
 
 Use `ZmuxErrors` helpers such as `applicationError(...)`, `openLimited(...)`,

@@ -23,6 +23,7 @@ dependencies {
 Maven:
 
 ```xml
+
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux</artifactId>
@@ -37,6 +38,7 @@ implementation("io.github.zmuxio:zmux-netty-quic:VERSION")
 ```
 
 ```xml
+
 <dependency>
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux-netty-quic</artifactId>
@@ -60,11 +62,13 @@ import io.zmux.ZmuxStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-try (Socket socket = new Socket("127.0.0.1", 9000);
-     ZmuxSession session = Zmux.openSession(socket);
-     ZmuxStream stream = session.openStream()) {
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-    byte[] reply = stream.readAllBytes();
+try(Socket socket = new Socket("127.0.0.1", 9000);
+ZmuxSession session = Zmux.openSession(socket);
+ZmuxStream stream = session.openStream()){
+        stream.
+
+writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+byte[] reply = stream.readAllBytes();
 }
 ```
 
@@ -87,11 +91,15 @@ All constructor families accept `Socket`, `InputStream` plus `OutputStream`,
 Bidirectional stream:
 
 ```java
-try (ZmuxStream stream = session.openStream()) {
-    stream.write("request".getBytes(StandardCharsets.UTF_8));
-    stream.closeWrite();
+try(ZmuxStream stream = session.openStream()){
+        stream.
 
-    byte[] response = stream.readAllBytes();
+write("request".getBytes(StandardCharsets.UTF_8));
+        stream.
+
+closeWrite();
+
+byte[] response = stream.readAllBytes();
 }
 ```
 
@@ -100,8 +108,9 @@ Unidirectional stream:
 ```java
 session.openUniAndSend("event".getBytes(StandardCharsets.UTF_8));
 
-try (ZmuxRecvStream recv = session.acceptUniStream()) {
-    byte[] event = recv.readAllBytes();
+        try(
+ZmuxRecvStream recv = session.acceptUniStream()){
+byte[] event = recv.readAllBytes();
 }
 ```
 
@@ -142,10 +151,20 @@ The optional async surface is transport-agnostic too:
 import io.zmux.ZmuxAsync;
 import io.zmux.ZmuxAsyncSession;
 
-ZmuxAsync.optionalSession(session).ifPresent(async -> {
-    async.openStreamAsync()
-            .thenCompose(stream -> stream.writeFinalAsync(new byte[]{1, 2, 3}));
-});
+ZmuxAsync.optionalSession(session).
+
+ifPresent(async ->{
+        async.
+
+openStreamAsync()
+            .
+
+thenCompose(stream ->stream.
+
+writeFinalAsync(new byte[] {
+    1, 2, 3
+}));
+        });
 ```
 
 Use `ZmuxAsync.session(...)`, `stream(...)`, `sendStream(...)`, or
@@ -167,11 +186,16 @@ OpenOptions options = OpenOptions.builder()
         .openInfo("rpc")
         .build();
 
-try (ZmuxSession session = Zmux.openSession(socket);
-     ZmuxStream stream = session.openStream(options)) {
-    stream.updateMetadata(MetadataUpdate.priority(3L));
-    stream.writeFinal("hello".getBytes(StandardCharsets.UTF_8));
-}
+try(
+ZmuxSession session = Zmux.openSession(socket);
+ZmuxStream stream = session.openStream(options)){
+        stream.
+
+updateMetadata(MetadataUpdate.priority(3L));
+        stream.
+
+writeFinal("hello".getBytes(StandardCharsets.UTF_8));
+        }
 ```
 
 The peer reads open metadata through `stream.openInfo()` or
@@ -198,14 +222,30 @@ Convenience factories:
 
 ```java
 ZmuxConnections.of(socket);
-ZmuxConnections.of(byteChannel);
-ZmuxConnections.of(readableChannel, writableChannel);
-ZmuxConnections.of(input, output);
-ZmuxConnections.of(input, output, closer);
-ZmuxConnections.of(input, output, localAddress, remoteAddress);
-ZmuxConnections.of(input, output, closer, localAddress, remoteAddress);
-ZmuxConnections.of(input, output, closer, localAddress, remoteAddress, gatheringOutput);
-ZmuxConnections.of(zmuxStream);
+ZmuxConnections.
+
+of(byteChannel);
+ZmuxConnections.
+
+of(readableChannel, writableChannel);
+ZmuxConnections.
+
+of(input, output);
+ZmuxConnections.
+
+of(input, output, closer);
+ZmuxConnections.
+
+of(input, output, localAddress, remoteAddress);
+ZmuxConnections.
+
+of(input, output, closer, localAddress, remoteAddress);
+ZmuxConnections.
+
+of(input, output, closer, localAddress, remoteAddress, gatheringOutput);
+ZmuxConnections.
+
+of(zmuxStream);
 ```
 
 When a transport exposes read and write halves separately, join them:
@@ -225,30 +265,43 @@ write half.
 
 ```java
 stream.closeWrite();                  // graceful local send-half close
-stream.closeRead();                   // local read cancellation
-stream.closeWithError(0x100L, "bye"); // stream application error
+stream.
 
-session.close();                      // graceful session close
-session.closeWithError(0x100L, "bye");
-session.awaitTerminationOrThrow();
+closeRead();                   // local read cancellation
+stream.
+
+closeWithError(0x100L,"bye"); // stream application error
+
+session.
+
+close();                      // graceful session close
+session.
+
+closeWithError(0x100L,"bye");
+session.
+
+awaitTerminationOrThrow();
 ```
 
 Use `ZmuxErrors` instead of matching exception text:
 
 ```java
-try {
-    stream.write(payload);
-} catch (IOException error) {
-    if (ZmuxErrors.sessionClosed(error)) {
-        return;
-    }
+try{
+        stream.write(payload);
+}catch(
+IOException error){
+        if(ZmuxErrors.
 
-    ApplicationError app = ZmuxErrors.applicationError(error);
-    if (app != null) {
-        long code = app.applicationCode();
-        String reason = app.reason();
+sessionClosed(error)){
+        return;
+        }
+
+ApplicationError app = ZmuxErrors.applicationError(error);
+    if(app !=null){
+long code = app.applicationCode();
+String reason = app.reason();
     }
-}
+            }
 ```
 
 Common helpers include `sessionClosed(...)`, `readClosed(...)`,
@@ -302,8 +355,8 @@ at most 2s) the session finishes with its original cause and the transport is
 closed. The transport is always closed outside the session lock, and `close()`
 and `awaitTermination(...)` wait at most 250ms for that close to complete, so a
 transport whose `close()` blocks cannot hold the session. For sockets passed as
-`Socket`, a plain socket close also fails the blocked write; a TLS socket
-(`SSLSocket`) closed while a write is still in progress is reset (SO_LINGER 0,
+`Socket`, a plain socket close also fails the blocked write; a TLS socket (`SSLSocket`) closed while a write is still in
+progress is reset (SO_LINGER 0,
 no close_notify), because an orderly TLS close would wait for that write.
 A caller-supplied `DuplexConnection` should make `close()` release a blocked
 write in the same way.

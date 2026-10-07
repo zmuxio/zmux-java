@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.zmux.adapter.quic.netty.TestLists.listOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class NettyQuicConformanceTest {

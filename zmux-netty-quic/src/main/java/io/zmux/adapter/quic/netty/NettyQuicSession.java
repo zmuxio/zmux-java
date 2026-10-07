@@ -312,6 +312,24 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         }
     }
 
+    // The eager open prelude (open_info / priority / group) is part of the open, so a timed open
+    // bounds it with the same budget and reports expiry as an open timeout.
+    private static void sendOpenPreludeWithinBudget(NettyQuicStreamState state, TimeoutBudget budget)
+            throws IOException {
+        if (!budget.bounded()) {
+            state.maybeSendOpenPreludeOnOpen();
+            return;
+        }
+        state.setWriteDeadlineNanos(budget.deadlineNanos());
+        try {
+            state.maybeSendOpenPreludeOnOpen();
+        } catch (WriteTimeoutException timeout) {
+            throw NettyQuicSupport.openTimedOut();
+        } finally {
+            state.setWriteDeadlineNanos(0L);
+        }
+    }
+
     @Override
     public ZmuxStream acceptStream() throws IOException, InterruptedException {
         return acceptStream(null);
@@ -1375,24 +1393,6 @@ final class NettyQuicSession implements ZmuxSession, NettyQuicAsyncSession {
         } catch (RuntimeException failure) {
             cleanupFailedLocalOpen(state, future);
             throw NettyQuicSupport.translateOpenFailure(failure);
-        }
-    }
-
-    // The eager open prelude (open_info / priority / group) is part of the open, so a timed open
-    // bounds it with the same budget and reports expiry as an open timeout.
-    private static void sendOpenPreludeWithinBudget(NettyQuicStreamState state, TimeoutBudget budget)
-            throws IOException {
-        if (!budget.bounded()) {
-            state.maybeSendOpenPreludeOnOpen();
-            return;
-        }
-        state.setWriteDeadlineNanos(budget.deadlineNanos());
-        try {
-            state.maybeSendOpenPreludeOnOpen();
-        } catch (WriteTimeoutException timeout) {
-            throw NettyQuicSupport.openTimedOut();
-        } finally {
-            state.setWriteDeadlineNanos(0L);
         }
     }
 

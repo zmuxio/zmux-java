@@ -14,23 +14,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import static io.zmux.SpecFixturePeer.LOCAL_BIDI;
-import static io.zmux.SpecFixturePeer.LOCAL_UNI;
-import static io.zmux.SpecFixturePeer.PEER_BIDI;
-import static io.zmux.SpecFixturePeer.WAIT;
-import static io.zmux.SpecFixturePeer.bytes;
-import static io.zmux.SpecFixtures.has;
-import static io.zmux.SpecFixtures.map;
-import static io.zmux.SpecFixtures.mapList;
-import static io.zmux.SpecFixtures.string;
-import static io.zmux.SpecFixtures.stringList;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static io.zmux.SpecFixturePeer.*;
+import static io.zmux.SpecFixtures.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Runs the zmux-spec {@code portable_state} case set (state_cases that use only the portable event/result
@@ -43,22 +29,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 final class SpecStateCaseFixtureTest {
     private static final int LATE_DATA_BYTES = 100;
-
-    @TestFactory
-    List<DynamicTest> portableStateCasesBehaveAsSpecified() {
-        Map<String, Map<String, Object>> cases = SpecFixtures.byId(SpecFixtures.loadNdjson("state_cases.ndjson"));
-        List<String> portable = stringList(map(SpecFixtures.loadJson("case_sets.json"), "sets"), "portable_state");
-        assertFalse(portable.isEmpty(), "portable_state case set should not be empty");
-        List<DynamicTest> tests = new ArrayList<>();
-        for (String id : portable) {
-            Map<String, Object> fixture = cases.get(id);
-            tests.add(DynamicTest.dynamicTest(id, () -> {
-                assertNotNull(fixture, "portable_state references unknown state case " + id);
-                runPortableCase(id, fixture);
-            }));
-        }
-        return tests;
-    }
 
     private static void runPortableCase(String id, Map<String, Object> fixture) throws Exception {
         List<Map<String, Object>> steps = mapList(fixture, "steps");
@@ -88,7 +58,9 @@ final class SpecStateCaseFixtureTest {
         }
     }
 
-    /** Reaches {@code initial_state} for the case's stream S with ordinary frames and API calls. */
+    /**
+     * Reaches {@code initial_state} for the case's stream S with ordinary frames and API calls.
+     */
     private static Target establish(SpecFixturePeer peer, String kind, String ownership, Object initial, String firstEvent) throws Exception {
         Target target = new Target();
         boolean bidi;
@@ -302,7 +274,9 @@ final class SpecStateCaseFixtureTest {
         return pressure.recvSessionAdvertisedBytes() - pressure.recvSessionReceivedBytes() + pressure.recvSessionPendingBytes();
     }
 
-    /** Checks the conceptual half states through what the API can observe. */
+    /**
+     * Checks the conceptual half states through what the API can observe.
+     */
     private static void assertState(String label, SpecFixturePeer peer, Target target, Map<String, Object> expect) throws Exception {
         String send = string(expect, "send_half");
         String recv = string(expect, "recv_half");
@@ -377,6 +351,22 @@ final class SpecStateCaseFixtureTest {
                 // a terminal receive half may refuse deadline changes
             }
         }
+    }
+
+    @TestFactory
+    List<DynamicTest> portableStateCasesBehaveAsSpecified() {
+        Map<String, Map<String, Object>> cases = SpecFixtures.byId(SpecFixtures.loadNdjson("state_cases.ndjson"));
+        List<String> portable = stringList(map(SpecFixtures.loadJson("case_sets.json"), "sets"), "portable_state");
+        assertFalse(portable.isEmpty(), "portable_state case set should not be empty");
+        List<DynamicTest> tests = new ArrayList<>();
+        for (String id : portable) {
+            Map<String, Object> fixture = cases.get(id);
+            tests.add(DynamicTest.dynamicTest(id, () -> {
+                assertNotNull(fixture, "portable_state references unknown state case " + id);
+                runPortableCase(id, fixture);
+            }));
+        }
+        return tests;
     }
 
     private static final class Target {

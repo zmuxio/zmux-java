@@ -68,6 +68,15 @@ final class SessionTerminalBookkeeping {
         return left + right;
     }
 
+    private static int streamIdClass(long streamId) {
+        return (int) (streamId & 3L);
+    }
+
+    private static long firstStreamIdOfClass(int streamClass) {
+        // Stream ID 0 is the session itself.
+        return streamClass == 0 ? 4L : streamClass;
+    }
+
     int hiddenControlStateRetainedLocked() {
         return this.hiddenTombstones.size();
     }
@@ -296,15 +305,6 @@ final class SessionTerminalBookkeeping {
 
     private boolean coveredByCoarsenedMarkersLocked(long streamId) {
         return streamId <= this.coarsenedMarkerFloors[streamIdClass(streamId)];
-    }
-
-    private static int streamIdClass(long streamId) {
-        return (int) (streamId & 3L);
-    }
-
-    private static long firstStreamIdOfClass(int streamClass) {
-        // Stream ID 0 is the session itself.
-        return streamClass == 0 ? 4L : streamClass;
     }
 
     private TerminalDataDisposition markerRangeDispositionForLocked(long streamId) {

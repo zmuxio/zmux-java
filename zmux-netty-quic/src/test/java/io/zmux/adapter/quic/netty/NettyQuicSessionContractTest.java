@@ -33,11 +33,7 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -2687,38 +2683,6 @@ class NettyQuicSessionContractTest {
         }
     }
 
-    @ChannelHandler.Sharable
-    private static final class RawStreamRecorder extends ChannelInboundHandlerAdapter {
-        private final LinkedBlockingQueue<QuicStreamChannel> streams = new LinkedBlockingQueue<>();
-        private final LinkedBlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
-
-        @Override
-        public void channelActive(ChannelHandlerContext ctx) throws Exception {
-            streams.add((QuicStreamChannel) ctx.channel());
-            super.channelActive(ctx);
-        }
-
-        @Override
-        public void channelRead(ChannelHandlerContext ctx, Object msg) {
-            ReferenceCountUtil.release(msg);
-        }
-
-        @Override
-        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-            if (evt == ChannelInputShutdownReadComplete.INSTANCE) {
-                outcomes.add("fin");
-            }
-            super.userEventTriggered(ctx, evt);
-        }
-
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            outcomes.add(cause instanceof QuicStreamResetException
-                    ? "reset:" + ((QuicStreamResetException) cause).applicationProtocolCode()
-                    : "error:" + cause);
-        }
-    }
-
     @Test
     void gracefulSessionCloseTerminatesBothSidesAndRejectsFurtherOpens() throws Exception {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
@@ -3228,6 +3192,38 @@ class NettyQuicSessionContractTest {
         try (NettyQuicTestSupport.SessionPair pair = openPair()) {
             assertFalse(pair.client.awaitTermination(Duration.ZERO));
             assertFalse(pair.client.awaitTermination(Duration.ofMillis(-1L)));
+        }
+    }
+
+    @ChannelHandler.Sharable
+    private static final class RawStreamRecorder extends ChannelInboundHandlerAdapter {
+        private final LinkedBlockingQueue<QuicStreamChannel> streams = new LinkedBlockingQueue<>();
+        private final LinkedBlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+            streams.add((QuicStreamChannel) ctx.channel());
+            super.channelActive(ctx);
+        }
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            ReferenceCountUtil.release(msg);
+        }
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+            if (evt == ChannelInputShutdownReadComplete.INSTANCE) {
+                outcomes.add("fin");
+            }
+            super.userEventTriggered(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            outcomes.add(cause instanceof QuicStreamResetException
+                    ? "reset:" + ((QuicStreamResetException) cause).applicationProtocolCode()
+                    : "error:" + cause);
         }
     }
 }

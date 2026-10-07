@@ -1,13 +1,6 @@
 package io.zmux;
 
-import io.zmux.protocol.FrameCodec;
-import io.zmux.protocol.FrameEnvelopeCodec;
-import io.zmux.protocol.FrameType;
-import io.zmux.protocol.Limits;
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-import io.zmux.protocol.Varint62;
-import io.zmux.protocol.ZmuxCodec;
+import io.zmux.protocol.*;
 import io.zmux.transport.BasicDuplexConnection;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
@@ -23,33 +16,14 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeSet;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.zmux.SpecFixturePeer.LOCAL_BIDI;
-import static io.zmux.SpecFixturePeer.LOCAL_UNI;
-import static io.zmux.SpecFixturePeer.PEER_BIDI;
-import static io.zmux.SpecFixturePeer.PEER_UNI;
-import static io.zmux.SpecFixturePeer.WAIT;
-import static io.zmux.SpecFixturePeer.bytes;
-import static io.zmux.SpecFixtures.has;
-import static io.zmux.SpecFixtures.hex;
-import static io.zmux.SpecFixtures.longValue;
-import static io.zmux.SpecFixtures.map;
-import static io.zmux.SpecFixtures.string;
-import static io.zmux.SpecFixtures.stringList;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static io.zmux.SpecFixturePeer.*;
+import static io.zmux.SpecFixtures.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Runs every case of the vendored zmux-spec {@code invalid_cases.ndjson} against the Java implementation.
@@ -215,105 +189,6 @@ final class SpecInvalidCaseFixtureTest {
         RUNNERS.put("rapid_open_abort_churn_without_local_limit", SpecInvalidCaseFixtureTest::rapidOpenAbortChurnCase);
     }
 
-    @TestFactory
-    List<DynamicTest> invalidCaseFixturesBehaveAsSpecified() {
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("invalid_cases.ndjson")) {
-            String id = string(fixture, "id");
-            tests.add(DynamicTest.dynamicTest(id, () -> {
-                Runner runner = RUNNERS.get(id);
-                assertNotNull(runner, "invalid fixture " + id + " has no Java runner; add one to " + SpecInvalidCaseFixtureTest.class.getSimpleName());
-                Outcome outcome = runner.run(fixture);
-                assertOutcome(id, map(fixture, "expected_result"), outcome);
-            }));
-        }
-        return tests;
-    }
-
-    @Test
-    void everyRunnerMatchesAVendoredFixture() {
-        TreeSet<String> stale = new TreeSet<>(RUNNERS.keySet());
-        stale.removeAll(SpecFixtures.byId(SpecFixtures.loadNdjson("invalid_cases.ndjson")).keySet());
-        assertTrue(stale.isEmpty(), "runners without a vendored invalid_cases fixture: " + stale);
-    }
-
-    @TestFactory
-    List<DynamicTest> wireInvalidFramesCloseTheSessionWithTheFixtureCode() {
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_invalid.ndjson")) {
-            if (!"frame_invalid".equals(string(fixture, "category"))) {
-                continue;
-            }
-            String id = string(fixture, "id");
-            tests.add(DynamicTest.dynamicTest(id, () -> {
-                Settings local = Settings.defaults();
-                if (has(fixture, "receiver_limits")) {
-                    Map<String, Object> limits = map(fixture, "receiver_limits");
-                    Settings.Builder builder = local.toBuilder();
-                    if (has(limits, "max_frame_payload")) {
-                        builder.maxFramePayload(longValue(limits, "max_frame_payload"));
-                    }
-                    if (has(limits, "max_control_payload_bytes")) {
-                        builder.maxControlPayloadBytes(longValue(limits, "max_control_payload_bytes"));
-                    }
-                    if (has(limits, "max_extension_payload_bytes")) {
-                        builder.maxExtensionPayloadBytes(longValue(limits, "max_extension_payload_bytes"));
-                    }
-                    local = builder.build();
-                }
-                try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().settings(local).build(), 0L, Settings.defaults())) {
-                    peer.sendRaw(hex(string(fixture, "hex")));
-                    Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
-                    assertEquals(SpecFixtures.errorCode(string(fixture, "expect_error")), outcome.code,
-                            id + ": the session must signal the fixture code with CLOSE");
-                }
-            }));
-        }
-        return tests;
-    }
-
-    /**
-     * SPEC 9.1 first-frame table: a stream-scoped MAX_DATA, BLOCKED, STOP_SENDING or RESET as the first frame on a
-     * stream ID that was never opened is a session PROTOCOL error, whichever class or owner the ID has and whether or
-     * not it is the next expected peer ID.
-     */
-    @Test
-    void firstNonOpeningStreamControlOnUnopenedStreamsClosesWithProtocol() throws Exception {
-        long[] streamIds = {PEER_BIDI, PEER_BIDI + 4L, PEER_UNI, LOCAL_BIDI, LOCAL_UNI};
-        FrameType[] types = {FrameType.MAX_DATA, FrameType.BLOCKED, FrameType.STOP_SENDING, FrameType.RESET};
-        for (long streamId : streamIds) {
-            for (FrameType type : types) {
-                try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
-                    peer.send(type, 0, streamId, firstFramePayload(type));
-                    Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
-                    assertEquals(ErrorCode.PROTOCOL, outcome.code,
-                            type + " as the first frame on unopened stream " + streamId + " must close the session with PROTOCOL");
-                }
-            }
-        }
-    }
-
-    /**
-     * The same first-frame rule after other streams exist: an unopened ID between or after live and terminal
-     * streams is still never opened by a non-opening frame.
-     */
-    @Test
-    void firstNonOpeningStreamControlAfterEarlierStreamsStillClosesWithProtocol() throws Exception {
-        for (FrameType type : new FrameType[]{FrameType.MAX_DATA, FrameType.BLOCKED, FrameType.STOP_SENDING, FrameType.RESET}) {
-            try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
-                peer.send(FrameType.DATA, 0, PEER_BIDI, bytes("live"));
-                peer.send(FrameType.ABORT, 0, PEER_BIDI + 4L, Varint62.encode(ErrorCode.CANCELLED.code()));
-                peer.sync();
-                assertEquals(SessionState.READY, peer.session().state(), "opening DATA and ABORT must not fail the session");
-
-                peer.send(type, 0, PEER_BIDI + 8L, firstFramePayload(type));
-                Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
-                assertEquals(ErrorCode.PROTOCOL, outcome.code,
-                        type + " as the first frame on the next unused peer stream must close the session with PROTOCOL");
-            }
-        }
-    }
-
     private static void assertOutcome(String id, Map<String, Object> expected, Outcome outcome) {
         assertNotNull(outcome, id + ": runner returned no outcome");
         String scope = string(expected, "scope");
@@ -331,8 +206,6 @@ final class SpecInvalidCaseFixtureTest {
         assertEquals(Outcome.Kind.ACTION, outcome.kind, id + ": expected a verified action, got " + outcome);
         assertEquals(string(expected, "action"), outcome.action, id + ": action");
     }
-
-    // ---- preface runners ----
 
     private static Outcome hexPrefaceCase(Map<String, Object> fixture) throws Exception {
         byte[] raw = hex(string(fixture, "hex"));
@@ -438,7 +311,7 @@ final class SpecInvalidCaseFixtureTest {
         }
     }
 
-    // ---- frame-shape runners ----
+    // ---- preface runners ----
 
     /**
      * Judges one encoded frame with every codec reader and with a live session. {@code deferredToSession} marks the
@@ -498,8 +371,6 @@ final class SpecInvalidCaseFixtureTest {
         );
     }
 
-    // ---- session-behaviour runners ----
-
     private static Outcome pingPayloadLimitCase(Map<String, Object> fixture) throws Exception {
         Map<String, Object> shape = inputShape(fixture);
         long localLimit = longValue(shape, "local_max_control_payload_bytes");
@@ -534,6 +405,8 @@ final class SpecInvalidCaseFixtureTest {
         }
         return Outcome.action("forbid_send");
     }
+
+    // ---- frame-shape runners ----
 
     private static Outcome priorityUpdateDuplicateSingletonCase(Map<String, Object> fixture) throws Exception {
         Map<String, Object> shape = inputShape(fixture);
@@ -615,6 +488,8 @@ final class SpecInvalidCaseFixtureTest {
         }
         return Outcome.action("ignore");
     }
+
+    // ---- session-behaviour runners ----
 
     private static Outcome unknownExtSubtypeCase(Map<String, Object> fixture) throws Exception {
         Map<String, Object> shape = inputShape(fixture);
@@ -875,8 +750,6 @@ final class SpecInvalidCaseFixtureTest {
         return Outcome.action("forbid_unbounded_stream_churn");
     }
 
-    // ---- helpers ----
-
     private static Map<String, Object> inputShape(Map<String, Object> fixture) {
         return map(fixture, "input_shape");
     }
@@ -929,6 +802,8 @@ final class SpecInvalidCaseFixtureTest {
         }
     }
 
+    // ---- helpers ----
+
     private static byte[] priorityUpdatePayload(long priority) throws IOException {
         return concat(
                 Varint62.encode(Protocol.EXT_PRIORITY_UPDATE),
@@ -977,12 +852,113 @@ final class SpecInvalidCaseFixtureTest {
         return out.toByteArray();
     }
 
-    /** The case's frame must have been ignored: no CLOSE, and no ABORT, RESET or STOP_SENDING on the stream. */
+    /**
+     * The case's frame must have been ignored: no CLOSE, and no ABORT, RESET or STOP_SENDING on the stream.
+     */
     private static void assertNoErrorSignal(SpecFixturePeer peer, long streamId) throws IOException {
         for (FrameCodec.Frame frame : peer.drain()) {
             assertFalse(frame.type() == FrameType.CLOSE, "unexpected CLOSE");
             boolean streamError = frame.type() == FrameType.ABORT || frame.type() == FrameType.RESET || frame.type() == FrameType.STOP_SENDING;
             assertFalse(streamError && frame.streamId() == streamId, "unexpected " + frame.type() + " on stream " + streamId);
+        }
+    }
+
+    @TestFactory
+    List<DynamicTest> invalidCaseFixturesBehaveAsSpecified() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("invalid_cases.ndjson")) {
+            String id = string(fixture, "id");
+            tests.add(DynamicTest.dynamicTest(id, () -> {
+                Runner runner = RUNNERS.get(id);
+                assertNotNull(runner, "invalid fixture " + id + " has no Java runner; add one to " + SpecInvalidCaseFixtureTest.class.getSimpleName());
+                Outcome outcome = runner.run(fixture);
+                assertOutcome(id, map(fixture, "expected_result"), outcome);
+            }));
+        }
+        return tests;
+    }
+
+    @Test
+    void everyRunnerMatchesAVendoredFixture() {
+        TreeSet<String> stale = new TreeSet<>(RUNNERS.keySet());
+        stale.removeAll(SpecFixtures.byId(SpecFixtures.loadNdjson("invalid_cases.ndjson")).keySet());
+        assertTrue(stale.isEmpty(), "runners without a vendored invalid_cases fixture: " + stale);
+    }
+
+    @TestFactory
+    List<DynamicTest> wireInvalidFramesCloseTheSessionWithTheFixtureCode() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_invalid.ndjson")) {
+            if (!"frame_invalid".equals(string(fixture, "category"))) {
+                continue;
+            }
+            String id = string(fixture, "id");
+            tests.add(DynamicTest.dynamicTest(id, () -> {
+                Settings local = Settings.defaults();
+                if (has(fixture, "receiver_limits")) {
+                    Map<String, Object> limits = map(fixture, "receiver_limits");
+                    Settings.Builder builder = local.toBuilder();
+                    if (has(limits, "max_frame_payload")) {
+                        builder.maxFramePayload(longValue(limits, "max_frame_payload"));
+                    }
+                    if (has(limits, "max_control_payload_bytes")) {
+                        builder.maxControlPayloadBytes(longValue(limits, "max_control_payload_bytes"));
+                    }
+                    if (has(limits, "max_extension_payload_bytes")) {
+                        builder.maxExtensionPayloadBytes(longValue(limits, "max_extension_payload_bytes"));
+                    }
+                    local = builder.build();
+                }
+                try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().settings(local).build(), 0L, Settings.defaults())) {
+                    peer.sendRaw(hex(string(fixture, "hex")));
+                    Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
+                    assertEquals(SpecFixtures.errorCode(string(fixture, "expect_error")), outcome.code,
+                            id + ": the session must signal the fixture code with CLOSE");
+                }
+            }));
+        }
+        return tests;
+    }
+
+    /**
+     * SPEC 9.1 first-frame table: a stream-scoped MAX_DATA, BLOCKED, STOP_SENDING or RESET as the first frame on a
+     * stream ID that was never opened is a session PROTOCOL error, whichever class or owner the ID has and whether or
+     * not it is the next expected peer ID.
+     */
+    @Test
+    void firstNonOpeningStreamControlOnUnopenedStreamsClosesWithProtocol() throws Exception {
+        long[] streamIds = {PEER_BIDI, PEER_BIDI + 4L, PEER_UNI, LOCAL_BIDI, LOCAL_UNI};
+        FrameType[] types = {FrameType.MAX_DATA, FrameType.BLOCKED, FrameType.STOP_SENDING, FrameType.RESET};
+        for (long streamId : streamIds) {
+            for (FrameType type : types) {
+                try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
+                    peer.send(type, 0, streamId, firstFramePayload(type));
+                    Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
+                    assertEquals(ErrorCode.PROTOCOL, outcome.code,
+                            type + " as the first frame on unopened stream " + streamId + " must close the session with PROTOCOL");
+                }
+            }
+        }
+    }
+
+    /**
+     * The same first-frame rule after other streams exist: an unopened ID between or after live and terminal
+     * streams is still never opened by a non-opening frame.
+     */
+    @Test
+    void firstNonOpeningStreamControlAfterEarlierStreamsStillClosesWithProtocol() throws Exception {
+        for (FrameType type : new FrameType[]{FrameType.MAX_DATA, FrameType.BLOCKED, FrameType.STOP_SENDING, FrameType.RESET}) {
+            try (SpecFixturePeer peer = SpecFixturePeer.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
+                peer.send(FrameType.DATA, 0, PEER_BIDI, bytes("live"));
+                peer.send(FrameType.ABORT, 0, PEER_BIDI + 4L, Varint62.encode(ErrorCode.CANCELLED.code()));
+                peer.sync();
+                assertEquals(SessionState.READY, peer.session().state(), "opening DATA and ABORT must not fail the session");
+
+                peer.send(type, 0, PEER_BIDI + 8L, firstFramePayload(type));
+                Outcome outcome = Outcome.sessionError(peer.awaitSessionClose());
+                assertEquals(ErrorCode.PROTOCOL, outcome.code,
+                        type + " as the first frame on the next unused peer stream must close the session with PROTOCOL");
+            }
         }
     }
 
@@ -992,17 +968,10 @@ final class SpecInvalidCaseFixtureTest {
     }
 
     private static final class Outcome {
-        enum Kind {
-            SESSION_ERROR,
-            STREAM_ERROR,
-            ACTION
-        }
-
         private final Kind kind;
         private final ErrorCode code;
         private final long streamId;
         private final String action;
-
         private Outcome(Kind kind, ErrorCode code, long streamId, String action) {
             this.kind = kind;
             this.code = code;
@@ -1032,6 +1001,12 @@ final class SpecInvalidCaseFixtureTest {
                 default:
                     return "action " + action;
             }
+        }
+
+        enum Kind {
+            SESSION_ERROR,
+            STREAM_ERROR,
+            ACTION
         }
     }
 }

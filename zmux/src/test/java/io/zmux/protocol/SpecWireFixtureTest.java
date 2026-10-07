@@ -16,30 +16,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
-import static io.zmux.SpecFixtures.has;
-import static io.zmux.SpecFixtures.hex;
-import static io.zmux.SpecFixtures.longValue;
-import static io.zmux.SpecFixtures.map;
-import static io.zmux.SpecFixtures.mapList;
-import static io.zmux.SpecFixtures.string;
-import static io.zmux.SpecFixtures.stringList;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static io.zmux.SpecFixtures.*;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -58,117 +38,6 @@ final class SpecWireFixtureTest {
             "state_cases.ndjson",
             "invalid_cases.ndjson",
     };
-
-    @TestFactory
-    List<DynamicTest> wireValidFixturesDecodeAndRoundTrip() {
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_valid.ndjson")) {
-            String id = string(fixture, "id");
-            tests.add(DynamicTest.dynamicTest(id, () -> {
-                byte[] raw = hex(string(fixture, "hex"));
-                Map<String, Object> expect = map(fixture, "expect");
-                String category = string(fixture, "category");
-                if ("preface_valid".equals(category)) {
-                    assertPrefaceFixture(id, raw, expect);
-                } else if ("frame_valid".equals(category)) {
-                    assertFrameFixture(id, raw, expect);
-                } else {
-                    fail(id + ": unsupported wire_valid category " + category);
-                }
-            }));
-        }
-        return tests;
-    }
-
-    @TestFactory
-    List<DynamicTest> wireInvalidFixturesFailWithTheFixtureCode() {
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_invalid.ndjson")) {
-            String id = string(fixture, "id");
-            tests.add(DynamicTest.dynamicTest(id, () -> {
-                byte[] raw = hex(string(fixture, "hex"));
-                ErrorCode expected = SpecFixtures.errorCode(string(fixture, "expect_error"));
-                String category = string(fixture, "category");
-                if ("bytes_invalid".equals(category)) {
-                    assertCode(id + " Varint62.decode", expected, () -> Varint62.decode(raw, 0));
-                    assertCode(id + " ZmuxCodec.parseVarint", expected, () -> ZmuxCodec.parseVarint(raw));
-                    assertCode(id + " Varint62.read", expected, () -> Varint62.read(new ByteArrayInputStream(raw)));
-                    assertCode(id + " Varint62.read(Decoder)", expected,
-                            () -> Varint62.read(FrameCodec.decoder(new ByteArrayInputStream(raw))));
-                } else if ("frame_invalid".equals(category)) {
-                    Limits limits = receiverLimits(fixture);
-                    assertEveryFrameReaderFails(id, raw, limits, expected);
-                    assertCode(id + " FrameEnvelopeCodec.readInboundSessionFrame", expected,
-                            () -> FrameEnvelopeCodec.readInboundSessionFrame(FrameCodec.decoder(new ByteArrayInputStream(raw)), limits, null));
-                } else {
-                    fail(id + ": unsupported wire_invalid category " + category);
-                }
-            }));
-        }
-        return tests;
-    }
-
-    @Test
-    void fixtureIndexCountsMatchVendoredBundle() {
-        Map<String, Object> index = SpecFixtures.loadJson("index.json");
-        assertEquals("zmux-fixture-bundle-v1", string(index, "schema"), "unexpected fixture bundle schema");
-        Set<String> indexed = new HashSet<>();
-        for (Map<String, Object> entry : mapList(index, "files")) {
-            String path = string(entry, "path");
-            assertTrue(path.startsWith("fixtures/"), "index path should name the bundle directory: " + path);
-            String name = path.substring("fixtures/".length());
-            indexed.add(name);
-            String kind = string(entry, "kind");
-            assertEquals(kind + ".ndjson", name, "index kind should match its file name");
-            assertEquals(
-                    longValue(entry, "count"),
-                    SpecFixtures.loadNdjson(name).size(),
-                    "vendored " + name + " record count must match index.json"
-            );
-        }
-        assertEquals(
-                new HashSet<>(Arrays.asList("wire_valid.ndjson", "wire_invalid.ndjson", "state_cases.ndjson", "invalid_cases.ndjson")),
-                indexed,
-                "index.json should list exactly the four NDJSON bundles"
-        );
-    }
-
-    @Test
-    void fixtureIdsAreUniqueAndCaseSetsResolve() {
-        Set<String> wireValid = ids("wire_valid.ndjson");
-        Set<String> wireInvalid = ids("wire_invalid.ndjson");
-        Set<String> all = new HashSet<>();
-        for (String name : new String[]{"wire_valid.ndjson", "wire_invalid.ndjson", "state_cases.ndjson", "invalid_cases.ndjson"}) {
-            for (String id : ids(name)) {
-                assertTrue(all.add(id), "fixture id " + id + " is not globally unique");
-            }
-        }
-
-        Map<String, Object> sets = map(SpecFixtures.loadJson("case_sets.json"), "sets");
-        for (Map.Entry<String, Object> set : sets.entrySet()) {
-            for (String id : stringList(sets, set.getKey())) {
-                assertTrue(all.contains(id), "case set " + set.getKey() + " references unknown fixture id " + id);
-            }
-        }
-        assertEquals(wireValid, new TreeSet<>(stringList(sets, "codec_valid")), "codec_valid should equal wire_valid");
-        assertEquals(wireInvalid, new TreeSet<>(stringList(sets, "codec_invalid")), "codec_invalid should equal wire_invalid");
-    }
-
-    /**
-     * Opt-in staleness check for workspaces that also check out zmux-spec: with {@code ZMUX_SPEC_ROOT} set, the
-     * vendored bundle must be a byte-for-byte copy of {@code $ZMUX_SPEC_ROOT/fixtures}.
-     */
-    @Test
-    void vendoredBundleMatchesSpecCheckoutWhenConfigured() throws IOException {
-        String specRoot = System.getenv("ZMUX_SPEC_ROOT");
-        assumeTrue(specRoot != null && !specRoot.trim().isEmpty(), "set ZMUX_SPEC_ROOT to compare with a zmux-spec checkout");
-        Path fixtures = Paths.get(specRoot.trim()).resolve("fixtures");
-        assumeTrue(Files.isDirectory(fixtures), "zmux-spec fixtures directory not found: " + fixtures);
-        for (String name : BUNDLE_FILES) {
-            String upstream = new String(Files.readAllBytes(fixtures.resolve(name)), StandardCharsets.UTF_8);
-            assertEquals(upstream, SpecFixtures.resourceText(name), "vendored " + name + " is stale; re-copy it from " + fixtures);
-        }
-    }
 
     private static void assertPrefaceFixture(String id, byte[] raw, Map<String, Object> expect) throws Exception {
         Preface preface = ZmuxCodec.parsePreface(raw);
@@ -513,6 +382,117 @@ final class SpecWireFixtureTest {
             assertTrue(ids.add(string(record, "id")), name + " repeats id " + string(record, "id"));
         }
         return ids;
+    }
+
+    @TestFactory
+    List<DynamicTest> wireValidFixturesDecodeAndRoundTrip() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_valid.ndjson")) {
+            String id = string(fixture, "id");
+            tests.add(DynamicTest.dynamicTest(id, () -> {
+                byte[] raw = hex(string(fixture, "hex"));
+                Map<String, Object> expect = map(fixture, "expect");
+                String category = string(fixture, "category");
+                if ("preface_valid".equals(category)) {
+                    assertPrefaceFixture(id, raw, expect);
+                } else if ("frame_valid".equals(category)) {
+                    assertFrameFixture(id, raw, expect);
+                } else {
+                    fail(id + ": unsupported wire_valid category " + category);
+                }
+            }));
+        }
+        return tests;
+    }
+
+    @TestFactory
+    List<DynamicTest> wireInvalidFixturesFailWithTheFixtureCode() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> fixture : SpecFixtures.loadNdjson("wire_invalid.ndjson")) {
+            String id = string(fixture, "id");
+            tests.add(DynamicTest.dynamicTest(id, () -> {
+                byte[] raw = hex(string(fixture, "hex"));
+                ErrorCode expected = SpecFixtures.errorCode(string(fixture, "expect_error"));
+                String category = string(fixture, "category");
+                if ("bytes_invalid".equals(category)) {
+                    assertCode(id + " Varint62.decode", expected, () -> Varint62.decode(raw, 0));
+                    assertCode(id + " ZmuxCodec.parseVarint", expected, () -> ZmuxCodec.parseVarint(raw));
+                    assertCode(id + " Varint62.read", expected, () -> Varint62.read(new ByteArrayInputStream(raw)));
+                    assertCode(id + " Varint62.read(Decoder)", expected,
+                            () -> Varint62.read(FrameCodec.decoder(new ByteArrayInputStream(raw))));
+                } else if ("frame_invalid".equals(category)) {
+                    Limits limits = receiverLimits(fixture);
+                    assertEveryFrameReaderFails(id, raw, limits, expected);
+                    assertCode(id + " FrameEnvelopeCodec.readInboundSessionFrame", expected,
+                            () -> FrameEnvelopeCodec.readInboundSessionFrame(FrameCodec.decoder(new ByteArrayInputStream(raw)), limits, null));
+                } else {
+                    fail(id + ": unsupported wire_invalid category " + category);
+                }
+            }));
+        }
+        return tests;
+    }
+
+    @Test
+    void fixtureIndexCountsMatchVendoredBundle() {
+        Map<String, Object> index = SpecFixtures.loadJson("index.json");
+        assertEquals("zmux-fixture-bundle-v1", string(index, "schema"), "unexpected fixture bundle schema");
+        Set<String> indexed = new HashSet<>();
+        for (Map<String, Object> entry : mapList(index, "files")) {
+            String path = string(entry, "path");
+            assertTrue(path.startsWith("fixtures/"), "index path should name the bundle directory: " + path);
+            String name = path.substring("fixtures/".length());
+            indexed.add(name);
+            String kind = string(entry, "kind");
+            assertEquals(kind + ".ndjson", name, "index kind should match its file name");
+            assertEquals(
+                    longValue(entry, "count"),
+                    SpecFixtures.loadNdjson(name).size(),
+                    "vendored " + name + " record count must match index.json"
+            );
+        }
+        assertEquals(
+                new HashSet<>(Arrays.asList("wire_valid.ndjson", "wire_invalid.ndjson", "state_cases.ndjson", "invalid_cases.ndjson")),
+                indexed,
+                "index.json should list exactly the four NDJSON bundles"
+        );
+    }
+
+    @Test
+    void fixtureIdsAreUniqueAndCaseSetsResolve() {
+        Set<String> wireValid = ids("wire_valid.ndjson");
+        Set<String> wireInvalid = ids("wire_invalid.ndjson");
+        Set<String> all = new HashSet<>();
+        for (String name : new String[]{"wire_valid.ndjson", "wire_invalid.ndjson", "state_cases.ndjson", "invalid_cases.ndjson"}) {
+            for (String id : ids(name)) {
+                assertTrue(all.add(id), "fixture id " + id + " is not globally unique");
+            }
+        }
+
+        Map<String, Object> sets = map(SpecFixtures.loadJson("case_sets.json"), "sets");
+        for (Map.Entry<String, Object> set : sets.entrySet()) {
+            for (String id : stringList(sets, set.getKey())) {
+                assertTrue(all.contains(id), "case set " + set.getKey() + " references unknown fixture id " + id);
+            }
+        }
+        assertEquals(wireValid, new TreeSet<>(stringList(sets, "codec_valid")), "codec_valid should equal wire_valid");
+        assertEquals(wireInvalid, new TreeSet<>(stringList(sets, "codec_invalid")), "codec_invalid should equal wire_invalid");
+    }
+
+    /**
+     * Opt-in staleness check for workspaces that also check out zmux-spec: with {@code ZMUX_SPEC_ROOT} set, the
+     * vendored bundle must be a byte-for-byte copy of {@code $ZMUX_SPEC_ROOT/fixtures}.
+     */
+    @Test
+    void vendoredBundleMatchesSpecCheckoutWhenConfigured() throws IOException {
+        String specRoot = System.getenv("ZMUX_SPEC_ROOT");
+        assumeTrue(specRoot != null && !specRoot.trim().isEmpty(), "set ZMUX_SPEC_ROOT to compare with a zmux-spec checkout");
+        Path fixtures = Paths.get(specRoot.trim()).resolve("fixtures");
+        assumeTrue(Files.isDirectory(fixtures), "zmux-spec fixtures directory not found: " + fixtures);
+        for (String name : BUNDLE_FILES) {
+            String upstream = new String(Files.readAllBytes(fixtures.resolve(name)), StandardCharsets.UTF_8);
+            assertEquals(upstream, SpecFixtures.resourceText(name), "vendored " + name + " is stale; re-copy it from " + fixtures);
+        }
     }
 
     private static final class ExpectedMetadata {

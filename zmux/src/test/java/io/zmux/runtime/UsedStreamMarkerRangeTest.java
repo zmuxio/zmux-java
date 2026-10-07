@@ -29,7 +29,9 @@ final class UsedStreamMarkerRangeTest {
         return new SessionTerminalBookkeeping(owner, 64L, TimeUnit.SECONDS.toNanos(1L));
     }
 
-    /** With a zero tombstone limit every tombstone is reaped straight into marker-only state. */
+    /**
+     * With a zero tombstone limit every tombstone is reaped straight into marker-only state.
+     */
     private static void reap(SessionTerminalBookkeeping bookkeeping, long streamId, SessionTerminalBookkeeping.Tombstone tombstone) {
         bookkeeping.putTombstoneLocked(streamId, tombstone);
     }

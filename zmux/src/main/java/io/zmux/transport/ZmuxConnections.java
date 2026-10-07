@@ -262,7 +262,9 @@ public final class ZmuxConnections {
         }
     }
 
-    /** Counts writes in progress so {@link SocketDuplexConnection#close()} can tell when a write would block it. */
+    /**
+     * Counts writes in progress so {@link SocketDuplexConnection#close()} can tell when a write would block it.
+     */
     private static final class WriteTrackingOutputStream extends FilterOutputStream {
         private final AtomicInteger writesInProgress;
 

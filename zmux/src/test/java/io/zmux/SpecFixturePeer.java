@@ -24,9 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Raw initiator peer in front of a real Java responder session, shared by the zmux-spec fixture runners.
@@ -111,6 +109,27 @@ final class SpecFixturePeer implements AutoCloseable {
         return text.getBytes(StandardCharsets.UTF_8);
     }
 
+    private static String describe(List<FrameCodec.Frame> frames) {
+        StringBuilder out = new StringBuilder("[");
+        for (FrameCodec.Frame frame : frames) {
+            if (out.length() > 1) {
+                out.append(", ");
+            }
+            out.append(frame.type()).append('@').append(frame.streamId());
+        }
+        return out.append(']').toString();
+    }
+
+    private static void rethrow(Throwable error) throws Exception {
+        if (error == null) {
+            return;
+        }
+        if (error instanceof Exception) {
+            throw (Exception) error;
+        }
+        throw new RuntimeException(error);
+    }
+
     ZmuxNativeSession session() {
         return session;
     }
@@ -129,7 +148,9 @@ final class SpecFixturePeer implements AutoCloseable {
         output.flush();
     }
 
-    /** Opens peer-owned bidi {@code streamId} with DATA and returns the accepted Java stream. */
+    /**
+     * Opens peer-owned bidi {@code streamId} with DATA and returns the accepted Java stream.
+     */
     ZmuxStream openPeerStream(long streamId) throws Exception {
         send(FrameType.DATA, 0, streamId, bytes("x"));
         ZmuxStream stream = session.acceptStream(WAIT);
@@ -137,7 +158,9 @@ final class SpecFixturePeer implements AutoCloseable {
         return stream;
     }
 
-    /** Round-trips a PING so every frame sent before it has been processed by the session. */
+    /**
+     * Round-trips a PING so every frame sent before it has been processed by the session.
+     */
     void sync() throws Exception {
         byte[] token = new byte[8];
         long value = ++pingCounter ^ 0x5a5a5a5a00000000L;
@@ -150,7 +173,9 @@ final class SpecFixturePeer implements AutoCloseable {
                 && Arrays.equals(Arrays.copyOf(frame.payload(), token.length), token), "PONG for sync PING");
     }
 
-    /** Waits for the session's CLOSE, checks that the session failed, and returns the CLOSE code. */
+    /**
+     * Waits for the session's CLOSE, checks that the session failed, and returns the CLOSE code.
+     */
     ErrorCode awaitSessionClose() throws Exception {
         FrameCodec.Frame close = await(frame -> frame.type() == FrameType.CLOSE, "CLOSE");
         long code = FrameCodec.parseErrorPayload(close.payload()).code();
@@ -159,7 +184,9 @@ final class SpecFixturePeer implements AutoCloseable {
         return ErrorCode.fromCode(code);
     }
 
-    /** Waits for an ABORT on {@code streamId}, checks that the session is still usable, and returns the code. */
+    /**
+     * Waits for an ABORT on {@code streamId}, checks that the session is still usable, and returns the code.
+     */
     ErrorCode awaitStreamAbort(long streamId) throws Exception {
         FrameCodec.Frame abort = await(frame -> frame.type() == FrameType.ABORT && frame.streamId() == streamId, "ABORT on stream " + streamId);
         long code = FrameCodec.parseErrorPayload(abort.payload()).code();
@@ -168,7 +195,9 @@ final class SpecFixturePeer implements AutoCloseable {
         return ErrorCode.fromCode(code);
     }
 
-    /** Asserts that nothing the session sent so far (and not yet consumed) is a CLOSE or targets {@code streamId}. */
+    /**
+     * Asserts that nothing the session sent so far (and not yet consumed) is a CLOSE or targets {@code streamId}.
+     */
     void assertNothingSentOn(long streamId) throws IOException {
         for (FrameCodec.Frame frame : drain()) {
             assertFalse(frame.type() == FrameType.CLOSE, "unexpected CLOSE");
@@ -200,7 +229,9 @@ final class SpecFixturePeer implements AutoCloseable {
                 + ", session=" + session.state() + ", unconsumed=" + describe(unconsumed));
     }
 
-    /** Reads whatever is already on the wire and returns every frame no await consumed, in arrival order. */
+    /**
+     * Reads whatever is already on the wire and returns every frame no await consumed, in arrival order.
+     */
     List<FrameCodec.Frame> drain() throws IOException {
         while (!transportClosed) {
             FrameCodec.Frame frame = poll();
@@ -212,13 +243,17 @@ final class SpecFixturePeer implements AutoCloseable {
         return new ArrayList<>(unconsumed);
     }
 
-    /** Forgets frames that are already read but unconsumed. */
+    /**
+     * Forgets frames that are already read but unconsumed.
+     */
     void discardUnconsumed() throws IOException {
         drain();
         unconsumed.clear();
     }
 
-    /** Every frame read from the session so far, consumed or not, in arrival order. */
+    /**
+     * Every frame read from the session so far, consumed or not, in arrival order.
+     */
     List<FrameCodec.Frame> received() {
         return new ArrayList<>(received);
     }
@@ -238,27 +273,6 @@ final class SpecFixturePeer implements AutoCloseable {
             transportClosed = true;
             return null;
         }
-    }
-
-    private static String describe(List<FrameCodec.Frame> frames) {
-        StringBuilder out = new StringBuilder("[");
-        for (FrameCodec.Frame frame : frames) {
-            if (out.length() > 1) {
-                out.append(", ");
-            }
-            out.append(frame.type()).append('@').append(frame.streamId());
-        }
-        return out.append(']').toString();
-    }
-
-    private static void rethrow(Throwable error) throws Exception {
-        if (error == null) {
-            return;
-        }
-        if (error instanceof Exception) {
-            throw (Exception) error;
-        }
-        throw new RuntimeException(error);
     }
 
     @Override

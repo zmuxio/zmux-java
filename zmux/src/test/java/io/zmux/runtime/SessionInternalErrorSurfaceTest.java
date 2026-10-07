@@ -8,7 +8,10 @@ import java.io.UncheckedIOException;
 import java.lang.reflect.InvocationTargetException;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class SessionInternalErrorSurfaceTest {
     private static void awaitState(SessionRuntime runtime, SessionState expected) throws InterruptedException {

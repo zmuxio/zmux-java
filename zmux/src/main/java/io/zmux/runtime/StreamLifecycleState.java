@@ -70,7 +70,9 @@ final class StreamLifecycleState {
         provisionalCreatedAtNanos = value;
     }
 
-    /** Creation time shifted past completed commit-turn waits; 0 when not provisional. */
+    /**
+     * Creation time shifted past completed commit-turn waits; 0 when not provisional.
+     */
     long provisionalAgeOriginNanos() {
         if (provisionalCreatedAtNanos == 0L) {
             return 0L;

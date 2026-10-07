@@ -53,6 +53,19 @@ final class ApiSurfaceTest {
         assertFalse(ZmuxErrors.timeout(interrupted));
     }
 
+    private static IOException drainUntilFailure(ZmuxRecvStream inbound) throws IOException {
+        inbound.setReadTimeout(Duration.ofSeconds(2));
+        byte[] buffer = new byte[64];
+        try {
+            while (inbound.read(buffer) >= 0) {
+                // Discard the bytes the failed helper managed to send before it aborted.
+            }
+        } catch (IOException error) {
+            return error;
+        }
+        throw new AssertionError("peer stream ended gracefully instead of being aborted");
+    }
+
     @Test
     void openUniStreamExposesSendOnlySurface() throws Exception {
         try (SessionPair pair = SessionPair.open()) {
@@ -619,24 +632,6 @@ final class ApiSurfaceTest {
             assertEquals("write", details.operation());
             assertTrue(details.timeout());
         }
-    }
-
-    @FunctionalInterface
-    private interface FailingOpenAndSend {
-        Object run(ZmuxNativeSession client) throws Exception;
-    }
-
-    private static IOException drainUntilFailure(ZmuxRecvStream inbound) throws IOException {
-        inbound.setReadTimeout(Duration.ofSeconds(2));
-        byte[] buffer = new byte[64];
-        try {
-            while (inbound.read(buffer) >= 0) {
-                // Discard the bytes the failed helper managed to send before it aborted.
-            }
-        } catch (IOException error) {
-            return error;
-        }
-        throw new AssertionError("peer stream ended gracefully instead of being aborted");
     }
 
     @Test
@@ -2153,6 +2148,11 @@ final class ApiSurfaceTest {
         assertEquals(2, stream.lastWriteLength);
         assertEquals(1, stream.writeFinalCalls);
         assertEquals(2, stream.lastFinalLength);
+    }
+
+    @FunctionalInterface
+    private interface FailingOpenAndSend {
+        Object run(ZmuxNativeSession client) throws Exception;
     }
 
     private static final class SelfCauseIOException extends IOException {

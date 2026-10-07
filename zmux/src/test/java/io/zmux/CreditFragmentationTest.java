@@ -77,6 +77,36 @@ final class CreditFragmentationTest {
         return received;
     }
 
+    private static void assertPairTransfers(ZmuxConfig clientConfig, ZmuxConfig serverConfig, int length) throws Exception {
+        byte[] payload = pattern(length);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (SessionPair pair = SessionPair.open(clientConfig, serverConfig)) {
+            Future<byte[]> serverRead = executor.submit(() -> {
+                ZmuxStream accepted = pair.server().acceptStream(Duration.ofSeconds(5));
+                byte[] received = accepted.readAllBytes();
+                accepted.close();
+                return received;
+            });
+            Future<ZmuxStream> clientWrite = executor.submit(() -> {
+                ZmuxStream stream = pair.client().openStream();
+                stream.write(payload);
+                stream.closeWrite();
+                return stream;
+            });
+            ZmuxStream clientStream;
+            try {
+                clientStream = clientWrite.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException timeout) {
+                throw new AssertionError("write of " + length + " bytes stalled", timeout);
+            }
+            byte[] received = serverRead.get(5, TimeUnit.SECONDS);
+            assertArrayEquals(payload, received, "server should read every byte of a " + length + " byte write");
+            clientStream.close();
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void openingWriteLargerThanStreamWindowCarriesAvailableCreditInOpener() throws Exception {
         Settings peerSettings = Settings.defaults().toBuilder()
@@ -239,36 +269,6 @@ final class CreditFragmentationTest {
                         .build())
                 .build();
         assertPairTransfers(ZmuxConfig.builder().build(), serverConfig, 300 * 1024);
-    }
-
-    private static void assertPairTransfers(ZmuxConfig clientConfig, ZmuxConfig serverConfig, int length) throws Exception {
-        byte[] payload = pattern(length);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try (SessionPair pair = SessionPair.open(clientConfig, serverConfig)) {
-            Future<byte[]> serverRead = executor.submit(() -> {
-                ZmuxStream accepted = pair.server().acceptStream(Duration.ofSeconds(5));
-                byte[] received = accepted.readAllBytes();
-                accepted.close();
-                return received;
-            });
-            Future<ZmuxStream> clientWrite = executor.submit(() -> {
-                ZmuxStream stream = pair.client().openStream();
-                stream.write(payload);
-                stream.closeWrite();
-                return stream;
-            });
-            ZmuxStream clientStream;
-            try {
-                clientStream = clientWrite.get(5, TimeUnit.SECONDS);
-            } catch (TimeoutException timeout) {
-                throw new AssertionError("write of " + length + " bytes stalled", timeout);
-            }
-            byte[] received = serverRead.get(5, TimeUnit.SECONDS);
-            assertArrayEquals(payload, received, "server should read every byte of a " + length + " byte write");
-            clientStream.close();
-        } finally {
-            executor.shutdownNow();
-        }
     }
 
     @FunctionalInterface

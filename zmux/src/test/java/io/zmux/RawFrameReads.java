@@ -24,14 +24,18 @@ final class RawFrameReads {
     private RawFrameReads() {
     }
 
-    /** {@link #readFrameIfStarted(Socket, BufferedInputStream, int, Limits)} with the default limits. */
+    /**
+     * {@link #readFrameIfStarted(Socket, BufferedInputStream, int, Limits)} with the default limits.
+     */
     static FrameCodec.Frame readFrameIfStarted(Socket socket,
                                                BufferedInputStream input,
                                                int firstByteTimeoutMillis) throws IOException {
         return readFrameIfStarted(socket, input, firstByteTimeoutMillis, Settings.defaults().limits());
     }
 
-    /** {@link #readFrameIfStarted(Socket, BufferedInputStream, int, Limits)} with the default limits. */
+    /**
+     * {@link #readFrameIfStarted(Socket, BufferedInputStream, int, Limits)} with the default limits.
+     */
     static FrameCodec.Frame readFrameIfStarted(Socket socket,
                                                BufferedInputStream input,
                                                Duration firstByteTimeout) throws IOException {
@@ -63,7 +67,9 @@ final class RawFrameReads {
         return FrameCodec.readFrame(input, limits);
     }
 
-    /** {@link #readFrame(Socket, BufferedInputStream, Duration, Limits)} with the default limits. */
+    /**
+     * {@link #readFrame(Socket, BufferedInputStream, Duration, Limits)} with the default limits.
+     */
     static FrameCodec.Frame readFrame(Socket socket, BufferedInputStream input, Duration timeout) throws IOException {
         return readFrame(socket, input, timeout, Settings.defaults().limits());
     }

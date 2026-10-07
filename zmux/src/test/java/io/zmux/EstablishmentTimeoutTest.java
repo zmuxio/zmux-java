@@ -8,11 +8,7 @@ import io.zmux.transport.DuplexConnection;
 import io.zmux.transport.ZmuxConnections;
 import org.junit.jupiter.api.Test;
 
-import java.io.BufferedInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -88,52 +84,6 @@ final class EstablishmentTimeoutTest {
             } finally {
                 session.closeWithError(ErrorCode.NO_ERROR.code(), "");
             }
-        }
-    }
-
-    /**
-     * Socket transport that also advertises (no-op) write-deadline support, so a failed establishment emits its
-     * bounded fatal CLOSE (the session skips that CLOSE when it cannot bound the write).
-     */
-    private static final class WriteDeadlineSocketConnection implements DuplexConnection {
-        private final DuplexConnection delegate;
-
-        WriteDeadlineSocketConnection(Socket socket) throws IOException {
-            this.delegate = ZmuxConnections.of(socket);
-        }
-
-        @Override
-        public InputStream input() {
-            return delegate.input();
-        }
-
-        @Override
-        public OutputStream output() {
-            return delegate.output();
-        }
-
-        @Override
-        public boolean supportsReadDeadline() {
-            return delegate.supportsReadDeadline();
-        }
-
-        @Override
-        public void setReadDeadline(Instant deadline) throws IOException {
-            delegate.setReadDeadline(deadline);
-        }
-
-        @Override
-        public boolean supportsWriteDeadline() {
-            return true;
-        }
-
-        @Override
-        public void setWriteDeadline(Instant deadline) {
-        }
-
-        @Override
-        public void close() throws IOException {
-            delegate.close();
         }
     }
 
@@ -217,5 +167,51 @@ final class EstablishmentTimeoutTest {
                 "unexpected establishment failure: " + error.getMessage()
         );
         assertTrue(elapsedMillis < 1_200L, "configured bound should fire well before the peer preface, took " + elapsedMillis + "ms");
+    }
+
+    /**
+     * Socket transport that also advertises (no-op) write-deadline support, so a failed establishment emits its
+     * bounded fatal CLOSE (the session skips that CLOSE when it cannot bound the write).
+     */
+    private static final class WriteDeadlineSocketConnection implements DuplexConnection {
+        private final DuplexConnection delegate;
+
+        WriteDeadlineSocketConnection(Socket socket) throws IOException {
+            this.delegate = ZmuxConnections.of(socket);
+        }
+
+        @Override
+        public InputStream input() {
+            return delegate.input();
+        }
+
+        @Override
+        public OutputStream output() {
+            return delegate.output();
+        }
+
+        @Override
+        public boolean supportsReadDeadline() {
+            return delegate.supportsReadDeadline();
+        }
+
+        @Override
+        public void setReadDeadline(Instant deadline) throws IOException {
+            delegate.setReadDeadline(deadline);
+        }
+
+        @Override
+        public boolean supportsWriteDeadline() {
+            return true;
+        }
+
+        @Override
+        public void setWriteDeadline(Instant deadline) {
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
     }
 }

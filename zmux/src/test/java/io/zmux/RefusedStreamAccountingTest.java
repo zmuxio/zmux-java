@@ -336,7 +336,9 @@ final class RefusedStreamAccountingTest {
             output.flush();
         }
 
-        /** Reads at most one frame into the seen list. */
+        /**
+         * Reads at most one frame into the seen list.
+         */
         void poll(Duration timeout) throws IOException {
             FrameCodec.Frame frame = RawFrameReads.readFrameIfStarted(socket, input, timeout);
             if (frame != null) {

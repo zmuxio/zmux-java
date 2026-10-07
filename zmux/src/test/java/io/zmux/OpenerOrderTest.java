@@ -1,6 +1,9 @@
 package io.zmux;
 
-import io.zmux.protocol.*;
+import io.zmux.protocol.FrameCodec;
+import io.zmux.protocol.FrameType;
+import io.zmux.protocol.Preface;
+import io.zmux.protocol.Protocol;
 import io.zmux.transport.BasicDuplexConnection;
 import org.junit.jupiter.api.Test;
 
@@ -35,78 +38,6 @@ final class OpenerOrderTest {
             throw (Exception) error;
         }
         throw new RuntimeException(error);
-    }
-
-    @Test
-    void concurrentOpenWritesKeepStreamIdOrder() throws Exception {
-        assertConcurrentOpensStayOrdered(index -> OpenOptions.empty(), 100, Settings.defaults());
-    }
-
-    @Test
-    void concurrentOpenWritesWithMixedPrioritiesKeepStreamIdOrder() throws Exception {
-        assertConcurrentOpensStayOrdered(
-                index -> OpenOptions.builder().initialPriority(index % 16).build(),
-                100,
-                Settings.defaults()
-        );
-    }
-
-    @Test
-    void concurrentOpenWritesLargerThanAvailableCreditKeepStreamIdOrder() throws Exception {
-        // A small session window makes most first writes wait for credit right after their stream opens.
-        Settings smallSessionWindow = Settings.defaults().toBuilder().initialMaxData(48L * 1024L).build();
-        assertConcurrentOpensStayOrdered(index -> OpenOptions.empty(), 40_000, smallSessionWindow);
-    }
-
-    @Test
-    void cancelWriteRacingFirstWriteNeverMakesResetTheFirstFrame() throws Exception {
-        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
-            ExecutorService writers = Executors.newSingleThreadExecutor();
-            try {
-                for (int iteration = 0; iteration < 120; iteration++) {
-                    ZmuxStream stream = peer.session().openStream();
-                    Future<?> write = writers.submit(() -> {
-                        stream.write(new byte[10]);
-                        return null;
-                    });
-                    long spinUntil = System.nanoTime() + TimeUnit.MICROSECONDS.toNanos(50L * (iteration % 12));
-                    while (System.nanoTime() < spinUntil) {
-                        Thread.yield();
-                    }
-                    try {
-                        stream.cancelWrite(ErrorCode.CANCELLED.code());
-                    } catch (IOException ignored) {
-                        // The write may already have finished the stream or failed it; both are fine here.
-                    }
-                    try {
-                        write.get(2, TimeUnit.SECONDS);
-                    } catch (ExecutionException ignored) {
-                        // cancelWrite may fail the in-flight write.
-                    }
-                }
-            } finally {
-                writers.shutdownNow();
-            }
-
-            Map<Long, FrameType> firstFrames = new LinkedHashMap<>();
-            long lastOpened = -1L;
-            FrameCodec.Frame frame;
-            while ((frame = peer.pollFrame(Duration.ofMillis(300))) != null) {
-                long streamId = frame.streamId();
-                if (streamId == 0L || firstFrames.containsKey(streamId)) {
-                    continue;
-                }
-                firstFrames.put(streamId, frame.type());
-                assertTrue(
-                        frame.type() == FrameType.DATA || frame.type() == FrameType.ABORT,
-                        "first frame for stream " + streamId + " must be opening-eligible, was " + frame.type()
-                );
-                assertTrue(streamId > lastOpened, "stream " + streamId + " opened after " + lastOpened);
-                assertEquals(lastOpened < 0L ? 1L : lastOpened + 4L, streamId, "local stream IDs must open without gaps");
-                lastOpened = streamId;
-            }
-            assertFalse(firstFrames.isEmpty(), "the race should have opened streams on the wire");
-        }
     }
 
     private static void assertConcurrentOpensStayOrdered(IntFunction<OpenOptions> options,
@@ -184,6 +115,78 @@ final class OpenerOrderTest {
         } finally {
             writers.shutdownNow();
             readers.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentOpenWritesKeepStreamIdOrder() throws Exception {
+        assertConcurrentOpensStayOrdered(index -> OpenOptions.empty(), 100, Settings.defaults());
+    }
+
+    @Test
+    void concurrentOpenWritesWithMixedPrioritiesKeepStreamIdOrder() throws Exception {
+        assertConcurrentOpensStayOrdered(
+                index -> OpenOptions.builder().initialPriority(index % 16).build(),
+                100,
+                Settings.defaults()
+        );
+    }
+
+    @Test
+    void concurrentOpenWritesLargerThanAvailableCreditKeepStreamIdOrder() throws Exception {
+        // A small session window makes most first writes wait for credit right after their stream opens.
+        Settings smallSessionWindow = Settings.defaults().toBuilder().initialMaxData(48L * 1024L).build();
+        assertConcurrentOpensStayOrdered(index -> OpenOptions.empty(), 40_000, smallSessionWindow);
+    }
+
+    @Test
+    void cancelWriteRacingFirstWriteNeverMakesResetTheFirstFrame() throws Exception {
+        try (RawPeerSession peer = RawPeerSession.open(ZmuxConfig.builder().build(), 0L, Settings.defaults())) {
+            ExecutorService writers = Executors.newSingleThreadExecutor();
+            try {
+                for (int iteration = 0; iteration < 120; iteration++) {
+                    ZmuxStream stream = peer.session().openStream();
+                    Future<?> write = writers.submit(() -> {
+                        stream.write(new byte[10]);
+                        return null;
+                    });
+                    long spinUntil = System.nanoTime() + TimeUnit.MICROSECONDS.toNanos(50L * (iteration % 12));
+                    while (System.nanoTime() < spinUntil) {
+                        Thread.yield();
+                    }
+                    try {
+                        stream.cancelWrite(ErrorCode.CANCELLED.code());
+                    } catch (IOException ignored) {
+                        // The write may already have finished the stream or failed it; both are fine here.
+                    }
+                    try {
+                        write.get(2, TimeUnit.SECONDS);
+                    } catch (ExecutionException ignored) {
+                        // cancelWrite may fail the in-flight write.
+                    }
+                }
+            } finally {
+                writers.shutdownNow();
+            }
+
+            Map<Long, FrameType> firstFrames = new LinkedHashMap<>();
+            long lastOpened = -1L;
+            FrameCodec.Frame frame;
+            while ((frame = peer.pollFrame(Duration.ofMillis(300))) != null) {
+                long streamId = frame.streamId();
+                if (streamId == 0L || firstFrames.containsKey(streamId)) {
+                    continue;
+                }
+                firstFrames.put(streamId, frame.type());
+                assertTrue(
+                        frame.type() == FrameType.DATA || frame.type() == FrameType.ABORT,
+                        "first frame for stream " + streamId + " must be opening-eligible, was " + frame.type()
+                );
+                assertTrue(streamId > lastOpened, "stream " + streamId + " opened after " + lastOpened);
+                assertEquals(lastOpened < 0L ? 1L : lastOpened + 4L, streamId, "local stream IDs must open without gaps");
+                lastOpened = streamId;
+            }
+            assertFalse(firstFrames.isEmpty(), "the race should have opened streams on the wire");
         }
     }
 
