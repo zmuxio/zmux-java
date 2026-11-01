@@ -734,12 +734,15 @@ public final class StreamTable {
 
     /** The stream became known to the peer: peer-opened, or its first frame went out. */
     void markOpened(Stream st) {
+        if (st.tab.opened) return;
         st.tab.opened = true;
+        ctl.opened(st);
     }
 
-    /** The bootstrap restarted: a local stream's opening frame goes again. */
+    /** The bootstrap restarted: a local stream's opening frame goes again, and its frames wait for it. */
     void restartOpen(Stream st) {
         st.tab.opened = false;
+        ctl.reopen(st);
     }
 
     /** The priority the peer put in st's preamble (EXTENSIONS.md 3). */

@@ -401,6 +401,12 @@ public final class Transmitter {
 
     /** Writes the pending control frames of one stream; false when the batch is full. */
     private boolean writeStreamCtl(RecordWriter w, Stream st, PathLayer path, long now) {
+        if (ControlQueue.held(st)) {
+            // Not yet known to the peer: only its RESET may go; the rest waits for the opening frame.
+            if (ControlQueue.has(st, ControlQueue.RESET) && !send.writeReset(w, st, path.retainsSent())) return false;
+            ctl.settle(st);
+            return true;
+        }
         if (ControlQueue.has(st, ControlQueue.MAX_STREAM_DATA)) {
             if (!recv.writeMaxStreamData(w, st, path, now)) return false;
             ControlQueue.done(st, ControlQueue.MAX_STREAM_DATA);

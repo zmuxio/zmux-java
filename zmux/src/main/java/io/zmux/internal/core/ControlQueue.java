@@ -6,6 +6,12 @@ package io.zmux.internal.core;
  * pending stream-level frames, in the order they were first queued. The stream list is
  * intrusive and doubly linked through each stream's {@link Entry}: queueing and removal
  * are O(1) and allocate nothing.
+ *
+ * <p>A local stream whose opening frame has not gone out is unknown to the peer, and a
+ * frame naming it would name an identifier the peer has not seen (or none at all, before
+ * allocation). Its frames other than RESET are therefore <em>held</em>: their bits are kept,
+ * but the stream leaves the list until {@link #opened} queues it again, so a held stream
+ * never makes control look pending.
  */
 final class ControlQueue {
     // Stream-level frame bits.
@@ -75,8 +81,28 @@ final class ControlQueue {
 
     // ---- stream-level frames ----
 
-    /** Marks a pending stream-level frame of st and asks for a write. */
+    /** Whether st's frames other than RESET wait for its opening frame. */
+    static boolean held(Stream st) {
+        return st.local && !st.tab.opened();
+    }
+
+    /** Whether st has a frame it may write now. */
+    private static boolean writable(Stream st) {
+        return (st.cq.bits & (held(st) ? RESET : ~0)) != 0;
+    }
+
+    /** Marks a pending stream-level frame of st and asks for a write; held frames only mark. */
     void stream(Stream st, int bit) {
+        st.cq.bits |= bit;
+        if (writable(st)) link(st);
+    }
+
+    /** st's opening frame went out: its held frames are queued. */
+    void opened(Stream st) {
+        if (st.cq.bits != 0) link(st);
+    }
+
+    private void link(Stream st) {
         Entry e = st.cq;
         if (!e.linked) {
             e.linked = true;
@@ -86,7 +112,6 @@ final class ControlQueue {
             else tail.next = e;
             tail = e;
         }
-        e.bits |= bit;
         wantWrite.run();
     }
 
@@ -105,15 +130,23 @@ final class ControlQueue {
         st.cq.bits &= ~bit;
     }
 
-    /** Removes st from the queue once it has nothing pending. */
+    /** Removes st from the queue once it has nothing it may write; held bits stay. */
     void settle(Stream st) {
-        if (st.cq.bits == 0) remove(st);
+        if (!writable(st)) unlink(st.cq);
     }
 
     /** Drops every pending frame of st. */
     void remove(Stream st) {
-        Entry e = st.cq;
-        e.bits = 0;
+        st.cq.bits = 0;
+        unlink(st.cq);
+    }
+
+    /** The opening frame goes again (a rejected 0-RTT): st's frames are held until it does. */
+    void reopen(Stream st) {
+        if (!writable(st)) unlink(st.cq);
+    }
+
+    private void unlink(Entry e) {
         if (!e.linked) return;
         e.linked = false;
         if (e.prev == null) head = e.next;
