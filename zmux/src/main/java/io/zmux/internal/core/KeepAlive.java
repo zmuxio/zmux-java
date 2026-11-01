@@ -99,7 +99,7 @@ public final class KeepAlive {
     static long effectivePeriod(long k, long idle) {
         if (k < 0 || idle <= 0) return k;
         long cap = Math.max(idle / 2, 1);
-        return k < cap ? k : cap;
+        return Math.min(k, cap);
     }
 
     /** The keep-alive period in effect, {@link CoreConfig#OFF}: off. */

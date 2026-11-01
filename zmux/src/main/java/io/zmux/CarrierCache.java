@@ -249,6 +249,16 @@ public final class CarrierCache {
          */
         public static Snapshot fromJson(String text) {
             Objects.requireNonNull(text);
+            var out = new ArrayList<Entry>();
+            for (SnapshotJson.Value item : entries(text)) {
+                Entry e = entry(item);
+                if (e != null) out.add(e);
+            }
+            return new Snapshot(out);
+        }
+
+        /** The entries of a snapshot's JSON form, after its version is checked. */
+        private static List<SnapshotJson.Value> entries(String text) {
             SnapshotJson.Value v;
             try {
                 v = SnapshotJson.parse(text);
@@ -258,18 +268,12 @@ public final class CarrierCache {
             if (!(v instanceof SnapshotJson.Obj top)) throw new InvalidSnapshotException("not an object");
             if (!(top.get("version") instanceof SnapshotJson.Int(long version))) throw new InvalidSnapshotException("no integer version");
             if (version != VERSION) throw new InvalidSnapshotException("version " + version);
-            List<SnapshotJson.Value> list = switch (top.get("entries")) {
+            return switch (top.get("entries")) {
                 case null -> List.of();
                 case SnapshotJson.Null _ -> List.of();
                 case SnapshotJson.Arr(List<SnapshotJson.Value> a) -> a;
                 default -> throw new InvalidSnapshotException("entries not an array");
             };
-            var out = new ArrayList<Entry>();
-            for (SnapshotJson.Value item : list) {
-                Entry e = entry(item);
-                if (e != null) out.add(e);
-            }
-            return new Snapshot(out);
         }
 
         /** One entry of the JSON form; null: an entry of an unknown kind, skipped. */
