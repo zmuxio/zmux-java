@@ -1,5 +1,15 @@
 # zmux-java
 
+[![CI](https://github.com/zmuxio/zmux-java/actions/workflows/ci.yml/badge.svg)](https://github.com/zmuxio/zmux-java/actions/workflows/ci.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux?label=maven%20central)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux)
+[![Javadoc](https://javadoc.io/badge2/io.github.zmuxio/zmux/javadoc.svg)](https://javadoc.io/doc/io.github.zmuxio/zmux)
+[![Java](https://img.shields.io/badge/Java-25%2B-blue)](pom.xml)
+[![License](https://img.shields.io/github/license/zmuxio/zmux-java)](LICENSE)
+
+[![zmux-quic](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-quic?label=zmux-quic)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-quic)
+[![zmux-http](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-http?label=zmux-http)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-http)
+[![zmux-shaping](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-shaping?label=zmux-shaping)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-shaping)
+
 Java 25 stream and datagram multiplexing over reliable carriers, compatible
 with QMux draft-02. The core has no runtime dependencies. A shared NIO event
 loop owns each session; blocking application calls park their calling thread.
