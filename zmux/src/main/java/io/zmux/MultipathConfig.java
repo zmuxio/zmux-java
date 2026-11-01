@@ -25,7 +25,7 @@ import java.util.Optional;
  * <li>probeInterval idle pipe probe interval, measured to the carrier, at least 1 s, default 15 s;
  *     {@link #disableIdleProbes()} turns off the idle probes of pipe pairs only (answers to the peer's probes,
  *     standby probes and unpaired attachments keep probing)
- * <li>probeJitter the probe jitter j, 0 <= j < 1, default 0.25: each probe waits a uniform draw from
+ * <li>probeJitter the probe jitter j, {@code 0 <= j < 1}, default 0.25: each probe waits a uniform draw from
  *     [k_eff x (1 - j), k_eff] with k_eff = max(1 s, k - the pipe's longest record hold); the first wait of a
  *     bootstrap pipe from [0, k_eff] when j > 0; 0 gives a fixed schedule
  * <li>redundancy urgent and first-after-idle redundant copies

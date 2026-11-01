@@ -9,7 +9,7 @@ public final class VarInt {
 
     private VarInt() {}
 
-    /** Length of the shortest encoding of {@code v} (0 <= v <= MAX). */
+    /** Length of the shortest encoding of {@code v} ({@code 0 <= v <= MAX}). */
     public static int length(long v) {
         if (v < (1L << 6)) return 1;
         if (v < (1L << 14)) return 2;

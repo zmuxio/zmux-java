@@ -311,7 +311,7 @@ public record CoreConfig(
 
         public Builder probeInterval(long v) { probeInterval = v; return this; }
 
-        /** The default probe jitter of the session's pipes, 0 <= v < 1. */
+        /** The default probe jitter of the session's pipes, {@code 0 <= v < 1}. */
         public Builder probeJitter(double v) { probeJitter = v; return this; }
 
         public Builder redundancy(boolean v) { redundancy = v; return this; }

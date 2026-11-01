@@ -193,7 +193,7 @@ public final class PipeOptions {
             return this;
         }
 
-        /** The probe jitter j of the pipe, 0 <= j < 1: each probe waits a uniform draw from [k(1 - j), k]; unset: the session's. */
+        /** The probe jitter j of the pipe, {@code 0 <= j < 1}: each probe waits a uniform draw from [k(1 - j), k]; unset: the session's. */
         public Builder probeJitter(double j) {
             probeJitter = MultipathConfig.jitter(j, "probeJitter");
             return this;

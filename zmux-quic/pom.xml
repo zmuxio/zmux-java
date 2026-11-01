@@ -4,6 +4,7 @@
  <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.1.2</version></parent>
  <artifactId>zmux-quic</artifactId><name>zmux-quic</name>
  <description>QUIC streams as zmux carriers.</description>
+ <url>https://github.com/zmuxio/zmux-java/tree/main/zmux-quic</url>
  <dependencies>
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux</artifactId><version>${project.version}</version></dependency>
   <dependency><groupId>io.netty</groupId><artifactId>netty-codec-classes-quic</artifactId><version>${netty.version}</version></dependency>

@@ -4,6 +4,7 @@
  <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.1.2</version></parent>
  <artifactId>zmux-shaping</artifactId><name>zmux-shaping</name>
  <description>A Shaper driven by state machines read from a definition.</description>
+ <url>https://github.com/zmuxio/zmux-java/tree/main/zmux-shaping</url>
  <dependencies>
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux</artifactId><version>${project.version}</version></dependency>
   <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>${junit.version}</version><scope>test</scope></dependency>
