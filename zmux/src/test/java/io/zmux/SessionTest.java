@@ -110,7 +110,9 @@ class SessionTest {
             ZmuxStream d = p.server().acceptStream();
             d.stop(5);
             StreamStoppedException s = assertThrows(StreamStoppedException.class, () -> {
-                for (int i = 0; i < 1000; i++) c.write(new byte[1024]);
+                // Until the STOP_SENDING arrives: a fixed amount can fit in the buffers under load.
+                long end = System.nanoTime() + 10_000_000_000L;
+                while (System.nanoTime() < end) c.write(new byte[1024]);
             });
             assertEquals(5, s.code());
         }
