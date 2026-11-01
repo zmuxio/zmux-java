@@ -204,7 +204,7 @@ public final class ZmuxConfig {
         if (multipath()) {
             c.resume(nanos(m.resumeTimeout()));
             p.present |= TransportParams.MULTIPATH;
-            if (pipeAuth.tls()) p.secretFlags |= TransportParams.SECRET_EXPORTER;
+            if (pipeAuth.useExporter()) p.secretFlags |= TransportParams.SECRET_EXPORTER;
             if (pipeAuth.psk() != null) {
                 p.secretFlags |= TransportParams.SECRET_PSK;
                 c.psk(pipeAuth.psk());

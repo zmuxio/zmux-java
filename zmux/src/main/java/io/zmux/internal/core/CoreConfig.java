@@ -318,7 +318,7 @@ public record CoreConfig(
 
         public Builder psk(byte[] v) { psk = v; return this; }
 
-        /** TLS exporter of pipe 0 (E flag asserted by the application). */
+        /** Exporter of pipe 0's innermost end-to-end handshake (E flag asserted by the application). */
         public Builder exporter(byte[] v) { exporter = v; return this; }
 
         public Builder earlyZmuxPeer(boolean v) { earlyZmuxPeer = v; return this; }

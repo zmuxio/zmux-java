@@ -73,7 +73,7 @@ class SplitBootstrapTest {
     }
     @Test void splitExporterBindsBothHalvesInUplinkDownlinkOrder() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.tlsExporter()).withProbation(Duration.ZERO)).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.exporter()).withProbation(Duration.ZERO)).build();
             try (var listener = Zmux.listener(ListenerConfig.of(config))) {
                 PipeIo.Exporter upKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 3); return key; };
                 PipeIo.Exporter downKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 9); return key; };

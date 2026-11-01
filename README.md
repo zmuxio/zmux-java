@@ -113,7 +113,8 @@ not yet exposed.
 ## Multiple pipes
 
 Enable multipath with `ZmuxConfig.builder().multipath(MultipathConfig.of(n, auth))`.
-Use `PipeAuth.psk(secret)` or TLS exporter authentication; the explicitly
+Use `PipeAuth.psk(secret)` or `PipeAuth.exporter()` (the exporter of the
+innermost end-to-end handshake, today TLS that this process terminates); the explicitly
 insecure mode is for trusted environments. A nonzero `MultipathConfig.resumeTimeout` retains
 a session during loss of all usable pipes.
 

@@ -121,7 +121,7 @@ class MultipathTest {
     @Test
     void carrierBoundJoinOverTls() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.tlsExporter()).build();
+            ZmuxConfig cfg = mp(loops, PipeAuth.exporter()).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build());
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
