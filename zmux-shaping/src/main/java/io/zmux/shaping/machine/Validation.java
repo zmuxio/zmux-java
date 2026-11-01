@@ -106,23 +106,7 @@ final class Validation {
         try { value(v); }
         catch (DefinitionException e) { throw new DefinitionException(what, e); }
         DefinitionException[] bad = {null};
-        walk(v, u -> {
-            List<Double> xs = new ArrayList<>();
-            if (u.constant() != null) xs.add(u.constant());
-            if (u.range() != null) for (double x : u.range()) xs.add(x);
-            if (u.min() != null) xs.add(u.min());
-            if (u.max() != null) xs.add(u.max());
-            if (u.dist() != null) {
-                for (double x : u.dist().points()) xs.add(x);
-                if (u.dist().kind() == DistKind.UNIFORM || u.dist().kind() == DistKind.LOGUNIFORM) for (double x : u.dist().params()) xs.add(x);
-            }
-            for (double x : xs) {
-                if (bad[0] != null) return;
-                if (x < f.min) bad[0] = new DefinitionException(what + ": " + x + (f.min == 0 ? " is negative" : " is below " + fmt(f.min)));
-                else if (x > f.max) bad[0] = new DefinitionException(what + ": " + x + " above max " + fmt(f.max));
-                else if (f == Family.RATE && x > 0 && x < 1) bad[0] = new DefinitionException(what + ": rate " + x + " in (0, 1)");
-            }
-        });
+        walk(v, u -> { if (bad[0] == null) bad[0] = outOfFamily(u, f, what); });
         if (bad[0] != null) throw bad[0];
         double lo = lower(v);
         if (!Double.isNaN(f.floor) && !(lo >= f.floor)) {
@@ -212,31 +196,57 @@ final class Validation {
 
     static boolean finite(double x) { return Double.isFinite(x); }
 
+    /** The error of the first number written in u (its nested values aside) outside family f; null: none. */
+    private static DefinitionException outOfFamily(Value u, Family f, String what) {
+        for (double x : written(u)) {
+            if (x < f.min) return new DefinitionException(what + ": " + x + (f.min == 0 ? " is negative" : " is below " + fmt(f.min)));
+            if (x > f.max) return new DefinitionException(what + ": " + x + " above max " + fmt(f.max));
+            if (f == Family.RATE && x > 0 && x < 1) return new DefinitionException(what + ": rate " + x + " in (0, 1)");
+        }
+        return null;
+    }
+
+    /** The numbers written in u itself: constant, range, min, max, distribution points and uniform bounds. */
+    private static List<Double> written(Value u) {
+        List<Double> xs = new ArrayList<>();
+        if (u.constant() != null) xs.add(u.constant());
+        if (u.range() != null) for (double x : u.range()) xs.add(x);
+        if (u.min() != null) xs.add(u.min());
+        if (u.max() != null) xs.add(u.max());
+        if (u.dist() != null) {
+            for (double x : u.dist().points()) xs.add(x);
+            if (u.dist().kind() == DistKind.UNIFORM || u.dist().kind() == DistKind.LOGUNIFORM) for (double x : u.dist().params()) xs.add(x);
+        }
+        return xs;
+    }
+
+    /** Checks d against the size bounds of l; an unset bound is {@link Integer#MAX_VALUE}, which no size exceeds. */
     static void size(Definition d, SizeLimits l) throws DefinitionException {
-        if (over(d.machines().size(), l.maxMachines())) {
-            throw new DefinitionException("machine: " + d.machines().size() + " machines, limit " + l.maxMachines().getAsInt());
+        int maxMachines = l.maxMachines().orElse(Integer.MAX_VALUE), maxStates = l.maxStates().orElse(Integer.MAX_VALUE);
+        int maxActions = l.maxActions().orElse(Integer.MAX_VALUE), maxTransitions = l.maxTransitions().orElse(Integer.MAX_VALUE);
+        int maxPoints = l.maxPoints().orElse(Integer.MAX_VALUE);
+        if (d.machines().size() > maxMachines) {
+            throw new DefinitionException("machine: " + d.machines().size() + " machines, limit " + maxMachines);
         }
         for (int i = 0; i < d.machines().size(); i++) {
             Machine m = d.machines().get(i);
-            if (over(m.states().size(), l.maxStates())) {
-                throw new DefinitionException("machine " + i + ": " + m.states().size() + " states, limit " + l.maxStates().getAsInt());
+            if (m.states().size() > maxStates) {
+                throw new DefinitionException("machine " + i + ": " + m.states().size() + " states, limit " + maxStates);
             }
             for (int j = 0; j < m.states().size(); j++) {
                 State st = m.states().get(j);
-                if (over(st.enter().size(), l.maxActions()) || over(st.next().size(), l.maxTransitions())) {
+                if (st.enter().size() > maxActions || st.next().size() > maxTransitions) {
                     throw new DefinitionException("machine " + i + ": state " + j + ": actions or transitions over limit");
                 }
                 boolean[] bad = {false};
                 values(st, v -> {
                     Dist ds = v.dist();
-                    if (ds != null && (over(ds.points().length, l.maxPoints()) || over(ds.of().size(), l.maxPoints()))) bad[0] = true;
+                    if (ds != null && (ds.points().length > maxPoints || ds.of().size() > maxPoints)) bad[0] = true;
                 });
                 if (bad[0]) throw new DefinitionException("machine " + i + ": state " + j + ": distribution over limit");
             }
         }
     }
-
-    private static boolean over(int n, java.util.OptionalInt m) { return SizeLimits.over(n, m); }
 
     /** Calls f for every value of st, nested ones included. */
     static void values(State st, Consumer<Value> f) {

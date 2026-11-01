@@ -168,7 +168,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         return join(new ModeJoin(new ModeSource(Objects.requireNonNull(mode), policy)));
     }
     /** The mode of a {@link #mode} pool; null otherwise. */
-    ModeSource modeSource() { return join instanceof ModeJoin m ? m.source() : null; }
+    ModeSource modeSource() { return join instanceof ModeJoin(ModeSource source) ? source : null; }
     /** Adapts a raw carrier factory through the session's existing in-band join operation. */
     public static PipePool carriers(CarrierDial dial) { return join(new InBandDial(Objects.requireNonNull(dial))); }
     public PipePool withCount(int value) { return new PipePool(join, value, options, rotation, backoff, inspectionInterval, attemptTimeout, policy); }

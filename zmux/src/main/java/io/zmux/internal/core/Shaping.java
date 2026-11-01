@@ -109,7 +109,7 @@ final class Shaping {
     /** The write overhead of p's outbound carrier (lane 0). */
     private static int writeOverhead(Pipe p) {
         var out = p.out();
-        return out == null || out.lanes.isEmpty() ? 0 : out.lanes.get(0).st.info().writeOverhead();
+        return out == null || out.lanes.isEmpty() ? 0 : out.lanes.getFirst().st.info().writeOverhead();
     }
 
     private PipeShape install(Pipe p, Shaper x) {

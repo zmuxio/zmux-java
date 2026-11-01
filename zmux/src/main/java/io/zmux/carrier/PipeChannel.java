@@ -71,17 +71,16 @@ public final class PipeChannel implements ByteChannel {
             while (current == null) {
                 if (ended) return -1;
                 if (failure != null) throw failure instanceof IOException e ? e : new IOException(failure);
-                Object o = queue.poll();
-                if (o == null) {
-                    if (closed.get()) throw new ClosedChannelException();
-                    try { wait(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new InterruptedIOException(); }
-                    continue;
+                switch (queue.poll()) {
+                    case null -> {
+                        if (closed.get()) throw new ClosedChannelException();
+                        try { wait(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new InterruptedIOException(); }
+                    }
+                    case Item(ByteBuffer data, Runnable release) when !data.hasRemaining() -> release.run();
+                    case Item(ByteBuffer data, Runnable release) -> { current = data; currentRelease = release; }
+                    case Throwable t -> failure = t;
+                    default -> ended = true;
                 }
-                if (o instanceof Item i) {
-                    if (!i.data().hasRemaining()) { i.release().run(); continue; }
-                    current = i.data(); currentRelease = i.release();
-                } else if (o instanceof Throwable t) failure = t;
-                else ended = true;
             }
             if (!dst.hasRemaining()) return 0;
             int n = Math.min(dst.remaining(), current.remaining());

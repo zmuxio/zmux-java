@@ -2,6 +2,7 @@ package io.zmux;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 
 /**
@@ -13,11 +14,13 @@ public final class ListenerConfig {
     public static final int MAX_INSTANCE_ID = 8;
 
     private static final ListenerConfig DEFAULTS = builder().build();
+    /** {@link #memoryBudget} unlimited. */
+    private static final long NO_BUDGET = -1;
 
     private final ZmuxConfig session;
     private final TlsOptions tls;
     private final int backlog;
-    private final java.util.OptionalLong memoryBudget;
+    private final long memoryBudget; // NO_BUDGET: unlimited
     private final int maxPendingPerSource;
     private final Duration firstRecordTimeout;
     private final byte[] instanceId;
@@ -65,7 +68,7 @@ public final class ListenerConfig {
      * window-growth bytes, default 1 GiB; empty ({@link Builder#noMemoryBudget()}) is unlimited. It replaces
      * the sessions' own budget.
      */
-    public java.util.OptionalLong memoryBudget() { return memoryBudget; }
+    public OptionalLong memoryBudget() { return memoryBudget == NO_BUDGET ? OptionalLong.empty() : OptionalLong.of(memoryBudget); }
     /** Carriers of one source address that have not yet sent their first record. */
     public int maxPendingPerSource() { return maxPendingPerSource; }
     /** How long a new carrier may take to send its first record. */
@@ -99,7 +102,7 @@ public final class ListenerConfig {
         private ZmuxConfig session = ZmuxConfig.defaults();
         private TlsOptions tls;
         private int backlog = 128;
-        private java.util.OptionalLong memoryBudget = java.util.OptionalLong.of(1L << 30);
+        private long memoryBudget = 1L << 30;
         private int maxPendingPerSource = 8;
         private Duration firstRecordTimeout = Duration.ofSeconds(2);
         private byte[] instanceId = new byte[0];
@@ -147,11 +150,11 @@ public final class ListenerConfig {
 
         public Builder memoryBudget(long n) {
             if (n < 0) throw new IllegalArgumentException("negative memoryBudget");
-            memoryBudget = java.util.OptionalLong.of(n); return this;
+            memoryBudget = n; return this;
         }
 
         /** An unlimited memory budget. */
-        public Builder noMemoryBudget() { memoryBudget = java.util.OptionalLong.empty(); return this; }
+        public Builder noMemoryBudget() { memoryBudget = NO_BUDGET; return this; }
 
         public Builder maxPendingPerSource(int n) {
             if (n < 1) throw new IllegalArgumentException("maxPendingPerSource below 1");

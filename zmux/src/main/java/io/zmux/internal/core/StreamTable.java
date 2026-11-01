@@ -432,7 +432,7 @@ public final class StreamTable {
         beforeFirstFrame(st);
         List<Preamble.Tlv> app = preSpec(st).app;
         app.add(new Preamble.Tlv(type, v.clone()));
-        checkPreamble(st, () -> app.removeLast());
+        checkPreamble(st, app::removeLast);
     }
 
     /** Marks the stream as a carrier before the first frame. */

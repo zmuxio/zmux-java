@@ -102,7 +102,7 @@ public final class QuicServer implements AutoCloseable {
             connection.pipeline().addLast(carrier);
         };
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
-        if (connection.eventLoop().inEventLoop()) add.run(); else connection.eventLoop().execute(add);
+        if (ChannelLoops.inLoop(connection)) add.run(); else ChannelLoops.executor(connection).execute(add);
         result.whenComplete((v, e) -> { if (result.isCancelled()) carrier.stop(); });
         return result;
     }

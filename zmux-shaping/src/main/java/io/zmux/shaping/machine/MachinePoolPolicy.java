@@ -89,8 +89,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
     }
 
     static MachinePoolPolicy read(byte[] json, Options o) throws DefinitionException {
-        var m = o.limits().maxBytes();
-        if (SizeLimits.over(json.length, m)) throw new DefinitionException("pool: " + json.length + " bytes, limit " + m.getAsInt());
+        o.limits().checkBytes(json.length, "pool");
         Map<String, Object> spec = DefinitionJson.object(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)), "pool");
         DefinitionJson.known(spec, FIELDS, "pool");
         Value count = memberFree(spec.get("count"), Family.POOL_COUNT, "count");

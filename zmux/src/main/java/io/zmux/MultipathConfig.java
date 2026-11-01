@@ -36,7 +36,8 @@ public final class MultipathConfig {
     private final Duration resumeTimeout;
     private final PipeAuth auth;
     private final Scheduler scheduler;
-    private final Optional<Duration> suspectFloor, deadTimeout, probation;
+    // null: unset.
+    private final Duration suspectFloor, deadTimeout, probation;
     private final int spreadChunk;
     private final Duration overflowDelay;
     // null: off.
@@ -47,20 +48,20 @@ public final class MultipathConfig {
     /** The default probe jitter. */
     public static final double DEFAULT_PROBE_JITTER = 0.25;
     private static final MultipathConfig DEFAULTS = new MultipathConfig(1, Duration.ZERO, null, Scheduler.AFFINITY,
-            Optional.empty(), Optional.empty(), Optional.empty(), io.zmux.internal.core.CoreConfig.DEFAULT_SPREAD_CHUNK,
+            null, null, null, io.zmux.internal.core.CoreConfig.DEFAULT_SPREAD_CHUNK,
             Duration.ofNanos(io.zmux.internal.core.CoreConfig.DEFAULT_OVERFLOW_DELAY),
             Duration.ofNanos(io.zmux.internal.core.CoreConfig.DEFAULT_STANDBY_PROBE),
             Duration.ofNanos(io.zmux.internal.core.CoreConfig.DEFAULT_PROBE_INTERVAL), DEFAULT_PROBE_JITTER, true);
 
     private MultipathConfig(int maxPipes, Duration resumeTimeout, PipeAuth auth, Scheduler scheduler,
-                            Optional<Duration> suspectFloor, Optional<Duration> deadTimeout, Optional<Duration> probation, int spreadChunk,
+                            Duration suspectFloor, Duration deadTimeout, Duration probation, int spreadChunk,
                             Duration overflowDelay, Duration standbyProbe, Duration probeInterval, double probeJitter, boolean redundancy) {
         if (maxPipes < 1) throw new IllegalArgumentException("maxPipes below 1");
         Timeouts.nonNegative(resumeTimeout, "resumeTimeout");
         Objects.requireNonNull(scheduler, "scheduler");
-        Objects.requireNonNull(suspectFloor, "suspectFloor").ifPresent(d -> atLeast(d, Duration.ofMillis(50), "suspectFloor"));
-        Objects.requireNonNull(deadTimeout, "deadTimeout").ifPresent(d -> atLeast(d, Duration.ofSeconds(1), "deadTimeout"));
-        Objects.requireNonNull(probation, "probation").ifPresent(d -> Timeouts.nonNegative(d, "probation"));
+        if (suspectFloor != null) atLeast(suspectFloor, Duration.ofMillis(50), "suspectFloor");
+        if (deadTimeout != null) atLeast(deadTimeout, Duration.ofSeconds(1), "deadTimeout");
+        if (probation != null) Timeouts.nonNegative(probation, "probation");
         if (spreadChunk < 1) throw new IllegalArgumentException("spreadChunk below 1");
         Timeouts.nonNegative(overflowDelay, "overflowDelay");
         if (standbyProbe != null) probeInterval(standbyProbe, "standbyProbe");
@@ -85,9 +86,9 @@ public final class MultipathConfig {
     public Duration resumeTimeout() { return resumeTimeout; }
     public PipeAuth auth() { return auth; }
     public Scheduler scheduler() { return scheduler; }
-    public Optional<Duration> suspectFloor() { return suspectFloor; }
-    public Optional<Duration> deadTimeout() { return deadTimeout; }
-    public Optional<Duration> probation() { return probation; }
+    public Optional<Duration> suspectFloor() { return Optional.ofNullable(suspectFloor); }
+    public Optional<Duration> deadTimeout() { return Optional.ofNullable(deadTimeout); }
+    public Optional<Duration> probation() { return Optional.ofNullable(probation); }
     public int spreadChunk() { return spreadChunk; }
     public Duration overflowDelay() { return overflowDelay; }
     /** The standby probe interval; empty: off. */
@@ -127,9 +128,9 @@ public final class MultipathConfig {
     public MultipathConfig withResumeTimeout(Duration d) { return new MultipathConfig(maxPipes, d, auth, scheduler, suspectFloor, deadTimeout, probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
     public MultipathConfig withAuth(PipeAuth a) { return new MultipathConfig(maxPipes, resumeTimeout, a, scheduler, suspectFloor, deadTimeout, probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
     public MultipathConfig withScheduler(Scheduler s) { return new MultipathConfig(maxPipes, resumeTimeout, auth, s, suspectFloor, deadTimeout, probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
-    public MultipathConfig withSuspectFloor(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, Optional.of(d), deadTimeout, probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
-    public MultipathConfig withDeadTimeout(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, Optional.of(d), probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
-    public MultipathConfig withProbation(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, deadTimeout, Optional.of(d), spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
+    public MultipathConfig withSuspectFloor(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, Objects.requireNonNull(d), deadTimeout, probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
+    public MultipathConfig withDeadTimeout(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, Objects.requireNonNull(d), probation, spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
+    public MultipathConfig withProbation(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, deadTimeout, Objects.requireNonNull(d), spreadChunk, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
     public MultipathConfig withSpreadChunk(int n) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, deadTimeout, probation, n, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy); }
     public MultipathConfig withOverflowDelay(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, deadTimeout, probation, spreadChunk, d, standbyProbe, probeInterval, probeJitter, redundancy); }
     public MultipathConfig withStandbyProbe(Duration d) { return new MultipathConfig(maxPipes, resumeTimeout, auth, scheduler, suspectFloor, deadTimeout, probation, spreadChunk, overflowDelay, d, probeInterval, probeJitter, redundancy); }
@@ -143,8 +144,8 @@ public final class MultipathConfig {
 
     @Override public boolean equals(Object o) {
         return o instanceof MultipathConfig m && maxPipes == m.maxPipes && resumeTimeout.equals(m.resumeTimeout)
-                && Objects.equals(auth, m.auth) && scheduler.equals(m.scheduler) && suspectFloor.equals(m.suspectFloor)
-                && deadTimeout.equals(m.deadTimeout) && probation.equals(m.probation) && spreadChunk == m.spreadChunk
+                && Objects.equals(auth, m.auth) && scheduler.equals(m.scheduler) && Objects.equals(suspectFloor, m.suspectFloor)
+                && Objects.equals(deadTimeout, m.deadTimeout) && Objects.equals(probation, m.probation) && spreadChunk == m.spreadChunk
                 && overflowDelay.equals(m.overflowDelay) && Objects.equals(standbyProbe, m.standbyProbe)
                 && Objects.equals(probeInterval, m.probeInterval) && Double.compare(probeJitter, m.probeJitter) == 0
                 && redundancy == m.redundancy;
@@ -155,7 +156,7 @@ public final class MultipathConfig {
     }
     @Override public String toString() {
         return "MultipathConfig[maxPipes=" + maxPipes + ", resumeTimeout=" + resumeTimeout + ", scheduler=" + scheduler
-                + ", suspectFloor=" + suspectFloor + ", deadTimeout=" + deadTimeout + ", probation=" + probation
+                + ", suspectFloor=" + suspectFloor() + ", deadTimeout=" + deadTimeout() + ", probation=" + probation()
                 + ", spreadChunk=" + spreadChunk + ", overflowDelay=" + overflowDelay + ", standbyProbe=" + standbyProbe()
                 + ", probeInterval=" + probeInterval() + ", probeJitter=" + probeJitter + ", redundancy=" + redundancy + "]";
     }

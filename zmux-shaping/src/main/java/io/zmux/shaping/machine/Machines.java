@@ -38,8 +38,7 @@ public final class Machines {
 
     /** Reads a JSON definition and returns its factory. */
     public static ShaperFactory factory(String json, Options o) throws DefinitionException {
-        var m = o.limits().maxBytes();
-        if (SizeLimits.over(json.length(), m)) throw new DefinitionException("machine: " + json.length() + " bytes, limit " + m.getAsInt());
+        o.limits().checkBytes(json.length(), "machine");
         return factory(Definition.parse(json), o);
     }
 
@@ -64,8 +63,7 @@ public final class Machines {
      * options' {@code maxBytes}.
      */
     public static ShapingLimits sessionLimits(byte[] json, Options o) throws DefinitionException {
-        var m = o.limits().maxBytes();
-        if (SizeLimits.over(json.length, m)) throw new DefinitionException("limits: " + json.length + " bytes, limit " + m.getAsInt());
+        o.limits().checkBytes(json.length, "limits");
         return DefinitionJson.sessionLimits(new String(json, StandardCharsets.UTF_8));
     }
 
@@ -285,10 +283,9 @@ public final class Machines {
             return (long) bounded(Sampler.round(sample(v) * 1e9), Long.MAX_VALUE / 2.0);
         }
 
-        /** x within [-m, m], NaN as 0, so that a conversion to an integer is the same on every platform. */
+        /** x within [-m, m] (m > 0), NaN as 0, so that a conversion to an integer is the same on every platform. */
         private static double bounded(double x, double m) {
-            if (Double.isNaN(x)) return 0;
-            return Math.max(Math.min(x, m), -m);
+            return Double.isNaN(x) ? 0 : Math.clamp(x, -m, m);
         }
 
         /** v, kept per its scope. */

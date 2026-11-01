@@ -32,6 +32,9 @@ public record SizeLimits(OptionalInt maxBytes, OptionalInt maxMachines, Optional
     public SizeLimits withMaxTransitions(int n) { return new SizeLimits(maxBytes, maxMachines, maxStates, maxActions, OptionalInt.of(n), maxPoints); }
     public SizeLimits withMaxPoints(int n) { return new SizeLimits(maxBytes, maxMachines, maxStates, maxActions, maxTransitions, OptionalInt.of(n)); }
 
-    /** Whether n exceeds the bound b. */
-    static boolean over(int n, OptionalInt b) { return b.isPresent() && n > b.getAsInt(); }
+    /** Fails when JSON input of n characters exceeds {@link #maxBytes()}; what names the input. */
+    void checkBytes(int n, String what) throws DefinitionException {
+        int limit = maxBytes.orElse(Integer.MAX_VALUE);
+        if (n > limit) throw new DefinitionException(what + ": " + n + " bytes, limit " + limit);
+    }
 }

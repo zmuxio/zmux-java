@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.io.Serial;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -265,19 +266,25 @@ public final class CarrierCache {
             };
             var out = new ArrayList<Entry>();
             for (SnapshotJson.Value item : list) {
-                if (!(item instanceof SnapshotJson.Obj o)) throw new InvalidSnapshotException("an entry not an object");
-                String key = string(o, "key"), kind = string(o, "kind"), url = string(o, "url");
-                Instant good = time(o, "good_until"), fail = time(o, "fail_until");
-                Duration backoff = switch (o.get("backoff_ms")) {
-                    case null -> Duration.ZERO;
-                    case SnapshotJson.Null _ -> Duration.ZERO;
-                    case SnapshotJson.Int(long ms) when ms >= 0 -> Duration.ofMillis(ms);
-                    default -> throw new InvalidSnapshotException("backoff_ms not a non-negative integer");
-                };
-                CarrierKind k = kind(kind);
-                if (k != null) out.add(new Entry(key, k, good, fail, backoff, url));
+                Entry e = entry(item);
+                if (e != null) out.add(e);
             }
             return new Snapshot(out);
+        }
+
+        /** One entry of the JSON form; null: an entry of an unknown kind, skipped. */
+        private static Entry entry(SnapshotJson.Value item) {
+            if (!(item instanceof SnapshotJson.Obj o)) throw new InvalidSnapshotException("an entry not an object");
+            String key = string(o, "key"), kind = string(o, "kind"), url = string(o, "url");
+            Instant good = time(o, "good_until"), fail = time(o, "fail_until");
+            Duration backoff = switch (o.get("backoff_ms")) {
+                case null -> Duration.ZERO;
+                case SnapshotJson.Null _ -> Duration.ZERO;
+                case SnapshotJson.Int(long ms) when ms >= 0 -> Duration.ofMillis(ms);
+                default -> throw new InvalidSnapshotException("backoff_ms not a non-negative integer");
+            };
+            CarrierKind k = kind(kind);
+            return k == null ? null : new Entry(key, k, good, fail, backoff, url);
         }
 
         private static String string(SnapshotJson.Obj o, String name) {
@@ -305,7 +312,7 @@ public final class CarrierCache {
 
     /** Text that {@link Snapshot#fromJson} does not read as a snapshot; nothing of it is taken. */
     public static final class InvalidSnapshotException extends IllegalArgumentException {
-        private static final long serialVersionUID = 1L;
+        @Serial private static final long serialVersionUID = 1L;
 
         InvalidSnapshotException(String what) { super("invalid carrier cache snapshot: " + what); }
     }

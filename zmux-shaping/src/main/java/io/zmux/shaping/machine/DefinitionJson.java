@@ -251,10 +251,12 @@ final class DefinitionJson {
 
     /** A JSON number in the integer form; null: absent. */
     static Long integerForm(Object x, String what) throws DefinitionException {
-        if (x == null) return null;
-        if (x instanceof Long l) return l;
-        if (x instanceof BigInteger b) return b.signum() < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
-        throw new DefinitionException(what + ": want an integer");
+        return switch (x) {
+            case null -> null;
+            case Long l -> l;
+            case BigInteger b -> b.signum() < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+            default -> throw new DefinitionException(what + ": want an integer");
+        };
     }
 
     private static int integer(Object x, String what) throws DefinitionException {

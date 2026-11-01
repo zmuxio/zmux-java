@@ -92,9 +92,14 @@ public final class KeepAlive {
         waitRef = Long.MIN_VALUE;
     }
 
-    /** The keep-alive period in effect: k capped at half the idle timeout when there is one (SPEC.md 6.4). */
+    /**
+     * The keep-alive period in effect: k capped at half the idle timeout (at least 1 ns) when there
+     * is one (SPEC.md 6.4). Not {@code Math.clamp}: k = 0 is a valid period below the cap's floor.
+     */
     static long effectivePeriod(long k, long idle) {
-        return k >= 0 && idle > 0 ? Math.min(k, Math.max(idle / 2, 1)) : k;
+        if (k < 0 || idle <= 0) return k;
+        long cap = Math.max(idle / 2, 1);
+        return k < cap ? k : cap;
     }
 
     /** The keep-alive period in effect, {@link CoreConfig#OFF}: off. */
