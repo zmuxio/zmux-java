@@ -1,516 +1,228 @@
 package io.zmux;
 
-import io.zmux.protocol.Negotiated;
-import io.zmux.protocol.Preface;
-import io.zmux.runtime.SessionRuntime;
-import io.zmux.transport.*;
-
+import io.zmux.carrier.PipeIo;
+import io.zmux.internal.core.CoreConfig;
+import io.zmux.internal.loop.Bootstrap;
+import io.zmux.internal.loop.EventLoop;
+import io.zmux.internal.loop.SessionHost;
+import io.zmux.internal.loop.SessionRuntime;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.Socket;
-import java.net.SocketAddress;
-import java.nio.channels.ByteChannel;
-import java.nio.channels.GatheringByteChannel;
-import java.nio.channels.ReadableByteChannel;
-import java.nio.channels.WritableByteChannel;
-import java.time.Duration;
+import java.io.InterruptedIOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.SocketChannel;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import javax.net.ssl.SSLEngine;
 
+/**
+ * Entry points: sessions over TCP, TLS or any pipe input. Establishment returns once the
+ * peer's parameters were processed, or at once when early data toward a declared zmux peer
+ * is configured (API.md Section 3).
+ */
 public final class Zmux {
-    private static final Settings ZERO_SETTINGS = new Settings(
-            0L,
-            0L,
-            0L,
-            0L,
-            0L,
-            0L,
-            0L,
-            0L,
-            0L,
-            SchedulerHint.UNSPECIFIED_OR_BALANCED
-    );
-    private static final Preface ZERO_PREFACE = new Preface(
-            (byte) 0,
-            Role.INITIATOR,
-            0L,
-            0L,
-            0L,
-            0L,
-            ZERO_SETTINGS
-    );
-    private static final Negotiated ZERO_NEGOTIATED = new Negotiated(
-            0L,
-            0L,
-            Role.INITIATOR,
-            Role.INITIATOR,
-            ZERO_SETTINGS
-    );
-    private static final ZmuxNativeSession CLOSED_SESSION = new ClosedSession();
-
-    private Zmux() {
-    }
-
-    public static ZmuxSession closedSession() {
-        return CLOSED_SESSION;
-    }
-
-    public static ZmuxNativeSession closedNativeSession() {
-        return CLOSED_SESSION;
-    }
-
-    public static ZmuxSession asSession(ZmuxSession session) {
-        return session == null ? closedSession() : session;
-    }
-
-    public static ZmuxNativeSession asNativeSession(ZmuxNativeSession session) {
-        return session == null ? closedNativeSession() : session;
-    }
-
-    public static JoinedDuplexConnection join(ReadHalf input, WriteHalf output) {
-        return ZmuxConnections.join(input, output);
-    }
-
-    public static JoinedDuplexConnection join(ZmuxRecvStream input, ZmuxSendStream output) {
-        return ZmuxConnections.join(input, output);
-    }
-
-    public static JoinedDuplexConnection join(InputStream input, OutputStream output) {
-        return ZmuxConnections.join(input, output);
-    }
-
-    public static JoinedDuplexConnection join(InputStream input,
-                                              OutputStream output,
-                                              GatheringByteChannel gatheringOutput) {
-        return ZmuxConnections.join(input, output, gatheringOutput);
-    }
-
-    public static JoinedDuplexConnection join(InputStream input,
-                                              OutputStream output,
-                                              SocketAddress localAddress,
-                                              SocketAddress remoteAddress) {
-        return ZmuxConnections.join(input, output, localAddress, remoteAddress);
-    }
-
-    public static JoinedDuplexConnection join(InputStream input,
-                                              OutputStream output,
-                                              GatheringByteChannel gatheringOutput,
-                                              SocketAddress localAddress,
-                                              SocketAddress remoteAddress) {
-        return ZmuxConnections.join(input, output, gatheringOutput, localAddress, remoteAddress);
-    }
-
-    public static ZmuxNativeSession open(DuplexConnection connection) throws IOException {
-        return open(connection, null);
-    }
-
-    public static ZmuxNativeSession open(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return SessionRuntime.open(connection, effectiveConfig(config));
-    }
-
-    public static ZmuxNativeSession open(Socket socket) throws IOException {
-        return open(socket, null);
-    }
-
-    public static ZmuxNativeSession open(Socket socket, ZmuxConfig config) throws IOException {
-        return open(ZmuxConnections.of(socket), config);
-    }
-
-    public static ZmuxNativeSession open(InputStream input, OutputStream output) throws IOException {
-        return open(input, output, null);
-    }
-
-    public static ZmuxNativeSession open(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
-        return open(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxNativeSession open(ByteChannel channel) throws IOException {
-        return open(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxNativeSession open(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return open(ZmuxConnections.of(channel), config);
-    }
-
-    public static ZmuxNativeSession open(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return open(input, output, null);
-    }
-
-    public static ZmuxNativeSession open(ReadableByteChannel input,
-                                         WritableByteChannel output,
-                                         ZmuxConfig config) throws IOException {
-        return open(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxSession openSession(DuplexConnection connection) throws IOException {
-        return openSession(connection, null);
-    }
-
-    public static ZmuxSession openSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return open(connection, config);
-    }
-
-    public static ZmuxSession openSession(Socket socket) throws IOException {
-        return openSession(socket, null);
-    }
-
-    public static ZmuxSession openSession(Socket socket, ZmuxConfig config) throws IOException {
-        return open(socket, config);
-    }
-
-    public static ZmuxSession openSession(InputStream input, OutputStream output) throws IOException {
-        return openSession(input, output, null);
-    }
-
-    public static ZmuxSession openSession(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
-        return open(input, output, config);
-    }
-
-    public static ZmuxSession openSession(ByteChannel channel) throws IOException {
-        return openSession(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxSession openSession(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return open(channel, config);
-    }
-
-    public static ZmuxSession openSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return openSession(input, output, null);
-    }
-
-    public static ZmuxSession openSession(ReadableByteChannel input,
-                                          WritableByteChannel output,
-                                          ZmuxConfig config) throws IOException {
-        return open(input, output, config);
-    }
-
-    public static ZmuxNativeSession client(DuplexConnection connection) throws IOException {
-        return client(connection, null);
-    }
-
-    public static ZmuxNativeSession client(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return openWithRole(connection, config, Role.INITIATOR);
-    }
-
-    public static ZmuxNativeSession client(Socket socket) throws IOException {
-        return client(socket, null);
-    }
-
-    public static ZmuxNativeSession client(Socket socket, ZmuxConfig config) throws IOException {
-        return client(ZmuxConnections.of(socket), config);
-    }
-
-    public static ZmuxNativeSession client(InputStream input, OutputStream output) throws IOException {
-        return client(input, output, null);
-    }
-
-    public static ZmuxNativeSession client(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
-        return client(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxNativeSession client(ByteChannel channel) throws IOException {
-        return client(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxNativeSession client(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return client(ZmuxConnections.of(channel), config);
-    }
-
-    public static ZmuxNativeSession client(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return client(input, output, null);
-    }
-
-    public static ZmuxNativeSession client(ReadableByteChannel input,
-                                           WritableByteChannel output,
-                                           ZmuxConfig config) throws IOException {
-        return client(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxSession clientSession(DuplexConnection connection) throws IOException {
-        return clientSession(connection, null);
-    }
-
-    public static ZmuxSession clientSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return client(connection, config);
-    }
-
-    public static ZmuxSession clientSession(Socket socket) throws IOException {
-        return clientSession(socket, null);
-    }
-
-    public static ZmuxSession clientSession(Socket socket, ZmuxConfig config) throws IOException {
-        return client(socket, config);
-    }
-
-    public static ZmuxSession clientSession(InputStream input, OutputStream output) throws IOException {
-        return clientSession(input, output, null);
-    }
-
-    public static ZmuxSession clientSession(InputStream input,
-                                            OutputStream output,
-                                            ZmuxConfig config) throws IOException {
-        return client(input, output, config);
-    }
-
-    public static ZmuxSession clientSession(ByteChannel channel) throws IOException {
-        return clientSession(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxSession clientSession(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return client(channel, config);
-    }
-
-    public static ZmuxSession clientSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return clientSession(input, output, null);
-    }
-
-    public static ZmuxSession clientSession(ReadableByteChannel input,
-                                            WritableByteChannel output,
-                                            ZmuxConfig config) throws IOException {
-        return client(input, output, config);
-    }
-
-    public static ZmuxNativeSession server(DuplexConnection connection) throws IOException {
-        return server(connection, null);
-    }
-
-    public static ZmuxNativeSession server(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return openWithRole(connection, config, Role.RESPONDER);
-    }
-
-    public static ZmuxNativeSession server(Socket socket) throws IOException {
-        return server(socket, null);
-    }
-
-    public static ZmuxNativeSession server(Socket socket, ZmuxConfig config) throws IOException {
-        return server(ZmuxConnections.of(socket), config);
-    }
-
-    public static ZmuxNativeSession server(InputStream input, OutputStream output) throws IOException {
-        return server(input, output, null);
-    }
-
-    public static ZmuxNativeSession server(InputStream input, OutputStream output, ZmuxConfig config) throws IOException {
-        return server(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxNativeSession server(ByteChannel channel) throws IOException {
-        return server(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxNativeSession server(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return server(ZmuxConnections.of(channel), config);
-    }
-
-    public static ZmuxNativeSession server(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return server(input, output, null);
-    }
-
-    public static ZmuxNativeSession server(ReadableByteChannel input,
-                                           WritableByteChannel output,
-                                           ZmuxConfig config) throws IOException {
-        return server(ZmuxConnections.of(input, output), config);
-    }
-
-    public static ZmuxSession serverSession(DuplexConnection connection) throws IOException {
-        return serverSession(connection, null);
-    }
-
-    public static ZmuxSession serverSession(DuplexConnection connection, ZmuxConfig config) throws IOException {
-        return server(connection, config);
-    }
-
-    public static ZmuxSession serverSession(Socket socket) throws IOException {
-        return serverSession(socket, null);
-    }
-
-    public static ZmuxSession serverSession(Socket socket, ZmuxConfig config) throws IOException {
-        return server(socket, config);
-    }
-
-    public static ZmuxSession serverSession(InputStream input, OutputStream output) throws IOException {
-        return serverSession(input, output, null);
-    }
-
-    public static ZmuxSession serverSession(InputStream input,
-                                            OutputStream output,
-                                            ZmuxConfig config) throws IOException {
-        return server(input, output, config);
-    }
-
-    public static ZmuxSession serverSession(ByteChannel channel) throws IOException {
-        return serverSession(channel, (ZmuxConfig) null);
-    }
-
-    public static ZmuxSession serverSession(ByteChannel channel, ZmuxConfig config) throws IOException {
-        return server(channel, config);
-    }
-
-    public static ZmuxSession serverSession(ReadableByteChannel input, WritableByteChannel output) throws IOException {
-        return serverSession(input, output, null);
-    }
-
-    public static ZmuxSession serverSession(ReadableByteChannel input,
-                                            WritableByteChannel output,
-                                            ZmuxConfig config) throws IOException {
-        return server(input, output, config);
-    }
-
-    private static ZmuxConfig effectiveConfig(ZmuxConfig config) {
-        return config == null ? ZmuxConfig.defaults() : config;
-    }
-
-    private static ZmuxNativeSession openWithRole(DuplexConnection connection,
-                                                  ZmuxConfig config,
-                                                  Role role) throws IOException {
-        return open(connection, effectiveConfig(config).withRole(role));
-    }
-
-    private static final class ClosedSession implements ZmuxNativeSession {
-        private static SessionClosedException sessionClosed() {
-            return new SessionClosedException(ZmuxErrorSource.LOCAL);
+    private Zmux() {}
+
+    /**
+     * Transfers both streams to a bounded, bidirectional relay (API.md Section A.2). Cancelling the returned stage
+     * ({@code toCompletableFuture().cancel(...)}) cancels the splice: both streams are reset and stopped with code 0
+     * and there is no result. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
+     * finished, with how each direction ended, or exceptionally when a limiter failed.
+     */
+    public static java.util.concurrent.CompletionStage<SpliceResult> splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+        return Splice.start(a, b, options);
+    }
+
+    public static java.util.concurrent.CompletionStage<SpliceResult> splice(ZmuxStream a, ZmuxStream b) {
+        return splice(a, b, SpliceOptions.defaults());
+    }
+
+    /** Resolves two established sessions the application authenticated as connecting the same endpoints. */
+    public static DuplicateResult resolveDuplicate(ZmuxSession a, ZmuxSession b, DuplicateOptions options) throws IOException {
+        return Duplicates.resolve(a, b, options);
+    }
+    public static DuplicateResult resolveDuplicate(ZmuxSession a, ZmuxSession b) throws IOException {
+        return resolveDuplicate(a, b, DuplicateOptions.defaults());
+    }
+
+    /** Connects within timeoutNanos (the handshake timeout); SocketTimeoutException after it. */
+    static SocketChannel dial(InetSocketAddress address, long timeoutNanos) throws IOException {
+        if (SessionHost.onHostThread()) throw new IllegalStateException("dial on a zmux event-loop thread");
+        int millis = timeoutNanos >= io.zmux.internal.core.Time.NEVER / 2 ? 0
+                : Math.clamp(Math.ceilDiv(Math.max(timeoutNanos, 1), 1_000_000L), 1, Integer.MAX_VALUE);
+        SocketChannel ch = SocketChannel.open();
+        try {
+            ch.setOption(java.net.StandardSocketOptions.TCP_NODELAY, true);
+            ch.socket().connect(address, millis);
+        } catch (IOException | RuntimeException e) {
+            ch.close();
+            throw e;
         }
+        return ch;
+    }
 
-        @Override
-        public ZmuxNativeStream acceptStream() throws IOException {
-            throw sessionClosed();
-        }
+    /** A client session over TCP with the default configuration. */
+    public static ZmuxSession connect(InetSocketAddress address) throws IOException {
+        return connect(address, ZmuxConfig.defaults());
+    }
 
-        @Override
-        public ZmuxNativeStream acceptStream(Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    /** A client session over TCP; the connection starts with the prefix of {@link ZmuxConfig#credential()}. */
+    public static ZmuxSession connect(InetSocketAddress address, ZmuxConfig cfg) throws IOException {
+        EventLoop loop = cfg.nextLoop();
+        SocketChannel ch = dial(address, cfg.handshakeNanos());
+        present(ch, cfg.credential(), address);
+        return established(Bootstrap.socket(loop, cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR), ch, cfg.hooks), cfg);
+    }
 
-        @Override
-        public ZmuxNativeRecvStream acceptUniStream() throws IOException {
-            throw sessionClosed();
+    /** Writes the prefix of credential (null: none) on a connected blocking socket without TLS; closes it on failure. */
+    static void present(SocketChannel ch, Credential credential, InetSocketAddress address) throws IOException {
+        Bootstrap.Presenter p = presenter(credential, address);
+        if (p == null) return;
+        try {
+            byte[] b = p.prefix("", "", null);
+            if (b == null) return;
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(b);
+            while (buf.hasRemaining()) ch.write(buf);
+        } catch (IOException | RuntimeException e) {
+            ch.close();
+            throw e;
         }
+    }
 
-        @Override
-        public ZmuxNativeRecvStream acceptUniStream(Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    /**
+     * The presentation of credential on a carrier to address; null without a credential.
+     */
+    static Bootstrap.Presenter presenter(Credential credential, InetSocketAddress address) {
+        if (credential == null) return null;
+        return (alpn, serverName, exporter) ->
+                credential.prefix(new Admission.CarrierInfo(address, address, alpn, serverName, exporter, RequestHead.NONE));
+    }
 
-        @Override
-        public ZmuxNativeStream openStream() throws IOException {
-            throw sessionClosed();
-        }
+    /** {@link #connect(InetSocketAddress, ZmuxConfig)} on a virtual thread. */
+    public static CompletableFuture<ZmuxSession> connectAsync(InetSocketAddress address, ZmuxConfig cfg) {
+        CompletableFuture<ZmuxSession> f = new CompletableFuture<>();
+        Thread.ofVirtual().name("zmux-connect").start(() -> {
+            try { f.complete(connect(address, cfg)); } catch (Throwable e) { f.completeExceptionally(e); }
+        });
+        return f;
+    }
 
-        @Override
-        public ZmuxNativeStream openStream(OpenOptions options) throws IOException {
-            throw sessionClosed();
-        }
+    /**
+     * A client session over TLS; ALPN offers {@link ZmuxConfig#alpn()}. Once the handshake
+     * completed, the connection starts with the prefix of {@link ZmuxConfig#credential()},
+     * which may bind to the handshake's exporter.
+     */
+    public static ZmuxSession connectTls(InetSocketAddress address, TlsOptions tls, ZmuxConfig cfg) throws IOException {
+        SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
+        EventLoop loop = cfg.nextLoop();
+        SocketChannel ch = dial(address, cfg.handshakeNanos());
+        return established(Bootstrap.tls(loop, cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR), ch, engine, cfg.hooks,
+                null, presenter(cfg.credential(), address)), cfg);
+    }
 
-        @Override
-        public ZmuxNativeStream openStreamWithTimeout(Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    /**
+     * A session in the given role over any pipe input. A credential is presented where the
+     * pipe was dialed, not here ({@link Credential}).
+     */
+    public static ZmuxSession open(PipeIo io, Role role, ZmuxConfig cfg) throws IOException {
+        CoreConfig.Role r = core(role);
+        return external(io, cfg, r, r);
+    }
 
-        @Override
-        public ZmuxNativeStream openStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    static CoreConfig.Role core(Role role) {
+        return switch (role) {
+            case CLIENT -> CoreConfig.Role.INITIATOR;
+            case SERVER -> CoreConfig.Role.RESPONDER;
+            case PEER -> CoreConfig.Role.AUTO;
+        };
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniStream() throws IOException {
-            throw sessionClosed();
-        }
+    /**
+     * Dials a client session over the carrier the mode selects (API.md Section 4.8); each
+     * carrier presents cfg's {@link ZmuxConfig#credential()}. policy is the policy of
+     * {@link CarrierMode#auto} (null: the defaults).
+     *
+     * <p>An explicit mode dials its one candidate as its own dialer does. An auto mode does not
+     * use early data, so that nothing the application sends goes out before a carrier is chosen,
+     * and it does not race candidates: it skips the kinds the cache holds as failed (unless all
+     * are) and, when the configuration allows more than one pipe, establishes the session on the
+     * most robust candidate (a kind the cache holds as usable, else the exchange carrier, else
+     * the last) and joins the preferred ones as further pipes in the background, retiring the
+     * pipes of the kind they replace once one has stayed joined for {@link ModePolicy#settle()};
+     * it keeps retrying preferred kinds as their backoff expires, and joins the best kind
+     * available again when the active one fails. Without joins (one pipe,
+     * {@link ModePolicy#noJoin()}, or a peer without multipath) it tries the candidates one after
+     * another, in order, and keeps the first usable one. A candidate is usable when the peer's
+     * parameters arrive within its timer ({@link ModePolicy#timerFactor()}); one that misses it
+     * is closed without CONNECTION_CLOSE.
+     *
+     * <p>Each try is reported as a {@link SessionEvent.CarrierCandidate}, the choice as a
+     * {@link SessionEvent.CarrierChosen} (again on every switch), and both in
+     * {@link SessionStats}.
+     *
+     * @throws ModeException when no candidate is usable, with the outcome of every one tried
+     */
+    public static ZmuxSession dial(CarrierMode mode, ZmuxConfig cfg, ModePolicy policy) throws IOException {
+        return CarrierSelection.dial(mode, cfg, policy);
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniStream(OpenOptions options) throws IOException {
-            throw sessionClosed();
-        }
+    /** Listens for TCP carriers on address with the default configuration. */
+    public static ZmuxListener listen(InetSocketAddress address) throws IOException {
+        return listen(address, ListenerConfig.defaults());
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniStreamWithTimeout(Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    /** Listens for TCP carriers, or TLS ones when {@link ListenerConfig#tls()} is set. */
+    public static ZmuxListener listen(InetSocketAddress address, ListenerConfig cfg) throws IOException {
+        return ZmuxListener.bind(address, cfg);
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniStreamWithTimeout(OpenOptions options, Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
+    /** A listener without a socket: carriers arrive through {@link ZmuxListener#handle}. */
+    public static ZmuxListener listener(ListenerConfig cfg) {
+        return ZmuxListener.external(cfg);
+    }
 
-        @Override
-        public ZmuxNativeStream openAndSend(byte[] data) throws IOException {
-            throw sessionClosed();
-        }
+    private static ZmuxSession external(PipeIo io, ZmuxConfig cfg, CoreConfig.Role role, CoreConfig.Role transport)
+            throws IOException {
+        return established(startExternal(io, cfg, role, transport), cfg);
+    }
 
-        @Override
-        public ZmuxNativeStream openAndSend(OpenOptions options, byte[] data) throws IOException {
-            throw sessionClosed();
+    /** Starts a session over io without waiting for the peer's parameters. */
+    static CompletableFuture<Bootstrap.Started> startExternal(PipeIo io, ZmuxConfig cfg, CoreConfig.Role role, CoreConfig.Role transport) {
+        if (SessionHost.onHostThread()) throw new IllegalStateException("connect on a zmux event-loop thread");
+        CompletableFuture<Bootstrap.Started> started;
+        try {
+            started = Bootstrap.external(() -> io.carrierConn() instanceof SessionRuntime parent
+                    ? parent.loop() : cfg.nextLoop(), cfg.toCore(role, transport), io, cfg.hooks);
+        } catch (RuntimeException error) {
+            try { if (io.reader() != null) io.reader().close(); }
+            finally { if (io.writer() != null) io.writer().abort(error); }
+            throw error;
         }
+        return started;
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniAndSend(byte[] data) throws IOException {
-            throw sessionClosed();
+    static ZmuxSession started(CompletableFuture<Bootstrap.Started> f, Credential credential) throws IOException {
+        try {
+            Bootstrap.Started s = f.get();
+            return new ZmuxSession(s.driver(), s.driver().core(), s.applicationProtocol(), credential);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            f.thenAccept(s -> s.driver().post(() -> s.driver().core().close(0, null)));
+            throw new InterruptedIOException("interrupted");
+        } catch (ExecutionException e) {
+            throw Errors.failure(e.getCause());
         }
+    }
 
-        @Override
-        public ZmuxNativeSendStream openUniAndSend(OpenOptions options, byte[] data) throws IOException {
-            throw sessionClosed();
+    static ZmuxSession established(CompletableFuture<Bootstrap.Started> f, ZmuxConfig cfg) throws IOException {
+        ZmuxSession s = started(f, cfg.credential());
+        if (cfg.earlyData() == EarlyData.OFF) {
+            try {
+                s.awaitEstablished(Long.MAX_VALUE);
+            } catch (IOException e) {
+                s.close();
+                throw e;
+            }
         }
-
-        @Override
-        public Duration ping(byte[] echo, Duration timeout) throws IOException {
-            throw sessionClosed();
-        }
-
-        @Override
-        public void goAway(long lastAcceptedBidi, long lastAcceptedUni, long code, String reason) throws IOException {
-            throw sessionClosed();
-        }
-
-        @Override
-        public ApplicationError peerGoAwayError() {
-            return null;
-        }
-
-        @Override
-        public ApplicationError peerCloseError() {
-            return null;
-        }
-
-        @Override
-        public Preface localPreface() {
-            return ZERO_PREFACE;
-        }
-
-        @Override
-        public Preface peerPreface() {
-            return ZERO_PREFACE;
-        }
-
-        @Override
-        public Negotiated negotiated() {
-            return ZERO_NEGOTIATED;
-        }
-
-        @Override
-        public void closeWithError(long code, String reason) {
-        }
-
-        @Override
-        public boolean awaitTermination(Duration timeout) {
-            return true;
-        }
-
-        @Override
-        public boolean isClosed() {
-            return true;
-        }
-
-        @Override
-        public SessionState state() {
-            return SessionState.INVALID;
-        }
-
-        @Override
-        public SessionStats stats() {
-            return SessionStats.empty(SessionState.INVALID);
-        }
-
-        @Override
-        public void close() {
-        }
+        return s;
     }
 }

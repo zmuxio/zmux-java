@@ -1,51 +1,20 @@
-param(
-    [string] $Includes = "io.zmux.benchmarks.CodecBenchmark|io.zmux.OrdinaryBatchOrdererBenchmark|io.zmux.FlowControlRegistryBenchmark",
-    [switch] $Quick,
-    [string] $ResultFile = "zmux-benchmarks/target/jmh-result.json"
-)
-
+param([switch] $Quick, [switch] $LoadedOnly, [switch] $FootprintOnly, [string] $ResultFile = "target/benchmark.json")
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
-function Invoke-Native
-{
-    param(
-        [string] $Command,
-        [string[]] $Arguments
-    )
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "$Command failed with exit code $LASTEXITCODE"
-    }
-}
-
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-Push-Location $repoRoot
-try
-{
-    Invoke-Native "mvn" @("-B", "-Pbenchmarks", "-pl", "zmux-benchmarks", "-am", "-DskipTests", "package")
-
-    $jar = Join-Path $repoRoot "zmux-benchmarks/target/benchmarks.jar"
-    if (-not (Test-Path $jar))
-    {
-        throw "Benchmark jar was not generated: $jar"
+function Invoke-Timed([string] $Command, [int] $Seconds) {
+    $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d','/c', $Command) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
+    $handle = $process.Handle
+    if (-not $process.WaitForExit($Seconds * 1000)) {
+        taskkill /PID $process.Id /T /F
+        throw "Benchmark command timed out"
     }
-
-    $jmhArgs = @(
-        "-jar", $jar,
-        $Includes,
-        "-rf", "json",
-        "-rff", $ResultFile
-    )
-    if ($Quick)
-    {
-        $jmhArgs += @("-wi", "1", "-i", "2", "-w", "500ms", "-r", "500ms", "-f", "1")
-    }
-
-    Invoke-Native "java" $jmhArgs
+    if ($process.ExitCode -ne 0) { throw "Benchmark command failed: $($process.ExitCode)" }
 }
-finally
-{
-    Pop-Location
-}
+if ($LoadedOnly -and $FootprintOnly) { throw "Choose one measurement family" }
+Invoke-Timed 'mvn -B -pl zmux -am -DskipTests package' 600
+$quickArg = if ($Quick) { ' --quick' } else { '' }
+if ($LoadedOnly) { $quickArg += ' --loaded-only' }
+if ($FootprintOnly) { $quickArg += ' --footprint-only' }
+if ($ResultFile.Contains('"')) { throw "Invalid result path" }
+Invoke-Timed ('java --class-path zmux/target/classes tools/Benchmark.java' + $quickArg + ' --result-file "' + $ResultFile + '"') 330

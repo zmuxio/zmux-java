@@ -6,12 +6,12 @@
     <parent>
         <groupId>io.github.zmuxio</groupId>
         <artifactId>zmux-parent</artifactId>
-        <version>1.1.1</version>
+        <version>1.1.2</version>
     </parent>
 
     <artifactId>zmux</artifactId>
     <name>zmux</name>
-    <description>Core Java implementation of the ZMux multiplexing protocol.</description>
+    <description>QMux-compatible multiplexing of streams and datagrams over reliable byte pipes.</description>
     <url>https://github.com/zmuxio/zmux-java/tree/main/zmux</url>
 
     <dependencies>
@@ -23,4 +23,23 @@
         </dependency>
     </dependencies>
 
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <zmux.spec.dir>${project.basedir}/src/test/resources/spec</zmux.spec.dir>
+                        <!-- Temporary files stay in the build directory, never in a system temp directory. -->
+                        <java.io.tmpdir>${project.build.directory}</java.io.tmpdir>
+                    </systemPropertyVariables>
+                    <environmentVariables>
+                        <ZMUX_JAVA_ROOT>${maven.multiModuleProjectDirectory}</ZMUX_JAVA_ROOT>
+                        <TMPDIR>${project.build.directory}</TMPDIR>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

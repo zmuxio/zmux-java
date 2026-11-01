@@ -1,1413 +1,308 @@
 package io.zmux;
 
-import io.zmux.protocol.Preface;
-import io.zmux.protocol.Protocol;
-
-import java.security.SecureRandom;
+import io.zmux.internal.core.CoreConfig;
+import io.zmux.internal.core.Time;
+import io.zmux.internal.wire.TransportParams;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 
+/**
+ * Session configuration (API.md Section 6), immutable; {@link #defaults()} or {@link #builder()}.
+ * Durations accept any non-negative value; one beyond the clock's range never fires.
+ */
 public final class ZmuxConfig {
-    public static final long DEFAULT_PREFACE_PADDING_MIN_BYTES = 16L;
-    public static final long DEFAULT_PREFACE_PADDING_MAX_BYTES = 256L;
-    public static final long DEFAULT_PING_PADDING_MIN_BYTES = 16L;
-    public static final long DEFAULT_PING_PADDING_MAX_BYTES = 64L;
-    public static final long DEFAULT_CAPABILITIES =
-            Protocol.CAPABILITY_OPEN_METADATA
-                    | Protocol.CAPABILITY_PRIORITY_HINTS
-                    | Protocol.CAPABILITY_STREAM_GROUPS
-                    | Protocol.CAPABILITY_PRIORITY_UPDATE;
+    /** The default ALPN identifier (SPEC.md Section 6.2). */
+    public static final String DEFAULT_ALPN = "qmux-02";
+
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+    private static final ZmuxConfig DEFAULTS = builder().build();
+
+    final Timeouts timeouts;
+    final FlowControl flow;
+    final Limits limits;
+    final MultipathConfig multipath;
+    final boolean datagrams;
+    final EarlyData earlyData;
+    final List<String> alpn;
+    final EventLoops eventLoops;
+    final io.zmux.shaping.ShapingLimits shapingLimits;
+    final io.zmux.shaping.ShaperFactory shaper;
+    final Credential credential;
+    final io.zmux.internal.loop.DriverHooks hooks;
+
+    private ZmuxConfig(Builder b) {
+        timeouts = b.timeouts; flow = b.flow; limits = b.limits; multipath = b.multipath;
+        datagrams = b.datagrams; earlyData = b.earlyData; alpn = List.copyOf(b.alpn); eventLoops = b.eventLoops;
+        shapingLimits = b.shapingLimits;
+        shaper = b.shaper;
+        credential = b.credential;
+        SessionObserver observer = b.observer;
+        hooks = new io.zmux.internal.loop.DriverHooks(observer == null ? null : e -> {
+            if (e.kind() == io.zmux.internal.core.Event.Kind.ESTABLISHED) observer.established();
+            else if (e.kind() == io.zmux.internal.core.Event.Kind.CLOSED) observer.closed(Errors.session(e.error()));
+            else { SessionEvent event = Events.publicEvent(e); if (event != null) observer.event(event); }
+        }, observer == null ? null : observer::dropped, b.observerQueue, b.allowWindowGrowth,
+                b.datagramSend, b.datagramReceive, Scheduling.picker(multipath.scheduler()));
+    }
+
+    /** This configuration with early data turned off. */
+    ZmuxConfig withoutEarlyData() {
+        return earlyData == EarlyData.OFF ? this : new ZmuxConfig(this, EarlyData.OFF);
+    }
+
+    private ZmuxConfig(ZmuxConfig o, EarlyData earlyData) {
+        timeouts = o.timeouts; flow = o.flow; limits = o.limits; multipath = o.multipath;
+        datagrams = o.datagrams; this.earlyData = earlyData; alpn = o.alpn; eventLoops = o.eventLoops;
+        shapingLimits = o.shapingLimits; shaper = o.shaper; credential = o.credential; hooks = o.hooks;
+    }
+
+    public Timeouts timeouts() { return timeouts; }
+    public FlowControl flowControl() { return flow; }
+    public Limits limits() { return limits; }
+    public MultipathConfig multipathConfig() { return multipath; }
+    public boolean datagrams() { return datagrams; }
+    public EarlyData earlyData() { return earlyData; }
+
     /**
-     * Repository-default bound on session establishment (local preface write, peer preface read and
-     * negotiation). See {@link Builder#establishmentTimeout(Duration)}.
+     * The credential presented on the carrier of a client session by the dialers that open it
+     * with this configuration ({@link Zmux#connect(java.net.InetSocketAddress, ZmuxConfig)},
+     * {@link Zmux#connectTls}, {@link ZmuxListener#connect}, {@link ZmuxListener#connectTls}
+     * and the zmux-quic session dialers), and by the TCP and TLS pipes a session of this
+     * configuration dials ({@link Paths#add(java.net.InetSocketAddress, PipeOptions)},
+     * {@link Paths#addTls}); null: none. Pipes the application opens present their own
+     * ({@link Credential}).
      */
-    public static final Duration DEFAULT_ESTABLISHMENT_TIMEOUT = Duration.ofSeconds(10);
-    private static final Duration DEFAULT_IDLE_KEEPALIVE_INTERVAL = Duration.ofMinutes(1);
-    private static final Duration DEFAULT_KEEPALIVE_MAX_PING_INTERVAL = Duration.ofMinutes(5);
-    private static final SecureRandom NONCE_RANDOM = new SecureRandom();
-    private static final Object DEFAULT_LOCK = new Object();
-    private static final ZmuxConfig BUILTIN_DEFAULTS = new Builder().build();
-    private static ZmuxConfig defaultTemplate = BUILTIN_DEFAULTS;
+    public Credential credential() { return credential; }
 
-    private final Role role;
-    private final long tieBreakerNonce;
-    private final long minProto;
-    private final long maxProto;
-    private final long capabilities;
-    private final boolean disableCapabilities;
-    private final Settings settings;
-    private final boolean prefacePadding;
-    private final long prefacePaddingMinBytes;
-    private final long prefacePaddingMaxBytes;
-    private final Duration keepaliveInterval;
-    private final Duration keepaliveMaxPingInterval;
-    private final Duration keepaliveTimeout;
-    private final boolean pingPadding;
-    private final long pingPaddingMinBytes;
-    private final long pingPaddingMaxBytes;
-    private final long sessionMemoryCap;
-    private final long perStreamQueuedDataHwm;
-    private final long sessionQueuedDataHwm;
-    private final long urgentQueuedBytesCap;
-    private final long pendingControlBytesBudget;
-    private final long pendingPriorityBytesBudget;
-    private final Duration abuseWindow;
-    private final Duration gracefulCloseDrainTimeout;
-    private final Duration stopSendingGracefulDrainWindow;
-    private final long stopSendingGracefulTailCap;
-    private final Duration hiddenAbortChurnWindow;
-    private final int hiddenAbortChurnThreshold;
-    private final Duration visibleTerminalChurnWindow;
-    private final int visibleTerminalChurnThreshold;
-    private final int inboundControlFrameBudget;
-    private final long inboundControlBytesBudget;
-    private final int inboundExtFrameBudget;
-    private final long inboundExtBytesBudget;
-    private final int inboundMixedFrameBudget;
-    private final long inboundMixedBytesBudget;
-    private final int noOpControlFloodThreshold;
-    private final int noOpMaxDataFloodThreshold;
-    private final int noOpBlockedFloodThreshold;
-    private final int noOpZeroDataFloodThreshold;
-    private final int noOpPriorityUpdateFloodThreshold;
-    private final int groupRebucketChurnThreshold;
-    private final int inboundPingFloodThreshold;
-    private final int acceptBacklogLimit;
-    private final long acceptBacklogBytesLimit;
-    private final int tombstoneLimit;
-    private final int markerOnlyUsedStreamLimit;
-    private final long retainedOpenInfoBytesBudget;
-    private final long retainedPeerReasonBytesBudget;
-    private final long aggregateLateDataCap;
-    private final ZmuxEventHandler eventHandler;
-    private final Duration establishmentTimeout;
-    private final boolean disableEstablishmentTimeout;
-
-    public ZmuxConfig(Role role,
-                      long tieBreakerNonce,
-                      long minProto,
-                      long maxProto,
-                      long capabilities,
-                      Settings settings,
-                      Duration keepaliveInterval,
-                      Duration keepaliveMaxPingInterval,
-                      Duration keepaliveTimeout,
-                      long sessionMemoryCap,
-                      long perStreamQueuedDataHwm,
-                      long sessionQueuedDataHwm,
-                      long urgentQueuedBytesCap,
-                      long pendingControlBytesBudget,
-                      long pendingPriorityBytesBudget,
-                      Duration abuseWindow,
-                      Duration gracefulCloseDrainTimeout,
-                      Duration stopSendingGracefulDrainWindow,
-                      long stopSendingGracefulTailCap,
-                      Duration hiddenAbortChurnWindow,
-                      int hiddenAbortChurnThreshold,
-                      Duration visibleTerminalChurnWindow,
-                      int visibleTerminalChurnThreshold,
-                      int inboundControlFrameBudget,
-                      long inboundControlBytesBudget,
-                      int inboundExtFrameBudget,
-                      long inboundExtBytesBudget,
-                      int inboundMixedFrameBudget,
-                      long inboundMixedBytesBudget,
-                      int noOpControlFloodThreshold,
-                      int noOpMaxDataFloodThreshold,
-                      int noOpBlockedFloodThreshold,
-                      int noOpZeroDataFloodThreshold,
-                      int noOpPriorityUpdateFloodThreshold,
-                      int groupRebucketChurnThreshold,
-                      int inboundPingFloodThreshold,
-                      int acceptBacklogLimit,
-                      long acceptBacklogBytesLimit,
-                      int tombstoneLimit,
-                      int markerOnlyUsedStreamLimit,
-                      long retainedOpenInfoBytesBudget,
-                      long retainedPeerReasonBytesBudget,
-                      long aggregateLateDataCap,
-                      ZmuxEventHandler eventHandler) {
-        this(
-                role,
-                tieBreakerNonce,
-                minProto,
-                maxProto,
-                capabilities,
-                false,
-                settings,
-                false,
-                0L,
-                0L,
-                keepaliveInterval,
-                keepaliveMaxPingInterval,
-                keepaliveTimeout,
-                false,
-                0L,
-                0L,
-                sessionMemoryCap,
-                perStreamQueuedDataHwm,
-                sessionQueuedDataHwm,
-                urgentQueuedBytesCap,
-                pendingControlBytesBudget,
-                pendingPriorityBytesBudget,
-                abuseWindow,
-                gracefulCloseDrainTimeout,
-                stopSendingGracefulDrainWindow,
-                stopSendingGracefulTailCap,
-                hiddenAbortChurnWindow,
-                hiddenAbortChurnThreshold,
-                visibleTerminalChurnWindow,
-                visibleTerminalChurnThreshold,
-                inboundControlFrameBudget,
-                inboundControlBytesBudget,
-                inboundExtFrameBudget,
-                inboundExtBytesBudget,
-                inboundMixedFrameBudget,
-                inboundMixedBytesBudget,
-                noOpControlFloodThreshold,
-                noOpMaxDataFloodThreshold,
-                noOpBlockedFloodThreshold,
-                noOpZeroDataFloodThreshold,
-                noOpPriorityUpdateFloodThreshold,
-                groupRebucketChurnThreshold,
-                inboundPingFloodThreshold,
-                acceptBacklogLimit,
-                acceptBacklogBytesLimit,
-                tombstoneLimit,
-                markerOnlyUsedStreamLimit,
-                retainedOpenInfoBytesBudget,
-                retainedPeerReasonBytesBudget,
-                aggregateLateDataCap,
-                eventHandler
-        );
-    }
-
-    public ZmuxConfig(Role role,
-                      long tieBreakerNonce,
-                      long minProto,
-                      long maxProto,
-                      long capabilities,
-                      boolean disableCapabilities,
-                      Settings settings,
-                      boolean prefacePadding,
-                      long prefacePaddingMinBytes,
-                      long prefacePaddingMaxBytes,
-                      Duration keepaliveInterval,
-                      Duration keepaliveMaxPingInterval,
-                      Duration keepaliveTimeout,
-                      boolean pingPadding,
-                      long pingPaddingMinBytes,
-                      long pingPaddingMaxBytes,
-                      long sessionMemoryCap,
-                      long perStreamQueuedDataHwm,
-                      long sessionQueuedDataHwm,
-                      long urgentQueuedBytesCap,
-                      long pendingControlBytesBudget,
-                      long pendingPriorityBytesBudget,
-                      Duration abuseWindow,
-                      Duration gracefulCloseDrainTimeout,
-                      Duration stopSendingGracefulDrainWindow,
-                      long stopSendingGracefulTailCap,
-                      Duration hiddenAbortChurnWindow,
-                      int hiddenAbortChurnThreshold,
-                      Duration visibleTerminalChurnWindow,
-                      int visibleTerminalChurnThreshold,
-                      int inboundControlFrameBudget,
-                      long inboundControlBytesBudget,
-                      int inboundExtFrameBudget,
-                      long inboundExtBytesBudget,
-                      int inboundMixedFrameBudget,
-                      long inboundMixedBytesBudget,
-                      int noOpControlFloodThreshold,
-                      int noOpMaxDataFloodThreshold,
-                      int noOpBlockedFloodThreshold,
-                      int noOpZeroDataFloodThreshold,
-                      int noOpPriorityUpdateFloodThreshold,
-                      int groupRebucketChurnThreshold,
-                      int inboundPingFloodThreshold,
-                      int acceptBacklogLimit,
-                      long acceptBacklogBytesLimit,
-                      int tombstoneLimit,
-                      int markerOnlyUsedStreamLimit,
-                      long retainedOpenInfoBytesBudget,
-                      long retainedPeerReasonBytesBudget,
-                      long aggregateLateDataCap,
-                      ZmuxEventHandler eventHandler) {
-        this(
-                role,
-                tieBreakerNonce,
-                minProto,
-                maxProto,
-                capabilities,
-                disableCapabilities,
-                settings,
-                prefacePadding,
-                prefacePaddingMinBytes,
-                prefacePaddingMaxBytes,
-                keepaliveInterval,
-                keepaliveMaxPingInterval,
-                keepaliveTimeout,
-                pingPadding,
-                pingPaddingMinBytes,
-                pingPaddingMaxBytes,
-                sessionMemoryCap,
-                perStreamQueuedDataHwm,
-                sessionQueuedDataHwm,
-                urgentQueuedBytesCap,
-                pendingControlBytesBudget,
-                pendingPriorityBytesBudget,
-                abuseWindow,
-                gracefulCloseDrainTimeout,
-                stopSendingGracefulDrainWindow,
-                stopSendingGracefulTailCap,
-                hiddenAbortChurnWindow,
-                hiddenAbortChurnThreshold,
-                visibleTerminalChurnWindow,
-                visibleTerminalChurnThreshold,
-                inboundControlFrameBudget,
-                inboundControlBytesBudget,
-                inboundExtFrameBudget,
-                inboundExtBytesBudget,
-                inboundMixedFrameBudget,
-                inboundMixedBytesBudget,
-                noOpControlFloodThreshold,
-                noOpMaxDataFloodThreshold,
-                noOpBlockedFloodThreshold,
-                noOpZeroDataFloodThreshold,
-                noOpPriorityUpdateFloodThreshold,
-                groupRebucketChurnThreshold,
-                inboundPingFloodThreshold,
-                acceptBacklogLimit,
-                acceptBacklogBytesLimit,
-                tombstoneLimit,
-                markerOnlyUsedStreamLimit,
-                retainedOpenInfoBytesBudget,
-                retainedPeerReasonBytesBudget,
-                aggregateLateDataCap,
-                eventHandler,
-                null,
-                false
-        );
-    }
-
-    private ZmuxConfig(Role role,
-                       long tieBreakerNonce,
-                       long minProto,
-                       long maxProto,
-                       long capabilities,
-                       boolean disableCapabilities,
-                       Settings settings,
-                       boolean prefacePadding,
-                       long prefacePaddingMinBytes,
-                       long prefacePaddingMaxBytes,
-                       Duration keepaliveInterval,
-                       Duration keepaliveMaxPingInterval,
-                       Duration keepaliveTimeout,
-                       boolean pingPadding,
-                       long pingPaddingMinBytes,
-                       long pingPaddingMaxBytes,
-                       long sessionMemoryCap,
-                       long perStreamQueuedDataHwm,
-                       long sessionQueuedDataHwm,
-                       long urgentQueuedBytesCap,
-                       long pendingControlBytesBudget,
-                       long pendingPriorityBytesBudget,
-                       Duration abuseWindow,
-                       Duration gracefulCloseDrainTimeout,
-                       Duration stopSendingGracefulDrainWindow,
-                       long stopSendingGracefulTailCap,
-                       Duration hiddenAbortChurnWindow,
-                       int hiddenAbortChurnThreshold,
-                       Duration visibleTerminalChurnWindow,
-                       int visibleTerminalChurnThreshold,
-                       int inboundControlFrameBudget,
-                       long inboundControlBytesBudget,
-                       int inboundExtFrameBudget,
-                       long inboundExtBytesBudget,
-                       int inboundMixedFrameBudget,
-                       long inboundMixedBytesBudget,
-                       int noOpControlFloodThreshold,
-                       int noOpMaxDataFloodThreshold,
-                       int noOpBlockedFloodThreshold,
-                       int noOpZeroDataFloodThreshold,
-                       int noOpPriorityUpdateFloodThreshold,
-                       int groupRebucketChurnThreshold,
-                       int inboundPingFloodThreshold,
-                       int acceptBacklogLimit,
-                       long acceptBacklogBytesLimit,
-                       int tombstoneLimit,
-                       int markerOnlyUsedStreamLimit,
-                       long retainedOpenInfoBytesBudget,
-                       long retainedPeerReasonBytesBudget,
-                       long aggregateLateDataCap,
-                       ZmuxEventHandler eventHandler,
-                       Duration establishmentTimeout,
-                       boolean disableEstablishmentTimeout) {
-        role = role == null ? Role.AUTO : role;
-        requireVarint62(tieBreakerNonce, "tieBreakerNonce");
-        minProto = normalizeProtocolVersion(minProto, "minProto");
-        maxProto = normalizeProtocolVersion(maxProto, "maxProto");
-        if (minProto > maxProto) {
-            throw new IllegalArgumentException("zmux config minProto must be <= maxProto");
-        }
-        requireVarint62(capabilities, "capabilities");
-        if (disableCapabilities) {
-            capabilities = 0L;
-        } else if (capabilities == 0L) {
-            capabilities = DEFAULT_CAPABILITIES;
-        }
-        settings = normalizeConfigSettings(settings);
-        requireNonNegative(prefacePaddingMinBytes, "prefacePaddingMinBytes");
-        requireNonNegative(prefacePaddingMaxBytes, "prefacePaddingMaxBytes");
-        keepaliveInterval = normalizeOptionalDuration(keepaliveInterval, "keepaliveInterval");
-        keepaliveMaxPingInterval = normalizeOptionalDuration(keepaliveMaxPingInterval, "keepaliveMaxPingInterval");
-        keepaliveTimeout = normalizeOptionalDuration(keepaliveTimeout, "keepaliveTimeout");
-        requireNonNegative(pingPaddingMinBytes, "pingPaddingMinBytes");
-        requireNonNegative(pingPaddingMaxBytes, "pingPaddingMaxBytes");
-        requireNonNegative(sessionMemoryCap, "sessionMemoryCap");
-        requireNonNegative(perStreamQueuedDataHwm, "perStreamQueuedDataHwm");
-        requireNonNegative(sessionQueuedDataHwm, "sessionQueuedDataHwm");
-        requireNonNegative(urgentQueuedBytesCap, "urgentQueuedBytesCap");
-        requireNonNegative(pendingControlBytesBudget, "pendingControlBytesBudget");
-        requireNonNegative(pendingPriorityBytesBudget, "pendingPriorityBytesBudget");
-        abuseWindow = normalizeOptionalDuration(abuseWindow, "abuseWindow");
-        gracefulCloseDrainTimeout = normalizeOptionalDuration(gracefulCloseDrainTimeout, "gracefulCloseDrainTimeout");
-        stopSendingGracefulDrainWindow = normalizeOptionalDuration(stopSendingGracefulDrainWindow, "stopSendingGracefulDrainWindow");
-        requireNonNegative(stopSendingGracefulTailCap, "stopSendingGracefulTailCap");
-        hiddenAbortChurnWindow = normalizeOptionalDuration(hiddenAbortChurnWindow, "hiddenAbortChurnWindow");
-        requireNonNegative(hiddenAbortChurnThreshold, "hiddenAbortChurnThreshold");
-        visibleTerminalChurnWindow = normalizeOptionalDuration(visibleTerminalChurnWindow, "visibleTerminalChurnWindow");
-        requireNonNegative(visibleTerminalChurnThreshold, "visibleTerminalChurnThreshold");
-        requireNonNegative(inboundControlFrameBudget, "inboundControlFrameBudget");
-        requireNonNegative(inboundControlBytesBudget, "inboundControlBytesBudget");
-        requireNonNegative(inboundExtFrameBudget, "inboundExtFrameBudget");
-        requireNonNegative(inboundExtBytesBudget, "inboundExtBytesBudget");
-        requireNonNegative(inboundMixedFrameBudget, "inboundMixedFrameBudget");
-        requireNonNegative(inboundMixedBytesBudget, "inboundMixedBytesBudget");
-        requireNonNegative(noOpControlFloodThreshold, "noOpControlFloodThreshold");
-        requireNonNegative(noOpMaxDataFloodThreshold, "noOpMaxDataFloodThreshold");
-        requireNonNegative(noOpBlockedFloodThreshold, "noOpBlockedFloodThreshold");
-        requireNonNegative(noOpZeroDataFloodThreshold, "noOpZeroDataFloodThreshold");
-        requireNonNegative(noOpPriorityUpdateFloodThreshold, "noOpPriorityUpdateFloodThreshold");
-        requireNonNegative(groupRebucketChurnThreshold, "groupRebucketChurnThreshold");
-        requireNonNegative(inboundPingFloodThreshold, "inboundPingFloodThreshold");
-        requireNonNegative(acceptBacklogLimit, "acceptBacklogLimit");
-        requireNonNegative(acceptBacklogBytesLimit, "acceptBacklogBytesLimit");
-        requireNonNegative(tombstoneLimit, "tombstoneLimit");
-        requireNonNegative(markerOnlyUsedStreamLimit, "markerOnlyUsedStreamLimit");
-        requireNonNegative(retainedOpenInfoBytesBudget, "retainedOpenInfoBytesBudget");
-        requireNonNegative(retainedPeerReasonBytesBudget, "retainedPeerReasonBytesBudget");
-        requireNonNegative(aggregateLateDataCap, "aggregateLateDataCap");
-        establishmentTimeout = normalizeOptionalDuration(establishmentTimeout, "establishmentTimeout");
-        if (disableEstablishmentTimeout) {
-            establishmentTimeout = Duration.ZERO;
-        } else if (establishmentTimeout.isZero()) {
-            establishmentTimeout = DEFAULT_ESTABLISHMENT_TIMEOUT;
-        }
-        this.role = role;
-        this.tieBreakerNonce = tieBreakerNonce;
-        this.minProto = minProto;
-        this.maxProto = maxProto;
-        this.capabilities = capabilities;
-        this.disableCapabilities = disableCapabilities;
-        this.settings = settings;
-        this.prefacePadding = prefacePadding;
-        this.prefacePaddingMinBytes = prefacePaddingMinBytes;
-        this.prefacePaddingMaxBytes = prefacePaddingMaxBytes;
-        this.keepaliveInterval = keepaliveInterval;
-        this.keepaliveMaxPingInterval = keepaliveMaxPingInterval;
-        this.keepaliveTimeout = keepaliveTimeout;
-        this.pingPadding = pingPadding;
-        this.pingPaddingMinBytes = pingPaddingMinBytes;
-        this.pingPaddingMaxBytes = pingPaddingMaxBytes;
-        this.sessionMemoryCap = sessionMemoryCap;
-        this.perStreamQueuedDataHwm = perStreamQueuedDataHwm;
-        this.sessionQueuedDataHwm = sessionQueuedDataHwm;
-        this.urgentQueuedBytesCap = urgentQueuedBytesCap;
-        this.pendingControlBytesBudget = pendingControlBytesBudget;
-        this.pendingPriorityBytesBudget = pendingPriorityBytesBudget;
-        this.abuseWindow = abuseWindow;
-        this.gracefulCloseDrainTimeout = gracefulCloseDrainTimeout;
-        this.stopSendingGracefulDrainWindow = stopSendingGracefulDrainWindow;
-        this.stopSendingGracefulTailCap = stopSendingGracefulTailCap;
-        this.hiddenAbortChurnWindow = hiddenAbortChurnWindow;
-        this.hiddenAbortChurnThreshold = hiddenAbortChurnThreshold;
-        this.visibleTerminalChurnWindow = visibleTerminalChurnWindow;
-        this.visibleTerminalChurnThreshold = visibleTerminalChurnThreshold;
-        this.inboundControlFrameBudget = inboundControlFrameBudget;
-        this.inboundControlBytesBudget = inboundControlBytesBudget;
-        this.inboundExtFrameBudget = inboundExtFrameBudget;
-        this.inboundExtBytesBudget = inboundExtBytesBudget;
-        this.inboundMixedFrameBudget = inboundMixedFrameBudget;
-        this.inboundMixedBytesBudget = inboundMixedBytesBudget;
-        this.noOpControlFloodThreshold = noOpControlFloodThreshold;
-        this.noOpMaxDataFloodThreshold = noOpMaxDataFloodThreshold;
-        this.noOpBlockedFloodThreshold = noOpBlockedFloodThreshold;
-        this.noOpZeroDataFloodThreshold = noOpZeroDataFloodThreshold;
-        this.noOpPriorityUpdateFloodThreshold = noOpPriorityUpdateFloodThreshold;
-        this.groupRebucketChurnThreshold = groupRebucketChurnThreshold;
-        this.inboundPingFloodThreshold = inboundPingFloodThreshold;
-        this.acceptBacklogLimit = acceptBacklogLimit;
-        this.acceptBacklogBytesLimit = acceptBacklogBytesLimit;
-        this.tombstoneLimit = tombstoneLimit;
-        this.markerOnlyUsedStreamLimit = markerOnlyUsedStreamLimit;
-        this.retainedOpenInfoBytesBudget = retainedOpenInfoBytesBudget;
-        this.retainedPeerReasonBytesBudget = retainedPeerReasonBytesBudget;
-        this.aggregateLateDataCap = aggregateLateDataCap;
-        this.eventHandler = eventHandler;
-        this.establishmentTimeout = establishmentTimeout;
-        this.disableEstablishmentTimeout = disableEstablishmentTimeout;
+    /** Whether sessions offer multipath (more than one pipe, or resume). */
+    public boolean multipath() {
+        return multipath.enabled();
     }
 
     public static ZmuxConfig defaults() {
-        synchronized (DEFAULT_LOCK) {
-            return defaultTemplate.toBuilder().build();
-        }
+        return DEFAULTS;
     }
 
     public static Builder builder() {
         return new Builder();
     }
 
-    public static void configureDefaultConfig(Consumer<Builder> customizer) {
-        if (customizer == null) {
-            return;
+    /** The ALPN identifiers, in preference order. */
+    public List<String> alpn() {
+        return alpn;
+    }
+
+    public EventLoops eventLoops() {
+        return eventLoops;
+    }
+
+    /** A loop of the configured group for a new session; the group's owner closes it. */
+    io.zmux.internal.loop.EventLoop nextLoop() {
+        return eventLoops.next();
+    }
+
+    /**
+     * The ALPN list a server accepts: the configured identifiers, then their draft-01
+     * aliases (SPEC.md Section 6.2).
+     */
+    public static List<String> withAliases(List<String> ids) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>(ids);
+        for (String id : ids) {
+            String alias = null;
+            if (id.equals("qmux-02")) alias = "qmux-01";
+            else if (id.startsWith("qmux-02.")) alias = "qmux-01." + id.substring("qmux-02.".length());
+            else if (id.endsWith("-02")) alias = id.substring(0, id.length() - 3) + "-01";
+            if (alias != null && !out.contains(alias)) out.add(alias);
         }
-        ZmuxConfig base;
-        synchronized (DEFAULT_LOCK) {
-            base = defaultTemplate;
-        }
-        Builder builder = base.toBuilder();
-        customizer.accept(builder);
-        ZmuxConfig next = sanitizeDefaultTemplate(builder.build());
-        synchronized (DEFAULT_LOCK) {
-            defaultTemplate = next;
+        return out;
+    }
+
+    static long nanos(Duration d) {
+        try {
+            return d.toNanos();
+        } catch (ArithmeticException e) {
+            return Time.NEVER;
         }
     }
 
-    public static void resetDefaultConfig() {
-        synchronized (DEFAULT_LOCK) {
-            defaultTemplate = BUILTIN_DEFAULTS;
+    /** The handshake timeout as a bound; one beyond the clock's range for no timeout. */
+    Duration handshakeBound() {
+        return timeouts.handshake().orElse(java.time.temporal.ChronoUnit.FOREVER.getDuration());
+    }
+
+    /** The handshake timeout in nanoseconds; {@link Time#NEVER} for no timeout. */
+    long handshakeNanos() {
+        return timeouts.handshake().map(ZmuxConfig::nanos).orElse(Time.NEVER);
+    }
+
+    /** Whole milliseconds of d, saturating. */
+    static long millis(Duration d) {
+        try {
+            return d.toMillis();
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
         }
     }
 
-    private static long randomVarint62() {
-        long value;
-        do {
-            value = NONCE_RANDOM.nextLong() & Protocol.MAX_VARINT62;
-        } while (value == 0L);
-        return value;
-    }
-
-    private static ZmuxConfig sanitizeDefaultTemplate(ZmuxConfig config) {
-        Settings settings = config.settings();
-        if (settings.pingPaddingKey() != 0L) {
-            settings = settings.toBuilder().pingPaddingKey(0L).build();
+    /** The core configuration for a session in the given transport role. */
+    CoreConfig toCore(CoreConfig.Role role, CoreConfig.Role transportRole) {
+        CoreConfig.Builder c = CoreConfig.builder();
+        c.role(role);
+        c.transportRole(transportRole);
+        c.handshakeTimeout(handshakeNanos());
+        c.keepAlive(timeouts.keepAlive().map(ZmuxConfig::nanos).orElse(CoreConfig.OFF));
+        TransportParams p = c.local();
+        p.maxIdleTimeoutMillis = timeouts.idle().map(ZmuxConfig::millis).orElse(0L);
+        p.initialMaxData = flow.initialConnectionWindow();
+        p.maxStreamDataBidiLocal = flow.initialStreamWindow();
+        p.maxStreamDataBidiRemote = flow.initialStreamWindow();
+        p.maxStreamDataUni = flow.initialStreamWindow();
+        p.maxStreamsBidi = limits.incomingStreams();
+        if (limits.incomingUniStreams() >= 0) {
+            c.stagedUni(false);
+            p.maxStreamsUni = limits.incomingUniStreams();
         }
-        return config.toBuilder()
-                .tieBreakerNonce(0L)
-                .settings(settings)
-                .build();
-    }
-
-    private static Settings normalizeConfigSettings(Settings value) {
-        if (value == null) {
-            return Settings.defaults();
+        c.streamWindowCap(flow.maxStreamWindow());
+        c.connWindowCap(flow.maxConnectionWindow());
+        c.memoryBudget(flow.memoryBudget().orElse(CoreConfig.UNLIMITED));
+        c.windowPredicate(hooks.allowWindowGrowth() != null);
+        c.datagramReceiveLimited(hooks.datagramReceive() != null);
+        c.sendBuffer(flow.sendBuffer());
+        c.sendBufferMax(flow.maxSendBuffer() == 0 ? 0 : Math.max(flow.maxSendBuffer(), flow.sendBuffer()));
+        if (datagrams) {
+            c.datagrams(true);
+            p.present |= TransportParams.DATAGRAM | TransportParams.FLOWS;
+            p.maxDatagramFrameSize = 65535;
+            c.datagramSendQueue(limits.datagramSendQueue());
+            c.datagramReceiveQueue(limits.datagramReceiveQueue());
+            c.datagramStreamQueue(limits.datagramStreamQueue());
+            c.datagramReceiveBytes(limits.datagramReceiveBytes());
         }
-        Settings defaults = Settings.defaults();
-        if (value.maxFramePayload() != 0L
-                && value.maxControlPayloadBytes() != 0L
-                && value.maxExtensionPayloadBytes() != 0L) {
-            return value;
+        p.maxLanes = limits.lanes();
+        System.arraycopy(randomBytes(16), 0, p.laneKey, 0, 16);
+        if (role == CoreConfig.Role.AUTO) {
+            p.present |= TransportParams.ROLE;
+            p.role = TransportParams.ROLE_AUTO;
+            p.roleNonce = RANDOM.nextLong();
         }
-        return value.toBuilder()
-                .maxFramePayload(value.maxFramePayload() == 0L ? defaults.maxFramePayload() : value.maxFramePayload())
-                .maxControlPayloadBytes(value.maxControlPayloadBytes() == 0L
-                        ? defaults.maxControlPayloadBytes()
-                        : value.maxControlPayloadBytes())
-                .maxExtensionPayloadBytes(value.maxExtensionPayloadBytes() == 0L
-                        ? defaults.maxExtensionPayloadBytes()
-                        : value.maxExtensionPayloadBytes())
-                .build();
-    }
-
-    private static Duration normalizeOptionalDuration(Duration value, String field) {
-        if (value == null || value.isZero()) {
-            return Duration.ZERO;
-        }
-        if (value.isNegative()) {
-            throw new IllegalArgumentException("zmux config " + field + " must be >= 0");
-        }
-        return value;
-    }
-
-    private static void requireVarint62(long value, String field) {
-        if (value < 0L || value > Protocol.MAX_VARINT62) {
-            throw new IllegalArgumentException("zmux config " + field + " must be within varint62 range");
-        }
-    }
-
-    private static long normalizeProtocolVersion(long value, String field) {
-        if (value == 0L) {
-            return Protocol.PROTO_VERSION;
-        }
-        if (value < 0L) {
-            throw new IllegalArgumentException("zmux config " + field + " must be > 0");
-        }
-        if (value > Protocol.MAX_VARINT62) {
-            throw new IllegalArgumentException("zmux config " + field + " must be within varint62 range");
-        }
-        return value;
-    }
-
-    private static void requireNonNegative(long value, String field) {
-        if (value < 0L) {
-            throw new IllegalArgumentException("zmux config " + field + " must be >= 0");
-        }
-    }
-
-    private static void requireNonNegative(int value, String field) {
-        if (value < 0) {
-            throw new IllegalArgumentException("zmux config " + field + " must be >= 0");
-        }
-    }
-
-    public Builder toBuilder() {
-        return new Builder()
-                .role(role)
-                .tieBreakerNonce(tieBreakerNonce)
-                .minProto(minProto)
-                .maxProto(maxProto)
-                .capabilities(capabilities)
-                .disableCapabilities(disableCapabilities)
-                .settings(settings)
-                .prefacePadding(prefacePadding)
-                .prefacePaddingMinBytes(prefacePaddingMinBytes)
-                .prefacePaddingMaxBytes(prefacePaddingMaxBytes)
-                .keepaliveInterval(keepaliveInterval)
-                .keepaliveMaxPingInterval(keepaliveMaxPingInterval)
-                .keepaliveTimeout(keepaliveTimeout)
-                .pingPadding(pingPadding)
-                .pingPaddingMinBytes(pingPaddingMinBytes)
-                .pingPaddingMaxBytes(pingPaddingMaxBytes)
-                .sessionMemoryCap(sessionMemoryCap)
-                .perStreamQueuedDataHwm(perStreamQueuedDataHwm)
-                .sessionQueuedDataHwm(sessionQueuedDataHwm)
-                .urgentQueuedBytesCap(urgentQueuedBytesCap)
-                .pendingControlBytesBudget(pendingControlBytesBudget)
-                .pendingPriorityBytesBudget(pendingPriorityBytesBudget)
-                .abuseWindow(abuseWindow)
-                .gracefulCloseDrainTimeout(gracefulCloseDrainTimeout)
-                .stopSendingGracefulDrainWindow(stopSendingGracefulDrainWindow)
-                .stopSendingGracefulTailCap(stopSendingGracefulTailCap)
-                .hiddenAbortChurnWindow(hiddenAbortChurnWindow)
-                .hiddenAbortChurnThreshold(hiddenAbortChurnThreshold)
-                .visibleTerminalChurnWindow(visibleTerminalChurnWindow)
-                .visibleTerminalChurnThreshold(visibleTerminalChurnThreshold)
-                .inboundControlFrameBudget(inboundControlFrameBudget)
-                .inboundControlBytesBudget(inboundControlBytesBudget)
-                .inboundExtFrameBudget(inboundExtFrameBudget)
-                .inboundExtBytesBudget(inboundExtBytesBudget)
-                .inboundMixedFrameBudget(inboundMixedFrameBudget)
-                .inboundMixedBytesBudget(inboundMixedBytesBudget)
-                .noOpControlFloodThreshold(noOpControlFloodThreshold)
-                .noOpMaxDataFloodThreshold(noOpMaxDataFloodThreshold)
-                .noOpBlockedFloodThreshold(noOpBlockedFloodThreshold)
-                .noOpZeroDataFloodThreshold(noOpZeroDataFloodThreshold)
-                .noOpPriorityUpdateFloodThreshold(noOpPriorityUpdateFloodThreshold)
-                .groupRebucketChurnThreshold(groupRebucketChurnThreshold)
-                .inboundPingFloodThreshold(inboundPingFloodThreshold)
-                .acceptBacklogLimit(acceptBacklogLimit)
-                .acceptBacklogBytesLimit(acceptBacklogBytesLimit)
-                .tombstoneLimit(tombstoneLimit)
-                .markerOnlyUsedStreamLimit(markerOnlyUsedStreamLimit)
-                .retainedOpenInfoBytesBudget(retainedOpenInfoBytesBudget)
-                .retainedPeerReasonBytesBudget(retainedPeerReasonBytesBudget)
-                .aggregateLateDataCap(aggregateLateDataCap)
-                .eventHandler(eventHandler)
-                .establishmentTimeout(establishmentTimeout)
-                .disableEstablishmentTimeout(disableEstablishmentTimeout);
-    }
-
-    public ZmuxConfig withRole(Role role) {
-        Role effectiveRole = role == null ? Role.AUTO : role;
-        long effectiveNonce = effectiveRole == Role.AUTO ? tieBreakerNonce : 0L;
-        return toBuilder()
-                .role(effectiveRole)
-                .tieBreakerNonce(effectiveNonce)
-                .build();
-    }
-
-    public Preface localPreface() {
-        long nonce = tieBreakerNonce;
-        if (role == Role.INITIATOR || role == Role.RESPONDER) {
-            nonce = 0L;
-        } else if (nonce == 0L) {
-            nonce = randomVarint62();
-        }
-        Settings localSettings = settings;
-        if (pingPadding) {
-            if (localSettings.pingPaddingKey() == 0L) {
-                localSettings = localSettings.toBuilder()
-                        .pingPaddingKey(randomVarint62())
-                        .build();
+        long g = Math.floorMod(RANDOM.nextLong(), 1L << 20);
+        p.greaseId = 31 * g + 27;
+        p.greaseValue = randomBytes(RANDOM.nextInt(17));
+        c.earlyZmuxPeer(earlyData == EarlyData.ZMUX_PEER);
+        c.shapingLimits(shapingLimits);
+        c.shaper(shaper);
+        MultipathConfig m = multipath;
+        c.maxPipes(m.maxPipes());
+        c.policy(Scheduling.policy(m.scheduler()));
+        c.spreadChunk(m.spreadChunk()); c.overflowDelay(nanos(m.overflowDelay())); c.standbyProbe(m.standbyProbe().map(ZmuxConfig::nanos).orElse(0L));
+        c.probeInterval(m.probeInterval().map(ZmuxConfig::nanos).orElse(0L)); c.probeJitter(m.probeJitter()); c.redundancy(m.redundancy()); c.latencyBudget(nanos(flow.latencyBudget()));
+        m.suspectFloor().ifPresent(d -> c.suspectFloor(nanos(d)));
+        m.deadTimeout().ifPresent(d -> c.deadTimeout(nanos(d)));
+        m.probation().ifPresent(d -> c.probation(nanos(d)));
+        PipeAuth pipeAuth = m.auth();
+        if (multipath()) {
+            c.resume(nanos(m.resumeTimeout()));
+            p.present |= TransportParams.MULTIPATH;
+            if (pipeAuth.tls()) p.secretFlags |= TransportParams.SECRET_EXPORTER;
+            if (pipeAuth.psk() != null) {
+                p.secretFlags |= TransportParams.SECRET_PSK;
+                c.psk(pipeAuth.psk());
             }
-        } else if (localSettings.pingPaddingKey() != 0L) {
-            localSettings = localSettings.toBuilder()
-                    .pingPaddingKey(0L)
-                    .build();
+            if (pipeAuth.allowInsecure()) p.secretFlags |= TransportParams.SECRET_INSECURE;
+            System.arraycopy(randomBytes(16), 0, p.sessionNonce, 0, 16);
+            if (!m.resumeTimeout().isZero()) {
+                p.present |= TransportParams.RESUME;
+                p.resumeGraceMillis = Math.max(1, m.resumeTimeout().toMillis());
+            }
         }
-        return new Preface(
-                Protocol.PREFACE_VERSION,
-                role,
-                nonce,
-                minProto,
-                maxProto,
-                capabilities,
-                localSettings
-        );
+        return c.build();
     }
 
-    public Role role() {
-        return role;
+    private static byte[] randomBytes(int n) {
+        byte[] b = new byte[n];
+        RANDOM.nextBytes(b);
+        return b;
     }
 
-    public long tieBreakerNonce() {
-        return tieBreakerNonce;
-    }
-
-    public long minProto() {
-        return minProto;
-    }
-
-    public long maxProto() {
-        return maxProto;
-    }
-
-    public long capabilities() {
-        return capabilities;
-    }
-
-    public boolean disableCapabilities() {
-        return disableCapabilities;
-    }
-
-    public Settings settings() {
-        return settings;
-    }
-
-    public boolean prefacePadding() {
-        return prefacePadding;
-    }
-
-    public long prefacePaddingMinBytes() {
-        return prefacePaddingMinBytes;
-    }
-
-    public long prefacePaddingMaxBytes() {
-        return prefacePaddingMaxBytes;
-    }
-
-    public Duration keepaliveInterval() {
-        return keepaliveInterval;
-    }
-
-    public Duration keepaliveMaxPingInterval() {
-        return keepaliveMaxPingInterval;
-    }
-
-    public Duration keepaliveTimeout() {
-        return keepaliveTimeout;
-    }
-
-    public boolean pingPadding() {
-        return pingPadding;
-    }
-
-    public long pingPaddingMinBytes() {
-        return pingPaddingMinBytes;
-    }
-
-    public long pingPaddingMaxBytes() {
-        return pingPaddingMaxBytes;
-    }
-
-    public long sessionMemoryCap() {
-        return sessionMemoryCap;
-    }
-
-    public long perStreamQueuedDataHwm() {
-        return perStreamQueuedDataHwm;
-    }
-
-    public long sessionQueuedDataHwm() {
-        return sessionQueuedDataHwm;
-    }
-
-    public long urgentQueuedBytesCap() {
-        return urgentQueuedBytesCap;
-    }
-
-    public long pendingControlBytesBudget() {
-        return pendingControlBytesBudget;
-    }
-
-    public long pendingPriorityBytesBudget() {
-        return pendingPriorityBytesBudget;
-    }
-
-    public Duration abuseWindow() {
-        return abuseWindow;
-    }
-
-    public Duration gracefulCloseDrainTimeout() {
-        return gracefulCloseDrainTimeout;
-    }
-
-    public Duration stopSendingGracefulDrainWindow() {
-        return stopSendingGracefulDrainWindow;
-    }
-
-    public long stopSendingGracefulTailCap() {
-        return stopSendingGracefulTailCap;
-    }
-
-    public Duration hiddenAbortChurnWindow() {
-        return hiddenAbortChurnWindow;
-    }
-
-    public int hiddenAbortChurnThreshold() {
-        return hiddenAbortChurnThreshold;
-    }
-
-    public Duration visibleTerminalChurnWindow() {
-        return visibleTerminalChurnWindow;
-    }
-
-    public int visibleTerminalChurnThreshold() {
-        return visibleTerminalChurnThreshold;
-    }
-
-    public int inboundControlFrameBudget() {
-        return inboundControlFrameBudget;
-    }
-
-    public long inboundControlBytesBudget() {
-        return inboundControlBytesBudget;
-    }
-
-    public int inboundExtFrameBudget() {
-        return inboundExtFrameBudget;
-    }
-
-    public long inboundExtBytesBudget() {
-        return inboundExtBytesBudget;
-    }
-
-    public int inboundMixedFrameBudget() {
-        return inboundMixedFrameBudget;
-    }
-
-    public long inboundMixedBytesBudget() {
-        return inboundMixedBytesBudget;
-    }
-
-    public int noOpControlFloodThreshold() {
-        return noOpControlFloodThreshold;
-    }
-
-    public int noOpMaxDataFloodThreshold() {
-        return noOpMaxDataFloodThreshold;
-    }
-
-    public int noOpBlockedFloodThreshold() {
-        return noOpBlockedFloodThreshold;
-    }
-
-    public int noOpZeroDataFloodThreshold() {
-        return noOpZeroDataFloodThreshold;
-    }
-
-    public int noOpPriorityUpdateFloodThreshold() {
-        return noOpPriorityUpdateFloodThreshold;
-    }
-
-    public int groupRebucketChurnThreshold() {
-        return groupRebucketChurnThreshold;
-    }
-
-    public int inboundPingFloodThreshold() {
-        return inboundPingFloodThreshold;
-    }
-
-    public int acceptBacklogLimit() {
-        return acceptBacklogLimit;
-    }
-
-    public long acceptBacklogBytesLimit() {
-        return acceptBacklogBytesLimit;
-    }
-
-    public int tombstoneLimit() {
-        return tombstoneLimit;
-    }
-
-    public int markerOnlyUsedStreamLimit() {
-        return markerOnlyUsedStreamLimit;
-    }
-
-    public long retainedOpenInfoBytesBudget() {
-        return retainedOpenInfoBytesBudget;
-    }
-
-    public long retainedPeerReasonBytesBudget() {
-        return retainedPeerReasonBytesBudget;
-    }
-
-    /**
-     * Advisory session-wide bound on retained late-data accounting; see {@link Builder#aggregateLateDataCap(long)}.
-     */
-    public long aggregateLateDataCap() {
-        return aggregateLateDataCap;
-    }
-
-    public ZmuxEventHandler eventHandler() {
-        return eventHandler;
-    }
-
-    /**
-     * Returns the effective establishment bound: the configured value, {@link #DEFAULT_ESTABLISHMENT_TIMEOUT} when
-     * none was configured, or {@link Duration#ZERO} when the bound is disabled.
-     */
-    public Duration establishmentTimeout() {
-        return establishmentTimeout;
-    }
-
-    public boolean disableEstablishmentTimeout() {
-        return disableEstablishmentTimeout;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-        if (this == other) {
-            return true;
-        }
-        if (!(other instanceof ZmuxConfig)) {
-            return false;
-        }
-        ZmuxConfig that = (ZmuxConfig) other;
-        return tieBreakerNonce == that.tieBreakerNonce
-                && minProto == that.minProto
-                && maxProto == that.maxProto
-                && capabilities == that.capabilities
-                && disableCapabilities == that.disableCapabilities
-                && prefacePadding == that.prefacePadding
-                && prefacePaddingMinBytes == that.prefacePaddingMinBytes
-                && prefacePaddingMaxBytes == that.prefacePaddingMaxBytes
-                && pingPadding == that.pingPadding
-                && pingPaddingMinBytes == that.pingPaddingMinBytes
-                && pingPaddingMaxBytes == that.pingPaddingMaxBytes
-                && sessionMemoryCap == that.sessionMemoryCap
-                && perStreamQueuedDataHwm == that.perStreamQueuedDataHwm
-                && sessionQueuedDataHwm == that.sessionQueuedDataHwm
-                && urgentQueuedBytesCap == that.urgentQueuedBytesCap
-                && pendingControlBytesBudget == that.pendingControlBytesBudget
-                && pendingPriorityBytesBudget == that.pendingPriorityBytesBudget
-                && stopSendingGracefulTailCap == that.stopSendingGracefulTailCap
-                && hiddenAbortChurnThreshold == that.hiddenAbortChurnThreshold
-                && visibleTerminalChurnThreshold == that.visibleTerminalChurnThreshold
-                && inboundControlFrameBudget == that.inboundControlFrameBudget
-                && inboundControlBytesBudget == that.inboundControlBytesBudget
-                && inboundExtFrameBudget == that.inboundExtFrameBudget
-                && inboundExtBytesBudget == that.inboundExtBytesBudget
-                && inboundMixedFrameBudget == that.inboundMixedFrameBudget
-                && inboundMixedBytesBudget == that.inboundMixedBytesBudget
-                && noOpControlFloodThreshold == that.noOpControlFloodThreshold
-                && noOpMaxDataFloodThreshold == that.noOpMaxDataFloodThreshold
-                && noOpBlockedFloodThreshold == that.noOpBlockedFloodThreshold
-                && noOpZeroDataFloodThreshold == that.noOpZeroDataFloodThreshold
-                && noOpPriorityUpdateFloodThreshold == that.noOpPriorityUpdateFloodThreshold
-                && groupRebucketChurnThreshold == that.groupRebucketChurnThreshold
-                && inboundPingFloodThreshold == that.inboundPingFloodThreshold
-                && acceptBacklogLimit == that.acceptBacklogLimit
-                && acceptBacklogBytesLimit == that.acceptBacklogBytesLimit
-                && tombstoneLimit == that.tombstoneLimit
-                && markerOnlyUsedStreamLimit == that.markerOnlyUsedStreamLimit
-                && retainedOpenInfoBytesBudget == that.retainedOpenInfoBytesBudget
-                && retainedPeerReasonBytesBudget == that.retainedPeerReasonBytesBudget
-                && aggregateLateDataCap == that.aggregateLateDataCap
-                && disableEstablishmentTimeout == that.disableEstablishmentTimeout
-                && role == that.role
-                && Objects.equals(settings, that.settings)
-                && Objects.equals(keepaliveInterval, that.keepaliveInterval)
-                && Objects.equals(keepaliveMaxPingInterval, that.keepaliveMaxPingInterval)
-                && Objects.equals(keepaliveTimeout, that.keepaliveTimeout)
-                && Objects.equals(abuseWindow, that.abuseWindow)
-                && Objects.equals(gracefulCloseDrainTimeout, that.gracefulCloseDrainTimeout)
-                && Objects.equals(stopSendingGracefulDrainWindow, that.stopSendingGracefulDrainWindow)
-                && Objects.equals(hiddenAbortChurnWindow, that.hiddenAbortChurnWindow)
-                && Objects.equals(visibleTerminalChurnWindow, that.visibleTerminalChurnWindow)
-                && Objects.equals(establishmentTimeout, that.establishmentTimeout)
-                && Objects.equals(eventHandler, that.eventHandler);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(
-                role,
-                tieBreakerNonce,
-                minProto,
-                maxProto,
-                capabilities,
-                disableCapabilities,
-                settings,
-                prefacePadding,
-                prefacePaddingMinBytes,
-                prefacePaddingMaxBytes,
-                keepaliveInterval,
-                keepaliveMaxPingInterval,
-                keepaliveTimeout,
-                pingPadding,
-                pingPaddingMinBytes,
-                pingPaddingMaxBytes,
-                sessionMemoryCap,
-                perStreamQueuedDataHwm,
-                sessionQueuedDataHwm,
-                urgentQueuedBytesCap,
-                pendingControlBytesBudget,
-                pendingPriorityBytesBudget,
-                abuseWindow,
-                gracefulCloseDrainTimeout,
-                stopSendingGracefulDrainWindow,
-                stopSendingGracefulTailCap,
-                hiddenAbortChurnWindow,
-                hiddenAbortChurnThreshold,
-                visibleTerminalChurnWindow,
-                visibleTerminalChurnThreshold,
-                inboundControlFrameBudget,
-                inboundControlBytesBudget,
-                inboundExtFrameBudget,
-                inboundExtBytesBudget,
-                inboundMixedFrameBudget,
-                inboundMixedBytesBudget,
-                noOpControlFloodThreshold,
-                noOpMaxDataFloodThreshold,
-                noOpBlockedFloodThreshold,
-                noOpZeroDataFloodThreshold,
-                noOpPriorityUpdateFloodThreshold,
-                groupRebucketChurnThreshold,
-                inboundPingFloodThreshold,
-                acceptBacklogLimit,
-                acceptBacklogBytesLimit,
-                tombstoneLimit,
-                markerOnlyUsedStreamLimit,
-                retainedOpenInfoBytesBudget,
-                retainedPeerReasonBytesBudget,
-                aggregateLateDataCap,
-                eventHandler,
-                establishmentTimeout,
-                disableEstablishmentTimeout
-        );
-    }
-
+    /** Builds a {@link ZmuxConfig}; every group validates its values. */
     public static final class Builder {
-        private Role role = Role.AUTO;
-        private long tieBreakerNonce;
-        private long minProto = Protocol.PROTO_VERSION;
-        private long maxProto = Protocol.PROTO_VERSION;
-        private long capabilities;
-        private boolean disableCapabilities;
-        private Settings settings = Settings.defaults();
-        private boolean prefacePadding = true;
-        private long prefacePaddingMinBytes;
-        private long prefacePaddingMaxBytes;
-        private Duration keepaliveInterval = DEFAULT_IDLE_KEEPALIVE_INTERVAL;
-        private Duration keepaliveMaxPingInterval = DEFAULT_KEEPALIVE_MAX_PING_INTERVAL;
-        private Duration keepaliveTimeout = Duration.ZERO;
-        private boolean pingPadding = true;
-        private long pingPaddingMinBytes;
-        private long pingPaddingMaxBytes;
-        private long sessionMemoryCap;
-        private long perStreamQueuedDataHwm;
-        private long sessionQueuedDataHwm;
-        private long urgentQueuedBytesCap;
-        private long pendingControlBytesBudget;
-        private long pendingPriorityBytesBudget;
-        private Duration abuseWindow = Duration.ZERO;
-        private Duration gracefulCloseDrainTimeout = Duration.ZERO;
-        private Duration stopSendingGracefulDrainWindow = Duration.ZERO;
-        private long stopSendingGracefulTailCap;
-        private Duration hiddenAbortChurnWindow = Duration.ZERO;
-        private int hiddenAbortChurnThreshold;
-        private Duration visibleTerminalChurnWindow = Duration.ZERO;
-        private int visibleTerminalChurnThreshold;
-        private int inboundControlFrameBudget;
-        private long inboundControlBytesBudget;
-        private int inboundExtFrameBudget;
-        private long inboundExtBytesBudget;
-        private int inboundMixedFrameBudget;
-        private long inboundMixedBytesBudget;
-        private int noOpControlFloodThreshold;
-        private int noOpMaxDataFloodThreshold;
-        private int noOpBlockedFloodThreshold;
-        private int noOpZeroDataFloodThreshold;
-        private int noOpPriorityUpdateFloodThreshold;
-        private int groupRebucketChurnThreshold;
-        private int inboundPingFloodThreshold;
-        private int acceptBacklogLimit;
-        private long acceptBacklogBytesLimit;
-        private int tombstoneLimit;
-        private int markerOnlyUsedStreamLimit;
-        private long retainedOpenInfoBytesBudget;
-        private long retainedPeerReasonBytesBudget;
-        private long aggregateLateDataCap;
-        private ZmuxEventHandler eventHandler;
-        private Duration establishmentTimeout = Duration.ZERO;
-        private boolean disableEstablishmentTimeout;
+        private Timeouts timeouts = Timeouts.defaults();
+        private FlowControl flow = FlowControl.defaults();
+        private Limits limits = Limits.defaults();
+        private MultipathConfig multipath = MultipathConfig.defaults();
+        private boolean datagrams;
+        private EarlyData earlyData = EarlyData.OFF;
+        private List<String> alpn = List.of(DEFAULT_ALPN);
+        private EventLoops eventLoops = EventLoops.shared();
+        private io.zmux.shaping.ShapingLimits shapingLimits = io.zmux.shaping.ShapingLimits.none();
+        private io.zmux.shaping.ShaperFactory shaper;
+        private SessionObserver observer;
+        private int observerQueue = 256;
+        private java.util.function.LongPredicate allowWindowGrowth;
+        private io.zmux.helper.Limiter datagramSend;
+        private io.zmux.helper.Limiter datagramReceive;
+        private Credential credential;
 
-        public Builder role(Role value) {
-            this.role = value;
+        private Builder() {}
+
+        /** The credential client dialers present to a server's admission ({@link ZmuxConfig#credential()}); null: none. */
+        public Builder credential(Credential c) { credential = c; return this; }
+
+        public Builder timeouts(Timeouts t) { timeouts = Objects.requireNonNull(t); return this; }
+        public Builder flowControl(FlowControl f) { flow = Objects.requireNonNull(f); return this; }
+        public Builder limits(Limits l) { limits = Objects.requireNonNull(l); return this; }
+        public Builder multipath(MultipathConfig m) { multipath = Objects.requireNonNull(m); return this; }
+
+        /** Enables datagrams and datagram flows (EXTENSIONS.md Section 6). */
+        public Builder datagrams(boolean on) { datagrams = on; return this; }
+
+        public Builder earlyData(EarlyData mode) { earlyData = Objects.requireNonNull(mode); return this; }
+
+        /** The ALPN identifiers in preference order (default qmux-02). */
+        public Builder alpn(List<String> ids) {
+            if (ids.isEmpty()) throw new IllegalArgumentException("empty ALPN list");
+            alpn = List.copyOf(ids);
             return this;
         }
 
-        public Builder tieBreakerNonce(long value) {
-            this.tieBreakerNonce = value;
-            return this;
+        public Builder eventLoops(EventLoops loops) { eventLoops = Objects.requireNonNull(loops); return this; }
+
+        /** Upper bounds of {@link io.zmux.shaping.Shaper} decisions over a session (default: none). */
+        public Builder shapingLimits(io.zmux.shaping.ShapingLimits limits) { shapingLimits = Objects.requireNonNull(limits); return this; }
+
+        /**
+         * The shaper factory every session of this configuration starts with, so that each
+         * outbound pipe, including those of listener-accepted sessions and joined pipes, is
+         * shaped from its first record; the factory is called once per pipe when the pipe sends
+         * its first record. {@link ZmuxSession#setShaper} replaces it. Null (the default): none.
+         */
+        public Builder shaper(io.zmux.shaping.ShaperFactory factory) { shaper = factory; return this; }
+
+        /** Ordered asynchronous notifications; capacity bounds queued events (default 256). */
+        public Builder observer(SessionObserver o, int capacity) {
+            if (capacity < 1) throw new IllegalArgumentException("observer queue below 1");
+            observer = o; observerQueue = capacity; return this;
         }
 
-        public Builder minProto(long value) {
-            this.minProto = value;
-            return this;
+        /** Called off-loop with the proposed connection-window increase in bytes. */
+        public Builder allowConnectionWindowIncrease(java.util.function.LongPredicate predicate) {
+            allowWindowGrowth = predicate; return this;
         }
 
-        public Builder maxProto(long value) {
-            this.maxProto = value;
-            return this;
-        }
-
-        public Builder capabilities(long value) {
-            this.capabilities = value;
-            return this;
-        }
-
-        public Builder disableCapabilities(boolean value) {
-            this.disableCapabilities = value;
-            return this;
-        }
-
-        public Builder disableCapabilities() {
-            return disableCapabilities(true);
-        }
-
-        public Builder settings(Settings value) {
-            this.settings = value;
-            return this;
-        }
-
-        public Builder prefacePadding(boolean value) {
-            this.prefacePadding = value;
-            return this;
-        }
-
-        public Builder prefacePaddingMinBytes(long value) {
-            this.prefacePaddingMinBytes = value;
-            return this;
-        }
-
-        public Builder prefacePaddingMaxBytes(long value) {
-            this.prefacePaddingMaxBytes = value;
-            return this;
-        }
-
-        public Builder keepaliveInterval(Duration value) {
-            this.keepaliveInterval = value;
-            return this;
-        }
-
-        public Builder keepaliveMaxPingInterval(Duration value) {
-            this.keepaliveMaxPingInterval = value;
-            return this;
-        }
-
-        public Builder keepaliveTimeout(Duration value) {
-            this.keepaliveTimeout = value;
-            return this;
-        }
-
-        public Builder pingPadding(boolean value) {
-            this.pingPadding = value;
-            return this;
-        }
-
-        public Builder pingPaddingMinBytes(long value) {
-            this.pingPaddingMinBytes = value;
-            return this;
-        }
-
-        public Builder pingPaddingMaxBytes(long value) {
-            this.pingPaddingMaxBytes = value;
-            return this;
-        }
-
-        public Builder sessionMemoryCap(long value) {
-            this.sessionMemoryCap = value;
-            return this;
-        }
-
-        public Builder perStreamQueuedDataHwm(long value) {
-            this.perStreamQueuedDataHwm = value;
-            return this;
-        }
-
-        public Builder sessionQueuedDataHwm(long value) {
-            this.sessionQueuedDataHwm = value;
-            return this;
-        }
-
-        public Builder urgentQueuedBytesCap(long value) {
-            this.urgentQueuedBytesCap = value;
-            return this;
-        }
-
-        public Builder pendingControlBytesBudget(long value) {
-            this.pendingControlBytesBudget = value;
-            return this;
-        }
-
-        public Builder pendingPriorityBytesBudget(long value) {
-            this.pendingPriorityBytesBudget = value;
-            return this;
-        }
-
-        public Builder abuseWindow(Duration value) {
-            this.abuseWindow = value;
-            return this;
-        }
-
-        public Builder gracefulCloseDrainTimeout(Duration value) {
-            this.gracefulCloseDrainTimeout = value;
-            return this;
-        }
-
-        public Builder stopSendingGracefulDrainWindow(Duration value) {
-            this.stopSendingGracefulDrainWindow = value;
-            return this;
-        }
-
-        public Builder stopSendingGracefulTailCap(long value) {
-            this.stopSendingGracefulTailCap = value;
-            return this;
-        }
-
-        public Builder hiddenAbortChurnWindow(Duration value) {
-            this.hiddenAbortChurnWindow = value;
-            return this;
-        }
-
-        public Builder hiddenAbortChurnThreshold(int value) {
-            this.hiddenAbortChurnThreshold = value;
-            return this;
-        }
-
-        public Builder visibleTerminalChurnWindow(Duration value) {
-            this.visibleTerminalChurnWindow = value;
-            return this;
-        }
-
-        public Builder visibleTerminalChurnThreshold(int value) {
-            this.visibleTerminalChurnThreshold = value;
-            return this;
-        }
-
-        public Builder inboundControlFrameBudget(int value) {
-            this.inboundControlFrameBudget = value;
-            return this;
-        }
-
-        public Builder inboundControlBytesBudget(long value) {
-            this.inboundControlBytesBudget = value;
-            return this;
-        }
-
-        public Builder inboundExtFrameBudget(int value) {
-            this.inboundExtFrameBudget = value;
-            return this;
-        }
-
-        public Builder inboundExtBytesBudget(long value) {
-            this.inboundExtBytesBudget = value;
-            return this;
-        }
-
-        public Builder inboundMixedFrameBudget(int value) {
-            this.inboundMixedFrameBudget = value;
-            return this;
-        }
-
-        public Builder inboundMixedBytesBudget(long value) {
-            this.inboundMixedBytesBudget = value;
-            return this;
-        }
-
-        public Builder noOpControlFloodThreshold(int value) {
-            this.noOpControlFloodThreshold = value;
-            return this;
-        }
-
-        public Builder noOpMaxDataFloodThreshold(int value) {
-            this.noOpMaxDataFloodThreshold = value;
-            return this;
-        }
-
-        public Builder noOpBlockedFloodThreshold(int value) {
-            this.noOpBlockedFloodThreshold = value;
-            return this;
-        }
-
-        public Builder noOpZeroDataFloodThreshold(int value) {
-            this.noOpZeroDataFloodThreshold = value;
-            return this;
-        }
-
-        public Builder noOpPriorityUpdateFloodThreshold(int value) {
-            this.noOpPriorityUpdateFloodThreshold = value;
-            return this;
-        }
-
-        public Builder groupRebucketChurnThreshold(int value) {
-            this.groupRebucketChurnThreshold = value;
-            return this;
-        }
-
-        public Builder inboundPingFloodThreshold(int value) {
-            this.inboundPingFloodThreshold = value;
-            return this;
-        }
-
-        public Builder acceptBacklogLimit(int value) {
-            this.acceptBacklogLimit = value;
-            return this;
-        }
-
-        public Builder acceptBacklogBytesLimit(long value) {
-            this.acceptBacklogBytesLimit = value;
-            return this;
-        }
-
-        public Builder tombstoneLimit(int value) {
-            this.tombstoneLimit = value;
-            return this;
-        }
-
-        public Builder markerOnlyUsedStreamLimit(int value) {
-            this.markerOnlyUsedStreamLimit = value;
-            return this;
-        }
-
-        public Builder retainedOpenInfoBytesBudget(long value) {
-            this.retainedOpenInfoBytesBudget = value;
-            return this;
-        }
-
-        public Builder retainedPeerReasonBytesBudget(long value) {
-            this.retainedPeerReasonBytesBudget = value;
-            return this;
+        /** Nonblocking whole-payload datagram admission in each direction; null disables a limiter. */
+        public Builder datagramLimiters(io.zmux.helper.Limiter send, io.zmux.helper.Limiter receive) {
+            datagramSend = send; datagramReceive = receive; return this;
         }
 
         /**
-         * Overrides the session-wide late-data aggregate (late bytes still accounted to stopped or aborted streams and
-         * their tombstones). Zero uses the default. The value is advisory: late bytes are never buffered, and exceeding
-         * the aggregate never fails the session; further late bytes keep being discarded with their session credit
-         * released (API_SEMANTICS 3). Per-stream late-data allowances are enforced independently of this value.
+         * The configuration.
+         *
+         * @throws IllegalArgumentException when multipath or resume is on without {@link MultipathConfig#auth()}
          */
-        public Builder aggregateLateDataCap(long value) {
-            this.aggregateLateDataCap = value;
-            return this;
-        }
-
-        public Builder eventHandler(ZmuxEventHandler value) {
-            this.eventHandler = value;
-            return this;
-        }
-
-        /**
-         * Bounds session establishment: the local preface write, the peer preface read and negotiation. A
-         * {@code null} or zero value selects {@link ZmuxConfig#DEFAULT_ESTABLISHMENT_TIMEOUT}. The bound applies to
-         * transports that expose read/write deadlines (for example sockets); on expiry establishment fails with
-         * {@code INTERNAL} and a best-effort establishment {@code CLOSE}. Use {@link #disableEstablishmentTimeout()}
-         * to wait without a bound.
-         */
-        public Builder establishmentTimeout(Duration value) {
-            this.establishmentTimeout = value;
-            return this;
-        }
-
-        public Builder disableEstablishmentTimeout(boolean value) {
-            this.disableEstablishmentTimeout = value;
-            return this;
-        }
-
-        public Builder disableEstablishmentTimeout() {
-            return disableEstablishmentTimeout(true);
-        }
-
         public ZmuxConfig build() {
-            return new ZmuxConfig(
-                    role,
-                    tieBreakerNonce,
-                    minProto,
-                    maxProto,
-                    capabilities,
-                    disableCapabilities,
-                    settings,
-                    prefacePadding,
-                    prefacePaddingMinBytes,
-                    prefacePaddingMaxBytes,
-                    keepaliveInterval,
-                    keepaliveMaxPingInterval,
-                    keepaliveTimeout,
-                    pingPadding,
-                    pingPaddingMinBytes,
-                    pingPaddingMaxBytes,
-                    sessionMemoryCap,
-                    perStreamQueuedDataHwm,
-                    sessionQueuedDataHwm,
-                    urgentQueuedBytesCap,
-                    pendingControlBytesBudget,
-                    pendingPriorityBytesBudget,
-                    abuseWindow,
-                    gracefulCloseDrainTimeout,
-                    stopSendingGracefulDrainWindow,
-                    stopSendingGracefulTailCap,
-                    hiddenAbortChurnWindow,
-                    hiddenAbortChurnThreshold,
-                    visibleTerminalChurnWindow,
-                    visibleTerminalChurnThreshold,
-                    inboundControlFrameBudget,
-                    inboundControlBytesBudget,
-                    inboundExtFrameBudget,
-                    inboundExtBytesBudget,
-                    inboundMixedFrameBudget,
-                    inboundMixedBytesBudget,
-                    noOpControlFloodThreshold,
-                    noOpMaxDataFloodThreshold,
-                    noOpBlockedFloodThreshold,
-                    noOpZeroDataFloodThreshold,
-                    noOpPriorityUpdateFloodThreshold,
-                    groupRebucketChurnThreshold,
-                    inboundPingFloodThreshold,
-                    acceptBacklogLimit,
-                    acceptBacklogBytesLimit,
-                    tombstoneLimit,
-                    markerOnlyUsedStreamLimit,
-                    retainedOpenInfoBytesBudget,
-                    retainedPeerReasonBytesBudget,
-                    aggregateLateDataCap,
-                    eventHandler,
-                    establishmentTimeout,
-                    disableEstablishmentTimeout
-            );
+            if (multipath.enabled() && multipath.auth() == null) throw new IllegalArgumentException("multipath needs auth");
+            return new ZmuxConfig(this);
         }
     }
 }

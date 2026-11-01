@@ -7,7 +7,9 @@ Published coordinates:
 
 - `io.github.zmuxio:zmux-parent`
 - `io.github.zmuxio:zmux`
-- `io.github.zmuxio:zmux-netty-quic`
+- `io.github.zmuxio:zmux-quic`
+- `io.github.zmuxio:zmux-http`
+- `io.github.zmuxio:zmux-shaping`
 
 ## Model
 
@@ -30,16 +32,19 @@ git fetch origin
 git rev-list --left-right --count main...origin/main
 ```
 
-Check external dependencies before setting the release version:
+Before setting the release version, update every dependency and plugin to
+its latest release:
 
 ```bash
-mvn -B versions:display-property-updates
-mvn -B versions:display-dependency-updates
+mvn -B versions:update-properties -DgenerateBackupPoms=false
+mvn -B versions:use-latest-releases -DgenerateBackupPoms=false
 mvn -B versions:display-plugin-updates
 ```
 
-Review updates deliberately. Keep Java compatibility unchanged unless that is
-an intentional release decision.
+Raise the plugin versions that the last command reports, review all changes,
+run `mvn -B verify`, and commit the updates on their own before the release
+commit. Keep Java compatibility unchanged unless that is an intentional
+release decision.
 
 Set the release version:
 
@@ -59,7 +64,7 @@ updates:
 
 ```bash
 git status --short --branch
-git add pom.xml zmux/pom.xml zmux-netty-quic/pom.xml RELEASING.md README.md
+git add pom.xml zmux/pom.xml zmux-quic/pom.xml zmux-http/pom.xml zmux-shaping/pom.xml RELEASING.md README.md
 git commit -m "release: prepare vX.Y.Z"
 git push origin main
 ```

@@ -1,26 +1,11 @@
 package io.zmux;
 
+/** The role a session takes on its bootstrap carrier. */
 public enum Role {
-    INITIATOR(0),
-    RESPONDER(1),
-    AUTO(2);
-
-    private final int code;
-
-    Role(int code) {
-        this.code = code;
-    }
-
-    public static Role fromCode(int code) {
-        for (Role value : values()) {
-            if (value.code == code) {
-                return value;
-            }
-        }
-        throw new IllegalArgumentException("invalid role: " + code);
-    }
-
-    public int code() {
-        return code;
-    }
+    /** The initiator: the dialling side of the carrier. */
+    CLIENT,
+    /** The responder: the accepting side of the carrier. */
+    SERVER,
+    /** Negotiated over a symmetric carrier (zmux_role auto, EXTENSIONS.md Section 2). */
+    PEER
 }

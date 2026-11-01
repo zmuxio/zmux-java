@@ -1,183 +1,105 @@
 package io.zmux;
 
-import io.zmux.support.DeadlineSupport;
-import io.zmux.support.RangeChecks;
-import io.zmux.support.StreamApiSupport;
-import io.zmux.transport.WriteHalf;
-
 import java.io.IOException;
 import java.io.OutputStream;
-import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.Objects;
 
-public interface ZmuxSendStream extends ZmuxStreamInfo, WriteHalf {
-    void write(byte[] src, int offset, int length) throws IOException;
+/** The sending part of a stream. */
+public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream {
+    /**
+     * Writes all of src, waiting for send-buffer room. It returns once the bytes are in the
+     * stream's send buffer: a STOP_SENDING, reset or session end that races it may drop them,
+     * and that error is reported by the next call or by {@link #finish()}, as with TCP.
+     */
+    void write(ByteBuffer src) throws IOException;
 
-    default void write(byte[] src) throws IOException {
-        Objects.requireNonNull(src, "src");
-        if (src.length == 0) {
-            return;
-        }
-        write(src, 0, src.length);
+    /** Writes owned bytes without copying. Takes ownership even on failure or interruption. */
+    void writeChunk(Chunk chunk) throws IOException;
+
+    /** Transfers ownership of src's remaining bytes without copying. */
+    default void writeChunk(ByteBuffer src) throws IOException { writeChunk(Chunk.of(src)); }
+
+    void write(byte[] b, int off, int len) throws IOException;
+
+    default void write(byte[] b) throws IOException {
+        write(b, 0, b.length);
     }
 
-    int writeFinal(byte[] src, int offset, int length) throws IOException;
+    /**
+     * Writes as much of src as the send buffer takes now, without waiting; returns the count.
+     * Returns 0 at once while another write of this stream is in progress.
+     */
+    int tryWrite(ByteBuffer src) throws IOException;
 
-    default int writeFinal(byte[] src) throws IOException {
-        Objects.requireNonNull(src, "src");
-        return StreamApiSupport.validateWriteFinalProgress(writeFinal(src, 0, src.length), src.length);
-    }
+    /**
+     * Finishes the sending part cleanly: FIN after the written data, so the peer reads every
+     * byte and then end of stream. This is the only way to end a stream successfully. It
+     * queues behind writes in progress, waiting at most the write timeout for them.
+     */
+    void finish() throws IOException;
 
-    default int writeFinal(ByteBuffer src) throws IOException {
-        Objects.requireNonNull(src, "src");
-        if (!src.hasRemaining()) {
-            return writeFinal(DeadlineSupport.EMPTY_BYTES);
-        }
-        if (src.hasArray()) {
-            int position = src.position();
-            int length = src.remaining();
-            int written = writeFinal(src.array(), src.arrayOffset() + position, length);
-            StreamApiSupport.validateWriteFinalProgress(written, length);
-            if (written > 0) {
-                src.position(position + written);
-            }
-            return written;
-        }
+    /**
+     * Aborts the sending part with an application error code: RESET_STREAM (RESET_STREAM_AT
+     * after {@link #markReliableBoundary()}). Unlike {@link #finish()} this is not a clean
+     * end: unsent data is discarded and the peer sees the reset, never end of stream.
+     */
+    void reset(long code);
 
-        int total = 0;
-        byte[] buffer = StreamApiSupport.transientBuffer();
-        while (src.remaining() > buffer.length) {
-            int position = src.position();
-            src.get(buffer, 0, buffer.length);
-            try {
-                write(buffer, 0, buffer.length);
-                total += buffer.length;
-            } catch (IOException error) {
-                src.position(position);
-                throw error;
-            }
-        }
+    /** The data written so far is delivered even if the stream is reset later (RESET_STREAM_AT). */
+    void markReliableBoundary();
 
-        int finalPosition = src.position();
-        int finalLength = src.remaining();
-        src.get(buffer, 0, finalLength);
-        int written;
-        try {
-            written = writeFinal(buffer, 0, finalLength);
-            StreamApiSupport.validateWriteFinalProgress(written, finalLength);
-        } catch (IOException error) {
-            src.position(finalPosition);
-            throw error;
-        }
-        if (written >= 0 && written < finalLength) {
-            src.position(finalPosition + written);
-        }
-        if (written > 0) {
-            total += written;
-        }
-        return total;
-    }
+    /** Bytes the part could transmit now within the peer's credit, minus what it holds unsent. */
+    long sendCapacity() throws IOException;
 
-    default int writevFinal(byte[]... parts) throws IOException {
-        Objects.requireNonNull(parts, "parts");
-        if (parts.length == 1) {
-            return writeFinal(Objects.requireNonNull(parts[0], "parts[0]"));
-        }
-        if (parts.length == 0) {
-            return writeFinal(DeadlineSupport.EMPTY_BYTES);
-        }
-        int total = StreamApiSupport.checkedWritevTotalLength(parts);
-        if (total == 0) {
-            return writeFinal(DeadlineSupport.EMPTY_BYTES);
-        }
-        int lastNonEmpty = StreamApiSupport.lastNonEmptyPart(parts);
-        int written = 0;
-        for (int i = 0; i <= lastNonEmpty; i++) {
-            byte[] part = parts[i];
-            if (part.length == 0) {
-                continue;
-            }
-            if (i < lastNonEmpty) {
-                write(part);
-                written += part.length;
-            } else {
-                written += StreamApiSupport.validateWriteFinalProgress(writeFinal(part), part.length);
-            }
-        }
-        return written;
-    }
+    /** Waits until the capacity is at least min, or above 0 while nothing is held unsent; returns it. */
+    long awaitSendCapacity(long min) throws IOException;
 
-    default OutputStream asOutputStream() {
-        return new OutputStream() {
-            private final byte[] singleByte = new byte[1];
+    /** Like {@link #awaitSendCapacity(long)}, waiting at most timeout; {@link java.net.SocketTimeoutException} after it. */
+    long awaitSendCapacity(long min, Duration timeout) throws IOException;
 
-            @Override
-            public void write(int value) throws IOException {
-                singleByte[0] = (byte) value;
-                ZmuxSendStream.this.write(singleByte, 0, 1);
-            }
+    /**
+     * Local scheduling priority. Like every setter that cannot fail, it is applied on the
+     * session's loop without waiting; it has no effect on a released stream or a closed
+     * session.
+     */
+    void setPriority(Priority priority);
 
-            @Override
-            public void write(byte[] buffer, int offset, int length) throws IOException {
-                Objects.requireNonNull(buffer, "buffer");
-                RangeChecks.checkFromIndexSize(offset, length, buffer.length);
-                if (length == 0) {
-                    return;
-                }
-                ZmuxSendStream.this.write(buffer, offset, length);
-            }
+    /** Bounds this direction's written-but-unreleased bytes (at least 16 KiB); queued like {@link #setPriority}. */
+    void setSendBuffer(long bytes);
 
-            @Override
-            public void close() throws IOException {
-                ZmuxSendStream.this.closeWrite();
-            }
-        };
-    }
+    /** Limits blocking writes; null for none. */
+    void setWriteTimeout(Duration timeout);
 
-    void updateMetadata(MetadataUpdate update) throws IOException;
+    /** An OutputStream view: close() finishes the sending part. */
+    OutputStream outputStream();
 
-    void closeWrite() throws IOException;
+    /**
+     * The stream identifier. Reading it before the first frame pins it and sends the opening
+     * frame at once, so set the preamble when opening.
+     */
+    long id() throws IOException;
 
-    default void cancelWrite(ErrorCode code) throws IOException {
-        Objects.requireNonNull(code, "code");
-        cancelWrite(code.code());
-    }
+    /** Pins the identifier asynchronously, with the same effect as {@link #id()}. */
+    ZmuxFuture<Long> idAsync();
+    /**
+     * Like {@link #write(ByteBuffer)} without blocking: src is borrowed until the future
+     * completes or a {@link ZmuxFuture#cancel cancel} returns true.
+     */
+    ZmuxFuture<Void> writeAsync(ByteBuffer src);
+    /** Like {@link #writeChunk(Chunk)} without blocking; the chunk is released on every outcome. */
+    ZmuxFuture<Void> writeChunkAsync(Chunk chunk);
+    /** Like {@link #finish()} without blocking: FIN behind all earlier writes. */
+    ZmuxFuture<Void> finishAsync();
 
-    void cancelWrite(long code) throws IOException;
-
-    default void closeWithError(ErrorCode code, String reason) throws IOException {
-        Objects.requireNonNull(code, "code");
-        closeWithError(code.code(), reason);
-    }
-
-    void closeWithError(long code, String reason) throws IOException;
-
-    void setWriteDeadline(Instant deadline) throws IOException;
-
-    default void setDeadline(Instant deadline) throws IOException {
-        setWriteDeadline(deadline);
-    }
-
-    default void setWriteTimeout(Duration timeout) throws IOException {
-        setWriteDeadline(DeadlineSupport.after(timeout));
-    }
-
-    default void clearWriteDeadline() throws IOException {
-        setWriteDeadline(null);
-    }
-
+    /**
+     * Releases the stream: an unfinished sending part is <b>reset</b> and an unread receiving
+     * part stopped, code 0.
+     *
+     * <p><b>Unlike {@link java.net.Socket#close()}, this does not finish the stream.</b> Data
+     * still unsent is discarded and the peer sees RESET_STREAM, never end of stream. To end a
+     * stream cleanly call {@link #finish()} after the last write, then close.
+     */
     @Override
-    SocketAddress localAddress();
-
-    @Override
-    SocketAddress remoteAddress();
-
-    @Override
-    default void close() throws IOException {
-        closeWrite();
-    }
-
+    void close();
 }
