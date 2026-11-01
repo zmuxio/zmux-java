@@ -31,3 +31,6 @@ target/
 # Editor and IDE files
 .idea/
 .vscode/
+
+# Built interop peer
+interop/qmux-go-peer/qmux-go-peer
