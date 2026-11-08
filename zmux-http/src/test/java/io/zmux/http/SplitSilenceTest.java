@@ -1,7 +1,6 @@
 package io.zmux.http;
 
 import static org.junit.jupiter.api.Assertions.*;
-import io.zmux.MultipathConfig;
 import io.zmux.PipeAuth;
 import io.zmux.PipeOptions;
 import io.zmux.PipePool;
@@ -39,14 +38,23 @@ class SplitSilenceTest {
 
     static boolean[] member(ZmuxSession s) {
         boolean up = false, down = false;
-        for (ZmuxPipe p : s.paths().list()) {
+        for (ZmuxPipe p : s.pipes()) {
             if (p.id() == 0) continue;
             var st = stats(p);
             if (st == null) continue;
             up |= st.outbound() == PipeState.Outbound.ACTIVE;
-            down |= st.outbound() == null && st.inbound() == PipeState.Inbound.OPEN;
+            down |= st.inbound() == PipeState.Inbound.OPEN;
         }
         return new boolean[] {up, down};
+    }
+
+    /** A member whose uplink is active and has an acknowledgement, so an RTT sample; null: none. */
+    static ZmuxPipe sampled(ZmuxSession s) {
+        for (ZmuxPipe p : s.pipes()) {
+            var st = p.id() == 0 ? null : stats(p);
+            if (st != null && st.outbound() == PipeState.Outbound.ACTIVE && st.smoothedRtt() != null) return p;
+        }
+        return null;
     }
 
     static boolean gone(ZmuxPipe p) {
@@ -55,23 +63,23 @@ class SplitSilenceTest {
     }
 
     @Test void aSilencedDownlinkFailsTheUnacknowledgedUplinkAndThePoolRejoins() throws Exception {
-        var mp = MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)
-                .withResumeTimeout(Duration.ofSeconds(30)).withProbeInterval(Duration.ofSeconds(1));
-        try (var f = new Fixture(b -> b.multipath(mp), b -> b, b -> b.streaming(), false, null);
+        java.util.function.UnaryOperator<io.zmux.ZmuxConfig.Builder> mp = b -> b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO)
+                .resumeTimeout(Duration.ofSeconds(30)).probeInterval(Duration.ofSeconds(1));
+        try (var f = new Fixture(mp, b -> b, b -> b.streaming(), false, null);
              var px = new TestProxy(f.base, TestProxy.Profile.PASS); var c = f.client(b -> b)) {
             var s = Zmux.open(c.pipe(px.base, Map.of(), PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, f.config);
             var server = f.listener.accept(Duration.ofSeconds(5));
             var joins = new AtomicInteger();
-            var pool = PipePool.join(a -> { joins.incrementAndGet(); return c.splitJoin(a.session(), px.base, Map.of(), null, a.options()); })
+            var pool = PipePool.join(a -> { joins.incrementAndGet(); return java.util.List.of(c.splitJoin(a.session(), px.base, Map.of(), null, a.options())); })
                     .withOptions(PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build())
                     .withBackoff(new PipePool.Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
-            var run = s.paths().maintain(pool);
-            // The silence reaches the responses streaming now only: the member's uplink must be
-            // active and its downlink open before it.
-            await(5000, "pool member", () -> { var m = member(s); return m[0] && m[1]; });
-            ZmuxPipe p0 = s.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
-            ZmuxPipe up = s.paths().list().stream().filter(p -> p.id() != 0 && stats(p) != null && stats(p).outbound() == PipeState.Outbound.ACTIVE)
-                    .findFirst().orElseThrow();
+            var run = s.maintainPipes(pool);
+            // The silence reaches the responses streaming now only, so the member's downlink must be
+            // open before it. Its uplink must also hold an RTT sample: without one PTO is the initial
+            // estimate and T_fail about 8 s, beyond the bound below.
+            await(5000, "pool member", () -> { var m = member(s); return m[0] && m[1] && sampled(s) != null; });
+            ZmuxPipe p0 = s.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
+            ZmuxPipe up = sampled(s);
             px.silenceResponses();
             long start = System.nanoTime();
             // k = 1 s, T_fail = 2 s at these round-trip times, and a margin.

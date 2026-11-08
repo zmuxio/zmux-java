@@ -18,7 +18,8 @@ public record CoreConfig(
         TransportParams local,
         RandomGenerator random,
         long handshakeTimeout,
-        long keepAlive,
+        long joinTimeout,
+        boolean redial,
         boolean stagedUni,
         long uniTarget,
         long streamWindowCap,
@@ -42,22 +43,58 @@ public record CoreConfig(
         long resume,
         Policy policy,
         int spreadChunk,
-        long suspectFloor,
-        long deadTimeout,
         long probation,
         long overflowDelay,
-        long standbyProbe,
-        long probeInterval,
-        double probeJitter,
         boolean redundancy,
         byte[] psk,
-        byte[] exporter,
+        java.util.function.Supplier<byte[]> exporter,
+        boolean deferredPsk,
+        boolean declaredEndToEnd,
+        boolean secureFirstPipe,
+        io.zmux.internal.join.Mode firstPipeMode,
+        int joinEarlyHello,
+        Live live,
         boolean earlyZmuxPeer,
-        boolean earlyReplayable,
-        TransportParams earlyRemembered,
+        boolean holdFirstFlight,
         io.zmux.shaping.ShapingLimits shapingLimits,
+        io.zmux.shaping.ShapingBudget shapingBudget,
         io.zmux.shaping.ShaperFactory shaper,
+        Epochs epochs,
         TestHooks test) {
+
+    /**
+     * The policy of session epochs: an exchange after period in Stable ({@link Time#NEVER}: never by time) or
+     * after joins joins in one epoch ({@link Long#MAX_VALUE}: never by count), once after the first Sealed or
+     * Bound pipe of a session whose secret is not from an Establish, once after a resumption; and the
+     * instance identifier that begins every new local Locator.
+     */
+    public record Epochs(long period, long joins, boolean afterFirstPipe, boolean afterResume, byte[] locatorPrefix) {
+        /** The default policy: an exchange every hour or every 2^16 joins, after the first secure pipe and after a resumption. */
+        public static final Epochs DEFAULT = new Epochs(3600 * Time.SECOND, 1 << 16, true, true, new byte[0]);
+        /** No exchange but those asked for. */
+        public static final Epochs MANUAL = new Epochs(Time.NEVER, Long.MAX_VALUE, false, false, new byte[0]);
+
+        public Epochs {
+            locatorPrefix = locatorPrefix.clone();
+        }
+
+        /** This policy with another Locator prefix. */
+        public Epochs withLocatorPrefix(byte[] prefix) { return new Epochs(period, joins, afterFirstPipe, afterResume, prefix); }
+    }
+
+    /** The longest join deadline: no join timeout is longer. */
+    public static final long MAX_JOIN_DEADLINE = 60 * Time.SECOND;
+    /** How long an endpoint keeps accepting the previous epoch after it starts using the new one: three maximum join deadlines. */
+    public static final long EPOCH_RETENTION = 3 * MAX_JOIN_DEADLINE;
+
+    /** The default join timeout. */
+    public static final long DEFAULT_JOIN_TIMEOUT = 10 * Time.SECOND;
+
+    /**
+     * The deadline of a join, of a lane's confirmation and of a held or stalled join carrier: the
+     * join timeout, which is independent of the handshake timeout.
+     */
+    public long joinDeadline() { return joinTimeout; }
 
     /** The role argument of session creation. */
     public enum Role { INITIATOR, RESPONDER, AUTO }
@@ -70,15 +107,50 @@ public record CoreConfig(
     public static final long DEFAULT_STANDBY_PROBE = Time.SECOND;
     public static final long DEFAULT_PROBE_INTERVAL = 15 * Time.SECOND;
     public static final long DEFAULT_LATENCY_BUDGET = 100 * Time.MICROSECOND;
+    /**
+     * The liveness settings in effect, one set per built configuration: owned by the session's
+     * loop and replaced while it runs ({@link Session#setLiveness}).
+     */
+    public static final class Live {
+        private long keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval;
+        private double probeJitter;
+
+        /** Takes the values of l. */
+        void set(Live l) {
+            keepAlive = l.keepAlive; suspectFloor = l.suspectFloor; deadTimeout = l.deadTimeout;
+            standbyProbe = l.standbyProbe; probeInterval = l.probeInterval; probeJitter = l.probeJitter;
+        }
+
+        public Live(long keepAlive, long suspectFloor, long deadTimeout, long standbyProbe, long probeInterval, double probeJitter) {
+            this.keepAlive = keepAlive; this.suspectFloor = suspectFloor; this.deadTimeout = deadTimeout;
+            this.standbyProbe = standbyProbe; this.probeInterval = probeInterval; this.probeJitter = probeJitter;
+        }
+
+        public long keepAlive() { return keepAlive; }
+        public long suspectFloor() { return suspectFloor; }
+        public long deadTimeout() { return deadTimeout; }
+        public long standbyProbe() { return standbyProbe; }
+        public long probeInterval() { return probeInterval; }
+        public double probeJitter() { return probeJitter; }
+    }
+
+    public long keepAlive() { return live.keepAlive(); }
+    public long suspectFloor() { return live.suspectFloor(); }
+    public long deadTimeout() { return live.deadTimeout(); }
+    public long standbyProbe() { return live.standbyProbe(); }
+    public long probeInterval() { return live.probeInterval(); }
+    public double probeJitter() { return live.probeJitter(); }
+
     /** {@link #keepAlive()} turned off; 0 is a period of zero. */
     public static final long OFF = -1;
     /** An unlimited {@link #memoryBudget()}; 0 is a budget of no byte. */
     public static final long UNLIMITED = Long.MAX_VALUE;
 
     /** The trace runner's deterministic values. */
+    /** epochLocatorPrefix: when set, the local Locator of epoch e is this prefix and e in decimal ASCII. */
     public record TestHooks(boolean enabled, Preamble.Tlv greaseTlv, long pingSeqStart, long rtt,
-                            Map<Long, Long> pipeRtt, int pipeCap) {
-        public static final TestHooks NONE = new TestHooks(false, null, 0, 0, Map.of(), 0);
+                            Map<Long, Long> pipeRtt, int pipeCap, byte[] epochLocatorPrefix) {
+        public static final TestHooks NONE = new TestHooks(false, null, 0, 0, Map.of(), 0, null);
 
         public TestHooks {
             pipeRtt = Map.copyOf(pipeRtt);
@@ -103,7 +175,14 @@ public record CoreConfig(
         b.local = local;
         b.random = random;
         b.handshakeTimeout = handshakeTimeout;
-        b.keepAlive = keepAlive;
+        b.joinTimeout = joinTimeout;
+        b.epochs = epochs;
+        b.redial = redial;
+        b.declaredEndToEnd = declaredEndToEnd;
+        b.secureFirstPipe = secureFirstPipe;
+        b.firstPipeMode = firstPipeMode;
+        b.joinEarlyHello = joinEarlyHello;
+        b.keepAlive = live.keepAlive();
         b.stagedUni = stagedUni;
         b.uniTarget = uniTarget;
         b.streamWindowCap = streamWindowCap;
@@ -127,26 +206,27 @@ public record CoreConfig(
         b.resume = resume;
         b.policy = policy;
         b.spreadChunk = spreadChunk;
-        b.suspectFloor = suspectFloor;
-        b.deadTimeout = deadTimeout;
+        b.suspectFloor = live.suspectFloor();
+        b.deadTimeout = live.deadTimeout();
         b.probation = probation;
         b.overflowDelay = overflowDelay;
-        b.standbyProbe = standbyProbe;
-        b.probeInterval = probeInterval;
-        b.probeJitter = probeJitter;
+        b.standbyProbe = live.standbyProbe();
+        b.probeInterval = live.probeInterval();
+        b.probeJitter = live.probeJitter();
         b.redundancy = redundancy;
         b.psk = psk;
         b.exporter = exporter;
+        b.deferredPsk = deferredPsk;
         b.earlyZmuxPeer = earlyZmuxPeer;
-        b.earlyReplayable = earlyReplayable;
-        b.earlyRemembered = earlyRemembered;
+        b.holdFirstFlight = holdFirstFlight;
         b.shapingLimits = shapingLimits;
+        b.shapingBudget = shapingBudget;
         b.shaper = shaper;
         b.test = test;
         return b;
     }
 
-    /** The parameters a zmux endpoint sends by default (SPEC.md Sections 5.3 and 5.5). */
+    /** The parameters a zmux endpoint sends by default. */
     static TransportParams endpointParams() {
         TransportParams p = new TransportParams();
         p.present = TransportParams.IDLE | TransportParams.MAX_DATA | TransportParams.BIDI_LOCAL
@@ -174,6 +254,8 @@ public record CoreConfig(
         private TransportParams local = endpointParams();
         private RandomGenerator random = new SecureRandom();
         private long handshakeTimeout = 10 * Time.SECOND;
+        private long joinTimeout = DEFAULT_JOIN_TIMEOUT;
+        private boolean redial;
         private long keepAlive = OFF;
         private boolean stagedUni = true;
         private long uniTarget = 256;
@@ -204,26 +286,37 @@ public record CoreConfig(
         private long overflowDelay = DEFAULT_OVERFLOW_DELAY;
         private long standbyProbe = DEFAULT_STANDBY_PROBE;
         private long probeInterval = DEFAULT_PROBE_INTERVAL;
-        private double probeJitter = io.zmux.MultipathConfig.DEFAULT_PROBE_JITTER;
+        private double probeJitter = io.zmux.ZmuxConfig.DEFAULT_PROBE_JITTER;
         private boolean redundancy = true;
         private byte[] psk;
-        private byte[] exporter;
+        private java.util.function.Supplier<byte[]> exporter;
+        private boolean deferredPsk;
         private boolean earlyZmuxPeer;
-        private boolean earlyReplayable;
-        private TransportParams earlyRemembered;
+        private boolean holdFirstFlight;
+        private boolean declaredEndToEnd;
+        private boolean secureFirstPipe;
+        private io.zmux.internal.join.Mode firstPipeMode;
+        private int joinEarlyHello;
         private TestHooks test = TestHooks.NONE;
-        private io.zmux.shaping.ShapingLimits shapingLimits = io.zmux.shaping.ShapingLimits.none();
+        private Epochs epochs = Epochs.DEFAULT;
+        private io.zmux.shaping.ShapingLimits shapingLimits = io.zmux.shaping.ShapingLimits.defaults();
+        private io.zmux.shaping.ShapingBudget shapingBudget = io.zmux.shaping.ShapingBudget.NONE;
         private io.zmux.shaping.ShaperFactory shaper;
 
         private Builder() { }
 
         public CoreConfig build() {
-            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, keepAlive, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, suspectFloor, deadTimeout, probation, overflowDelay, standbyProbe, probeInterval, probeJitter, redundancy, psk, exporter, earlyZmuxPeer, earlyReplayable, earlyRemembered, shapingLimits, shaper, test);
+            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
         }
 
         public Builder role(Role v) { role = v; return this; }
 
+        public Builder epochs(Epochs v) { epochs = java.util.Objects.requireNonNull(v); return this; }
+
         public Builder shapingLimits(io.zmux.shaping.ShapingLimits v) { shapingLimits = java.util.Objects.requireNonNull(v); return this; }
+
+        /** The configuration's budget for this session. */
+        public Builder shapingBudget(io.zmux.shaping.ShapingBudget v) { shapingBudget = java.util.Objects.requireNonNull(v); return this; }
 
         /** The shaper factory installed at session creation; null: none. */
         public Builder shaper(io.zmux.shaping.ShaperFactory v) { shaper = v; return this; }
@@ -231,17 +324,20 @@ public record CoreConfig(
         /** The carrier role (who dialled the bootstrap carrier) when role negotiation is not in use. */
         public Builder transportRole(Role v) { transportRole = v; return this; }
 
-        /** Exactly what the endpoint sends (GREASE included); the builder starts from the zmux endpoint defaults (SPEC.md Sections 5.3 and 5.5). */
+        /** Exactly what the endpoint sends (GREASE included); the builder starts from the zmux endpoint defaults. */
         public Builder local(TransportParams v) { local = v; return this; }
 
         /** The session's random source (GREASE choices); tests inject a seeded one. */
         public Builder random(RandomGenerator v) { random = v; return this; }
 
         public Builder handshakeTimeout(long v) { handshakeTimeout = v; return this; }
+        public Builder joinTimeout(long v) { joinTimeout = v; return this; }
+        /** A redial hook dials for the session when it suspends. */
+        public Builder redial(boolean v) { redial = v; return this; }
 
         public Builder keepAlive(long v) { keepAlive = v; return this; }
 
-        /** initial_max_streams_uni is staged and raised to uniTarget on the first accept (SPEC.md 8.5 rule 4). */
+        /** initial_max_streams_uni is staged and raised to uniTarget on the first accept. */
         public Builder stagedUni(boolean v) { stagedUni = v; return this; }
 
         public Builder uniTarget(long v) { uniTarget = v; return this; }
@@ -318,17 +414,22 @@ public record CoreConfig(
 
         public Builder psk(byte[] v) { psk = v; return this; }
 
-        /** Exporter of pipe 0's innermost end-to-end handshake (E flag asserted by the application). */
-        public Builder exporter(byte[] v) { exporter = v; return this; }
+        /** Exporter of pipe 0's innermost end-to-end handshake (E flag asserted by the application), read once when the peer's parameters arrive; null from it: not available. */
+        public Builder exporter(java.util.function.Supplier<byte[]> v) { exporter = v; return this; }
+
+        /** The PSK is supplied after establishment. */
+        public Builder deferredPsk(boolean v) { deferredPsk = v; return this; }
+        public Builder declaredEndToEnd(boolean v) { declaredEndToEnd = v; return this; }
+        // Internal packages are exported only to this project's modules (qualified export), so these signatures name types that stay unexported.
+        //noinspection ClassEscapesItsScope
+        public Builder secureFirstPipe(io.zmux.internal.join.Mode m) { secureFirstPipe = m != null; firstPipeMode = m; return this; }
+        public Builder joinEarlyHello(int v) { joinEarlyHello = v; return this; }
 
         public Builder earlyZmuxPeer(boolean v) { earlyZmuxPeer = v; return this; }
 
-        public Builder earlyReplayable(boolean v) { earlyReplayable = v; return this; }
+        public Builder holdFirstFlight(boolean v) { holdFirstFlight = v; return this; }
 
-        /** Peer parameters remembered from an earlier session for carrier early data; null when none. */
-        public Builder earlyRemembered(TransportParams v) { earlyRemembered = v; return this; }
-
-        /** Test hooks (TRACES.md Section 3.3); never set from production configuration. */
+        /** Test hooks; never set from production configuration. */
         public Builder test(TestHooks v) { test = v; return this; }
 
         /** The parameter set being built, for in-place adjustment. */

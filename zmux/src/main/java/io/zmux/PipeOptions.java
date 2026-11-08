@@ -26,7 +26,10 @@ public final class PipeOptions {
     final Duration probeInterval;
     final boolean idleProbesOff;
     final double probeJitter;
-    final boolean carrierBound;
+    final RecordMode mode;
+    /** The Group a join exchanges keys in; 0: Group 1 when usable, otherwise Group 2. */
+    final long group;
+    final boolean noWaitAttached;
 
     private PipeOptions(Builder b) {
         direction = b.direction;
@@ -42,7 +45,9 @@ public final class PipeOptions {
         probeInterval = b.probeInterval;
         idleProbesOff = b.idleProbesOff;
         probeJitter = b.probeJitter;
-        carrierBound = b.carrierBound;
+        mode = b.mode;
+        group = b.group;
+        noWaitAttached = b.noWaitAttached;
     }
 
     public static PipeOptions defaults() {
@@ -71,7 +76,9 @@ public final class PipeOptions {
         b.direction = direction; b.sendPriority = sendPriority; b.sendStandby = sendStandby; b.receivePriority = receivePriority;
         b.receiveStandby = receiveStandby; b.weight = weight; b.probation = probation; b.fateGroup = fateGroup;
         b.suspectFloor = suspectFloor; b.deadTimeout = deadTimeout; b.probeInterval = probeInterval; b.idleProbesOff = idleProbesOff; b.probeJitter = probeJitter;
-        b.carrierBound = carrierBound;
+        b.mode = mode;
+        b.group = group;
+        b.noWaitAttached = noWaitAttached;
         return b;
     }
 
@@ -93,7 +100,8 @@ public final class PipeOptions {
                 .deadTimeout(deadTimeout == null ? 0 : ZmuxConfig.nanos(deadTimeout))
                 .probeInterval(idleProbesOff ? 0 : probeInterval == null ? -1 : ZmuxConfig.nanos(probeInterval))
                 .probeJitter(probeJitter)
-                .carrierBound(carrierBound)
+                .mode(mode == null ? null : io.zmux.internal.join.Mode.of(mode))
+                .group(group)
                 .build();
     }
 
@@ -112,7 +120,9 @@ public final class PipeOptions {
         private Duration probeInterval;
         private boolean idleProbesOff;
         private double probeJitter = Double.NaN;
-        private boolean carrierBound;
+        private RecordMode mode;
+        private long group;
+        private boolean noWaitAttached;
 
         private Builder() {}
 
@@ -161,13 +171,13 @@ public final class PipeOptions {
 
         /** The pipe's suspicion floor, at least 50 ms; unset: the session's. */
         public Builder suspectFloor(Duration d) {
-            suspectFloor = MultipathConfig.atLeast(d, Duration.ofMillis(50), "suspectFloor");
+            suspectFloor = ZmuxConfig.atLeast(d, Duration.ofMillis(50), "suspectFloor");
             return this;
         }
 
         /** The pipe's dead timeout, at least 1 s; unset: the session's. */
         public Builder deadTimeout(Duration d) {
-            deadTimeout = MultipathConfig.atLeast(d, Duration.ofSeconds(1), "deadTimeout");
+            deadTimeout = ZmuxConfig.atLeast(d, Duration.ofSeconds(1), "deadTimeout");
             return this;
         }
 
@@ -176,7 +186,7 @@ public final class PipeOptions {
          * Without an outbound direction at the peer at most 15 s takes effect.
          */
         public Builder probeInterval(Duration d) {
-            MultipathConfig.probeInterval(d, "probeInterval");
+            ZmuxConfig.probeIntervalOf(d, "probeInterval");
             ZmuxConfig.nanos(d);
             probeInterval = d;
             idleProbesOff = false;
@@ -195,12 +205,36 @@ public final class PipeOptions {
 
         /** The probe jitter j of the pipe, {@code 0 <= j < 1}: each probe waits a uniform draw from [k(1 - j), k]; unset: the session's. */
         public Builder probeJitter(double j) {
-            probeJitter = MultipathConfig.jitter(j, "probeJitter");
+            probeJitter = ZmuxConfig.jitter(j, "probeJitter");
             return this;
         }
 
-        /** Ties the join to the new carrier's TLS 1.3 handshake (MULTIPATH.md 10.5); the carrier must be TLS. */
-        public Builder carrierBound(boolean on) { carrierBound = on; return this; }
+        /**
+         * The Group the join exchanges keys in; 0, the default:
+         * Group 1 when it is usable in the session, otherwise Group 2. A Group the session cannot use
+         * falls back to that default.
+         */
+        public Builder group(long g) {
+            if (g < 0) throw new IllegalArgumentException("group " + g);
+            group = g;
+            return this;
+        }
+
+        /** The carrier's record mode; null (the default): the configuration's {@link ZmuxConfig.Builder#recordPolicy}, else Sealed. */
+        public Builder mode(RecordMode m) {
+            if (m == RecordMode.UNMANAGED) throw new IllegalArgumentException("a join has no Unmanaged mode");
+            mode = m;
+            return this;
+        }
+
+        /**
+         * Whether adding the pipe returns once the Reply verified instead of once the peer attached
+         * it ({@link ZmuxPipe#awaitPeerAttached}); default false. Fixed when the pipe is added.
+         * Before the peer attached it, closing the session's last other pipes loses the session
+         * unless it resumes: an application that replaces pipes itself waits for the attachment
+         * first. Pools and their redials always join this way and judge the attachment themselves.
+         */
+        public Builder noWaitAttached(boolean on) { noWaitAttached = on; return this; }
 
         public PipeOptions build() {
             return new PipeOptions(this);

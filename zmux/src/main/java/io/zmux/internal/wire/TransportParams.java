@@ -8,8 +8,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A transport parameter set (SPEC.md Section 5, MULTIPATH.md Section 3, RESUME.md
- * Section 3, EXTENSIONS.md Sections 2 and 4.1). Presence is a bit per known
+ * A transport parameter set. Presence is a bit per known
  * parameter in {@link #present}.
  */
 public final class TransportParams {
@@ -30,22 +29,22 @@ public final class TransportParams {
     public static final long ID_DATAGRAM_FLOWS = 0x0af391edL;
     public static final long ID_MULTIPATH = 0x30dc2978L;
     public static final long ID_ACK_THRESHOLD = 0x2762c7e5L;
+    public static final long ID_SESSION_CRYPTO = 0x026f24b5L;
     public static final long ID_PIPE_ACK = 0x34b47621L;
     public static final long ID_MAX_ACK_DELAY = 0x17fa1ed6L;
     public static final long ID_MAX_LANES = 0x27856ef0L;
     public static final long ID_RESUME = 0x0d5778ceL;
-    /** The qmux crate's application_protocols hook (SPEC.md Section 13.3). */
+    /** The qmux crate's application_protocols hook. */
     public static final long ID_APP_PROTOCOLS = 0x3d4f9c2a8b1e6075L;
-    /** zmux_carrier_datagrams (EXTENSIONS.md Section 6.8). */
+    /** zmux_carrier_datagrams. */
     public static final long ID_CARRIER_DATAGRAMS = 0x3d274c5fL;
 
     /** The record size limit when max_record_size is absent. */
     public static final int DEFAULT_MAX_RECORD_SIZE = io.zmux.shaping.RecordPlan.MAX_RECORD_LENGTH;
 
-    /** Secret flags of zmux_multipath (MULTIPATH.md Section 3.1). */
+    /** Secret flags of zmux_multipath. */
     public static final int SECRET_EXPORTER = 0x01;
     public static final int SECRET_PSK = 0x04;
-    public static final int SECRET_INSECURE = 0x08;
 
     public static final int ROLE_INITIATOR = 0;
     public static final int ROLE_RESPONDER = 1;
@@ -56,9 +55,9 @@ public final class TransportParams {
             STREAMS_BIDI = 1 << 5, STREAMS_UNI = 1 << 6, RESET_AT = 1 << 7, DATAGRAM = 1 << 8, RECORD_SIZE = 1 << 9,
             ROLE = 1 << 10, GOAWAY = 1 << 11, PREAMBLE = 1 << 12, PRIORITY = 1 << 13, FLOWS = 1 << 14,
             MULTIPATH = 1 << 15, ACK_THRESHOLD = 1 << 16, PIPE_ACK = 1 << 17, ACK_DELAY = 1 << 18, LANES = 1 << 19,
-            RESUME = 1 << 20, APP_PROTOCOLS = 1 << 21, CARRIER_DATAGRAMS = 1 << 22;
+            RESUME = 1 << 20, APP_PROTOCOLS = 1 << 21, CARRIER_DATAGRAMS = 1 << 22, SESSION_CRYPTO = 1 << 23;
 
-    /** The zmux parameters whose presence identifies a zmux peer (SPEC.md Section 13.1). */
+    /** The zmux parameters whose presence identifies a zmux peer. */
     public static final int ANY_ZMUX = ROLE | GOAWAY | PREAMBLE | PRIORITY | FLOWS | MULTIPATH | ACK_THRESHOLD
             | PIPE_ACK | ACK_DELAY | LANES | RESUME | CARRIER_DATAGRAMS;
 
@@ -66,7 +65,7 @@ public final class TransportParams {
             ID_MAX_STREAM_DATA_BIDI_REMOTE, ID_MAX_STREAM_DATA_UNI, ID_MAX_STREAMS_BIDI, ID_MAX_STREAMS_UNI,
             ID_RESET_STREAM_AT, ID_MAX_DATAGRAM_FRAME_SIZE, ID_MAX_RECORD_SIZE, ID_ROLE, ID_GOAWAY, ID_PREAMBLE,
             ID_PRIORITY, ID_DATAGRAM_FLOWS, ID_MULTIPATH, ID_ACK_THRESHOLD, ID_PIPE_ACK, ID_MAX_ACK_DELAY,
-            ID_MAX_LANES, ID_RESUME, ID_APP_PROTOCOLS, ID_CARRIER_DATAGRAMS};
+            ID_MAX_LANES, ID_RESUME, ID_APP_PROTOCOLS, ID_CARRIER_DATAGRAMS, ID_SESSION_CRYPTO};
 
     private static final long MAX_60 = 1L << 60;
 
@@ -86,6 +85,10 @@ public final class TransportParams {
     public long roleNonce;
     public long maxPreambleSize;
     public byte[] locator = new byte[0];
+    /** The Join Suites and Groups offered ({@code zmux_session_crypto}); null when absent. */
+    // Internal packages are exported only to this project's modules (qualified export), so these signatures name types that stay unexported.
+    //noinspection ClassEscapesItsScope
+    public io.zmux.internal.join.SessionCrypto sessionCrypto;
     public long ackThreshold;
     public long maxAckDelayMillis;
     public long maxLanes;
@@ -205,9 +208,17 @@ public final class TransportParams {
             secretFlags = b.get(vp) & 0xff;
             b.get(vp + 1, sessionNonce);
             int ll = b.get(vp + 17) & 0xff;
-            if (ll > 16 || vl != 18 + ll) throw WireException.param("zmux_multipath locator");
+            if (vl != 18 + ll) throw WireException.param("zmux_multipath locator");
             locator = new byte[ll];
             b.get(vp + 18, locator);
+        } else if (id == ID_SESSION_CRYPTO) {
+            byte[] v = new byte[vl];
+            b.get(vp, v);
+            try {
+                sessionCrypto = io.zmux.internal.join.SessionCrypto.decode(v);
+            } catch (io.zmux.carrier.SecureCarrierException e) {
+                throw WireException.param("zmux_session_crypto: " + e.getMessage());
+            }
         } else if (id == ID_ACK_THRESHOLD) {
             ackThreshold = varintValue(b, vp, vl);
             if (ackThreshold < 1024) throw WireException.param("zmux_ack_threshold below 1024");
@@ -244,6 +255,7 @@ public final class TransportParams {
         if ((present & (ACK_THRESHOLD | ACK_DELAY | LANES)) != 0 && !ackish) {
             throw WireException.param("companion parameter without zmux_multipath or zmux_pipe_ack");
         }
+        if (has(SESSION_CRYPTO) != has(MULTIPATH)) throw WireException.param("zmux_session_crypto and zmux_multipath go together");
         if (has(RESUME) && !has(MULTIPATH)) throw WireException.param("zmux_resume without zmux_multipath");
         if (has(PREAMBLE)) {
             if (!has(RESET_AT)) throw WireException.param("zmux_preamble without reset_stream_at");
@@ -256,6 +268,7 @@ public final class TransportParams {
 
     /** The encoded parameter block. */
     public byte[] toBytes() {
+        if (has(MULTIPATH) && locator.length > 255) throw new IllegalArgumentException("zmux_multipath locator over 255 bytes");
         int bound = 512 + greaseValue.length + locator.length;
         for (byte[] a : appProtocols) bound += 1 + a.length;
         ByteBuffer b = ByteBuffer.allocate(bound);
@@ -308,6 +321,7 @@ public final class TransportParams {
             System.arraycopy(locator, 0, v, 18, locator.length);
             param(b, ID_MULTIPATH, v);
         }
+        if (has(SESSION_CRYPTO)) param(b, ID_SESSION_CRYPTO, sessionCrypto.encode());
         if (has(ACK_THRESHOLD)) varintParam(b, ID_ACK_THRESHOLD, ackThreshold);
         if (has(PIPE_ACK)) param(b, ID_PIPE_ACK, EMPTY);
         if (has(ACK_DELAY)) varintParam(b, ID_MAX_ACK_DELAY, maxAckDelayMillis);

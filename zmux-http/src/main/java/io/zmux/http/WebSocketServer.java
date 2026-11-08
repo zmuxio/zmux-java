@@ -27,7 +27,7 @@ import java.util.List;
  * prefix token in its {@code Zmux-Prefix-Auth} field), and only an accepted one is answered with
  * 101; any other request, and one the admission gives back, goes to the host's handler. The
  * subprotocol is chosen in the server's order of preference, each identifier also accepted as
- * its draft-01 alias (SPEC.md Section 6.2), and is the carrier's application protocol.
+ * its draft-01 alias, and is the carrier's application protocol.
  */
 final class WebSocketServer {
     private final HttpEndpoint ep;

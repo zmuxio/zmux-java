@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * A retained frame of a multipath session (MULTIPATH.md Section 7.4): what to do when the
+ * A retained frame of a multipath session: what to do when the
  * record carrying it is acknowledged or lost.
  *
  * @param id stream ID, or pipe ID for PIPE_STATUS and PIPE_ABANDON

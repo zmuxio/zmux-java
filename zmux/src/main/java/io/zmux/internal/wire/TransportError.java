@@ -2,7 +2,7 @@ package io.zmux.internal.wire;
 
 import java.util.Map;
 
-/** Transport error codes (SPEC.md Section 10.2) and ZMUX_REJECTED. */
+/** Transport error codes and ZMUX_REJECTED. */
 public final class TransportError {
     public static final long NO_ERROR = 0x00;
     public static final long INTERNAL_ERROR = 0x01;
@@ -23,7 +23,7 @@ public final class TransportError {
     public static final long PIPE_RESOURCE_LIMIT = 0x0b4fa113L;
     public static final long PIPE_AUTH_FAILED = 0x09613938L;
     public static final long IDLE_TIMEOUT = 0x2736d55cL;
-    /** ZMUX_REJECTED, an application code (EXTENSIONS.md Section 7). */
+    /** ZMUX_REJECTED, an application code. */
     public static final long REJECTED = 0x5a4d0002L;
 
     private static final Map<Long, String> NAMES = Map.ofEntries(

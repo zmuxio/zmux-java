@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-/** The wire corpus of the dev spec (CONFORMANCE.md Section 4.1). */
+/** The wire corpus of the dev spec. */
 class CorpusTest {
 
     static Gates gates(Map<String, Object> e) {
@@ -130,7 +130,7 @@ class CorpusTest {
         assertTrue(n > 80);
     }
 
-    /** CONFORMANCE.md Section 4.1: re-encoding is no longer, decodes to the same frame and is stable. */
+    /** Re-encoding is no longer, decodes to the same frame and is stable. */
     static void checkRoundTrip(String id, byte[] in, boolean exact) {
         ByteBuffer b = ByteBuffer.wrap(in);
         Frame f1 = new Frame();

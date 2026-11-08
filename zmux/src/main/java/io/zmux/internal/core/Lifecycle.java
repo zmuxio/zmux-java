@@ -5,13 +5,11 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.carrier.VarInt;
 
 /**
- * The ending of one session: the handshake deadline, the two-phase GOAWAY (EXTENSIONS.md
- * Section 3), the pending CONNECTION_CLOSE with its lane wait, and the linger timer (SPEC.md
- * Section 6.5). The session's state machine and what closing does to streams and pipes stay
+ * The ending of one session: the handshake deadline, the two-phase GOAWAY, the pending CONNECTION_CLOSE with its lane wait, and the linger timer. The session's state machine and what closing does to streams and pipes stay
  * with the session; this component owns the facts and deadlines they are decided from.
  */
 final class Lifecycle {
-    /** A CONNECTION_CLOSE to send (SPEC.md Section 4.6). */
+    /** A CONNECTION_CLOSE to send. */
     record CloseFrame(boolean app, long code, long frameType, byte[] reason) {
         static CloseFrame of(boolean app, long code, long frameType, byte[] reason) {
             return new CloseFrame(app, code, frameType, reason == null ? new byte[0] : reason);
@@ -22,6 +20,11 @@ final class Lifecycle {
     private long handshake;
     private long linger = Time.NEVER;
     private long laneWait = Time.NEVER;
+    /** The bound of a close's hand-off of CONNECTION_CLOSE to the carriers. */
+    private long handOff = Time.NEVER;
+    /** Pipe 0 writes nothing until the release or firstFlight (a CONNECTION_CLOSE does not wait). */
+    private boolean firstHeld;
+    private long firstFlight = Time.NEVER;
 
     // CONNECTION_CLOSE
     private CloseFrame close;
@@ -52,6 +55,36 @@ final class Lifecycle {
         handshake = Time.NEVER;
     }
 
+    /** Holds the first flight until the deadline, which the handshake deadline then runs after. */
+    void holdFirstFlight() {
+        firstHeld = true;
+        firstFlight = handshake;
+        handshake = Time.NEVER;
+    }
+
+    boolean firstHeld() {
+        return firstHeld;
+    }
+
+    /** Whether pipe's output waits for the release. */
+    boolean holdsFirst(long pipe) {
+        return firstHeld && pipe == 0 && !closePending;
+    }
+
+    /** Ends the hold; handshakeDeadline applies when the handshake is still to complete (else NEVER). False when not held. */
+    boolean releaseFirstFlight(long handshakeDeadline) {
+        if (!firstHeld) return false;
+        firstHeld = false;
+        firstFlight = Time.NEVER;
+        handshake = handshakeDeadline;
+        return true;
+    }
+
+    /** Whether the hold's deadline passed at t. */
+    boolean firstFlightDue(long t) {
+        return firstHeld && t >= firstFlight;
+    }
+
     /** True once when the handshake deadline passed at t. */
     boolean handshakeDue(long t) {
         if (t < handshake) return false;
@@ -73,24 +106,36 @@ final class Lifecycle {
         return true;
     }
 
+    /** Bounds the hand-off at until; a later bound never extends an earlier one. */
+    void handOffBy(long until) {
+        if (until < handOff) handOff = until;
+    }
+
+    /** True once when the hand-off bound passed at t. */
+    boolean handOffDue(long t) {
+        if (t < handOff) return false;
+        handOff = Time.NEVER;
+        return true;
+    }
+
     void linger(long until) {
         linger = until;
     }
 
     long deadline() {
-        long t = Math.min(handshake, linger);
+        long t = Math.min(Math.min(Math.min(handshake, linger), firstFlight), handOff);
         if (waitLanes) t = Math.min(t, laneWait);
         return t;
     }
 
     /** CLOSED: no deadline remains. */
     void clearTimers() {
-        handshake = linger = laneWait = Time.NEVER;
+        handshake = linger = laneWait = firstFlight = handOff = Time.NEVER;
     }
 
     // ---- CONNECTION_CLOSE ----
 
-    /** Queues fr; laneWaitUntil, unless NEVER, holds it until the lanes drained (MULTIPATH.md 2.5). */
+    /** Queues fr; laneWaitUntil, unless NEVER, holds it until the lanes drained. */
     void closeQueued(CloseFrame fr, long laneWaitUntil) {
         close = fr;
         closePending = true;
@@ -99,6 +144,11 @@ final class Lifecycle {
             waitLanes = true;
             laneWait = laneWaitUntil;
         }
+    }
+
+    /** Whether a CONNECTION_CLOSE was queued, pending or already sent. */
+    boolean closeQueued() {
+        return close != null;
     }
 
     boolean closePending() {
@@ -199,7 +249,7 @@ final class Lifecycle {
     }
 
     /**
-     * The fence ping returned: phase 2 (EXTENSIONS.md Section 3.3). False when not in phase 1;
+     * The fence ping returned: phase 2. False when not in phase 1;
      * otherwise lowered reports whether the watermarks dropped to what was offered.
      */
     boolean finalGoAway(boolean[] lowered) {

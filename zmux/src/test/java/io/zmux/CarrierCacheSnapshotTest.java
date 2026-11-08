@@ -88,8 +88,8 @@ class CarrierCacheSnapshotTest {
 
     @Test void restoreConvertsMonotonicTimesAndKeepsTheNewer() {
         var c = new CarrierCache();
-        c.record("k", CarrierKind.SPLIT, false, System.nanoTime());
-        c.record("k", CarrierKind.WEBSOCKET, true, System.nanoTime());
+        c.record("k", CarrierKind.SPLIT, "", false, System.nanoTime());
+        c.record("k", CarrierKind.WEBSOCKET, "", true, System.nanoTime());
         var snap = c.snapshot();
         assertEquals(2, snap.entries().size());
         var split = snap.entries().getFirst();

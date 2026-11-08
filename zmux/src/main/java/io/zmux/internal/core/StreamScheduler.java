@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * Stream scheduling (IMPLEMENTATION.md Section 5): strict priority by urgency,
+ * Stream scheduling: strict priority by urgency,
  * deficit round robin with a 16 KiB quantum within a level. Each level is a ring of
  * the streams' {@link Node}s, whose fields only the scheduler writes.
  */

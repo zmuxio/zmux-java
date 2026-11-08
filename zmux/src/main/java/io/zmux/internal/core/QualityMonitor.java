@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * Quality events (API.md Section 4.5): a pipe's smoothed RTT or delivery rate leaving a band
+ * Quality events: a pipe's smoothed RTT or delivery rate leaving a band
  * around the last reported values, and the outbound capacity crossing a floor. Allocated only
  * when the application sets a band or a floor; evaluated where the estimates change.
  */
@@ -124,7 +124,7 @@ final class QualityMonitor {
         }
     }
 
-    /** A pipe's quality band state (API.md Section 4.5). */
+    /** A pipe's quality band state. */
     static final class PipeQ {
         private Band band;
         private long rtt;

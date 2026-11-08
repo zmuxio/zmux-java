@@ -11,7 +11,7 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** How much carrier input the transports copy (IMPLEMENTATION.md Section 2.8 and design §8.5). */
+/** How much carrier input the transports copy. */
 @Timeout(60)
 class CarrierCopyTest {
     /**
@@ -166,8 +166,8 @@ class CarrierCopyTest {
                 try { return Zmux.open(pair[1], Role.SERVER, config); } catch (Exception e) { throw new CompletionException(e); }
             });
             try (var c = Zmux.open(client, Role.CLIENT, config); var s = server.get(10, TimeUnit.SECONDS)) {
-                assertEquals(java.util.OptionalLong.of(4096), c.paths().list().getFirst().stats().orElseThrow().queuedBytes());
-                assertTrue(s.paths().list().getFirst().stats().orElseThrow().queuedBytes().isEmpty(), "a writer without the query reports none");
+                assertEquals(java.util.OptionalLong.of(4096), c.pipes().getFirst().stats().orElseThrow().queuedBytes());
+                assertTrue(s.pipes().getFirst().stats().orElseThrow().queuedBytes().isEmpty(), "a writer without the query reports none");
             }
         }
     }

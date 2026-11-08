@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import io.zmux.internal.wire.TransportParams;
 
 /**
- * Suspension and resumption of a multipath session and the reinjection hold of new attachments (RESUME.md 4, 6).
+ * Suspension and resumption of a multipath session and the reinjection hold of new attachments.
  */
 final class Resume {
     /** What Resume asks of the rest of the path layer and the session. */
@@ -14,7 +14,7 @@ final class Resume {
         /** The session clock. */
         long now();
 
-        /** The session leaves SUSPENDED (RESUME.md 4.4). */
+        /** The session leaves SUSPENDED. */
         void resumed();
 
         /** The session state. */
@@ -22,6 +22,9 @@ final class Resume {
 
         /** The session enters SUSPENDED with the grace deadline. */
         void suspended(long graceDeadline);
+
+        /** Whether something will dial for the session: a redial hook or a running pool. */
+        boolean attended();
     }
 
     private final Port port;
@@ -37,12 +40,14 @@ final class Resume {
         this.pipes = pipes;
     }
 
-    /** Enters SUSPENDED after the last pipe was lost (RESUME.md 4). */
+    /** Enters SUSPENDED after the last pipe was lost. */
     void suspend(Throwable cause) {
         if (port.state() == SessionState.SUSPENDED) return;
         suspendCause = cause;
         port.suspended(Time.add(port.now(), graceDuration()));
         port.emit(Event.simple(Event.Kind.SUSPENDED));
+        // A session that can rejoin, with nothing to dial for it, ends at the grace period unless the application adds a pipe.
+        if (peer.locator.length > 0 && !port.attended()) port.emit(Event.simple(Event.Kind.RESUME_UNATTENDED));
     }
 
     long graceDuration() {
@@ -54,7 +59,7 @@ final class Resume {
         return g;
     }
 
-    /** Leaves SUSPENDED once an ACTIVE outbound and an OPEN inbound pipe exist (RESUME.md 4.4). */
+    /** Leaves SUSPENDED once an ACTIVE outbound and an OPEN inbound pipe exist. */
     void checkResumed() {
         if (port.state() != SessionState.SUSPENDED) return;
         boolean act = false, open = false;
@@ -104,7 +109,7 @@ final class Resume {
         p.mp().res.holdSent += n;
     }
 
-    /** The reinjection hold of one attachment (RESUME.md). */
+    /** The reinjection hold of one attachment. */
     static final class Slot {
         private long holdUntil;
         private boolean held1;

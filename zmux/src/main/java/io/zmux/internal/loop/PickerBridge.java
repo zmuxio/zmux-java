@@ -54,7 +54,7 @@ public final class PickerBridge {
     private int[] groupIndex = new int[8];
 
     /**
-     * Runs the custom policies synchronously on the loop (IMPLEMENTATION.md Section 2.5.2):
+     * Runs the custom policies synchronously on the loop:
      * one call per distinct picker with the frames it owns, over the reused value view.
      */
     boolean pick() {

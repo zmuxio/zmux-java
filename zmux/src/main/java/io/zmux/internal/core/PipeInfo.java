@@ -4,7 +4,7 @@ package io.zmux.internal.core;
 public final class PipeInfo {
     private PipeInfo() {}
 
-    /** Outbound states (STATE_MACHINE.md 3.1); the first seven ordinals are Attach's OUT_ constants. */
+    /** Outbound states; the first seven ordinals are Attach's OUT_ constants. */
     public enum Out {
         NONE, JOINING, ACTIVE, SUSPECT, DRAINING, FAILED, CLOSED, RETIRED;
 
@@ -21,7 +21,7 @@ public final class PipeInfo {
             };
         }
     }
-    /** Inbound states (STATE_MACHINE.md 3.2); the first four ordinals are Attach's IN_ constants. */
+    /** Inbound states; the first four ordinals are Attach's IN_ constants. */
     public enum In {
         NONE, JOINING, OPEN, ENDED, RETIRED;
 

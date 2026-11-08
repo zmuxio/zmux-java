@@ -113,9 +113,9 @@ public final class ShapingPeer {
 
     static String report(ZmuxSession session, boolean shaped, boolean client) throws IOException {
         var st = session.shapingStats();
-        String line = "STATS padding=" + st.paddingBytes() + " injected=" + st.injected() + " dropped=" + st.injectDropped()
+        String line = "STATS wire_spent=" + st.wireSpent() + " injected=" + st.injected() + " dropped=" + st.injectDropped()
                 + " clamped=" + st.clamped() + " faults=" + st.faults();
-        if (shaped && (st.paddingBytes() == 0 || st.faults() != 0)) throw new IOException("not shaped: " + line);
+        if (shaped && (st.wireSpent() == 0 || st.faults() != 0)) throw new IOException("not shaped: " + line);
         return line;
     }
 }

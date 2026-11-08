@@ -5,7 +5,7 @@ import io.zmux.carrier.VarInt;
 import java.nio.ByteBuffer;
 
 /**
- * Decodes one frame (SPEC.md Section 4). Bounds-checked: every field is read
+ * Decodes one frame. Bounds-checked: every field is read
  * within the record; nothing allocates.
  */
 public final class FrameDecoder {
@@ -49,7 +49,7 @@ public final class FrameDecoder {
     /**
      * Decodes the frame at {@code pos}; {@code limit} is the end of the record.
      * Returns the frame length. Decode errors take precedence over a non-minimal
-     * type, which is reported only after the frame decoded (SPEC.md Section 10.3).
+     * type, which is reported only after the frame decoded.
      */
     public int decode(ByteBuffer buf, int pos, int limit, Frame f) throws WireException {
         f.reset();
@@ -175,9 +175,6 @@ public final class FrameDecoder {
                 f.urgency = p >>> 5;
                 f.incremental = (p & 0x10) != 0;
             }
-        } else if (t == FrameType.PIPE_JOIN) {
-            f.kind = FrameKind.PIPE_JOIN;
-            decodeJoin(pos, f.join);
         } else if (t == FrameType.PIPE_ACK) {
             f.kind = FrameKind.PIPE_ACK;
             long cnt = varint();
@@ -208,6 +205,18 @@ public final class FrameDecoder {
             f.kind = FrameKind.PIPE_ABANDON;
             f.pipeId = varint();
             f.code = varint();
+        } else if (t == FrameType.SESSION_EPOCH) {
+            f.kind = FrameKind.SESSION_EPOCH;
+            f.bodyPos = i;
+            f.phase = u8();
+            if (!bad && f.phase > 1) throw new WireException(TransportError.PROTOCOL_VIOLATION, t, "SESSION_EPOCH phase", "");
+            f.value = varint();
+            long sl = varint();
+            f.dataPos = bytes(sl);
+            f.dataLen = (int) (bad ? 0 : sl);
+            f.locatorLen = u8();
+            f.locatorPos = bytes(f.locatorLen);
+            f.bodyEnd = i;
         } else if (t == FrameType.PIPE_STATUS) {
             f.kind = FrameKind.PIPE_STATUS;
             f.pipeId = varint();
@@ -225,23 +234,4 @@ public final class FrameDecoder {
         return i - pos;
     }
 
-    private void decodeJoin(int start, Frame.Join j) throws WireException {
-        int ll = u8();
-        if (!bad && (ll == 0 || ll > 16)) throw WireException.frame(FrameType.PIPE_JOIN, "PIPE_JOIN locator length");
-        j.locatorLen = ll;
-        j.locatorPos = bytes(ll);
-        j.pipeId = varint();
-        int fl = u8();
-        if (!bad) {
-            if ((fl & 0xf0) != 0 || (fl & 0x03) == 3) throw WireException.frame(FrameType.PIPE_JOIN, "PIPE_JOIN flags");
-            j.direction = fl & 3;
-            j.carrierBound = (fl & 0x04) != 0;
-            j.standby = (fl & 0x08) != 0;
-        }
-        j.fateGroup = varint();
-        j.priority = varint();
-        j.macLength = i - start;
-        j.tokenPos = bytes(16);
-        if (!bad && i - start > 64) throw WireException.frame(FrameType.PIPE_JOIN, "PIPE_JOIN longer than 64 bytes");
-    }
 }

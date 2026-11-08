@@ -18,7 +18,11 @@ import java.util.concurrent.CompletionStage;
  *
  * @param peek bytes read before the decision (0: none), at most {@link #MAX_PEEK}; fewer when
  *     the carrier ends or the peek timeout passes first; a carrier without a receiving half,
- *     or one decided on its HTTP request head, is decided at once
+ *     or one decided on its HTTP request head, is decided at once. On a message-framed carrier
+ *     any peek above 0 reads the first message whole as the prefix, of at most max(peek, maxPeek)
+ *     bytes (a longer one is closed, counted once as closed); skip is then 0 (replayed) or its length
+ * @param maxPeek bounds {@link Decision#need()}, at most {@link #MAX_PEEK}; 0: peek, so that
+ *     {@link Verdict#MORE} is invalid
  * @param peekTimeout runs from the end of the outer handshake and bounds the reading of the
  *     prefix and the decision together; zero: drawn once per admission from a secure random
  *     source between 5 s and 30 s
@@ -28,13 +32,14 @@ import java.util.concurrent.CompletionStage;
  *     30 s and 120 s and stallMin between a quarter and three quarters of it
  * @param decider the decision function
  */
-public record Admission(int peek, Duration peekTimeout, Duration stallMin, Duration stallMax, Decider decider) {
+public record Admission(int peek, int maxPeek, Duration peekTimeout, Duration stallMin, Duration stallMax, Decider decider) {
     /** The longest prefix: it is read into the carrier's read buffer, which holds a first record of at most this size. */
     public static final int MAX_PEEK = 65535;
 
     public Admission {
         Objects.requireNonNull(decider, "decider");
         if (peek < 0 || peek > MAX_PEEK) throw new IllegalArgumentException("peek outside [0, " + MAX_PEEK + "]");
+        if (maxPeek < 0 || maxPeek > MAX_PEEK) throw new IllegalArgumentException("maxPeek outside [0, " + MAX_PEEK + "]");
         if (Objects.requireNonNull(peekTimeout).isNegative() || Objects.requireNonNull(stallMin).isNegative()
                 || Objects.requireNonNull(stallMax).isNegative()) throw new IllegalArgumentException("negative duration");
         if (stallMin.compareTo(stallMax) > 0) throw new IllegalArgumentException("stallMin above stallMax");
@@ -43,14 +48,18 @@ public record Admission(int peek, Duration peekTimeout, Duration stallMin, Durat
 
     /** An admission with drawn timeouts and stall bounds. */
     public static Admission of(int peek, Decider decider) {
-        return new Admission(peek, Duration.ZERO, Duration.ZERO, Duration.ZERO, decider);
+        return new Admission(peek, 0, Duration.ZERO, Duration.ZERO, Duration.ZERO, decider);
     }
 
-    public Admission withPeekTimeout(Duration d) { return new Admission(peek, d, stallMin, stallMax, decider); }
-    public Admission withStall(Duration min, Duration max) { return new Admission(peek, peekTimeout, min, max, decider); }
+    public Admission withPeekTimeout(Duration d) { return new Admission(peek, maxPeek, d, stallMin, stallMax, decider); }
+    public Admission withStall(Duration min, Duration max) { return new Admission(peek, maxPeek, peekTimeout, min, max, decider); }
+    /** This admission with the bound of {@link Decision#need()}. */
+    public Admission withMaxPeek(int n) { return new Admission(peek, n, peekTimeout, stallMin, stallMax, decider); }
+    /** The longest prefix a decider can see. */
+    public int prefixLimit() { return Math.max(peek, maxPeek); }
 
     /**
-     * Decides on a carrier, once per carrier and for different carriers concurrently, outside
+     * Decides on a carrier, once per carrier and once more per {@link Verdict#MORE}, and for different carriers concurrently, outside
      * every lock of zmux, on the listener's event loop: it must not block, and returns a stage
      * that completes later when the decision takes time. prefix is read-only and valid until
      * the stage completes. The decision is due by deadline (what is left of the peek
@@ -101,7 +110,14 @@ public record Admission(int peek, Duration peekTimeout, Duration stallMin, Durat
          */
         STALL,
         /** Closes the carrier at once. */
-        CLOSE
+        CLOSE,
+        /**
+         * Asks for a longer prefix on a byte stream ({@link Decision#need()}): the listener reads
+         * on, within the same peek timeout, and decides again. A need that does not exceed the
+         * prefix or exceeds the bound, and this verdict on a message-framed carrier or on a
+         * carrier that ended or timed out, are {@link #CLOSE}.
+         */
+        MORE
     }
 
     /**
@@ -113,18 +129,37 @@ public record Admission(int peek, Duration peekTimeout, Duration stallMin, Durat
      *     and to the session ({@link ZmuxSession#admitted()}) or pipe ({@link ZmuxPipe#admitted()})
      *     the carrier makes, and holds it until their state is released. Whether a join comes
      *     from the session's client is the host's to decide: zmux compares no values
+     * @param need with {@link Verdict#MORE}, the total prefix length asked for
+     * @param variant a short label of the carrier for any verdict, one of a few constants of the
+     *     host: counted in {@link ZmuxListener#variantStats()}, and on acceptance the pipe input's
+     *     variant unless a transform's result has its own
      */
-    public record Decision(Verdict verdict, int skip, Object value) {
+    public record Decision(Verdict verdict, int skip, Object value, int need, String variant) {
         public static final Decision FALLBACK = new Decision(Verdict.FALLBACK, 0, null);
         public static final Decision STALL = new Decision(Verdict.STALL, 0, null);
         public static final Decision CLOSE = new Decision(Verdict.CLOSE, 0, null);
-        public Decision { Objects.requireNonNull(verdict); }
+        public Decision {
+            Objects.requireNonNull(verdict);
+            if (variant == null) variant = "";
+        }
         /** A verdict without a value. */
         public Decision(Verdict verdict, int skip) { this(verdict, skip, null); }
+        /** A verdict with a value and without a variant. */
+        public Decision(Verdict verdict, int skip, Object value) { this(verdict, skip, value, 0, ""); }
         public static Decision accept(int skip) { return new Decision(Verdict.ACCEPT, skip, null); }
         /** An accept carrying the host's value (null: none). */
         public static Decision accept(int skip, Object value) { return new Decision(Verdict.ACCEPT, skip, value); }
+        /** Asks for a prefix of need bytes. */
+        public static Decision more(int need) { return new Decision(Verdict.MORE, 0, null, need, ""); }
+        /** This decision labelled v. */
+        public Decision withVariant(String v) { return new Decision(verdict, skip, value, need, v); }
     }
+
+    /** The counts of one {@link Decision#variant()} ({@link ZmuxListener#variantStats()}). */
+    public record VariantStat(String name, boolean overflow, long accepted, long fallback, long stalled, long closed) {}
+
+    /** How many labels are counted apart; further ones share one bucket, listed last. */
+    public static final int MAX_VARIANTS = 64;
 
     /**
      * The target of a carrier that was not accepted. serve runs off the event loop, once per
@@ -155,17 +190,25 @@ public record Admission(int peek, Duration peekTimeout, Duration stallMin, Durat
      *     Section 7.5), for a carrier decided on its HTTP request head that of the connection
      *     carrying the request; null without one
      * @param request the HTTP request of the carrier; {@link RequestHead#NONE} for other carriers
+     * @param terminatedTls whether this process terminated the carrier's completed TLS or QUIC
+     *     handshake; no proof of an end-to-end handshake: an intermediary may have opened it
      */
     public record CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
-                              io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request) {
+                              io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls) {
+        /** The carrier of a completed handshake exactly when it has an exporter. */
+        public CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
+                           io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request) {
+            this(source, peer, applicationProtocol, serverName, exporter, request, exporter != null);
+        }
+
         public CarrierInfo {
             Objects.requireNonNull(applicationProtocol, "applicationProtocol");
             Objects.requireNonNull(serverName, "serverName");
             Objects.requireNonNull(request, "request");
         }
 
-        /** Whether the carrier has a TLS (or QUIC) exporter; a carrier given to the listener has one when its pipe input offers it. */
-        public boolean tls() { return exporter != null; }
+        /** Whether this process terminated the carrier's completed TLS or QUIC handshake. */
+        public boolean tls() { return terminatedTls; }
 
         /** length bytes of the exporter for label and context; null without an exporter or when it fails. */
         public byte[] exportKeyingMaterial(String label, byte[] context, int length) {

@@ -14,11 +14,10 @@ import java.util.concurrent.locks.LockSupport;
  * <p>A dial attempt that outlives its deadline, a rotation preemption, closing or the session's
  * end is interrupted and abandoned, never awaited: the run may complete while the attempt's
  * {@link PipePool.Dial#open} is still executing. Whatever that attempt then creates (a joined
- * pipe or a reservation) is released as soon as it returns. A dial that ignores interruption
+ * pipe) is released as soon as it returns. A dial that ignores interruption
  * therefore delays only its own cleanup, never the run, its completion or {@link #close()}.
  */
 public final class PipeMaintenance implements AutoCloseable {
-    private static final java.util.logging.Logger LOG = java.util.logging.Logger.getLogger(PipeMaintenance.class.getName());
     public record Result(long joined, long rotations, long failures, List<ZmuxPipe> pipes, IOException cause) {
         public Result { pipes = List.copyOf(pipes); }
     }
@@ -139,8 +138,8 @@ public final class PipeMaintenance implements AutoCloseable {
         return Math.max(0, mode.settle().toNanos() - (now - m.usableSince));
     }
     /**
-     * A dial succeeded: the next one waits the minimum backoff from this one's start (API.md
-     * Appendix A, measured from the previous attempt whether it succeeded or failed), its jitter
+     * A dial succeeded: the next one waits the minimum backoff from this one's start (measured
+     * from the previous attempt whether it succeeded or failed), its jitter
      * drawn once now. The backoff after a failure restarts from the minimum only once the
      * member is usable.
      */
@@ -177,6 +176,18 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private static boolean usableOnOwner(io.zmux.internal.core.Session core, List<ZmuxPipe> pipes) {
         for (ZmuxPipe p : pipes) if (!core.pipeUsable(p.id())) return false;
+        return true;
+    }
+    /**
+     * A replacement may retire the original once it is usable and the peer holds all of its
+     * pipes: retiring the original earlier may leave the acceptor without a live pipe.
+     */
+    private boolean takesOver(List<ZmuxPipe> pipes) throws IOException {
+        return usable(pipes) && (Boolean)session.run(op -> takesOverOnOwner(session.core, pipes));
+    }
+    private static boolean takesOverOnOwner(io.zmux.internal.core.Session core, List<ZmuxPipe> pipes) {
+        if (!usableOnOwner(core, pipes)) return false;
+        for (ZmuxPipe p : pipes) if (!core.pipePeerAttached(p.id())) return false;
         return true;
     }
     private static void abort(List<ZmuxPipe> pipes) {
@@ -231,13 +242,13 @@ public final class PipeMaintenance implements AutoCloseable {
             members.add(successor(donor)); settled.add(donor.replacementKind); donor.replacement = null; changed = true;
         }
         long now = System.nanoTime();
-        for (Member m : members) if (m.replacement != null && !usable(m.replacement)) m.usableSince = 0;
+        for (Member m : members) if (m.replacement != null && !takesOver(m.replacement)) m.usableSince = 0;
         if (members.size() >= target && canRotate()) for (int i = 0; i < members.size(); i++) {
             Member m = members.get(i);
-            if (m.replacement != null && usable(m.replacement) && settleLeft(m, now) == 0) {
+            if (m.replacement != null && takesOver(m.replacement) && settleLeft(m, now) == 0) {
                 List<ZmuxPipe> old = m.pipes, replacement = m.replacement;
                 boolean committed = (Boolean)session.run(op -> {
-                    if (!rotationReadyOnOwner() || !usableOnOwner(session.core, replacement)) return Boolean.FALSE;
+                    if (!rotationReadyOnOwner() || !takesOverOnOwner(session.core, replacement)) return Boolean.FALSE;
                     for (ZmuxPipe p : old) session.core.removePipe(p.id(), true);
                     return Boolean.TRUE;
                 });
@@ -289,7 +300,7 @@ public final class PipeMaintenance implements AutoCloseable {
         } catch (RuntimeException error) {
             // A rejected decision (such as one Decision refuses to build) keeps the pool as it is,
             // is reported, and the run goes on.
-            LOG.log(java.util.logging.Level.WARNING, "zmux pool policy decision rejected; keeping the pool", error);
+            session.driver.hooks().log(System.Logger.Level.WARNING, "zmux pool policy decision rejected; keeping the pool", error);
             d = PoolPolicy.Decision.KEEP;
         }
         target = d.count().orElse(policy.count());
@@ -346,7 +357,7 @@ public final class PipeMaintenance implements AutoCloseable {
         var attemptDone = new CompletableFuture<Void>(); var verdict = new CompletableFuture<Boolean>();
         // The attempt's creation is settled once both the attempt has returned and the owner has
         // decided; whichever comes last runs it, so the owner never waits for a dial that ignores
-        // interruption (IMPLEMENTATION.md 2.5).
+        // interruption.
         attemptDone.thenCombine(verdict, (ignored, ok) -> ok).thenAccept(ok -> {
             PipePool.Attempt scope = creation.get(); if (scope != null) scope.finish(ok);
         });
@@ -354,7 +365,10 @@ public final class PipeMaintenance implements AutoCloseable {
             List<ZmuxPipe> p = null; Throwable failure = null;
             try {
                 if (cancellation.isCancelled()) throw new InterruptedException("dial cancelled");
-                var scope = new PipePool.Attempt(session, dialOptions, cancellation, kind); creation.set(scope);
+                // A replacement retires its original only once the peer attached it (takesOver), and a
+                // redial must not wait for an acknowledgement only the direction it restores could carry.
+                var scope = new PipePool.Attempt(session, dialOptions.toBuilder().noWaitAttached(true).build(), cancellation, kind);
+                creation.set(scope);
                 p = Objects.requireNonNull(policy.join().open(scope), "join returned null");
                 if (!scope.adopt(p)) { failure = new IOException("a dial must return the pipes created by its Attempt"); p = null; }
             } catch (Throwable error) { failure = error; }
@@ -380,7 +394,7 @@ public final class PipeMaintenance implements AutoCloseable {
     /** Waits for the attempt's pipes within the attempt timeout and checks their directions. */
     private List<ZmuxPipe> awaitDial(CompletableFuture<List<ZmuxPipe>> outcome, boolean rotating) throws IOException {
         try {
-            long timeout = policy.attemptTimeout() == null ? session.core.handshakeTimeout() : policy.attemptTimeout().toNanos();
+            long timeout = policy.attemptTimeout() == null ? session.core.joinDeadline() : policy.attemptTimeout().toNanos();
             long started = System.nanoTime();
             List<ZmuxPipe> pipe;
             while (true) {
@@ -442,6 +456,8 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private void run() {
         worker = Thread.currentThread(); IOException cause = null;
+        // A running pool dials for the session: its suspension is attended.
+        session.driver.executeCarrier(() -> session.core.attend(1));
         Runnable removeClose = session.driver.watchClosed(error -> { terminal.compareAndSet(null, Errors.session(error)); Thread t = worker; if (t != null) t.interrupt(); });
         try {
             while (true) {
@@ -481,7 +497,12 @@ public final class PipeMaintenance implements AutoCloseable {
                 }
                 check(); await(pause());
             }
-        } catch (IOException error) { cause = error; }
+        } catch (IOException error) {
+            // The session's end interrupts the worker wherever it waits, a session call included:
+            // that interruption reports the end, not a cancellation.
+            SessionError ended = terminal.get();
+            cause = ended != null && !stopped.get() && error instanceof InterruptedIOException ? new SessionClosedException(ended) : error;
+        }
         catch (RuntimeException error) { cause = new IOException("pipe maintenance failed", error); }
         finally {
             // A session that failed soon after its members' kinds were chosen counts against them.
@@ -489,7 +510,7 @@ public final class PipeMaintenance implements AutoCloseable {
                 for (Member m : members) mode.dropped(m.kind, m.added);
             }
             Errors.clearInternalWake(); parent.close(); removeClose.run();
-            session.driver.executeCarrier(() -> session.driver.cancelPipeWait(pipeChange));
+            session.driver.executeCarrier(() -> { session.driver.cancelPipeWait(pipeChange); session.core.attend(-1); });
             var done = new CompletableFuture<Void>();
             if (session.driver.executeCarrier(() -> done.complete(null))) done.join(); else session.driver.closedFuture().join();
             worker = null;

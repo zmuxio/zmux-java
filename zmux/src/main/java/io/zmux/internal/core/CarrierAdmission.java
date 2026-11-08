@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The listener's handling of new carriers (MULTIPATH.md 5.5 and 5.6, SPEC.md 6.1.1 and 6.2):
+ * The listener's handling of new carriers:
  * classification of the first record, per-source admission of carriers that have not yet
  * delivered it, and the pairing of split bootstraps. Not thread-safe: the owner serialises.
  */
@@ -20,12 +20,15 @@ public final class CarrierAdmission {
     public record Classified(Kind kind, int firstRecordLength) {}
 
     private static final byte[] TP = io.zmux.internal.wire.Records.TRANSPORT_PARAMETERS_PREFIX;
-    private static final byte[] JOIN = {(byte) 0x9a, 0x24, (byte) 0xde, 0x36};
     private static final byte[] LANE = {(byte) 0xba, 0x05, (byte) 0xa1, (byte) 0xc9};
 
-    /** Classifies the first bytes [pos, limit) of a carrier incrementally. */
+    /**
+     * Classifies the first bytes [pos, limit) of a carrier incrementally. First byte 02 is a Hello, whose
+     * parser takes over, and its first record length stays 0.
+     */
     public static Classified classify(ByteBuffer b, int pos, int limit, long maxRecord) {
         if (pos >= limit) return new Classified(Kind.MORE, 0);
+        if ((b.get(pos) & 0xff) == io.zmux.internal.join.Hello.PROFILE_JOIN) return new Classified(Kind.JOIN, 0);
         long size = VarInt.get(b, pos, limit);
         if (size < 0) return new Classified(Kind.MORE, 0);
         if (size > maxRecord) return new Classified(Kind.REJECT, 0);
@@ -36,9 +39,6 @@ public final class CarrierAdmission {
         if (size >= 9 && matches(b, body, limit, TP)) {
             k = Kind.SESSION;
             need = 8;
-        } else if (size >= 26 && matches(b, body, limit, JOIN)) {
-            k = Kind.JOIN;
-            need = 4;
         } else if (size >= 22 && matches(b, body, limit, LANE)) {
             k = Kind.LANE;
             need = 4;
@@ -48,29 +48,6 @@ public final class CarrierAdmission {
         if (limit - body < need) return new Classified(Kind.MORE, 0);
         if (limit - body < size) return new Classified(k, 0);
         return new Classified(k, n + (int) size);
-    }
-
-    /** The PIPE_JOIN that body (a record body without its Size field, or an out-of-band join) starts with, or null. */
-    public static io.zmux.internal.wire.Frame parseJoin(byte[] body) {
-        io.zmux.internal.wire.Frame f = new io.zmux.internal.wire.Frame();
-        try {
-            new io.zmux.internal.wire.FrameDecoder().decode(ByteBuffer.wrap(body), 0, body.length, f);
-        } catch (io.zmux.internal.wire.WireException e) {
-            return null;
-        }
-        return f.kind == io.zmux.internal.wire.FrameKind.PIPE_JOIN ? f : null;
-    }
-
-    /** Strict unpadded base64url of exactly one PIPE_JOIN, bounded by its wire maximum. */
-    public static byte[] decodeJoinHeader(String value) {
-        if (value == null || value.length() > (64 * 8 + 5) / 6 || value.indexOf('=') >= 0) return null;
-        try {
-            byte[] bytes = java.util.Base64.getUrlDecoder().decode(value);
-            if (bytes.length > 64 || !java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes).equals(value)) return null;
-            var frame = new io.zmux.internal.wire.Frame();
-            int consumed = new io.zmux.internal.wire.FrameDecoder().decode(ByteBuffer.wrap(bytes), 0, bytes.length, frame);
-            return consumed == bytes.length && frame.kind == io.zmux.internal.wire.FrameKind.PIPE_JOIN ? bytes : null;
-        } catch (IllegalArgumentException | io.zmux.internal.wire.WireException invalid) { return null; }
     }
 
     /** The PIPE_LANE that a complete first record contains, or null. */
@@ -85,27 +62,12 @@ public final class CarrierAdmission {
         byte[] key = new byte[16]; frame.src.get(frame.laneKeyPos, key); return key;
     }
 
-    /** The MAC input of a decoded PIPE_JOIN: its bytes before the token (MULTIPATH.md 10.3). */
-    public static byte[] joinMac(io.zmux.internal.wire.Frame f) {
-        int start = f.join.tokenPos - f.join.macLength;
-        byte[] m = new byte[f.join.macLength];
-        f.src.get(start, m);
-        return m;
-    }
-
-    /** The locator a decoded PIPE_JOIN names. */
-    public static byte[] joinLocator(io.zmux.internal.wire.Frame f) {
-        byte[] loc = new byte[f.join.locatorLen];
-        f.src.get(f.join.locatorPos, loc);
-        return loc;
-    }
-
     private static boolean matches(ByteBuffer b, int at, int limit, byte[] prefix) {
         for (int i = 0; i < prefix.length && at + i < limit; i++) if (b.get(at + i) != prefix[i]) return false;
         return true;
     }
 
-    // ---- per-source bounds of pending carriers (MULTIPATH.md 5.6) ----
+    // ---- per-source bounds of pending carriers ----
 
     private final int maxPerSource;
     private final long firstRecordTimeout;
@@ -127,7 +89,7 @@ public final class CarrierAdmission {
         return true;
     }
 
-    /** Returns the slot of a carrier whose first record arrived, that was closed, or that a fallback took. */
+    /** Returns the slot of a carrier classified as no join, of a join with its result, of one closed, or one a fallback took. */
     public void release(java.net.InetSocketAddress source) {
         bySource.computeIfPresent(sourceKey(source), (k, v) -> v > 1 ? v - 1 : null);
     }
@@ -168,7 +130,7 @@ public final class CarrierAdmission {
         return Time.add(t, firstRecordTimeout);
     }
 
-    // ---- split bootstrap pairing (SPEC.md 6.1.1) ----
+    // ---- split bootstrap pairing ----
 
     /** Pairs the two unidirectional carriers of a split bootstrap by their token. */
     public static final class SplitPairing {

@@ -38,7 +38,7 @@ public final class ZmuxPipe {
 
     /**
      * The value of the admission that accepted this pipe's carrier, the one that carried its
-     * PIPE_JOIN ({@link Admission.Decision#value()}; for the bootstrap pipe the session's,
+     * Hello ({@link Admission.Decision#value()}; for the bootstrap pipe the session's,
      * {@link ZmuxSession#admitted()}); empty without one, on the dialing side, and once the
      * pipe is retired. zmux does not compare it with the session's: a host that requires a
      * join to come from the session's client compares them, in its {@link InboundTransform} or
@@ -52,7 +52,7 @@ public final class ZmuxPipe {
         }));
     }
 
-    /** The states of the outbound and inbound directions (STATE_MACHINE.md 3); empty once retired. */
+    /** The states of the outbound and inbound directions; empty once retired. */
     public Optional<PipeState> state() throws IOException {
         Session core = session.core;
         Object st = session.run(op -> {
@@ -64,7 +64,7 @@ public final class ZmuxPipe {
         return Optional.of(new PipeState(s.out().toPublic(), s.in().toPublic()));
     }
 
-    private static final Object MISSING = new Object();
+    static final Object MISSING = new Object();
 
     /** A current immutable snapshot; empty once retired. */
     public Optional<PipeStats> stats() throws IOException {
@@ -72,6 +72,18 @@ public final class ZmuxPipe {
             session.driver.refreshUnsent(id);
             return session.core.pipeStats(id, io.zmux.internal.loop.Clock.now(), System.nanoTime());
         }));
+    }
+
+    /**
+     * Replaces the pipe's own liveness settings as a whole, those it was added with included;
+     * a setting not written follows the session's ({@link ZmuxSession#setLiveness}). A pipe already suspect keeps the floor
+     * and dead timeout it turned suspect under. Nothing is sent.
+     */
+    public void setLiveness(Liveness.Pipe l) throws IOException {
+        java.util.Objects.requireNonNull(l, "l");
+        long interval = l.idleProbesOff() ? 0 : l.probeInterval().map(ZmuxConfig::nanos).orElse(-1L);
+        double jitter = l.probeJitter().orElse(Double.NaN);
+        gone(() -> session.core.setPipeLiveness(id, l.suspectFloor().map(ZmuxConfig::nanos).orElse(0L), l.deadTimeout().map(ZmuxConfig::nanos).orElse(0L), interval, jitter));
     }
 
     /** Overrides the session's quality event band for this outbound pipe. */
@@ -125,7 +137,43 @@ public final class ZmuxPipe {
         set(Tiers.PipeSettings.builder().probation(ZmuxConfig.nanos(d)).build());
     }
 
-    /** Re-checks the pipe after a suspected path change (MULTIPATH.md 9.6). */
+    /**
+     * Waits until the peer is known to hold this pipe: a pipe this side joined
+     * counts once a PIPE_ACK on any lane covered more than zero bytes or, receive-only, once a
+     * record arrived; pipe 0 and pipes the peer joined are held from the start. Joining waits for
+     * this unless {@link PipeOptions.Builder#noWaitAttached} is set, when it returns once the Reply
+     * verified, before the acceptor read the Confirm: removing the session's other pipes earlier
+     * may leave the peer without a live pipe. null timeout: no limit;
+     * {@link java.net.SocketTimeoutException} after it, {@link PipeGoneException} once the pipe is
+     * retired, {@link SessionClosedException} once the session ended.
+     */
+    public void awaitPeerAttached(Duration timeout) throws IOException {
+        Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, ZmuxSession.deadline(timeout));
+        if (r == MISSING) throw new PipeGoneException(id);
+    }
+
+    /** Like {@link #awaitPeerAttached} without blocking; cancelling the future withdraws the wait. */
+    public ZmuxFuture<Void> peerAttachedAsync(Duration timeout) {
+        return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, ZmuxSession.deadline(timeout), r -> {
+            if (r == MISSING) throw new PipeGoneException(id);
+            return null;
+        });
+    }
+
+    io.zmux.internal.loop.Operation.Step attachedStep() {
+        Session core = session.core;
+        return op -> {
+            try {
+                Boolean held = core.waitPeerAttached(id, op);
+                return held != null ? held : io.zmux.internal.loop.Operation.PENDING;
+            } catch (CoreException e) {
+                if (e.reason() == CoreException.Reason.INVALID) return MISSING;
+                throw e;
+            }
+        };
+    }
+
+    /** Re-checks the pipe after a suspected path change. */
     public void revalidate() throws IOException {
         Session core = session.core;
         gone(() -> core.revalidatePipes(id, false));
@@ -134,13 +182,21 @@ public final class ZmuxPipe {
     /** Retires the pipe gracefully: its data moves to the other pipes first. */
     public void close() throws IOException {
         Session core = session.core;
-        gone(() -> core.removePipe(id, true));
+        gone(() -> { strandWarning(core); core.removePipe(id, true); });
     }
 
     /** Fails the pipe and closes its carrier at once; protocol bookkeeping may await retirement. */
     public void abort() throws IOException {
         Session core = session.core;
-        gone(() -> core.removePipe(id, false));
+        gone(() -> { strandWarning(core); core.removePipe(id, false); });
+    }
+
+    /** Logs the removal of the last pipe of a direction while streams are open; on the loop. */
+    private void strandWarning(Session core) {
+        if (core.removalStrands(id)) {
+            session.driver.hooks().warn("zmux: removing pipe " + id + ", the last of a direction, while streams are open: the session "
+                    + (core.config().resume() > 0 ? "suspends" : "ends with pipes lost"));
+        }
     }
 
     /**

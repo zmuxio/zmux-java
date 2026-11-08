@@ -4,7 +4,7 @@ import java.util.Set;
 
 /**
  * Shaper customizes record sizes and timing. The session calls its methods one at a time on
- * its own thread; they must not block or call methods of the session.
+ * its own thread; they must not block or call methods of the session. A runtime exception stops the shaping of the pipe.
  */
 public interface Shaper {
     /** Called once, when the instance is installed. */
@@ -13,6 +13,6 @@ public interface Shaper {
     /** Called before each outgoing record of the pipe ({@link Capability#PLAN}); plan is cleared. */
     void plan(RecordView view, RecordPlan plan);
 
-    /** Receives a notification; reply is cleared. Unknown kinds should be ignored. */
-    void onEvent(Event event, Reply reply);
+    /** Receives a notification; effects is cleared. Unknown kinds should be ignored. */
+    void onEvent(Event event, Effects effects);
 }

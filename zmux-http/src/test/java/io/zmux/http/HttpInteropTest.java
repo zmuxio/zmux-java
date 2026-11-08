@@ -257,7 +257,7 @@ class HttpInteropTest {
 
     static ExchangeConfig config(String psk, boolean b64, String downUrl) {
         var b = ExchangeConfig.builder().base64(b64).downUrl(downUrl);
-        return (psk.isEmpty() ? b.allowInsecure(true) : b.psk(HexFormat.of().parseHex(psk))).build();
+        return (psk.isEmpty() ? b.psk(new byte[32]) : b.psk(HexFormat.of().parseHex(psk))).build();
     }
 
     /** Echoes every stream of every session the listener accepts, until it closes. */

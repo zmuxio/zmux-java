@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * Session-level flow control (SPEC.md Sections 8.2 and 8.3): the receive window, its released
+ * Session-level flow control: the receive window, its released
  * and held credit, the buffered count, and the send credit with the send-buffer sums. The
  * caller supplies the buffer cap and memory pressure, which depend on the stream table and the
  * memory budget; a due MAX_DATA is reported through the injected callback.
@@ -40,7 +40,7 @@ final class ConnFlow {
         return Math.clamp(256 << 10, w / 16, w / 4); // w >= 0, so w/16 <= w/4
     }
 
-    /** Whether a scope's released credit must be sent now (SPEC.md Section 8.3 rules 2 and 3). */
+    /** Whether a scope's released credit must be sent now. */
     static boolean creditDue(long c, long l, long w, long received, boolean blockedFrame) {
         if (c <= l) return false;
         long d = c - l;
@@ -66,11 +66,12 @@ final class ConnFlow {
 
     /**
      * Counts newly received session bytes; false when they exceed the advertised limit
-     * (FLOW_CONTROL_ERROR, SPEC.md Section 8.2).
+     * (FLOW_CONTROL_ERROR).
      */
     boolean received(long n) {
+        if (n > adv - recv) return false;
         recv += n;
-        return recv <= adv;
+        return true;
     }
 
     /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count (C1). */
@@ -140,7 +141,7 @@ final class ConnFlow {
         return rel + win;
     }
 
-    /** Whether MAX_DATA v is worth sending (force: a copy is owed, MULTIPATH.md 6.5). */
+    /** Whether MAX_DATA v is worth sending (force: a copy is owed). */
     boolean maxDataWanted(long v, boolean force) {
         return v > adv || adv == 0 || force;
     }
@@ -163,7 +164,7 @@ final class ConnFlow {
         return sendMax - Math.min(sendMax, sent);
     }
 
-    /** The peer's initial limit (or an assumed one, SPEC.md 6.1.2). */
+    /** The peer's initial limit (or an assumed one). */
     void sendLimit(long v) {
         sendMax = v;
     }
@@ -178,12 +179,6 @@ final class ConnFlow {
 
     void consumed(long n) {
         sent += n;
-    }
-
-    /** Everything is resent from offset zero under unknown limits (early data restart). */
-    void restartSend() {
-        sent = 0;
-        sendMax = 0;
     }
 
     /** Marks the session blocked at its current limit; false when already marked there. */

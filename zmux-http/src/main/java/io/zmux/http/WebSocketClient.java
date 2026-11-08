@@ -32,7 +32,41 @@ import java.util.concurrent.CompletableFuture;
 final class WebSocketClient {
     private WebSocketClient() {}
 
-    static PipeIo open(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential)
+    /** A carrier and the URL redirects led it to. */
+    record Opened(PipeIo io, URI url) {}
+
+    /** The upgrade was answered with a redirect: the attempt's internal outcome. */
+    private static final class Redirected extends IOException {
+        final int status;
+        final String location;
+
+        Redirected(int status, String location) {
+            super("redirect " + status);
+            this.status = status;
+            this.location = location;
+        }
+    }
+
+    /**
+     * Opens a WebSocket to url, following redirects of the upgrade as {@link Redirects#check}
+     * allows, up to {@link Redirects#DEFAULT_MAX}, each on a new connection with the credential
+     * presented anew.
+     */
+    static Opened open(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential)
+            throws IOException {
+        URI cur = url;
+        for (int hops = 0; ; hops++) {
+            try {
+                return new Opened(attempt(http, cur, headers, protocols, credential), cur);
+            } catch (Redirected r) {
+                URI next = Redirects.check(cur, "GET", r.status, r.location);
+                if (hops >= Redirects.DEFAULT_MAX) throw new io.zmux.HttpRedirectException(r.status, next.toString(), "too many redirects");
+                cur = next;
+            }
+        }
+    }
+
+    private static PipeIo attempt(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential)
             throws IOException {
         String scheme = url.getScheme() == null ? "" : url.getScheme().toLowerCase(java.util.Locale.ROOT);
         if (!List.of("ws", "wss", "http", "https").contains(scheme) || url.getHost() == null) {
@@ -40,7 +74,7 @@ final class WebSocketClient {
         }
         boolean secure = Connections.secure(url);
         URI ws = URI.create((secure ? "wss" : "ws") + url.toString().substring(scheme.length()));
-        // The client offers its identifiers, then their aliases (SPEC.md Section 6.2).
+        // The client offers its identifiers, then their aliases.
         List<String> offer = ZmuxConfig.withAliases(protocols.isEmpty() ? List.of(ZmuxConfig.DEFAULT_ALPN) : protocols);
         Channel ch = http.await(http.conns.open(url, false, true), "connect");
         try {
@@ -99,8 +133,9 @@ final class WebSocketClient {
                     } catch (WebSocketClientHandshakeException e) {
                         var resp = e.response();
                         int s = resp == null ? 0 : resp.status().code();
-                        done.completeExceptionally(s != 0 && s != 101
-                                ? new HttpStatusException(s, resp.status().reasonPhrase()) : new IOException(e.getMessage(), e));
+                        if (resp != null && Redirects.isRedirect(s)) done.completeExceptionally(new Redirected(s, resp.headers().get("Location")));
+                        else if (resp != null && s != 101) done.completeExceptionally(new HttpStatusException(s, resp.status().reasonPhrase()));
+                        else done.completeExceptionally(new IOException(e.getMessage(), e));
                         ctx.close();
                     }
                 }

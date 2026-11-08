@@ -7,8 +7,8 @@ import io.zmux.carrier.VarInt;
 import io.zmux.internal.wire.WireException;
 
 /**
- * Liveness of one session: QX_PING requests and responses (SPEC.md Section 4.5), the idle
- * timeout and keep-alive (Section 6.4), and the no-effect frame budget (Section 9.4).
+ * Liveness of one session: QX_PING requests and responses, the idle
+ * timeout and keep-alive, and the no-effect frame budget.
  * Owned by the session's loop; effects on other components go through {@link Port}.
  */
 public final class KeepAlive {
@@ -17,13 +17,13 @@ public final class KeepAlive {
         /** A frame of this component wants to be written. */
         void wantWrite();
 
-        /** The no-effect budget is exhausted (SPEC.md Section 9.4.2). */
+        /** The no-effect budget is exhausted. */
         void budgetExhausted();
 
         /** A QX_PING request completed with rtt (before its waiters wake). */
         void pingMeasured(long rtt);
 
-        /** The response covered the GOAWAY fence (EXTENSIONS.md Section 3.3). */
+        /** The response covered the GOAWAY fence. */
         void fenceReached();
     }
 
@@ -33,8 +33,8 @@ public final class KeepAlive {
     private final Port port;
     private final Outbox outbox;
     /** The configured keep-alive period, {@link CoreConfig#OFF}: off. */
-    private final long keepAlive;
-    private final double jitter;
+    private long keepAlive;
+    private double jitter;
     private final java.util.random.RandomGenerator random;
     /** The period in effect: the configured one, capped at half the effective idle timeout. */
     private long period;
@@ -94,12 +94,20 @@ public final class KeepAlive {
 
     /**
      * The keep-alive period in effect: k capped at half the idle timeout (at least 1 ns) when there
-     * is one (SPEC.md 6.4). Not {@code Math.clamp}: k = 0 is a valid period below the cap's floor.
+     * is one. Not {@code Math.clamp}: k = 0 is a valid period below the cap's floor.
      */
     static long effectivePeriod(long k, long idle) {
         if (k < 0 || idle <= 0) return k;
         long cap = Math.max(idle / 2, 1);
         return Math.min(k, cap);
+    }
+
+    /** Replaces the settings: the timer restarts its wait under them, still capped at half the idle timeout. */
+    void settings(long keepAlive, double jitter) {
+        this.keepAlive = keepAlive;
+        this.jitter = jitter;
+        period = idle > 0 ? effectivePeriod(keepAlive, idle) : keepAlive;
+        waitRef = Long.MIN_VALUE;
     }
 
     /** The keep-alive period in effect, {@link CoreConfig#OFF}: off. */
@@ -116,7 +124,7 @@ public final class KeepAlive {
         return wait;
     }
 
-    /** The effective idle timeout (SPEC.md Section 6.4), 0 when none. */
+    /** The effective idle timeout, 0 when none. */
     long idleTimeout() {
         return idle;
     }
@@ -162,7 +170,7 @@ public final class KeepAlive {
         if (outstanding == 0) requestFirst = true;
     }
 
-    /** Requests a ping whose response fences GOAWAY phase 1 (EXTENSIONS.md Section 3.3). */
+    /** Requests a ping whose response fences GOAWAY phase 1. */
     void startFence() {
         want = true;
         fence = next + 1;
@@ -209,7 +217,7 @@ public final class KeepAlive {
 
     // ---- input ----
 
-    /** A QX_PING frame; stale frames are tolerated on multipath sessions (MULTIPATH.md 6.4). */
+    /** A QX_PING frame; stale frames are tolerated on multipath sessions. */
     void onPing(Frame f, boolean multipath, long now) throws WireException {
         if (!f.response) {
             if (f.value + 1 <= reqSeen) {
@@ -244,7 +252,7 @@ public final class KeepAlive {
         }
     }
 
-    /** The outbound pipe that carried the outstanding request failed (MULTIPATH.md 7.2). */
+    /** The outbound pipe that carried the outstanding request failed. */
     void pipeFailed(long pipeId) {
         if (outstanding != 0 && pipe == pipeId) expired();
     }
@@ -260,7 +268,7 @@ public final class KeepAlive {
 
     // ---- budget ----
 
-    /** Subtracts one token for a chargeable frame (SPEC.md Section 9.4.2). */
+    /** Subtracts one token for a chargeable frame. */
     void charge(long now) {
         long step = Time.SECOND / BUDGET_REFILL;
         long el = Time.sub(now, budgetLast);

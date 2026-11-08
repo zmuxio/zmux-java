@@ -7,7 +7,7 @@ import io.zmux.internal.wire.TransportParams;
 import io.zmux.carrier.VarInt;
 
 /**
- * Builds the batches of outbound lanes (SPEC.md Sections 3 and 9.2): the first record of the
+ * Builds the batches of outbound lanes: the first record of the
  * bootstrap pipe, PIPE_LANE records, CONNECTION_CLOSE, coalesced control ahead of stream
  * data in priority order, the plan of each STREAM frame, pacing room and lane turns, and the
  * accounting of a produced batch. The path layer decides what a pipe carries; owned by the
@@ -24,7 +24,7 @@ public final class Transmitter {
 
         Features features();
 
-        /** The session SRTT of SPEC.md Section 1.3. */
+        /** The session SRTT: the smoothed RTT over its pipes. */
         long srtt();
 
         /** Pipe acknowledgement, or null without it. */
@@ -108,6 +108,8 @@ public final class Transmitter {
         int m = (int) Math.min(peerMaxRecord, 65535);
         if (!port.established()) m = TransportParams.DEFAULT_MAX_RECORD_SIZE;
         if (ol.st.info().tls() && m > RecordPlan.MAX_RECORD_LENGTH) m = RecordPlan.MAX_RECORD_LENGTH;
+        int carrier = ol.st.info().maxRecord();
+        if (carrier > 0 && m > carrier) m = carrier;
         return m;
     }
 
@@ -119,7 +121,7 @@ public final class Transmitter {
         if (p == null || p.out() == null || p.out().failed()) return false;
         Pipe.OutLane ol = p.out().lane(lane);
         SessionState state = port.state();
-        if (ol == null || ol.st.shut() || ol.tx.closeSent || state == SessionState.CLOSED) return false;
+        if (ol == null || ol.st.shut() || ol.tx.closeSent || state == SessionState.CLOSED || life.holdsFirst(pipeId)) return false;
         if (pipeId == 0 && lane == 0 && !ol.tx.tpSent) {
             // The parameters lead the pipe: a planned delay of that first record holds them like
             // any other record, unless CONNECTION_CLOSE is owed.
@@ -127,7 +129,7 @@ public final class Transmitter {
         }
         if (life.closePending()) return lane == 0 && !life.waitingLanes();
         if (ol.st.laneFirst()) {
-            // The lane's PIPE_LANE record is a record of the pipe: a planned delay holds it too (MULTIPATH.md 5.8).
+            // The lane's PIPE_LANE record is a record of the pipe: a planned delay holds it too.
             return state.compareTo(SessionState.CLOSING) < 0 && (pipes.shaping() == null || !Shaping.delaying(p, port.now()));
         }
         if (!ol.st.confirmed() || state == SessionState.CLOSING) return false;
@@ -210,7 +212,7 @@ public final class Transmitter {
         SessionState state = port.state();
         if (p == null || p.out() == null || p.out().failed() || state == SessionState.CLOSED) return false;
         Pipe.OutLane ol = p.out().lane(lane);
-        if (ol == null || ol.st.shut()) return false;
+        if (ol == null || ol.st.shut() || life.holdsFirst(pipeId)) return false;
         RecordWriter w = writer;
         w.init(b, ol.st.info().framing(), recMax(ol), max);
         AckEngine ack = port.ack();
@@ -250,10 +252,15 @@ public final class Transmitter {
         return true;
     }
 
+    /** Own bytes sent: no padding, injections or copies. */
+    private long earnBytes;
+
+    long earnBytes() { return earnBytes; }
+
     /** Accounts positions and statistics of a produced batch. */
     void afterBatch(RecordWriter w, Pipe p, Pipe.OutLane ol) {
         // queue_p as this batch is handed over: unsent_ahead (Q_p without the batch) over R_p, both taken
-        // now (MULTIPATH.md 7.1).
+        // now.
         long queue = p.mp() != null ? PathHealth.queueDelay(mp().metrics.queueBytes(p), mp().metrics.rateOf(p)) : 0;
         long pos = 0;
         Batch b = w.b();
@@ -262,6 +269,14 @@ public final class Transmitter {
         ol.tx.pos += pos;
         for (Stream st : w.touched) Lanes.boundEnd(st, ol.tx.pos);
         stats.sent(pos, w.recs());
+        // Earned are the bytes given to the carrier: a message carries no size field.
+        long given = pos;
+        if (w.framing() == Framing.RECORDS) {
+            given = 0;
+            for (int i = 0; i < b.messageCount(); i++) given += b.recordSize(i);
+        }
+        long earned = given - Math.min(given, w.notEarned());
+        earnBytes += earned;
         p.out().recordsWritten(w.recs());
         AckEngine ack = port.ack();
         long now = port.now();
@@ -273,19 +288,29 @@ public final class Transmitter {
             port.closeSent();
         }
         // Without acknowledgement a record passed to the carrier restarts the idle timer unless it
-        // carries only QX_PING requests and PADDING (SPEC.md Section 6.4).
+        // carries only QX_PING requests and PADDING.
         if (!port.features().acked() && !w.onlyPing()) ka.activity(now);
         if (ack != null) port.pacer().onSent(p, pos, now);
     }
 
+    /** The carrier of an outbound lane shut its write side. */
+    void outputShut(long pipeId, long lane) {
+        Pipe p = pipes.get(pipeId);
+        Pipe.OutLane ol = p == null || p.out() == null ? null : p.out().lane(lane);
+        if (ol != null) ol.tx.shutDone = true;
+    }
+
     /** A batch was written or failed: releases its references and the lane's writing state. */
-    void written(Batch b, long t) {
+    void written(Batch b, boolean ok, long t) {
         b.release();
         Pipe p = pipes.get(b.pipe());
         if (p != null && p.out() != null) {
             Pipe.OutLane ol = p.out().lane(b.lane());
             if (ol != null) {
                 ol.tx.writing = false;
+                // Nothing follows CONNECTION_CLOSE on a lane and a lane has one batch in a write
+                // at a time: once it was built, this write carried it.
+                ol.tx.closeDone = ol.tx.closeSent && ok;
                 ol.tx.inCall = 0;
                 if (ol.tx.notWritable) ol.tx.stallAt = t;
             }
@@ -316,7 +341,7 @@ public final class Transmitter {
         if (writable) pipes.wake(p);
     }
 
-    /** Writes the first record of the bootstrap pipe (SPEC.md Section 5.1). */
+    /** Writes the first record of the bootstrap pipe. */
     private void writeParams(RecordWriter w, Pipe.OutLane ol) {
         byte[] block = cfg.local().toBytes();
         int n = VarInt.length(FrameType.TRANSPORT_PARAMETERS) + VarInt.length(block.length) + block.length;
@@ -343,7 +368,7 @@ public final class Transmitter {
 
     // ---- control ----
 
-    /** Writes the coalesced control state (SPEC.md Section 9.2) ahead of data. */
+    /** Writes the coalesced control state ahead of data. */
     void writeControl(RecordWriter w, Pipe p) {
         AckEngine ack = port.ack();
         PathLayer path = port.path();
@@ -402,8 +427,7 @@ public final class Transmitter {
     /** Writes the pending control frames of one stream; false when the batch is full. */
     private boolean writeStreamCtl(RecordWriter w, Stream st, PathLayer path, long now) {
         if (ControlQueue.held(st)) {
-            // Not yet known to the peer: only its RESET may go; the rest waits for the opening frame.
-            if (ControlQueue.has(st, ControlQueue.RESET) && !send.writeReset(w, st, path.retainsSent())) return false;
+            // No identifier to name: the bits stay until allocation queues it again.
             ctl.settle(st);
             return true;
         }
@@ -465,11 +489,11 @@ public final class Transmitter {
             return p;
         }
         if (p.off + p.n == sp.q().end() && sp.finWritten() && !sp.finSent() && !sp.reset()) p.fin = true;
-        p.open = p.n == 0 && !p.fin && !st.tab.opened() && st.tab.pinned();
+        p.open = p.n == 0 && !p.fin && !st.tab.opened() && (st.tab.pinned() || st.tab.openWant());
         return p;
     }
 
-    /** Plans a frame of reinjected stream data (MULTIPATH.md 7.4); false when nothing is left to resend. */
+    /** Plans a frame of reinjected stream data; false when nothing is left to resend. */
     private static boolean planResend(Stream st, ChunkPlan p) {
         StreamSend.SendPart sp = st.snd;
         PathStreamState m = sp.mps();
@@ -540,7 +564,7 @@ public final class Transmitter {
                 if (established && !streams.idAvailable(t)) streams.markStreamsBlocked(t);
                 if ((established || earlyActive()) && port.features().preamble() && streams.idAvailable(t)) {
                     if (!streams.preambleAllowed(st, send)) return CHUNK_SKIP;
-                    // The preamble does not fit the session credit: allocate and report the block (SPEC.md 8.4).
+                    // The preamble does not fit the session credit: allocate and report the block.
                     streams.allocId(st);
                     blockedOn(st, false, true);
                 }
@@ -569,10 +593,20 @@ public final class Transmitter {
             fin = false;
             if (off == 0 && sp.preLen() > n) n = sp.preLen();
         }
-        int room = w.dataFit(w.room() - FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) n, true)); // plans a record when shaped
+        int head = FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) n, true);
+        int fits = w.room() - head; // plans a record when shaped
+        if (off == 0 && Math.max(fits, 0) < sp.preLen() && w.waiveCutFor(head, sp.preLen())) {
+            fits = (int) sp.preLen();
+            pipes.shaping().clamp();
+        }
+        int room = w.dataFit(fits);
         if (room <= 0) return CHUNK_FULL;
         if (n > room) {
-            if (off == 0 && sp.preLen() > 0 && room < sp.preLen()) return CHUNK_FULL;
+            if (off == 0 && sp.preLen() > 0 && room < sp.preLen()) {
+                // The preamble goes whole: an open gate lets it through in debt.
+                if (Math.max(fits, 0) < sp.preLen()) return CHUNK_FULL;
+                room = (int) sp.preLen();
+            }
             n = room;
             fin = false;
         }
@@ -603,6 +637,7 @@ public final class Transmitter {
         st.payloadSent(off, n);
         w.spendData(n);
         if (resend) {
+            w.copied(st.tab.id(), off, n);
             if (d != null) mp().resume.resent(d.p(), n);
             PathStreamState m = sp.mps();
             m.ret.resent(off, n, fin);
@@ -620,9 +655,12 @@ public final class Transmitter {
             path.retain(grown);
         }
         send.checkCapacity(st);
+        // The chunk used the last of the peer's stream credit while data waits: the direction is
+        // blocked now, whichever pipe the scheduler offers it next (a binding that moves offers none).
+        if (sp.sent() >= sp.maxData() && sp.sendEnd() > sp.sent()) blockedOn(st, true, conn.room() == 0);
         if (path.retainsSent()) {
             sp.mp();
-        } else if (!early.holdSends()) {
+        } else {
             send.release(st, sp.sent());
             if (fin) send.sendTerminal(st, Stream.SEND_DATA_RECVD);
         }
@@ -632,7 +670,7 @@ public final class Transmitter {
         return CHUNK_SENT;
     }
 
-    /** Queues STREAM_DATA_BLOCKED / DATA_BLOCKED once per limit (SPEC.md Section 8.4). */
+    /** Queues STREAM_DATA_BLOCKED / DATA_BLOCKED once per limit. */
     private void blockedOn(Stream st, boolean stream, boolean connBlocked) {
         if (stream && send.markBlocked(st)) ctl.stream(st, ControlQueue.BLOCKED);
         if (stream) port.path().creditBlocked(st);
@@ -646,6 +684,10 @@ public final class Transmitter {
         private long pos;
         private boolean tpSent;
         private boolean closeSent;
+        /** The batch that carried CONNECTION_CLOSE was written ({@link Session#closeHandedOff}). */
+        private boolean closeDone;
+        /** The carrier's write side is shut (FIN, close_notify or a stream FIN handed to it). */
+        private boolean shutDone;
         private boolean writing;
         private boolean notWritable;
         private long stallAt;
@@ -680,6 +722,14 @@ public final class Transmitter {
 
         boolean closeSent() {
             return closeSent;
+        }
+
+        boolean closeDone() {
+            return closeDone;
+        }
+
+        boolean shutDone() {
+            return shutDone;
         }
 
         boolean writing() {

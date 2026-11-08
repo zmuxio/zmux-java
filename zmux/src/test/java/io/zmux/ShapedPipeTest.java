@@ -27,8 +27,8 @@ class ShapedPipeTest {
         }
     }
 
-    static MultipathConfig multipath() {
-        return MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO);
+    static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b) {
+        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
     }
 
     /** A server configured with a shaper pads its very first record and every one after. */
@@ -45,7 +45,7 @@ class ShapedPipeTest {
                 ShapingTest.transfer(server, client, 5000);
                 var recs = rec.records();
                 assertFalse(recs.isEmpty());
-                for (int[] r : recs) assertEquals(0, r[0] % 64, "record of " + r[0] + " bytes");
+                for (int[] r : recs) assertEquals(0, (io.zmux.carrier.VarInt.length(r[0]) + r[0]) % 64, "record of " + r[0] + " frames bytes");
             }
         }
     }
@@ -54,8 +54,8 @@ class ShapedPipeTest {
     @Test void factoriesSeeTheDeclaredKindOfEveryPipe() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             Seen cs = new Seen(), ss = new Seen();
-            var ccfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath()).shaper(cs).build();
-            var scfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath()).shaper(ss).build();
+            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(cs).build();
+            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(ss).build();
             try (var listener = Zmux.listener(ListenerConfig.of(scfg))) {
                 var first = MemoryPipe.pair(Framing.MESSAGES);
                 listener.handle(first[1].withCarrier(CarrierKind.WEBSOCKET), JoinHint.inBand(TestAddr.peer("peer")), null);
@@ -65,7 +65,7 @@ class ShapedPipeTest {
                     ShapingTest.transfer(server, client, 100);
                     var second = MemoryPipe.pair(Framing.BYTE_STREAM);
                     listener.handle(second[1].withCarrier(CarrierKind.STREAMING), JoinHint.inBand(TestAddr.peer("peer")), null);
-                    ZmuxPipe joined = client.paths().add(second[0].withCarrier(CarrierKind.STREAMING), PipeOptions.defaults());
+                    ZmuxPipe joined = client.addPipe(second[0].withCarrier(CarrierKind.STREAMING), PipeOptions.defaults());
                     assertEquals(CarrierKind.STREAMING, joined.stats().orElseThrow().carrier());
                     cs.await(2); ss.await(2);
                     assertEquals(Set.of(CarrierKind.WEBSOCKET, CarrierKind.STREAMING), cs.kinds());
@@ -75,7 +75,7 @@ class ShapedPipeTest {
                     }
                     Set<CarrierKind> evented = new HashSet<>();
                     while (!evented.contains(CarrierKind.STREAMING)) {
-                        if (client.nextEvent(Duration.ofSeconds(5)) instanceof SessionEvent.OutboundPipeStateChanged c) evented.add(c.carrier());
+                        if (client.nextEvent(Duration.ofSeconds(5)) instanceof SessionEvent.PipeAdded c) evented.add(c.carrier());
                     }
                     assertTrue(evented.contains(CarrierKind.STREAMING), evented.toString());
                 }
@@ -96,7 +96,7 @@ class ShapedPipeTest {
                 cs.await(1); ss.await(1);
                 assertEquals(Collections.singleton(null), cs.kinds());
                 assertEquals(Collections.singleton(null), ss.kinds());
-                assertNull(client.paths().list().getFirst().stats().orElseThrow().carrier());
+                assertNull(client.pipes().getFirst().stats().orElseThrow().carrier());
             }
         }
     }

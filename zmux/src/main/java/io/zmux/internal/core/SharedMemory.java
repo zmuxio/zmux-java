@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * A memory budget shared by several sessions (a listener's, API.md Section 4.4); the core only
+ * A memory budget shared by several sessions (a listener's); the core only
  * charges and reads it. Implementations are thread-safe: the sessions run on different loops.
  */
 public interface SharedMemory {

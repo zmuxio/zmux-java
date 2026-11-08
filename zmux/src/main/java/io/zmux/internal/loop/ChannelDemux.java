@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Routes the channel datagrams of one carrier connection shared by several pipes, such as a
- * QUIC connection, to those pipes by their Pipe Stream ID (EXTENSIONS.md Section 6.8); the
+ * QUIC connection, to those pipes by their Pipe Stream ID; the
  * pipes may belong to several sessions. Used on the connection's loop; {@link #dropped} from
  * any thread.
  */

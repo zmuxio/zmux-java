@@ -25,7 +25,7 @@ class ClassifyTest {
                 // 1. WebSocket opening handshakes.
                 {head("GET", 1, "", -1, "Upgrade", "websocket", "Connection", "Upgrade"), HttpClass.WEBSOCKET},
                 {head("GET", 1, "", -1, "Upgrade", "h2c, WebSocket"), HttpClass.WEBSOCKET},
-                {head("GET", 1, "", -1, "Upgrade", "websocket", "Zmux-Pipe-Join", "x"), HttpClass.WEBSOCKET},
+                {head("GET", 1, "", -1, "Upgrade", "websocket", "Zmux-Pipe-Pair", "x"), HttpClass.WEBSOCKET},
                 {head("GET", 2, "", -1, "Upgrade", "websocket"), HttpClass.NONE},
                 {head("CONNECT", 2, "websocket", -1), HttpClass.WEBSOCKET},
                 {head("CONNECT", 3, "WebSocket", -1), HttpClass.WEBSOCKET},
@@ -38,17 +38,13 @@ class ClassifyTest {
                 {head("CONNECT", 1, "", -1), HttpClass.NONE},
                 // 3. Downlinks.
                 {head("GET", 1, "", -1, "Zmux-Pipe-Pair", "t"), HttpClass.DOWNLINK},
-                {head("GET", 2, "", -1, "zmux-pipe-join", "j"), HttpClass.DOWNLINK},
-                {head("GET", 1, "", -1, "Zmux-Pipe-Join", ""), HttpClass.NONE},
                 // 4. A split bootstrap's uplink, with or without a length.
                 {head("POST", 1, "", -1, "Zmux-Pipe-Pair", "t"), HttpClass.UPLINK},
                 {head("POST", 1, "", 10, "Zmux-Pipe-Pair", "t"), HttpClass.UPLINK},
                 // 5. Exchange requests.
                 {head("POST", 1, "", 0), HttpClass.EXCHANGE},
-                {head("POST", 2, "", 100, "Zmux-Pipe-Join", "j"), HttpClass.EXCHANGE},
                 // 6. Bidirectional carriers, or an uplink with a join.
                 {head("POST", 2, "", -1), HttpClass.BIDIRECTIONAL},
-                {head("POST", 1, "", -1, "Zmux-Pipe-Join", "j"), HttpClass.UPLINK},
                 // 7. Everything else.
                 {head("GET", 1, "", -1), HttpClass.NONE},
                 {head("PUT", 1, "", -1), HttpClass.NONE},

@@ -85,14 +85,14 @@ A server can open a new bidirectional carrier on a connection it already owns:
 var connection = server.connections().getFirst(); // Choose the authenticated peer.
 var carrier = server.openPipe(connection).toCompletableFuture()
         .get(10, TimeUnit.SECONDS);
-var pipe = session.paths().add(carrier, PipeOptions.defaults());
+var pipe = session.addPipe(carrier, PipeOptions.defaults());
 ```
 
-The peer's client must use a bound listener to classify the incoming PIPE_JOIN.
+The peer's client must use a bound listener to classify the incoming Hello.
 `openPipe` rejects connections owned by another endpoint. Completion delivery
 runs outside the native event loop, in order, in the endpoint's completion context. Cancelling the returned future reclaims only
 the new stream, including a stream created after cancellation; it does not close
-the shared QUIC connection. Once a carrier is returned, transfer it to `paths().add`
+the shared QUIC connection. Once a carrier is returned, transfer it to `session.addPipe`
 or close its halves if it will not be used. This is an explicit carrier opener,
 not a connection pool or an independent-path guarantee. Pipes and lanes on one
 connection share its transport failure and receive-window estimate. When joining
@@ -128,9 +128,9 @@ first; the connection's other streams wait and then reach the listener
 without a new admission. A client presents a `Credential` on stream 0 of
 every connection it opens, in 1-RTT data: `connect` takes the session
 configuration's (`ZmuxConfig.credential()`, the bound listener's for a
-listener-backed client), `openPipe` and `QuicPool` take one per call. The
-Netty QUIC handshake offers no TLS exporter here, so a token bound to it
-(`PrefixAuth` with `bindTls`) cannot be presented or verified over QUIC. A source is the
+listener-backed client), `openPipe` and `QuicPool` take one per call. A token
+bound to the connection's TLS exporter (`PrefixAuth` with `bindTls`) works here:
+see [Joins and the exporter](#joins-and-the-exporter). A source is the
 remote IP address, not the QUIC connection ID. Native stream credit bounds
 the number of streams awaiting classification. Listener closure leaves
 already accepted sessions application-owned; endpoint closure closes every
@@ -151,7 +151,7 @@ refuses early data in its TLS configuration.
 
 Enable multipath and configure the same PSK on both peers. Then use
 `endpoint.openPipe(address, serverName, session)` and
-`session.paths().add(pipeIo, PipeOptions.defaults())` to join another QUIC
+`session.addPipe(pipeIo, PipeOptions.defaults())` to join another QUIC
 connection. A failed connection can be replaced while the zmux session and
 its logical streams survive. Connection identity is checked before admitting
 lanes; lane IDs are independent in each direction. Lane refusal resets only
@@ -181,7 +181,7 @@ try (var listener = Zmux.listener(ListenerConfig.of(config));
      var pool = new QuicPool(client, peerAddress, serverName,
              new QuicPool.Limits(8, 2000, Duration.ofMinutes(30)))) {
     var carrier = pool.openPipe().toCompletableFuture().get(10, TimeUnit.SECONDS);
-    session.paths().add(carrier, PipeOptions.defaults());
+    session.addPipe(carrier, PipeOptions.defaults());
 }
 ```
 
@@ -194,11 +194,9 @@ additional connections are opened as that connection fills. Native stream
 creation and application completion run outside the pool lock.
 
 Each pooled connection supplies one non-zero varint62 fate group through its
-`PipeIo` capabilities. In-band `paths().add` uses that group when options leave it
+`PipeIo` capabilities. `addPipe` uses that group when options leave it
 unset; an explicit application group wins, allowing a broader shared path group.
-For an out-of-band reservation, choose a non-zero group before signing (the
-carrier's default or an application override). A reservation signed with group
-zero cannot acquire the pool's default at attach time. Bootstrap pipe 0 keeps its protocol-defined
+Bootstrap pipe 0 keeps its protocol-defined
 group 0. `connections()` returns immutable policy snapshots with the native
 connection, group, active reservation count, total, age and retirement flag.
 `total` conservatively includes failed native opening attempts; it counts a
@@ -250,9 +248,7 @@ accept TLS builders and force `earlyData(false)` on both peers; transport
 a successful handshake. Protocol-level early opening over an established
 carrier remains governed by the zmux configuration.
 
-Netty's supported public API does not provide this adapter with a TLS
-exporter. Use PSK authentication for multipath joins; exporter-bound joins
-are unavailable. Do not use the explicitly insecure mode on untrusted paths.
+Do not use the explicitly insecure mode on untrusted paths.
 
 Standalone clients accept reverse unidirectional lanes. Listener-backed clients
 also route server-initiated joined pipes; servers can open them on their accepted
@@ -260,3 +256,15 @@ connections. The connections of an externally owned endpoint are served with
 `QuicServer.serve` (see [Server](#server)).
 Cross-language interoperability and remote platform validation are separate
 release gates.
+
+## Joins and the exporter
+
+A join on a QUIC stream is Sealed by default. A QUIC stream declares the Bound contract: `RecordMode.BOUND`
+asks for it, with the connection's TLS exporter as the Binding; lanes exist only outside Sealed.
+`QuicClient` and `QuicServer` read the exporter from the TLS key log (`QuicExporter.KEYLOG`), which they install
+on the TLS builder: it replaces a key log of the host's. A host that builds its own codec for
+`QuicServer.serve` passes `QuicExporter.KEYLOG` itself. 0-RTT stays off, so a Hello never travels as early data.
+The key log hands over every secret of the connection, its traffic secrets included: `QuicExporter.KEYLOG` keeps only the
+exporter secret, in memory for the life of the connection's engine, but the lines with the others pass through the heap as
+strings until they are collected.
+

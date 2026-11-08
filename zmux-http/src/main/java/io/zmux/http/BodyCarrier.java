@@ -184,7 +184,12 @@ final class BodyCarrier {
         if (!inClosed) drain();
     }
 
+    /** Bounds a first message, for a carrier of messages (its frames set it). */
+    java.util.function.IntConsumer firstLimit = n -> {};
+
     private final class Reader implements PipeReader {
+        @Override public void limitFirstMessage(int limit) { firstLimit.accept(limit); }
+
         @Override public void start(Sink s) {
             run(() -> {
                 if (inClosed || detached) return;

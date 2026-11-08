@@ -48,7 +48,10 @@ public interface PipeWriter {
         return OptionalLong.empty();
     }
 
-    /** Ends the half gracefully (a graceful end of the pipe). */
+    /**
+     * Ends the half gracefully (a graceful end of the pipe). It runs on a thread of its own and may overlap a
+     * write in progress, whose completion is still reported.
+     */
     void close();
 
     /** Ends the half abortively, so the peer sees a failure; defaults to {@link #close}. */

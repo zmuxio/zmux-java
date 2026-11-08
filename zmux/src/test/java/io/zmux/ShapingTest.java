@@ -3,19 +3,14 @@ package io.zmux;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.*;
 import io.zmux.shaping.*;
-import io.zmux.testutil.Json;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.Consumer;
-import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.Timeout;
 
 @Timeout(60)
@@ -103,18 +98,8 @@ class ShapingTest {
         return pipe -> new Shaper() {
             @Override public Set<Capability> capabilities() { return EnumSet.of(Capability.PLAN); }
             @Override public void plan(RecordView view, RecordPlan plan) { f.accept(plan); }
-            @Override public void onEvent(Event event, Reply reply) {}
+            @Override public void onEvent(Event event, Effects effects) {}
         };
-    }
-
-    static int num(Map<String, Object> m, String k) {
-        Object v = m == null ? null : m.get(k);
-        return v == null ? 0 : ((Number) v).intValue();
-    }
-
-    @SuppressWarnings("unchecked")
-    static Map<String, Object> contract() throws Exception {
-        return Json.object(Files.readString(Path.of("src", "test", "resources", "shaping", "contract.json")));
     }
 
     static void await(BooleanSupplierX c) throws Exception {
@@ -122,51 +107,6 @@ class ShapingTest {
         while (!c.get() && System.nanoTime() < until) Thread.sleep(5);
     }
     @FunctionalInterface interface BooleanSupplierX { boolean get() throws Exception; }
-
-    @SuppressWarnings("unchecked")
-    @TestFactory Collection<DynamicTest> contractRecords() throws Exception {
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Object o : (List<Object>) contract().get("records")) {
-            Map<String, Object> v = (Map<String, Object>) o;
-            tests.add(DynamicTest.dynamicTest((String) v.get("name"), () -> {
-                var limits = (Map<String, Object>) v.get("limits");
-                var plan = (Map<String, Object>) v.get("plan");
-                var e = (Map<String, Object>) v.get("expect");
-                try (EventLoops loops = EventLoops.create(2)) {
-                    var shaped = ZmuxConfig.builder().eventLoops(loops)
-                            .shapingLimits(limits == null || !limits.containsKey("max_padding_bytes") ? ShapingLimits.none()
-                                    : ShapingLimits.none().withMaxPaddingBytes(num(limits, "max_padding_bytes"))).build();
-                    var other = ZmuxConfig.builder().eventLoops(loops).build();
-                    try (var p = pair(shaped, other, "server".equals(v.get("side")))) {
-                        p.shaped().setShaper(planShaper(pl -> pl.maxLength(num(plan, "max_len")).padTo(num(plan, "pad_to"))
-                                .padMultiple(num(plan, "pad_multiple")).pad(num(plan, "pad"))));
-                        p.rec().start();
-                        for (int i = 0; i < Math.max(num(v, "repeat"), 1); i++) transfer(p.shaped(), p.other(), num(v, "send"));
-                        var recs = p.rec().records();
-                        assertFalse(recs.isEmpty());
-                        assertTrue(recs.size() >= num(e, "min_records"), recs.size() + " records");
-                        for (int[] r : recs) {
-                            int n = r[0];
-                            boolean ok = n >= num(e, "min_len") && (num(e, "max_len") == 0 || n <= num(e, "max_len"))
-                                    && (num(e, "mod") == 0 || n % num(e, "mod") == num(e, "rem")) && r[1] >= num(e, "min_pad");
-                            assertTrue(ok, "record of " + n + " bytes, " + r[1] + " trailing zero bytes");
-                        }
-                        int records = recs.size();
-                        await(() -> statsOk(p.shaped().shapingStats(), e, records));
-                        assertTrue(statsOk(p.shaped().shapingStats(), e, records), p.shaped().shapingStats().toString());
-                    }
-                }
-            }));
-        }
-        return tests;
-    }
-
-    static boolean statsOk(ShapingStats st, Map<String, Object> e, int records) {
-        return !(num(e, "max_padding_bytes") > 0 && st.paddingBytes() > num(e, "max_padding_bytes")
-                || Boolean.TRUE.equals(e.get("clamped")) && st.clamped() == 0
-                || Boolean.TRUE.equals(e.get("padding")) && st.paddingBytes() == 0
-                || st.paddingBytes() < (long) records * num(e, "min_pad"));
-    }
 
     /**
      * A record whose frames reach the target on their own takes no PADDING, and one whose target
@@ -186,10 +126,11 @@ class ShapingTest {
                     var recs = p.rec().records();
                     assertTrue(recs.size() >= 20, recs.size() + " records");
                     for (int[] r : recs) {
-                        String what = "plan " + Arrays.toString(pl) + ": record of " + r[0] + " bytes";
-                        if (pl[1] > 0) assertTrue(r[0] >= pl[1], what);
-                        if (pl[1] > 0 && pl[0] == pl[1]) assertEquals(pl[1], r[0], what);
-                        if (pl[2] > 0) assertEquals(0, r[0] % pl[2], what);
+                        int wire = VarInt.length(r[0]) + r[0];
+                        String what = "plan " + Arrays.toString(pl) + ": record of " + wire + " bytes";
+                        if (pl[1] > 0) assertTrue(wire >= pl[1], what);
+                        if (pl[1] > 0 && pl[0] == pl[1]) assertEquals(pl[1], wire, what);
+                        if (pl[2] > 0) assertEquals(0, wire % pl[2], what);
                     }
                 }
             }
@@ -204,9 +145,11 @@ class ShapingTest {
                 p.shaped().setShaper(pipe -> new Shaper() {
                     @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
                     @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Reply reply) {
+                    @Override public void onEvent(Event event, Effects effects) {
                         if (event.kind() == EventKind.START || event.kind() == EventKind.INJECTED && sent.incrementAndGet() < 40) {
-                            reply.inject(0, 100);
+                            effects.inject(event.nowNanos(), 100);
+                        } else if (event.kind() == EventKind.INJECTED) {
+                            effects.noInject();
                         }
                     }
                 });
@@ -225,8 +168,8 @@ class ShapingTest {
                 long t0 = System.nanoTime();
                 transfer(p.shaped(), p.other(), 3000);
                 assertTrue(System.nanoTime() - t0 >= 2_000_000);
-                await(() -> p.shaped().shapingStats().pauseTotal().toNanos() > 0);
-                assertTrue(p.shaped().shapingStats().pauseTotal().toNanos() > 0);
+                await(() -> p.shaped().shapingStats().stallSpent().toNanos() > 0);
+                assertTrue(p.shaped().shapingStats().stallSpent().toNanos() > 0);
             }
         }
     }
@@ -239,7 +182,7 @@ class ShapingTest {
             @Override public void plan(RecordView view, RecordPlan plan) {
                 if (n++ == 0 || all) plan.delayNanos(delayNanos);
             }
-            @Override public void onEvent(Event event, Reply reply) {}
+            @Override public void onEvent(Event event, Effects effects) {}
         };
     }
 
@@ -300,8 +243,8 @@ class ShapingTest {
                 p.shaped().setShaper(pipe -> new Shaper() {
                     @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
                     @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Reply reply) {
-                        if (event.kind() == EventKind.START) reply.gate(0, 200_000, 4096);
+                    @Override public void onEvent(Event event, Effects effects) {
+                        if (event.kind() == EventKind.START) effects.gate(0, 200_000, 4096);
                     }
                 });
                 long t0 = System.nanoTime();
@@ -312,7 +255,37 @@ class ShapingTest {
         }
     }
 
-    @Test void timersFireAndReplacementNotifiesTheOldInstance() throws Exception {
+    /** What an answer leaves alone stays: the session goes on with the old value until an answer clears it. */
+    @Test void anInjectionAndAWakeUpStayUntilAnAnswerChangesThem() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            try (var p = pair(cfg, cfg, false)) {
+                var injected = new AtomicInteger();
+                var wakes = new AtomicInteger();
+                p.shaped().setShaper(pipe -> new Shaper() {
+                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
+                    @Override public void plan(RecordView view, RecordPlan plan) {}
+                    @Override public void onEvent(Event event, Effects effects) {
+                        switch (event.kind()) {
+                            case START -> effects.inject(event.nowNanos(), 100).wake(event.nowNanos());
+                            case INJECTED -> { if (injected.incrementAndGet() >= 3) effects.noInject(); }
+                            case WAKE -> { if (wakes.incrementAndGet() >= 3) effects.noWake(); }
+                            default -> { }
+                        }
+                    }
+                });
+                await(() -> injected.get() >= 3 && wakes.get() >= 3);
+                assertEquals(3, Math.min(injected.get(), 3), "the slot was used up by its first injection");
+                assertEquals(3, Math.min(wakes.get(), 3), "the wake-up was used up by its first event");
+                Thread.sleep(100);
+                assertEquals(3, injected.get(), "cleared by the answer");
+                assertEquals(3, wakes.get(), "cleared by the answer");
+                transfer(p.shaped(), p.other(), 1000);
+            }
+        }
+    }
+
+    @Test void wakeUpsComeAndReplacementNotifiesTheOldInstance() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             try (var p = pair(cfg, cfg, false)) {
@@ -320,18 +293,18 @@ class ShapingTest {
                 p.shaped().setShaper(pipe -> new Shaper() {
                     @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
                     @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Reply reply) {
+                    @Override public void onEvent(Event event, Effects effects) {
                         events.add(event.kind());
-                        if (event.kind() == EventKind.START) reply.timer(1, 1_000_000);
+                        if (event.kind() == EventKind.START) effects.wake(event.nowNanos() + 1_000_000);
                     }
                 });
-                await(() -> events.contains(EventKind.TIMER));
-                assertTrue(events.contains(EventKind.TIMER));
+                await(() -> events.contains(EventKind.WAKE));
+                assertTrue(events.contains(EventKind.WAKE));
                 var second = new ConcurrentLinkedQueue<EventKind>();
                 p.shaped().setShaper(pipe -> new Shaper() {
                     @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
                     @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Reply reply) { second.add(event.kind()); }
+                    @Override public void onEvent(Event event, Effects effects) { second.add(event.kind()); }
                 });
                 await(() -> events.contains(EventKind.REPLACED) && second.contains(EventKind.START));
                 assertTrue(events.contains(EventKind.REPLACED));

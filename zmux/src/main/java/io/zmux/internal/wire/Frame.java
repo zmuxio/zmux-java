@@ -48,25 +48,13 @@ public final class Frame {
     /** PIPE_ACK entries, validated: [entriesPos, entriesEnd). */
     public int entriesPos;
     public int entriesEnd;
-    /** PIPE_JOIN fields. */
-    public final Join join = new Join();
-
-    /** Decoded PIPE_JOIN (MULTIPATH.md Section 5.1). */
-    public static final class Join {
-        public int locatorPos;
-        public int locatorLen;
-        public long pipeId;
-        /** 0 up, 1 down, 2 bidirectional. */
-        public int direction;
-        public boolean carrierBound;
-        public boolean standby;
-        public long fateGroup;
-        public long priority;
-        public int tokenPos;
-        /** Bytes from the frame start through Priority: the MAC input. */
-        public int macLength;
-    }
-
+    /** SESSION_EPOCH: the phase (0 offer, 1 answer), the epoch in {@link #value}, the share in data, and the Locator. */
+    public int phase;
+    public int locatorPos;
+    public int locatorLen;
+    /** SESSION_EPOCH: where its body, from Phase through Locator, starts and ends. */
+    public int bodyPos;
+    public int bodyEnd;
     void reset() {
         kind = null;
         type = 0;
@@ -76,6 +64,7 @@ public final class Frame {
         errorFrameType = maxBidi = maxUni = pipeId = lane = seq = status = priority = 0;
         urgency = 0;
         laneKeyPos = count = entriesPos = entriesEnd = 0;
+        phase = locatorPos = locatorLen = bodyPos = bodyEnd = 0;
     }
 
     /** A copy of the data range. */
@@ -86,6 +75,20 @@ public final class Frame {
     }
 
     /** A read-only view of the data range. */
+    /** The Locator of a SESSION_EPOCH; empty keeps the sender's current one. */
+    public byte[] locatorBytes() {
+        byte[] a = new byte[locatorLen];
+        src.get(locatorPos, a);
+        return a;
+    }
+
+    /** The body of a SESSION_EPOCH, from Phase through Locator. */
+    public byte[] bodyBytes() {
+        byte[] a = new byte[bodyEnd - bodyPos];
+        src.get(bodyPos, a);
+        return a;
+    }
+
     public ByteBuffer data() {
         return src.slice(dataPos, dataLen).asReadOnlyBuffer();
     }

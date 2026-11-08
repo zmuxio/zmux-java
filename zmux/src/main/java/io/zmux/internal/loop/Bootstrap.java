@@ -4,7 +4,7 @@ import io.zmux.carrier.PipeIo;
 import io.zmux.internal.core.CoreConfig;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.internal.wire.JoinCrypto;
+import io.zmux.internal.join.Kdf;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.CompletableFuture;
 import javax.net.ssl.SSLEngine;
@@ -104,7 +104,7 @@ public final class Bootstrap {
                 Callbacks.EXECUTOR.execute(() -> f.complete(new Started(d, alpn)));
             } catch (RuntimeException e) {
                 unregister.run();
-                if (driver != null) driver.failInternal(e);
+                if (driver != null) driver.failInternalNow(e);
                 c.close(e);
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(e));
             }
@@ -117,6 +117,62 @@ public final class Bootstrap {
         return f;
     }
 
+    /**
+     * Closes a pipe input handed to zmux that never became a carrier: zmux owns it whatever the
+     * outcome, so every failure before it is adopted closes both halves, each once.
+     */
+    public static void discard(PipeIo io, Throwable cause) {
+        if (io == null) return;
+        try { if (io.reader() != null) io.reader().close(); }
+        catch (RuntimeException ignored) { /* Closing anyway. */ }
+        finally {
+            try { if (io.writer() != null) io.writer().abort(cause); } catch (RuntimeException ignored) { /* Closed anyway. */ }
+        }
+    }
+
+    /**
+     * cfg checked against its first pipe c, before any byte is written, and reading the session
+     * exporter late from c, the one source: when the peer's parameters arrive, through c, so
+     * that whatever connection serves c by then is the one read. A secure first pipe is the
+     * session secret's source and takes no other; multipath or resume without any source, and
+     * the exporter on a carrier without one, are configuration errors. On an error c is closed.
+     */
+    static CoreConfig withExporter(CoreConfig cfg, Transport c) {
+        io.zmux.RecordMode r = c.firstPipeMode();
+        io.zmux.internal.join.Mode first = r == null || r == io.zmux.RecordMode.UNMANAGED ? null : io.zmux.internal.join.Mode.of(r);
+        TransportParams l = cfg.local();
+        if (first != null) {
+            if (l.secretFlags != 0) {
+                c.close(null);
+                throw new IllegalArgumentException("a pre-shared key or the exporter in PipeAuth on a secure first pipe, whose Establish is the session secret's only source: leave PipeAuth unset or with withEndToEnd() only");
+            }
+            l.secretFlags = TransportParams.SECRET_EXPORTER;
+            return cfg.toBuilder().secureFirstPipe(first).exporter(() -> c.export(Kdf.EXPORTER_SESSION, null, 32)).build();
+        }
+        if (l.has(TransportParams.MULTIPATH) && l.secretFlags == 0) {
+            c.close(null);
+            throw new IllegalArgumentException("multipath (maxPipes above 1) or resume without a secret source: set PipeAuth with a pre-shared key"
+                    + " (static or deferred) or the exporter, or use the secure carrier for the first pipe; withEndToEnd() alone is no source");
+        }
+        if ((l.secretFlags & TransportParams.SECRET_EXPORTER) == 0) return cfg;
+        if (!c.hasExporter()) {
+            c.close(null);
+            throw new IllegalArgumentException("PipeAuth.exporter() on a carrier without an exporter");
+        }
+        return cfg.toBuilder().exporter(() -> c.export(Kdf.EXPORTER_SESSION, null, 32)).build();
+    }
+
+    /** Runs the TLS handshake of engine over ch; f gets the connection as a pipe input. */
+    public static void tlsPipe(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout, boolean secure, CompletableFuture<PipeIo> f) {
+        TlsTransport.handshake(loop, ch, engine, timeout, secure, (c, err) -> {
+            if (err != null) Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(err));
+            else {
+                PipeIo io = c.asPipe();
+                Callbacks.EXECUTOR.execute(() -> f.complete(io));
+            }
+        });
+    }
+
     /** A session over a connected TCP or Unix-domain socket. */
     public static CompletableFuture<Started> socket(EventLoop loop, CoreConfig cfg, SocketChannel ch, DriverHooks hooks) {
         return socket(loop, cfg, ch, hooks, null);
@@ -124,7 +180,8 @@ public final class Bootstrap {
 
     public static CompletableFuture<Started> socket(EventLoop loop, CoreConfig cfg, SocketChannel ch, DriverHooks hooks,
                                                    java.util.function.Function<SessionRuntime, Runnable> registration) {
-        return start(loop, cfg, new SocketTransport(loop, ch), "", hooks, registration);
+        SocketTransport c = new SocketTransport(loop, ch);
+        return start(loop, withExporter(cfg, c), c, "", hooks, registration);
     }
 
     /** A session over a pipe input. */
@@ -142,15 +199,19 @@ public final class Bootstrap {
                                                      java.util.function.Function<SessionRuntime, Runnable> registration) {
         Transport carrier = Transport.claim(io);
         if (carrier == null) carrier = new ExternalTransport(loop.get(), io);
-        if ((cfg.local().secretFlags & TransportParams.SECRET_EXPORTER) != 0) {
-            cfg = cfg.toBuilder().exporter(carrier.export(JoinCrypto.EXPORTER_SESSION, null, carrier.info().exporterLength())).build();
+        if (io.capabilities().seal() != null) carrier = new SealedTransport(carrier, io.capabilities().seal(), io.capabilities().exporter());
+        try {
+            cfg = withExporter(cfg, carrier);
+        } catch (IllegalArgumentException invalid) {
+            // The carrier owns io now and was closed: the caller must not close io again.
+            return CompletableFuture.failedFuture(invalid);
         }
         return start(carrier.loop(), cfg, carrier, io.capabilities().applicationProtocol(), hooks, registration);
     }
 
     /**
      * Runs the TLS handshake of engine over ch, then a session over it. A client without a
-     * negotiated application protocol closes before sending any record (SPEC.md Section 6.2).
+     * negotiated application protocol closes before sending any record.
      */
     public static CompletableFuture<Started> tls(EventLoop loop, CoreConfig cfg, SocketChannel ch, SSLEngine engine,
                                                  DriverHooks hooks) {
@@ -166,8 +227,15 @@ public final class Bootstrap {
     public static CompletableFuture<Started> tls(EventLoop loop, CoreConfig cfg, SocketChannel ch, SSLEngine engine,
                                                 DriverHooks hooks, java.util.function.Function<SessionRuntime, Runnable> registration,
                                                 Presenter presenter) {
+        return tls(loop, cfg, ch, engine, false, hooks, registration, presenter);
+    }
+
+    /** As above; secure: the host declares the Bound contract for this connection. */
+    public static CompletableFuture<Started> tls(EventLoop loop, CoreConfig cfg, SocketChannel ch, SSLEngine engine, boolean secure,
+                                                DriverHooks hooks, java.util.function.Function<SessionRuntime, Runnable> registration,
+                                                Presenter presenter) {
         CompletableFuture<Started> f = new CompletableFuture<>();
-        TlsTransport.handshake(loop, ch, engine, cfg.handshakeTimeout(), (c, err) -> {
+        TlsTransport.handshake(loop, ch, engine, cfg.handshakeTimeout(), secure, (c, err) -> {
             if (err != null) {
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(err));
                 return;
@@ -180,8 +248,13 @@ public final class Bootstrap {
                         new javax.net.ssl.SSLHandshakeException("no application protocol negotiated")));
                 return;
             }
-            CoreConfig sc = (cfg.local().secretFlags & TransportParams.SECRET_EXPORTER) == 0 ? cfg
-                    : cfg.toBuilder().exporter(c.export(JoinCrypto.EXPORTER_SESSION, null, 32)).build();
+            CoreConfig sc;
+            try {
+                sc = withExporter(cfg, c);
+            } catch (IllegalArgumentException invalid) {
+                Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(invalid));
+                return;
+            }
             start(loop, sc, c, alpn, hooks, registration,
                     presenter == null ? null : () -> presenter.prefix(alpn, c.serverName(), c::export)).whenComplete((s, e) -> {
                 if (e != null) f.completeExceptionally(e);

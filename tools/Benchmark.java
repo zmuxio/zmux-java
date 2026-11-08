@@ -26,10 +26,10 @@ public final class Benchmark {
     private static void control(ZmuxSession session) throws Exception {
         int warmup = quick ? 2000 : 20000;
         int count = quick ? 5000 : 50000;
-        for (int i = 0; i < warmup; i++) session.paths().joinReady();
+        for (int i = 0; i < warmup; i++) session.joinReady();
         long[] ns = new long[count];
         for (int i = 0; i < count; i++) {
-            long start = System.nanoTime(); session.paths().joinReady(); ns[i] = System.nanoTime() - start;
+            long start = System.nanoTime(); session.joinReady(); ns[i] = System.nanoTime() - start;
         }
         Arrays.sort(ns);
         samples.put("control_samples", count);
@@ -130,18 +130,18 @@ public final class Benchmark {
     }
     private static void loadedCase(EventLoops loops, ExecutorService workers, int pipes,
                                    Scheduler scheduler, int round, boolean reverse) throws Exception {
-        var builder = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withScheduler(scheduler));
-        if (pipes > 1) builder.multipath(MultipathConfig.of(pipes, PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO));
+        var builder = ZmuxConfig.builder().eventLoops(loops).scheduler(scheduler);
+        if (pipes > 1) builder.maxPipes(pipes).pipeAuth(PipeAuth.psk(new byte[32])).probation(Duration.ZERO);
         var config = builder.build();
         String key = "rr_tcp" + pipes + "_" + scheduler + (reverse ? "_reverse" : "_forward") + "_round" + round;
         System.out.println("BENCH_PROGRESS," + key);
         try (var listener = Zmux.listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), ListenerConfig.of(config));
              var connected = new Pair(Zmux.connect(listener.localAddress(), config), listener.accept(Duration.ofSeconds(10)))) {
             var pair = reverse ? new Pair(connected.server, connected.client) : connected;
-            for (int i = 1; i < pipes; i++) connected.client.paths().add(listener.localAddress(), PipeOptions.defaults());
+            for (int i = 1; i < pipes; i++) connected.client.addPipe(listener.localAddress(), PipeOptions.defaults());
             long readyDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (pipes > 1 && (pair.client.paths().stats().stream().filter(p -> p.sending().eligible()).count() != pipes
-                    || pair.server.paths().stats().stream().filter(p -> p.sending().eligible()).count() != pipes)) {
+            while (pipes > 1 && (pair.client.pipeStats().stream().filter(p -> p.eligible()).count() != pipes
+                    || pair.server.pipeStats().stream().filter(p -> p.eligible()).count() != pipes)) {
                 if (System.nanoTime() >= readyDeadline) throw new AssertionError("pipes not eligible");
                 Thread.sleep(1);
             }
@@ -178,17 +178,17 @@ public final class Benchmark {
             try {
                 if (!receiving.await(10, TimeUnit.SECONDS)) throw new AssertionError("bulk never became active");
                 roundTrips(pair, workers, warmup);
-                var before = pair.client.paths().stats();
+                var before = pair.client.pipeStats();
                 long bulkBefore = progress.get();
                 long start = System.nanoTime();
                 latencySamples(key + "_loaded", roundTrips(pair, workers, count));
                 long elapsed = System.nanoTime() - start;
-                var after = pair.client.paths().stats();
+                var after = pair.client.pipeStats();
                 long bytes = 0;
                 for (var a : after) {
-                    var b = before.stream().filter(x -> x.id() == a.id()).findFirst().orElseThrow();
-                    long delta = a.traffic().bytesSent() - b.traffic().bytesSent(); bytes += delta;
-                    samples.put(key + "_pipe" + a.id() + "_sent_bytes", delta);
+                    var b = before.stream().filter(x -> x.pipe() == a.pipe()).findFirst().orElseThrow();
+                    long delta = a.bytesSent() - b.bytesSent(); bytes += delta;
+                    samples.put(key + "_pipe" + a.pipe() + "_sent_bytes", delta);
                 }
                 long bulkDelta = progress.get() - bulkBefore;
                 if (bulkDelta <= 0) throw new AssertionError("bulk made no progress");
@@ -234,7 +234,7 @@ public final class Benchmark {
     private static void footprint(EventLoops loops, ExecutorService workers, boolean multipath) throws Exception {
         int count = quick ? 20 : 200;
         var builder = ZmuxConfig.builder().eventLoops(loops);
-        if (multipath) builder.multipath(MultipathConfig.of(8, PipeAuth.psk(new byte[32])));
+        if (multipath) builder.maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]));
         var config = builder.build();
         warmFootprint(loops, workers, config);
         String prefix = multipath ? "mp_bootstrap_" : "";

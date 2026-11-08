@@ -22,14 +22,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * The inbound transform and the admission value (API.md 4.4, 4.7), the unknown-join answer
- * (MULTIPATH.md 5.4), the write overhead hint and the pipe loss statistics (API.md 4.1, 7.2).
+ * The inbound transform and the admission value, the silence towards an unknown
+ * locator, the write overhead hint and the pipe loss statistics.
  */
 @Timeout(60)
 class InboundTransformTest {
     static ZmuxConfig.Builder builder(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO));
+                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
     }
 
     static ZmuxConfig config(EventLoops loops) { return builder(loops).build(); }
@@ -81,12 +81,10 @@ class InboundTransformTest {
                     assertNotNull(p);
                     assertEquals(29, p.writeOverhead(), "the transform's overhead reaches the shaper factory");
                     // A join carries its own value; zmux does not compare it with the session's.
-                    try (var r = c.paths().reserve(PipeOptions.builder().probation(Duration.ZERO).build())) {
-                        var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                        l.handle(pair[1], JoinHint.join(r.header(), TestAddr.peer("c")));
-                        r.attach(pair[0]);
-                        ListenerEntryTest.await(() -> l.stats().joins() == 1);
-                    }
+                    var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
+                    c.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build());
+                    ListenerEntryTest.await(() -> l.stats().joins() == 1);
                     assertEquals(Optional.of("tenant-7"), seen.poll(5, TimeUnit.SECONDS).admitted());
                     ListenerEntryTest.await(() -> s.pipes().size() >= 2);
                     ZmuxPipe joined = s.pipes().stream().filter(x -> x.id() != 0).findFirst().orElseThrow();
@@ -113,7 +111,7 @@ class InboundTransformTest {
 
     @Test void aTransformThatChangesTheFramingOrNeverCompletesIsRefused() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = builder(loops).timeouts(Timeouts.defaults().withHandshake(Duration.ofMillis(300))).build();
+            var cfg = builder(loops).handshakeTimeout(Duration.ofMillis(300)).build();
             var calls = new java.util.concurrent.atomic.AtomicInteger();
             var cancelled = new CompletableFuture<Void>();
             InboundTransform t = (carrier, ctx) -> {
@@ -135,7 +133,7 @@ class InboundTransformTest {
         }
     }
 
-    @Test void theIdentityTransformRunsForEveryCarrierOfASplitBootstrap() throws Exception {
+    @Test void theTransformRunsOnceOnAPairedSplitBootstrap() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var hints = new LinkedBlockingQueue<JoinHint>();
             InboundTransform t = (carrier, ctx) -> { hints.add(ctx.hint()); return CompletableFuture.completedFuture(carrier); };
@@ -152,93 +150,25 @@ class InboundTransformTest {
                 var client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null),
                         new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null));
                 try (var c = Zmux.open(client, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
-                    assertEquals(2, hints.size());
+                    assertEquals(1, hints.size());
                     assertEquals(Optional.of("half-2"), s.admitted());
                 }
             }
         }
     }
 
-    @Test void anUnknownJoinIsAnsweredOnlyWhenTheListenerSaysSo() throws Exception {
+    @Test void anUnknownLocatorGetsNoAnswerAndFailsOnlyThatJoin() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var home = Zmux.listener(ListenerConfig.of(cfg));
-                 var quiet = Zmux.listener(ListenerConfig.of(cfg));
-                 var answering = Zmux.listener(ListenerConfig.builder().session(cfg).answerUnknownJoins(true).build())) {
-                var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                home.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
-                try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5))) {
-                    for (var l : List.of(quiet, answering)) {
-                        try (var r = c.paths().reserve(PipeOptions.builder().probation(Duration.ZERO).build())) {
-                            var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                            var got = new ByteArrayOutputStream();
-                            var ended = new CompletableFuture<Void>();
-                            // Read what the listener writes in place of the joiner.
-                            pair[0].reader().start(new PipeReader.Sink() {
-                                @Override public void onData(ByteBuffer d, Runnable release) {
-                                    synchronized (got) { while (d.hasRemaining()) got.write(d.get()); } release.run();
-                                }
-                                @Override public void onEnd() { ended.complete(null); }
-                                @Override public void onError(Throwable e) { ended.complete(null); }
-                            });
-                            l.handle(pair[1], JoinHint.join(r.header(), TestAddr.peer("c")));
-                            ended.get(5, TimeUnit.SECONDS);
-                            ListenerEntryTest.await(() -> l.stats().rejected() == 1);
-                            byte[] answer = got.toByteArray();
-                            if (l == quiet) assertEquals(0, answer.length);
-                            else assertArrayEquals(new byte[] {0x07, 0x1c, (byte) 0x8f, 0x05, (byte) 0xf7, 0x4e, 0x00, 0x00}, answer);
-                            pair[0].writer().close();
-                        }
-                    }
-                    assertNotNull(c.info(), "the session lives on");
-                }
-            }
-        }
-    }
-
-    @Test void anUnknownJoinOnACarrierWithoutASendingHalfGetsNoAnswer() throws Exception {
-        try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = config(loops);
-            try (var home = Zmux.listener(ListenerConfig.of(cfg));
-                 var answering = Zmux.listener(ListenerConfig.builder().session(cfg).answerUnknownJoins(true).build())) {
-                var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                home.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
-                try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5));
-                     var r = c.paths().reserve(PipeOptions.builder().probation(Duration.ZERO).build())) {
-                    // An input-only carrier, as an uplink request: the answer would have nowhere to go.
-                    var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    var closed = new CompletableFuture<Void>();
-                    PipeReader in = pair[1].reader();
-                    PipeReader watched = new PipeReader() {
-                        @Override public void start(Sink sink) { in.start(sink); }
-                        @Override public void close() { closed.complete(null); in.close(); }
-                    };
-                    answering.handle(new PipeIo(watched, null, Framing.BYTE_STREAM, "uplink", null), JoinHint.join(r.header(), TestAddr.peer("c")));
-                    closed.get(5, TimeUnit.SECONDS);
-                    ListenerEntryTest.await(() -> answering.stats().rejected() == 1);
-                    pair[0].writer().close();
-                    assertNotNull(c.info(), "the session lives on");
-                }
-            }
-        }
-    }
-
-    @Test void aJoinAnsweredWithResumeFailedFailsOnlyThatJoinAndBacksOff() throws Exception {
-        try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = config(loops);
-            try (var home = Zmux.listener(ListenerConfig.of(cfg));
-                 var other = Zmux.listener(ListenerConfig.builder().session(cfg).answerUnknownJoins(true).build())) {
+            try (var home = Zmux.listener(ListenerConfig.of(cfg)); var other = Zmux.listener(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 home.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5))) {
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     other.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
-                    assertThrows(Exception.class, () -> c.paths().add(pair[0], PipeOptions.builder().probation(Duration.ZERO).build()));
-                    ListenerEntryTest.await(() -> c.stats().joinRefusals() == 1);
-                    var st = c.openStream();
-                    st.write(new byte[] {1});
-                    st.finish();
-                    assertArrayEquals(new byte[] {1}, readAll(s.acceptStream()));
+                    assertThrows(Exception.class, () -> c.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build()));
+                    ListenerEntryTest.await(() -> other.stats().rejected() == 1);
+                    assertNotNull(c.info(), "the session lives on");
                 }
             }
         }
@@ -257,14 +187,14 @@ class InboundTransformTest {
                     st.finish();
                     readAll(s.acceptStream());
                     ListenerEntryTest.await(() -> {
-                        try { return c.paths().stats().getFirst().bytesRetransmitted().isPresent(); } catch (Exception e) { return false; }
+                        try { return c.pipeStats().getFirst().bytesRetransmitted().isPresent(); } catch (Exception e) { return false; }
                     });
-                    var p = c.paths().stats().getFirst();
+                    var p = c.pipeStats().getFirst();
                     assertEquals(1234, p.bytesRetransmitted().getAsLong());
                     assertEquals(OptionalLong.of(0), p.bytesLost(), "nothing lost before a failure");
                     assertEquals(OptionalLong.of(0), p.recordsLost());
                     assertTrue(p.lossRate().isEmpty(), "no sample a second apart yet");
-                    assertTrue(s.paths().stats().getFirst().bytesRetransmitted().isEmpty(), "the adapter reports none");
+                    assertTrue(s.pipeStats().getFirst().bytesRetransmitted().isEmpty(), "the adapter reports none");
                 }
             }
         }

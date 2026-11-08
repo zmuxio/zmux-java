@@ -12,8 +12,7 @@ import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 
 /**
- * Splits the bytes of inbound lanes into records and records into frames (SPEC.md
- * Sections 3 and 5): record sizes, the first record of the bootstrap pipe, the PIPE_LANE
+ * Splits the bytes of inbound lanes into records and records into frames: record sizes, the first record of the bootstrap pipe, the PIPE_LANE
  * record of a lane, gating, and the per-lane positions. Decoded frames go to the session
  * through {@link Port#dispatch}; owned by the session's loop.
  */
@@ -34,12 +33,10 @@ final class RecordReceiver {
 
         /**
          * Whether a CONNECTION_CLOSE leading the record would answer an unconfirmed local join
-         * of p (MULTIPATH.md 5.4 step 3): the peer holds no session for its locator.
+         * of p: the peer holds no session for its locator.
          */
-        boolean unconfirmedJoin(Pipe p);
 
-        /** The peer answered an unconfirmed local join of p with CONNECTION_CLOSE. */
-        void joinAnswered(Pipe p, boolean application, long code, String reason);
+    
 
         /** A PIPE_ACK while the session waits for its lanes before CONNECTION_CLOSE. */
         void closingAck(Frame f);
@@ -119,7 +116,7 @@ final class RecordReceiver {
         return consumed;
     }
 
-    /** Processes one message of a message-framed carrier (SPEC.md Section 3.4). */
+    /** Processes one message of a message-framed carrier. */
     void receiveMessage(Pipe p, long lane, ReadBuf buf, ByteBuffer data, int pos, int limit, long now) {
         if (p == null || p.in() == null || closing()) return;
         Pipe.InLane il = p.in().lane(lane);
@@ -142,7 +139,7 @@ final class RecordReceiver {
         record(p, il, buf, data, pos, limit, VarInt.length(len) + len, now);
     }
 
-    /** Validates the prefix of a bootstrap pipe's first record byte by byte (SPEC.md Section 6.2). */
+    /** Validates the prefix of a bootstrap pipe's first record byte by byte. */
     private WireException checkFirstRecord(ByteBuffer b, int pos, int limit) {
         if (pos >= limit) return null;
         long size = VarInt.get(b, pos, limit);
@@ -159,29 +156,10 @@ final class RecordReceiver {
         return null;
     }
 
-    /** Applies every frame of one complete record, then counts it into the lane's position (MULTIPATH.md 6.1). */
+    /** Applies every frame of one complete record, then counts it into the lane's position. */
     private void record(Pipe p, Pipe.InLane il, ReadBuf buf, ByteBuffer data, int pos, int end, long posBytes, long now) {
         rxPipe = p;
         int frames = end - pos;
-        if (il.rx.discardTp) {
-            il.rx.discardTp = false;
-            boolean tp = end - pos >= 8;
-            for (int i = 0; tp && i < 8; i++) tp = data.get(pos + i) == Records.TRANSPORT_PARAMETERS_PREFIX[i];
-            // A shared listener's parameters leading a join carrier: discarded, not counted (MULTIPATH.md 5.7 step 3).
-            if (tp) return;
-        }
-        if (il.lane == 0 && port.unconfirmedJoin(p)) {
-            Frame c = frame;
-            try {
-                decoder.decode(data, pos, end, c);
-                if (c.kind == FrameKind.CONNECTION_CLOSE) {
-                    port.joinAnswered(p, c.application, c.code, new String(c.dataBytes(), java.nio.charset.StandardCharsets.UTF_8));
-                    return;
-                }
-            } catch (WireException ignored) {
-                // Decoded again below, where the failure is reported.
-            }
-        }
         boolean first = il.rx.expectTp;
         boolean elicit = false, otherElicit = false, activity = false, pipePing = false, traffic = false, onlyPad = true;
         Frame f = frame;
@@ -198,13 +176,6 @@ final class RecordReceiver {
                 port.failLocal(e.frameType() != 0 || f.type == 0 ? e
                         : new WireException(e.code(), f.type, e.reason(), e.details()));
                 return;
-            }
-            if (il.rx.skipJoin && idx == 0 && f.kind == FrameKind.PIPE_JOIN) {
-                il.rx.skipJoin = false;
-                elicit = otherElicit = true;
-                pos += n;
-                idx++;
-                continue;
             }
             if (il.rx.expectLane && idx == 0) {
                 if (f.kind != FrameKind.PIPE_LANE) {
@@ -288,11 +259,6 @@ final class RecordReceiver {
         if (p.shape() != null) Shaping.recordIn(p, il.lane, frames, onlyPad);
     }
 
-    /** The first record of an in-band join starts with the PIPE_JOIN the listener processed. */
-    static void skipJoin(Pipe.InLane il) {
-        il.rx.skipJoin = true;
-    }
-
     /** The inbound lane ended; false when it had ended already. */
     boolean laneEnded(Pipe.InLane il) {
         if (il.rx.ended) return false;
@@ -307,14 +273,11 @@ final class RecordReceiver {
         private long recs;
         private boolean expectTp;
         private boolean expectLane;
-        private boolean skipJoin;
-        private boolean discardTp;
         private boolean ended;
 
-        LaneRx(boolean expectTp, boolean expectLane, boolean discardTp) {
+        LaneRx(boolean expectTp, boolean expectLane) {
             this.expectTp = expectTp;
             this.expectLane = expectLane;
-            this.discardTp = discardTp;
         }
 
         long pos() {
@@ -335,14 +298,6 @@ final class RecordReceiver {
 
         boolean expectLane() {
             return expectLane;
-        }
-
-        boolean skipJoin() {
-            return skipJoin;
-        }
-
-        boolean discardTp() {
-            return discardTp;
         }
 
         boolean ended() {

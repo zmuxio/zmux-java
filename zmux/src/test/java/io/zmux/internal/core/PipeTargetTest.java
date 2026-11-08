@@ -12,7 +12,7 @@ class PipeTargetTest {
         CoreConfig config = b.maxPipes(2).headroom(8).build();
         Session s = new Session(config, 0); var info = new CarrierInfo(Framing.BYTES, false, false, false, false);
         s.pipes().attachBootstrap(info, info, null); Poke.set(s, "peerSeen", true); Poke.set(s, "state", SessionState.ACTIVE);
-        Poke.set(s, "path", s.multiPath()); return s;
+        Poke.set(s, "path", s.multiPath()); Poke.set(s.mp().joins, "keysPending", false); return s;
     }
     static Pipe append(Session s, boolean local, int out, int in) {
         return add(s, local, out, in, null);
@@ -23,7 +23,7 @@ class PipeTargetTest {
     }
     private static Pipe add(Session s, boolean local, int out, int in, Pipe.OutDir dir) {
         Pipe p = new Pipe(s.pipes.all().size() * 2L, null, dir,
-                new Attach(local, out == Attach.OUT_NONE ? 1 : 2, 0, false, 0, 0, -1, Double.NaN, out, in, false, 0), null);
+                new Attach(local, out == Attach.OUT_NONE ? 1 : 2, 0, 0, 0, -1, Double.NaN, out, in, false, 0), null);
         s.pipes.add(p); return p;
     }
     @Test void readinessUsesTheLocalTargetRatherThanFailureHeadroom() {

@@ -28,7 +28,7 @@ class SessionTest {
     @BeforeAll
     static void setUp() {
         loops = EventLoops.create(2);
-        cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+        cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
     }
 
     @AfterAll
@@ -216,6 +216,27 @@ class SessionTest {
         p.client().shutdown(Duration.ofSeconds(5));
         assertTrue(p.client().isClosed());
         p.server().awaitClosed();
+        p.close();
+    }
+
+    /** A stream whose both parts ended no longer holds up a shutdown, though neither handle was closed. */
+    @Test
+    void shutdownDoesNotWaitForTheHandlesOfEndedStreams() throws Exception {
+        Pair p = Pair.memory(cfg);
+        ZmuxStream a = p.client().openStream();
+        a.write("q".getBytes());
+        a.finish();
+        ZmuxStream b = p.server().acceptStream();
+        assertEquals("q", new String(b.inputStream().readAllBytes(), StandardCharsets.UTF_8));
+        b.write("r".getBytes());
+        b.finish();
+        assertEquals("r", new String(a.inputStream().readAllBytes(), StandardCharsets.UTF_8));
+        long start = System.nanoTime();
+        p.client().shutdown(Duration.ofSeconds(10));
+        assertTrue(p.client().isClosed());
+        assertTrue(System.nanoTime() - start < Duration.ofSeconds(5).toNanos(), "the shutdown waited for the open handles");
+        // The session ended gracefully, not by the timeout's close.
+        assertInstanceOf(SessionError.ApplicationClosed.class, p.server().awaitClosed());
         p.close();
     }
 

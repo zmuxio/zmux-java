@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import org.junit.jupiter.api.Test;
 
-/** Keep-alive (SPEC.md 6.4): at most one keep-alive request per period of inactivity after each activity. */
+/** Keep-alive: at most one keep-alive request per period of inactivity after each activity. */
 class KeepAliveOnceTest {
     @Test void aKeepAliveIsRequestedAtMostOnceAfterEachActivity() {
         int[] writes = {0};

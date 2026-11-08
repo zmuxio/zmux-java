@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * A pipe carrier's datagram channel as the core sees it (EXTENSIONS.md Section 6.8): an
+ * A pipe carrier's datagram channel as the core sees it: an
  * unreliable datagram service of the carrier besides the reliable stream that is the pipe,
  * such as the QUIC DATAGRAM frames of the connection a QUIC stream belongs to. The core
  * decides per DATAGRAM frame whether it goes there ({@link Session#pollChannel}); the driver

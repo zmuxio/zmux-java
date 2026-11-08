@@ -85,7 +85,9 @@ final class Requests {
         if (e.getSession() instanceof ExtendedSSLSession s) {
             for (var n : s.getRequestedServerNames()) if (n instanceof javax.net.ssl.SNIHostName h) { sni = h.getAsciiName(); break; }
         }
-        return io.withExporter(x).withServerName(sni);
+        // A connection whose handshake has not completed counts as without TLS; the exporter reads it late.
+        boolean complete = e.getHandshakeStatus() == javax.net.ssl.SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING;
+        return io.withExporter(x).withServerName(sni).withTerminatedTls(complete);
     }
 
     /** The keying material exporter of a TLS connection (RFC 5705). */

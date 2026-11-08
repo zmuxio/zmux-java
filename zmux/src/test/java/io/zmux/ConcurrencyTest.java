@@ -30,7 +30,7 @@ class ConcurrencyTest {
     @RepeatedTest(5)
     void randomOperationsRaceClose() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
             Pair p = Pair.memory(cfg);
             AtomicInteger done = new AtomicInteger();
             AtomicInteger served = new AtomicInteger();

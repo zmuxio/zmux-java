@@ -13,15 +13,29 @@ import java.util.Objects;
  *
  * @param joiner joins carriers of the kind to an established session, for a kind whose dialer
  *     does not open a carrier that can join (a split bootstrap joins its uplink and downlink as
- *     two pipes); null: {@link Paths#add(PipeIo, PipeOptions)} on a carrier from the dialer
+ *     two pipes); null: {@link ZmuxSession#addPipe(PipeIo, PipeOptions)} on a carrier from the dialer
+ * @param variant a short label of the host for the transform the candidate's carriers run ("": none):
+ *     a kind's variants are different candidates of the cache, ordered as listed
+ * @param target for a kind dialed at a URL, where its carriers start and what redirects led them
+ *     to; the mode dialer keeps it per server in its cache. null: not known
  */
-public record Candidate(CarrierKind kind, Dialer dialer, Joiner joiner) {
+public record Candidate(CarrierKind kind, Dialer dialer, Joiner joiner, String variant, HttpTarget target) {
     public Candidate {
         Objects.requireNonNull(kind);
         Objects.requireNonNull(dialer);
+        if (variant == null) variant = "";
     }
 
-    /** A candidate whose carriers join through {@link Paths#add(PipeIo, PipeOptions)}. */
+    /** A candidate of no variant and no target. */
+    public Candidate(CarrierKind kind, Dialer dialer, Joiner joiner) { this(kind, dialer, joiner, "", null); }
+
+    /** This candidate with variant v. */
+    public Candidate withVariant(String v) { return new Candidate(kind, dialer, joiner, v, target); }
+
+    /** This candidate with the target t its dialer and joiner start from. */
+    public Candidate withTarget(HttpTarget t) { return new Candidate(kind, dialer, joiner, variant, t); }
+
+    /** A candidate whose carriers join through {@link ZmuxSession#addPipe(PipeIo, PipeOptions)}. */
     public static Candidate of(CarrierKind kind, Dialer dialer) { return new Candidate(kind, dialer, null); }
 
     /**
@@ -32,7 +46,7 @@ public record Candidate(CarrierKind kind, Dialer dialer, Joiner joiner) {
         Objects.requireNonNull(wrap);
         Dialer inner = dialer;
         return new Candidate(kind, (credential, timeout) -> Objects.requireNonNull(
-                wrap.wrap(inner.dial(credential, timeout)), "wrap returned null"), joiner);
+                wrap.wrap(inner.dial(credential, timeout)), "wrap returned null"), joiner, variant, target);
     }
 
     /** Opens a carrier of the kind. */

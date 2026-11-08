@@ -10,7 +10,7 @@ import java.util.List;
 
 /**
  * Tiers, usability and the tier gate, saturation reports, the standby takeover and PIPE_STATUS settings
- * (MULTIPATH.md 9, SCHEDULER.md 10).
+ *.
  */
 public final class Tiers {
     /** What Tiers asks of the rest of the path layer and the session. */
@@ -388,7 +388,7 @@ public final class Tiers {
         }
     }
 
-    /** Applies tier settings (MULTIPATH.md 9); false when the pipe is unknown. */
+    /** Applies tier settings; false when the pipe is unknown. */
     boolean setPipe(long id, PipeSettings o) {
         Pipe p = pipes.get(id);
         if (p == null || p.mp() == null || p.mp().health.retired()) return false;
@@ -418,7 +418,7 @@ public final class Tiers {
         if (req) requestStatus(p);
         if (wasProbation != a.prob.probOn()) port.capacityChanged();
         if (a.effPrio() != bp || a.effStandby() != bs || a.tier.weight != bw) {
-            emitPriority(p);
+            emitPriority(p, false);
             port.pickChanged();
         }
         checkTakeover();
@@ -426,9 +426,10 @@ public final class Tiers {
         return true;
     }
 
-    void emitPriority(Pipe p) {
+    /** Reports the effective outbound settings of p; peer: the peer's request changed them, else a local setting. */
+    void emitPriority(Pipe p, boolean peer) {
         if (p.out() == null) return;
-        port.emit(Event.pipePriority(p.id, p.carrier(), p.mp().effPrio(), p.mp().effStandby(), p.mp().tier.weight));
+        port.emit(Event.pipePriority(p.id, p.carrier(), p.mp().effPrio(), p.mp().effStandby(), p.mp().tier.weight, peer));
     }
 
     /** Queues the current request for the peer's outbound direction as a new PIPE_STATUS. */
@@ -436,6 +437,7 @@ public final class Tiers {
         Attach a = p.mp();
         if (p.in() == null) return;
         a.tier.statusSeq++;
+        a.tier.statusHeld |= a.handshaking();
         if (a.tier.statusQ.size() >= STATUS_OWED_MAX) a.tier.statusQ.removeFirst();
         a.tier.statusQ.add(new long[] {a.tier.statusSeq, a.tier.recvStandby && !a.tier.takeover ? 1 : 0, a.tier.recvPrio});
         pipes.wakeWriters();
@@ -450,7 +452,7 @@ public final class Tiers {
         pipes.wakeWriters();
     }
 
-    /** The peer's request for the local outbound direction (MULTIPATH.md 9). */
+    /** The peer's request for the local outbound direction. */
     void onPipeStatus(io.zmux.internal.wire.Frame f) throws WireException {
         Pipe q = pipes.get(f.pipeId);
         if (q == null) {
@@ -466,12 +468,12 @@ public final class Tiers {
         a.tier.peerSeq = f.seq;
         a.tier.peerPrio = f.priority;
         a.tier.peerStandby = f.status == 1;
-        if (a.effPrio() != bp || a.effStandby() != bs) emitPriority(q);
+        if (a.effPrio() != bp || a.effStandby() != bs) emitPriority(q, true);
         checkTakeover();
         pipes.wakeWriters();
     }
 
-    /** The standby takeover (MULTIPATH.md 9). */
+    /** The standby takeover. */
     void checkTakeover() {
         int c = usableClass();
         boolean ok = (c & 4) != 0, standby = (c & 1) != 0, probOk = (c & 2) != 0;
@@ -496,14 +498,15 @@ public final class Tiers {
             w.logFrame(new FrameDesc(FrameDesc.Kind.STATUS, false, false, id, 0, 0, seq));
             qa.tier.statusQ.removeFirst();
         }
+        qa.tier.statusHeld = false;
         return true;
     }
 
-    /** Whether q's PIPE_STATUS may go out: the attachment is ACTIVE. */
-    static boolean statusReady(Pipe q) {
+    /** Whether q's PIPE_STATUS may go out on p: the attachment is ACTIVE, and a change made while JOINING goes on the attachment itself. */
+    static boolean statusReady(Pipe q, Pipe p) {
         Attach qa = q.mp();
         return qa != null && !qa.tier.statusQ.isEmpty() && !qa.health.retired() && q.in() != null && qa.health.in() == Attach.IN_OPEN
-                && qa.health.out() != Attach.OUT_JOINING;
+                && !qa.handshaking() && (!qa.tier.statusHeld || q == p);
     }
 
     /** The number of tiers currently eligible. */
@@ -528,7 +531,7 @@ public final class Tiers {
         a.tier.peerStandby = standby;
     }
 
-    /** The tier options and PIPE_STATUS state of one attachment (MULTIPATH.md 9). */
+    /** The tier options and PIPE_STATUS state of one attachment. */
     static final class Slot {
         private Long sendPrio;
         private Boolean sendStandby;
@@ -539,6 +542,7 @@ public final class Tiers {
         private boolean recvStandby;
         private long statusSeq;
         private final ArrayList<long[]> statusQ = new ArrayList<>(0);
+        private boolean statusHeld;
         private long weight = 1;
         private boolean takeover;
         private long probOpt = -1;

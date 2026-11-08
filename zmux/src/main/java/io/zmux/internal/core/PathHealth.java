@@ -5,13 +5,16 @@ import java.util.ArrayList;
 
 /**
  * Failure detection of the attachments: PTO, SUSPECT, failure and dead timeouts, PIPE_PING pacing, drains,
- * PIPE_ABANDON exchange, retirement, fate groups and the last-pipe rule (MULTIPATH.md 6.4, 7, 8).
+ * PIPE_ABANDON exchange, retirement, fate groups and the last-pipe rule.
  */
 final class PathHealth {
     /** What PathHealth asks of the rest of the path layer and the session. */
     interface Port {
         /** See {@link Joins}. */
         void backoffCleared();
+
+        /** See {@link Joins}. */
+        void joinFailed();
 
         /** See {@link Probation}. */
         boolean busyBackup(Pipe p, long now);
@@ -117,16 +120,30 @@ final class PathHealth {
 
     boolean oldestPingWaiter(Pipe p) {
         for (Pipe q : pipes.all()) {
-            if (q.mp() != null && q != p && q.mp().health.needPing && q.out() != null && !q.out().failed() && q.mp().health.pingSince < p.mp().health.pingSince) {
+            if (q.mp() != null && q != p && q.mp().health.needPing && !q.mp().handshaking() && q.out() != null && !q.out().failed() && q.mp().health.pingSince < p.mp().health.pingSince) {
                 return false;
             }
         }
         return true;
     }
 
+    /** Whether a's kept settings still apply: it has not left the suspicion they were kept for. */
+    private static boolean kept(Attach a) {
+        if (a.health.out == Attach.OUT_SUSPECT) return true;
+        a.kept(-1, -1);
+        return false;
+    }
+
+    /** Before the settings change: a suspect pipe keeps the values it turned suspect under. */
+    void keepSuspect(Pipe p) {
+        Attach a = p.mp();
+        if (a == null || !kept(a) || a.keptFloor() >= 0) return;
+        a.kept(a.suspectFloor() > 0 ? a.suspectFloor() : cfg.suspectFloor(), a.deadTimeout() > 0 ? a.deadTimeout() : cfg.deadTimeout());
+    }
+
     long tSuspect(Pipe p) {
         Attach a = p.mp();
-        long f = a.suspectFloor > 0 ? a.suspectFloor : cfg.suspectFloor();
+        long f = kept(a) && a.keptFloor() >= 0 ? a.keptFloor() : a.suspectFloor() > 0 ? a.suspectFloor() : cfg.suspectFloor();
         return Math.max(f, Time.mul(Time.add(metrics.pto(a), queueDelay(p)), 2));
     }
 
@@ -136,7 +153,7 @@ final class PathHealth {
     }
 
     /**
-     * queue_p = min(1 s, unsent_ahead_p / R_p) (MULTIPATH.md 7.1), both snapshotted when the oldest unacknowledged
+     * queue_p = min(1 s, unsent_ahead_p / R_p), both snapshotted when the oldest unacknowledged
      * ack-eliciting batch was handed over; 0 while nothing is unacknowledged.
      */
     long queueDelay(Pipe p) {
@@ -150,12 +167,12 @@ final class PathHealth {
         return (long) Math.min(Time.SECOND, ahead / rate * Time.SECOND);
     }
 
-    /** The protocol's probe interval for an attachment without an outbound direction at the peer (MULTIPATH.md 7.1). */
+    /** The protocol's probe interval for an attachment without an outbound direction at the peer. */
     static final long UNPAIRED_PROBE = 15 * Time.SECOND;
 
     /** The probe interval k of the pipe: its own (-1: none), else the session's; at most 15 s, and never 0, without a peer outbound direction. */
     long probeInterval(Pipe p) {
-        return probeInterval(p.mp().probeInterval, cfg.probeInterval(), p.in() == null);
+        return probeInterval(p.mp().probeInterval(), cfg.probeInterval(), p.in() == null);
     }
 
     static long probeInterval(long own, long session, boolean unpaired) {
@@ -164,7 +181,7 @@ final class PathHealth {
     }
 
     /**
-     * The pipe's current probe wait, drawn once per wait (MULTIPATH.md 7.1): in [k_eff(1 - j), k_eff] with k_eff =
+     * The pipe's current probe wait, drawn once per wait: in [k_eff(1 - j), k_eff] with k_eff =
      * min(k, max(1 s, k - H_p)), so that the probe reaches the carrier within k of the previous ack-eliciting byte however
      * long shaping holds it; the first wait of the bootstrap pipe in [0, k_eff] when j > 0 (a joined pipe carried
      * the joiner's PIPE_PING, so both of its ends draw as usual). 0 when the idle probes are off.
@@ -179,13 +196,13 @@ final class PathHealth {
             h.probeHold = sh == null ? 0 : sh.maxHold(p);
         }
         long kEff = effectiveInterval(k, h.probeHold);
-        double j = Double.isNaN(a.probeJitter) ? cfg.probeJitter() : a.probeJitter;
+        double j = Double.isNaN(a.probeJitter()) ? cfg.probeJitter() : a.probeJitter();
         if (j <= 0) return kEff;
         if (Double.isNaN(h.probeDraw)) h.probeDraw = cfg.random().nextDouble();
         return probeWait(kEff, drawJitter(p.id, h.pingsSent, j), h.probeDraw);
     }
 
-    /** The jitter a wait is drawn with: 1 (the whole interval) for the bootstrap pipe's first wait only (MULTIPATH.md 7.1). */
+    /** The jitter a wait is drawn with: 1 (the whole interval) for the bootstrap pipe's first wait only. */
     static double drawJitter(long pipeId, long pingsSent, double j) {
         return pipeId == 0 && pingsSent == 0 ? 1 : j;
     }
@@ -203,7 +220,7 @@ final class PathHealth {
 
     long tDead(Pipe p) {
         Attach a = p.mp();
-        long dt = a.deadTimeout > 0 ? a.deadTimeout : cfg.deadTimeout();
+        long dt = kept(a) && a.keptDead() >= 0 ? a.keptDead() : a.deadTimeout() > 0 ? a.deadTimeout() : cfg.deadTimeout();
         if (dt == 0) {
             if (feat.resume()) {
                 dt = tFail(p);
@@ -270,11 +287,13 @@ final class PathHealth {
             Pipe p = pipes.all().get(i);
             Attach a = p.mp();
             if (a == null || a.health.retired) continue;
-            if (a.joinerLocal && (a.health.out == Attach.OUT_JOINING || a.health.out == Attach.OUT_NONE && a.health.in == Attach.IN_JOINING) && p.id != 0) {
-                if (at(Time.add(a.joining.attachedAt(), cfg.handshakeTimeout())) && apply) {
+            if (a.handshaking()) {
+                // No stall clock runs until the attachment is ACTIVE. The join deadline runs
+                // from JOINING, a join the cap or the backoff holds included.
+                if (a.joining() && at(Time.add(a.joining.attachedAt(), cfg.joinDeadline())) && apply) {
                     failPipe(p, TransportError.PIPE_FAILED, null);
-                    continue;
                 }
+                continue;
             }
             long ws = writeStall(p);
             boolean wstall = ws != NO_STALL;
@@ -282,9 +301,8 @@ final class PathHealth {
                 long stall = a.tref();
                 if (wstall && (!a.link.unacked() || !liveIn || ws < stall)) stall = ws;
                 switch (a.health.out) {
-                    case Attach.OUT_ACTIVE, Attach.OUT_JOINING -> {
-                        // Only a deadline whose pass acts is due: an unconfirmed join waits for its timeout.
-                        if ((a.health.out != Attach.OUT_JOINING || confirmedOnce(p)) && at(Time.add(stall, tSuspect(p))) && apply) {
+                    case Attach.OUT_ACTIVE -> {
+                        if (at(Time.add(stall, tSuspect(p))) && apply) {
                             makeSuspect(p);
                         }
                     }
@@ -362,10 +380,6 @@ final class PathHealth {
         return Time.NEVER;
     }
 
-    boolean confirmedOnce(Pipe p) {
-        return p.out() != null && p.out().lanes.getFirst().ack.acked() > 0 || !p.mp().joinerLocal || p.id == 0;
-    }
-
     long maxPto() {
         long m = 0;
         for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, metrics.pto(p.mp()));
@@ -378,7 +392,7 @@ final class PathHealth {
         return m == 0 ? 333 * Time.MILLISECOND : m;
     }
 
-    /** The largest smoothed RTT of the live outbound pipes (SPEC.md 1.3), 0 when none. */
+    /** The largest smoothed RTT of the live outbound pipes, 0 when none. */
     long srttMax() {
         long m = 0;
         for (Pipe p : pipes.all()) {
@@ -391,6 +405,7 @@ final class PathHealth {
     void failPipe(Pipe p, long code, Throwable cause) {
         Attach a = p.mp();
         if (a == null || a.health.retired) return;
+        if (a.joining()) port.joinFailed();
         boolean wasDraining = a.health.out == Attach.OUT_DRAINING || a.health.draining;
         if (p.out() != null && a.health.out != Attach.OUT_FAILED && a.health.out != Attach.OUT_CLOSED) {
             a.health.out = Attach.OUT_FAILED;
@@ -442,10 +457,10 @@ final class PathHealth {
         }
     }
 
-    /** Moves an outbound pipe to SUSPECT (MULTIPATH.md 7.2). */
+    /** Moves an outbound pipe to SUSPECT. */
     void makeSuspect(Pipe p) {
         Attach a = p.mp();
-        if (a.health.out != Attach.OUT_ACTIVE && a.health.out != Attach.OUT_JOINING) return;
+        if (a.health.out != Attach.OUT_ACTIVE) return;
         a.health.out = Attach.OUT_SUSPECT;
         a.health.suspects++;
         a.health.suspectAt = port.now();
@@ -465,12 +480,13 @@ final class PathHealth {
     boolean removePipe(long id, boolean graceful) {
         Pipe p = pipes.get(id);
         if (p == null || p.mp() == null || p.mp().health.retired) return false;
-        if (!graceful) failPipe(p, TransportError.PIPE_FAILED, null);
+        // A graceful removal needs the carrier.
+        if (!graceful || p.mp().handshaking()) failPipe(p, TransportError.PIPE_FAILED, null);
         else startDrain(p);
         return true;
     }
 
-    /** Begins a graceful removal (MULTIPATH.md 8.2). */
+    /** Begins a graceful removal. */
     void startDrain(Pipe p) {
         Attach a = p.mp();
         if (a.health.draining) return;
@@ -488,7 +504,7 @@ final class PathHealth {
         pipes.wakeWriters();
     }
 
-    /** A received PIPE_ABANDON (MULTIPATH.md 8.2, 8.3). */
+    /** A received PIPE_ABANDON. */
     void peerAbandon(Pipe p, long code) {
         Attach a = p.mp();
         if (a == null || a.health.retired || a.health.abandonRecv) return;
@@ -517,7 +533,7 @@ final class PathHealth {
         return false;
     }
 
-    /** Completes a drain (MULTIPATH.md 8.2 step 3). */
+    /** Completes a drain. */
     void checkDrain(Pipe p) {
         Attach a = p.mp();
         if (a.health.out != Attach.OUT_DRAINING || !a.health.abandonSent || !a.health.abandonRecv || unackedStream(p)) return;
@@ -542,7 +558,7 @@ final class PathHealth {
         maybeRetire(p);
     }
 
-    /** Retires an attachment at the first moment every condition holds (MULTIPATH.md 8.4). */
+    /** Retires an attachment at the first moment every condition holds. */
     void maybeRetire(Pipe p) {
         Attach a = p.mp();
         if (a == null || a.health.retired) return;
@@ -566,10 +582,10 @@ final class PathHealth {
         }
         port.emit(Event.pipeState(p.id, p.carrier(), Action.DIR_BIDI, PipeInfo.Out.RETIRED));
         checkLastPipe(null);
-        if (a.joinerLocal && !a.health.resLimited) port.backoffCleared();
+        if (a.joinerLocal && !a.health.resLimited && !a.handshaking()) port.backoffCleared();
     }
 
-    /** MULTIPATH.md 8.5. */
+    /** The loss of the last pipe of a direction: suspension with resume, else the session ends with pipes lost. */
     void checkLastPipe(Throwable cause) {
         if (port.isClosing() || port.state() == SessionState.SUSPENDED) return;
         int[] lc = metrics.liveCounts();
@@ -583,7 +599,7 @@ final class PathHealth {
         else port.closeWith(e, null);
     }
 
-    /** The end of an inbound pipe (MULTIPATH.md 7.3). */
+    /** The end of an inbound pipe. */
     void inboundEnded(Pipe p, boolean graceful, Throwable cause) {
         Attach a = p.mp();
         if (a == null || a.health.retired) return;
@@ -612,11 +628,22 @@ final class PathHealth {
         p.mp().health.out = Attach.OUT_ACTIVE;
     }
 
-    /** The first record arrived on a joining inbound attachment: it is OPEN, and a joining outbound side ACTIVE. */
-    void inboundOpened(Pipe p) {
+    /** A verified Reply opened the inbound direction. */
+    void opened(Pipe p) {
+        p.mp().health.in = Attach.IN_OPEN;
+    }
+
+    /** A verified Reply refused the join: the attachment is retired without any PIPE_ABANDON. */
+    void declined(Pipe p) {
         Slot h = p.mp().health;
-        h.in = Attach.IN_OPEN;
-        if (h.out == Attach.OUT_JOINING) h.out = Attach.OUT_ACTIVE;
+        h.abandonSent = true;
+        h.abandonAcked = true;
+        h.resLimited = true;
+        p.mp().endHandshake();
+        if (p.out() != null) { h.out = Attach.OUT_FAILED; p.out().fail(); }
+        if (p.in() != null) { h.in = Attach.IN_ENDED; p.in().end(); }
+        retire(p);
+        outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
     }
 
     /** A PIPE_PING is owed on the pipe from now on. */
@@ -677,13 +704,13 @@ final class PathHealth {
         if (!h.abandonAcked) h.abandonQueued = true;
     }
 
-    /** Fails the pipe without owing a PIPE_ABANDON for it (displacement while suspended, RESUME.md 4.3). */
+    /** Fails the pipe without owing a PIPE_ABANDON for it (displacement while suspended). */
     void failWithoutAbandon(Pipe p, long code) {
         p.mp().health.abandonSent = true;
         failPipe(p, code, null);
     }
 
-    /** The failure-detection and removal state of one attachment (MULTIPATH.md 6.4, 7, 8). */
+    /** The failure-detection and removal state of one attachment. */
     static final class Slot {
         private int out;
         private int in;

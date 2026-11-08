@@ -44,6 +44,8 @@ final class Connections {
     private final Map<String, CompletableFuture<Channel>> h2 = new HashMap<>();
     /** Idle HTTP/1.1 connections by origin. */
     private final Map<String, ArrayDeque<Channel>> idle = new HashMap<>();
+    /** Under this: no connection opens or goes back to the pool any more. */
+    private boolean closed;
 
     /** ssl offers h2 and http/1.1, ssl1 http/1.1 only. */
     Connections(EventLoopGroup group, SslContext ssl, SslContext ssl1, Version version, Duration connectTimeout) {
@@ -78,11 +80,15 @@ final class Connections {
      * HTTP/1.1 in any case (a WebSocket upgrade).
      */
     CompletableFuture<Channel> open(URI u, boolean pooled, boolean http1) {
+        synchronized (this) {
+            if (closed) return CompletableFuture.failedFuture(new java.io.IOException("client closed"));
+        }
         String o = origin(u);
         boolean wantH2 = !http1 && (version == Version.HTTP_2 || version == Version.AUTO && secure(u));
         if (wantH2) {
             CompletableFuture<Channel> conn;
             synchronized (this) {
+                if (closed) return CompletableFuture.failedFuture(new java.io.IOException("client closed"));
                 conn = h2.get(o);
                 if (conn == null || conn.isCompletedExceptionally() || conn.isDone() && !conn.join().isActive()) {
                     conn = connect(u, false);
@@ -110,8 +116,12 @@ final class Connections {
         if (c instanceof Http2StreamChannel) { c.close(); return; }
         if (!reusable || !c.isActive()) { c.close(); return; }
         synchronized (this) {
-            idle.computeIfAbsent(origin(u), k -> new ArrayDeque<>()).addLast(c);
+            if (!closed) {
+                idle.computeIfAbsent(origin(u), k -> new ArrayDeque<>()).addLast(c);
+                return;
+            }
         }
+        c.close();
     }
 
     private CompletableFuture<Channel> stream(Channel conn) {
@@ -172,6 +182,7 @@ final class Connections {
 
     /** Closes the pooled and shared connections. */
     synchronized void close() {
+        closed = true;
         for (var q : idle.values()) for (Channel c : q) c.close();
         idle.clear();
         for (var f : h2.values()) f.thenAccept(Channel::close);

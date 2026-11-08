@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Pipe acknowledgement of a session with acknowledgement (MULTIPATH.md Sections 3.5 and 6):
+ * Pipe acknowledgement of a session with acknowledgement:
  * when PIPE_ACK is due and what it carries, send-order bookkeeping of produced batches, and
  * RTT and delivery-rate samples from acknowledged advances. Owned by the session's loop;
  * effects on other components go through {@link Port}.
@@ -28,7 +28,7 @@ final class AckEngine {
         /** A lane's acknowledged position advanced; cum is whether the pipe's cumulative point moved. */
         void advanced(Pipe p, Pipe.OutLane ol, boolean cum);
 
-        /** Whether the multipath session is quiet (MULTIPATH.md 7.1): its RTT samples stay out of min_rtt. */
+        /** Whether the multipath session is quiet: its RTT samples stay out of min_rtt. */
         boolean quiet();
     }
 
@@ -69,7 +69,7 @@ final class AckEngine {
      * Accounts an inbound record of n position bytes; true when a PIPE_ACK is now due. elicit counts the record
      * toward the acknowledgement delay of the primary pipe; atOnce makes that acknowledgement due at once (a PIPE_PING
      * answered there). A quiet session's PIPE_PING alone does neither: its answer goes on the probed pipe pair
-     * only (MULTIPATH.md 6.5).
+     * only.
      */
     boolean onRecord(Pipe.InLane il, long n, boolean elicit, boolean atOnce, long now) {
         if (elicit) {
@@ -127,7 +127,7 @@ final class AckEngine {
     }
 
     /**
-     * Writes the positions of every inbound pipe and lane above 0, split over frames when needed (MULTIPATH.md 6.2).
+     * Writes the positions of every inbound pipe and lane above 0, split over frames when needed.
      * settles: the snapshot answers what is due (the primary pipe's acknowledgement); a copy on another pipe (the
      * first record of a pipe, the answer to a PIPE_PING on its pipe pair) leaves that obligation in place. Returns
      * false when the record had no room for all of it.
@@ -229,7 +229,7 @@ final class AckEngine {
         return cum;
     }
 
-    /** The PIPE_ACK entries of a single-pipe session (MULTIPATH.md Section 3.5); p0 is pipe 0 or null. */
+    /** The PIPE_ACK entries of a single-pipe session; p0 is pipe 0 or null. */
     void onSinglePipeAck(Frame.AckEntries it, Pipe p0, long now) throws WireException {
         while (it.next()) {
             if (it.pipeId != 0) {
@@ -277,9 +277,16 @@ final class AckEngine {
         if (last != null) {
             long rtt = Time.sub(now, last.sent());
             long ad = Time.mul(delayMicros, Time.MICROSECOND);
-            boolean late = ad > peerDelay && (ps.rttAt == 0 || Time.sub(now, ps.rttAt) < Time.SECOND);
+            boolean late = ad > peerDelay && ps.rttAt != 0 && Time.sub(now, ps.rttAt) < Time.SECOND;
             RttEstimator r = p.mp() != null ? p.mp().rtt : ps.rtt;
+            // Queue-proven: the range's adjusted RTT exceeded min_rtt by at least 4 x min_rtt, so the
+            // path held it back and was busy throughout (a deep carrier or path buffer that never
+            // refuses bytes). Its rate sample is a bottleneck sample, also for bytes sent before
+            // the pipe became SUSPECT; its RTT sample is skipped there all the same.
+            long minRtt = r.min();
+            boolean proven = minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
             boolean sampleOk = p.mp() == null || p.mp().sampleOk(last.sent());
+            boolean rateOk = sampleOk || proven && p.mp().health.out() != Attach.OUT_FAILED;
             if (!late && sampleOk) {
                 sampleRtt = r.update(rtt, Math.min(ad, peerDelay), peerDelay, now, p.mp() != null && port.quiet());
                 sampleSentAt = last.sent();
@@ -287,8 +294,8 @@ final class AckEngine {
                 port.rttSampled(r.min());
             }
             long iv = Math.max(Time.sub(last.sent(), last.firstSentAt()), Time.sub(now, last.deliveredAt()));
-            if (iv > 0 && sampleOk) {
-                sampleRate = ps.re.sample((ps.delivered - last.delivered()) * 1e9 / iv, last.bubble(), last.epoch(), now);
+            if (iv > 0 && rateOk) {
+                sampleRate = ps.re.sample((ps.delivered - last.delivered()) * 1e9 / iv, last.bubble(), last.epoch(), proven, now);
             }
             ps.firstSentAt = last.sent();
         }

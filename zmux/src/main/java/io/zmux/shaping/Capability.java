@@ -7,5 +7,7 @@ public enum Capability {
     /** {@link EventKind#RECORD_IN} is delivered. */
     RECORD_IN,
     /** {@link EventKind#STREAM_OPEN} and {@link EventKind#STREAM_END} are delivered. */
-    STREAMS
+    STREAMS,
+    /** {@link RecordView#meters()} and {@link Event#meters()} are filled. */
+    BUDGET
 }

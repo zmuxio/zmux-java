@@ -6,7 +6,6 @@ import io.zmux.CandidateOutcome;
 import io.zmux.CarrierKind;
 import io.zmux.CarrierMode;
 import io.zmux.ModePolicy;
-import io.zmux.MultipathConfig;
 import io.zmux.PipeAuth;
 import io.zmux.SessionEvent;
 import io.zmux.Zmux;
@@ -43,8 +42,7 @@ class ModeHttpTest {
     }
 
     static Function<ZmuxConfig.Builder, ZmuxConfig.Builder> session(boolean multipath, ShaperFactory shaper) {
-        return b -> (multipath ? b.multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32]))
-                .withProbation(Duration.ZERO)) : b).shaper(shaper);
+        return b -> (multipath ? b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO) : b).shaper(shaper);
     }
 
     /** The same, its sessions shaped by shaper. */
@@ -140,8 +138,8 @@ class ModeHttpTest {
                 } while (!(e instanceof SessionEvent.CarrierChosen ch && ch.kind() == CarrierKind.WEBSOCKET));
                 assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier());
                 long until = System.nanoTime() + 5_000_000_000L;
-                while (s.paths().list().stream().anyMatch(p -> p.id() == 0) && System.nanoTime() < until) Thread.sleep(10);
-                assertTrue(s.paths().list().stream().noneMatch(p -> p.id() == 0), "the exchange pipe retired: " + s.paths().list());
+                while (s.pipes().stream().anyMatch(p -> p.id() == 0) && System.nanoTime() < until) Thread.sleep(10);
+                assertTrue(s.pipes().stream().noneMatch(p -> p.id() == 0), "the exchange pipe retired: " + s.pipes());
                 f.echo(s);
                 assertNull(f.listener.accept(Duration.ofMillis(200)), "a second session");
             }

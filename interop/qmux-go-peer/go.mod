@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/okdaichi/qmux-go v0.3.0
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.65.0
 )
 
 require (

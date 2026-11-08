@@ -1,301 +1,387 @@
 package io.zmux.shaping.machine;
 
 import io.zmux.shaping.Capability;
+import io.zmux.shaping.Effects;
 import io.zmux.shaping.Event;
 import io.zmux.shaping.RecordPlan;
 import io.zmux.shaping.RecordView;
-import io.zmux.shaping.Reply;
 import io.zmux.shaping.Shaper;
-import io.zmux.shaping.ShapingLimits;
 import io.zmux.shaping.ShaperFactory;
+import io.zmux.shaping.ShapingMeters;
+import io.zmux.shaping.ShapingLimits;
 import io.zmux.shaping.machine.Definition.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
-import java.util.IdentityHashMap;
-import java.util.Map;
+import java.util.List;
 import java.util.Set;
-import java.util.random.RandomGenerator;
 
-/** Factories of {@link Shaper}s that run the machines of a {@link Definition}. */
+/** Factories of {@link Shaper}s that run the machines of a {@link Definition}, and the other JSON readers. */
 public final class Machines {
     private Machines() {}
 
-    /**
-     * A factory running d; d is checked against the options' limits. Every pipe runs d as
-     * defined, whatever its {@link io.zmux.shaping.ShapedPipe} says, except for its write
-     * overhead: the {@code max_len} and {@code pad_to} lengths of d are those of a carrier
-     * write below the pipe, so the pipe's {@link io.zmux.shaping.ShapedPipe#writeOverhead()} is
-     * taken off them on the first record of each write ({@link RecordView#writeStart()}); a
-     * {@code max_len} that falls below {@link RecordPlan#MIN_MAX_LENGTH} is raised to it by the
-     * session (and counted as clamped).
-     */
-    public static ShaperFactory factory(Definition d, Options o) throws DefinitionException {
-        d.check(o.limits());
-        Factory f = new Factory(d, o);
-        return pipe -> f.newShaper(pipe.writeOverhead());
+    private static final long NONE = -1;
+    private static final long NANOS = 1000;
+
+    /** A factory running d; its shared values are drawn here from the options' source. */
+    public static ShaperFactory factory(Definition d, Options o) {
+        Compiled c = new Compiled(d, Sampler.of(o), o);
+        return pipe -> c.newShaper();
     }
 
     /** Reads a JSON definition and returns its factory. */
     public static ShaperFactory factory(String json, Options o) throws DefinitionException {
-        o.limits().checkBytes(json.length(), "machine");
-        return factory(Definition.parse(json), o);
+        return factory(Definition.parse(json, o.limits()), o);
     }
 
-    /**
-     * Reads a pool policy: a JSON object with the optional members {@code count} (a value),
-     * {@code dial_after} (a list of values; entry {@code min(failures, length - 1)} applies)
-     * and {@code retire} (a list of {@code {"metric": name, "above": value}}). Values have the
-     * JSON form and validation of a definition's values; times are in seconds. Unknown members
-     * and metrics are errors; scope {@code pipe} is accepted only in {@code retire}. The input
-     * is bounded by the options' {@code maxBytes}; values are drawn from the options' source.
-     * See {@link MachinePoolPolicy} for the decisions.
-     */
+    /** Reads a pool policy; see {@link MachinePoolPolicy}. */
     public static MachinePoolPolicy poolPolicy(byte[] json, Options o) throws DefinitionException {
-        return MachinePoolPolicy.read(json, o);
+        o.limits().check(json.length);
+        return MachinePoolPolicy.read(new String(json, StandardCharsets.UTF_8), o);
     }
 
     /**
-     * Reads session limits: a JSON object with the optional members {@code max_padding_bytes} and
-     * {@code max_injected} (integers, 0 to 2^53), {@code max_padding_ratio} (0 to 1),
-     * {@code max_pause_total} and {@code max_delay} (seconds, 0 to 1e9). An absent or null member is
-     * no limit; 0 allows none. Unknown and duplicate members are errors. The input is bounded by the
-     * options' {@code maxBytes}.
+     * Reads local limits: a JSON object with the optional members {@code wire} ({@code initial} up to 2^53, {@code per_mb} and
+     * {@code per_sec} up to 2^43, integers), {@code max_delay} (microseconds up to 10^15; 0 the default, negative no bound)
+     * and the switches {@code no_padding}, {@code no_pause} and {@code no_injection}. A wire of zeros allows no injection.
      */
-    public static ShapingLimits sessionLimits(byte[] json, Options o) throws DefinitionException {
-        o.limits().checkBytes(json.length, "limits");
-        return DefinitionJson.sessionLimits(new String(json, StandardCharsets.UTF_8));
+    public static ShapingLimits limits(byte[] json, Options o) throws DefinitionException {
+        o.limits().check(json.length);
+        return DefinitionJson.limits(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)));
     }
 
-    private static final Trigger[] TIMERS = {Trigger.TIMER0, Trigger.TIMER1};
-    private static final Trigger[] ZEROS = {Trigger.ZERO0, Trigger.ZERO1};
-    private static final Trigger[] TRIGGERS = Trigger.values();
-
-    private static final class Factory {
+    /** A definition with its shared values drawn: read only, shared by the pipes. */
+    static final class Compiled {
         final Definition d;
-        final Options o;
-        final IdentityHashMap<Value, Integer> idx = new IdentityHashMap<>();
+        final long[] shared;
         final Set<Capability> caps = EnumSet.of(Capability.PLAN);
-        /** Triggers processed per event. */
-        int bound;
-        /** Factory-scoped values. */
-        double[] kept;
-        boolean[] has;
+        private final Options o;
 
-        Factory(Definition d, Options o) {
+        Compiled(Definition d, Sampler compile, Options o) {
             this.d = d;
             this.o = o;
-            for (Machine m : d.machines()) {
-                bound += 4 * (m.states().size() + 1);
+            shared = new long[d.sharedSlots];
+            for (Value v : d.sites()) if (v.scope == Scope.SHARED) shared[v.slot] = compile.draw(v.segments);
+            for (Machine m : d.machines) {
                 for (State st : m.states()) {
-                    Validation.values(st, v -> idx.putIfAbsent(v, idx.size()));
                     for (Transition t : st.next()) {
                         switch (t.on()) {
                             case RECORD_IN, PADDING_IN -> caps.add(Capability.RECORD_IN);
                             case STREAM_OPEN, STREAM_END -> caps.add(Capability.STREAMS);
                             default -> { }
                         }
+                        if (t.cond() != null && t.cond().what().metered()) caps.add(Capability.BUDGET);
                     }
                 }
             }
-            MachineShaper s = newShaper(0);
-            double[] k = new double[idx.size()];
-            boolean[] h = new boolean[idx.size()];
-            for (Map.Entry<Value, Integer> e : idx.entrySet()) {
-                if (e.getKey().scope() == Scope.SHARED) { k[e.getValue()] = s.draw(e.getKey()); h[e.getValue()] = true; }
-            }
-            kept = k;
-            has = h;
         }
 
-        MachineShaper newShaper(int overhead) {
-            return new MachineShaper(this, Sampler.source(o), overhead);
-        }
+        MachineShaper newShaper() { return new MachineShaper(this, Sampler.of(o)); }
     }
 
-    /** The shaper of one pipe. */
-    private static final class MachineShaper extends Sampler implements Shaper {
-        private final Factory f;
-        private final int[] cur;
-        private final double[][] ctr;
-        /** Pipe-scoped values. */
-        private final double[] kept;
-        private final boolean[] has;
-        private long seq;
-        private Reply rep;
-        private boolean stopping;
+    /** The shaper of one pipe. Times inside are microseconds of the session clock. */
+    static final class MachineShaper implements Shaper {
+        private final Compiled c;
+        private final List<Machine> ms;
+        private final Sampler s;
+        private final int[] cur, gen;
+        private final long[][] counters, timers;
+        private final long[] injectAt, rate, burst, weight;
+        private final int[] injectLen;
+        private long pauseUntil, seq;
         /** Length of the triggering event. */
-        private int n;
-        private final ArrayDeque<long[]> q = new ArrayDeque<>();
-        /** The pipe's write overhead. */
-        private final int overhead;
+        private long len;
+        private long now;
+        private boolean stopped;
+        /** The readings of this entrance. */
+        private ShapingMeters meters = ShapingMeters.ZERO;
+        private final long[] pipeKept;
+        private final BitsOf pipeHas;
+        /** The FIFO of triggers, four ints each: machine, trigger, slot, generation. */
+        private int[] q = new int[64];
+        private int qHead, qTail;
+        /** The machine of the injection last reported; -1: none. */
+        private int surfaced = -1;
+        private long lastInjectAt = NONE, lastWake = NONE, lastUntil, lastRate, lastBurst, lastWeight;
+        private int lastInjectLen;
 
-        MachineShaper(Factory f, RandomGenerator r, int overhead) {
-            super(r);
-            this.f = f;
-            this.overhead = Math.max(overhead, 0);
-            int m = f.d.machines().size();
-            cur = new int[m];
-            ctr = new double[m][2];
-            kept = new double[f.idx.size()];
-            has = new boolean[f.idx.size()];
+        MachineShaper(Compiled c, Sampler s) {
+            this.c = c;
+            this.ms = c.d.machines;
+            this.s = s;
+            int n = ms.size();
+            cur = new int[n];
+            gen = new int[n];
+            counters = new long[n][];
+            timers = new long[n][];
+            injectAt = new long[n];
+            injectLen = new int[n];
+            rate = new long[n];
+            burst = new long[n];
+            weight = new long[n];
+            Arrays.fill(injectAt, NONE);
+            for (int i = 0; i < n; i++) {
+                cur[i] = ms.get(i).start();
+                counters[i] = new long[ms.get(i).counters()];
+                timers[i] = new long[ms.get(i).timers()];
+                Arrays.fill(timers[i], NONE);
+            }
+            pipeKept = new long[c.d.pipeSlots];
+            pipeHas = new BitsOf(c.d.pipeSlots);
         }
 
-        @Override public Set<Capability> capabilities() { return f.caps; }
+        @Override public Set<Capability> capabilities() { return c.caps; }
+
+        int state(int machine) { return cur[machine]; }
+
+        long[] counters(int machine) { return counters[machine]; }
 
         @Override public void plan(RecordView view, RecordPlan p) {
-            for (int i = 0; i < cur.length; i++) {
-                RecordRule rr = f.d.machines().get(i).states().get(cur[i]).record();
-                if (rr == null) continue;
-                int m = 0;
-                if (rr.maxLen() != null) {
-                    m = length(rr.maxLen());
-                    if (p.maxLength() == 0 || m > 0 && m < p.maxLength()) p.maxLength(m);
+            now = view.nowNanos() / NANOS;
+            meters = view.meters();
+            long maxLen = 0, padTo = 0, multiple = 0, pad = 0, delay = 0;
+            boolean flush = false;
+            for (int i = 0; i < ms.size(); i++) {
+                RecordRule r = ms.get(i).states().get(cur[i]).record();
+                if (r == null) continue;
+                long ml = 0;
+                if (r.target() != null) {
+                    ml = val(r.target());
+                    padTo = Math.max(padTo, ml);
+                } else if (r.maxLen() != null) {
+                    ml = val(r.maxLen());
                 }
-                if (rr.padTo() == rr.maxLen() && rr.padTo() != null) p.padTo(Math.max(p.padTo(), m)); // one draw for both fields
-                else if (rr.padTo() != null) p.padTo(Math.max(p.padTo(), length(rr.padTo())));
-                if (rr.padMultiple() != null) p.padMultiple(Math.max(p.padMultiple(), length(rr.padMultiple())));
-                if (rr.pad() != null) p.pad((int) Math.min((long) p.pad() + length(rr.pad()), Integer.MAX_VALUE)); // lengths are at most 2^31-1
-                if (rr.delay() != null) p.delayNanos(Math.max(p.delayNanos(), nanos(rr.delay())));
-                if (rr.flush()) p.flush(true);
+                if (ml != 0 && (maxLen == 0 || ml < maxLen)) maxLen = ml;
+                if (r.padTo() != null) padTo = Math.max(padTo, val(r.padTo()));
+                if (r.padMultiple() != null) multiple = Math.max(multiple, val(r.padMultiple()));
+                if (r.pad() != null) pad = Math.min(pad + val(r.pad()), Integer.MAX_VALUE);
+                if (r.delay() != null) delay = Math.max(delay, val(r.delay()));
+                flush |= r.flush();
             }
-            if (overhead > 0 && view.writeStart()) {
-                // Below MIN_MAX_LENGTH: raised and counted by the session.
-                if (p.maxLength() > 0) p.maxLength(Math.max(p.maxLength() - overhead, 1));
-                p.padTo(Math.max(p.padTo() - overhead, 0));
-            }
-            rep = p.reply();
-            stopping = false;
-            fire(Trigger.RECORD_OUT, 0);
+            p.maxLength((int) maxLen).padTo((int) padTo).padMultiple((int) multiple).pad((int) pad).delayNanos(delay * NANOS).flush(flush);
+            fire(Trigger.RECORD_OUT, -1, 0, -1);
             seq++;
-            if (stopping) p.stop(true); // The stop follows the record.
-            rep = null;
+            p.stop(stopped);
+            effects(p.effects());
         }
 
-        @Override public void onEvent(Event e, Reply reply) {
-            rep = reply;
-            stopping = false;
-            try {
-                switch (e.kind()) {
-                    case START -> {
-                        for (int i = 0; i < cur.length; i++) enter(i, f.d.machines().get(i).start());
-                        drain();
-                    }
-                    case RECORD_IN -> fire(e.paddingOnly() ? Trigger.PADDING_IN : Trigger.RECORD_IN, e.length());
-                    case INJECTED -> fire(Trigger.INJECTED, e.length());
-                    case TIMER -> fire(TIMERS[e.timer() & 1], 0);
-                    case STREAM_OPEN -> fire(Trigger.STREAM_OPEN, 0);
-                    case STREAM_END -> fire(Trigger.STREAM_END, 0);
-                    default -> { }
+        @Override public void onEvent(Event e, Effects out) {
+            now = e.nowNanos() / NANOS;
+            meters = e.meters();
+            switch (e.kind()) {
+                case START -> {
+                    for (int i = 0; i < ms.size(); i++) enter(i, ms.get(i).start());
+                    drain();
                 }
-                if (stopping) reply.stop();
-            } finally {
-                rep = null;
+                case RECORD_IN -> fire(e.paddingOnly() ? Trigger.PADDING_IN : Trigger.RECORD_IN, -1, e.length(), -1);
+                case INJECTED -> {
+                    clearSurfaced();
+                    fire(Trigger.INJECTED, -1, e.length(), -1);
+                }
+                case INJECT_DROPPED -> {
+                    clearSurfaced();
+                    if (surfaced >= 0) fire(Trigger.INJECT_DROPPED, -1, 0, surfaced);
+                }
+                case WAKE -> wake();
+                case STREAM_OPEN -> fire(Trigger.STREAM_OPEN, -1, 0, -1);
+                case STREAM_END -> fire(Trigger.STREAM_END, -1, 0, -1);
+                default -> { return; } // replaced, stopped, pipe failed: no machine hears them
+            }
+            effects(out);
+            if (stopped) out.stop();
+        }
+
+        private void clearSurfaced() {
+            if (surfaced >= 0) injectAt[surfaced] = NONE;
+        }
+
+        private void wake() {
+            List<long[]> due = new ArrayList<>();
+            for (int m = 0; m < timers.length; m++) {
+                for (int k = 0; k < timers[m].length; k++) {
+                    if (timers[m][k] != NONE && timers[m][k] <= now) due.add(new long[] {timers[m][k], m, k});
+                }
+            }
+            due.sort((a, b) -> a[0] != b[0] ? Long.compare(a[0], b[0]) : a[1] != b[1] ? Long.compare(a[1], b[1]) : Long.compare(a[2], b[2]));
+            for (long[] d : due) {
+                int m = (int) d[1], k = (int) d[2];
+                if (timers[m][k] != d[0]) continue;
+                timers[m][k] = NONE;
+                fire(Trigger.TIMER, k, 0, m);
             }
         }
 
-        /** Offers t to every machine. */
-        private void fire(Trigger t, int len) {
-            n = len;
-            for (int i = 0; i < cur.length; i++) q.add(new long[] {i, t.ordinal()});
+        private void push(int m, Trigger t, int slot) {
+            if (qTail + 4 > q.length) {
+                int live = qTail - qHead;
+                int[] to = live * 2 >= q.length ? new int[q.length * 2] : q;
+                System.arraycopy(q, qHead, to, 0, live);
+                q = to;
+                qHead = 0;
+                qTail = live;
+            }
+            q[qTail] = m;
+            q[qTail + 1] = t.ordinal();
+            q[qTail + 2] = slot;
+            q[qTail + 3] = gen[m];
+            qTail += 4;
+        }
+
+        private static final Trigger[] TRIGGERS = Trigger.values();
+
+        private void fire(Trigger t, int slot, long n, int only) {
+            len = n;
+            if (only >= 0) push(only, t, slot);
+            else for (int m = 0; m < ms.size(); m++) push(m, t, slot);
             drain();
         }
 
-        /** Processes pending triggers, at most the factory's bound per call. */
         private void drain() {
-            for (int steps = 0; !q.isEmpty() && steps < f.bound; steps++) {
-                long[] g = q.poll();
-                step((int) g[0], TRIGGERS[(int) g[1]]);
+            while (qHead < qTail) {
+                int m = q[qHead], t = q[qHead + 1], slot = q[qHead + 2], g = q[qHead + 3];
+                qHead += 4;
+                if (g == gen[m]) step(m, TRIGGERS[t], slot);
             }
-            q.clear();
+            qHead = qTail = 0;
         }
 
-        private void step(int m, Trigger t) {
-            State st = f.d.machines().get(m).states().get(cur[m]);
-            for (Transition tr : st.next()) {
-                if (tr.on() != t || tr.cond() != null && !cond(m, tr.cond())) continue;
-                if (tr.prob() != null && r.nextDouble() >= sample(tr.prob())) continue;
-                enter(m, tr.to());
+        private void step(int m, Trigger on, int slot) {
+            for (Transition t : ms.get(m).states().get(cur[m]).next()) {
+                if (t.on() != on || t.slot() != slot) continue;
+                if (t.cond() != null && !holds(m, t.cond())) continue;
+                if (t.prob() != null && !s.prob(val(t.prob()))) continue;
+                enter(m, t.to());
                 return;
             }
         }
 
+        private boolean holds(int m, Cond k) {
+            long x = switch (k.what()) {
+                case COUNTER -> counters[m][k.slot()];
+                case LEN -> len;
+                case SEQ -> seq;
+                case WIRE_LEFT -> meters.wireLeft();
+                case STALL_LEFT -> meters.stallLeft();
+                case WIRE_SPENT -> meters.wireSpent();
+                case SENT_BYTES -> meters.sentBytes();
+                case WIRE_PPM -> meters.wirePpm();
+            };
+            return k.cmp().holds(x, val(k.value()));
+        }
+
         private void enter(int m, int to) {
             cur[m] = to;
-            for (Action a : f.d.machines().get(m).states().get(to).enter()) act(m, a);
-            q.add(new long[] {m, Trigger.ENTER.ordinal()});
+            gen[m]++;
+            for (Action a : ms.get(m).states().get(to).enter()) {
+                if (a.op() == Op.RESTART) {
+                    enter(m, ms.get(m).start());
+                    return;
+                }
+                act(m, a);
+            }
+            push(m, Trigger.ENTER, -1);
         }
 
         private void act(int m, Action a) {
-            Reply rp = rep;
             switch (a.op()) {
                 case INJECT -> {
-                    if (a.cancel()) rp.cancelInject();
-                    else rp.inject(nanos(a.after()), length(a.len()));
+                    if (a.cancel()) {
+                        injectAt[m] = NONE;
+                    } else {
+                        long after = val(a.after());
+                        injectLen[m] = (int) val(a.len());
+                        injectAt[m] = now + after;
+                    }
                 }
-                case PAUSE -> rp.gate(nanos(a.after()), 0, 0);
-                case RATE -> rp.gate(0, (long) bounded(Sampler.round(sample(a.rate())), Validation.MAX_COUNT), a.burst() == null ? 0 : length(a.burst()));
-                case TIMER -> {
-                    if (a.cancel()) rp.cancelTimer(a.slot());
-                    else rp.timer(a.slot(), nanos(a.after()));
+                case PAUSE -> pauseUntil = Math.max(pauseUntil, now + val(a.after()));
+                case RATE -> {
+                    rate[m] = val(a.rate());
+                    burst[m] = a.burst() == null ? 0 : val(a.burst());
                 }
+                case TIMER -> timers[m][a.slot()] = a.cancel() ? NONE : now + val(a.after());
                 case SET, ADD, SUB -> {
-                    double was = ctr[m][a.slot()], x = Sampler.round(sample(a.value())); // not negative: checked at load
-                    double c = switch (a.op()) {
+                    long[] ct = counters[m];
+                    long was = ct[a.slot()], x = val(a.value());
+                    long v = switch (a.op()) {
                         case SET -> x;
-                        case ADD -> was + x;
-                        default -> Math.max(was - x, 0);
+                        case ADD -> Long.compareUnsigned(was + x, was) < 0 ? -1L : was + x;
+                        default -> Long.compareUnsigned(was, x) > 0 ? was - x : 0;
                     };
-                    ctr[m][a.slot()] = c;
-                    if (c == 0 && (was != 0 || a.op() != Op.SET)) q.add(new long[] {m, ZEROS[a.slot()].ordinal()});
+                    ct[a.slot()] = v;
+                    if (v == 0 && (was != 0 || a.op() != Op.SET)) push(m, Trigger.ZERO, a.slot());
                 }
-                case WEIGHT -> rp.weight(sample(a.value()));
-                case STOP -> stopping = true;
-                case RESTART -> enter(m, f.d.machines().get(m).start());
+                case WEIGHT -> {
+                    long w = val(a.value());
+                    if (w != 0) weight[m] = w;
+                }
+                case STOP -> stopped = true;
+                default -> { }
             }
         }
 
-        private boolean cond(int m, Cond c) {
-            double x = switch (c.what()) {
-                case COUNTER0 -> ctr[m][0];
-                case COUNTER1 -> ctr[m][1];
-                case LEN -> n;
-                case SEQ -> seq;
-            };
-            double y = sample(c.value());
-            return switch (c.cmp()) {
-                case LT -> x < y;
-                case LE -> x <= y;
-                case EQ -> x == y;
-                case NE -> x != y;
-                case GE -> x >= y;
-                case GT -> x > y;
+        private long val(Value v) {
+            return switch (v.scope) {
+                case SHARED -> c.shared[v.slot];
+                case PIPE -> {
+                    if (!pipeHas.get(v.slot)) {
+                        pipeKept[v.slot] = s.draw(v.segments);
+                        pipeHas.set(v.slot);
+                    }
+                    yield pipeKept[v.slot];
+                }
+                case EACH, SESSION -> s.draw(v.segments);
             };
         }
 
-        private int length(Value v) {
-            double x = Sampler.round(sample(v));
-            if (!(x > 0)) return 0;
-            return (int) Math.min(x, Integer.MAX_VALUE);
+        /** What differs from the last report. */
+        private void effects(Effects out) {
+            int best = -1;
+            for (int m = 0; m < injectAt.length; m++) {
+                if (injectAt[m] != NONE && (best < 0 || injectAt[m] < injectAt[best])) best = m;
+            }
+            surfaced = best;
+            long at = best < 0 ? NONE : injectAt[best];
+            int l = best < 0 ? 0 : injectLen[best];
+            if (at != lastInjectAt || l != lastInjectLen) {
+                if (best < 0) out.noInject();
+                else out.inject(at * NANOS, l);
+                lastInjectAt = at;
+                lastInjectLen = l;
+            }
+            long wake = NONE;
+            for (long[] ts : timers) for (long t : ts) if (t != NONE && (wake == NONE || t < wake)) wake = t;
+            if (wake != lastWake) {
+                if (wake == NONE) out.noWake();
+                else out.wake(wake * NANOS);
+                lastWake = wake;
+            }
+            long r = 0, b = 0;
+            for (int m = 0; m < rate.length; m++) {
+                if (rate[m] != 0 && (r == 0 || rate[m] < r)) { r = rate[m]; b = burst[m]; }
+            }
+            if (pauseUntil != lastUntil || r != lastRate || b != lastBurst) {
+                out.gate(pauseUntil * NANOS, r, b);
+                lastUntil = pauseUntil;
+                lastRate = r;
+                lastBurst = b;
+            }
+            long w = 0;
+            for (long x : weight) if (x != 0 && (w == 0 || x < w)) w = x;
+            if (w != lastWeight) {
+                out.weight(w);
+                lastWeight = w;
+            }
         }
+    }
 
-        private long nanos(Value v) {
-            return (long) bounded(Sampler.round(sample(v) * 1e9), Long.MAX_VALUE / 2.0);
-        }
-
-        /** x within [-m, m] (m > 0), NaN as 0, so that a conversion to an integer is the same on every platform. */
-        private static double bounded(double x, double m) {
-            return Double.isNaN(x) ? 0 : Math.clamp(x, -m, m);
-        }
-
-        /** v, kept per its scope. */
-        @Override double sample(Value v) {
-            int i = f.idx.get(v);
-            if (v.scope() == Scope.SHARED && f.has != null && f.has[i]) return f.kept[i];
-            if (v.scope() == Scope.PIPE && has[i]) return kept[i];
-            double x = draw(v);
-            if (v.scope() == Scope.PIPE) { kept[i] = x; has[i] = true; }
-            return x;
-        }
+    /** A fixed set of slots. */
+    // A mutable bit set: a record would compare and expose its array as a value, which it is not.
+    @SuppressWarnings("ClassCanBeRecord")
+    private static final class BitsOf {
+        private final long[] words;
+        BitsOf(int n) { words = new long[(n + 63) / 64]; }
+        boolean get(int i) { return (words[i >> 6] & 1L << i) != 0; }
+        void set(int i) { words[i >> 6] |= 1L << i; }
     }
 }

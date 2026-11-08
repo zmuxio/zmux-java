@@ -17,16 +17,18 @@ import javax.net.ssl.SSLEngine;
 /**
  * Entry points: sessions over TCP, TLS or any pipe input. Establishment returns once the
  * peer's parameters were processed, or at once when early data toward a declared zmux peer
- * is configured (API.md Section 3).
+ * is configured.
  */
 public final class Zmux {
     private Zmux() {}
 
     /**
-     * Transfers both streams to a bounded, bidirectional relay (API.md Section A.2). Cancelling the returned stage
+     * Transfers both streams to a bounded, bidirectional relay. Cancelling the returned stage
      * ({@code toCompletableFuture().cancel(...)}) cancels the splice: both streams are reset and stopped with code 0
      * and there is no result. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
-     * finished, with how each direction ended, or exceptionally when a limiter failed.
+     * finished, with how each direction ended, or exceptionally when a limiter failed. The ownership cleanup waits
+     * for each stream's event loop at most one second; a loop that does not answer by then completes the stage
+     * exceptionally with an {@link java.io.IOException} saying so (the cleanup still runs if the loop resumes).
      */
     public static java.util.concurrent.CompletionStage<SpliceResult> splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
         return Splice.start(a, b, options);
@@ -67,10 +69,11 @@ public final class Zmux {
 
     /** A client session over TCP; the connection starts with the prefix of {@link ZmuxConfig#credential()}. */
     public static ZmuxSession connect(InetSocketAddress address, ZmuxConfig cfg) throws IOException {
+        CoreConfig core = cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR);
         EventLoop loop = cfg.nextLoop();
         SocketChannel ch = dial(address, cfg.handshakeNanos());
         present(ch, cfg.credential(), address);
-        return established(Bootstrap.socket(loop, cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR), ch, cfg.hooks), cfg);
+        return established(Bootstrap.socket(loop, core, ch, cfg.hooks), cfg);
     }
 
     /** Writes the prefix of credential (null: none) on a connected blocking socket without TLS; closes it on failure. */
@@ -112,19 +115,54 @@ public final class Zmux {
      * which may bind to the handshake's exporter.
      */
     public static ZmuxSession connectTls(InetSocketAddress address, TlsOptions tls, ZmuxConfig cfg) throws IOException {
+        CoreConfig core = cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR);
         SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
         EventLoop loop = cfg.nextLoop();
         SocketChannel ch = dial(address, cfg.handshakeNanos());
-        return established(Bootstrap.tls(loop, cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR), ch, engine, cfg.hooks,
+        return established(Bootstrap.tls(loop, core, ch, engine, tls.secure(), cfg.hooks,
                 null, presenter(cfg.credential(), address)), cfg);
     }
 
     /**
+     * Dials a TLS connection and runs its handshake: the connection as a pipe input, for a layer such as an
+     * Establish, with the handshake's exporter and, per {@link TlsOptions#withSecure}, the Bound declaration.
+     * ALPN offers {@link ZmuxConfig#alpn()}.
+     */
+    public static CompletableFuture<PipeIo> dialTlsPipe(InetSocketAddress address, TlsOptions tls, ZmuxConfig cfg) {
+        CompletableFuture<PipeIo> f = new CompletableFuture<>();
+        try {
+            SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
+            SocketChannel ch = dial(address, cfg.handshakeNanos());
+            io.zmux.internal.loop.Bootstrap.tlsPipe(cfg.nextLoop(), ch, engine, cfg.handshakeNanos(), tls.secure(), f);
+        } catch (IOException | RuntimeException e) {
+            f.completeExceptionally(e);
+        }
+        return f;
+    }
+
+    /**
      * A session in the given role over any pipe input. A credential is presented where the
-     * pipe was dialed, not here ({@link Credential}).
+     * pipe was dialed, not here ({@link Credential}). The pipe input belongs to zmux from the
+     * call on, whatever the outcome: zmux closes it on every failure, a configuration error
+     * included, and the caller never does.
+     *
+     * <p>A {@link Role#SERVER} or {@link Role#PEER} session opened here has no listener, so it
+     * cannot accept joins: {@link ZmuxConfig.Builder#maxPipes} above 1 or a
+     * {@link ZmuxConfig.Builder#resumeTimeout} on it is rejected with
+     * {@link IllegalArgumentException} (use {@link ZmuxListener#handle} instead).
+     *
+     * @throws IllegalArgumentException for a configuration that cannot work on this pipe input,
+     *     before any byte is written; io is closed
      */
     public static ZmuxSession open(PipeIo io, Role role, ZmuxConfig cfg) throws IOException {
-        CoreConfig.Role r = core(role);
+        CoreConfig.Role r;
+        try {
+            r = core(java.util.Objects.requireNonNull(role, "role"));
+            cfg.checkWithoutListener(r);
+        } catch (RuntimeException error) {
+            Bootstrap.discard(io, error);
+            throw error;
+        }
         return external(io, cfg, r, r);
     }
 
@@ -137,7 +175,7 @@ public final class Zmux {
     }
 
     /**
-     * Dials a client session over the carrier the mode selects (API.md Section 4.8); each
+     * Dials a client session over the carrier the mode selects; each
      * carrier presents cfg's {@link ZmuxConfig#credential()}. policy is the policy of
      * {@link CarrierMode#auto} (null: the defaults).
      *
@@ -187,14 +225,13 @@ public final class Zmux {
 
     /** Starts a session over io without waiting for the peer's parameters. */
     static CompletableFuture<Bootstrap.Started> startExternal(PipeIo io, ZmuxConfig cfg, CoreConfig.Role role, CoreConfig.Role transport) {
-        if (SessionHost.onHostThread()) throw new IllegalStateException("connect on a zmux event-loop thread");
         CompletableFuture<Bootstrap.Started> started;
         try {
+            if (SessionHost.onHostThread()) throw new IllegalStateException("connect on a zmux event-loop thread");
             started = Bootstrap.external(() -> io.carrierConn() instanceof SessionRuntime parent
                     ? parent.loop() : cfg.nextLoop(), cfg.toCore(role, transport), io, cfg.hooks);
         } catch (RuntimeException error) {
-            try { if (io.reader() != null) io.reader().close(); }
-            finally { if (io.writer() != null) io.writer().abort(error); }
+            Bootstrap.discard(io, error);
             throw error;
         }
         return started;

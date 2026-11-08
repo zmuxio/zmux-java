@@ -119,7 +119,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         if (s != null) s.handshakeFailed();
     }
 
-    // ---- the datagram channel (EXTENSIONS.md Section 6.8) ----
+    // ---- the datagram channel ----
 
     /**
      * A QUIC datagram of the connection: a channel datagram, routed by its Pipe Stream ID to
@@ -276,11 +276,14 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     CompletionStage<PipeIo> openPipe() { return open(QuicStreamType.BIDIRECTIONAL); }
 
-    /** The client's view of this connection for its credential: no exporter (the QUIC handshake offers none here). */
+    /** The exporter of this connection's handshake; null until it completes. */
+    byte[] export(String label, byte[] context, int length) { return QuicExporter.export(channel.sslEngine(), label, context, length); }
+
+    /** The client's view of this connection for its credential. */
     private io.zmux.Admission.CarrierInfo clientInfo() {
         var remote = (java.net.InetSocketAddress) channel.remoteSocketAddress();
         String protocol = applicationProtocol();
-        return new io.zmux.Admission.CarrierInfo(remote, remote, protocol == null ? "" : protocol, serverName, null, io.zmux.RequestHead.NONE);
+        return new io.zmux.Admission.CarrierInfo(remote, remote, protocol == null ? "" : protocol, serverName, this::export, io.zmux.RequestHead.NONE);
     }
     /** The negotiated ALPN protocol; null without an engine or a negotiated protocol. */
     String applicationProtocol() {

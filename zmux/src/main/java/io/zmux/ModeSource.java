@@ -35,7 +35,7 @@ final class ModeSource {
     private CarrierCache cache() { return policy.cache(); }
 
     private boolean failed(int i, long now) {
-        return cache().failUntil(policy.key(), cands.get(i).kind(), now) != Long.MIN_VALUE;
+        return cache().failUntil(policy.key(), cands.get(i).kind(), cands.get(i).variant(), now) != Long.MIN_VALUE;
     }
 
     /** The candidates not held as failed, in order of preference; all of them when every one is. */
@@ -48,7 +48,7 @@ final class ModeSource {
 
     /** The most robust of order: a kind the cache holds as usable, else the exchange carrier, else the last. */
     int base(List<Integer> order, long now) {
-        for (int i : order) if (cache().good(policy.key(), cands.get(i).kind(), now)) return i;
+        for (int i : order) if (cache().good(policy.key(), cands.get(i).kind(), cands.get(i).variant(), now)) return i;
         for (int i : order) if (cands.get(i).kind() == CarrierKind.EXCHANGE) return i;
         return order.getLast();
     }
@@ -71,14 +71,24 @@ final class ModeSource {
     Duration settle() { return policy.settle(); }
 
     void record(int i, boolean usable) {
-        if (auto) cache().record(policy.key(), cands.get(i).kind(), usable, System.nanoTime());
+        Candidate c = cands.get(i);
+        if (auto) cache().record(policy.key(), c.kind(), c.variant(), usable, System.nanoTime(), c.target());
     }
 
-    /** Candidate i serves session: remembered as usable, and reported as its kind when it changed. */
+    /** Starts candidate i's target at the final URL the cache remembers for it, before a dial. */
+    void prime(int i) {
+        Candidate c = cands.get(i);
+        if (!auto || c.target() == null) return;
+        String u = cache().url(policy.key(), c.kind(), c.variant());
+        if (!u.isEmpty()) c.target().redirected(u);
+    }
+
+    /** Candidate i serves session: remembered as usable, and reported when its kind or variant changed. */
     void established(ZmuxSession session, int i) {
         record(i, true);
         CarrierKind kind = cands.get(i).kind();
-        if (session.carrierKind() != kind) session.reportCarrier(List.of(), kind);
+        String variant = cands.get(i).variant();
+        if (session.carrierKind() != kind || !variant.equals(session.carrierVariant())) session.reportCarrier(List.of(), kind, variant);
     }
 
     /** A pipe of candidate i, joined at joinedAt (System.nanoTime), ended or failed: a failure within the drop window. */
@@ -93,16 +103,17 @@ final class ModeSource {
     List<ZmuxPipe> join(ZmuxSession session, int i, PipeOptions options) throws IOException {
         Candidate c = cands.get(i);
         List<ZmuxPipe> pipes;
+        prime(i);
         try {
             pipes = joinCandidate(session, c, options);
         } catch (InterruptedIOException e) {
             throw e;
         } catch (IOException | RuntimeException e) {
-            session.reportCarrier(List.of(new CandidateResult(c.kind(), CarrierSelection.outcomeOf(e), true, e)), null);
+            session.reportCarrier(List.of(new CandidateResult(c.kind(), CarrierSelection.outcomeOf(e), true, e, c.variant())), null, "");
             record(i, false);
             throw e instanceof IOException io ? io : new IOException(c.kind() + " join failed", e);
         }
-        session.reportCarrier(List.of(new CandidateResult(c.kind(), CandidateOutcome.USABLE, true, null)), null);
+        session.reportCarrier(List.of(new CandidateResult(c.kind(), CandidateOutcome.USABLE, true, null, c.variant())), null, "");
         return pipes;
     }
 
@@ -114,7 +125,7 @@ final class ModeSource {
             return List.copyOf(pipes);
         }
         long t0 = System.nanoTime();
-        PipeIo io = c.dialer().dial(cred, Duration.ofNanos(s.core.handshakeTimeout())).withCarrier(c.kind());
+        PipeIo io = c.dialer().dial(cred, Duration.ofNanos(s.core.joinDeadline())).withCarrier(c.kind());
         return List.of(addWithin(s, io, options, policy.timer(Duration.ofNanos(System.nanoTime() - t0))));
     }
 
@@ -122,7 +133,7 @@ final class ModeSource {
     private static ZmuxPipe addWithin(ZmuxSession s, PipeIo io, PipeOptions options, Duration timer) throws IOException {
         CompletableFuture<ZmuxPipe> f = new CompletableFuture<>();
         Thread.ofVirtual().name("zmux-carrier-join").start(() -> {
-            try { f.complete(s.paths().add(io, options)); } catch (Throwable e) { f.completeExceptionally(e); }
+            try { f.complete(s.addPipe(io, options)); } catch (Throwable e) { f.completeExceptionally(e); }
         });
         try {
             return f.get(timer.toNanos(), TimeUnit.NANOSECONDS);

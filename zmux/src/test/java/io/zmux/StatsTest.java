@@ -22,26 +22,26 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** The statistics of API.md Section 7.2: each count is checked against what the test made happen. */
+/** The session and pipe statistics: each count is checked against what the test made happen. */
 @Timeout(60)
 class StatsTest {
     @Test
     void streamAndSessionCountsFollowTheirEvents() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).datagrams(true).limits(Limits.defaults().withIncomingStreams(4)).build();
-            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingStreams(4).build();
+            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
             PipeIo[] p = MemoryPipe.pair(Framing.BYTE_STREAM);
             PipeIo labelled = new PipeIo(p[0].reader(), p[0].writer(), p[0].framing(), "memory-a", p[0].carrierConn(), p[0].capabilities());
             Future<ZmuxSession> sf = ex.submit(() -> Zmux.open(p[1], Role.SERVER, server));
             try (ZmuxSession c = Zmux.open(labelled, Role.CLIENT, client); ZmuxSession s = sf.get(5, TimeUnit.SECONDS)) {
                 assertEquals(1, c.stats().pipesAdded(), "the bootstrap pair is an attachment");
-                PipeStats bootstrap = c.paths().stats().getFirst();
+                PipeStats bootstrap = c.pipeStats().getFirst();
                 assertEquals("memory-a", bootstrap.label());
                 assertTrue(bootstrap.local(), "the dialer joined the bootstrap pipe");
                 assertEquals(PipeState.Outbound.ACTIVE, bootstrap.outbound());
                 assertTrue(bootstrap.lanes().isEmpty(), "a pipe without lanes has no lane positions");
                 Thread.sleep(60);
-                assertTrue(c.paths().stats().getFirst().attachedFor().minus(bootstrap.attachedFor()).toMillis() >= 50,
+                assertTrue(c.pipeStats().getFirst().attachedFor().minus(bootstrap.attachedFor()).toMillis() >= 50,
                         "an idle session's pipe statistics are of the current time");
 
                 byte[] data = new byte[300_000];
@@ -123,7 +123,7 @@ class StatsTest {
 
     private static ZmuxConfig.Builder multipath(EventLoops loops, byte[] psk) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(psk)).withProbation(Duration.ZERO));
+                .maxPipes(4).pipeAuth(PipeAuth.psk(psk).withEndToEnd()).probation(Duration.ZERO);
     }
 
     @Test
@@ -137,10 +137,10 @@ class StatsTest {
                 ZmuxSession c = Zmux.connect(l.localAddress(), multipath(loops, other).build());
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
                 assertEquals(1, l.stats().sessions());
-                assertThrows(IOException.class, () -> c.paths().add(l.localAddress(), PipeOptions.defaults()));
+                assertThrows(IOException.class, () -> c.addPipe(l.localAddress(), PipeOptions.defaults()));
                 SessionEvent e;
                 do e = s.nextEvent(Duration.ofSeconds(5)); while (!(e instanceof SessionEvent.JoinAuthFailed));
-                assertEquals("mac", ((SessionEvent.JoinAuthFailed) e).reason());
+                assertEquals("auth", ((SessionEvent.JoinAuthFailed) e).reason());
                 assertEquals(1, s.stats().joinAuthFailures());
                 PipePoolTest.await(() -> l.stats().rejected() == 1);
                 assertEquals(0, l.stats().joins());
@@ -172,7 +172,7 @@ class StatsTest {
                 Future<ZmuxSession> sf = ex.submit((java.util.concurrent.Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
-                ZmuxPipe added = c.paths().add(l.localAddress(), PipeOptions.defaults());
+                ZmuxPipe added = c.addPipe(l.localAddress(), PipeOptions.defaults());
                 PipePoolTest.await(() -> l.stats().joins() == 1);
                 assertEquals(2, c.stats().pipesAdded());
                 PipePoolTest.await(() -> c.stats().pipesActive() == 2);
@@ -193,11 +193,11 @@ class StatsTest {
                 w.finish();
                 assertEquals(data.length, in.get(10, TimeUnit.SECONDS).length);
                 PipePoolTest.await(() -> c.stats().bytesRedundant() > 0);
-                long perPipe = c.paths().stats().stream().mapToLong(PipeStats::bytesRedundant).sum();
-                assertEquals(c.stats().bytesRedundant(), perPipe, "the session total is the sum over its pipes");
+                // The session total is the sum over its pipes, once one snapshot holds both.
+                PipePoolTest.await(() -> c.stats().bytesRedundant() == c.pipeStats().stream().mapToLong(PipeStats::bytesRedundant).sum());
                 PipePoolTest.await(() -> s.stats().bytesDuplicateReceived() > 0);
                 assertEquals(s.stats().bytesDuplicateReceived(),
-                        s.paths().stats().stream().mapToLong(PipeStats::bytesDuplicateReceived).sum());
+                        s.pipeStats().stream().mapToLong(PipeStats::bytesDuplicateReceived).sum());
                 assertTrue(w.stats().bytesSent() > data.length, "copies are sent again");
                 PipePoolTest.await(() -> w.stats().bytesAcknowledged() == data.length);
 
@@ -215,16 +215,16 @@ class StatsTest {
     void aJoinRefusedAtThePeersPipeLimitIsCounted() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops)
-                    .multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.psk(new byte[32]))).build();
+                    .maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(server))) {
                 Future<ZmuxSession> sf = ex.submit((java.util.concurrent.Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connect(l.localAddress(), ZmuxConfig.builder().eventLoops(loops)
-                        .multipath(MultipathConfig.defaults().withMaxPipes(16).withAuth(PipeAuth.psk(new byte[32]))).build());
+                        .maxPipes(16).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build());
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
                 // The peer's limit is its pipe count and a headroom of 8: joins beyond it are refused.
                 int added = 0;
                 for (int i = 0; i < 14 && c.stats().joinRefusals() == 0; i++) {
-                    try { c.paths().add(l.localAddress(), PipeOptions.defaults()); added++; } catch (IOException refused) { /* Counted below. */ }
+                    try { c.addPipe(l.localAddress(), PipeOptions.defaults()); added++; } catch (IOException refused) { /* Counted below. */ }
                     Thread.sleep(5);
                 }
                 PipePoolTest.await(() -> c.stats().joinRefusals() == 1);
@@ -245,7 +245,7 @@ class StatsTest {
                 Future<ZmuxSession> sf = ex.submit((java.util.concurrent.Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
-                ZmuxPipe added = c.paths().add(l.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
+                ZmuxPipe added = c.addPipe(l.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
                 PipePoolTest.await(() -> added.stats().orElseThrow().pingsAnswered() >= 1);
                 PipeStats st = added.stats().orElseThrow();
                 assertTrue(st.pingsAnswered() <= st.pingsSent());

@@ -6,8 +6,7 @@ import java.util.List;
 
 /**
  * Scheduling decisions of a multipath session: the per-opportunity decision, ECF/BLEST spread, weighted
- * round-robin, affinity bindings, redundancy and custom policy requests (MULTIPATH.md 11, SCHEDULER.md 3-8,
- * IMPLEMENTATION.md 2.5.2).
+ * round-robin, affinity bindings, redundancy and custom policy requests.
  */
 public final class PathScheduler {
     /** What PathScheduler asks of the rest of the path layer and the session. */
@@ -38,6 +37,9 @@ public final class PathScheduler {
 
         /** See {@link Tiers}. */
         boolean takes(Tiers.Gate g, Pipe p);
+
+        /** A direction that cannot send new data (here: its binding moves); see {@link Retention}. */
+        void heldBack(Stream st);
     }
 
     static final double ECF_BETA = 0.25;
@@ -149,7 +151,7 @@ public final class PathScheduler {
         d.multiTier = d.usable = d.takes = false;
         d.open = metrics.open(p);
         d.g = port.buildGate();
-        d.joiningTakes = p.mp().health.out() == Attach.OUT_JOINING;
+        d.joiningTakes = false;
         if (d.g == null) return;
         d.multiTier = d.g.tiers.size() > 1;
         d.usable = port.gateUsable(d.g, p);
@@ -307,7 +309,7 @@ public final class PathScheduler {
         return lv;
     }
 
-    /** spread-eta: earliest arrival with the ECF backlog and the BLEST credit test (SCHEDULER.md 5). */
+    /** spread-eta: earliest arrival with the ECF backlog and the BLEST credit test. */
     boolean spreadEtaOk(Decision d, Stream st) {
         Tiers.Gate g = d.g;
         Pipe p = d.p;
@@ -352,7 +354,7 @@ public final class PathScheduler {
         boolean first = true;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
-            if (a == null || p.out() == null || !a.liveOut()) continue;
+            if (a == null || p.out() == null || a.handshaking() || !a.liveOut()) continue;
             sum += metrics.rateOf(p);
             if (metrics.pipeUsable(p, true)) {
                 long o = metrics.owd(p);
@@ -515,7 +517,7 @@ public final class PathScheduler {
         if (!sampled) affProvisional = true;
     }
 
-    /** Re-evaluates affinity bindings once per batch (SCHEDULER.md 3). */
+    /** Re-evaluates affinity bindings once per batch. */
     void refreshBindings(Tiers.Gate g) {
         if (g == null) return;
         boolean sampled = allSampled(g);
@@ -558,6 +560,7 @@ public final class PathScheduler {
             if (target != null && target.id != b.sched.bindPipe) {
                 b.sched.moving = true;
                 b.sched.moveTo = target.id;
+                port.heldBack(st);
             }
         }
     }
@@ -674,7 +677,7 @@ public final class PathScheduler {
         req.gen = pickGen;
         Tiers.Gate g = port.buildGate();
         for (Pipe p : pipes.all()) {
-            if (p.mp() == null || p.out() == null || !p.mp().liveOut()) continue;
+            if (p.mp() == null || p.out() == null || p.mp().handshaking() || !p.mp().liveOut()) continue;
             Attach a = p.mp();
             boolean eligible = false, sat = false;
             if (g != null) {

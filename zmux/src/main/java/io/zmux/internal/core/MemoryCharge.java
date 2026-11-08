@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * What one session holds against its memory budget (SPEC.md Section 8.3 rule 4): its own
+ * What one session holds against its memory budget: its own
  * allowance, or its charge on a listener's shared {@link SharedMemory}.
  */
 public final class MemoryCharge {

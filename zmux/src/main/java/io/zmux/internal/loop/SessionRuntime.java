@@ -4,12 +4,16 @@ import io.zmux.internal.core.Datagrams;
 import io.zmux.internal.core.Action;
 import io.zmux.internal.core.CarrierAdmission;
 import io.zmux.internal.core.Joins;
-import io.zmux.internal.wire.JoinCrypto;
+import io.zmux.internal.core.Batch;
+import io.zmux.internal.core.ReadBuf;
+import java.nio.ByteBuffer;
 import io.zmux.internal.core.CoreException;
 import io.zmux.internal.core.Event;
+import io.zmux.internal.join.Kdf;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.core.SessionError;
 import io.zmux.internal.core.SessionState;
+import io.zmux.internal.core.Time;
 import io.zmux.internal.core.Waiter;
 import io.zmux.internal.wire.TransportError;
 import java.util.ArrayList;
@@ -39,7 +43,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /**
      * Future completions of this session, in the order the loop settled them. Never closed:
      * operations failed by the session's end still complete. Not a hook context, so blocking
-     * calls stay allowed there (IMPLEMENTATION.md Section 2.5.3).
+     * calls stay allowed there.
      */
     private final SerialCallbacks completions = new SerialCallbacks();
 
@@ -70,7 +74,8 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     public io.zmux.helper.Limiter datagramSendLimiter() { return hooks.datagramSend(); }
 
     private void trace(Event event) {
-        if (hooks.tracer() == null || traceClosed) return;
+        // PIPE_STATE is internal: the tracer sees the application's pipe kinds.
+        if (hooks.tracer() == null || traceClosed || event.kind() == Event.Kind.PIPE_STATE) return;
         if (event.kind() == Event.Kind.CLOSED) traceClosed = true;
         if (!terminal(event) && tracePending.get() >= hooks.tracerQueue()) {
             traceDropped.incrementAndGet(); return;
@@ -90,12 +95,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** The events a queue limit never discards: the session's end and a pipe direction's terminal state. */
     private static boolean terminal(Event e) {
-        if (e.kind() == Event.Kind.CLOSED) return true;
-        if (e.kind() != Event.Kind.PIPE_STATE) return false;
-        Object st = e.state();
-        return st == io.zmux.internal.core.PipeInfo.Out.FAILED || st == io.zmux.internal.core.PipeInfo.Out.CLOSED
-                || st == io.zmux.internal.core.PipeInfo.Out.RETIRED || st == io.zmux.internal.core.PipeInfo.In.ENDED
-                || st == io.zmux.internal.core.PipeInfo.In.RETIRED;
+        return e.kind() == Event.Kind.CLOSED || e.pipeTerminal();
     }
 
     private void runHooks() {
@@ -141,14 +141,14 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** Peer joins the core holds until establishment. */
     private final ArrayList<HeldJoin> heldJoins = new ArrayList<>();
     private final CompletableFuture<SessionError> closed = new CompletableFuture<>();
-    private final Runnable shutdownHook = () -> failInternal(new IllegalStateException("event loop closed"));
+    private final Runnable shutdownHook = () -> failInternalNow(new IllegalStateException("event loop closed"));
     private boolean finished;
     private final TimerHeap.Timer timer = new TimerHeap.Timer() {
         @Override
         void fire(long now) {
             try {
                 core.handleTimeout(now);
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | AssertionError | StackOverflowError e) {
                 internalError(e);
                 return;
             }
@@ -207,10 +207,15 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** Attaches the bootstrap transport and starts it (unless a listener already did): its inbound; on the loop. */
     Inbound attachBootstrap(Transport c) {
+        boot = c;
+        bootTls = c.tlsSession();
         Runnable edge = Nesting.tryAttach(this, c.info().connection());
         if (edge == null) throw new IllegalArgumentException("nested carrier would form a cycle");
         loop.onShutdown(shutdownHook);
-        core.attachBootstrap(c.info().carrier(), c.info().carrier(), null);
+        var carrier = c.info().carrier();
+        if (carrier.variant().isEmpty()) carrier = carrier.withVariant(bootstrapVariant);
+        core.attachBootstrap(carrier, carrier, null);
+        core.spendHandshake(c.handshakePadding());
         core.pipes().setCarrierConn(0, c.info().connection());
         Inbound in = carriers.attach(c, 0, 0, edge);
         markDirty();
@@ -231,117 +236,552 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** The session's stream lanes; their loop side. */
     public final LaneTable lanes = new LaneTable(this);
 
-    // ---- pipes (MULTIPATH.md 5) ----
+    // ---- pipes ----
 
-    private final java.util.HashMap<Long, Integer> reservations = new java.util.HashMap<>();
+    /** How often a join the cap or the backoff holds asks again. */
+    private static final long JOIN_HOLD_POLL = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(50);
 
-    /** Protocol reservation only: no writer is installed or polled until attach. On the owner loop. */
-    public Joins.Reservation reservePipe(Joins.JoinOptions options) throws CoreException {
-        if (finished) throw CoreException.session(terminal());
-        if (options.carrierBound()) throw CoreException.of(CoreException.Reason.INVALID);
-        var info = new io.zmux.internal.core.CarrierInfo(io.zmux.internal.core.Framing.BYTES, false, false, false, false);
-        options = options.toBuilder().in(info).out(info).build();
-        Joins.Reservation reserved = core.reservePipe(options);
-        long id = reserved.id() < 0 ? -reserved.id() - 1 : reserved.id();
-        reservations.put(id, options.dir());
-        return new Joins.Reservation(id, reserved.frame());
+    private static io.zmux.internal.join.Framing joinFraming(Transport c) {
+        return c.info().carrier().framing() == io.zmux.internal.core.Framing.RECORDS
+                ? io.zmux.internal.join.Framing.MESSAGE : io.zmux.internal.join.Framing.STREAM;
     }
 
-    /** Binds actual halves and properties once. No fake carrier or duplicate reservation state machine. */
-    public CompletableFuture<Long> attachReserved(long id, io.zmux.carrier.PipeIo io) {
-        CompletableFuture<Long> result = new CompletableFuture<>();
-        Transport carrier = Transport.of(loop, io);
-        if (carrier == null) { result.completeExceptionally(new java.io.IOException("carrier closed")); return result; }
-        if (!loop.tryExecute(() -> {
-            boolean readerOwned = false, writerOwned = false;
-            for (int i = 0; i < carriers.size(); i++) {
-                Transport attached = carriers.get(i).t;
-                readerOwned |= attached.ownsHalf(io.reader()); writerOwned |= attached.ownsHalf(io.writer());
-            }
-            if (readerOwned || writerOwned) {
-                // Preserve already transferred halves, but return any new half from a partially overlapping input.
-                try { if (!readerOwned && io.reader() != null) io.reader().close(); }
-                catch (RuntimeException ignored) { /* A failed close cannot prevent the other half being returned. */ }
-                try { if (!writerOwned && io.writer() != null) io.writer().abort(ABORTED); }
-                catch (RuntimeException ignored) { /* The operation still reports its failure. */ }
-                completions.execute(() -> result.completeExceptionally(CoreException.of(CoreException.Reason.INVALID)));
+    private static byte[] unit(ByteBuffer data, int pos, int lim) {
+        byte[] b = new byte[lim - pos];
+        data.get(pos, b);
+        return b;
+    }
+
+    private static void writeUnit(Transport c, byte[] unit) {
+        Batch b = new Batch();
+        b.wrap(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap(unit)));
+        c.write(b);
+    }
+
+    /** The local endpoint's handshake on a JOINING attachment: nothing read reaches the session before the Reply verifies. */
+    private final class JoinerGate extends TimerHeap.Timer implements Inbound {
+        final Transport c;
+        final long id;
+        final int dir;
+        final Runnable edge;
+        final CompletableFuture<Long> future;
+        final long due = Time.add(Clock.now(), joinWait());
+        final io.zmux.internal.join.Framing framing;
+        boolean prepared, helloSent, helloWritten, verified, confirming, done, inputEnded, endedGracefully;
+        io.zmux.internal.join.Result result;
+        byte[] confirm;
+
+        JoinerGate(Transport c, long id, int dir, Runnable edge, CompletableFuture<Long> future) {
+            this.c = c;
+            this.id = id;
+            this.dir = dir;
+            this.edge = edge;
+            this.future = future;
+            framing = joinFraming(c);
+        }
+
+        void begin() {
+            joinerGates.put(id, this);
+            c.taken();
+            c.start(this);
+            hello();
+        }
+
+        private void hello() {
+            if (done) return;
+            String message;
+            try {
+                message = core.joinPrepare(id, Clock.now());
+            } catch (CoreException e) {
+                fail(e);
                 return;
             }
-            boolean claimed = false;
-            Runnable edge = null;
-            try {
-                Integer direction = reservations.remove(id);
-                if (finished) throw CoreException.session(terminal());
-                if (direction == null) throw CoreException.of(CoreException.Reason.INVALID);
-                claimed = true;
-                if (carrier.info().fateGroup() != 0 && core.pipes().fateGroup(id) == 0) throw CoreException.of(CoreException.Reason.INVALID);
-                int halves = direction == 0 ? Action.DIR_OUT : direction == 1 ? Action.DIR_IN : Action.DIR_BIDI;
-                carrier.restrict(halves);
-                edge = Nesting.tryAttach(this, carrier.info().connection());
-                if (edge == null) throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
-                var info = carrier.info().carrier();
-                core.pipes().attachReserved(id, (halves & Action.DIR_IN) != 0 ? info : null,
-                        (halves & Action.DIR_OUT) != 0 ? info : null);
-                core.pipes().setCarrierConn(id, carrier.info().connection());
-                carriers.attach(carrier, id, 0, edge); edge = null;
-                core.pipes().wakeWriters(id); markDirty();
-                completions.execute(() -> result.complete(id));
-            } catch (CoreException | RuntimeException error) {
-                carrier.close(error); if (edge != null) edge.run();
-                if (claimed) try { core.removePipe(id, false); } catch (CoreException ignored) { /* Already retired. */ }
-                markDirty();
-                completions.execute(() -> result.completeExceptionally(error));
+            markDirty();
+            if (message == null) {
+                loop.schedule(this, Math.min(due, Time.add(Clock.now(), JOIN_HOLD_POLL)));
+                return;
             }
-        })) { carrier.close(null); result.completeExceptionally(CoreException.session(terminal())); }
-        return result;
+            prepared = true;
+            loop.schedule(this, due);
+            joinPlan(c, message, () -> !done, this::assemble);
+        }
+
+        private void assemble(io.zmux.carrier.HandshakeShaper.UnitPlan plan) {
+            byte[] h;
+            try {
+                h = core.joinHello(id, framing, plan, c.info().carrier().writeOverhead(), Clock.now());
+            } catch (io.zmux.carrier.SecureCarrierException | CoreException e) {
+                fail(e);
+                return;
+            }
+            helloSent = true;
+            writeUnit(c, h);
+            markDirty();
+        }
+
+        @Override void fire(long now) {
+            // Proven: the attachment is the core's, whatever the Confirm's write takes.
+            if (done || result != null) return;
+            if (now - due >= 0) fail(new java.io.IOException("pipe " + id + " not joined: handshake timeout"));
+            else if (!prepared) hello();
+        }
+
+        /** Fails the attachment and the carrier. */
+        void fail(Throwable cause) {
+            if (done) return;
+            end(cause);
+            try { core.removePipe(id, false); } catch (CoreException gone) { /* Already retired. */ }
+            markDirty();
+        }
+
+        /** The attachment failed or was removed in the core. */
+        void end(Throwable cause) {
+            if (done) return;
+            done = true;
+            joinerGates.remove(id);
+            loop.schedule(this, Time.NEVER);
+            c.close(null);
+            edge.run();
+            completions.execute(() -> future.completeExceptionally(cause));
+        }
+
+        private int step(byte[] b) {
+            if (done) return GONE;
+            Joins.JoinStep st = core.verifyReply(id, b, 0, b.length, Clock.now());
+            switch (st.status()) {
+                case MORE -> { }
+                case PROVEN -> {
+                    verified = true;
+                    c.pauseInput();
+                    if (core.pipeMode(id) == io.zmux.internal.join.Mode.BOUND) finish(io.zmux.carrier.HandshakeShaper.UnitPlan.NONE);
+                    else joinPlan(c, "confirm", () -> !done, this::finish);
+                }
+                case DECLINED -> end(CoreException.of(CoreException.Reason.JOIN_REFUSED));
+                case FAILED -> end(new java.io.IOException("pipe " + id + " not joined"));
+            }
+            markDirty();
+            return st.consumed();
+        }
+
+        private void finish(io.zmux.carrier.HandshakeShaper.UnitPlan plan) {
+            Joins.Finished f = core.joinFinish(id, plan, c.info().carrier().writeOverhead(), Clock.now());
+            markDirty();
+            if (f == null) {
+                end(new java.io.IOException("pipe " + id + " not joined"));
+                return;
+            }
+            result = f.result();
+            confirm = f.confirm();
+            loop.schedule(this, Time.NEVER);
+            if (helloWritten) proven();
+        }
+
+        /** Proven with the Hello's write complete (a Reply can overtake its report): the carrier's only write is this one. */
+        private void proven() {
+            if (confirm != null && confirm.length > 0) {
+                confirming = true;
+                writeUnit(c, confirm);
+            } else {
+                post(this::attach);
+            }
+        }
+
+        private void attach() {
+            if (done) return;
+            done = true;
+            joinerGates.remove(id);
+            loop.schedule(this, Time.NEVER);
+            // The session may have ended, or the attachment failed, while the Confirm was written.
+            boolean ended = finished || core.state().compareTo(SessionState.CLOSING) >= 0;
+            if (ended || !core.pipeAttached(id)) {
+                c.close(null);
+                edge.run();
+                // Proven made the attachment live in the core, so a close waits for it to take
+                // CONNECTION_CLOSE: it has no carrier now (as in endHandshakes).
+                if (ended) core.closingWithoutPipe(id);
+                completions.execute(() -> future.completeExceptionally(ended ? CoreException.session(terminal()) : new java.io.IOException("pipe " + id + " not joined")));
+                markDirty();
+                return;
+            }
+            Transport t = result.mode() == io.zmux.internal.join.Mode.SEALED ? new SealedTransport(c, result) : c;
+            t.restrict(dir == 0 ? Action.DIR_OUT : dir == 1 ? Action.DIR_IN : Action.DIR_BIDI);
+            core.spendHandshake(t.handshakePadding());
+            Inbound in = carriers.attach(t, id, 0, edge);
+            c.resumeInput();
+            if (inputEnded && dir != 0) in.ended(t, endedGracefully, false);
+            core.pipes().wakeWriters(id);
+            markDirty();
+            completions.execute(() -> future.complete(id));
+        }
+
+        @Override public boolean session() { return true; }
+        @Override public int bytes(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) {
+            if (verified) return 0;
+            return step(unit(data, pos, lim));
+        }
+        @Override public void message(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) {
+            if (!verified) step(unit(data, pos, lim));
+        }
+        @Override public void ended(Transport t, boolean graceful, boolean partial) {
+            if (verified) { // Proven: the attachment takes it.
+                inputEnded = true;
+                endedGracefully = graceful;
+                return;
+            }
+            fail(t.inputError() != null ? t.inputError() : new java.io.IOException("pipe " + id + " not joined: carrier ended"));
+        }
+        @Override public void written(Transport t, Batch b, Throwable cause) {
+            b.discard();
+            if (cause != null) { fail(cause); return; }
+            if (!helloWritten) {
+                helloWritten = true;
+                if (result != null) proven();
+            } else if (confirming) {
+                confirming = false;
+                post(this::attach);
+            }
+        }
     }
 
-    /** Gives up only a reservation that has not transferred to an attachment. */
-    public void cancelReservation(long id) {
-        post(() -> {
-            if (reservations.remove(id) != null) {
-                try { core.removePipe(id, false); } catch (CoreException ignored) { /* Already gone. */ }
+    /** A Hello that passed the listener, with what it needs once the session goes on. */
+    record OfferedHello(Transport c, io.zmux.internal.join.Hello hello, int skip, byte[] binding, Object admitted, String variant,
+                        ListenerHub.Counts counts, ListenerHub.JoinSlot slot, java.util.function.BiConsumer<Transport, String> reject, long slotAt,
+                        int maxUnconfirmed) {}
+
+    /** The acceptor's handling of a Hello that named this session; on the loop. */
+    void acceptHello(OfferedHello o) {
+        Transport c = o.c;
+        if (finished || core.state().compareTo(SessionState.CLOSING) >= 0 || o.slot.listenerClosed()) {
+            o.slot.settled();
+            c.close(null);
+            o.counts.refused();
+            return;
+        }
+        if (o.hello.mode() == io.zmux.internal.join.Mode.BOUND && o.binding == null) {
+            core.helloWithoutBinding();
+            markDirty();
+            o.slot.settled();
+            o.reject.accept(c, "binding_unavailable");
+            return;
+        }
+        var framing = joinFraming(c);
+        Joins.Opened opened = core.openHello(o.hello, framing, o.binding == null ? new byte[0] : o.binding);
+        markDirty();
+        switch (opened.result()) {
+            case HOLD, KEY_WAIT -> {
+                hold(new HeldJoin(o, Time.add(o.slotAt, joinWait())));
+                return;
             }
+            case ACCEPTED -> { }
+            default -> {
+                o.slot.settled();
+                o.reject.accept(c, opened.reason());
+                return;
+            }
+        }
+        Joins.PeerJoin pj = opened.join();
+        long pipe = pj.pipe().id();
+        if (!hooks.joinPolicy().allow(c, pj.mode(), o.admitted) || !hooks.joinPolicy().authorize(host, pipe)) {
+            o.slot.settled(); // The Pipe ID's bit stays clear.
+            o.reject.accept(c, "auth");
+            return;
+        }
+        Runnable edge = Nesting.tryAttach(this, c.info().connection());
+        var base = o.variant.isEmpty() || !c.info().carrier().variant().isEmpty() ? c.info().carrier() : c.info().carrier().withVariant(o.variant);
+        var carrier = pj.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base;
+        Joins.JoinCarrier jc = new Joins.JoinCarrier((c.directions() & Action.DIR_IN) != 0, (c.directions() & Action.DIR_OUT) != 0, carrier, carrier, null, edge == null);
+        // Waits for its plan off the session; the slot and the edge are held, and the claim checks the session again.
+        PlanningHello planning = new PlanningHello(o, edge);
+        planningHellos.add(planning);
+        loop.schedule(planning, Time.add(o.slotAt, joinWait()));
+        joinPlan(c, "reply", () -> !planning.done, plan -> {
+            planning.finish();
+            claim(o, pj, jc, edge, plan);
         });
     }
 
-    /** A local in-band join over c, which this loop owns and nobody started: the pipe ID. */
-    long addPipe(Transport c, Joins.JoinOptions o) throws CoreException {
+    /** A verified Hello waiting for its Reply's plan. */
+    private final class PlanningHello extends TimerHeap.Timer {
+        final OfferedHello o;
+        final Runnable edge;
+        boolean done;
+
+        PlanningHello(OfferedHello o, Runnable edge) {
+            this.o = o;
+            this.edge = edge;
+        }
+
+        void finish() {
+            done = true;
+            planningHellos.remove(this);
+            loop.schedule(this, Time.NEVER);
+        }
+
+        void drop(ListenerHub.Outcome how) {
+            if (done) return;
+            finish();
+            o.c.close(null);
+            if (edge != null) edge.run();
+            o.slot.settled();
+            o.counts.count(how);
+        }
+
+        @Override void fire(long now) { drop(ListenerHub.Outcome.TIMED_OUT); }
+    }
+
+    private final java.util.ArrayList<PlanningHello> planningHellos = new java.util.ArrayList<>();
+
+    /** The plan of an outgoing message, off the session and after its delay; next runs on the loop while live holds. */
+    private void joinPlan(Transport c, String message, java.util.function.BooleanSupplier live, java.util.function.Consumer<io.zmux.carrier.HandshakeShaper.UnitPlan> next) {
+        var shaper = hooks.handshakeShaper();
+        if (shaper == null) {
+            next.accept(io.zmux.carrier.HandshakeShaper.UnitPlan.NONE);
+            return;
+        }
+        var view = new io.zmux.carrier.HandshakeShaper.View(c.info().carrier().kind(), "join", message);
+        completions.execute(() -> {
+            boolean[] fault = new boolean[1];
+            var asked = io.zmux.carrier.HandshakeShaper.ask(shaper, view, () -> fault[0] = true);
+            post(() -> {
+                if (fault[0]) core.handshakeFault();
+                else if (asked == null) core.handshakeUnplanned();
+                if (!live.getAsBoolean()) return;
+                var plan = (asked == null ? io.zmux.carrier.HandshakeShaper.UnitPlan.NONE : asked).limited(core.shapingLimitsInForce());
+                markDirty();
+                long wait = plan.delayNanos();
+                if (wait <= 0) {
+                    next.accept(plan);
+                    return;
+                }
+                loop.schedule(new TimerHeap.Timer() {
+                    @Override void fire(long now) { if (live.getAsBoolean()) next.accept(plan); }
+                }, Time.add(Clock.now(), Math.min(wait, joinWait())));
+            });
+        });
+    }
+
+    private void claim(OfferedHello o, Joins.PeerJoin pj, Joins.JoinCarrier jc, Runnable edge, io.zmux.carrier.HandshakeShaper.UnitPlan plan) {
+        Transport c = o.c;
+        Joins.Claimed claimed = core.claimHello(pj, jc, plan, c.info().carrier().writeOverhead(), Math.max(o.hello.consumed(), o.skip));
+        markDirty();
+        switch (claimed.result()) {
+            case ACCEPTED -> new AcceptorGate(o, pj, jc, edge).begin(claimed.reply());
+            case REFUSED -> {
+                if (edge != null) edge.run();
+                o.slot.settled();
+                o.counts.refused();
+                c.taken();
+                c.start(new Inbound() {
+                    @Override public int bytes(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) { return lim - pos; }
+                    @Override public void ended(Transport t, boolean graceful, boolean partial) { t.close(null); }
+                    @Override public void written(Transport t, Batch b, Throwable cause) { b.discard(); t.close(null); }
+                });
+                writeUnit(c, claimed.reply());
+            }
+            default -> {
+                if (edge != null) edge.run();
+                o.slot.settled();
+                o.reject.accept(c, "auth");
+            }
+        }
+    }
+
+    /** An Unconfirmed carrier: it holds no session state until Confirmed. */
+    private final class AcceptorGate extends TimerHeap.Timer implements Inbound {
+        final OfferedHello o;
+        final Joins.PeerJoin pj;
+        final Joins.JoinCarrier jc;
+        final Runnable edge;
+        boolean replyWritten, confirmed, held, done, inputEnded, endedGracefully;
+        /** The Hello's bytes, still in the carrier's input: the listener read them before moving it here. */
+        int skip;
+
+        AcceptorGate(OfferedHello o, Joins.PeerJoin pj, Joins.JoinCarrier jc, Runnable edge) {
+            this.o = o;
+            this.pj = pj;
+            this.jc = jc;
+            this.edge = edge;
+            skip = o.skip;
+            confirmed = pj.mode() == io.zmux.internal.join.Mode.BOUND;
+        }
+
+        void begin(byte[] reply) {
+            // The listener's bound on Unconfirmed attachments: a new one closes the oldest.
+            if (unconfirmed.size() >= o.maxUnconfirmed) unconfirmed.getFirst().drop(ListenerHub.Outcome.REJECTED);
+            unconfirmed.addLast(this);
+            loop.schedule(this, Time.add(o.slotAt, joinWait()));
+            o.c.taken();
+            o.c.start(this);
+            if (!done) go();
+            if (!done) writeUnit(o.c, reply);
+        }
+
+        void drop(ListenerHub.Outcome how) {
+            if (done) return;
+            done = true;
+            unconfirmed.remove(this);
+            loop.schedule(this, Time.NEVER);
+            o.c.close(null);
+            edge.run();
+            o.slot.settled();
+            o.counts.count(how);
+        }
+
+        private void confirmed() {
+            if (done) return;
+            if (finished || core.state().compareTo(SessionState.CLOSING) >= 0) {
+                drop(ListenerHub.Outcome.REFUSED);
+                return;
+            }
+            done = true;
+            unconfirmed.remove(this);
+            loop.schedule(this, Time.NEVER);
+            io.zmux.internal.join.Result result;
+            Joins.JoinResult res;
+            try {
+                result = pj.result();
+                res = core.confirmJoin(pj, jc);
+            } catch (io.zmux.carrier.SecureCarrierException e) {
+                result = null;
+                res = Joins.JoinResult.CLOSE;
+            }
+            o.slot.settled();
+            if (res != Joins.JoinResult.ACCEPTED) {
+                o.c.close(null);
+                edge.run();
+                if (res == Joins.JoinResult.REFUSED) o.counts.refused(); else o.counts.rejected();
+                markDirty();
+                return;
+            }
+            long pipe = pj.pipe().id();
+            int dir = pj.pipe().direction();
+            Transport t = pj.mode() == io.zmux.internal.join.Mode.SEALED ? new SealedTransport(o.c, result) : o.c;
+            t.restrict(dir == 0 ? Action.DIR_IN : dir == 1 ? Action.DIR_OUT : Action.DIR_BIDI);
+            core.pipes().setCarrierConn(pipe, o.c.info().connection());
+            core.pipes().setAdmitted(pipe, o.admitted);
+            core.spendHandshake(t.handshakePadding());
+            Inbound in = carriers.attach(t, pipe, 0, edge);
+            o.c.resumeInput();
+            if (inputEnded && dir != 1) in.ended(t, endedGracefully, false);
+            core.pipes().wakeWriters(pipe);
+            o.counts.joined();
+            markDirty();
+        }
+
+        /** What follows the Confirm (a Bound join's Hello) is the attachment's: it stays unread from here, whenever the Reply's write reports. */
+        private void go() {
+            if (done || !confirmed || skip > 0) return;
+            if (!held) {
+                held = true;
+                o.c.pauseInput();
+            }
+            if (replyWritten) post(this::confirmed);
+        }
+
+        private int read(byte[] b) {
+            if (done || confirmed) return 0;
+            int n;
+            try {
+                n = pj.readConfirm(b, 0, b.length);
+            } catch (io.zmux.carrier.SecureCarrierException e) {
+                if (e.code() == io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE) return 0;
+                drop(ListenerHub.Outcome.REJECTED);
+                return GONE;
+            }
+            confirmed = true;
+            go();
+            return n;
+        }
+
+        @Override void fire(long now) { drop(ListenerHub.Outcome.TIMED_OUT); }
+        @Override public boolean session() { return true; }
+        @Override public int bytes(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) {
+            int skipped = Math.min(skip, lim - pos);
+            skip -= skipped;
+            if (skip > 0) return skipped;
+            if (skipped > 0) go();
+            if (pos + skipped == lim) return skipped;
+            int n = read(unit(data, pos + skipped, lim));
+            return n == GONE ? GONE : skipped + n;
+        }
+        @Override public void message(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) { read(unit(data, pos, lim)); }
+        @Override public void ended(Transport t, boolean graceful, boolean partial) {
+            if (!confirmed) {
+                drop(ListenerHub.Outcome.REJECTED);
+                return;
+            }
+            inputEnded = true; // Confirmed: the attachment takes it.
+            endedGracefully = graceful;
+        }
+        @Override public void written(Transport t, Batch b, Throwable cause) {
+            b.discard();
+            if (cause != null) { drop(ListenerHub.Outcome.REJECTED); return; }
+            replyWritten = true;
+            go();
+        }
+    }
+
+    private final java.util.HashMap<Long, JoinerGate> joinerGates = new java.util.HashMap<>();
+    private final java.util.ArrayDeque<AcceptorGate> unconfirmed = new java.util.ArrayDeque<>();
+
+    /** The configured callbacks, the logger among them. */
+    public DriverHooks hooks() { return hooks; }
+
+    /** The application's handle of this session, for the join policy. */
+    private volatile Object host;
+
+    public void host(Object h) { host = h; }
+
+    /** A local join over c, which this loop owns and nobody started; completes at Proven. */
+    private void addPipe(Transport c, Joins.JoinOptions o, CompletableFuture<Long> f) throws CoreException {
         if (finished) {
             c.close(null);
             throw CoreException.session(terminal());
         }
-        if (o.dir() == 1) { c.close(null); throw CoreException.of(CoreException.Reason.INVALID); }
-        try { c.restrict(o.dir() == 0 ? Action.DIR_OUT : Action.DIR_BIDI); }
-        catch (RuntimeException invalid) { c.close(invalid); throw invalid; }
-        Joins.JoinOptions.Builder ob = o.toBuilder().in(c.info().carrier()).out(c.info().carrier());
+        if (c.directions() != Action.DIR_BIDI) {
+            c.close(null);
+            throw new IllegalArgumentException("a join needs both directions of its carrier for its handshake");
+        }
+        var base = c.info().carrier();
+        if (o.mode() == null) {
+            io.zmux.internal.join.Mode chosen;
+            try {
+                chosen = hooks.joinPolicy().choose(c);
+            } catch (RuntimeException failed) {
+                c.close(failed);
+                hooks.log(System.Logger.Level.WARNING, "the record policy failed; the join's carrier is closed", failed);
+                throw failed;
+            }
+            o = o.toBuilder().mode(chosen).build();
+        }
+        Joins.JoinOptions.Builder ob = o.toBuilder();
+        ob.in(o.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base);
+        ob.out(o.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base);
         if (o.fateGroup() == 0) ob.fateGroup(c.info().fateGroup());
-        if (o.carrierBound()) {
-            byte[] binding = c.export(JoinCrypto.EXPORTER_PIPE, null, 32);
+        if (o.mode() == io.zmux.internal.join.Mode.BOUND) {
+            byte[] binding = c.bindable() ? c.export(Kdf.EXPORTER_JOIN, null, Kdf.BINDING_LEN) : null;
             if (binding == null) {
                 c.close(null);
-                throw CoreException.of(CoreException.Reason.INVALID);
+                throw new IllegalArgumentException("Bound on a carrier without a Secure declaration or an exporter");
             }
             ob.binding(binding);
         }
-        o = ob.build();
-        long r;
-        Runnable edge;
-        try {
-            edge = Nesting.tryAttach(this, c.info().connection());
-            if (edge == null) throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
-            try { r = core.addPipe(o); }
-            catch (CoreException | RuntimeException refused) { edge.run(); throw refused; }
-        } catch (CoreException e) {
+        Runnable edge = Nesting.tryAttach(this, c.info().connection());
+        if (edge == null) {
             c.close(null);
-            throw e;
+            throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
+        }
+        long r;
+        try {
+            r = core.addPipe(ob.build());
+        } catch (CoreException | RuntimeException refused) {
+            edge.run();
+            c.close(null);
+            throw refused;
         }
         long id = r < 0 ? -r - 1 : r;
         core.pipes().setCarrierConn(id, c.info().connection());
-        carriers.attach(c, id, 0, edge);
-        core.pipes().wakeWriters(id);
-        markDirty();
-        return id;
+        new JoinerGate(c, id, o.dir(), edge, f).begin();
     }
 
     /** Joins a TCP carrier to the session (in band); completes with the pipe ID, on the callback executor. */
@@ -380,16 +820,22 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     private static final class TlsJoin extends CompletableFuture<Long> { Runnable cancelHandshake = () -> {}; }
 
+    /** The waiter of a join gave up: its setup and its handshake end, a join the cap or the backoff holds included. */
     public void cancelJoinSetup(CompletableFuture<Long> future) {
         if (future instanceof TlsJoin tls) tls.cancelHandshake.run();
+        executeCarrier(() -> {
+            for (JoinerGate g : new ArrayList<>(joinerGates.values())) {
+                if (g.future == future && !g.verified) g.fail(new java.io.InterruptedIOException("join cancelled"));
+            }
+        });
     }
 
     /** Runs the TLS handshake of engine over ch, then joins it. */
     public CompletableFuture<Long> addPipe(java.nio.channels.SocketChannel ch, javax.net.ssl.SSLEngine engine,
-                                           long handshakeTimeout, Joins.JoinOptions o, Bootstrap.Presenter presenter) {
+                                           long handshakeTimeout, boolean secure, Joins.JoinOptions o, Bootstrap.Presenter presenter) {
         var f = new TlsJoin();
         EventLoop nio = loop instanceof EventLoop l ? l : EventLoopGroup.nextShared();
-        f.cancelHandshake = TlsTransport.handshake(nio, ch, engine, handshakeTimeout, (c, err) -> {
+        f.cancelHandshake = TlsTransport.handshake(nio, ch, engine, handshakeTimeout, secure, (c, err) -> {
             if (err != null) completions.execute(() -> f.completeExceptionally(err));
             else if (presenter == null) adopt(f, c, o);
             else Bootstrap.present(c, presenter, () -> adopt(f, c, o), e -> {
@@ -411,12 +857,32 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     private void complete(CompletableFuture<Long> f, Transport c, Joins.JoinOptions o) {
         try {
-            long id = addPipe(c, o);
-            completions.execute(() -> f.complete(id));
+            addPipe(c, o, f);
         } catch (CoreException | RuntimeException e) {
             completions.execute(() -> f.completeExceptionally(e));
         }
     }
+
+    /** The bootstrap carrier, whose exporter stays readable after it closed. */
+    /** The TLS session this process ran for the bootstrap carrier; null without one. */
+    private volatile javax.net.ssl.SSLSession bootTls;
+
+    public javax.net.ssl.SSLSession bootstrapTls() { return bootTls; }
+
+    private volatile Transport boot;
+
+    /** The admission's label of the bootstrap carrier, for one whose pipe input declares none; before it attaches. */
+    private String bootstrapVariant = "";
+
+    void bootstrapVariant(String v) { bootstrapVariant = v; }
+
+    /** The exporter of the bootstrap carrier ({@link Transport#export}); null while it is unavailable. Any thread. */
+    public byte[] exportKeyingMaterial(String label, byte[] context, int length) {
+        return boot.export(label, context, length);
+    }
+
+    /** Whether the bootstrap carrier has an exporter; any thread. */
+    public boolean bootHasExporter() { return boot.hasExporter(); }
 
     /** The admission value of the session's bootstrap carrier; set before the session starts. */
     private volatile Object admitted;
@@ -425,50 +891,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** The admission value of the session's bootstrap carrier, null without one. */
     public Object admitted() { return admitted; }
-
-    void acceptJoin(Transport c, byte[] join, byte[] binding, boolean inband, Object admitted, ListenerHub.Counts counts) {
-        if (finished) {
-            c.close(null);
-            counts.rejected();
-            return;
-        }
-        io.zmux.internal.wire.Frame f = CarrierAdmission.parseJoin(join);
-        if (f == null) { // not exactly one PIPE_JOIN: refused like any other invalid join
-            c.close(null);
-            counts.rejected();
-            return;
-        }
-        Joins.JoinResult res;
-        // The edge is recorded before admission, so concurrent joins see it; a join that is
-        // not accepted returns it at once.
-        Runnable edge = Nesting.tryAttach(this, c.info().connection());
-        try {
-            res = core.acceptJoin(f, CarrierAdmission.joinMac(f), binding,
-                    new Joins.JoinCarrier((c.directions() & Action.DIR_IN) != 0, (c.directions() & Action.DIR_OUT) != 0,
-                            c.info().carrier(), c.info().carrier(), null, edge == null));
-        } catch (RuntimeException failure) { if (edge != null) edge.run(); throw failure; }
-        if (res != Joins.JoinResult.ACCEPTED && edge != null) edge.run();
-        switch (res) {
-            case ACCEPTED -> {
-                c.restrict(f.join.direction == 0 ? Action.DIR_IN : f.join.direction == 1 ? Action.DIR_OUT : Action.DIR_BIDI);
-                long pipe = f.join.pipeId;
-                core.pipes().setCarrierConn(pipe, c.info().connection());
-                core.pipes().setAdmitted(pipe, admitted);
-                if (inband) core.pipes().skipJoinFrame(pipe);
-                carriers.attach(c, pipe, 0, edge);
-                core.pipes().wakeWriters(pipe);
-            }
-            case HOLD -> heldJoins.add(new HeldJoin(c, join, binding, inband, admitted, counts));
-            case CLOSE, REFUSED -> c.close(null);
-        }
-        switch (res) {
-            case ACCEPTED -> counts.joined();
-            case CLOSE -> counts.rejected();
-            case REFUSED -> counts.refused();
-            case HOLD -> { }
-        }
-        markDirty();
-    }
 
     /** Routes an authenticated-connection lane through the same core admission checks. */
     public void handleLane(io.zmux.carrier.PipeIo io) { ListenerHub.laneInput(this, io); }
@@ -510,12 +932,119 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         });
     }
 
-    private static void discard(io.zmux.carrier.PipeIo io) {
-        if (io.reader() != null) io.reader().close();
-        if (io.writer() != null) io.writer().abort(ABORTED);
+    private void discard(io.zmux.carrier.PipeIo io) {
+        // The host's code: never on the loop.
+        completions.execute(() -> {
+            try { if (io.reader() != null) io.reader().close(); } catch (RuntimeException ignored) { /* Closing anyway. */ }
+            try { if (io.writer() != null) io.writer().abort(ABORTED); } catch (RuntimeException ignored) { /* Closing anyway. */ }
+        });
     }
 
-    private record HeldJoin(Transport c, byte[] join, byte[] binding, boolean inband, Object admitted, ListenerHub.Counts counts) {}
+    private record HeldJoin(OfferedHello o, long due) {}
+
+    private long joinWait() { return core.joinDeadline(); }
+
+    private void hold(HeldJoin j) {
+        heldJoins.add(j);
+        armHeldJoins();
+        j.o.slot.held(() -> { if (!loop.tryExecute(() -> evictHeld(j.o.slot))) j.o.slot.settled(); });
+    }
+
+    /** Newer joins took the place of this held join; closed silently. */
+    private void evictHeld(ListenerHub.JoinSlot slot) {
+        heldJoins.removeIf(j -> {
+            if (j.o.slot != slot) return false;
+            endHeld(j, ListenerHub.Outcome.REJECTED);
+            return true;
+        });
+        armHeldJoins();
+    }
+
+    private static void endHeld(HeldJoin j, ListenerHub.Outcome how) {
+        j.o.slot.settled();
+        j.o.c.close(null);
+        j.o.counts.count(how);
+    }
+
+    /** Ends what is still in a handshake on this session: nothing the peer did, so no rejection. On the loop. */
+    private void endHandshakes(Throwable cause) {
+        for (HeldJoin j : heldJoins) endHeld(j, ListenerHub.Outcome.REFUSED);
+        heldJoins.clear();
+        loop.schedule(heldTimer, Time.NEVER);
+        if (!joinerGates.isEmpty()) {
+            for (JoinerGate g : new ArrayList<>(joinerGates.values())) {
+                long id = g.id;
+                g.end(cause);
+                // A close waits for every pipe that could take it, and this one has no carrier now.
+                core.closingWithoutPipe(id);
+            }
+        }
+        if (!unconfirmed.isEmpty()) for (AcceptorGate g : new ArrayList<>(unconfirmed)) g.drop(ListenerHub.Outcome.REFUSED);
+        if (!planningHellos.isEmpty()) for (PlanningHello h : new ArrayList<>(planningHellos)) h.drop(ListenerHub.Outcome.REFUSED);
+    }
+
+    /** The listener closed: the joins of this slot end, not an attached pipe. On the loop. */
+    void endOffered(ListenerHub.JoinSlot slot) {
+        heldJoins.removeIf(j -> {
+            if (j.o.slot != slot) return false;
+            endHeld(j, ListenerHub.Outcome.REFUSED);
+            return true;
+        });
+        armHeldJoins();
+        for (AcceptorGate g : new ArrayList<>(unconfirmed)) if (g.o.slot == slot) g.drop(ListenerHub.Outcome.REFUSED);
+        for (PlanningHello h : new ArrayList<>(planningHellos)) if (h.o.slot == slot) h.drop(ListenerHub.Outcome.REFUSED);
+        markDirty();
+    }
+
+    private void armHeldJoins() {
+        long next = Time.NEVER;
+        for (HeldJoin j : heldJoins) next = Math.min(next, j.due);
+        loop.schedule(heldTimer, next);
+    }
+
+    /** Closes the held joins whose wait is over, silently. */
+    private final TimerHeap.Timer heldTimer = new TimerHeap.Timer() {
+        @Override
+        void fire(long now) {
+            heldJoins.removeIf(j -> {
+                if (j.due - now > 0) return false;
+                endHeld(j, ListenerHub.Outcome.TIMED_OUT);
+                return true;
+            });
+            armHeldJoins();
+        }
+    };
+
+    /** The held joins go on: the session is established, or the join keys now exist. */
+    private void retryHeldJoins() {
+        List<HeldJoin> h = new ArrayList<>(heldJoins);
+        heldJoins.clear();
+        loop.schedule(heldTimer, Time.NEVER);
+        for (HeldJoin j : h) acceptHello(j.o);
+    }
+
+
+    /** The host proved pipe 0 end to end; on the loop. Held joins go on in the next round. */
+    public void declareEndToEnd() {
+        core.declareEndToEnd();
+        List<Waiter> w = new ArrayList<>(pipeWaiters);
+        pipeWaiters.clear();
+        for (Waiter op : w) op.wake();
+        markDirty();
+    }
+
+    /** The deferred PSK arrived; on the loop. */
+    public void setJoinSecret(byte[] psk) throws CoreException {
+        boolean wasPending = core.joinPending();
+        core.setJoinSecret(psk);
+        if (wasPending) {
+            retryHeldJoins();
+            List<Waiter> w = new ArrayList<>(pipeWaiters);
+            pipeWaiters.clear();
+            for (Waiter op : w) op.wake();
+            markDirty();
+        }
+    }
 
     /** Registers op to be attempted again at the next pipe state change; on the loop. */
     public void waitPipe(Waiter op) {
@@ -581,6 +1110,11 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     /** Checks before an application lock or carrier operation can block. */
+    /** Whether the calling thread may block on this session: not its event loop or callback thread. */
+    public boolean mayBlock() {
+        return !SessionHost.onHostThread() && !SerialCallbacks.onContext(this);
+    }
+
     public void checkBlocking() {
         if (SessionHost.onHostThread() || SerialCallbacks.onContext(this)) {
             throw new IllegalStateException("blocking zmux call on its event-loop or callback thread");
@@ -589,16 +1123,24 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     // ---- snapshots the loop publishes for other threads ----
 
-    /** What the session negotiated, as of the loop's last round. */
-    public record Info(boolean established, boolean initiator, boolean peerIsZmux, boolean goAway, boolean preamble,
-                       boolean priority, boolean datagramFlows, boolean pipeAck, boolean multipath, boolean lanesToPeer,
-                       int maxDatagramPayload) {}
+    /**
+     * What the session negotiated, as of the loop's last round.
+     *
+     * @param datagramLimit the largest datagram payload the peer accepts now before a flow prefix, 0 when none
+     * @param goAway the received GOAWAY watermarks [maxBidi, maxUni, code], null while none was received
+     */
+    public record Info(boolean established, boolean initiator, boolean peerIsZmux, boolean preamble,
+                       boolean priority, boolean datagramFlows, boolean pipeAck, boolean multipath, boolean resume,
+                       boolean lanesToPeer, boolean localDatagrams, boolean peerDatagrams, boolean localResetStreamAt,
+                       boolean peerResetStreamAt, int datagramLimit, boolean joinPending, boolean joinSecurityUnavailable,
+                       boolean suspended, long[] goAway) {}
 
     private volatile io.zmux.internal.core.SessionStats.Snapshot stats;
     private volatile Info info;
     // Loop only: what the published snapshots were made from.
     private long statsVersion = -1, statsBudget = -1;
-    private boolean infoEstablished, infoGoAway;
+    private boolean infoEstablished, infoSuspended, infoSecretPending;
+    private long[] infoGoAway;
 
     /** Set by the first read: the loop then also republishes when only a gauge changed. */
     private volatile boolean statsWanted;
@@ -692,13 +1234,22 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
      */
     void publishInfo() {
         var f = core.features();
-        boolean est = core.established(), away = f.goAway();
-        if (info == null || est != infoEstablished || away != infoGoAway) {
+        boolean est = core.established(), pending = core.joinPending(), suspended = core.state() == SessionState.SUSPENDED;
+        long[] away = core.peerGoAway();
+        if (info == null || est != infoEstablished || !java.util.Arrays.equals(away, infoGoAway) || pending != infoSecretPending
+                || suspended != infoSuspended) {
+            infoSecretPending = pending;
             infoEstablished = est;
             infoGoAway = away;
+            infoSuspended = suspended;
             var p = core.peerParams();
-            info = new Info(est, core.initiator(), p != null && p.isZmux(), away, f.preamble(), f.priority(), f.flows(),
-                    f.pipeAck(), f.multipath(), f.lanesOut(), core.datagrams().maxPayload(f.flows() ? 1 : 0));
+            var local = core.config().local();
+            info = new Info(est, core.initiator(), p != null && p.isZmux(), f.preamble(), f.priority(), f.flows(),
+                    f.pipeAck(), f.multipath(), f.resume(), f.lanesOut(), core.config().datagrams(),
+                    p != null && p.has(io.zmux.internal.wire.TransportParams.DATAGRAM) && p.maxDatagramFrameSize > 0,
+                    local.has(io.zmux.internal.wire.TransportParams.RESET_AT),
+                    p != null && p.has(io.zmux.internal.wire.TransportParams.RESET_AT),
+                    core.datagrams().maxPayload(0), pending, f.joinSecurityUnavailable(), suspended, away);
         }
     }
 
@@ -738,7 +1289,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         if (finished) return;
         try {
             drive();
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | AssertionError | StackOverflowError e) {
             internalError(e);
         }
     }
@@ -754,6 +1305,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         core.outbox().takeActions(actions);
         for (Action a : actions) apply(a);
         actions.clear();
+        if (core.state().compareTo(SessionState.CLOSING) >= 0) endHandshakes(CoreException.session(terminal()));
         publishSnapshots(); // Before anyone woken (an accepted or established session) reads them.
         core.outbox().takeWakes(wakes);
         for (Waiter w : wakes) w.wake();
@@ -761,16 +1313,12 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         core.settle();
         boolean pipeChanged = false;
         for (Event e; (e = core.outbox().pollEvent()) != null; ) {
-            pipeChanged |= e.kind() == Event.Kind.PIPE_STATE || e.kind() == Event.Kind.ESTABLISHED;
+            pipeChanged |= e.kind() == Event.Kind.PIPE_STATE || e.kind() == Event.Kind.ESTABLISHED || e.kind() == Event.Kind.EPOCH_COMMITTED;
             deliver(e);
         }
         if (pipeChanged) {
             refreshPipes();
-            if (!heldJoins.isEmpty() && core.established()) {
-                List<HeldJoin> h = new ArrayList<>(heldJoins);
-                heldJoins.clear();
-                for (HeldJoin j : h) acceptJoin(j.c, j.join, j.binding, j.inband, j.admitted, j.counts);
-            }
+            if (!heldJoins.isEmpty() && core.established() && !core.joinPending()) retryHeldJoins();
             if (!pipeWaiters.isEmpty()) {
                 List<Waiter> w = new ArrayList<>(pipeWaiters);
                 pipeWaiters.clear();
@@ -821,7 +1369,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             CarrierSet.Attached c = carriers.get(k);
             CarrierChannel ch = c.lane == 0 ? c.t.channel() : null;
             if (ch != null) {
-                // The pipe's datagram channel, independent of the batch write in flight (EXTENSIONS.md 6.8).
+                // The pipe's datagram channel, independent of the batch write in flight.
                 core.pollChannel(c.pipe, channelOut, channelSent, Clock.now());
                 for (int i = 0; i < channelOut.size(); i++) {
                     var sent = channelSent.get(i);
@@ -856,6 +1404,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     void apply(Action a) {
+        if (a.kind() == Action.Kind.ABORT || a.kind() == Action.Kind.CLOSE && a.dir() == Action.DIR_BIDI) {
+            JoinerGate g = joinerGates.get(a.pipe());
+            if (g != null) {
+                g.end(new java.io.IOException("pipe " + a.pipe() + " not joined"));
+                return;
+            }
+        }
         if (a.kind() == Action.Kind.OPEN_LANE) {
             for (int i = 0; i < carriers.size(); i++) {
                 CarrierSet.Attached c = carriers.get(i);
@@ -885,9 +1440,22 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     private static final Throwable ABORTED = new java.io.IOException("pipe aborted");
 
+    /** Told of every Locator joins may now name (true) or no longer name (false); the listener's routing. */
+    private java.util.function.BiConsumer<byte[], Boolean> locatorListener;
+
+    /** Installs the listener of Locator changes; on the loop or before the session runs. */
+    public void locatorListener(java.util.function.BiConsumer<byte[], Boolean> l) { locatorListener = l; }
+
     private void deliver(Event e) {
+        if (e.kind() == Event.Kind.LOCATOR_ADDED || e.kind() == Event.Kind.LOCATOR_REMOVED) {
+            if (locatorListener != null) locatorListener.accept(e.frame(), e.kind() == Event.Kind.LOCATOR_ADDED);
+            return;
+        }
         trace(e);
         if (e.kind() == Event.Kind.CLOSED) return;
+        if (e.kind() == Event.Kind.RESUME_UNATTENDED) {
+            hooks.warn("zmux session suspended with nothing to redial it (no redial hook, no running pool): it ends at its resume timeout unless the application adds a pipe");
+        }
         if (eventSink != null) eventSink.accept(e);
         events.add(e);
     }
@@ -901,7 +1469,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     /**
-     * The retirement summary (API.md Section 4.5): pipes retired since it was last read, of
+     * The retirement summary: pipes retired since it was last read, of
      * those the ones whose failure or end was unread, the unread non-terminal events dropped,
      * and the last few retired IDs, oldest first.
      */
@@ -917,23 +1485,47 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         events.cancel(waiter);
     }
 
-    /** A failure inside the endpoint: the session closes with INTERNAL_ERROR (I 2.5.6). */
+    /** A failure inside the endpoint: the session closes with INTERNAL_ERROR. */
     void internalError(Throwable t) {
-        java.util.logging.Logger.getLogger(SessionRuntime.class.getName()).log(java.util.logging.Level.WARNING,
-                "zmux session failed", t);
+        if (hooks.logger() != null) hooks.log(System.Logger.Level.ERROR, "zmux session failed", t);
+        else java.util.logging.Logger.getLogger(SessionRuntime.class.getName()).log(java.util.logging.Level.WARNING, "zmux session failed", t);
         failInternal(t);
     }
 
+    /**
+     * Closes with INTERNAL_ERROR. The CONNECTION_CLOSE goes out as in any close: a write still
+     * in flight on the carrier holds it back until it completes, so the session ends once it went
+     * out, or after {@link #FAIL_WAIT} at the latest. A second failure meanwhile ends it at once.
+     */
     void failInternal(Throwable t) {
         if (finished) return;
+        if (failing) { finish(); return; }
+        failing = true;
         try {
             if (core.state() != SessionState.CLOSED) core.forceClose(t);
             drive();
-        } catch (RuntimeException e2) {
+        } catch (RuntimeException | AssertionError | StackOverflowError e2) {
             finish();
         }
-        if (!finished) finish();
+        if (!finished) loop.schedule(failTimer, Time.add(Clock.now(), FAIL_WAIT));
     }
+
+    /** As {@link #failInternal}, but the session ends now: its loop is gone, or it never started. */
+    void failInternalNow(Throwable t) {
+        failInternal(t);
+        finish();
+    }
+
+    /** How long a session closing after a failure inside the endpoint waits for its CONNECTION_CLOSE to go out. */
+    static final long FAIL_WAIT = 2 * Time.SECOND;
+
+    /** A failure inside the endpoint closes the session: set once. */
+    private boolean failing;
+
+    private final TimerHeap.Timer failTimer = new TimerHeap.Timer() {
+        @Override
+        void fire(long now) { finish(); }
+    };
 
     /** Releases everything once the session is CLOSED. */
     private void finish() {
@@ -941,11 +1533,11 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         finished = true;
         publishSnapshots();
         loop.schedule(timer, io.zmux.internal.core.Time.NEVER);
+        loop.schedule(heldTimer, Time.NEVER);
+        loop.schedule(failTimer, Time.NEVER);
         loop.removeShutdownHook(shutdownHook);
         carriers.closeAll();
-        for (HeldJoin j : heldJoins) { j.c.close(null); j.counts.rejected(); }
-        heldJoins.clear();
-        reservations.clear();
+        endHandshakes(CoreException.session(terminal()));
         pipeWaiters.clear();
         pickers.clear();
         callbacks.close();

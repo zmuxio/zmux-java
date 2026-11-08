@@ -14,9 +14,9 @@ final class Pipe {
     /** The carrier connection of lane 0, compared by identity (lanes). */
     private Object conn;
     /** The kind of the pipe's carrier, null when undeclared. */
-    private io.zmux.CarrierKind carrier;
-    private InDir in;
-    private OutDir out;
+    private final io.zmux.CarrierKind carrier;
+    private final InDir in;
+    private final OutDir out;
     /** Multipath side storage; null outside multipath. */
     private Attach mp;
     /** Record shaping of the outbound direction; null until a shaper was set. */
@@ -69,6 +69,13 @@ final class Pipe {
         return carrier;
     }
 
+    /** The host's label of the transform the pipe's carrier runs, "" when none. */
+    private String variant = "";
+
+    String variant() { return variant; }
+
+    void variant(String v) { variant = v; }
+
     /** The label the application gave the pipe's carrier, or null. */
     private String label;
 
@@ -80,11 +87,6 @@ final class Pipe {
         label = l;
     }
 
-    /** The pipe's actual carrier was bound (a reservation). */
-    void carrier(io.zmux.CarrierKind k) {
-        carrier = k;
-    }
-
     /** Records the carrier connection of lane 0. */
     void conn(Object c) {
         conn = c;
@@ -94,12 +96,6 @@ final class Pipe {
     void attach(Attach a) {
         if (mp != null) throw new IllegalStateException("pipe " + id + " already attached");
         mp = a;
-    }
-
-    /** Replaces both directions of the bootstrap pipe (early data rejected by the carrier). */
-    void restart(InDir in, OutDir out) {
-        this.in = in;
-        this.out = out;
     }
 
     static final class InDir {
@@ -141,9 +137,9 @@ final class Pipe {
         final RecordReceiver.LaneRx rx;
         final AckEngine.InAck ack = new AckEngine.InAck();
 
-        InLane(long lane, boolean expectTp, boolean expectLane, boolean discardTp) {
+        InLane(long lane, boolean expectTp, boolean expectLane) {
             this.lane = lane;
-            rx = new RecordReceiver.LaneRx(expectTp, expectLane, discardTp);
+            rx = new RecordReceiver.LaneRx(expectTp, expectLane);
         }
     }
 
@@ -158,9 +154,9 @@ final class Pipe {
         final Waiter sig;
         private long records;
         private boolean failed;
-        /** Own lanes of this direction the peer refused (MULTIPATH.md 5.8). */
+        /** Own lanes of this direction the peer refused. */
         private long lanesRefused;
-        /** Bytes sent and not acknowledged when the pipe failed (MULTIPATH.md 7.2). */
+        /** Bytes sent and not acknowledged when the pipe failed. */
         private long bytesLost;
         /** The carrier's retransmitted bytes, as its adapter last reported them; -1: never. */
         private long retransmitted = -1;

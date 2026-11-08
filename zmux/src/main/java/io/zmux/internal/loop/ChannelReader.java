@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
 /**
  * The inbound half's read buffer: unprocessed bytes [pos, lim) of a pooled buffer. Complete
  * records go to the core, which may keep references to the buffer; a partial record stays.
- * An idle half holds no buffer (IMPLEMENTATION.md Section 2.8).
+ * An idle half holds no buffer.
  */
 final class ChannelReader {
     private final BufferPool pool;
@@ -39,6 +39,8 @@ final class ChannelReader {
 
     /** After the core consumed [pos, pos + n): keeps the rest, moving it so the next read has room. */
     void consumed(int n) {
+        // The delivery ended the half, which dropped the buffer.
+        if (buf == null) return;
         pos += n;
         if (pos == lim) {
             buf.unref();

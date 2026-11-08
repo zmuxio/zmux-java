@@ -80,6 +80,18 @@ public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream 
      */
     long id() throws IOException;
 
+    /**
+     * Sends what was written now: the opening frame at once when the stream has none yet, with
+     * the preamble and the data written before it in that one frame, and the rest of the buffered
+     * data, as flow control allows; waits until they were sent, bounded by the write timeout, and
+     * fails as a write does on a reset or closed stream or session. It counts as the first frame:
+     * preamble settings fail afterwards. Before establishment the opening frame goes as soon as
+     * the stream may open (in early data when in use); while the first flight is held the call
+     * returns at once and the frames leave with the flight. The explicit way to open a stream whose
+     * peer speaks first; {@link #id()} pins the same way but does not wait.
+     */
+    void flush() throws IOException;
+
     /** Pins the identifier asynchronously, with the same effect as {@link #id()}. */
     ZmuxFuture<Long> idAsync();
     /**
@@ -93,12 +105,13 @@ public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream 
     ZmuxFuture<Void> finishAsync();
 
     /**
-     * Releases the stream: an unfinished sending part is <b>reset</b> and an unread receiving
-     * part stopped, code 0.
+     * Releases the stream. After {@link #finish()} it does nothing to the sending part, so
+     * {@code write}, {@code finish}, {@code close} ends the stream cleanly; an unfinished sending
+     * part is <b>reset</b> with code 0.
      *
-     * <p><b>Unlike {@link java.net.Socket#close()}, this does not finish the stream.</b> Data
-     * still unsent is discarded and the peer sees RESET_STREAM, never end of stream. To end a
-     * stream cleanly call {@link #finish()} after the last write, then close.
+     * <p><b>Unlike {@link java.net.Socket#close()}, this does not finish the stream.</b> Without
+     * a finish, data still unsent is discarded and the peer sees RESET_STREAM, never end of
+     * stream. To end a stream cleanly call {@link #finish()} after the last write, then close.
      */
     @Override
     void close();

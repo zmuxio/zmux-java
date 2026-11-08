@@ -5,9 +5,9 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportParams;
 
 /**
- * Early data under an assumed parameter set (SPEC.md Section 6.1.2) and carrier early data
- * (the carrier's own 0-RTT). Owns the assumption, the fence and the outcome decision; the
- * session applies the assumption and adopts or rolls back its streams.
+ * Early data under an assumed parameter set (the zmux floor). Owns the assumption, the fence
+ * and the outcome decision; the session applies the assumption and adopts its streams. No
+ * carrier early data: no Java carrier sends TLS 1.3 early data or QUIC 0-RTT.
  */
 final class EarlyData {
     /** What the peer's parameters mean for the data sent early. */
@@ -18,25 +18,15 @@ final class EarlyData {
     private boolean floor;
     private boolean fenceSent;
     private boolean sentAny;
-    /** The early data rides on the carrier's early data, not yet accepted by it. */
-    private boolean carrier;
-    /** Sends are kept: the carrier's early data was not (yet) accepted. */
-    private boolean held;
-    private boolean accepted;
-    /** A server whose carrier took early data: peer streams are replayable until the handshake completes. */
-    private boolean replayableIn;
 
     EarlyData(CoreConfig cfg) {
-        if (cfg.earlyRemembered() != null && cfg.earlyReplayable() && allowed(cfg)) {
-            assumed = cfg.earlyRemembered();
-            carrier = true;
-        } else if (cfg.earlyZmuxPeer() && allowed(cfg)) {
+        if (cfg.earlyZmuxPeer() && allowed(cfg)) {
             assumed = floorParams();
             floor = true;
         }
     }
 
-    /** The role must not depend on the peer (SPEC.md Section 6.1.2 rule 1). */
+    /** The role must not depend on the peer. */
     private static boolean allowed(CoreConfig cfg) {
         TransportParams l = cfg.local();
         return cfg.role() != Role.AUTO && (!l.has(TransportParams.ROLE) || l.role != TransportParams.ROLE_AUTO);
@@ -70,30 +60,12 @@ final class EarlyData {
         return assumed != null;
     }
 
-    /** Sent stream data must be kept: carrier early data not yet accepted. */
-    boolean holdSends() {
-        return assumed != null && carrier || held;
-    }
-
     /** Stream data left under the assumption. */
     void sent() {
         if (assumed != null) sentAny = true;
     }
 
-    /** The carrier accepted its early data: the early sends are final. */
-    void carrierAccepted() {
-        held = false;
-        accepted = true;
-        carrier = false;
-    }
-
-    /** The carrier rejected its early data and restarted: everything is resent, held until accepted. */
-    void restarted() {
-        held = true;
-        assumed = null;
-    }
-
-    /** Writes the early fence (an empty PIPE_ACK, SPEC.md 6.1.2 rule 3) once; false when it did not fit. */
+    /** Writes the early fence (an empty PIPE_ACK) once; false when it did not fit. */
     boolean writeFence(RecordWriter w) {
         if (fenceSent || !assumed.isZmux()) return true;
         if (!w.frame(9, false, bb -> {
@@ -104,18 +76,10 @@ final class EarlyData {
         return true;
     }
 
-    /** Decides the fate of early data when the peer's parameters p arrive (SPEC.md Section 6.1.2, Outcome). */
+    /** Decides the fate of early data when the peer's parameters p arrive. */
     Outcome outcome(TransportParams p, boolean acked) {
         TransportParams a = assumed;
-        if (a == null) {
-            if (!held) return Outcome.NONE;
-            held = false;
-            return Outcome.ADOPT;
-        }
-        if (carrier) {
-            carrier = false;
-            held = !accepted;
-        }
+        if (a == null) return Outcome.NONE;
         assumed = null;
         if (!sentAny) return Outcome.ADOPT;
         if (a.isZmux() && !acked || floor && p.maxStreamsBidi == 0) return Outcome.REJECTED;
@@ -129,19 +93,5 @@ final class EarlyData {
         if (a.has(TransportParams.PREAMBLE) && (!p.has(TransportParams.PREAMBLE) || p.maxPreambleSize < a.maxPreambleSize)) return true;
         return a.has(TransportParams.PIPE_ACK) && !p.has(TransportParams.PIPE_ACK)
                 || a.has(TransportParams.RESET_AT) && !p.has(TransportParams.RESET_AT);
-    }
-
-    void carrierEarlyIn() {
-        replayableIn = true;
-    }
-
-    /** The carrier handshake completed: nothing received is replayable any more. */
-    void carrierHandshakeDone() {
-        replayableIn = false;
-    }
-
-    /** A peer stream opened now is replayable. */
-    boolean replayableIn() {
-        return replayableIn;
     }
 }

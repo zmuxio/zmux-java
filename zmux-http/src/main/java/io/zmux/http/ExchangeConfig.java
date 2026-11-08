@@ -8,8 +8,8 @@ import java.util.Objects;
 /**
  * Configures both ends of an HTTP exchange carrier: one bidirectional
  * carrier made of a sequence of bounded HTTP POST exchanges, for paths where a long-lived request
- * does not work. A PSK is required unless {@link Builder#allowInsecure} is set; every other field
- * has a default. The PSK (or allowInsecure) and base64 must be the same on both ends; the other
+ * does not work. A PSK is required; every other field
+ * has a default. The PSK and base64 must be the same on both ends; the other
  * fields are local to one end. The server's hold time must stay below the response timeout of
  * every intermediary on the path, and the client's request timeout above the hold time.
  *
@@ -25,9 +25,7 @@ public final class ExchangeConfig {
     private final Duration requestTimeout, backoffMin, backoffMax, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
     private ExchangeConfig(Builder b) {
-        if (b.allowInsecure == (b.psk.length > 0)) {
-            throw new IllegalArgumentException(b.allowInsecure ? "allowInsecure with a PSK" : "an exchange carrier needs a PSK or allowInsecure");
-        }
+        if (b.psk.length == 0) throw new IllegalArgumentException("an exchange carrier needs a PSK");
         psk = b.psk.clone();
         base64 = b.base64;
         cacheBust = !b.noCacheBust;
@@ -128,7 +126,7 @@ public final class ExchangeConfig {
      */
     public static final class Builder {
         private byte[] psk = new byte[0];
-        private boolean allowInsecure, base64, noCacheBust;
+        private boolean base64, noCacheBust;
         private Map<String, List<String>> header = Map.of();
         private String downUrl = "", instance = "", nonceParam = "";
         private int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
@@ -138,11 +136,6 @@ public final class ExchangeConfig {
 
         /** The pre-shared key: the MACs authenticate both ends with it. */
         public Builder psk(byte[] key) { psk = Objects.requireNonNull(key).clone(); return this; }
-        /**
-         * Runs the carrier without a PSK, for tests and protected networks: the MACs then only
-         * bind responses to requests, and the carrier ID inside every body is a bearer secret.
-         */
-        public Builder allowInsecure(boolean on) { allowInsecure = on; return this; }
         /** Sends every body base64-encoded (standard alphabet, padded). */
         public Builder base64(boolean on) { base64 = on; return this; }
         /**

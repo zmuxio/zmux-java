@@ -143,7 +143,7 @@ class QuicPoolTest {
                 var bootstrap=f.client.connections().getFirst();
                 var first=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
                 var second=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
-                a.paths().add(first,PipeOptions.defaults());a.paths().add(second,PipeOptions.defaults());
+                a.addPipe(first,PipeOptions.defaults());a.addPipe(second,PipeOptions.defaults());
                 var pooled=(io.netty.handler.codec.quic.QuicChannel)first.carrierConn();
                 pool.close();assertTrue(pooled.isActive());bootstrap.close().sync();
                 QuicTest.transfer(workers,a,b,4,128<<10);QuicTest.transfer(workers,b,a,2,64<<10);
@@ -275,7 +275,7 @@ class QuicPoolTest {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var a=f.client.connect(f.server.address(),"localhost").toCompletableFuture().get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
-            var maintenance=a.paths().maintain(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipe())).withCount(2)
+            var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipe())).withCount(2)
                     .withInspectionInterval(Duration.ofMillis(5)).withBackoff(new PipePool.Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
             try {
                 until(() -> maintenance.pipes().size()==2);assertEquals(1,pool.connections().size());
@@ -354,7 +354,7 @@ class QuicPoolTest {
     }
     @Test void machinePolicyAgeRuleRotatesConnectionsUnderALiveSession() throws Exception {
         PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
-                "{\"count\":{\"const\":1},\"retire\":[{\"metric\":\"age\",\"above\":{\"const\":0.3}}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 io.zmux.shaping.machine.Options.defaults());
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();
@@ -372,7 +372,7 @@ class QuicPoolTest {
     }
     @Test void machinePolicyAgeRuleRetiresABusyConnectionByRecheckAlone() throws Exception {
         PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
-                "{\"count\":{\"const\":1},\"retire\":[{\"metric\":\"age\",\"above\":{\"const\":0.3}}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 io.zmux.shaping.machine.Options.defaults());
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();

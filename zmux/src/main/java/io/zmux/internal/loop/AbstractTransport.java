@@ -87,6 +87,11 @@ public abstract class AbstractTransport implements Transport {
         in.written(this, b, cause);
     }
 
+    /** Reports to the inbound that the write side is shut (on the loop). */
+    protected final void outputShutDone() {
+        if (in != null) in.outputShut(this);
+    }
+
     /** Releases the write in flight without reporting it (the transport closed). */
     protected final void dropWrite() {
         Batch b = inFlight;
@@ -110,10 +115,15 @@ public abstract class AbstractTransport implements Transport {
      * read and written by an {@link ExternalTransport} there. Input is copied once on the way.
      */
     final Transport bridge(SessionHost to) {
+        return new ExternalTransport(to, asPipe());
+    }
+
+    /** On the loop, not started: this carrier as a pipe input, its exporter and declaration kept. */
+    final io.zmux.carrier.PipeIo asPipe() {
         Forwarded f = new Forwarded(this, null, false, false);
         io.zmux.carrier.PipeIo io = f.pipe(info().applicationProtocol());
-        if (info().carrier().tls()) io = io.withExporter(this::export);
-        return new ExternalTransport(to, io);
+        if (hasExporter()) io = io.withExporter(this::export).withTerminatedTls(info().carrier().tls());
+        return secure() ? io.secure() : io;
     }
 
     // ---- input ----

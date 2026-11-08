@@ -13,7 +13,7 @@ class CarrierActionsTest {
         boolean stoppedInput, stoppedOutput, closed;
         Carrier(EventLoop loop, int direction, Object connection, long bytes) {
             super(loop); this.direction = direction;
-            info = new TransportInfo(new CarrierInfo(Framing.BYTES, false, false, false, false), "", connection, bytes, 0, 32);
+            info = new TransportInfo(new CarrierInfo(Framing.BYTES, false, false, false, false), "", connection, bytes, 0);
         }
         @Override public TransportInfo info() { return info; }
         @Override public int directions() { return direction; }

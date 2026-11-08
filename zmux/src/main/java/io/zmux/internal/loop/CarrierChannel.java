@@ -3,7 +3,7 @@ package io.zmux.internal.loop;
 import java.nio.ByteBuffer;
 
 /**
- * The datagram channel of a transport's carrier (EXTENSIONS.md Section 6.8) as the session's
+ * The datagram channel of a transport's carrier as the session's
  * loop uses it: what the core decides goes there is sent at once, never behind a batch write,
  * and what arrives for the pipe goes to the core. Used only on the transport's loop.
  */

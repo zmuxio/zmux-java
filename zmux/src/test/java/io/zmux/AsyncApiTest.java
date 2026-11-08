@@ -60,7 +60,7 @@ class AsyncApiTest {
         }
     }
     @Test void cancelledAcceptAndCreditWaitDoNotConsumeAnotherStreamsSlot() throws Exception {
-        try (var loops = EventLoops.create(2); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).limits(Limits.defaults().withIncomingStreams(4)).build())) {
+        try (var loops = EventLoops.create(2); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build())) {
             var accept = pair.server().acceptStreamAsync(); assertTrue(accept.cancel(true));
             var held = new ArrayList<ZmuxStream>();
             for (int i = 0; i < 4; i++) held.add(get(pair.client().openStreamAsync()));

@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import io.zmux.internal.wire.TransportError;
 
 /**
- * The terminal error of a session (SPEC.md Section 6.5, API.md Section 5.3).
+ * The terminal error of a session.
  *
  * @param cause the last pipe error for PIPES_LOST and RESUME_TIMEOUT, or null
  */

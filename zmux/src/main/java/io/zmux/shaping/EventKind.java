@@ -8,10 +8,12 @@ public enum EventKind {
     REPLACED,
     /** A record arrived on the pipe ({@link Capability#RECORD_IN}). */
     RECORD_IN,
-    /** A record of PADDING only was sent, or PADDING was added to a record. */
+    /** The pending injection was sent, as a record of PADDING only or as PADDING of a record. */
     INJECTED,
-    /** A timer fired. */
-    TIMER,
+    /** The pending injection was given up. */
+    INJECT_DROPPED,
+    /** The time of the wake-up came. */
+    WAKE,
     /** Shaping of the pipe ended; no further calls. */
     STOPPED,
     /** The pipe's outbound direction failed; no further calls. */

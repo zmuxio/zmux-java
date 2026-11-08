@@ -11,12 +11,11 @@ import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** PipePool.mode: members dialled through a carrier mode, upgraded make before break (API.md Section 4.8). */
+/** PipePool.mode: members dialled through a carrier mode, upgraded make before break. */
 @Timeout(60)
 class ModePoolTest {
     private static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(4)
-                .withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
     }
 
     private static void await(BooleanSupplier done, String what) throws InterruptedException {
@@ -35,11 +34,11 @@ class ModePoolTest {
             try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var base = new AtomicInteger(); var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache(Duration.ofHours(1), Duration.ofMillis(300), Duration.ofSeconds(10));
-                cache.record("k", CarrierKind.WEBSOCKET, false, System.nanoTime());
+                cache.record("k", CarrierKind.WEBSOCKET, "", false, System.nanoTime());
                 var pool = PipePool.mode(CarrierMode.auto(reaching(CarrierKind.WEBSOCKET, l, ws), reaching(CarrierKind.EXCHANGE, l, ex)),
                         ModePolicy.of(cache, "k").withSettle(Duration.ofMillis(200)));
                 try (var s = Zmux.dial(CarrierMode.explicit(reaching(CarrierKind.STREAMING, l, base)), cfg, null);
-                     var m = s.paths().maintain(pool)) {
+                     var m = s.maintainPipes(pool)) {
                     await(() -> m.pipes().size() == 1, "first member");
                     long first = m.pipes().getFirst().id();
                     assertEquals(0, ws.get(), "the kind backing off is skipped");
@@ -71,7 +70,7 @@ class ModePoolTest {
                 var pool = PipePool.mode(CarrierMode.auto(refused(CarrierKind.WEBSOCKET, ws), reaching(CarrierKind.EXCHANGE, l, ex)),
                         ModePolicy.of(cache, "k")).withBackoff(new PipePool.Backoff(Duration.ofMillis(20), Duration.ofMillis(50), 0));
                 try (var s = Zmux.dial(CarrierMode.explicit(reaching(CarrierKind.STREAMING, l, base)), cfg, null);
-                     var m = s.paths().maintain(pool)) {
+                     var m = s.maintainPipes(pool)) {
                     await(() -> m.pipes().size() == 1, "first member");
                     List<Long> first = ids(m);
                     await(() -> ws.get() >= 2, "upgrade retried after the backoff");
@@ -93,7 +92,7 @@ class ModePoolTest {
                 var cache = new CarrierCache();
                 var pool = PipePool.mode(CarrierMode.auto(reaching(CarrierKind.EXCHANGE, l, ex)), ModePolicy.of(cache, "k"));
                 try (var s = Zmux.dial(CarrierMode.explicit(reaching(CarrierKind.STREAMING, l, base)), cfg, null);
-                     var m = s.paths().maintain(pool)) {
+                     var m = s.maintainPipes(pool)) {
                     await(() -> m.pipes().size() == 1, "first member");
                     assertTrue(cache.usable("k", CarrierKind.EXCHANGE));
                     m.pipes().getFirst().abort();

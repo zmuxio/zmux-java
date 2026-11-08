@@ -10,17 +10,17 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * The session events the application has not read (IMPLEMENTATION.md Section 2.5.7), on the
+ * The session events the application has not read, on the
  * loop. The queue is bounded by its structure, not by a count, and drops nothing terminal:
  *
  * <ul>
- * <li>a pipe direction keeps each state at most once, at the place of its latest
- *     occurrence, so a transient state (SUSPECT) and the terminal one are both seen
+ * <li>a pipe direction keeps each pipe event kind at most once, at the place of its latest
+ *     occurrence, so a transient one (PipeSuspect) and the terminal one are both seen
  *     however often the pipe flaps;
  * <li>every other kind keeps only its latest value (per pipe or tier where it has one);
  * <li>only pipes that are not retired hold events: a retirement folds the pipe's unread
  *     events into the one {@link SessionRuntime.RetiredPipes} summary, the only report of
- *     retirement (API.md Section 4.5), which enters the queue at the first retirement after
+ *     retirement, which enters the queue at the first retirement after
  *     it was last read and accumulates until it is read.
  * </ul>
  */
@@ -38,19 +38,25 @@ final class EventQueue {
     /** Queues e (CLOSED and the internal kinds are not application events). */
     void add(Event e) {
         Key k = switch (e.kind()) {
-            case PIPE_STATE -> new Key(e.kind(), e.pipe(), e.dir(), e.state());
+            // Only the retirement: the other states reach the application as the pipe kinds below.
+            case PIPE_STATE -> e.state() == PipeInfo.Out.RETIRED ? new Key(e.kind(), e.pipe(), e.dir(), e.state()) : null;
+            case PIPE_ADDED, PIPE_JOINED, PIPE_SUSPECT, PIPE_RECOVERED, PIPE_FAILED, PIPE_CLOSED -> new Key(e.kind(), e.pipe(), e.dir(), null);
             case PIPE_QUALITY, PIPE_PRIORITY -> new Key(e.kind(), e.pipe(), 0, null);
             case TIER_SATURATION -> new Key(e.kind(), -1, 0, e.code());
             case CAPACITY_BELOW, CAPACITY_RESTORED -> new Key(Event.Kind.CAPACITY_BELOW, -1, 0, null);
             case SUSPENDED, RESUMED -> new Key(Event.Kind.SUSPENDED, -1, 0, null);
-            case GOAWAY_RECEIVED, DATAGRAM_DROPPED -> new Key(e.kind(), -1, 0, null);
+            // Its own key: it follows SessionSuspended rather than replacing it; a resumption makes it stale.
+            case RESUME_UNATTENDED -> new Key(e.kind(), -1, 0, null);
+            case GOAWAY_RECEIVED, EPOCH_COMMITTED, EPOCH_DELETED -> new Key(e.kind(), -1, 0, null);
             case JOIN_AUTH_FAILED -> new Key(e.kind(), -1, 0, e.reason());
             default -> null;
         };
         if (k == null) return;
-        if (e.kind() == Event.Kind.PIPE_STATE && e.state() == PipeInfo.Out.RETIRED) {
+        // The only PIPE_STATE with a key is the retirement.
+        if (e.kind() == Event.Kind.PIPE_STATE) {
             fold(e.pipe());
         } else {
+            if (e.kind() == Event.Kind.RESUMED) pending.remove(new Key(Event.Kind.RESUME_UNATTENDED, -1, 0, null));
             pending.remove(k);
             pending.put(k, e);
         }
@@ -80,8 +86,8 @@ final class EventQueue {
         for (Iterator<Key> it = pending.keySet().iterator(); it.hasNext(); ) {
             Key k = it.next();
             if (k.pipe() != pipe || k.kind() == null) continue;
-            if (k.detail() == PipeInfo.Out.FAILED) failed = true;
-            else if (k.detail() == PipeInfo.Out.CLOSED || k.detail() == PipeInfo.In.ENDED) closed = true;
+            if (k.kind() == Event.Kind.PIPE_FAILED) failed = true;
+            else if (k.kind() == Event.Kind.PIPE_CLOSED) closed = true;
             it.remove();
         }
         var s = summary == null ? new SessionRuntime.RetiredPipes(0, 0, 0, 0, List.of()) : summary;

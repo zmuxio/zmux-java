@@ -174,7 +174,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     }
 
     /**
-     * The stream's statistics (API.md Section 7.2): taken on the session's loop while the
+     * The stream's statistics: taken on the session's loop while the
      * session holds the stream, its final values once the session released it.
      */
     public StreamStats stats() throws IOException {
@@ -344,7 +344,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     @Override
     public boolean isReplayable() {
-        return st.replayable(); // A loop-published volatile flag: true only until the handshake completes.
+        return false; // No Java carrier takes carrier early data.
     }
 
     @Override
@@ -377,8 +377,34 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     // ---- both ----
 
     @Override
+    public void flush() throws IOException {
+        checkApplicationIo();
+        session.driver.checkBlocking();
+        long[] target = {-1};
+        session.call(op -> {
+            session.driver.lanes.flushSending(st);
+            if (target[0] < 0) target[0] = core.streams().flush(st);
+            return core.sending().flushDone(st, target[0], op) ? Boolean.TRUE : Operation.PENDING;
+        }, op -> core.sending().cancelWriteWait(st, op), ZmuxSession.deadline(writeTimeout));
+    }
+
+    @Override
     public long id() throws IOException {
         return (Long) session.run(op -> core.streams().pinId(st));
+    }
+
+    /**
+     * The largest payload of a datagram of this stream's flow with the given context that the
+     * peer accepts now, 0 when none (no datagram flows): packet-carrying applications use it as
+     * their MTU. Before the stream has its identifier the flow prefix is counted at its longest.
+     * As of the loop's last round; no I/O.
+     */
+    public int maxDatagramPayload(long context) {
+        var i = session.info();
+        if (!i.datagramFlows()) return 0;
+        // The flow prefix: the stream's flow (its ID + 1) and the context, as variable-length integers.
+        int flow = st.idSet() ? io.zmux.carrier.VarInt.length(st.id() + 1) : 8;
+        return Math.max(0, session.datagramLimit() - flow - io.zmux.carrier.VarInt.length(context));
     }
 
     /**
@@ -407,9 +433,12 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     }
 
     /**
-     * Releases the stream: RESET_STREAM and STOP_SENDING with code 0 for the parts that have
-     * not ended (API.md Section 5.1). <b>This discards unsent data</b>; call
-     * {@link #finish()} first to end the stream cleanly.
+     * Releases the stream. A sending part that was {@link #finish() finished} and a receiving
+     * part read to its end are left as they are, so the block {@code write}, {@code finish},
+     * read the reply, {@code close} (the end of a try-with-resources) ends the stream cleanly.
+     * Only a part left open is ended abruptly, with code 0: an unfinished sending part is reset
+     * (RESET_STREAM, <b>its unsent data discarded</b>) and an unread receiving part stopped
+     * (STOP_SENDING). Close never finishes the stream: call {@link #finish()} after the last write.
      */
     @Override
     public void close() {

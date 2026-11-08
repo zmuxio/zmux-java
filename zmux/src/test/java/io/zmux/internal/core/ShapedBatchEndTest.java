@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * A planned record opens only where the batch holds its target: a frame may fit the batch's end
- * while the PADDING to pad_to does not, and the target would be clamped (design 18.9).
+ * while the PADDING to pad_to does not, and the target would be clamped.
  */
 @Timeout(30)
 class ShapedBatchEndTest {
@@ -37,7 +37,7 @@ class ShapedBatchEndTest {
                 int t = k[0]++ % 2 == 0 ? 1000 : 200;
                 plan.maxLength(t).padTo(t);
             }
-            @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Reply reply) {}
+            @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Effects effects) {}
         });
         return s;
     }
@@ -83,7 +83,7 @@ class ShapedBatchEndTest {
             w.end();
             List<Integer> recs = records(b);
             assertTrue(wrote && !recs.isEmpty());
-            for (int n : recs) assertTrue(n == 1000 || n == 200, "a record of " + n + " bytes: " + recs);
+            for (int n : recs) assertTrue(n == 998 || n == 198, "a record of " + n + " bytes: " + recs);
             b.release();
         }
         assertEquals(0, s.shapingStats().clamped());

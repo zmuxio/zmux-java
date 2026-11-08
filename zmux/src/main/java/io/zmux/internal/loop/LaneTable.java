@@ -46,6 +46,10 @@ public final class LaneTable {
         StreamLanes l = map.get(st);
         if (l != null && l.recv() != null) l.recv().close();
         driver.core.receiving().stop(st, code);
+        if (l != null && l.recv() != null) {
+            l.recv().appDone = true;
+            driver.post(() -> partEnded(st));
+        }
     }
 
     /** Moves written data into the core before a command that must follow it; on the loop. */
@@ -59,6 +63,22 @@ public final class LaneTable {
         flushSending(st);
         driver.core.sending().reset(st, code);
         endSending(st);
+        StreamLanes l = map.get(st);
+        if (l != null && l.send() != null) {
+            l.send().appDone = true;
+            driver.post(() -> partEnded(st));
+        }
+    }
+
+    /**
+     * One part of st ended for the application. Once it is done with both, as after reading the end and
+     * finishing, the stream is released as if its handle were closed: a graceful shutdown does not wait
+     * for handles nobody will close; on the loop.
+     */
+    void partEnded(Stream st) {
+        StreamLanes l = map.get(st);
+        if (l == null) return;
+        if ((l.send() == null || l.send().appDone) && (l.recv() == null || l.recv().appDone)) releaseStream(st);
     }
 
     private void endSending(Stream st) {

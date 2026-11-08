@@ -40,7 +40,7 @@ public sealed interface Scheduler permits Scheduler.Builtin, Scheduler.Custom {
      * One answer per request. A failed, missing or invalid answer falls back to affinity.
      *
      * <p>The picker runs synchronously on the session's event loop, between its I/O
-     * (IMPLEMENTATION.md Section 2.5.2), so it <b>must be fast and must never block</b>: no
+     *, so it <b>must be fast and must never block</b>: no
      * I/O, locks that other threads hold for long, sleeping or waiting. Blocking zmux calls
      * fail there at once. Answers are sticky, so a policy that binds streams is asked about
      * once per binding and one that spreads should return an allowance of a few milliseconds

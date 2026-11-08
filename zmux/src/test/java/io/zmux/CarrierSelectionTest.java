@@ -161,8 +161,7 @@ class CarrierSelectionTest {
 
     @Test void autoEstablishesOnTheRobustKindAndMovesToAPreferredOne() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(4)
-                    .withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
             try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var policy = ModePolicy.defaults().withSettle(Duration.ofMillis(200));
@@ -176,14 +175,14 @@ class CarrierSelectionTest {
                     assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier());
                     // The bootstrap pipe of the replaced kind drains and retires: on a loaded host the
                     // exchange carrier's drain may run to its T_fail fallback (8 x PTO) plus the linger.
-                    // A drain completes with the peer's PIPE_ABANDON (MULTIPATH.md 8.2), so the server
+                    // A drain completes with the peer's PIPE_ABANDON, so the server
                     // session stays open until then: ending it first ends the session, not the pipe.
                     try (var server = l.accept(Duration.ofSeconds(5))) {
                         echo(s, server);
                         long until = System.nanoTime() + 30_000_000_000L;
-                        while (s.paths().list().stream().anyMatch(p -> p.id() == 0) && !s.isClosed() && System.nanoTime() < until) Thread.sleep(10);
+                        while (s.pipes().stream().anyMatch(p -> p.id() == 0) && !s.isClosed() && System.nanoTime() < until) Thread.sleep(10);
                         assertFalse(s.isClosed(), "session open");
-                        assertTrue(s.paths().list().stream().noneMatch(p -> p.id() == 0), "pipe 0 retired: " + s.paths().list());
+                        assertTrue(s.pipes().stream().noneMatch(p -> p.id() == 0), "pipe 0 retired: " + s.pipes());
                         echo(s, server);
                     }
                     assertEquals(1, ws.get());
@@ -196,22 +195,34 @@ class CarrierSelectionTest {
     @Test void theCacheBacksOffFailedKindsAndForgetsOldSuccesses() {
         var c = new CarrierCache(Duration.ofSeconds(10), Duration.ofSeconds(60), Duration.ofSeconds(150));
         long t = 1_000;
-        c.record("k", CarrierKind.SPLIT, false, t);
-        assertEquals(t + 60_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, t));
-        c.record("k", CarrierKind.SPLIT, false, t);
-        assertEquals(t + 120_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, t));
-        c.record("k", CarrierKind.SPLIT, false, t);
-        assertEquals(t + 150_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, t), "bounded");
-        assertEquals(Long.MIN_VALUE, c.failUntil("k", CarrierKind.SPLIT, t + 150_000_000_000L));
-        assertEquals(Long.MIN_VALUE, c.failUntil("other", CarrierKind.SPLIT, t));
-        c.record("k", CarrierKind.SPLIT, true, t);
-        assertTrue(c.good("k", CarrierKind.SPLIT, t + 9_000_000_000L));
-        assertFalse(c.good("k", CarrierKind.SPLIT, t + 10_000_000_000L), "expired");
-        c.record("k", CarrierKind.SPLIT, false, t);
-        assertEquals(t + 60_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, t), "a success resets the backoff");
+        c.record("k", CarrierKind.SPLIT, "", false, t);
+        assertEquals(t + 60_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, "", t));
+        c.record("k", CarrierKind.SPLIT, "", false, t);
+        assertEquals(t + 120_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, "", t));
+        c.record("k", CarrierKind.SPLIT, "", false, t);
+        assertEquals(t + 150_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, "", t), "bounded");
+        assertEquals(Long.MIN_VALUE, c.failUntil("k", CarrierKind.SPLIT, "", t + 150_000_000_000L));
+        assertEquals(Long.MIN_VALUE, c.failUntil("other", CarrierKind.SPLIT, "", t));
+        c.record("k", CarrierKind.SPLIT, "", true, t);
+        assertTrue(c.good("k", CarrierKind.SPLIT, "", t + 9_000_000_000L));
+        assertFalse(c.good("k", CarrierKind.SPLIT, "", t + 10_000_000_000L), "expired");
+        c.record("k", CarrierKind.SPLIT, "", false, t);
+        assertEquals(t + 60_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, "", t), "a success resets the backoff");
         assertEquals(Duration.ofSeconds(3), ModePolicy.defaults().timer(Duration.ofSeconds(5)));
         assertEquals(Duration.ofSeconds(1), ModePolicy.defaults().timer(Duration.ZERO));
         assertEquals(Duration.ofMillis(1500), ModePolicy.defaults().timer(Duration.ofMillis(500)));
+    }
+
+    /** A candidate of the same kind and another variant is a change of carrier. */
+    @Test void establishedReportsAVariantChange() throws Exception {
+        try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
+            ZmuxSession c = pair.client();
+            Candidate a = refused(CarrierKind.WEBSOCKET, new AtomicInteger()).withVariant("a"), b = a.withVariant("b");
+            new ModeSource(CarrierMode.explicit(a), null).established(c, 0);
+            assertEquals("a", c.carrierVariant());
+            new ModeSource(CarrierMode.explicit(b), null).established(c, 0);
+            assertEquals("b", c.carrierVariant());
+        }
     }
 
     /** The statistics keep the latest 64 tries. */
@@ -221,7 +232,7 @@ class CarrierSelectionTest {
             var tries = new ArrayList<CandidateResult>();
             for (int i = 0; i < 100; i++) tries.add(new CandidateResult(CarrierKind.values()[i % CarrierKind.values().length],
                     CandidateOutcome.values()[i % CandidateOutcome.values().length], i == 99, null));
-            c.reportCarrier(tries, null);
+            c.reportCarrier(tries, null, "");
             var kept = c.stats().carrierCandidates();
             assertEquals(64, kept.size());
             assertEquals(tries.subList(36, 100), kept);

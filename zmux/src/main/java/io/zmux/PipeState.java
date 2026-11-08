@@ -1,7 +1,7 @@
 package io.zmux;
 
 /**
- * The states of a pipe's two directions (STATE_MACHINE.md Sections 3.1 and 3.2), each null for a direction the
+ * The states of a pipe's two directions, each null for a direction the
  * attachment does not have. A retired attachment has no state.
  */
 public record PipeState(Outbound outbound, Inbound inbound) {

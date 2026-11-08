@@ -1,7 +1,7 @@
 package io.zmux;
 
 /**
- * The counts of a listener since it was made (API.md Section 7.2). The unit is the pipe input handed to the listener:
+ * The counts of a listener since it was made. The unit is the pipe input handed to the listener:
  * a carrier, a lane, or the two carriers of a split pipe once paired, which are one input (a half that is never
  * paired is an input of its own). Each input whose outcome is known counts exactly once, when that outcome is
  * decided, in one of the first five fields, so that {@code sessions + joins + rejected + refused + timedOut} is the

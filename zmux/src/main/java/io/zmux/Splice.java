@@ -52,12 +52,18 @@ final class Splice {
         cancelled.set(true); forward.interrupt(); reverse.interrupt();
     }
 
-    private static void ownerCleanup(ZmuxStream stream, Runnable action) {
+    /**
+     * Runs action on the stream's loop and waits for it at most one second (a close's bound): a
+     * loop that does not answer by then is stuck, and the splice must not hang on it. The
+     * action stays queued and runs if the loop resumes. False on that timeout.
+     */
+    static boolean ownerCleanup(ZmuxStream stream, Runnable action) {
         var done = new CompletableFuture<Void>();
-        if (stream.session.driver.executeCarrier(() -> {
+        // A closing loop may not have run its cleanup hook yet: then the session's end is awaited.
+        CompletableFuture<?> wait = stream.session.driver.executeCarrier(() -> {
             try { action.run(); done.complete(null); } catch (Throwable error) { done.completeExceptionally(error); }
-        })) done.join();
-        else stream.session.driver.closedFuture().join(); // A closing loop may not have run its cleanup hook yet.
+        }) ? done : stream.session.driver.closedFuture();
+        return ZmuxSession.awaitBounded(wait, ZmuxSession.closeHandOffLimit);
     }
 
     private void run() {
@@ -65,6 +71,7 @@ final class Splice {
     }
 
     private void runOwned() {
+        boolean cleaned = true;
         try (var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
             tasks.submit(forward::datagrams); tasks.submit(reverse::datagrams);
             Future<?> f = tasks.submit(forward::run), r = tasks.submit(reverse::run);
@@ -74,8 +81,12 @@ final class Splice {
             finally { dataDone = true; forward.stopDatagrams(); reverse.stopDatagrams(); }
         } finally {
             a.close(); b.close();
-            try { ownerCleanup(a, () -> { a.session.driver.lanes.watchRecvEnd(a.st, null); a.session.driver.lanes.watchSendEnd(a.st, null); a.session.driver.lanes.releaseStream(a.st); }); }
-            finally { ownerCleanup(b, () -> { b.session.driver.lanes.watchRecvEnd(b.st, null); b.session.driver.lanes.watchSendEnd(b.st, null); b.session.driver.lanes.releaseStream(b.st); }); }
+            try { cleaned = ownerCleanup(a, () -> { a.session.driver.lanes.watchRecvEnd(a.st, null); a.session.driver.lanes.watchSendEnd(a.st, null); a.session.driver.lanes.releaseStream(a.st); }); }
+            finally { cleaned &= ownerCleanup(b, () -> { b.session.driver.lanes.watchRecvEnd(b.st, null); b.session.driver.lanes.watchSendEnd(b.st, null); b.session.driver.lanes.releaseStream(b.st); }); }
+        }
+        if (!cleaned) {
+            result.completeExceptionally(new IOException("splice cleanup timed out: a stream's event loop did not answer within 1 s"));
+            return;
         }
         IOException failed = forward.callbackFailure != null ? forward.callbackFailure : reverse.callbackFailure;
         if (failed != null) result.completeExceptionally(failed);

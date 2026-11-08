@@ -3,11 +3,15 @@ package io.zmux.shaping;
 /**
  * A notification.
  *
- * @param nowNanos the session clock, nanoseconds
+ * @param nowNanos the session clock, nanoseconds, never negative
  * @param length frames length, bytes ({@link EventKind#RECORD_IN}, {@link EventKind#INJECTED})
  * @param paddingOnly the record holds PADDING only ({@link EventKind#RECORD_IN})
- * @param timer the timer slot, 0 or 1 ({@link EventKind#TIMER})
  * @param stream the stream ID ({@link EventKind#STREAM_OPEN}, {@link EventKind#STREAM_END})
+ * @param meters the session's readings with {@link Capability#BUDGET}, otherwise {@link ShapingMeters#ZERO}
  */
-public record Event(EventKind kind, long pipe, long lane, long nowNanos, int length, boolean paddingOnly, int timer,
-                    long stream) {}
+public record Event(EventKind kind, long pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream, ShapingMeters meters) {
+    /** An event without readings. */
+    public Event(EventKind kind, long pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream) {
+        this(kind, pipe, lane, nowNanos, length, paddingOnly, stream, ShapingMeters.ZERO);
+    }
+}

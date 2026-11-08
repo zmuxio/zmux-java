@@ -34,7 +34,7 @@ class WireTest {
         TransportParams p = new TransportParams();
         p.present = TransportParams.IDLE | TransportParams.MAX_DATA | TransportParams.BIDI_REMOTE | TransportParams.UNI
                 | TransportParams.RESET_AT | TransportParams.PREAMBLE | TransportParams.PIPE_ACK | TransportParams.LANES
-                | TransportParams.MULTIPATH | TransportParams.ROLE | TransportParams.RECORD_SIZE;
+                | TransportParams.MULTIPATH | TransportParams.SESSION_CRYPTO | TransportParams.ROLE | TransportParams.RECORD_SIZE;
         p.maxIdleTimeoutMillis = 30000;
         p.initialMaxData = 1 << 20;
         p.maxStreamDataBidiRemote = 262144;
@@ -45,6 +45,7 @@ class WireTest {
         p.roleNonce = 0x0102030405060708L;
         p.maxRecordSize = 65535;
         p.secretFlags = TransportParams.SECRET_PSK;
+        p.sessionCrypto = io.zmux.internal.join.SessionCrypto.of(new long[] {1}, new long[] {2});
         p.locator = new byte[] {1, 2, 3};
         p.greaseId = 27 + 31 * 5;
         p.greaseValue = new byte[] {9};
@@ -81,39 +82,51 @@ class WireTest {
 
     @Test
     void firstRecordCheck() {
-        Records.FirstRecordCheck c = new Records.FirstRecordCheck(65535, false, false);
-        ByteBuffer legacy = ByteBuffer.wrap("ZMUX".getBytes());
-        assertEquals(Records.Verdict.REJECT, c.feed(legacy, 0, 4));
-        // The legacy magic fails at its third byte, without waiting for more (SPEC.md Section 6.2).
-        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, false, false).feed(legacy, 0, 3));
+        Records.FirstRecordCheck c = new Records.FirstRecordCheck(65535, true);
+        ByteBuffer foreign = ByteBuffer.wrap("GET ".getBytes());
+        assertEquals(Records.Verdict.REJECT, c.feed(foreign, 0, 4));
+        // A foreign first record fails at its third byte, without waiting for more.
+        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(foreign, 0, 3));
         ByteBuffer tp = ByteBuffer.wrap(HexFormat.of().parseHex("0dff5153300d0a0d0a0404024400"));
-        Records.FirstRecordCheck ok = new Records.FirstRecordCheck(65535, false, false);
+        Records.FirstRecordCheck ok = new Records.FirstRecordCheck(65535, true);
         assertEquals(Records.Verdict.NEED_MORE, ok.feed(tp, 0, 5));
         assertEquals(Records.Verdict.TRANSPORT_PARAMETERS, ok.feed(tp, 5, tp.limit()));
-        ByteBuffer join = ByteBuffer.wrap(HexFormat.of().parseHex("1a9a24de36"));
-        assertEquals(Records.Verdict.PIPE_JOIN, new Records.FirstRecordCheck(65535, true, false).feed(join, 0, 5));
-        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, false, false).feed(join, 0, 5));
+        ByteBuffer other = ByteBuffer.wrap(HexFormat.of().parseHex("1a9a24de36"));
+        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(other, 0, 5));
         ByteBuffer small = ByteBuffer.wrap(HexFormat.of().parseHex("08ff"));
-        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true, true).feed(small, 0, 1));
+        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(small, 0, 1));
         ByteBuffer http = ByteBuffer.wrap("GET / HTTP/1.1".getBytes());
-        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true, true).feed(http, 0, 3));
+        assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(http, 0, 3));
     }
 
     @Test
-    void joinTokenVerifies() {
-        byte[] secret = JoinCrypto.sessionSecret(new byte[16], new byte[16], new byte[0], "psk".getBytes());
-        assertEquals(32, secret.length);
-        byte[][] keys = JoinCrypto.joinKeys(secret);
-        byte[] tok = JoinCrypto.token(keys[0], new byte[] {1, 2}, new byte[0]);
-        assertEquals(16, tok.length);
-        assertTrue(JoinCrypto.verify(keys[0], new byte[] {1, 2}, new byte[0], tok));
-        assertTrue(!JoinCrypto.verify(keys[1], new byte[] {1, 2}, new byte[0], tok));
+    void reasonPhraseCutKeepsCharactersWhole() {
+        byte[] b = Utf8.truncate("x".repeat(1023) + "\u00e9", 1024);
+        assertEquals(1023, b.length);
+        assertEquals(1024, Utf8.truncate("y".repeat(2000), 1024).length);
     }
 
     @Test
-    void phraseIsBounded() {
-        WireException e = WireException.withDetails(TransportError.FLOW_CONTROL_ERROR, "x".repeat(2000), "stream", 4);
-        assertTrue(e.phrase().getBytes().length <= 1024);
-        assertEquals("stream=4", e.details());
+    void sessionEpochRoundTripsAndRefusesAnotherPhase() throws Exception {
+        byte[] share = {1, 2, 3}, locator = {9, 8};
+        for (int phase : new int[] {0, 1}) {
+            byte[] body = FrameEncoder.sessionEpochBody(phase, 64, share, locator);
+            ByteBuffer b = ByteBuffer.allocate(64);
+            FrameEncoder.sessionEpoch(b, body);
+            int n = b.position();
+            Frame f = new Frame();
+            assertEquals(n, new FrameDecoder().decode(b, 0, n, f));
+            assertEquals(FrameKind.SESSION_EPOCH, f.kind);
+            assertEquals(phase, f.phase);
+            assertEquals(64, f.value);
+            assertArrayEquals(share, f.dataBytes());
+            assertArrayEquals(locator, f.locatorBytes());
+            assertArrayEquals(body, f.bodyBytes());
+        }
+        ByteBuffer b = ByteBuffer.allocate(64);
+        FrameEncoder.sessionEpoch(b, FrameEncoder.sessionEpochBody(2, 1, new byte[0], new byte[0]));
+        int n = b.position();
+        var e = assertThrows(WireException.class, () -> new FrameDecoder().decode(b, 0, n, new Frame()));
+        assertEquals(TransportError.PROTOCOL_VIOLATION, e.code());
     }
 }

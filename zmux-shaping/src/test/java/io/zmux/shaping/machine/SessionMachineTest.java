@@ -12,8 +12,26 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(30)
 class SessionMachineTest {
+    /** A timer armed again for the deadline last reported is no change: the core still has that deadline, and wakes the machine. */
+    @Test void aTimerOfTheSameDeadlineIsNotReportedAndStillFires() throws Exception {
+        String d = "{\"machines\":[{\"start\":0,\"timers\":2,\"states\":[{\"enter\":[{\"op\":\"timer\",\"slot\":0,\"after\":1000}],\"next\":[{\"on\":\"timer\",\"slot\":0,\"to\":1}]},"
+                + "{\"enter\":[{\"op\":\"timer\",\"slot\":1,\"after\":0}],\"next\":[{\"on\":\"timer\",\"slot\":1,\"to\":2}]},{}]}]}";
+        var m = new Machines.Compiled(Definition.parse(d), Sampler.seeded(), Options.defaults()).newShaper();
+        var e = new io.zmux.shaping.Effects();
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.START, 0, 0, 0, 0, false, 0), e);
+        assertEquals(1_000_000, e.wakeAtNanos());
+        e = new io.zmux.shaping.Effects();
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, 0, 0, 1_000_000, 0, false, 0), e);
+        assertEquals(1, m.state(0));
+        assertFalse(e.hasWake());
+        e = new io.zmux.shaping.Effects();
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, 0, 0, 1_000_000, 0, false, 0), e);
+        assertEquals(2, m.state(0));
+        assertTrue(e.hasWake() && e.wakeNone());
+    }
+
     @Test void aDefinitionShapesTheRecordsOfASession() throws Exception {
-        var f = Machines.factory("{\"version\":1,\"machines\":[{\"states\":[{\"record\":{\"pad_to\":{\"const\":200}}}]}]}", Options.defaults());
+        var f = Machines.factory("{\"machines\":[{\"start\":0,\"states\":[{\"record\":{\"pad_to\":200}}]}]}", Options.defaults());
         var out = new ByteArrayOutputStream();
         var on = new java.util.concurrent.atomic.AtomicBoolean();
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -48,7 +66,7 @@ class SessionMachineTest {
             int first = b[i] & 0xff, len = 1 << (first >> 6);
             long v = first & 0x3f;
             for (int k = 1; k < len; k++) v = v << 8 | (b[i + k] & 0xff);
-            assertTrue(v >= 200, "record of " + v + " bytes");
+            assertTrue(len + v >= 200, "record of " + (len + v) + " bytes");
             i += len + (int) v;
         }
     }

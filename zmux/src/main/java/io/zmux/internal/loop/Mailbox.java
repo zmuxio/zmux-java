@@ -57,7 +57,7 @@ public final class Mailbox implements Runnable {
             if (c == null) break;
             try {
                 c.run();
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | AssertionError | StackOverflowError e) {
                 driver.internalError(e);
             }
             if (closed) return;

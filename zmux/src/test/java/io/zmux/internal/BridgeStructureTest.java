@@ -43,6 +43,7 @@ class BridgeStructureTest {
             Map.entry("SendLane.headPos", "loop (ring consumer)"),
             Map.entry("SendLane.leaseListed", "loop"),
             Map.entry("SendLane.activeRound", "loop"),
+            Map.entry("SendLane.appDone", "loop"),
             Map.entry("SendLane.endWatcher", "loop"),
             Map.entry("RecvLane.endWatcher", "loop"),
             Map.entry("SendLane.hostOwned", "loop"),
@@ -53,6 +54,7 @@ class BridgeStructureTest {
             Map.entry("RecvLane.tail", "loop (ring producer)"),
             Map.entry("RecvLane.ended", "loop (ring producer)"),
             Map.entry("RecvLane.endReported", "loop"),
+            Map.entry("RecvLane.appDone", "loop"),
             Map.entry("RecvLane.hostReader", "loop"),
             Map.entry("RecvLane$Piece.off", "turn holder (ring consumer); published with the piece's next link"));
 

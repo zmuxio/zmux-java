@@ -1,9 +1,10 @@
 package io.zmux;
 
 /**
- * Events of a session, delivered by {@link ZmuxSession#nextEvent}. Unread events are
- * coalesced, never dropped: a pipe direction keeps each state once, at its latest
- * occurrence (a transient SUSPECT and the terminal state both stay visible); other kinds keep
+ * Events of a session, delivered by {@link ZmuxSession#nextEvent}; every zmux implementation has
+ * these events under these names. Unread events are
+ * coalesced, never dropped: a pipe direction keeps each pipe event once, at its latest
+ * occurrence (a transient {@link PipeSuspect} and the terminal one both stay visible); other kinds keep
  * their latest value; a retired pipe's unread events leave the queue and are counted in
  * {@link PipesRetired}.
  */
@@ -11,23 +12,43 @@ public sealed interface SessionEvent {
     /** The peer sent GOAWAY and lowered a watermark: no new streams; streams at or above it fail. */
     record GoAwayReceived(long maxBidi, long maxUni, long code) implements SessionEvent {}
 
-    /** Received datagrams were dropped (queue full or no stream); total is the session's count. */
-    record DatagramsDropped(long total) implements SessionEvent {}
+    /*
+     * The pipe events. In each, carrier is the kind of the pipe's carrier as its pipe input
+     * declared it, null when undeclared, and direction the pipe direction the event is about,
+     * from the local endpoint: SEND_ONLY for the outbound direction, RECEIVE_ONLY for the inbound.
+     */
+
+    /** A local outbound pipe direction appeared (joining, or already active). */
+    record PipeAdded(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+
+    /** An outbound pipe direction became active. */
+    record PipeJoined(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+
+    /** An outbound pipe direction stopped making progress. */
+    record PipeSuspect(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+
+    /** A suspect outbound pipe direction is active again. */
+    record PipeRecovered(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+
+    /** An outbound pipe direction failed. */
+    record PipeFailed(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /**
-     * A pipe's outbound direction changed state (STATE_MACHINE.md 3.1). In the pipe events,
-     * carrier is the kind of the pipe's carrier as its pipe input declared it, null when undeclared.
+     * A pipe direction ended: the outbound direction CLOSED, the inbound one ENDED. Retirement
+     * is reported by {@link PipesRetired}.
      */
-    record OutboundPipeStateChanged(long pipe, CarrierKind carrier, PipeState.Outbound state) implements SessionEvent {}
-
-    /** A pipe's inbound direction changed state (STATE_MACHINE.md 3.2). */
-    record InboundPipeStateChanged(long pipe, CarrierKind carrier, PipeState.Inbound state) implements SessionEvent {}
+    record PipeClosed(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** A tier's saturation state changed. Lower numbered tiers are preferred. */
     record TierSaturation(long priority, boolean saturated) implements SessionEvent {}
 
-    /** The effective local outbound settings changed. */
-    record PipePriorityChanged(long pipe, CarrierKind carrier, long priority, boolean standby, long weight) implements SessionEvent {}
+    /**
+     * The effective outbound settings of a pipe (priority, standby or weight) changed; source
+     * is {@link PipeStats.SettingSource#LOCAL} for a local setting and
+     * {@link PipeStats.SettingSource#PEER} for the peer's request.
+     */
+    record PipePriorityChanged(long pipe, CarrierKind carrier, long priority, boolean standby, long weight,
+                               PipeStats.SettingSource source) implements SessionEvent {}
 
     /** A quality estimate left the configured band; rate is bytes/s. */
     record PipeQualityChanged(long pipe, CarrierKind carrier, java.time.Duration smoothedRtt, double rate) implements SessionEvent {}
@@ -39,29 +60,49 @@ public sealed interface SessionEvent {
     record CapacityRestored(double rate) implements SessionEvent {}
 
     /**
-     * A candidate of {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} was tried (API.md
-     * Section 4.8); an unread one is replaced by the next try of the same kind.
+     * A candidate of {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} was tried; an unread one is replaced by the next try of the same kind.
      */
     record CarrierCandidate(CandidateResult result) implements SessionEvent {}
 
     /** The carrier kind of the session was chosen, at the dial and again on every switch. */
-    record CarrierChosen(CarrierKind kind) implements SessionEvent {}
+    record CarrierChosen(CarrierKind kind, String variant) implements SessionEvent {
+        /** A chosen kind of no variant. */
+        public CarrierChosen(CarrierKind kind) { this(kind, ""); }
+    }
 
     /**
-     * A peer join's token did not verify (MULTIPATH.md Section 5.4 step 5): reason is
-     * {@code mac} or {@code mac_carrier_bound}. Also counted in
+     * A peer's Hello did not verify, for example because the two ends have different join
+     * secrets: reason is {@code auth}. Also counted in
      * {@link SessionStats#joinAuthFailures()}; an unread one is replaced by the next of the same reason.
      */
     record JoinAuthFailed(String reason) implements SessionEvent {}
 
-    /** Every pipe was lost; the session waits for a join to resume (RESUME.md). */
-    record Suspended() implements SessionEvent {}
-
-    /** A join ended the suspension. */
-    record Resumed() implements SessionEvent {}
+    /**
+     * Every pipe of a direction was lost in a session with resume: it waits, until its grace
+     * period, for a join to resume it. Writes buffer up to the limits and then block; reads wait.
+     */
+    record SessionSuspended() implements SessionEvent {}
 
     /**
-     * The only report of pipe retirement (MULTIPATH.md 8.4): the pipes retired since this
+     * Follows {@link SessionSuspended} when the session can rejoin but nothing in the library
+     * will dial for it: it has no {@link ZmuxConfig.Builder#redial redial hook} and no running
+     * pool ({@link ZmuxSession#maintainPipes}). It ends at the grace period unless the
+     * application adds a pipe; one that resumes by its own {@link ZmuxSession#addPipe} calls
+     * can ignore this event. Also logged as a warning ({@link ZmuxConfig.Builder#logger}).
+     */
+    record ResumeUnattended() implements SessionEvent {}
+
+    /** A join ended the suspension. */
+    record SessionResumed() implements SessionEvent {}
+
+    /** The session committed a session epoch: its secret is derived, and joins of it are accepted. */
+    record EpochCommitted(long epoch) implements SessionEvent {}
+
+    /** A session epoch, its secret, its join keys and its Locators were deleted. */
+    record EpochDeleted(long epoch) implements SessionEvent {}
+
+    /**
+     * The only report of pipe retirement: the pipes retired since this
      * event was last read; of those, the ones whose failure ({@code failed}) or end without
      * failure ({@code closed}) was not yet read, judged by the unread terminal state of each
      * direction (an unread failure in either direction counts as failed); the events a queue
@@ -69,7 +110,7 @@ public sealed interface SessionEvent {
      * queue uncounted, and the limit never discards this summary or a terminal event); and the IDs of the last retired pipes, at
      * most four, oldest first. It enters the stream at the first retirement after it was last
      * read and accumulates until read. An application that needs every retired ID compares
-     * {@link Paths#list()} with the handles it holds.
+     * {@link ZmuxSession#pipes()} with the handles it holds.
      */
     record PipesRetired(long retired, long failed, long closed, long dropped, java.util.List<Long> last) implements SessionEvent {}
 }

@@ -41,11 +41,11 @@ class PathLossTest {
     @EnumSource(value = Scheduler.Builtin.class, names = {"AFFINITY", "SPREAD_ETA", "SPREAD_ROUND_ROBIN", "SPREAD_RATE_WEIGHTED"})
     void aSilentFailedPreferredPipeReinjectsOnTheRemainingCarrier(Scheduler policy) throws Exception {
         try (EventLoops loops = EventLoops.create(3); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(3).withAuth(PipeAuth.psk(new byte[32])).withScheduler(policy).withProbation(Duration.ZERO).withSuspectFloor(Duration.ofMillis(50)).withDeadTimeout(Duration.ofSeconds(1))).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(policy).probation(Duration.ZERO).suspectFloor(Duration.ofMillis(50)).deadTimeout(Duration.ofSeconds(1)).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var proxy = new Blackhole(listener.localAddress())) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(proxy.address(), cfg); var s = accepted.get();
-                var backup = c.paths().add(listener.localAddress(), PipeOptions.builder().sendPriority(1).receivePriority(1).build());
+                var backup = c.addPipe(listener.localAddress(), PipeOptions.builder().sendPriority(1).receivePriority(1).build());
                 var incoming = ex.submit(() -> {
                     var stream = s.acceptStream(); byte[] bytes = SessionTest.readAll(stream);
                     stream.write(MessageDigest.getInstance("SHA-256").digest(bytes)); stream.finish();
@@ -61,8 +61,8 @@ class PathLossTest {
                 boolean suspect = false;
                 while (!suspect) {
                     SessionEvent event = c.nextEvent();
-                    suspect = event instanceof SessionEvent.OutboundPipeStateChanged p && p.pipe() == 0
-                            && (p.state() == PipeState.Outbound.SUSPECT || p.state() == PipeState.Outbound.FAILED);
+                    suspect = event instanceof SessionEvent.PipeSuspect p && p.pipe() == 0
+                            || event instanceof SessionEvent.PipeFailed f && f.pipe() == 0;
                 }
                 PipePoolTest.await(() -> c.stats().reinjections() >= 1);
                 var st = c.stats();

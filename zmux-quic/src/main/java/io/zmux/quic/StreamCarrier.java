@@ -77,12 +77,12 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         return PipeIo.of(reader, writer).withCarrierConn(connection.channel())
                 .withReceiveMemory(connection.options().connectionWindow())
                 .withProtocol(connection.applicationProtocol())
+                .withTerminatedTls(true).withExporter(connection::export).secure() // A QUIC stream is end to end.
                 .withLaneOpener(send ? connection::openLane : null).withCarrier(CarrierKind.QUIC);
     }
 
     /**
-     * The datagram channel of the pipe this bidirectional stream is (EXTENSIONS.md Section
-     * 6.8): the connection's QUIC datagrams, named by the stream's ID; null for a lane.
+     * The datagram channel of the pipe this bidirectional stream is: the connection's QUIC datagrams, named by the stream's ID; null for a lane.
      */
     synchronized io.zmux.internal.loop.CarrierChannel channel() {
         if (channel == null && connection != null && !unidirectional()) channel = new PipeChannel(connection, stream.streamId());
@@ -96,6 +96,9 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         @Override public void send(byte[] datagram, Runnable refused) { connection.sendDatagram(datagram, refused); }
         @Override public Runnable receive(Sink sink) { return connection.receiveDatagrams(id, sink); }
     }
+
+    /** This stream's connection's exporter, read now; null while it is unavailable. */
+    byte[] export(String label, byte[] context, int length) { return connection == null ? null : connection.export(label, context, length); }
 
     boolean owns(Object half) { return half != null && (half == reader || half == writer); }
 
@@ -148,9 +151,10 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
             @Override public void close() { closeOutput(false); }
             @Override public void abort(Throwable cause) { closeOutput(true); }
         };
-        PipeIo io = PipeIo.of(r, w).withCarrierConn(info.connection()).withReceiveMemory(info.receiveMemory())
+        PipeIo io = PipeIo.of(r, w).withTerminatedTls(true).withCarrierConn(info.connection()).withReceiveMemory(info.receiveMemory())
                 .withProtocol(info.applicationProtocol()).withFateGroup(info.fateGroup())
                 .withCarrier(CarrierKind.QUIC);
+        io = io.withExporter(connection::export).secure();
         return lanes == null ? io : io.withLaneOpener(lanes);
     }
 

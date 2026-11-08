@@ -12,30 +12,44 @@ import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 import org.opentest4j.AssertionFailedError;
 
-/** Runs the dev specification's executable traces (TRACES.md) against the core. */
+/**
+ * Runs the specification's executable traces against the core: the public traces (fixtures/traces)
+ * and, when the repository has them, the traces of this implementation's local sender policy
+ * (src/test/resources/local/spec-traces, absent from a published tree).
+ */
 class TraceTest {
-    /** Trace id prefixes the implementation runs so far. */
-    static final List<String> ENABLED = List.of("core.", "ext.", "compat.", "findings.", "multipath.", "resume.");
+    /** The number of public traces: none is left out. */
+    static final int TRACE_COUNT = 372;
 
     @TestFactory
     Stream<DynamicTest> traces() throws Exception {
         Path root = SpecFixtures.root().resolve("fixtures");
         Map<String, Object> profiles = Json.object(Files.readString(root.resolve("profiles.json")));
-        List<Path> files;
-        try (Stream<Path> w = Files.walk(root.resolve("traces"))) {
-            files = w.filter(p -> p.toString().endsWith(".ndjson")).sorted().toList();
-        }
+        List<Path> files = new ArrayList<>(traceFiles(root.resolve("traces"), TRACE_COUNT));
+        Path local = Path.of("src", "test", "resources", "local", "spec-traces");
+        if (Files.isDirectory(local)) files.addAll(traceFiles(local, -1));
         List<DynamicTest> tests = new ArrayList<>();
         for (Path f : files) {
             List<String> lines = Files.readAllLines(f).stream().filter(l -> !l.isBlank()).toList();
             Map<String, Object> h = Json.object(lines.getFirst());
             String id = (String) h.get("id");
-            if (ENABLED.stream().noneMatch(id::startsWith)) continue;
             String only = System.getProperty("zmux.trace");
             if (only != null && !id.startsWith(only)) continue;
             tests.add(DynamicTest.dynamicTest(id, () -> run(h, profiles, lines)));
         }
         return tests.stream();
+    }
+
+    /** The traces below dir; want, when not negative, is how many there must be. */
+    private static List<Path> traceFiles(Path dir, int want) throws Exception {
+        List<Path> files;
+        try (Stream<Path> w = Files.walk(dir)) {
+            files = w.filter(p -> p.toString().endsWith(".ndjson")).sorted().toList();
+        }
+        if (want >= 0 && files.size() != want) {
+            throw new AssertionFailedError(dir + ": " + files.size() + " traces, want " + want);
+        }
+        return files;
     }
 
     static void run(Map<String, Object> h, Map<String, Object> profiles, List<String> lines) {

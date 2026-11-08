@@ -2,7 +2,7 @@ package io.zmux;
 
 import java.util.Locale;
 
-/** A kind of carrier that {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} may use (API.md Section 4.8). */
+/** A kind of carrier that {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} may use. */
 public enum CarrierKind {
     /** A WebSocket: one binary message per record. */
     WEBSOCKET,

@@ -17,7 +17,7 @@ class ResumeTest {
     }
     @Test void tcpSessionResumesTheSameLogicalStreamAfterLosingEveryCarrier() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.psk(new byte[32])).withResumeTimeout(Duration.ofSeconds(10)).withProbation(Duration.ZERO)).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).probation(Duration.ZERO).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
@@ -30,17 +30,17 @@ class ResumeTest {
                 ByteArrayOutputStream received = new ByteArrayOutputStream();
                 ByteBuffer first = ByteBuffer.allocate(16384); assertTrue(receiver.read(first) > 0);
                 received.write(first.array(), 0, first.position());
-                var clientSuspended = workers.submit(() -> { event(client, SessionEvent.Suspended.class); return null; });
-                var serverSuspended = workers.submit(() -> { event(server, SessionEvent.Suspended.class); return null; });
-                client.paths().list().getFirst().abort();
+                var clientSuspended = workers.submit(() -> { event(client, SessionEvent.SessionSuspended.class); return null; });
+                var serverSuspended = workers.submit(() -> { event(server, SessionEvent.SessionSuspended.class); return null; });
+                client.pipes().getFirst().abort();
                 clientSuspended.get(5, TimeUnit.SECONDS); serverSuspended.get(5, TimeUnit.SECONDS);
                 PipePoolTest.await(() -> client.stats().suspensions() == 1 && client.stats().pipesActive() == 0);
                 Duration early = client.stats().suspendedTime();
                 Thread.sleep(20);
                 assertTrue(client.stats().suspendedTime().compareTo(early) > 0, "the current suspension counts");
                 sender.write(bytes, 128 << 10, bytes.length - (128 << 10)); sender.finish();
-                var resumed = workers.submit(() -> { event(server, SessionEvent.Resumed.class); return null; });
-                var pipe = client.paths().add(listener.localAddress(), PipeOptions.builder().probation(Duration.ZERO).build());
+                var resumed = workers.submit(() -> { event(server, SessionEvent.SessionResumed.class); return null; });
+                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().probation(Duration.ZERO).build());
                 assertTrue(pipe.id() > 0); resumed.get(5, TimeUnit.SECONDS);
                 PipePoolTest.await(() -> client.stats().pipesAdded() == 2 && client.stats().pipesActive() == 1);
                 Duration total = client.stats().suspendedTime();

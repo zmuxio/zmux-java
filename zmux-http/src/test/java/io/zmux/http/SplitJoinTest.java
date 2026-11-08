@@ -25,35 +25,23 @@ class SplitJoinTest {
         }
     }
 
-    @Test void aSplitBootstrapCannotJoinButASplitJoinPoolKeepsItsPairWhole() throws Exception {
+    @Test void aSplitJoinPoolKeepsOnePipeAcrossItsPairedRequests() throws Exception {
         try (var f = new Fixture(ModeHttpTest.session(true, null), b -> b, b -> b.streaming(), false, null);
              var c = f.client(b -> b)) {
             try (var s = Zmux.open(c.pipe(f.base, Map.of(), PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, f.config);
                  var server = f.listener.accept(Duration.ofSeconds(5))) {
-                var boot = c.splitPipe(f.base, Map.of(), null);
-                try {
-                    assertThrows(IllegalArgumentException.class, () -> s.paths().add(boot, PipeOptions.defaults()));
-                } finally {
-                    boot.reader().close();
-                    boot.writer().abort(new java.io.IOException("refused"));
-                }
-                var pool = PipePool.join(a -> c.splitJoin(a.session(), f.base, Map.of(), null, a.options()))
+                var pool = PipePool.join(a -> List.of(c.splitJoin(a.session(), f.base, Map.of(), null, a.options())))
                         .withInspectionInterval(Duration.ofMillis(5));
-                try (var run = s.paths().maintain(pool)) {
-                    await(() -> run.pipes().size() == 2);
+                try (var run = s.maintainPipes(pool)) {
+                    await(() -> run.pipes().size() == 1);
                     List<ZmuxPipe> first = run.pipes();
-                    boolean up = false, down = false;
-                    for (ZmuxPipe p : first) {
-                        var st = p.stats().orElseThrow();
-                        up |= st.outbound() != null && st.inbound() == null;
-                        down |= st.inbound() != null && st.outbound() == null;
-                    }
-                    assertTrue(up && down, "an uplink and a downlink");
+                    var st = first.getFirst().stats().orElseThrow();
+                    assertTrue(st.outbound() != null && st.inbound() != null, "one bidirectional attachment");
                     var old = new HashSet<Long>();
                     for (ZmuxPipe p : first) old.add(p.id());
-                    // The loss of one half replaces the member whole.
+                    // The loss of the pipe replaces the member.
                     first.getFirst().abort();
-                    await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> old.contains(p.id())));
+                    await(() -> run.pipes().size() == 1 && run.pipes().stream().noneMatch(p -> old.contains(p.id())));
                     Fixture.exchange(s, server, 4);
                 }
             }

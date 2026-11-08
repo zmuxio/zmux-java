@@ -14,7 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiFunction;
 
-/** JSON frames of TRACES.md Section 6: encoding peer frames, describing local frames, matching patterns. */
+/** JSON frames of the trace format: encoding peer frames, describing local frames, matching patterns. */
 final class TraceFrames {
     private TraceFrames() {}
 
@@ -34,6 +34,7 @@ final class TraceFrames {
             Map.entry("zmux_datagram_flows", TransportParams.ID_DATAGRAM_FLOWS),
             Map.entry("zmux_carrier_datagrams", TransportParams.ID_CARRIER_DATAGRAMS),
             Map.entry("zmux_multipath", TransportParams.ID_MULTIPATH),
+            Map.entry("zmux_session_crypto", TransportParams.ID_SESSION_CRYPTO),
             Map.entry("zmux_ack_threshold", TransportParams.ID_ACK_THRESHOLD),
             Map.entry("zmux_pipe_ack", TransportParams.ID_PIPE_ACK),
             Map.entry("zmux_max_ack_delay", TransportParams.ID_MAX_ACK_DELAY),
@@ -106,6 +107,14 @@ final class TraceFrames {
                 b.put((byte) loc.length);
                 b.put(loc);
             }
+            case "zmux_session_crypto" -> {
+                Map<String, Object> m = map(v);
+                for (String set : List.of("suites", "groups")) {
+                    List<Object> ids = list(m.get(set));
+                    VarInt.put(b, ids.size());
+                    for (Object id : ids) VarInt.put(b, num(id));
+                }
+            }
             case "zmux_max_lanes" -> {
                 Map<String, Object> m = map(v);
                 VarInt.put(b, num(m.get("max_lanes")));
@@ -148,6 +157,16 @@ final class TraceFrames {
                     p.secretFlags = (int) num(m.get("flags"));
                     System.arraycopy(hex(m.get("nonce")), 0, p.sessionNonce, 0, 16);
                     p.locator = hex(m.get("locator"));
+                }
+                case "zmux_session_crypto" -> {
+                    p.present |= TransportParams.SESSION_CRYPTO;
+                    @SuppressWarnings("unchecked") var m = (Map<String, Object>) v;
+                    try {
+                        p.sessionCrypto = io.zmux.internal.join.SessionCrypto.of(list(m.get("suites")).stream().mapToLong(TraceFrames::num).toArray(),
+                                list(m.get("groups")).stream().mapToLong(TraceFrames::num).toArray());
+                    } catch (io.zmux.carrier.SecureCarrierException bad) {
+                        throw new IllegalArgumentException(bad);
+                    }
                 }
                 case "zmux_ack_threshold" -> { p.present |= TransportParams.ACK_THRESHOLD; p.ackThreshold = num(v); }
                 case "zmux_pipe_ack" -> p.present |= TransportParams.PIPE_ACK;
@@ -232,12 +251,6 @@ final class TraceFrames {
                 case "QX_PING" -> FrameEncoder.ping(b, getB(f, "response"), getU(f, "seq"));
                 case "GOAWAY" -> FrameEncoder.goAway(b, getU(f, "max_bidi"), getU(f, "max_uni"), getU(f, "code"));
                 case "PRIORITY_UPDATE" -> FrameEncoder.priorityUpdate(b, getU(f, "id"), getU(f, "seq"), (int) getU(f, "urgency"), getB(f, "incremental"));
-                case "PIPE_JOIN" -> {
-                    int dir = Map.of("up", 0, "down", 1, "bidi", 2).get((String) f.get("direction"));
-                    FrameEncoder.joinMacInput(b, hex(f.get("locator")), getU(f, "pipe"), dir, getB(f, "carrier_bound"),
-                            getB(f, "standby"), getU(f, "fate_group"), getU(f, "priority"));
-                    b.put(hex(f.get("token")));
-                }
                 case "PIPE_ACK" -> {
                     List<Object> ents = list(f.get("entries"));
                     FrameEncoder.pipeAckHeader(b, ents.size());
@@ -258,6 +271,8 @@ final class TraceFrames {
                 }
                 case "PIPE_LANE" -> FrameEncoder.pipeLane(b, hex(f.get("lane_key")), getU(f, "pipe"), getU(f, "lane"));
                 case "PIPE_PING" -> FrameEncoder.pipePing(b);
+                case "SESSION_EPOCH" -> FrameEncoder.sessionEpoch(b, FrameEncoder.sessionEpochBody("answer".equals(f.get("phase")) ? 1 : 0,
+                        getU(f, "epoch"), f.get("share") instanceof String sh ? hex(sh) : new byte[0], f.get("locator") instanceof String l ? hex(l) : new byte[0]));
                 case "PIPE_ABANDON" -> FrameEncoder.pipeAbandon(b, getU(f, "pipe"), getU(f, "code"));
                 case "PIPE_STATUS" -> FrameEncoder.pipeStatus(b, getU(f, "pipe"), getU(f, "seq"),
                         "standby".equals(f.get("status")) ? 1 : 0, getU(f, "priority"));
@@ -282,7 +297,7 @@ final class TraceFrames {
         }
     }
 
-    /** A decoded frame as the field map of TRACES.md Section 6. */
+    /** A decoded frame as the field map of the trace format. */
     static Map<String, Object> frameObj(Frame f) {
         Map<String, Object> o = new LinkedHashMap<>();
         o.put("type", f.kind.wireName());
@@ -318,17 +333,6 @@ final class TraceFrames {
             case PRIORITY_UPDATE -> {
                 o.put("id", f.streamId); o.put("seq", f.seq); o.put("urgency", (long) f.urgency); o.put("incremental", f.incremental);
             }
-            case PIPE_JOIN -> {
-                Frame.Join j = f.join;
-                byte[] loc = new byte[j.locatorLen];
-                f.src.get(j.locatorPos, loc);
-                byte[] tok = new byte[16];
-                f.src.get(j.tokenPos, tok);
-                o.put("locator", hex(loc)); o.put("pipe", j.pipeId);
-                o.put("direction", List.of("up", "down", "bidi").get(j.direction));
-                o.put("carrier_bound", j.carrierBound); o.put("standby", j.standby);
-                o.put("fate_group", j.fateGroup); o.put("priority", j.priority); o.put("token", hex(tok));
-            }
             case PIPE_ACK -> {
                 List<Object> ents = new ArrayList<>();
                 Frame.AckEntries it = f.entries(new Frame.AckEntries());
@@ -350,11 +354,15 @@ final class TraceFrames {
                 o.put("status", f.status == 0 ? "available" : "standby");
             }
             case PIPE_PING -> { }
+            case SESSION_EPOCH -> {
+                o.put("phase", f.phase == 0 ? "offer" : "answer"); o.put("epoch", f.value);
+                o.put("share", hex(f.dataBytes())); o.put("locator", hex(f.locatorBytes()));
+            }
         }
         return o;
     }
 
-    /** Matches one pattern field (TRACES.md Section 5.6). */
+    /** Matches one pattern field. */
     static boolean matchValue(Object pat, Object got) {
         if ("*".equals(pat)) return true;
         if (pat instanceof Map<?, ?> pm) {

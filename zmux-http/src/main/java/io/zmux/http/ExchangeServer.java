@@ -20,7 +20,7 @@ import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
-import io.zmux.helper.ReplayRecord;
+import io.zmux.ReplayFilter;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -46,7 +46,7 @@ final class ExchangeServer {
     static final int PIECE_COST = 64;
     private final HttpEndpoint ep;
     final ExchangeConfig cfg;
-    private final ReplayRecord nonces;
+    private final ReplayFilter nonces;
     private final ConcurrentHashMap<ByteBuffer, Carrier> carriers = new ConcurrentHashMap<>();
     /** Ended carriers remembered to answer GONE: key and expiry (System.nanoTime). */
     private final ConcurrentHashMap<ByteBuffer, Gone> gone = new ConcurrentHashMap<>();
@@ -59,7 +59,11 @@ final class ExchangeServer {
     ExchangeServer(HttpEndpoint ep, ExchangeConfig cfg) {
         this.ep = ep;
         this.cfg = cfg;
-        nonces = new ReplayRecord(cfg.nonceCacheSize());
+        nonces = new ReplayFilter(cfg.maxClockSkew().plusSeconds(1), cfg.nonceCacheSize(), null, new java.time.Clock() {
+            @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+            @Override public java.time.Clock withZone(java.time.ZoneId z) { return this; }
+            @Override public java.time.Instant instant() { return java.time.Instant.ofEpochSecond(seconds.getAsLong()); }
+        });
     }
 
     /** The encoded body limit of a request. */
@@ -189,7 +193,7 @@ final class ExchangeServer {
         byte[] k = new byte[Exchange.CID + Exchange.NONCE];
         System.arraycopy(q.cid(), 0, k, 0, Exchange.CID);
         System.arraycopy(q.nonce(), 0, k, Exchange.CID, Exchange.NONCE);
-        return nonces.add(now + d, k, now - skew);
+        return nonces.check(k, (now + d) * 1000) == ReplayFilter.Verdict.FRESH;
     }
 
     private Gone gone(ByteBuffer cid) {
@@ -244,6 +248,12 @@ final class ExchangeServer {
 
         /** Writes the response with flags and data (a piece, not consumed). */
         void send(int flags, ByteBuf data) {
+            // The context's executor is borrowed; its group owns and shuts it down.
+            //noinspection resource
+            if (ctx.executor().isShuttingDown()) { // The connection's group ended first: no reader is left.
+                if (hold != null) { hold.release(); hold = null; }
+                return;
+            }
             ByteBuffer d = data == null ? ByteBuffer.allocate(0) : data.nioBuffer();
             ByteBuffer hdr = ByteBuffer.allocate(Exchange.RESP_HDR);
             hdr.put(key.responseMac(q.cid(), q.kind(), seqRaw, q.nonce(), flags, d)).put((byte) flags).flip();

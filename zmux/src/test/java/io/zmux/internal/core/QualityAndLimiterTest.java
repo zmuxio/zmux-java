@@ -46,7 +46,7 @@ class QualityAndLimiterTest {
 
     private static void measured(Pipe pipe, double rate) {
         Poke.set(pipe.out().snd.re(), "blockedNow", true);
-        pipe.out().snd.re().sample(rate, false, 0, 0);
+        pipe.out().snd.re().sample(rate, false, 0, false, 0);
         Poke.set(pipe.out().snd.re(), "blockedNow", false);
     }
 
@@ -61,7 +61,7 @@ class QualityAndLimiterTest {
         session.setCapacityFloor(1_500_000, 1.01);
         assertEquals(0, capacityEvent(session).rate());
         var rate = session.pipes.get(0).out().snd.re();
-        rate.sample(2_000_000, true, 0, 1);
+        rate.sample(2_000_000, true, 0, false, 1);
         assertFalse(rate.measured(), "an application-limited sample must not end placement probing");
         session.quality().sample(session.pipes.get(0));
         var restored = capacityEvent(session);
@@ -74,7 +74,7 @@ class QualityAndLimiterTest {
         Session session = new Session(CoreConfig.defaults(), 0);
         var info = new CarrierInfo(Framing.BYTES, false, false, false, false);
         session.pipes().attachBootstrap(info, info, null);
-        session.pipes.get(0).out().snd.re().sample(500_000, true, 0, 1);
+        session.pipes.get(0).out().snd.re().sample(500_000, true, 0, false, 1);
         session.setCapacityFloor(100_000, 1.01);
         assertEquals(0, capacityEvent(session).rate());
     }

@@ -62,12 +62,12 @@ class QuicCapacityProbe {
                     var a = pair.local(); var b = pair.remote();
                     for (int i = 0; i < pipes; i++) {
                         var io = QuicEndpointTest.awaitPipe(topology.pool(i).openPipe());
-                        a.paths().add(io, PipeOptions.defaults());
+                        a.addPipe(io, PipeOptions.defaults());
                     }
                     // Exclude the separate bootstrap connection from every measured topology.
-                    a.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> a.paths().stats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes
-                            && b.paths().stats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes);
+                    a.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
+                    QuicPoolTest.until(() -> a.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes
+                            && b.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes);
                     int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                     assertEquals(mode >= 2 ? pipes : 1, connections);
                     for (int direction = 0; direction < 2; direction++) {
@@ -76,7 +76,7 @@ class QuicCapacityProbe {
                         var receiver = direction == 0 ? b : a;
                         QuicTest.transfer(workers, sender, receiver, 4, 256 << 10);
                         if (trainEachPipe) {
-                            var paths = sender.paths().list().stream().filter(p -> p.id() != 0).toList();
+                            var paths = sender.pipes().stream().filter(p -> p.id() != 0).toList();
                             try {
                                 for (var selected : paths) {
                                     selected.setSendStandby(false);
@@ -87,7 +87,7 @@ class QuicCapacityProbe {
                                 }
                             } finally { for (var path : paths) path.setSendStandby(false); }
                             results.add(String.format(Locale.ROOT, "TRAINING_ESTIMATE,%d,%s,%s,%.3f", round, name,
-                                    direction == 0 ? "forward" : "reverse", sender.paths().stats().stream()
+                                    direction == 0 ? "forward" : "reverse", sender.pipeStats().stream()
                                             .filter(p -> p.pipe() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));
                         }
                         System.out.printf("PROBE_PROGRESS,round=%d,mode=%s,direction=%d,phase=measure%n", round, name, direction);
@@ -127,7 +127,7 @@ class QuicCapacityProbe {
     private Observed measureTransfers(ExecutorService workers, List<Traffic> traffic, int bytes) throws Exception {
         var samples = new ArrayList<Double>();
         var before = new ArrayList<List<PipeStats>>();
-        for (var flow : traffic) before.add(flow.sender().paths().stats());
+        for (var flow : traffic) before.add(flow.sender().pipeStats());
         long acknowledged = 0;
         for (var flow : traffic) acknowledged += acknowledged(flow.sender());
         long begin = System.nanoTime();
@@ -160,7 +160,7 @@ class QuicCapacityProbe {
         var pipeTraffic = new ArrayList<String>();
         for (int i = 0; i < traffic.size(); i++) {
             var prior = before.get(i);
-            var after = traffic.get(i).sender().paths().stats();
+            var after = traffic.get(i).sender().pipeStats();
             for (var old : prior) {
                 if (old.pipe() != 0 && after.stream().noneMatch(p -> p.pipe() == old.pipe()))
                     pipeTraffic.add(i + "," + old.pipe() + ",-1,-1");
@@ -179,7 +179,7 @@ class QuicCapacityProbe {
     }
 
     private double rateSum(ZmuxSession session) throws Exception {
-        return session.paths().stats().stream().filter(p -> p.pipe() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
     }
 
     private record Pair(ZmuxSession local, ZmuxSession remote) implements AutoCloseable {
@@ -215,10 +215,10 @@ class QuicCapacityProbe {
                     if (i == 0) identity = io.carrierConn();
                     else if (mode == 1) assertSame(identity, io.carrierConn());
                     else assertNotSame(identity, io.carrierConn());
-                    pair.local().paths().add(io, PipeOptions.defaults());
-                    pair.local().paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> pair.local().paths().stats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible())
-                            && pair.remote().paths().stats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible()));
+                    pair.local().addPipe(io, PipeOptions.defaults());
+                    pair.local().pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
+                    QuicPoolTest.until(() -> pair.local().pipeStats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible())
+                            && pair.remote().pipeStats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible()));
                 }
                 int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                 assertEquals(mode == 1 ? 1 : 2, connections);
@@ -297,6 +297,6 @@ class QuicCapacityProbe {
     }
 
     private long acknowledged(ZmuxSession session) throws Exception {
-        return session.paths().stats().stream().filter(p -> p.pipe() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipe() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
     }
 }

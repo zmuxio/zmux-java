@@ -96,7 +96,7 @@ class ExternalTransportTest {
             var hub = new ListenerHub(new ListenerHub.Owner() {
                 @Override public io.zmux.internal.core.CoreConfig config() { return io.zmux.internal.core.CoreConfig.defaults(); }
                 @Override public DriverHooks hooks() { return DriverHooks.NONE; }
-                @Override public void started(SessionRuntime driver, String protocol) { fail("incomplete first record started a session"); }
+                @Override public void started(SessionRuntime driver, String protocol, io.zmux.Credential credential) { fail("incomplete first record started a session"); }
             }, null, new byte[0], 8, 0, 0);
             try {
                 if (knownLane) {
@@ -108,11 +108,17 @@ class ExternalTransportTest {
                 sink.get().onData(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
                 loop.close();
-                assertEquals(1, closed.get()); assertEquals(0, loop.pool.outstanding());
+                // A half's close runs off the loop.
+                awaitCount(closed, 1); assertEquals(0, loop.pool.outstanding());
                 hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null);
-                assertEquals(2, closed.get(), "rejected dispatch must return carrier ownership");
+                awaitCount(closed, 2);
             } finally { hub.close(); loop.close(); }
         }
+    }
+
+    private static void awaitCount(java.util.concurrent.atomic.AtomicInteger n, int want) throws Exception {
+        for (long end = System.nanoTime() + 5_000_000_000L; n.get() < want && System.nanoTime() < end; ) Thread.sleep(1);
+        assertEquals(want, n.get());
     }
 
     @Test void retainedPayloadReferencesOutliveTheReusedTransmitBatch() throws Exception {
@@ -133,4 +139,33 @@ class ExternalTransportTest {
         } finally { loop.close(); }
     }
 
+
+    /** The listener holds at most MAX_HELD_JOINS joins: a newer one ends the oldest, each settled once. */
+    @Test void heldJoinsAreBounded() {
+        var hub = new ListenerHub(new ListenerHub.Owner() {
+            @Override public io.zmux.internal.core.CoreConfig config() { return io.zmux.internal.core.CoreConfig.defaults(); }
+            @Override public DriverHooks hooks() { return DriverHooks.NONE; }
+            @Override public void started(SessionRuntime driver, String protocol, io.zmux.Credential credential) { }
+        }, null, new byte[0], 1, 0, 0);
+        var evicted = new java.util.ArrayList<Integer>();
+        var slots = new java.util.ArrayList<ListenerHub.JoinSlot>();
+        var sources = new java.util.ArrayList<java.net.InetSocketAddress>();
+        for (int i = 0; i <= ListenerHub.MAX_HELD_JOINS; i++) {
+            var source = new java.net.InetSocketAddress("10.0." + i / 256 + "." + i % 256, 1);
+            org.junit.jupiter.api.Assertions.assertTrue(hub.reserve(source));
+            var slot = hub.new JoinSlot(source);
+            int n = i;
+            slot.held(() -> { evicted.add(n); slot.settled(); });
+            slot.held(() -> { evicted.add(n); slot.settled(); }); // held again keeps its place
+            slots.add(slot); sources.add(source);
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(0), evicted);
+        org.junit.jupiter.api.Assertions.assertTrue(hub.reserve(sources.get(0)), "the evicted join gave its slot back");
+        org.junit.jupiter.api.Assertions.assertFalse(hub.reserve(sources.get(1)));
+        slots.get(1).settled();
+        slots.get(1).settled();
+        org.junit.jupiter.api.Assertions.assertTrue(hub.reserve(sources.get(1)));
+        org.junit.jupiter.api.Assertions.assertFalse(hub.reserve(sources.get(1)), "settled once");
+        hub.close();
+    }
 }

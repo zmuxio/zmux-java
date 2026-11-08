@@ -14,11 +14,11 @@ import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** Pipe liveness (MULTIPATH.md 5.2, 6.5, 7.1): answers to probes, deadlines made due in a timer pass, delayed first records. */
+/** Pipe liveness: answers to probes, deadlines made due in a timer pass, delayed first records. */
 @Timeout(60)
 class LivenessTest {
-    static MultipathConfig multipath() {
-        return MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO);
+    static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b) {
+        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
     }
 
     /**
@@ -27,9 +27,9 @@ class LivenessTest {
      */
     @Test void aDeadTimeoutBelowTheSuspicionFailsTheLastPipeInTheSamePass() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).timeouts(Timeouts.defaults().disableKeepAlive())
-                    .multipath(multipath().withProbeInterval(Duration.ofSeconds(1)).withProbeJitter(0).withDeadTimeout(Duration.ofSeconds(1))
-                            .withSuspectFloor(Duration.ofSeconds(2))).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()
+                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1))
+                            .suspectFloor(Duration.ofSeconds(2)).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(relay.address(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 relay.blackhole = true;
@@ -50,13 +50,13 @@ class LivenessTest {
      */
     @Test void anEndWithProbesOffAnswersWithAProbeOfItsOwn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var ccfg = ZmuxConfig.builder().eventLoops(loops).timeouts(Timeouts.defaults().disableKeepAlive()).multipath(multipath().withProbeJitter(0)).build();
-            var scfg = ZmuxConfig.builder().eventLoops(loops).timeouts(Timeouts.defaults().disableKeepAlive()).multipath(multipath().disableIdleProbes()).build();
+            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()).probeJitter(0).build();
+            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()).disableIdleProbes().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(scfg));
                  var client = Zmux.connect(listener.localAddress(), ccfg); var server = listener.accept(Duration.ofSeconds(5))) {
-                var pipe = client.paths().add(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(2)).build());
+                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(2)).build());
                 Thread.sleep(1000);
-                ZmuxPipe peer = server.paths().list().stream().filter(p -> p.id() == pipe.id()).findFirst().orElseThrow();
+                ZmuxPipe peer = server.pipes().stream().filter(p -> p.id() == pipe.id()).findFirst().orElseThrow();
                 long before = peer.stats().orElseThrow().pingsSent();
                 Thread.sleep(7000);
                 long answers = peer.stats().orElseThrow().pingsSent() - before;
@@ -71,23 +71,23 @@ class LivenessTest {
     /** Records what a session writes to one carrier. */
     static final class Recorder implements PipeWriter {
         final PipeWriter inner;
-        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        final java.util.List<byte[]> writes = new java.util.ArrayList<>();
         Recorder(PipeWriter inner) { this.inner = inner; }
         @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
-            synchronized (out) {
-                for (ByteBuffer b : data.segments(new ByteBuffer[data.segmentCount()])) {
-                    var d = b.duplicate(); byte[] a = new byte[d.remaining()]; d.get(a); out.writeBytes(a);
-                }
+            ByteArrayOutputStream one = new ByteArrayOutputStream();
+            for (ByteBuffer b : data.segments(new ByteBuffer[data.segmentCount()])) {
+                var d = b.duplicate(); byte[] a = new byte[d.remaining()]; d.get(a); one.writeBytes(a);
             }
+            synchronized (writes) { writes.add(one.toByteArray()); }
             inner.write(data, done);
         }
         @Override public void close() { inner.close(); }
         @Override public void abort(Throwable cause) { inner.abort(cause); }
+        /** The first record after the Join's Reply, which is one write. */
         byte[] firstRecord() {
-            byte[] b; synchronized (out) { b = out.toByteArray(); }
-            if (b.length == 0) return null;
-            ByteBuffer bb = ByteBuffer.wrap(b);
-            long n = VarInt.get(bb, 0, b.length);
+            byte[] b;
+            synchronized (writes) { if (writes.size() < 2) return null; b = writes.get(1); }
+            long n = VarInt.get(ByteBuffer.wrap(b), 0, b.length);
             int start = VarInt.lengthOf(b[0]);
             return start + n > b.length ? null : Arrays.copyOfRange(b, start, (int) (start + n));
         }
@@ -110,12 +110,12 @@ class LivenessTest {
 
     /**
      * The acceptor of a join whose records are delayed delays the pipe's first record whole: once the delay ends it
-     * still leads with the PIPE_ACK snapshot and carries the PIPE_PING (MULTIPATH.md 5.2).
+     * still leads with the PIPE_ACK snapshot and carries the PIPE_PING.
      */
     @Test void aDelayedFirstRecordOfAnAcceptedJoinKeepsItsSnapshotAndPing() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var ccfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath()).build();
-            var scfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath()).shaper(ShapingTest.firstDelay(30_000_000, false)).build();
+            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).recordPolicy(c -> RecordMode.TRUSTED).build();
+            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).allowRecordMode((c, m, p) -> true).shaper(ShapingTest.firstDelay(30_000_000, false)).build();
             try (var l = Zmux.listener(ListenerConfig.of(scfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
@@ -124,7 +124,7 @@ class LivenessTest {
                     var m = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var rec = new Recorder(m[1].writer());
                     l.handle(new PipeIo(m[1].reader(), rec, Framing.BYTE_STREAM, "memory", null), JoinHint.inBand(TestAddr.peer("peer"))).closed();
-                    c.paths().add(m[0], PipeOptions.defaults());
+                    c.addPipe(m[0], PipeOptions.defaults());
                     long until = System.nanoTime() + 5_000_000_000L;
                     byte[] first;
                     while ((first = rec.firstRecord()) == null) {

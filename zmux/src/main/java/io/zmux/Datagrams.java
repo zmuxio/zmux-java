@@ -4,7 +4,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 
-/** The session datagrams of a {@link ZmuxSession} (EXTENSIONS.md Section 6). */
+/** The session datagrams of a {@link ZmuxSession}. */
 public final class Datagrams {
     private final ZmuxSession session;
 

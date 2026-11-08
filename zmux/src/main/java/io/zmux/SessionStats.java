@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * A snapshot of a session (API.md Section 7.2), as of its loop's last round. Counts only
+ * A snapshot of a session, as of its loop's last round. Counts only
  * increase; gauges are current values; RTTs are null before the first sample.
  *
  * @param carrier the carrier kind a carrier mode chose (the latest, after a switch); null for a
@@ -14,9 +14,9 @@ import java.util.List;
  * @param bytesReceived bytes of the records received from the carriers
  * @param recordsSent records passed to the carriers
  * @param recordsReceived records received from the carriers
- * @param bytesWritten application bytes written to streams (API.md Section 7.1)
- * @param bytesRead application bytes read from streams (API.md Section 7.1)
- * @param datagramBytesSent payload bytes of datagrams handed to a carrier (API.md Section 7.1)
+ * @param bytesWritten application bytes written to streams
+ * @param bytesRead application bytes read from streams
+ * @param datagramBytesSent payload bytes of datagrams handed to a carrier
  * @param datagramBytesReceived payload bytes of datagrams returned to the application
  * @param streamsOpenedLocal streams opened by this endpoint: counted at their first frame or when pinned
  * @param streamsOpenedRemote streams opened by the peer: counted when first seen
@@ -24,14 +24,16 @@ import java.util.List;
  * @param streamCreditWaits opens that had to wait for stream-count credit
  * @param datagramsSent session and stream datagrams handed to a carrier
  * @param datagramsReceived datagrams received and queued for the application
- * @param datagramsSentChannel of datagramsSent, those on a carrier datagram channel (EXTENSIONS.md Section 6.8)
+ * @param datagramsSentChannel of datagramsSent, those on a carrier datagram channel
  * @param datagramsReceivedChannel of datagramsReceived, those that arrived on a carrier datagram channel
  * @param datagramsDroppedSend datagrams dropped from the send queue (full, or not allowed by the peer)
  * @param datagramsDroppedRecv received datagrams dropped: a full queue, an unknown or closed stream, the byte limit
  * @param datagramsDroppedLimit datagrams dropped by a datagram limiter, sent or received
- * @param noEffectBudget gauge: the current tokens of the no-effect budget (SPEC.md Section 9.4)
+ * @param noEffectBudget gauge: the current tokens of the no-effect budget
+ * @param joinFailures join attempts failed in a row since the last verified Reply
+ * @param joinBatchDropped frames of a Hello's or a Reply's first batch dropped
  * @param smoothedRtt pipe 0's estimate outside multipath, the primary pipe's in a multipath session
- * @param minRtt the minimum RTT (SPEC.md Section 8.3 rule 6)
+ * @param minRtt the minimum RTT
  * @param latestRtt the latest sample
  * @param meanDeviation the RTT variation; null where the source measures none
  * @param bytesReinjected stream bytes sent again after a pipe failed or became suspect, or opportunistically
@@ -48,11 +50,17 @@ import java.util.List;
  * @param pipeFailures attachments that failed
  * @param joinAuthFailures joins whose token did not verify ({@link SessionEvent.JoinAuthFailed})
  * @param joinReplays joins closed as replays or too late
+ * @param joinPending peer joins held for want of join keys (a deferred PSK not supplied yet, an Unmanaged first pipe
+ *     not declared); not join authentication failures
  * @param joinRefusals own joins the peer refused with ZMUX_PIPE_RESOURCE_LIMIT
  * @param suspensions times the session entered SUSPENDED
  * @param suspendedTime time spent suspended, the current suspension included
  * @param schedulerAnswers custom scheduler answers applied
  * @param schedulerFallbacks custom scheduler answers replaced by the affinity choice
+ * @param firstFlightTimeouts 0 or 1: 1 when the first flight {@link ZmuxConfig.Builder#holdFirstFlight} held was
+ *     released by the handshake timeout rather than by {@link ZmuxSession#releaseFirstFlight}
+ * @param joinFailures own consecutive failed joins, reset by a proven join
+ * @param joinBatchDropped first batch frames dropped without closing the session
  */
 public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCandidates,
                            long bytesSent, long bytesReceived, long recordsSent, long recordsReceived,
@@ -64,8 +72,8 @@ public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCan
                            Duration meanDeviation, long bytesReinjected, long bytesOpportunistic, long penalties,
                            long reinjections, long bytesRedundant, long bytesDuplicateReceived, long sendBuffered,
                            long recvBuffered, long retained, long pipesActive, long pipesAdded, long pipeFailures,
-                           long joinAuthFailures, long joinReplays, long joinRefusals, long suspensions,
-                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks) {
+                           long joinAuthFailures, long joinReplays, long joinPending, long joinRefusals, long suspensions,
+                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped) {
     public SessionStats {
         carrierCandidates = List.copyOf(carrierCandidates);
         java.util.Objects.requireNonNull(suspendedTime);
@@ -83,8 +91,8 @@ public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCan
                 rtt(g.smoothedRtt()), rtt(g.minRtt()), rtt(g.latestRtt()), rtt(g.meanDeviation()),
                 s.bytesReinjected(), s.bytesOpportunistic(), s.penalties(), s.reinjections(), s.bytesRedundant(),
                 s.bytesDuplicateReceived(), g.sendBuffered(), g.recvBuffered(), g.retained(), g.pipesActive(),
-                s.pipesAdded(), s.pipeFailures(), s.joinAuthFailures(), s.joinReplays(), s.joinRefusals(), s.suspensions(),
-                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks());
+                s.pipesAdded(), s.pipeFailures(), s.joinAuthFailures(), s.joinReplays(), s.joinPending(), s.joinRefusals(), s.suspensions(),
+                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks(), s.firstFlightTimeouts(), s.joinFailures(), s.joinBatchDropped());
     }
 
     private static Duration rtt(long nanos) {

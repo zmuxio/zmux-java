@@ -41,8 +41,8 @@ class ListenerEndpointTest {
             try (var a = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var b = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = a.connect(b.localAddress()); var server = b.accept(Duration.ofSeconds(3))) {
                 assertEquals(16,((byte[])client.run(op -> client.core.locator().clone())).length);
-                var fromResponder = server.paths().add(a.localAddress(),PipeOptions.defaults());
-                var fromInitiator = client.paths().add(b.localAddress(),PipeOptions.defaults());
+                var fromResponder = server.addPipe(a.localAddress(),PipeOptions.defaults());
+                var fromInitiator = client.addPipe(b.localAddress(),PipeOptions.defaults());
                 assertEquals(PipeState.Outbound.ACTIVE, fromResponder.state().orElseThrow().outbound()); assertEquals(PipeState.Outbound.ACTIVE, fromInitiator.state().orElseThrow().outbound());
                 assertNull(a.accept(Duration.ofMillis(20)),"a join must not create a second application session");
                 exchange(client,server); exchange(server,client); closed(client,server);
@@ -50,28 +50,18 @@ class ListenerEndpointTest {
             assertEquals(0,loops.outstandingBuffers());
         }
     }
-    @Test void initiatedExternalSessionAcceptsOobJoinsAndRejectsBadMacAndReplay() throws Exception {
+    @Test void initiatedExternalSessionAcceptsJoinsOnEveryFraming() throws Exception {
         try (EventLoops loops = EventLoops.create(4)) {
             var cfg = config(loops);
             try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
-                    for (Framing framing : Framing.values()) try (var reserved = server.paths().reserve(PipeOptions.defaults())) {
-                        int before = client.paths().list().size();
-                        byte[] body = Base64.getUrlDecoder().decode(reserved.header()); body[body.length-1] ^= 1;
-                        var invalid = MemoryPipe.pair(framing);
-                        a.handle(invalid[1],JoinHint.join(Base64.getUrlEncoder().withoutPadding().encodeToString(body), TestAddr.peer("bad"))).closed()
-                                .toCompletableFuture().get(3,TimeUnit.SECONDS);
-                        invalid[0].reader().close(); invalid[0].writer().close();
-                        assertEquals(before,client.paths().list().size());
+                    for (Framing framing : Framing.values()) {
                         var pair = MemoryPipe.pair(framing);
-                        var lifetime = a.handle(pair[1],JoinHint.join(reserved.header(), TestAddr.peer("joined"))).closed();
-                        var joined = reserved.attach(pair[0]);
+                        var lifetime = a.handle(pair[1],JoinHint.inBand(TestAddr.peer("joined"))).closed();
+                        var joined = server.addPipe(pair[0], PipeOptions.defaults());
                         assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound());
-                        var replay = MemoryPipe.pair(framing);
-                        a.handle(replay[1],JoinHint.join(reserved.header(), TestAddr.peer("replay"))).closed().toCompletableFuture().get(3,TimeUnit.SECONDS);
-                        replay[0].reader().close(); replay[0].writer().close();
-                        assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound()); exchange(client,server);
+                        exchange(client,server);
                         joined.abort(); lifetime.toCompletableFuture().get(3,TimeUnit.SECONDS);
                     }
                     closed(client,server);
@@ -99,8 +89,8 @@ class ListenerEndpointTest {
                         assertEquals(0,CancellationTest.registrations(cancel));
                         old.finish(); assertArrayEquals(new byte[] {7},SessionTest.readAll(accepted));
                         accepted.finish(); assertArrayEquals(new byte[0],SessionTest.readAll(old));
-                        PipePoolTest.await(() -> a1.paths().list().size() > 1);
-                        a1.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
+                        PipePoolTest.await(() -> a1.pipes().size() > 1);
+                        a1.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
                         exchange(a1,b1); exchange(b1,a1);
                     }
                 }
@@ -115,7 +105,7 @@ class ListenerEndpointTest {
             try (var a = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build());
                  var b = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build());
                  var client = a.connectTls(b.localAddress(), TlsOptions.client(TestTls.client(), "localhost")); var server = b.accept(Duration.ofSeconds(3))) {
-                var joined = server.paths().addTls(a.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), PipeOptions.defaults());
+                var joined = server.addTlsPipe(a.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), PipeOptions.defaults());
                 assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound()); exchange(client,server); closed(client,server);
             }
             assertEquals(0,loops.outstandingBuffers());
@@ -130,11 +120,9 @@ class ListenerEndpointTest {
                     assertTrue((Integer)client.run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(client.core)) > 0);
                     a.close(); exchange(client,server); empty(a);
                     assertEquals(0,(Integer)client.run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(client.core)));
-                    try (var reservation = server.paths().reserve(PipeOptions.defaults())) {
-                        var refused = MemoryPipe.pair(Framing.BYTE_STREAM);
-                        a.handle(refused[1],JoinHint.join(reservation.header(), TestAddr.peer("late"))).closed().toCompletableFuture().get(3,TimeUnit.SECONDS);
-                        refused[0].reader().close(); refused[0].writer().close();
-                    }
+                    var refused = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    a.handle(refused[1],JoinHint.inBand(TestAddr.peer("late"))).closed().toCompletableFuture().get(3,TimeUnit.SECONDS);
+                    refused[0].reader().close(); refused[0].writer().close();
                     assertThrows(java.nio.channels.ClosedChannelException.class,() -> a.connect(NetworkTest.any()));
                     var unused = MemoryPipe.pair(Framing.BYTE_STREAM);
                     assertThrows(java.nio.channels.ClosedChannelException.class,() -> a.open(unused[0], Role.CLIENT));
@@ -231,7 +219,7 @@ class ListenerEndpointTest {
                     first.designateDialer(true); second.designateDialer(false);
                     assertNull(a.accept(Duration.ofMillis(10))); assertNull(b.accept(Duration.ofMillis(10)));
                     var extra = MemoryPipe.pair(Framing.BYTE_STREAM); a.handle(extra[1], JoinHint.inBand(TestAddr.peer("joined"))).closed();
-                    var joined = second.paths().add(extra[0],PipeOptions.defaults());
+                    var joined = second.addPipe(extra[0],PipeOptions.defaults());
                     assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound()); exchange(first,second); closed(first,second);
                 }
                 empty(a); empty(b);

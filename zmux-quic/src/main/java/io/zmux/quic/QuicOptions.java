@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
  *
  * @param datagrams the connection negotiates QUIC DATAGRAM frames (RFC 9221), the datagram
  *     channel of its pipes: a session that enables datagrams sends those that fit on it
- *     instead of in records (EXTENSIONS.md Section 6.8). On by default.
+ *     instead of in records. On by default.
  */
 public record QuicOptions(long streamWindow, long bidirectionalStreams, long lanes, Duration idleTimeout, boolean datagrams) {
     private static final long MAX = (1L << 62) - 1;

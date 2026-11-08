@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * The carrier queue limiter of one outbound pipe (SCHEDULER.md Section 9.1): a pipe
+ * The carrier queue limiter of one outbound pipe: a pipe
  * whose carrier has neither a low-water mark nor an unsent count is paced from what
  * the peer acknowledges. Every event costs constant amortised work.
  */

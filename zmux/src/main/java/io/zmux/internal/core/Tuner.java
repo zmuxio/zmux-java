@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * Receive-window auto-tuning state of one scope (SPEC.md Section 8.3 rule 6): the
+ * Receive-window auto-tuning state of one scope: the
  * arrival rate in the last intervals and the credit-loop samples awaiting their
  * first byte beyond the old limit.
  */

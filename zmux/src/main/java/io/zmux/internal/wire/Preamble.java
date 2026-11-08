@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A stream preamble (EXTENSIONS.md Section 4): parsed from, or encoded into, the
+ * A stream preamble: parsed from, or encoded into, the
  * STREAM frame at offset 0.
  *
  * @param size Length field plus Length; 0 for a preamble to encode
@@ -42,14 +42,14 @@ public record Preamble(int size, byte[] openInfo, int urgency, boolean increment
         return t >= TLV_APP_FIRST && t <= TLV_APP_LAST && !isGrease(t);
     }
 
-    /** The PRIORITY byte (EXTENSIONS.md Section 5.2). */
+    /** The PRIORITY byte. */
     public static byte priorityByte(int urgency, boolean incremental) {
         return (byte) (urgency << 5 | (incremental ? 0x10 : 0));
     }
 
     /**
      * Parses a preamble from the data of the STREAM frame at offset 0 alone
-     * (EXTENSIONS.md Section 4.4 rule 1). Every violation is a PROTOCOL_VIOLATION.
+     * . Every violation is a PROTOCOL_VIOLATION.
      */
     public static Preamble parse(ByteBuffer b, int pos, int len, long limit) throws WireException {
         int end = pos + len;
@@ -126,7 +126,7 @@ public record Preamble(int size, byte[] openInfo, int urgency, boolean increment
         b.put(v);
     }
 
-    /** Encodes the TLVs in increasing type order with the GREASE TLV last (TRACES.md Section 3.3). */
+    /** Encodes the TLVs in increasing type order with the GREASE TLV last. */
     public void encode(ByteBuffer b) {
         VarInt.put(b, bodyLength());
         if (openInfo != null) tlv(b, TLV_OPEN_INFO, openInfo);

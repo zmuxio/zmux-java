@@ -13,7 +13,7 @@ public final class SessionStats {
     private long datagramsDroppedSend;
     private long datagramsDroppedRecv;
     private long datagramsDroppedLimit;
-    /** Of datagramsSent and datagramsReceived: those on carrier datagram channels (EXTENSIONS.md Section 6.8). */
+    /** Of datagramsSent and datagramsReceived: those on carrier datagram channels. */
     private long datagramsSentChannel;
     private long datagramsReceivedChannel;
     private long appBytesWritten;
@@ -31,13 +31,17 @@ public final class SessionStats {
     private long pipeFailures;
     private long joinAuthFailures;
     private long joinReplays;
+    private long joinPending;
     private long joinRefusals;
+    private long joinFailures;
+    private long joinBatchDropped;
     private long suspensions;
     /** Time spent suspended before the current suspension; suspendedSince is its start, or -1. */
     private long suspendedTotal;
     private long suspendedSince = -1;
     private long schedulerAnswers;
     private long schedulerFallbacks;
+    private long firstFlightTimeouts;
     /** Changes with every count: lets a reader publish only what changed. */
     private long version;
 
@@ -80,7 +84,7 @@ public final class SessionStats {
 
     void redundant(long n) { version++; bytesRedundant += n; }
 
-    /** n opportunistic copy bytes: also reinjected bytes (API.md Section 7.2). */
+    /** n opportunistic copy bytes: also reinjected bytes. */
     void opportunistic(long n) { version++; bytesOpportunistic += n; bytesReinjected += n; }
 
     /** A datagram of n payload bytes went to a carrier. */
@@ -105,9 +109,14 @@ public final class SessionStats {
 
     void joinAuthFailed() { version++; joinAuthFailures++; }
 
+    void joinPending() { version++; joinPending++; }
     void joinReplay() { version++; joinReplays++; }
 
     void joinRefused() { version++; joinRefusals++; }
+    void joinFailures(long v) { version++; joinFailures = v; }
+    void joinBatchDrop() { version++; joinBatchDropped++; }
+    public long joinFailures() { return joinFailures; }
+    public long joinBatchDropped() { return joinBatchDropped; }
 
     void suspended(long now) { version++; suspensions++; suspendedSince = now; }
 
@@ -121,6 +130,7 @@ public final class SessionStats {
     void schedulerAnswer() { version++; schedulerAnswers++; }
 
     void schedulerFallback() { version++; schedulerFallbacks++; }
+    void firstFlightTimeout() { version++; firstFlightTimeouts++; }
 
     public long bytesSent() { return bytesSent; }
 
@@ -179,8 +189,8 @@ public final class SessionStats {
                            long datagramsDroppedSend, long datagramsDroppedRecv, long datagramsDroppedLimit,
                            long budgetTokens, long bytesReinjected, long bytesOpportunistic, long penalties, long reinjections,
                            long bytesRedundant, long bytesDuplicateReceived, long pipesAdded, long pipeFailures,
-                           long joinAuthFailures, long joinReplays, long joinRefusals, long suspensions,
-                           long suspendedTotal, long suspendedSince, long schedulerAnswers, long schedulerFallbacks,
+                           long joinAuthFailures, long joinReplays, long joinPending, long joinRefusals, long suspensions,
+                           long suspendedTotal, long suspendedSince, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped,
                            Gauges gauges) {}
 
     public Snapshot snapshot(long budgetTokens, Gauges g) {
@@ -189,6 +199,6 @@ public final class SessionStats {
                 datagramsSent, datagramsReceived, datagramsSentChannel, datagramsReceivedChannel, datagramsDroppedSend,
                 datagramsDroppedRecv, datagramsDroppedLimit, budgetTokens, bytesReinjected, bytesOpportunistic, penalties,
                 reinjections, bytesRedundant, bytesDuplicateReceived, pipesAdded, pipeFailures, joinAuthFailures, joinReplays,
-                joinRefusals, suspensions, suspendedTotal, suspendedSince, schedulerAnswers, schedulerFallbacks, g);
+                joinPending, joinRefusals, suspensions, suspendedTotal, suspendedSince, schedulerAnswers, schedulerFallbacks, firstFlightTimeouts, joinFailures, joinBatchDropped, g);
     }
 }

@@ -8,7 +8,7 @@ import io.zmux.carrier.VarInt;
 import io.zmux.internal.wire.WireException;
 
 /**
- * Lanes (MULTIPATH.md Sections 2.5 and 5.8): opening, confirmation, refusal and the
+ * Lanes: opening, confirmation, refusal and the
  * handshake timeout of outbound lanes, the binding of stream directions to lanes, the
  * data turns of paced lanes, and the admission of inbound lanes. Owned by the session's
  * loop; carrier commands and wake-ups go through the {@link Outbox}.
@@ -194,7 +194,7 @@ public final class Lanes {
         pipes.wakeWriters();
     }
 
-    /** Whether every record written on lanes other than 0 is acknowledged (SPEC.md Section 6.5 step 1). */
+    /** Whether every record written on lanes other than 0 is acknowledged. */
     boolean covered() {
         for (Pipe p : pipes.all()) {
             if (p.out() == null) continue;
@@ -221,7 +221,7 @@ public final class Lanes {
         for (Pipe p : pipes.all()) {
             if (p.out() == null || p.out().lo.pending == null) continue;
             Pipe.OutLane l = p.out().lo.pending;
-            long d = Time.add(l.st.openedAt, cfg.handshakeTimeout());
+            long d = Time.add(l.st.openedAt, cfg.joinDeadline());
             if (apply && t >= d) {
                 refused(p, l);
                 continue;
@@ -273,7 +273,7 @@ public final class Lanes {
     /**
      * Attaches an inbound lane whose first record starts with a PIPE_LANE naming (pipe,
      * lane) with this session's key; false when the stream must be aborted without any
-     * effect (MULTIPATH.md Section 5.8 rule 1). Protocol violations close the session.
+     * effect. Protocol violations close the session.
      */
     public boolean accept(Object c, long pipeId, long lane, CarrierInfo info) {
         if (port.closing() || !port.established()) return false;
@@ -288,7 +288,7 @@ public final class Lanes {
             port.failLocal(WireException.withDetails(TransportError.PROTOCOL_VIOLATION, "invalid lane", "pipe", pipeId, "value", lane));
             return false;
         }
-        Pipe.InLane il = new Pipe.InLane(lane, false, true, false);
+        Pipe.InLane il = new Pipe.InLane(lane, false, true);
         p.in().add(il);
         return true;
     }
@@ -300,15 +300,9 @@ public final class Lanes {
         return true;
     }
 
-    /** A reserved pipe's actual outbound carrier, installed before it performs I/O. */
-    static void rebind(Pipe.OutDir d, CarrierInfo info) {
-        d.lanes.getFirst().st.info = info;
-        d.lo.offered = info.lanes();
-    }
-
     /** The lane lifecycle of one outbound lane. */
     static final class LaneState {
-        private CarrierInfo info;
+        private final CarrierInfo info;
         private boolean shut;
         private boolean laneFirst;
         private boolean confirmed;
@@ -364,7 +358,7 @@ public final class Lanes {
     static final class Out {
         private long next;
         private Pipe.OutLane pending;
-        private boolean offered;
+        private final boolean offered;
         private boolean requested;
         private boolean refused;
 
@@ -403,7 +397,7 @@ public final class Lanes {
         st.snd.bind().laneBound = false;
     }
 
-    /** The lane a stream's sending part is bound to (MULTIPATH.md 6.5). */
+    /** The lane a stream's sending part is bound to. */
     static final class Bind {
         private long lane;
         private long lanePipe;

@@ -1,34 +1,73 @@
 package io.zmux;
 
 /**
- * The secret sources of pipe joins (MULTIPATH.md 10.1); multipath and resume need one.
+ * The secret sources of pipe joins: a pre-shared key (static or deferred), the exporter, or both.
+ * Multipath and resume need a source; without one ({@link #none()}, or no {@code PipeAuth} at all) a
+ * session that enables them fails to start with {@link IllegalArgumentException}, before any byte,
+ * unless its first pipe is on the secure carrier, whose Establish is then the only source: a key or
+ * the exporter here is rejected for such a session, and {@link #none()}{@code .withEndToEnd()} is
+ * accepted without effect, so that one configuration serves both kinds of first pipe. A session whose
+ * first pipe is not on the secure carrier also needs the proof that it is end to end: {@link
+ * #withEndToEnd()} when known before the session starts, else {@link ZmuxSession#declareEndToEnd()};
+ * neither is a source. What is configured is what is used: a source is never dropped because the
+ * peer did not offer it.
  *
  * @param psk a pre-shared key of at least 16 bytes, or null
  * @param useExporter derives the secret from the exporter of the innermost end-to-end handshake of the
- *     bootstrap carrier; today its source is TLS 1.3 that this process terminates
- * @param allowInsecure joins without a secret (tests, protected networks); not with a PSK
+ *     bootstrap carrier ({@link io.zmux.carrier.PipeIo.Capabilities#exporter()}); a session on a
+ *     carrier without one fails to start
+ * @param deferredPsk offers a PSK the application supplies after establishment with
+ *     {@link ZmuxSession#setJoinSecret}; until then local joins fail with
+ *     {@link JoinPendingException}, the peer's are held and the session cannot resume. Combines
+ *     with the exporter as a static PSK does; the peer may have the same bytes configured as a static one
+ * @param endToEnd the host knows pipe 0 is end to end before the session starts
  */
-public record PipeAuth(byte[] psk, boolean useExporter, boolean allowInsecure) {
+public record PipeAuth(byte[] psk, boolean useExporter, boolean deferredPsk, boolean endToEnd) {
     public PipeAuth {
         if (psk != null) {
             if (psk.length < 16) throw new IllegalArgumentException("PSK shorter than 16 bytes");
-            if (allowInsecure) throw new IllegalArgumentException("allowInsecure with a PSK");
             psk = psk.clone();
         }
-        if (psk == null && !useExporter && !allowInsecure) throw new IllegalArgumentException("no secret source");
+        if (deferredPsk && psk != null) throw new IllegalArgumentException("deferredPsk with a PSK");
+    }
+
+    /** No source, for {@link #withEndToEnd()} alone: valid only where the first pipe is on the secure carrier. */
+    public static PipeAuth none() {
+        return new PipeAuth(null, false, false, false);
+    }
+
+    /** Whether this names a source: a pre-shared key (static or deferred) or the exporter. */
+    public boolean hasSource() {
+        return psk != null || useExporter || deferredPsk;
     }
 
     public static PipeAuth psk(byte[] key) {
-        return new PipeAuth(key, false, false);
+        return new PipeAuth(key, false, false, false);
     }
 
     /** The exporter of the innermost end-to-end handshake of the bootstrap carrier (E). */
     public static PipeAuth exporter() {
-        return new PipeAuth(null, true, false);
+        return new PipeAuth(null, true, false, false);
     }
 
-    public static PipeAuth insecure() {
-        return new PipeAuth(null, false, true);
+    /** A PSK supplied later with {@link ZmuxSession#setJoinSecret}. */
+    public static PipeAuth deferred() {
+        return new PipeAuth(null, false, true, false);
+    }
+
+    /** This source together with a static pre-shared key of at least 16 bytes. */
+    public PipeAuth withPsk(byte[] key) {
+        return new PipeAuth(java.util.Objects.requireNonNull(key, "key"), useExporter, deferredPsk, endToEnd);
+    }
+
+    /** This source together with the exporter. */
+    public PipeAuth withExporter() {
+        return new PipeAuth(psk, true, deferredPsk, endToEnd);
+    }
+
+    /** This source on a pipe 0 the host knows is end to end. */
+    public PipeAuth withEndToEnd() {
+        return new PipeAuth(psk, useExporter, deferredPsk, true);
     }
 
     @Override

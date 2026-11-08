@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Read buffers shared by the sessions of one loop (IMPLEMENTATION.md Section 2.8). A buffer
+ * Read buffers shared by the sessions of one loop. A buffer
  * returns here when its last reference goes, from any thread; idle buffers are kept up to the
  * configured idle bytes, the rest are left to the garbage collector.
  */

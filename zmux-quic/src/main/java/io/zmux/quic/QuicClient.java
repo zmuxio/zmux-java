@@ -47,7 +47,7 @@ public final class QuicClient implements AutoCloseable {
     public QuicClient(QuicSslContextBuilder tlsBuilder, QuicOptions options, ZmuxListener listener) throws IOException {
         this.options = options; this.listener = listener;
         try {
-            tls = tlsBuilder.earlyData(false).endpointIdentificationAlgorithm("HTTPS").build();
+            tls = tlsBuilder.earlyData(false).endpointIdentificationAlgorithm("HTTPS").keylog(QuicExporter.KEYLOG).build();
             if (!tls.isClient()) throw new IllegalArgumentException("client TLS builder required");
             Channel ipv4 = bindDatagram(SocketProtocolFamily.INET).sync().channel();
             datagrams.put(SocketProtocolFamily.INET, CompletableFuture.completedFuture(ipv4));
@@ -81,6 +81,27 @@ public final class QuicClient implements AutoCloseable {
     }
 
     @FunctionalInterface private interface SessionFactory { ZmuxSession start(PipeIo pipe) throws IOException; }
+    /**
+     * As {@link #connect(InetSocketAddress, String, ZmuxConfig)} with a layer that runs on the first stream before the
+     * session does, such as an Establish ({@code p -> Seal.establish(p, cfg)}); the layer bounds its own time.
+     */
+    public CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName, ZmuxConfig config,
+                                                java.util.function.Function<PipeIo, CompletionStage<PipeIo>> layer) {
+        if (listener != null) return CompletableFuture.failedFuture(new IllegalStateException("listener-backed clients use connect(address, serverName)"));
+        java.util.Objects.requireNonNull(config);
+        java.util.Objects.requireNonNull(layer);
+        return connect(address, serverName, config.credential(), pipe -> {
+            try {
+                return Zmux.open(layer.apply(pipe).toCompletableFuture().get(), Role.CLIENT, config);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new java.io.InterruptedIOException();
+            } catch (java.util.concurrent.ExecutionException e) {
+                throw new IOException(e.getCause());
+            }
+        });
+    }
+
     private CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName, io.zmux.Credential credential,
                                                  SessionFactory factory) {
         CompletableFuture<ZmuxSession> result = track(new CompletableFuture<>());

@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * The listener's classification (API.md Section 7.2): every pipe input handed to it is counted once, in exactly
+ * The listener's classification: every pipe input handed to it is counted once, in exactly
  * one of sessions, joins, rejected, refused and timedOut, and setupFailures stays out of that sum.
  */
 @Timeout(60)
@@ -36,7 +36,7 @@ class ListenerStatsTest {
 
     @Test void everyPipeInputCountsOnceInOneOutcome() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).maxPendingPerSource(1).build();
             int inputs = 0;
             try (var l = Zmux.listener(lc)) {
@@ -57,7 +57,7 @@ class ListenerStatsTest {
                     l.handle(PipeIo.of(null, MemoryPipe.pair(Framing.BYTE_STREAM)[1].writer()), JoinHint.pair(token, false, TestAddr.peer("b"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().rejected() == 1);
-                    // An uplink half without a first record: timed out, on its own.
+                    // An uplink half without a first record: ended by the handshake timeout, on its own.
                     l.handle(PipeIo.of(MemoryPipe.pair(Framing.BYTE_STREAM)[1].reader(), null), JoinHint.pair(SplitBootstrapTest.token(2), true, TestAddr.peer("c"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().timedOut() == 1);
@@ -105,56 +105,14 @@ class ListenerStatsTest {
         }
     }
 
-    @Test void aReplayedJoinIsCountedByTheSessionAndRejectedByTheListener() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
-                PipeIo[] boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("a"))).closed();
-                var connecting = ex.submit(() -> Zmux.open(boot[0], Role.CLIENT, cfg));
-                try (var c = connecting.get(5, TimeUnit.SECONDS); var s = l.accept(Duration.ofSeconds(5))) {
-                    // The join's carrier, its bytes recorded on the way.
-                    PipeIo[] j = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    var seen = new ByteArrayOutputStream();
-                    PipeWriter tap = new PipeWriter() {
-                        @Override public void write(OutboundBatch batch, Completion done) {
-                            synchronized (seen) {
-                                for (int i = 0; i < batch.segmentCount(); i++) {
-                                    ByteBuffer b = batch.segment(i);
-                                    byte[] a = new byte[b.remaining()]; b.get(a); seen.writeBytes(a);
-                                }
-                            }
-                            j[0].writer().write(batch, done);
-                        }
-                        @Override public void close() { j[0].writer().close(); }
-                        @Override public void abort(Throwable cause) { j[0].writer().abort(cause); }
-                    };
-                    l.handle(j[1], JoinHint.inBand(TestAddr.peer("a"))).closed();
-                    c.paths().add(new PipeIo(j[0].reader(), tap, Framing.BYTE_STREAM, "join", null), PipeOptions.defaults());
-                    PipePoolTest.await(() -> l.stats().joins() == 1);
-                    byte[] replay;
-                    synchronized (seen) { replay = seen.toByteArray(); }
-                    // The same PIPE_JOIN on a new carrier: a replay.
-                    l.handle(bytes(replay), JoinHint.inBand(TestAddr.peer("a"))).closed();
-                    PipePoolTest.await(() -> s.stats().joinReplays() == 1);
-                    PipePoolTest.await(() -> l.stats().rejected() == 1);
-                    assertEquals(new ListenerStats(1, 1, 0, 1, 0, 0, new AdmissionStats(0, 0, 0, 0, 0, 0, 0)), l.stats());
-                    c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
-                }
-            }
-            assertEquals(0, loops.outstandingBuffers());
-        }
-    }
-
     /**
-     * A first record that is not a well-formed PIPE_JOIN (empty, the join tag over a truncated or trailing-garbage
+     * A first record that is not a well-formed Hello (empty, a truncated or trailing-garbage
      * body, another frame type) is closed and counted rejected, and leaves the established session working.
      */
-    @Test void aFirstRecordThatIsNoPipeJoinIsRejectedAndLeavesTheSessionAlone() throws Exception {
+    @Test void aFirstRecordThatIsNoHelloIsRejectedAndLeavesTheSessionAlone() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .multipath(MultipathConfig.defaults().withMaxPipes(8).withAuth(PipeAuth.insecure())).build();
+                    .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofSeconds(10)).build();
             try (var l = Zmux.listener(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);

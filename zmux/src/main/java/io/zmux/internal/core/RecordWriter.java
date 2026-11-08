@@ -9,7 +9,7 @@ import java.util.function.Consumer;
 /**
  * Builds records into a {@link Batch}. A STREAM or DATAGRAM frame stays pending
  * until the next frame or the end of its record, so the LEN field of the last
- * frame of a record is omitted (IMPLEMENTATION.md Section 4).
+ * frame of a record is omitted.
  */
 final class RecordWriter {
     private Batch b;
@@ -77,6 +77,10 @@ final class RecordWriter {
     /** The batch holds a PIPE_PING. */
     private boolean pingSent;
     boolean pingSent() { return pingSent; }
+    /** The epoch of a SESSION_EPOCH answer in the batch, 0 for none. */
+    private long epochAnswer;
+    long epochAnswer() { return epochAnswer; }
+    void epochAnswer(long n) { epochAnswer = n; }
 
     // The pending STREAM or DATAGRAM frame.
     private boolean pendOn;
@@ -102,6 +106,8 @@ final class RecordWriter {
         onlyPing = true;
         touched.clear();
         dataSpent = 0;
+        notEarned = 0;
+        cutWaived = false;
         dataRoom = -1;
         shape = null;
         cut = 0;
@@ -113,6 +119,7 @@ final class RecordWriter {
         abandonsSent.clear();
         revalPing = false;
         pingSent = false;
+        epochAnswer = 0;
         pingRequests = 0;
         pendOn = false;
         pendData.clear();
@@ -131,7 +138,7 @@ final class RecordWriter {
 
     /** The largest frames bytes of the open record. */
     private int max() {
-        return cut > 0 ? cut : recMax;
+        return cut > 0 && !cutWaived ? cut : recMax;
     }
 
     /** Frame bytes that still fit in the open record (or a new one) within the batch budget. */
@@ -175,7 +182,7 @@ final class RecordWriter {
 
     /**
      * The most frames bytes the open record (open) or the next one may hold so that its plan's
-     * padded target fits the batch (design 18.9): 0 when the next record's target does not fit, so
+     * padded target fits the batch: 0 when the next record's target does not fit, so
      * that it opens in the next batch. Unbounded unshaped, and for the batch's first record (a batch
      * smaller than the target could never send it), which also takes what the batch holds once open.
      */
@@ -305,6 +312,7 @@ final class RecordWriter {
 
     /** Closes the open record and writes its Size. */
     void end() {
+        cutWaived = false;
         if (!open) return;
         Shaping.PipeShape ps = shape;
         if (ps != null && ps.planned() && recBytes + pendLen(false) > 0) endShaped(ps);
@@ -334,12 +342,13 @@ final class RecordWriter {
      * Applies the plan to the record being closed; the pending frame is still to be flushed. A
      * size target (pad_to, pad_multiple) is met exactly: the PADDING follows the last frame, which
      * then keeps its Length field, unless the target falls within that field, where the PADDING
-     * goes before the last frame, which ends the record without it. Planned extra PADDING (pad,
-     * injections) follows the last frame in full, on top of the target of the frames.
+     * goes before the last frame, which ends the record without it. Injected PADDING follows the
+     * last frame in full, on top of the target of the frames.
      */
     private void endShaped(Shaping.PipeShape ps) {
         int bare = recBytes + pendLen(false), full = recBytes + pendLen(true);
         int extra = ps.extraPad();
+        if (cut > 0 && full >= cut) ps.owner().spend(ps.cutCost(cut)); // cut at the plan's largest record: the next record's head
         if (extra > 0) {
             flushPend(true);
             pad(clampPad(ps, ps.target(full) - full + extra, 0));
@@ -358,14 +367,20 @@ final class RecordWriter {
         ps.ended(this);
     }
 
-    /** Bounds n bytes of PADDING by the record and batch room left besides rest bytes still to follow, then by the limits. */
+    /** Bounds n bytes of PADDING by the record and batch room left besides rest bytes still to follow, and meters what is not yet. */
     private int clampPad(Shaping.PipeShape ps, int n, int rest) {
         int avail = Math.min(recMax - recBytes - rest, budget - rest - VarInt.length(recMax));
         if (n > avail) {
             n = Math.max(avail, 0);
             ps.owner().clamp();
         }
-        return ps.owner().allowPad(n);
+        Shaping sh = ps.owner();
+        if (sh.noPadding()) {
+            if (n > 0) sh.clamp();
+            return 0;
+        }
+        sh.spend(n - ps.extraPad()); // the account already metered the injection
+        return n;
     }
 
     /** Appends n bytes of PADDING to the open record. */
@@ -374,6 +389,7 @@ final class RecordWriter {
         b.refSeg(ZERO_PAD.slice(0, n));
         recBytes += n;
         budget -= n;
+        notEarned += n;
     }
 
     /** Frame bytes of the open record, the pending frame included; 0 when none is open. */
@@ -397,6 +413,7 @@ final class RecordWriter {
         pad(n);
         end();
         shape = ps;
+        if (framing != Framing.RECORDS) notEarned += Batch.positionBytes(n) - n;
     }
 
     /** The shaped pipe of this batch. */
@@ -404,6 +421,20 @@ final class RecordWriter {
 
     /** The plan's largest frames length; 0: none. */
     void cut(int n) { cut = n; }
+
+    /** The record's first frame carries a whole preamble, past the plan's largest record. */
+    private boolean cutWaived;
+
+    /**
+     * Whether the empty record, past a plan's largest record, takes a first frame of a head and a preamble that do not fit
+     * otherwise: the plan gives way, or the stream never opens.
+     */
+    boolean waiveCutFor(int head, long preamble) {
+        if (held || cut <= 0 || recBytes + pendLen(false) > 0 && open) return false;
+        if (Math.max(Math.min(recMax, budget - sizeCost()) - head, 0) < preamble) return false;
+        cutWaived = true;
+        return true;
+    }
 
     /** The planned record waits for its delay. */
     void holdRecord() { held = !noHold; }
@@ -489,6 +520,13 @@ final class RecordWriter {
     void limitData(long room) {
         dataRoom = room;
     }
+
+    /** Bytes of this batch that are not this endpoint's own: padding, injections and copies. */
+    private long notEarned;
+    long notEarned() { return notEarned; }
+
+    /** A frame of already sent stream data at off: it earns the account nothing. */
+    void copied(long id, long off, long n) { notEarned += FrameEncoder.streamHeaderLength(id, off, (int) n, true) + n; }
 
     /** Charges n bytes of stream data to the limiter's room. */
     void spendData(long n) {

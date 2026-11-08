@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The streams of one session (SPEC.md Sections 7 and 8.5): the table of live streams,
+ * The streams of one session: the table of live streams,
  * local and peer stream counts and credit, the accept queues, open and accept waiters,
  * provisional streams (opened before establishment), identifier allocation, opening by
  * peer frames, and discarding. Effects on the sending and receiving parts and on the
@@ -41,7 +41,7 @@ public final class StreamTable {
         /** Resets the sending part with code (an application reset). */
         void reset(Stream st, long code);
 
-        /** Resets the sending part with ZMUX_REJECTED (EXTENSIONS.md 3.4, 7.2). */
+        /** Resets the sending part with ZMUX_REJECTED. */
         void rejectSend(Stream st);
 
         /** Abandons the receiving part with code (STOP_SENDING). */
@@ -74,12 +74,13 @@ public final class StreamTable {
     private final SessionStats stats;
     private final Outbox outbox;
     private final Lifecycle life;
-    private final EarlyData early;
     private final Datagrams dg;
     private final ConnFlow conn;
     private final MemoryCharge mem;
     private final StreamScheduler sched;
     private final ControlQueue ctl;
+    /** What the first accept moves staged unidirectional credit to. */
+    private long uniTarget;
     private final Port port;
 
     private final LongMap<Stream> streams = new LongMap<>();
@@ -93,13 +94,12 @@ public final class StreamTable {
     private long openLocalBidiRecv;
     private boolean greaseFirst;
 
-    StreamTable(CoreConfig cfg, SessionStats stats, Outbox outbox, Lifecycle life, EarlyData early, Datagrams dg,
+    StreamTable(CoreConfig cfg, SessionStats stats, Outbox outbox, Lifecycle life, Datagrams dg,
                 ConnFlow conn, MemoryCharge mem, StreamScheduler sched, ControlQueue ctl, Port port) {
         this.cfg = cfg;
         this.stats = stats;
         this.outbox = outbox;
         this.life = life;
-        this.early = early;
         this.dg = dg;
         this.conn = conn;
         this.mem = mem;
@@ -112,6 +112,7 @@ public final class StreamTable {
         rem[1].limit = l.maxStreamsUni;
         rem[1].initial = l.maxStreamsUni;
         rem[1].staged = cfg.stagedUni();
+        uniTarget = cfg.uniTarget();
         greaseFirst = !cfg.test().enabled() || cfg.test().greaseTlv() != null;
     }
 
@@ -120,6 +121,9 @@ public final class StreamTable {
     Stream get(long id) { return streams.get(id); }
 
     Iterable<Stream> live() { return streams.values(); }
+
+    /** A copy of the streams without an identifier yet. */
+    java.util.List<Stream> withoutId() { return new java.util.ArrayList<>(provisional); }
 
     /** The streams the session holds, those without an identifier yet included. */
     int count() { return streams.size() + provisional.size(); }
@@ -157,11 +161,11 @@ public final class StreamTable {
         return ((id & 1) == 1) == responder;
     }
 
-    // ---- buffer accounting (SPEC.md Section 8.3) ----
+    // ---- buffer accounting ----
 
     static final long SESSION_WINDOW_CAP_FLOOR = 96L << 20;
 
-    /** max(session window cap, S) (SPEC.md Section 8.3 rule 4). */
+    /** max(session window cap, S). */
     long bufferCap() {
         long c = cfg.connWindowCap() > 0 ? cfg.connWindowCap() : SESSION_WINDOW_CAP_FLOOR;
         TransportParams l = cfg.local();
@@ -182,7 +186,7 @@ public final class StreamTable {
 
     // ---- establishment ----
 
-    /** Applies the peer's stream limits (SPEC.md Section 6.1). */
+    /** Applies the peer's stream limits. */
     void peerLimits(long bidi, long uni) {
         loc[0].limit = bidi;
         loc[1].limit = uni;
@@ -218,6 +222,9 @@ public final class StreamTable {
      * Opens a local stream. Once established it reserves stream-count credit and fails
      * with STREAM_LIMIT without it; before establishment the stream is provisional.
      */
+    /** The streams the session holds, of either direction and either side. */
+    public int liveCount() { return streams.size(); }
+
     public Stream openStream(boolean bidi) throws CoreException {
         openCheck();
         int t = Stream.typeIndex(bidi);
@@ -294,12 +301,10 @@ public final class StreamTable {
     }
 
     private Stream newStream(boolean bidi, boolean local) {
-        Stream st = new Stream(bidi, local);
-        st.replayable(!local && early.replayableIn());
-        return st;
+        return new Stream(bidi, local);
     }
 
-    /** Gives a local stream its identifier (SPEC.md Section 7.2 rule 1). */
+    /** Gives a local stream its identifier. */
     void allocId(Stream st) {
         int t = Stream.typeIndex(st.bidi);
         long idx = loc[t].next++;
@@ -324,11 +329,12 @@ public final class StreamTable {
             conn.held(h, st.heldAfter());
         }
         st.tab.pre = null;
+        ctl.allocated(st);
     }
 
     /** The local bound of a preamble, whatever the peer allows. */
     static final int MAX_PREAMBLE = 4096;
-    /** The preamble bound before the peer's parameters (SPEC.md Section 6.1.2 floor). */
+    /** The preamble bound before the peer's parameters. */
     static final int FLOOR_PREAMBLE = 1024;
     /** The session's GREASE TLV, chosen once before its first use; it goes in the first preamble sent. */
     private Preamble.Tlv grease;
@@ -349,7 +355,7 @@ public final class StreamTable {
 
     /**
      * The largest preamble a stream may send now: the peer's Maximum Preamble Size once its
-     * parameters arrived, the assumed one while sending early (remembered, or the floor), the
+     * parameters arrived, the assumed one while sending early (the floor), the
      * floor before either, and never above {@link #MAX_PREAMBLE}.
      */
     int preambleLimit() {
@@ -386,7 +392,7 @@ public final class StreamTable {
         return false;
     }
 
-    /** Returns the identifier, pinning it before the first frame (SPEC.md Section 7.2 rule 1). */
+    /** Returns the identifier, pinning it before the first frame. */
     public long pinId(Stream st) throws CoreException {
         if (st.tab.idSet) return st.tab.id;
         if (st.snd.cancelled()) throw CoreException.stream(st.snd.errState());
@@ -399,7 +405,26 @@ public final class StreamTable {
         return st.tab.id;
     }
 
-    /** A provisional stream that never emitted a frame is gone (SPEC.md Section 7.2). */
+    /**
+     * Makes st's opening frame owed and returns the send offset covering what is buffered now;
+     * {@link StreamSend#flushDone} tells when it was sent. Once established it pins the
+     * identifier; before, the opening frame goes as soon as the stream may open (in early data
+     * when in use). Data written before goes in the opening frame.
+     */
+    public long flush(Stream st) throws CoreException {
+        if (!st.hasSend) throw CoreException.of(CoreException.Reason.INVALID);
+        if (st.snd.errState() != null) throw CoreException.stream(st.snd.errState());
+        if (port.error() != null) throw CoreException.session(port.error());
+        if (!st.tab.idSet) {
+            if (port.established()) pinId(st);
+            else st.tab.openWant = true;
+        }
+        sched.ensure(st);
+        port.wantWrite();
+        return st.snd.q().end();
+    }
+
+    /** A provisional stream that never emitted a frame is gone. */
     void unopenedGone(Stream st) {
         provisional.remove(st);
         life.streamGone();
@@ -413,7 +438,7 @@ public final class StreamTable {
     }
 
     private void beforeFirstFrame(Stream st) throws CoreException {
-        if (!st.local || st.tab.idSet) throw CoreException.of(CoreException.Reason.TOO_LATE);
+        if (!st.local || st.tab.idSet || st.tab.openWant) throw CoreException.of(CoreException.Reason.TOO_LATE);
         if (port.established() && !port.features().preamble()) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
     }
 
@@ -475,8 +500,7 @@ public final class StreamTable {
     // ---- peer streams ----
 
     /**
-     * Resolves the stream a frame references, opening peer streams implicitly (SPEC.md
-     * Section 7.2 rules 2-4); null for a discarded stream (crossing frame, Section 7.6).
+     * Resolves the stream a frame references, opening peer streams implicitly; null for a discarded stream (a frame crossing the stream's end).
      */
     Stream lookup(long id, boolean opens) throws WireException {
         Stream found = streams.get(id);
@@ -519,7 +543,7 @@ public final class StreamTable {
         return last;
     }
 
-    /** The stream a received datagram flow names (EXTENSIONS.md Section 6.3), null to drop it. */
+    /** The stream a received datagram flow names, null to drop it. */
     Stream flow(long id) throws WireException {
         if (!Stream.isBidiId(id)) throw WireException.protocol("datagram flow names a unidirectional stream");
         if (isLocalId(id, port.responder())) {
@@ -560,7 +584,7 @@ public final class StreamTable {
         acceptW[t].wakeFirst(outbox);
     }
 
-    /** Rejects a peer stream with ZMUX_REJECTED on both parts without offering it (EXTENSIONS.md 3.4, 7.2). */
+    /** Rejects a peer stream with ZMUX_REJECTED on both parts without offering it. */
     private void stackReject(Stream st) {
         st.tab.stackReject = true;
         st.tab.releasedRecv = true;
@@ -569,7 +593,7 @@ public final class StreamTable {
         port.stopRecv(st, TransportError.REJECTED);
     }
 
-    /** Rejects the peer streams above the final GOAWAY watermarks that were never offered (EXTENSIONS.md 3.3). */
+    /** Rejects the peer streams above the final GOAWAY watermarks that were never offered. */
     void rejectAboveWater() {
         for (Stream st : streams.valuesSnapshot()) {
             if (!st.local && !st.tab.offered && !st.tab.stackReject && (st.tab.id >>> 2) >= life.sentWater(Stream.typeIndex(st.bidi))) {
@@ -609,12 +633,37 @@ public final class StreamTable {
         if (!acceptW[t].isEmpty() && !acceptQ[t].isEmpty()) acceptW[t].wakeFirst(outbox);
     }
 
-    /** Raises staged unidirectional credit on the first accept (SPEC.md Section 8.5 rule 4). */
+    /**
+     * Raises the concurrency of the peer's streams of one type to n: MAX_STREAMS only grows, so n
+     * at or below the current concurrency changes nothing. While unidirectional credit is staged,
+     * n raises the target the first accept moves it to. After GOAWAY no credit is sent.
+     */
+    void raiseIncoming(boolean bidi, long n) {
+        RemoteCount rc = rem[bidi ? 0 : 1];
+        if (!bidi && rc.staged) {
+            if (n > uniTarget) uniTarget = n;
+            return;
+        }
+        if (n <= rc.initial) return;
+        rc.initial = n;
+        if (life.goAwaySent() || port.error() != null) return;
+        long nl = Math.min(n + rc.discarded, MAX_STREAM_COUNT);
+        if (nl > rc.limit) {
+            rc.limit = nl;
+            ctl.wantMaxStreams(bidi ? 0 : 1);
+            port.wantWrite();
+        }
+    }
+
+    /** The largest MAX_STREAMS value. */
+    private static final long MAX_STREAM_COUNT = 1L << 60;
+
+    /** Raises staged unidirectional credit on the first accept. */
     private void unstageUni() {
         RemoteCount rc = rem[1];
         if (!rc.staged) return;
         rc.staged = false;
-        rc.initial = cfg.uniTarget();
+        rc.initial = uniTarget;
         if (life.goAwaySent()) return;
         long nl = rc.initial + rc.discarded;
         if (nl > rc.limit) {
@@ -638,7 +687,7 @@ public final class StreamTable {
         maybeDiscard(st);
     }
 
-    /** Declines an accepted stream before reading (EXTENSIONS.md Section 7.2). */
+    /** Declines an accepted stream before reading. */
     public void reject(Stream st) {
         if (st.hasSend && !st.snd.reset()) port.rejectSend(st);
         st.tab.releasedSend = true;
@@ -649,7 +698,7 @@ public final class StreamTable {
         maybeDiscard(st);
     }
 
-    /** Discards the stream's state once both parts are terminal and it was released (SPEC.md 7.6, 8.5). */
+    /** Discards the stream's state once both parts are terminal and it was released. */
     void maybeDiscard(Stream st) {
         if (st.tab.discarded || !st.tab.idSet) return;
         boolean sendDone = !st.hasSend || st.snd.state() == Stream.SEND_DATA_RECVD || st.snd.state() == Stream.SEND_RESET_RECVD;
@@ -713,7 +762,7 @@ public final class StreamTable {
         if (st.hasSend) st.snd.q().drop();
     }
 
-    /** The local preamble of a stream opened with one (EXTENSIONS.md 3); written only here. */
+    /** The local preamble of a stream opened with one; written only here. */
     static final class PreambleSpec {
         private byte[] openInfo;
         private int urgency = -1;
@@ -736,16 +785,9 @@ public final class StreamTable {
     void markOpened(Stream st) {
         if (st.tab.opened) return;
         st.tab.opened = true;
-        ctl.opened(st);
     }
 
-    /** The bootstrap restarted: a local stream's opening frame goes again, and its frames wait for it. */
-    void restartOpen(Stream st) {
-        st.tab.opened = false;
-        ctl.reopen(st);
-    }
-
-    /** The priority the peer put in st's preamble (EXTENSIONS.md 3). */
+    /** The priority the peer put in st's preamble. */
     void preamblePriority(Stream st, int urgency, boolean incremental) {
         st.tab.urgency = urgency;
         st.tab.incremental = incremental;
@@ -772,6 +814,8 @@ public final class StreamTable {
         private boolean stackReject;
         private boolean discarded;
         private boolean pinned;
+        /** Flush before establishment: the opening frame is owed once the stream may open. */
+        private boolean openWant;
         private boolean opened;
         private int urgency = 3;
         private boolean incremental = true;
@@ -812,6 +856,10 @@ public final class StreamTable {
 
         boolean discarded() {
             return discarded;
+        }
+
+        boolean openWant() {
+            return openWant;
         }
 
         boolean pinned() {

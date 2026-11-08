@@ -24,7 +24,7 @@ class PairingShutdownTest {
             var hub = new ListenerHub(new ListenerHub.Owner() {
                 @Override public CoreConfig config() { return CoreConfig.builder().role(CoreConfig.Role.RESPONDER).transportRole(CoreConfig.Role.RESPONDER).build(); }
                 @Override public DriverHooks hooks() { return DriverHooks.NONE; }
-                @Override public void started(SessionRuntime driver, String protocol) {}
+                @Override public void started(SessionRuntime driver, String protocol, io.zmux.Credential credential) {}
             }, null, new byte[0], 8, 0, 0);
             try {
                 PipeReader reader = new PipeReader() {

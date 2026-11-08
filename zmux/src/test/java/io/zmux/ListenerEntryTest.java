@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * The listener's one entry (API.md Sections 4.4, 4.7, 7.2): the carrier's source and peer, the
+ * The listener's one entry: the carrier's source and peer, the
  * source slot before the outer handshake, asynchronous decisions bounded by the peek timeout and
  * cancelled on close, the admission counts, the preamble bound, and the graceful shutdown.
  */
@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Timeout;
 class ListenerEntryTest {
     static ZmuxConfig config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
     }
 
     static InetSocketAddress ip(String literal, int port) {
@@ -205,7 +205,7 @@ class ListenerEntryTest {
 
     @Test void theSourceSlotComesBeforeTheTlsHandshakeAndAFailedHandshakeCountsOnce() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).timeouts(Timeouts.defaults().withHandshake(Duration.ofMillis(800))).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
             for (boolean admission : new boolean[] {true, false}) {
                 var b = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).maxPendingPerSource(1);
                 if (admission) b.admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0))));
@@ -217,7 +217,8 @@ class ListenerEntryTest {
                         InputStream in = second.getInputStream();
                         assertEquals(-1, in.read(), "the source's one slot is taken before the handshake");
                     }
-                    await(() -> l.stats().refused() == 1);
+                    // Over the source's pending limit: the reject policy, which cannot stall it without a slot.
+                    await(() -> l.stats().rejected() == 1);
                     // The silent carrier's handshake times out.
                     await(() -> admission ? l.stats().admission().handshakeFailed() == 1 : l.stats().setupFailures() == 1);
                     assertEquals(admission ? 0 : 1, l.stats().setupFailures());
@@ -260,12 +261,10 @@ class ListenerEntryTest {
             }, r -> Thread.ofVirtual().start(r));
             await(() -> l.stats().refused() == refused + 1);
             // The live session still joins a pipe.
-            try (var reservation = client.paths().reserve(PipeOptions.builder().probation(Duration.ZERO).build())) {
-                var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1], JoinHint.join(reservation.header(), TestAddr.peer("c")));
-                reservation.attach(pair[0]);
-                await(() -> l.stats().joins() == 1);
-            }
+            var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+            l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
+            client.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build());
+            await(() -> l.stats().joins() == 1);
             assertFalse(done.isDone(), "open while its session lives");
             assertFalse(l.isClosed());
             client.close(); server.close(); client.awaitClosed(); server.awaitClosed();

@@ -53,18 +53,14 @@ public final class PipeTable {
     public void attachBootstrap(CarrierInfo in, CarrierInfo out, Waiter writerWaiter) {
         Pipe p = new Pipe(0, bootstrapIn(), new Pipe.OutDir(out, writerWaiter), null, out.kind());
         p.label(out.label() != null ? out.label() : in != null ? in.label() : null);
+        p.variant(out.variant());
         add(p);
         outbox.wake(writerWaiter);
     }
 
-    /** Replaces both directions of the bootstrap pipe after the carrier rejected its early data. */
-    void restartBootstrap(Pipe p, CarrierInfo info) {
-        p.restart(bootstrapIn(), new Pipe.OutDir(info, p.out().sig));
-    }
-
     /** The bootstrap pipe's inbound side: its first record carries the peer's transport parameters. */
     private static Pipe.InDir bootstrapIn() {
-        return new Pipe.InDir(new Pipe.InLane(0, true, false, false));
+        return new Pipe.InDir(new Pipe.InLane(0, true, false));
     }
 
     // ---- wake-ups ----
@@ -126,26 +122,6 @@ public final class PipeTable {
         return p == null ? null : p.carrier();
     }
 
-    /** The first record of an in-band join starts with the PIPE_JOIN the listener processed. */
-    public void skipJoinFrame(long pipeId) {
-        Pipe p = get(pipeId);
-        if (p != null && p.in() != null) RecordReceiver.skipJoin(p.in().lanes.getFirst());
-    }
-
-    /** Installs the actual carrier properties before the reserved pipe performs I/O. */
-    public void attachReserved(long id, CarrierInfo in, CarrierInfo out) throws CoreException {
-        Pipe pipe = get(id);
-        if (pipe == null || pipe.mp() != null && pipe.mp().health.retired()) throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
-        if (pipe.mp() == null || !pipe.mp().oob || !pipe.mp().joinerLocal || in == null && out == null
-                || (pipe.in() == null) != (in == null) || (pipe.out() == null) != (out == null)) {
-            throw CoreException.of(CoreException.Reason.INVALID);
-        }
-        if (pipe.out() != null) Lanes.rebind(pipe.out(), out);
-        CarrierInfo info = out != null ? out : in;
-        pipe.carrier(info.kind());
-        pipe.label(info.label());
-    }
-
     /** The immutable wire fate group chosen when a pipe was reserved or joined. */
     public long fateGroup(long id) throws CoreException {
         Pipe p = get(id);
@@ -166,6 +142,11 @@ public final class PipeTable {
     }
 
     /** Aborts the carriers of every pipe. */
+    /** Closes every pipe's carriers gracefully. */
+    void closeAll() {
+        for (Pipe p : list) outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_BIDI));
+    }
+
     void abortAll() {
         for (Pipe p : list) outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
     }
@@ -182,7 +163,7 @@ public final class PipeTable {
     private static boolean canCarryClose(Pipe p) {
         if (p.out() == null || p.out().failed()) return false;
         Pipe.OutLane l = p.out().lane(0);
-        return l != null && !l.st.shut() && (p.mp() == null || p.mp().liveOut() && !p.mp().health.retired());
+        return l != null && !l.st.shut() && (p.mp() == null || p.mp().liveOut() && !p.mp().health.retired() && !p.mp().handshaking());
     }
 
     /** Whether CONNECTION_CLOSE went out on every outbound pipe that takes one. */
@@ -191,6 +172,32 @@ public final class PipeTable {
             if (!canCarryClose(p)) continue;
             Pipe.OutLane l = p.out().lane(0);
             if (l != null && !l.tx.closeSent()) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Whether every live outbound pipe that took CONNECTION_CLOSE has written it: a failed
+     * carrier no longer counts.
+     */
+    boolean closeWritten() {
+        for (Pipe p : list) {
+            if (p.out() == null || p.out().failed()) continue;
+            Pipe.OutLane l = p.out().lane(0);
+            if (l != null && l.tx.closeSent() && !l.tx.closeDone()) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Whether CONNECTION_CLOSE was written and the write side shut after it (FIN or close_notify
+     * out, not only requested) on every outbound pipe that took it: a process may exit then.
+     */
+    boolean closeShut() {
+        for (Pipe p : list) {
+            if (p.out() == null || p.out().failed()) continue;
+            Pipe.OutLane l = p.out().lane(0);
+            if (l != null && l.tx.closeSent() && !(l.tx.closeDone() && l.tx.shutDone())) return false;
         }
         return true;
     }

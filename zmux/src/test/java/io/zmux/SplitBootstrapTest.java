@@ -51,9 +51,9 @@ class SplitBootstrapTest {
             assertEquals(0, loops.outstandingBuffers());
         }
     }
-    @Test void firstRecordTimeoutAndListenerCloseReleaseUnpairedHalves() throws Exception {
+    @Test void handshakeTimeoutAndListenerCloseReleaseUnpairedHalves() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(300)).build();
             var listener = Zmux.listener(ListenerConfig.builder().session(config).firstRecordTimeout(Duration.ofMillis(20)).build());
             try {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -73,7 +73,7 @@ class SplitBootstrapTest {
     }
     @Test void splitExporterBindsBothHalvesInUplinkDownlinkOrder() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.exporter()).withProbation(Duration.ZERO)).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.exporter().withEndToEnd()).probation(Duration.ZERO).build();
             try (var listener = Zmux.listener(ListenerConfig.of(config))) {
                 PipeIo.Exporter upKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 3); return key; };
                 PipeIo.Exporter downKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 9); return key; };
@@ -84,7 +84,7 @@ class SplitBootstrapTest {
                         PipeIo.of(down[0].reader(), null).withExporter(downKey)), Role.CLIENT, config);
                      var server = listener.accept(Duration.ofSeconds(5))) {
                     var newPipe = MemoryPipe.pair(Framing.BYTE_STREAM); listener.handle(newPipe[1], JoinHint.inBand(TestAddr.peer("client"))).closed();
-                    var added = client.paths().add(newPipe[0], PipeOptions.defaults());
+                    var added = client.addPipe(newPipe[0], PipeOptions.defaults());
                     assertEquals(PipeState.Outbound.ACTIVE, added.state().orElseThrow().outbound());
                     client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
                 }

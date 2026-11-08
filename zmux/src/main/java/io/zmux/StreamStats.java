@@ -3,18 +3,18 @@ package io.zmux;
 import java.util.OptionalLong;
 
 /**
- * A snapshot of one stream (API.md Section 7.2), in payload bytes, the preamble excluded. The
+ * A snapshot of one stream, in payload bytes, the preamble excluded. The
  * fields of a direction the stream does not have stay 0. Once the session released the
  * stream, {@link ZmuxStream#stats()} returns its final values.
  *
- * @param bytesWritten payload bytes the application handed to the sending part (API.md Section 7.1)
+ * @param bytesWritten payload bytes the application handed to the sending part
  * @param bytesSent payload bytes put into STREAM frames, each copy (reinjection, redundancy,
  *     opportunistic, retransmission) again
  * @param bytesAcknowledged distinct payload offsets acknowledged: passed to the carrier without
  *     multipath, covered by PIPE_ACK in a multipath session
  * @param bytesReceived distinct payload bytes received, read or not; after a stop, every byte
  *     below the highest offset received
- * @param bytesRead payload bytes returned to the application (API.md Section 7.1)
+ * @param bytesRead payload bytes returned to the application
  * @param datagramsSent the stream's datagrams handed to a carrier
  * @param datagramsReceived the stream's datagrams received and queued for the application
  * @param datagramsDroppedRecv the stream's datagrams dropped from its full queue

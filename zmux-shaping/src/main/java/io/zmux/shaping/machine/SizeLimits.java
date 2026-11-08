@@ -1,40 +1,35 @@
 package io.zmux.shaping.machine;
 
-import java.util.Objects;
 import java.util.OptionalInt;
 
 /**
- * Bounds of the size of a definition; an unset bound is unbounded, one set to zero allows none.
- * Every bound set is zero or more.
+ * The bounds of what a reader takes. Everything else about a definition is bounded by its own structure and the size of its text.
  *
- * @param maxBytes JSON input characters
- * @param maxMachines machines
- * @param maxStates per machine
- * @param maxActions per state
- * @param maxTransitions per state
- * @param maxPoints points or components per distribution
+ * @param maxBytes JSON input characters, tables included; unset is unbounded, zero allows none
+ * @param maxSlots the counters and timers of all a candidate's machines together, which each pipe allocates and a short text
+ *     could otherwise ask for without end: 0 is {@link #DEFAULT_MAX_SLOTS}, a negative value is no bound
  */
-public record SizeLimits(OptionalInt maxBytes, OptionalInt maxMachines, OptionalInt maxStates, OptionalInt maxActions,
-                         OptionalInt maxTransitions, OptionalInt maxPoints) {
-    public static final SizeLimits NONE = new SizeLimits(OptionalInt.empty(), OptionalInt.empty(), OptionalInt.empty(),
-            OptionalInt.empty(), OptionalInt.empty(), OptionalInt.empty());
+public record SizeLimits(OptionalInt maxBytes, int maxSlots) {
+    /** The bound on a candidate's counters and timers when {@code maxSlots} is 0. */
+    public static final int DEFAULT_MAX_SLOTS = 4096;
+
+    public static final SizeLimits NONE = new SizeLimits(OptionalInt.empty(), 0);
 
     public SizeLimits {
-        for (OptionalInt b : new OptionalInt[] {maxBytes, maxMachines, maxStates, maxActions, maxTransitions, maxPoints}) {
-            if (Objects.requireNonNull(b).isPresent() && b.getAsInt() < 0) throw new IllegalArgumentException("negative size limit");
+        if (maxBytes.isPresent() && maxBytes.getAsInt() < 0) throw new IllegalArgumentException("negative size limit");
+    }
+
+    public SizeLimits withMaxBytes(int n) { return new SizeLimits(OptionalInt.of(n), maxSlots); }
+
+    public SizeLimits withMaxSlots(int n) { return new SizeLimits(maxBytes, n); }
+
+    void check(int n) throws DefinitionException {
+        if (maxBytes.isPresent() && n > maxBytes.getAsInt()) {
+            throw new DefinitionException(DefinitionException.Category.LIMIT, n + " bytes above the limit of " + maxBytes.getAsInt());
         }
     }
 
-    public SizeLimits withMaxBytes(int n) { return new SizeLimits(OptionalInt.of(n), maxMachines, maxStates, maxActions, maxTransitions, maxPoints); }
-    public SizeLimits withMaxMachines(int n) { return new SizeLimits(maxBytes, OptionalInt.of(n), maxStates, maxActions, maxTransitions, maxPoints); }
-    public SizeLimits withMaxStates(int n) { return new SizeLimits(maxBytes, maxMachines, OptionalInt.of(n), maxActions, maxTransitions, maxPoints); }
-    public SizeLimits withMaxActions(int n) { return new SizeLimits(maxBytes, maxMachines, maxStates, OptionalInt.of(n), maxTransitions, maxPoints); }
-    public SizeLimits withMaxTransitions(int n) { return new SizeLimits(maxBytes, maxMachines, maxStates, maxActions, OptionalInt.of(n), maxPoints); }
-    public SizeLimits withMaxPoints(int n) { return new SizeLimits(maxBytes, maxMachines, maxStates, maxActions, maxTransitions, OptionalInt.of(n)); }
-
-    /** Fails when JSON input of n characters exceeds {@link #maxBytes()}; what names the input. */
-    void checkBytes(int n, String what) throws DefinitionException {
-        int limit = maxBytes.orElse(Integer.MAX_VALUE);
-        if (n > limit) throw new DefinitionException(what + ": " + n + " bytes, limit " + limit);
+    boolean slotsOver(long n) {
+        return maxSlots >= 0 && n > (maxSlots == 0 ? DEFAULT_MAX_SLOTS : maxSlots);
     }
 }

@@ -38,7 +38,7 @@ public final class WireException extends Exception {
         return new WireException(TransportError.TRANSPORT_PARAMETER_ERROR, reason);
     }
 
-    /** Builds an error with a diagnostic line of {@code key=value} pairs (SPEC.md Section 4.3). */
+    /** Builds an error with a diagnostic line of {@code key=value} pairs. */
     public static WireException withDetails(long code, String reason, Object... kv) {
         StringBuilder b = new StringBuilder();
         for (int i = 0; i + 1 < kv.length; i += 2) {
@@ -52,12 +52,6 @@ public final class WireException extends Exception {
     public long frameType() { return frameType; }
     public String reason() { return reason; }
     public String details() { return details; }
-
-    /** The Reason Phrase with its diagnostic line, at most 1024 bytes of UTF-8. */
-    public String phrase() {
-        String s = details.isEmpty() ? reason : reason + "\n" + details;
-        return Utf8.truncate(s, 1024);
-    }
 
     @Override
     public String getMessage() {

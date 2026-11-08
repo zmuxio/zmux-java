@@ -29,6 +29,7 @@ final class WebSocketFrames {
     WebSocketFrames(BodyCarrier carrier) {
         this.carrier = carrier;
         ch = carrier.ch;
+        carrier.firstLimit = this::limitFirstMessage;
     }
 
     /** The outbound side of a WebSocket carrier: binary messages, and a close frame as the graceful end. */
@@ -53,7 +54,18 @@ final class WebSocketFrames {
         }
     }
 
+    /** The admission's bound of the first message, -1 once it passed or without one. */
+    private volatile int firstLimit = -1;
+
+    void limitFirstMessage(int limit) { firstLimit = limit; }
+
     private void data(WebSocketFrame f, boolean continuation) {
+        int limit = firstLimit;
+        if (limit >= 0) {
+            int have = partial == null ? 0 : partial.readableBytes();
+            if (have + f.content().readableBytes() > limit) { fail("a first message above " + limit + " bytes"); return; }
+            if (f.isFinalFragment()) firstLimit = -1;
+        }
         if (continuation == (partial == null)) { fail("an unexpected continuation frame"); return; }
         if (!continuation && f.isFinalFragment()) {
             carrier.in(f.content().retain());

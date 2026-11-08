@@ -11,7 +11,7 @@ import java.util.Objects;
  * completed and before any zmux record: {@link Zmux#connect(java.net.InetSocketAddress, ZmuxConfig)},
  * {@link Zmux#connectTls}, {@link ZmuxListener#connect} and {@link ZmuxListener#connectTls}
  * take {@link ZmuxConfig#credential()}, as the zmux-quic session dialers and a session's own
- * TCP and TLS pipes ({@link Paths#add(java.net.InetSocketAddress, PipeOptions)}, {@link Paths#addTls}) do; the zmux-quic
+ * TCP and TLS pipes ({@link ZmuxSession#addPipe(java.net.InetSocketAddress, PipeOptions)}, {@link ZmuxSession#addTlsPipe}) do; the zmux-quic
  * pipe dialers take one per call. A pipe the application opened itself ({@link Zmux#open},
  * {@link ZmuxListener#open}) presents its credential where it was dialed: the prefix written
  * first, or the header field in its HTTP request.

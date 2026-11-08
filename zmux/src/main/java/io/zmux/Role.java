@@ -6,6 +6,6 @@ public enum Role {
     CLIENT,
     /** The responder: the accepting side of the carrier. */
     SERVER,
-    /** Negotiated over a symmetric carrier (zmux_role auto, EXTENSIONS.md Section 2). */
+    /** Negotiated over a symmetric carrier (the zmux_role parameter, auto, with a random nonce). */
     PEER
 }

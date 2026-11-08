@@ -22,8 +22,8 @@ final class Errors {
     static SessionError session(io.zmux.internal.core.SessionError e) {
         return switch (e.kind()) {
             case APPLICATION -> new SessionError.ApplicationClosed(e.code(), e.reason(), e.remote());
-            case TRANSPORT -> new SessionError.TransportClosed(e.code(), TransportError.name(e.code()), e.frameType(),
-                    e.reason(), e.details(), e.remote());
+            case TRANSPORT -> e.code() == TransportError.RESUME_FAILED ? new SessionError.ResumeFailed(e.remote())
+                    : new SessionError.TransportClosed(e.code(), TransportError.name(e.code()), e.frameType(), e.reason(), e.details(), e.remote());
             case IDLE -> new SessionError.IdleTimeout(e.remote());
             case HANDSHAKE_TIMEOUT -> new SessionError.HandshakeTimeout();
             case EARLY_REJECTED -> new SessionError.EarlyDataRejected();
@@ -43,6 +43,9 @@ final class Errors {
             case INVALID -> throw new IllegalStateException("not valid in this state");
             case DATAGRAM_TOO_LARGE -> new DatagramTooLargeException(e.max());
             case PIPE_REFUSED -> new PipeRefusedException();
+            case JOIN_PENDING -> new JoinPendingException((e.max() & CoreException.MISSING_END_TO_END) != 0, (e.max() & CoreException.MISSING_PSK) != 0);
+            case JOIN_SECRET_SET -> new JoinSecretSetException();
+            case JOIN_REFUSED -> new JoinRefusedException(-1);
             case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException();
         };
     }
@@ -53,6 +56,8 @@ final class Errors {
             case CoreException ce -> io(ce);
             case IOException io -> io;
             case Error error -> throw error;
+            // A configuration error is the caller's to see as it is (a host callback's failure is a failed operation).
+            case IllegalArgumentException invalid -> throw invalid;
             default -> new IOException(c);
         };
     }

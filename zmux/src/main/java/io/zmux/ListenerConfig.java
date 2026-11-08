@@ -22,6 +22,7 @@ public final class ListenerConfig {
     private final int backlog;
     private final long memoryBudget; // NO_BUDGET: unlimited
     private final int maxPendingPerSource;
+    private final int maxPendingPerSession;
     private final Duration firstRecordTimeout;
     private final byte[] instanceId;
     private final int maxSuspended;
@@ -29,14 +30,16 @@ public final class ListenerConfig {
     private final Admission admission;
     private final Admission.Fallback fallback;
     private final InboundTransform inboundTransform;
-    private final boolean answerUnknownJoins;
+    private final java.util.function.Function<RejectInfo, RejectInfo.Action> onReject;
+    private final SessionConfigs sessionConfigs;
+    private final System.Logger logger;
 
     private ListenerConfig(Builder b) {
         session = b.session; tls = b.tls; backlog = b.backlog; memoryBudget = b.memoryBudget;
-        maxPendingPerSource = b.maxPendingPerSource; firstRecordTimeout = b.firstRecordTimeout;
+        maxPendingPerSource = b.maxPendingPerSource; maxPendingPerSession = b.maxPendingPerSession; firstRecordTimeout = b.firstRecordTimeout;
         instanceId = b.instanceId.clone(); maxSuspended = b.maxSuspended; memoryPressureListener = b.memoryPressureListener;
         admission = b.admission; fallback = b.fallback;
-        inboundTransform = b.inboundTransform; answerUnknownJoins = b.answerUnknownJoins;
+        inboundTransform = b.inboundTransform; onReject = b.onReject; sessionConfigs = b.sessionConfigs; logger = b.logger;
     }
 
     public static ListenerConfig defaults() { return DEFAULTS; }
@@ -50,10 +53,10 @@ public final class ListenerConfig {
     public Builder toBuilder() {
         Builder b = new Builder();
         b.session = session; b.tls = tls; b.backlog = backlog; b.memoryBudget = memoryBudget;
-        b.maxPendingPerSource = maxPendingPerSource; b.firstRecordTimeout = firstRecordTimeout;
+        b.maxPendingPerSource = maxPendingPerSource; b.maxPendingPerSession = maxPendingPerSession; b.firstRecordTimeout = firstRecordTimeout;
         b.instanceId = instanceId.clone(); b.maxSuspended = maxSuspended; b.memoryPressureListener = memoryPressureListener;
         b.admission = admission; b.fallback = fallback;
-        b.inboundTransform = inboundTransform; b.answerUnknownJoins = answerUnknownJoins;
+        b.inboundTransform = inboundTransform; b.onReject = onReject; b.sessionConfigs = sessionConfigs; b.logger = logger;
         return b;
     }
 
@@ -71,6 +74,11 @@ public final class ListenerConfig {
     public OptionalLong memoryBudget() { return memoryBudget == NO_BUDGET ? OptionalLong.empty() : OptionalLong.of(memoryBudget); }
     /** Carriers of one source address that have not yet sent their first record. */
     public int maxPendingPerSource() { return maxPendingPerSource; }
+    /**
+     * The Unconfirmed join carriers one session keeps (authenticated Hellos whose Confirm has not
+     * arrived): one more evicts the session's oldest.
+     */
+    public int maxPendingPerSession() { return maxPendingPerSession; }
     /** How long a new carrier may take to send its first record. */
     public Duration firstRecordTimeout() { return firstRecordTimeout; }
     /** The leading bytes of every 16-byte session locator; random bytes fill the rest. */
@@ -90,12 +98,37 @@ public final class ListenerConfig {
     /** The transform of every carrier after its admission; null: none. */
     public InboundTransform inboundTransform() { return inboundTransform; }
     /**
-     * Whether the listener answers an admitted, well-formed join whose locator starts with the
-     * {@link #instanceId()} but names no session here with CONNECTION_CLOSE
-     * ZMUX_RESUME_FAILED, so that a suspended client fails at once instead of at its resume
-     * timeout; false by default.
+     * The answer to an unauthenticated carrier the listener refused (a Join, an unknown Locator
+     * included, or an Establish a carrier transform refused); null: the default, which stalls an
+     * Establish refused before authentication and closes everything else.
      */
-    public boolean answerUnknownJoins() { return answerUnknownJoins; }
+    public java.util.function.Function<RejectInfo, RejectInfo.Action> onReject() { return onReject; }
+
+    /** The chooser of each new session's configuration; null: {@link #session()} for all. */
+    public SessionConfigs sessionConfigs() { return sessionConfigs; }
+
+    /** The listener's own logger; null: the logger of {@link #session()}. */
+    public System.Logger logger() { return logger; }
+
+    /**
+     * Chooses each new session's configuration, for example {@link PipeAuth#exporter()} where the
+     * process terminates TLS and {@link PipeAuth#deferred()} where an intermediary does, or
+     * per-session shaping limits. Called once per carrier that starts a session, never for a
+     * join, outside every lock, on the listener's event loop: it must not block. What belongs to
+     * the listener stays its own (its memory budget, its loops, the carrier-level bounds before a
+     * session is known): the returned configuration's values for those are not used.
+     */
+    @FunctionalInterface
+    public interface SessionConfigs {
+        /**
+         * The configuration of the session carrier starts; null keeps {@link #session()}. An
+         * exception, like an invalid configuration, closes the carrier without a byte, counted
+         * as rejected.
+         *
+         * @param admitted the admission's {@link Admission.Decision#value()}, or null
+         */
+        ZmuxConfig choose(Admission.CarrierInfo info, Object admitted);
+    }
 
     /** Builds a {@link ListenerConfig}; every setter validates its value. */
     public static final class Builder {
@@ -104,6 +137,7 @@ public final class ListenerConfig {
         private int backlog = 128;
         private long memoryBudget = 1L << 30;
         private int maxPendingPerSource = 8;
+        private int maxPendingPerSession = 4;
         private Duration firstRecordTimeout = Duration.ofSeconds(2);
         private byte[] instanceId = new byte[0];
         private int maxSuspended = 1024;
@@ -111,23 +145,36 @@ public final class ListenerConfig {
         private Admission admission;
         private Admission.Fallback fallback;
         private InboundTransform inboundTransform;
-        private boolean answerUnknownJoins;
+        private java.util.function.Function<RejectInfo, RejectInfo.Action> onReject;
+        private SessionConfigs sessionConfigs;
+        private System.Logger logger;
 
         private Builder() {}
+
+        /** The chooser of each new session's configuration; null (the default): {@link ListenerConfig#session()}. */
+        public Builder sessionConfigs(SessionConfigs c) { sessionConfigs = c; return this; }
+
+        /**
+         * The logger of the listener's own warnings, failures of its host callbacks ({@link #onReject},
+         * {@link #sessionConfigs}) among them. It is called outside every lock and must not block. Null
+         * (the default): the logger of {@link #session}. Sessions log to their own configuration's.
+         */
+        public Builder logger(System.Logger l) { logger = l; return this; }
 
         /** The transform of every carrier after its admission ({@link InboundTransform}); null (the default): none. */
         public Builder inboundTransform(InboundTransform t) { inboundTransform = t; return this; }
 
         /**
-         * Answers an admitted carrier whose well-formed join (in band or out of band) names a
-         * locator that starts with the instance ID but no session here: the listener writes
-         * CONNECTION_CLOSE with ZMUX_RESUME_FAILED and ends the carrier (MULTIPATH.md 5.4); the
-         * carrier still counts as rejected, and every other rejected carrier gets no byte. Off
-         * by default, for correctness: where a load balancer can route a join to an instance
-         * with the same instance ID that does not hold its session, the answer would end a
-         * session that lives on. Turn it on for a single instance or unique instance IDs.
+         * Answers a refused unauthenticated carrier, nothing written either way. A stalled Join
+         * ends one join timeout of {@link #session} after the refusal, whatever the session its
+         * Locator names configures; a known Locator declined under memory pressure is refused as
+         * {@code memory_pressure} and answered the same way. A stalled Establish at the handshake timeout, and never later than
+         * the maximum stall duration (the admission's, or one drawn when there is none). A source
+         * already holding its maximum of stalled carriers has the carrier closed at once
+         * ({@link AdmissionStats#stallOverflow}). Null (the default): an Establish refused before
+         * authentication stalls, a Join and every other refusal closes. A failing function closes.
          */
-        public Builder answerUnknownJoins(boolean on) { answerUnknownJoins = on; return this; }
+        public Builder onReject(java.util.function.Function<RejectInfo, RejectInfo.Action> f) { onReject = f; return this; }
 
         /** The admission of every new carrier; null (the default): none. */
         public Builder admission(Admission a) { admission = a; return this; }
@@ -159,6 +206,12 @@ public final class ListenerConfig {
         public Builder maxPendingPerSource(int n) {
             if (n < 1) throw new IllegalArgumentException("maxPendingPerSource below 1");
             maxPendingPerSource = n; return this;
+        }
+
+        /** The Unconfirmed join carriers one session keeps, default 4; at least 1. */
+        public Builder maxPendingPerSession(int n) {
+            if (n < 1) throw new IllegalArgumentException("maxPendingPerSession below 1");
+            maxPendingPerSession = n; return this;
         }
 
         public Builder firstRecordTimeout(Duration d) {

@@ -12,11 +12,11 @@ import org.junit.jupiter.api.Timeout;
 /** Per-pipe probe interval and jitter, the since-last-traffic statistic, and pool redial. */
 @Timeout(40)
 class ProbeTest {
-    static ZmuxConfig config(EventLoops loops, MultipathConfig m) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(m.withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+    static ZmuxConfig config(EventLoops loops, java.util.function.UnaryOperator<ZmuxConfig.Builder> m) {
+        return m.apply(ZmuxConfig.builder().eventLoops(loops).maxPipes(4)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
     }
 
-    static MultipathConfig multipath() { return MultipathConfig.defaults().withMaxPipes(4); }
+    static java.util.function.UnaryOperator<ZmuxConfig.Builder> multipath() { return b -> b; }
 
     @Test void probeSettingsAreValidated() {
         var b = PipeOptions.builder();
@@ -26,9 +26,9 @@ class ProbeTest {
         assertThrows(IllegalArgumentException.class, () -> b.probeJitter(1));
         assertThrows(IllegalArgumentException.class, () -> b.probeJitter(Double.NaN));
         b.probeJitter(0).probeJitter(0.99);
-        assertThrows(IllegalArgumentException.class, () -> MultipathConfig.defaults().withProbeJitter(1));
-        assertThrows(IllegalArgumentException.class, () -> MultipathConfig.defaults().withProbeJitter(-1));
-        assertEquals(0.5, MultipathConfig.defaults().withProbeJitter(0.5).probeJitter());
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().probeJitter(1));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().probeJitter(-1));
+        assertEquals(0.5, ZmuxConfig.builder().probeJitter(0.5).build().probeJitter());
         assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withProbeInterval(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withProbeJitter(1));
     }
@@ -42,14 +42,14 @@ class ProbeTest {
     @Test void aPipeProbesAtItsOwnIntervalWithinItsJitter() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             // The session's default without jitter: the bootstrap pipe's first wait is the whole 15 s.
-            var cfg = config(loops, multipath().withProbeJitter(0));
+            var cfg = config(loops, b -> b.probeJitter(0));
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
-                var fast = client.paths().add(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
-                var jittered = client.paths().add(listener.localAddress(),
+                var fast = client.addPipe(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
+                var jittered = client.addPipe(listener.localAddress(),
                         PipeOptions.builder().probeInterval(Duration.ofSeconds(2)).probeJitter(0.9).build());
-                ZmuxPipe bootstrap = client.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
+                ZmuxPipe bootstrap = client.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
                 long f0 = fast.stats().orElseThrow().pingsSent(), j0 = jittered.stats().orElseThrow().pingsSent(), b0 = bootstrap.stats().orElseThrow().pingsSent();
                 Thread.sleep(6500);
                 long f = fast.stats().orElseThrow().pingsSent() - f0, j = jittered.stats().orElseThrow().pingsSent() - j0;
@@ -65,8 +65,8 @@ class ProbeTest {
 
     @Test void probesNeitherResetSinceLastTrafficNorKeepTheSessionAlive() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).timeouts(Timeouts.defaults().withIdle(Duration.ofSeconds(4)).disableKeepAlive())
-                    .multipath(multipath().withProbeInterval(Duration.ofSeconds(1)).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofSeconds(4)).disableKeepAlive()
+                    .maxPipes(4).probeInterval(Duration.ofSeconds(1)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
@@ -75,7 +75,7 @@ class ProbeTest {
                     s.write(new byte[] {1}); s.finish();
                     try (var peer = server.acceptStream()) { assertArrayEquals(new byte[] {1}, SessionTest.readAll(peer)); }
                 }
-                ZmuxPipe pipe = client.paths().list().getFirst();
+                ZmuxPipe pipe = client.pipes().getFirst();
                 assertTrue(pipe.stats().orElseThrow().sinceLastTraffic().toMillis() < 1000);
                 Thread.sleep(2500);
                 PipeStats st = pipe.stats().orElseThrow();
@@ -105,7 +105,7 @@ class ProbeTest {
                     return attempt.join(listener.localAddress());
                 }).withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new PipePool.Backoff(Duration.ofSeconds(10), Duration.ofSeconds(20), 0))
                         .withPolicy(policy);
-                try (var run = client.paths().maintain(pool)) {
+                try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     assertEquals(3, dials.size());
                     for (int i = 1; i < 3; i++) {
@@ -130,7 +130,7 @@ class ProbeTest {
                 var dials = new AtomicInteger();
                 PipePool pool = PipePool.of(attempt -> { dials.incrementAndGet(); return attempt.join(listener.localAddress()); })
                         .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new PipePool.Backoff(Duration.ofMillis(200), Duration.ofSeconds(1), 0));
-                try (var run = client.paths().maintain(pool)) {
+                try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     Thread.sleep(300); // older than the backoff: the redial goes at once
                     long old = run.pipes().getFirst().id();
@@ -155,15 +155,15 @@ class ProbeTest {
                 @Override public void plan(io.zmux.shaping.RecordView view, io.zmux.shaping.RecordPlan plan) {
                     planned.incrementAndGet(); if (delay.get()) plan.delayNanos(TimeUnit.MILLISECONDS.toNanos(600));
                 }
-                @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Reply reply) { }
+                @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Effects effects) { }
             };
             var base = config(loops, multipath());
             var shaped = ZmuxConfig.builder().eventLoops(loops).shaper(factory)
-                    .multipath(multipath().withProbeInterval(Duration.ofSeconds(1)).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO)).build();
+                    .maxPipes(4).probeInterval(Duration.ofSeconds(1)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(base));
                  var client = Zmux.connect(listener.localAddress(), shaped);
                  var server = listener.accept(Duration.ofSeconds(5))) {
-                ZmuxPipe pipe = client.paths().list().getFirst();
+                ZmuxPipe pipe = client.pipes().getFirst();
                 delay.set(true);
                 long p0 = pipe.stats().orElseThrow().pingsSent(), r0 = planned.get();
                 Thread.sleep(5000);

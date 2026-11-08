@@ -91,7 +91,7 @@ class SpliceTest {
 
     @Test void upstreamResetCannotHideBehindZeroDownstreamCapacity() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).flowControl(FlowControl.defaults().withInitialStreamWindow(4096).withMaxStreamWindow(4096)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).initialStreamReceiveWindow(4096).maxStreamReceiveWindow(4096).build();
             try (var relay = new Relay(cfg); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
                 var splice = Zmux.splice(relay.a, relay.b).toCompletableFuture();
                 try (var peer = relay.destination()) {
@@ -189,7 +189,7 @@ class SpliceTest {
 
     @Test void datagramsKeepContextsAndUseOnlyTheSessionsQueues() throws Exception {
         try (EventLoops loops = EventLoops.create(3);
-             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).datagrams(true).build())) {
+             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
             var splice = Zmux.splice(relay.a, relay.b).toCompletableFuture();
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
@@ -245,7 +245,7 @@ class SpliceTest {
 
     @Test void datagramsDeniedByTheDirectionLimiterAreCountedWithoutAHelperQueue() throws Exception {
         try (EventLoops loops = EventLoops.create(2);
-             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).datagrams(true).build())) {
+             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
             var dropped = new CountDownLatch(1); var charged = new AtomicInteger();
             Limiter limiter = new Limiter() {
                 @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(max); }

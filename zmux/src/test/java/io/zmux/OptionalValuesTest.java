@@ -43,31 +43,33 @@ class OptionalValuesTest {
     }
 
     @Test void offSettingsAreNotValues() {
-        var t = Timeouts.defaults();
-        assertEquals(Optional.of(Timeouts.DEFAULT_HANDSHAKE), t.handshake());
-        assertEquals(Optional.empty(), t.disableHandshakeTimeout().handshake());
-        assertEquals(Optional.empty(), t.disableIdleTimeout().idle());
-        assertEquals(Optional.empty(), t.disableKeepAlive().keepAlive());
-        assertThrows(IllegalArgumentException.class, () -> t.withKeepAlive(Duration.ZERO), "0 has no meaning");
-        assertThrows(IllegalArgumentException.class, () -> t.withKeepAlive(Duration.ofMillis(999)));
-        assertEquals(Optional.of(Duration.ofSeconds(1)), t.withKeepAlive(Duration.ofSeconds(1)).keepAlive());
-        assertEquals(Optional.of(Duration.ZERO), t.withHandshake(Duration.ZERO).handshake());
-        assertThrows(IllegalArgumentException.class, () -> t.withIdle(Duration.ZERO), "below the 1 ms unit");
-        assertThrows(IllegalArgumentException.class, () -> t.withIdle(Duration.ofNanos(999_999)));
-        assertThrows(IllegalArgumentException.class, () -> t.withKeepAlive(Duration.ofNanos(-1)));
-        var cfg = ZmuxConfig.builder().timeouts(t.disableHandshakeTimeout().disableIdleTimeout().disableKeepAlive())
-                .flowControl(FlowControl.defaults().withoutMemoryBudget()).build();
+        var d = ZmuxConfig.defaults();
+        assertEquals(Optional.of(ZmuxConfig.DEFAULT_HANDSHAKE_TIMEOUT), d.handshakeTimeout());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().disableHandshakeTimeout().build().handshakeTimeout());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().disableIdleTimeout().build().maxIdleTimeout());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().disableKeepAlive().build().keepAlivePeriod());
+        var t = ZmuxConfig.builder();
+        assertThrows(IllegalArgumentException.class, () -> t.keepAlivePeriod(Duration.ZERO), "0 has no meaning");
+        assertThrows(IllegalArgumentException.class, () -> t.keepAlivePeriod(Duration.ofMillis(999)));
+        assertEquals(Optional.of(Duration.ofSeconds(1)), ZmuxConfig.builder().keepAlivePeriod(Duration.ofSeconds(1)).build().keepAlivePeriod());
+        assertEquals(Optional.of(Duration.ZERO), ZmuxConfig.builder().handshakeTimeout(Duration.ZERO).build().handshakeTimeout());
+        assertThrows(IllegalArgumentException.class, () -> t.maxIdleTimeout(Duration.ZERO), "below the 1 ms unit");
+        assertThrows(IllegalArgumentException.class, () -> t.maxIdleTimeout(Duration.ofNanos(999_999)));
+        assertThrows(IllegalArgumentException.class, () -> t.keepAlivePeriod(Duration.ofNanos(-1)));
+        var cfg = ZmuxConfig.builder().disableHandshakeTimeout().disableIdleTimeout().disableKeepAlive()
+                .unlimitedMemoryBudget().build();
+        assertEquals(java.util.OptionalLong.empty(), cfg.memoryBudget());
         var core = cfg.toCore(io.zmux.internal.core.CoreConfig.Role.INITIATOR, io.zmux.internal.core.CoreConfig.Role.INITIATOR);
         assertEquals(io.zmux.internal.core.Time.NEVER, core.handshakeTimeout());
         assertEquals(0, core.local().maxIdleTimeoutMillis, "none announced");
         assertEquals(io.zmux.internal.core.CoreConfig.OFF, core.keepAlive());
         assertEquals(io.zmux.internal.core.CoreConfig.UNLIMITED, core.memoryBudget());
         var zero = ZmuxConfig.builder()
-                .flowControl(FlowControl.defaults().withMemoryBudget(0)).build()
+                .memoryBudget(0).build()
                 .toCore(io.zmux.internal.core.CoreConfig.Role.INITIATOR, io.zmux.internal.core.CoreConfig.Role.INITIATOR);
         assertEquals(0, zero.memoryBudget());
         assertEquals(java.util.OptionalLong.empty(), ListenerConfig.builder().noMemoryBudget().build().memoryBudget());
-        assertThrows(IllegalArgumentException.class, () -> FlowControl.defaults().withMemoryBudget(-1));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().memoryBudget(-1));
     }
 
     @Test void pipeOptionsRejectZeroLivenessBounds() {
@@ -78,24 +80,24 @@ class OptionalValuesTest {
     }
 
     @Test void multipathLivenessBoundsAreUnsetUntilSet() {
-        var m = MultipathConfig.defaults();
+        var m = ZmuxConfig.defaults();
         assertEquals(Optional.empty(), m.suspectFloor());
         assertEquals(Optional.empty(), m.deadTimeout());
         assertEquals(Optional.empty(), m.probation());
-        assertThrows(IllegalArgumentException.class, () -> m.withSuspectFloor(Duration.ZERO));
-        assertThrows(IllegalArgumentException.class, () -> m.withDeadTimeout(Duration.ZERO));
-        assertEquals(Optional.of(Duration.ZERO), m.withProbation(Duration.ZERO).probation());
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().suspectFloor(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().deadTimeout(Duration.ZERO));
+        assertEquals(Optional.of(Duration.ZERO), ZmuxConfig.builder().probation(Duration.ZERO).build().probation());
     }
 
     @Test void standbyProbeIsOneSecondUnlessSet() {
-        var m = MultipathConfig.defaults();
-        assertEquals(Optional.of(Duration.ofSeconds(1)), m.standbyProbe());
-        assertEquals(Optional.empty(), m.disableStandbyProbes().standbyProbe(), "off");
-        assertEquals(Optional.empty(), m.disableIdleProbes().probeInterval(), "off");
-        assertThrows(IllegalArgumentException.class, () -> m.withStandbyProbe(Duration.ZERO), "0 is not off");
-        assertThrows(IllegalArgumentException.class, () -> m.withProbeInterval(Duration.ZERO), "0 is not off");
-        assertThrows(IllegalArgumentException.class, () -> m.withStandbyProbe(Duration.ofMillis(500)));
-        assertThrows(IllegalArgumentException.class, () -> m.withStandbyProbe(Duration.ofSeconds(-1)));
+        var m = ZmuxConfig.builder();
+        assertEquals(Optional.of(Duration.ofSeconds(1)), ZmuxConfig.defaults().standbyProbe());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().disableStandbyProbes().build().standbyProbe(), "off");
+        assertEquals(Optional.empty(), ZmuxConfig.builder().disableIdleProbes().build().probeInterval(), "off");
+        assertThrows(IllegalArgumentException.class, () -> m.standbyProbe(Duration.ZERO), "0 is not off");
+        assertThrows(IllegalArgumentException.class, () -> m.probeInterval(Duration.ZERO), "0 is not off");
+        assertThrows(IllegalArgumentException.class, () -> m.standbyProbe(Duration.ofMillis(500)));
+        assertThrows(IllegalArgumentException.class, () -> m.standbyProbe(Duration.ofSeconds(-1)));
     }
 
     @Test void qualityBandMinIntervalIsOneSecondUnlessSet() {
@@ -109,14 +111,11 @@ class OptionalValuesTest {
         assertThrows(IllegalArgumentException.class, () -> ModePolicy.defaults().withTimer(Double.NaN, null, null));
     }
 
-    @Test void shapingLimitsAreUnboundedUnlessSet() {
-        var none = ShapingLimits.none();
-        assertTrue(none.maxPaddingBytes().isEmpty() && none.maxPaddingRatio().isEmpty() && none.maxInjected().isEmpty()
-                && none.maxPauseTotal().isEmpty() && none.maxDelay().isEmpty());
-        assertEquals(0, none.withMaxInjected(0).maxInjected().getAsLong(), "0 allows none");
-        assertEquals(Duration.ZERO, none.withMaxDelay(Duration.ZERO).maxDelay().orElseThrow());
-        assertThrows(IllegalArgumentException.class, () -> none.withMaxInjected(-1));
-        assertThrows(IllegalArgumentException.class, () -> none.withMaxPauseTotal(Duration.ofNanos(-1)));
+    @Test void oneWaitIsBoundedByDefault() {
+        var d = ShapingLimits.defaults();
+        assertFalse(d.wire().isSet());
+        assertEquals(Duration.ofSeconds(1), d.under(io.zmux.shaping.ShapingBudget.NONE).maxDelay());
+        assertTrue(d.withMaxDelay(Duration.ofNanos(-1)).under(io.zmux.shaping.ShapingBudget.NONE).maxDelay().isNegative(), "negative: no bound");
     }
 
     @Test void recheckZeroIsAsSoonAsTheFloorAllows() {

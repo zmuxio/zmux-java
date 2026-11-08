@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 /**
- * queue_p (MULTIPATH.md 7.1): T_suspect and T_fail include min(1 s, unsent_ahead / R_p), where
+ * queue_p: T_suspect and T_fail include min(1 s, unsent_ahead / R_p), where
  * unsent_ahead is Q_p when the oldest unacknowledged ack-eliciting batch was handed over,
  * without that batch: the bytes of write calls in progress plus the carrier's unsent count.
  */

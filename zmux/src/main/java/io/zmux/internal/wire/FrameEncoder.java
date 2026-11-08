@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
 
 /**
  * Frame encoders writing at the buffer's position, every field in its shortest
- * encoding (IMPLEMENTATION.md Section 4, compact frames). The caller checks room.
+ * encoding (compact frames). The caller checks room.
  */
 public final class FrameEncoder {
     private FrameEncoder() {}
@@ -130,18 +130,6 @@ public final class FrameEncoder {
         b.put(Preamble.priorityByte(urgency, incremental));
     }
 
-    /** PIPE_JOIN from Type through Priority: the MAC input (MULTIPATH.md Section 5.1). */
-    public static void joinMacInput(ByteBuffer b, byte[] locator, long pipeId, int direction, boolean carrierBound,
-                                    boolean standby, long fateGroup, long priority) {
-        VarInt.put(b, FrameType.PIPE_JOIN);
-        b.put((byte) locator.length);
-        b.put(locator);
-        VarInt.put(b, pipeId);
-        b.put((byte) ((direction & 3) | (carrierBound ? 0x04 : 0) | (standby ? 0x08 : 0)));
-        VarInt.put(b, fateGroup);
-        VarInt.put(b, priority);
-    }
-
     /** PIPE_ACK type and entry count; the entries follow. */
     public static void pipeAckHeader(ByteBuffer b, int count) {
         VarInt.put(b, FrameType.PIPE_ACK);
@@ -178,6 +166,24 @@ public final class FrameEncoder {
         VarInt.put(b, FrameType.PIPE_ABANDON);
         VarInt.put(b, pipeId);
         VarInt.put(b, code);
+    }
+
+    /** A SESSION_EPOCH from its body, Phase through Locator, which the sender keeps. */
+    public static void sessionEpoch(ByteBuffer b, byte[] body) {
+        VarInt.put(b, FrameType.SESSION_EPOCH);
+        b.put(body);
+    }
+
+    /** The body of a SESSION_EPOCH. */
+    public static byte[] sessionEpochBody(int phase, long epoch, byte[] share, byte[] locator) {
+        ByteBuffer b = ByteBuffer.allocate(1 + 8 + 8 + share.length + 1 + locator.length);
+        b.put((byte) phase);
+        VarInt.put(b, epoch);
+        VarInt.put(b, share.length);
+        b.put(share);
+        b.put((byte) locator.length);
+        b.put(locator);
+        return java.util.Arrays.copyOf(b.array(), b.position());
     }
 
     public static void pipeStatus(ByteBuffer b, long pipeId, long seq, long status, long priority) {
@@ -226,13 +232,6 @@ public final class FrameEncoder {
             case PING -> ping(b, f.response, f.value);
             case GOAWAY -> goAway(b, f.maxBidi, f.maxUni, f.code);
             case PRIORITY_UPDATE -> priorityUpdate(b, f.streamId, f.seq, f.urgency, f.incremental);
-            case PIPE_JOIN -> {
-                Frame.Join j = f.join;
-                byte[] loc = new byte[j.locatorLen];
-                s.get(j.locatorPos, loc);
-                joinMacInput(b, loc, j.pipeId, j.direction, j.carrierBound, j.standby, j.fateGroup, j.priority);
-                b.put(s.slice(j.tokenPos, 16));
-            }
             case PIPE_ACK -> {
                 pipeAckHeader(b, f.count);
                 Frame.AckEntries it = f.entries(new Frame.AckEntries());
@@ -246,6 +245,7 @@ public final class FrameEncoder {
             case PIPE_PING -> pipePing(b);
             case PIPE_ABANDON -> pipeAbandon(b, f.pipeId, f.code);
             case PIPE_STATUS -> pipeStatus(b, f.pipeId, f.seq, f.status, f.priority);
+            case SESSION_EPOCH -> sessionEpoch(b, f.bodyBytes());
         }
     }
 }

@@ -1,4 +1,4 @@
 package io.zmux.internal.core;
 
-/** A carrier's record framing (SPEC.md Sections 3.1 and 3.4). */
+/** A carrier's record framing. */
 public enum Framing { BYTES, RECORDS }

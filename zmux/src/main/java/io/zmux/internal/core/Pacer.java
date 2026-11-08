@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import java.util.List;
 
 /**
- * Pacing of the outbound pipes of a session with acknowledgement (SCHEDULER.md Section 9.1):
+ * Pacing of the outbound pipes of a session with acknowledgement:
  * one {@link Limiter} per pipe whose carrier is not queue-bound. Owned by the session's loop;
  * wake-ups go through {@link Port}.
  */

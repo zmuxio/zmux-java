@@ -174,7 +174,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
         private final long slot, skew;
         private final byte[] k;
         private final ThreadLocal<Mac> macs;
-        private final io.zmux.helper.ReplayRecord nonces;
+        private final ReplayFilter nonces;
         java.util.function.LongSupplier clock = () -> System.currentTimeMillis() / 1000;
 
         private Verifier(PrefixAuth a) {
@@ -183,7 +183,14 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
             slot = a.slot.toSeconds();
             skew = a.skew;
             k = a.derive();
-            nonces = new io.zmux.helper.ReplayRecord(a.cacheSize == 0 ? 1 << 16 : a.cacheSize);
+            // The filter reads the clock field on each use, so a clock set later takes effect.
+            java.time.Clock filterClock = new java.time.Clock() {
+                @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+                @Override public java.time.Clock withZone(java.time.ZoneId z) { return this; }
+                @Override public java.time.Instant instant() { return java.time.Instant.ofEpochSecond(clock.getAsLong()); }
+            };
+            // Tokens of a slot in [cur - skew, cur + skew] verify; a stamp is its slot's start.
+            nonces = new ReplayFilter(java.time.Duration.ofSeconds((skew + 1) * slot), a.cacheSize == 0 ? 1 << 16 : a.cacheSize, null, filterClock);
             macs = ThreadLocal.withInitial(() -> mac(k));
         }
 
@@ -201,7 +208,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
                 if (MessageDigest.isEqual(tag(m, s, b, token, 0), got)) { found = true; at = s; }
             }
             if (!found) return false;
-            return nonces.add(at, java.util.Arrays.copyOf(token, NONCE), cur - skew);
+            return nonces.check(java.util.Arrays.copyOf(token, NONCE), at * slot * 1000) == ReplayFilter.Verdict.FRESH;
         }
 
         @Override public java.util.concurrent.CompletionStage<Admission.Decision> decide(Admission.CarrierInfo info, ByteBuffer prefix,

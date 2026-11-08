@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /**
  * The opening information of a stream, given once when the stream is opened and read on the
- * accepting side (the stream preamble, EXTENSIONS.md Section 4).
+ * accepting side (the stream preamble).
  *
  * @param openInfo the OPEN_INFO value (an address, a request line), or null
  * @param tlvs application TLVs, types 0x1000 to 0x3fff, in order

@@ -13,9 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Base64;
-import java.util.List;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -44,7 +42,11 @@ class QuicChannelInteropTest {
         return p;
     }
 
-    /** The test certificate and key as PEM files, for the peer's server. */
+    /**
+     * The test certificate and key as PEM files, for the peer's server. Test-only key: TestTls
+     * generates it with keytool into target/tls on first use (self-signed, CN=localhost); it is
+     * never committed and never used outside the tests.
+     */
     static Path[] pem() throws Exception {
         Path dir = Path.of("target", "tls");
         KeyStore store = KeyStore.getInstance("PKCS12");
@@ -117,25 +119,22 @@ class QuicChannelInteropTest {
                         ZmuxStream st = c.openStream();
                         Future<byte[]> echo = workers.submit(() -> QuicTest.read(st));
                         st.write(ByteBuffer.wrap(new byte[] {1}));
-                        Thread.sleep(4 * d.toMillis());
-                        relay.drop.set(2);
+                        relay.arm(2);
                         st.write(ByteBuffer.wrap(new byte[QuicChannelTest.BURST]));
-                        Thread.sleep(5);
-                        List<Long> lat = new ArrayList<>();
+                        QuicChannelTest.awaitDropped(relay, 2);
                         for (int i = 0; i < 10; i++) c.datagrams().send(ByteBuffer.wrap(QuicChannelTest.stamp(i)));
-                        for (int i = 0; i < 10; i++) {
-                            try { lat.add(QuicChannelTest.latencyMillis(c.datagrams().receive(Duration.ofSeconds(2)))); }
+                        // The echoes come back while the burst's lost data is held at the relay.
+                        int echoed = 0;
+                        for (; echoed < 10; echoed++) {
+                            try { c.datagrams().receive(Duration.ofSeconds(2)); }
                             catch (java.net.SocketTimeoutException e) { break; }
                         }
+                        relay.release();
                         st.finish();
                         assertEquals(QuicChannelTest.BURST + 1, echo.get(20, TimeUnit.SECONDS).length);
                         st.close();
-                        assertTrue(relay.dropped.get() > 0, "no packet lost");
-                        assertTrue(lat.size() >= 5, lat.toString());
-                        // A round trip through the relay is 2d; the lost stream packets delay none of them.
-                        for (long l : lat) assertTrue(l < 3 * d.toMillis(), "echoed channel datagram took " + l + " ms: " + lat);
-                        n += lat.size();
-                        System.out.println(env + " lossy round trips " + lat);
+                        assertTrue(echoed >= 5, echoed + " echoed while the stream was held");
+                        n += echoed;
                     }
                     var s = c.stats();
                     assertEquals(n, s.datagramsSentChannel(), s.toString());

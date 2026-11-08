@@ -1,17 +1,16 @@
 package io.zmux.internal.core;
 
 /**
- * The control frames waiting to be written (SPEC.md Section 9.2): the session-level flags
+ * The control frames waiting to be written: the session-level flags
  * (MAX_DATA, MAX_STREAMS, DATA_BLOCKED, STREAMS_BLOCKED, GOAWAY) and the streams with
  * pending stream-level frames, in the order they were first queued. The stream list is
  * intrusive and doubly linked through each stream's {@link Entry}: queueing and removal
  * are O(1) and allocate nothing.
  *
- * <p>A local stream whose opening frame has not gone out is unknown to the peer, and a
- * frame naming it would name an identifier the peer has not seen (or none at all, before
- * allocation). Its frames other than RESET are therefore <em>held</em>: their bits are kept,
- * but the stream leaves the list until {@link #opened} queues it again, so a held stream
- * never makes control look pending.
+ * <p>A local stream without an identifier has none to name in a frame, so its frames are
+ * <em>held</em>: their bits are kept, but the stream leaves the list until {@link #allocated}
+ * queues it again, so a held stream never makes control look pending. Once allocated a
+ * control frame may itself be the stream's first frame and opens it at the peer: it must not wait for a STREAM frame that credit may block.
  */
 final class ControlQueue {
     // Stream-level frame bits.
@@ -55,7 +54,7 @@ final class ControlQueue {
     boolean goAway() { return goAway; }
 
     void wantMaxData() { maxData = true; }
-    /** MAX_DATA is due even when its value did not grow (a lost frame, MULTIPATH.md 7.4). */
+    /** MAX_DATA is due even when its value did not grow (a lost frame). */
     void forceMaxData() { maxData = true; forceMaxData = true; }
     void maxDataDone() { maxData = false; }
     void forceMaxDataDone() { forceMaxData = false; }
@@ -81,14 +80,14 @@ final class ControlQueue {
 
     // ---- stream-level frames ----
 
-    /** Whether st's frames other than RESET wait for its opening frame. */
+    /** Whether st's frames wait for its identifier. */
     static boolean held(Stream st) {
-        return st.local && !st.tab.opened();
+        return st.local && !st.tab.idSet();
     }
 
     /** Whether st has a frame it may write now. */
     private static boolean writable(Stream st) {
-        return (st.cq.bits & (held(st) ? RESET : ~0)) != 0;
+        return st.cq.bits != 0 && !held(st);
     }
 
     /** Marks a pending stream-level frame of st and asks for a write; held frames only mark. */
@@ -97,8 +96,8 @@ final class ControlQueue {
         if (writable(st)) link(st);
     }
 
-    /** st's opening frame went out: its held frames are queued. */
-    void opened(Stream st) {
+    /** st got its identifier: its held frames are queued. */
+    void allocated(Stream st) {
         if (st.cq.bits != 0) link(st);
     }
 
@@ -139,11 +138,6 @@ final class ControlQueue {
     void remove(Stream st) {
         st.cq.bits = 0;
         unlink(st.cq);
-    }
-
-    /** The opening frame goes again (a rejected 0-RTT): st's frames are held until it does. */
-    void reopen(Stream st) {
-        if (!writable(st)) unlink(st.cq);
     }
 
     private void unlink(Entry e) {

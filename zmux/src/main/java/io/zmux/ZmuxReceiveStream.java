@@ -43,7 +43,10 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     /** The opening information the peer sent (empty for local streams). */
     Preamble preamble();
 
-    /** Whether the opening frame arrived as carrier early data and the handshake has not completed (replayable). */
+    /**
+     * Whether the opening frame arrived as carrier early data (replayable); it stays true for the
+     * stream's life. Always false: no Java carrier accepts TLS 1.3 early data or QUIC 0-RTT.
+     */
     boolean isReplayable();
 
     /** Limits blocking reads; null for none. */
@@ -64,6 +67,10 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     /** Like {@link #readChunk(int)} without blocking; null at FIN. */
     ZmuxFuture<Chunk> readChunkAsync(int max);
 
+    /**
+     * Releases the stream: a receiving part read to its end is left as it is; one not read to
+     * its end is stopped (STOP_SENDING) with code 0.
+     */
     @Override
     void close();
 }

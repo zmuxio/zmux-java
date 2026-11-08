@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Frame matching of TRACES.md Section 5.6. */
+/** Frame matching of traces. */
 final class TraceMatch {
     private TraceMatch() {}
 

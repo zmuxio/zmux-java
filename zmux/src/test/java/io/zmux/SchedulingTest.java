@@ -10,10 +10,9 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(40)
 class SchedulingTest {
-    private static final MultipathConfig MULTIPATH = MultipathConfig.of(3, PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO);
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(MULTIPATH);
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
     }
 
     @Test void customPoliciesUseValuesAndCanChangeOnline() throws Exception {
@@ -36,14 +35,14 @@ class SchedulingTest {
                 int pick = selected;
                 return requests.stream().map(q -> Scheduler.Answer.pipe(pick, 16384)).toList();
             });
-            ZmuxConfig cfg = config(loops).multipath(MULTIPATH.withScheduler(policy)).build();
+            ZmuxConfig cfg = config(loops).scheduler(policy).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg))) {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>)listener::accept);
                 ZmuxSession c = Zmux.connect(listener.localAddress(), cfg), s = sf.get();
                 session.set(c);
-                ZmuxPipe added = c.paths().add(listener.localAddress(), PipeOptions.builder().weight(0).receivePriority(12).receiveStandby(true).build());
+                ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.builder().weight(0).receivePriority(12).receiveStandby(true).build());
                 assertEquals(0, added.stats().orElseThrow().weight());
-                var peer = s.paths().list().stream().filter(p -> p.id() == added.id()).findFirst().orElseThrow().stats().orElseThrow();
+                var peer = s.pipes().stream().filter(p -> p.id() == added.id()).findFirst().orElseThrow().stats().orElseThrow();
                 assertEquals(12, peer.sendPriority()); assertTrue(peer.standby());
                 assertEquals(PipeStats.SettingSource.PEER, peer.sendPrioritySource()); assertEquals(PipeStats.SettingSource.PEER, peer.standbySource());
                 added.setSendPriority(9);
@@ -66,7 +65,7 @@ class SchedulingTest {
                 assertTrue(calls.get() > 0); assertTrue(blocked.get());
                 PipePoolTest.await(() -> c.stats().schedulerAnswers() > 0);
                 long fallbacks = c.stats().schedulerFallbacks();
-                assertEquals(2, c.paths().stats().size());
+                assertEquals(2, c.pipeStats().size());
                 stream.setScheduler(Scheduler.custom((q, p) -> { throw new IllegalArgumentException("bad picker"); }));
                 // A failing policy must fall back, without failing the session.
                 Future<byte[]> fallback = ex.submit(() -> SessionTest.readAll(s.acceptStream()));

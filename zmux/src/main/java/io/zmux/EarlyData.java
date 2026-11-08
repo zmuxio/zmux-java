@@ -5,8 +5,10 @@ public enum EarlyData {
     /** Establishment waits for the peer's parameters. */
     OFF,
     /**
-     * The peer is declared a zmux endpoint: data goes out at once under the zmux floor
-     * (SPEC.md Section 6.1.2), and establishment returns without waiting.
+     * The peer is declared a zmux endpoint: stream data goes out at once under the zmux floor
+     * (early data of the opening pipe), behind the PIPE_ACK fence, and establishment returns without
+     * waiting. There is no carrier early data (TLS 1.3 early data or QUIC 0-RTT): no Java
+     * carrier offers it.
      */
     ZMUX_PEER
 }

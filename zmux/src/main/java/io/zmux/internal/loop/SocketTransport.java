@@ -11,7 +11,7 @@ import java.nio.channels.SocketChannel;
 /** A TCP (or Unix-domain) transport on the loop's selector: non-blocking, writability-driven writes. */
 final class SocketTransport extends AbstractTransport implements EventLoop.IoHandler {
     private static final TransportInfo INFO = new TransportInfo(
-            new CarrierInfo(Framing.BYTES, false, false, false, false), "", null, 0, 0, 32);
+            new CarrierInfo(Framing.BYTES, false, false, false, false), "", null, 0, 0);
 
     private final SocketChannel ch;
     private SelectionKey key;
@@ -227,6 +227,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         } catch (IOException ignored) {
             // The peer is gone; the read side reports it.
         }
+        outputShutDone();
     }
 
     @Override public void shutdownInput() {
@@ -242,8 +243,11 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         if (closed) return;
         closed = true;
         if (key != null) key.cancel();
+        if (cause != null) {
+            // A socket that already ended can refuse the option; it must still close.
+            try { ch.setOption(java.net.StandardSocketOptions.SO_LINGER, 0); } catch (IOException ended) { /* Nothing left to abort. */ }
+        }
         try {
-            if (cause != null) ch.setOption(java.net.StandardSocketOptions.SO_LINGER, 0);
             ch.close();
         } catch (IOException ignored) {
             // Closing anyway.

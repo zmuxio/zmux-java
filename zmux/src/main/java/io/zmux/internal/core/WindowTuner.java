@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * Receive-window auto-tuning (SPEC.md Section 8.3 rule 6): per-scope delivery-rate samples,
+ * Receive-window auto-tuning: per-scope delivery-rate samples,
  * the RTT they are measured over, and growth of the stream and session windows within the
  * memory allowance, optionally through the application's predicate.
  */
@@ -14,7 +14,7 @@ public final class WindowTuner {
         /** pipe_min_rtt of the pipe the current input arrived on, or -1 (multipath only). */
         long inputPipeMinRtt();
 
-        /** max(session window cap, S) (SPEC.md Section 8.3 rule 4). */
+        /** max(session window cap, S). */
         long bufferCap();
 
         /** The largest session window the memory budget allows. */

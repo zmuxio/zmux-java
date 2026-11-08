@@ -42,8 +42,9 @@ class PeerInterop {
     private void run(boolean initiating, boolean multipath) throws Exception {
         String binary = InteropProcess.required("ZMUX_INTEROP_PEER");
         try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).limits(Limits.defaults().withIncomingUniStreams(16));
-            if (multipath) builder.multipath(MultipathConfig.of(4, PipeAuth.psk(PSK)));
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingUniStreams(16);
+            // The peer joins in Trusted mode, which an end admits only when told to.
+            if (multipath) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             var config = builder.build();
             try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
                  var child = initiating ? new InteropProcess(binary, multipath ? "mp-server" : "server", "127.0.0.1:0")
@@ -53,19 +54,19 @@ class PeerInterop {
                     assertNotNull(session); child.expect("ESTABLISHED");
                     assertEquals(multipath, session.info().multipath());
                     if (multipath) {
-                        if (initiating) session.paths().add(target, PipeOptions.defaults());
+                        if (initiating) session.addPipe(target, PipeOptions.defaults());
                         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                        while ((session.paths().stats().size() < 2 || session.paths().stats().stream().anyMatch(p -> !p.eligible())) && System.nanoTime() < end) Thread.sleep(2);
-                        assertTrue(session.paths().stats().size() >= 2 && session.paths().stats().stream().allMatch(p -> p.eligible()), session.paths().stats().toString());
+                        while ((session.pipeStats().size() < 2 || session.pipeStats().stream().anyMatch(p -> !p.eligible())) && System.nanoTime() < end) Thread.sleep(2);
+                        assertTrue(session.pipeStats().size() >= 2 && session.pipeStats().stream().allMatch(p -> p.eligible()), session.pipeStats().toString());
                         session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
-                        var before = session.paths().stats(); echo(session, 16 << 20, 1);
-                        for (var pipe : session.paths().stats()) {
+                        var before = session.pipeStats(); echo(session, 16 << 20, 1);
+                        for (var pipe : session.pipeStats()) {
                             long prior = before.stream().filter(p -> p.pipe() == pipe.pipe()).findFirst().orElseThrow().bytesSent();
                             assertTrue(pipe.bytesSent() - prior >= 1 << 20, "pipe did not carry spread data: " + pipe);
                         }
                         assertEquals("scheduled", command(session, "schedule:round-robin", new byte[0]));
-                        var inbound = session.paths().stats(); echo(session, 8 << 20, 2);
-                        for (var pipe : session.paths().stats()) {
+                        var inbound = session.pipeStats(); echo(session, 8 << 20, 2);
+                        for (var pipe : session.pipeStats()) {
                             long prior = inbound.stream().filter(p -> p.pipe() == pipe.pipe()).findFirst().orElseThrow().bytesReceived();
                             assertTrue(pipe.bytesReceived() - prior >= 1 << 20, "reverse pipe did not carry spread data: " + pipe);
                         }

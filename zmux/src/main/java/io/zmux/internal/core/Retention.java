@@ -10,7 +10,7 @@ import java.util.Iterator;
 /**
  * What a multipath session retains of sent frames until acknowledged: lane logs, acknowledgement, loss and
  * reinjection, the retransmit budget, redundant and idle copies, opportunistic reinjection and penalization, and the
- * credit copies of the redundant snapshot (MULTIPATH.md 6.5, 7.4, 7.5.1; SCHEDULER.md 4.1, 13.1).
+ * credit copies of the redundant snapshot.
  */
 final class Retention {
     /** What Retention asks of the rest of the path layer and the session. */
@@ -73,7 +73,7 @@ final class Retention {
     private final StreamsView streams;
     private final PathMetrics metrics;
     private long retained;
-    /** The latest MAX_DATA is copied with the redundant snapshot (MULTIPATH.md 6.5). */
+    /** The latest MAX_DATA is copied with the redundant snapshot. */
     private boolean copyMaxData;
     /** Stream directions whose latest MAX_STREAM_DATA is copied with the redundant snapshot. */
     private final HashSet<Stream> copyMsd = new HashSet<>();
@@ -293,14 +293,14 @@ final class Retention {
     /**
      * Bounds the retained unacknowledged stream data: four times the summed delivery rate
      * times (smoothed RTT + the peer's ack delay) of the live outbound pipes, at least 1 MiB
-     * and at most the send buffer maximum (SCHEDULER.md Section 13.1).
+     * and at most the send buffer maximum.
      */
     long retransmitBudget() {
         double sum = 0;
         long pd = ack != null ? ack.peerDelay() : 25 * Time.MILLISECOND;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
-            if (a == null || p.out() == null || !a.liveOut()) continue;
+            if (a == null || p.out() == null || a.handshaking() || !a.liveOut()) continue;
             sum += p.out().snd.re().value() * (a.rtt.smoothed() + pd) / 1e9;
         }
         long b = (long) (4 * sum);
@@ -425,6 +425,7 @@ final class Retention {
             w.logFrame(FrameDesc.stream(st.tab.id(), start, n, fin));
             st.payloadSent(start, n);
             w.spendData(n);
+            w.copied(st.tab.id(), start, n);
             stats.redundant(n);
             if (w.pipe() != null && w.pipe().mp() != null) w.pipe().mp().ret.redundantBytes += n;
             if (start + n >= end) {
@@ -473,10 +474,16 @@ final class Retention {
         if (blockedSet.add(st)) blocked.add(st);
     }
 
+    /**
+     * Whether new data of a listed direction is held back: by its stream credit, or by a binding
+     * that moves and so takes no new data until its data on the old pipe is acknowledged. A small
+     * credit that arrives during the move (a blocked direction gets credit at once) leaves it as
+     * held as before: the data that blocks it still sits on the old pipe.
+     */
     static boolean streamBlocked(Stream st) {
         StreamSend.SendPart sp = st.snd;
-        return !st.tab.discarded() && st.hasSend && !sp.reset() && st.tab.idSet() && sp.sendEnd() > Math.max(sp.sent(), sp.q().base())
-                && sp.sent() >= sp.maxData();
+        if (st.tab.discarded() || !st.hasSend || sp.reset() || !st.tab.idSet() || sp.sendEnd() <= Math.max(sp.sent(), sp.q().base())) return false;
+        return sp.sent() >= sp.maxData() || sp.mps() != null && sp.mps().sched.moving();
     }
 
     void opportunistic(PathScheduler.Decision d, RecordWriter w) {
@@ -530,6 +537,7 @@ final class Retention {
         w.logFrame(FrameDesc.stream(st.tab.id(), lo, n, false));
         st.payloadSent(lo, n);
         w.spendData(n);
+        w.copied(st.tab.id(), lo, n);
         ms.ret.oppSent.add(lo, lo + n);
         stats.opportunistic(n);
         f.mp().ret.oppBytes += n;
@@ -572,8 +580,38 @@ final class Retention {
         stats.penalty();
         a.ret.penaltyEnd = p.out().snd.so();
         p.out().snd.re().penalize();
+        reinjectPenalized(p);
         port.capacityChanged();
         port.checkTakeover();
+    }
+
+    /**
+     * Re-sends, once per penalty, the unacknowledged stream data on p of every direction bound to
+     * p: the penalty keeps new data off p, so the binding moves, and its data left on the slow
+     * pipe would otherwise hold the receiver until p delivers it. An entry is re-sent at most
+     * once for penalties (and not after a reinjection), so the copies stay within what p had in
+     * flight; they go where reinjected information goes. No timer: the penalty is the trigger.
+     */
+    private void reinjectPenalized(Pipe p) {
+        if (p.out() == null) return;
+        long bytes = 0;
+        for (Pipe.OutLane ol : p.out().lanes) {
+            for (Retained e : ol.log) {
+                if (e.d.kind() != FrameDesc.Kind.STREAM || e.reinjected()) continue;
+                Stream st = streams.get(e.d.id());
+                if (st == null || !st.hasSend) continue;
+                PathStreamState m = st.snd.mps();
+                if (m == null || !m.sched.bindSet() || m.sched.bindPipe() != p.id) continue;
+                if (!e.penalize()) continue;
+                bytes += e.d.n();
+                lost(e.d);
+            }
+        }
+        if (bytes > 0) {
+            p.mp().ret.reinjectedBytes += bytes;
+            stats.reinjected(bytes);
+            pipes.wakeWriters();
+        }
     }
 
     void penaltyAcked(Pipe p) {

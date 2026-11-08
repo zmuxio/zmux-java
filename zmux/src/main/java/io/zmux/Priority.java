@@ -1,7 +1,7 @@
 package io.zmux;
 
 /**
- * A stream's scheduling priority (EXTENSIONS.md priorities): urgency 0 (first) to 7, and
+ * A stream's scheduling priority: urgency 0 (first) to 7, and
  * whether streams of the same urgency share the pipe round-robin.
  */
 public record Priority(int urgency, boolean incremental) {

@@ -5,7 +5,7 @@ import io.zmux.carrier.VarInt;
 import java.nio.ByteBuffer;
 
 /**
- * Channel datagrams (EXTENSIONS.md Section 6.8): one DATAGRAM frame sent on a carrier's own
+ * Channel datagrams: one DATAGRAM frame sent on a carrier's own
  * datagram channel instead of in a record, after the Pipe Stream ID on channels shared by the
  * pipes of a connection (QUIC, WebTransport) and alone where the channel belongs to the pipe
  * (HTTP/3). The only place channel datagrams are encoded and decoded.

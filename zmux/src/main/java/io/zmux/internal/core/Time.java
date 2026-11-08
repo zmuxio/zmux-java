@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 /**
  * Session clock arithmetic: instants and durations in nanoseconds as {@code long},
  * {@link #NEVER} for a deadline that never fires. Every addition saturates
- * (IMPLEMENTATION.md Section 13.4 T1).
+ * .
  */
 public final class Time {
     public static final long NEVER = Long.MAX_VALUE;

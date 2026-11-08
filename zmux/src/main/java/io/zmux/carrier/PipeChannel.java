@@ -7,11 +7,14 @@ import java.nio.channels.ByteChannel;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -144,18 +147,27 @@ public final class PipeChannel implements ByteChannel {
      * Framing#MESSAGES}, so in must keep message boundaries, as a {@link PipeChannel} does);
      * its writer makes one write call on out (null: no sending half) for each write it takes,
      * the batch gathered (one call per message with {@link Framing#MESSAGES}), on a virtual
-     * thread. Closing a half closes its channel.
+     * thread. Closing a half closes its channel; when in and out are one socket channel,
+     * closing a half shuts that direction down (the sending half's close sends FIN, its abort
+     * closes the socket) and the socket closes with the second half.
+     *
+     * <p>A selectable half (a socket channel) is served by a platform thread of its own instead:
+     * on Windows, JDK 25 and later lose the wake-up of a virtual thread waiting to write on a
+     * socket while another virtual thread waits to read from it, so a write that fills the send
+     * buffer would stall until the next inbound byte. Plain blocking reads and writes on two
+     * platform threads do not depend on the virtual-thread poller.
      *
      * @param readSize the largest read
      */
     public static PipeIo pipe(ReadableByteChannel in, WritableByteChannel out, Framing framing, int readSize) {
         Objects.requireNonNull(framing, "framing");
         if (readSize < 1) throw new IllegalArgumentException("readSize below 1");
+        Socket shared = in == out && in instanceof SocketChannel sc ? new Socket(sc) : null;
         PipeReader r = in == null ? null : new PipeReader() {
             private final AtomicBoolean once = new AtomicBoolean();
             @Override public void start(Sink sink) {
                 if (!once.compareAndSet(false, true)) throw new IllegalStateException("reader already started");
-                Thread.ofVirtual().name("zmux-pipe-channel-read").start(() -> {
+                threads(in).name("zmux-pipe-channel-read").start(() -> {
                     try {
                         while (true) {
                             ByteBuffer b = ByteBuffer.allocate(readSize);
@@ -171,11 +183,12 @@ public final class PipeChannel implements ByteChannel {
                     }
                 });
             }
-            @Override public void close() { closeQuietly(in); }
+            @Override public void close() { if (shared != null) shared.closeHalf(false); else closeQuietly(in); }
         };
         PipeWriter w = out == null ? null : new PipeWriter() {
+            private final Executor run = out instanceof SelectableChannel ? new WriteThread() : t -> Thread.ofVirtual().name("zmux-pipe-channel-write").start(t);
             @Override public void write(OutboundBatch batch, Completion done) {
-                Thread.ofVirtual().name("zmux-pipe-channel-write").start(() -> {
+                run.execute(() -> {
                     try {
                         if (framing == Framing.MESSAGES) {
                             for (int m = 0, from = 0; m < batch.messageCount(); m++) {
@@ -196,9 +209,61 @@ public final class PipeChannel implements ByteChannel {
                     }
                 });
             }
-            @Override public void close() { closeQuietly(out); }
+            @Override public void close() {
+                if (shared != null) shared.closeHalf(true); else closeQuietly(out);
+                if (run instanceof WriteThread t) t.stop();
+            }
+            @Override public void abort(Throwable cause) {
+                closeQuietly(out);
+                if (run instanceof WriteThread t) t.stop();
+            }
         };
         return new PipeIo(r, w, framing, null, null);
+    }
+
+    /** The two halves of one socket channel: each close shuts its direction, the second closes the socket. */
+    private record Socket(SocketChannel ch, java.util.concurrent.atomic.AtomicInteger open) {
+        Socket(SocketChannel ch) { this(ch, new java.util.concurrent.atomic.AtomicInteger(2)); }
+
+        void closeHalf(boolean output) {
+            try {
+                if (output) ch.shutdownOutput(); else ch.shutdownInput();
+            } catch (IOException ignored) {
+                // The socket is gone already; closing it below is all that is left.
+            }
+            if (open.decrementAndGet() == 0) closeQuietly(ch);
+        }
+    }
+
+    /** Virtual threads, or a platform thread for a selectable channel (see {@link #pipe}). */
+    private static Thread.Builder threads(java.nio.channels.Channel c) {
+        return c instanceof SelectableChannel ? Thread.ofPlatform().daemon(true) : Thread.ofVirtual();
+    }
+
+    /**
+     * The platform thread of a selectable sending half, started with its first write. A writer
+     * has at most one write in flight, so the queue holds at most that one and a stop.
+     */
+    private static final class WriteThread implements Executor {
+        private static final Runnable STOP = () -> {};
+        private final java.util.concurrent.LinkedBlockingQueue<Runnable> queue = new java.util.concurrent.LinkedBlockingQueue<>();
+        private final AtomicBoolean started = new AtomicBoolean();
+
+        @Override public void execute(Runnable task) {
+            queue.add(task);
+            if (started.compareAndSet(false, true)) Thread.ofPlatform().daemon(true).name("zmux-pipe-channel-write").start(this::run);
+        }
+
+        /** Ends the thread after the write in flight, which the closed channel fails. */
+        void stop() { queue.add(STOP); }
+
+        private void run() {
+            try {
+                for (Runnable t; (t = queue.take()) != STOP; ) t.run();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static ByteBuffer gather(OutboundBatch batch, int from, int to) {

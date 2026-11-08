@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 
 /**
- * The transports of one session and what each is to it (IMPLEMENTATION.md Section 2.8):
+ * The transports of one session and what each is to it:
  * the pipe and lane it carries, the batch of its writes, the nesting edge and the memory
  * charge of its connection. The only place a transport is attached to or detached from a
  * session; detaching closes it and returns its charge and edge exactly once. Loop only.
@@ -70,6 +70,12 @@ final class CarrierSet {
         @Override
         public void written(Transport t, Batch b, Throwable cause) {
             rt.written(t, b, cause);
+        }
+
+        @Override
+        public void outputShut(Transport t) {
+            rt.core.outputShut(pipe, lane, Clock.now());
+            rt.markDirty();
         }
 
         @Override

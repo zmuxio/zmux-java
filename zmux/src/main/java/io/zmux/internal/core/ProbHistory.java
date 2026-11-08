@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 /**
- * The probation history of a path (SCHEDULER.md Section 11): a pipe of fate group 0, or a
+ * The probation history of a path: a pipe of fate group 0, or a
  * non-zero fate group of a joiner in one direction.
  */
 final class ProbHistory {

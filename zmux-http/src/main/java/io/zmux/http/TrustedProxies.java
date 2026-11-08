@@ -10,7 +10,7 @@ import java.util.Objects;
 
 /**
  * The intermediaries in front of a server (reverse proxies, load balancers, CDNs) whose report of
- * a carrier's client address is believed (MULTIPATH.md Section 5.6). The source of a carrier,
+ * a carrier's client address is believed. The source of a carrier,
  * which the admission sees as {@code CarrierInfo.source()} and the listener counts in its
  * per-source limits, is then the client address the intermediary reports; the same report from
  * any other peer is ignored, so that a client cannot choose its own source.
@@ -71,7 +71,7 @@ public final class TrustedProxies {
 
     /**
      * The source of an HTTP request that arrived from peer with these header fields, the one resolver of the
-     * trusted-intermediary configuration (API.md Section 4.7): the client's address and port that the trusted
+     * trusted-intermediary configuration: the client's address and port that the trusted
      * intermediary reports in the configured header field (port 0 when it reports none), or peer itself when peer
      * is not trusted or the fields name no client.
      */

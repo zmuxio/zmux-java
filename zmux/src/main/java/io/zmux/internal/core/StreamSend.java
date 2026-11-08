@@ -1,12 +1,12 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
 import java.util.ArrayList;
 
 /**
- * The sending parts of a session's streams (SPEC.md Sections 4.3, 7.1 and 8.4,
- * IMPLEMENTATION.md Section 6.4): application writes into the send buffer, the
+ * The sending parts of a session's streams: application writes into the send buffer, the
  * water-filling share of the session's send buffer, FIN, resets and the peer's
  * STOP_SENDING and MAX_STREAM_DATA, send-capacity waiters, and the terminal states.
  * Effects on the session go through {@link Port}.
@@ -18,6 +18,9 @@ public final class StreamSend {
 
         /** The session's terminal error, or null. */
         SessionError error();
+
+        /** Whether the first flight is held. */
+        boolean firstHeld();
 
         /** Whether the peer's parameters arrived. */
         boolean established();
@@ -153,7 +156,7 @@ public final class StreamSend {
 
     /**
      * Grants up to max of the part's remaining send-buffer share as a lease the application may fill
-     * without asking (IMPLEMENTATION.md Section 6.4: leased bytes count as held, so the
+     * without asking (leased bytes count as held, so the
      * water-filling sums stay the single authority). Returns the grant; 0 when the part
      * cannot take data or has no room.
      */
@@ -316,7 +319,7 @@ public final class StreamSend {
         startReset(st, code, false);
     }
 
-    /** Resets the part with ZMUX_REJECTED (EXTENSIONS.md Sections 3.4 and 7.2). */
+    /** Resets the part with ZMUX_REJECTED. */
     void reject(Stream st) {
         st.snd.errState = StreamError.of(StreamError.Kind.REJECTED, st.tab.id());
         startReset(st, TransportError.REJECTED, false);
@@ -357,7 +360,7 @@ public final class StreamSend {
         port.wantWrite();
     }
 
-    /** Forgets a stream that never emitted a frame (SPEC.md Section 7.2). */
+    /** Forgets a stream that never emitted a frame. */
     void cancelUnopened(Stream st) {
         if (st.snd.cancelled) return;
         st.snd.cancelled = true;
@@ -375,7 +378,7 @@ public final class StreamSend {
         table.unreserve(st);
     }
 
-    /** A received STOP_SENDING (SPEC.md Section 4.3). */
+    /** A received STOP_SENDING. */
     void onStopSending(Stream st, long code) {
         StreamSend.SendPart sp = st.snd;
         if (sp.state == Stream.SEND_DATA_RECVD || sp.state == Stream.SEND_RESET_RECVD) return;
@@ -497,7 +500,24 @@ public final class StreamSend {
             sp.finSent = true;
             sp.state = Stream.SEND_DATA_SENT;
         }
+        outbox.wake(sp.wsig); // A waiting flush, also where the bytes are retained.
         return grown;
+    }
+
+    /**
+     * Whether st's opening frame and its data up to target were sent, registering sig otherwise.
+     * A reset stream is done; a failed one reports its failure. While the first flight is held
+     * they are queued in it and leave with it: done.
+     */
+    public boolean flushDone(Stream st, long target, Waiter sig) throws CoreException {
+        StreamSend.SendPart sp = st.snd;
+        if (sp.errState != null) throw CoreException.stream(sp.errState);
+        if (sp.reset) return true;
+        if (port.error() != null) throw CoreException.session(port.error());
+        if (port.firstHeld()) return true;
+        if (st.tab.opened() && sp.sent >= Math.min(target, sp.q().end())) return true;
+        sp.wsig = sig;
+        return false;
     }
 
     /** Marks st blocked at its current credit; false when already marked there. */
@@ -508,7 +528,7 @@ public final class StreamSend {
         return true;
     }
 
-    /** Writes RESET_STREAM(_AT) once the data below the Reliable Size went out (SPEC.md 4.3); false when the batch is full. */
+    /** Writes RESET_STREAM(_AT) once the data below the Reliable Size went out; false when the batch is full. */
     boolean writeReset(RecordWriter w, Stream st, boolean retainsSent) {
         StreamSend.SendPart sp = st.snd;
         if (sp.sent < sp.resetRel) return true;
@@ -533,7 +553,7 @@ public final class StreamSend {
         return true;
     }
 
-    /** Writes PRIORITY_UPDATE for st (EXTENSIONS.md 5); false when the batch is full. */
+    /** Writes PRIORITY_UPDATE for st; false when the batch is full. */
     boolean writePriority(RecordWriter w, Stream st) {
         long id = st.tab.id();
         Ext x = ext(st);
@@ -558,18 +578,6 @@ public final class StreamSend {
         return true;
     }
 
-    /** The bootstrap restarted (early data rejected): st's data goes again from the start under the new parameters; true when a RESET_STREAM is owed again. */
-    static boolean restart(Stream st) {
-        SendPart sp = st.snd;
-        sp.sent = 0;
-        sp.finSent = false;
-        sp.maxData = 0;
-        if (sp.state == Stream.SEND_DATA_SENT) sp.state = Stream.SEND_SEND;
-        if (!sp.reset) return false;
-        sp.resetSent = false;
-        return true;
-    }
-
     /** Raises st's send credit to v (initial parameters); true when it grew. */
     static boolean raiseCredit(Stream st, long v) {
         if (v <= st.snd.maxData) return false;
@@ -582,7 +590,7 @@ public final class StreamSend {
         if (!keep || st.snd.errState == null) st.snd.errState = e;
     }
 
-    /** Puts the encoded preamble ahead of st's data (EXTENSIONS.md 3). */
+    /** Puts the encoded preamble ahead of st's data. */
     static void prependPreamble(Stream st, byte[] b) {
         SendPart sp = st.snd;
         sp.preLen = b.length;
@@ -591,6 +599,67 @@ public final class StreamSend {
     }
 
     /** The sending part of a stream (RFC 9000 Section 3.1); written only here. */
+    /**
+     * Copies at most limit bytes of unsent or unacknowledged stream data as STREAM frames without FIN
+     *. New bytes count as sent here, against session credit and the retransmit
+     * budget, as the acceptor counts them; since the batch counts in no position, all it carries goes again
+     * as reinjected information and the receiver deduplicates. A new stream's ID is allocated here and not
+     * cancelled afterwards.
+     */
+    byte[] firstBatch(int limit, java.util.function.Predicate<Stream> sendable, PathLayer path) {
+        java.util.List<Stream> live = new ArrayList<>();
+        table.live().forEach(live::add);
+        live.addAll(table.withoutId()); // A stream written and not yet opened has no identifier until here.
+        for (Stream st : live) {
+            if (st.hasSend && !st.tab.idSet() && !st.snd.cancelled && st.snd.q.end() > 0 && sendable.test(st)) {
+                try { table.pinId(st); } catch (CoreException full) { /* No credit: the stream stays out of the batch. */ }
+            }
+        }
+        java.nio.ByteBuffer out = java.nio.ByteBuffer.allocate(limit);
+        for (Stream st : live) {
+            if (!st.hasSend || st.snd.reset || !st.tab.idSet()) continue;
+            SendPart sp = st.snd;
+            long off = sp.q.base();
+            long end = Math.min(sp.q.end(), sp.maxData);
+            if (off < end && out.position() < limit) {
+                // The limit is on the encoded frames; a length that the room leaves shorter has a header no longer.
+                int space = limit - out.position();
+                long want = Math.min(end - off, space);
+                long old = off < sp.sent ? Math.min(sp.sent - off, want) : 0;
+                want = Math.min(want, old + Math.min(conn.room(), path.retainRoom()));
+                long whole = want;
+                while (want > 0 && FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) want, true) + want > space) {
+                    want = Math.min(want - 1, space - FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) want, true));
+                }
+                // The cut used the longer header; what is left may take a shorter one.
+                while (want > 0 && want < whole && FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) want + 1, true) + want + 1 <= space) want++;
+                int have = 0;
+                while (have < want) {
+                    SendQueue.Peek c = sp.q.peek(off + have, (int) want - have);
+                    if (c == null || !c.data().hasRemaining()) break;
+                    have += c.data().remaining();
+                }
+                // The frame at offset 0 carries the whole preamble.
+                if (have > 0 && (off > 0 || have >= sp.preLen)) {
+                    FrameEncoder.streamHeader(out, st.tab.id(), off, have, false, true);
+                    for (int n = 0; n < have; ) {
+                        // The loop above found these have bytes queued, and nothing runs between: the peek finds them again.
+                        java.nio.ByteBuffer c = java.util.Objects.requireNonNull(sp.q.peek(off + n, have - n), "the counted bytes are queued").data();
+                        n += c.remaining();
+                        out.put(c);
+                    }
+                    writing(st);
+                    long grown = dataWritten(st, off + have, false);
+                    conn.consumed(grown);
+                    path.retain(grown);
+                    checkCapacity(st);
+                    path.batchCarried(st, off, have);
+                }
+            }
+        }
+        return out.position() == 0 ? null : java.util.Arrays.copyOf(out.array(), out.position());
+    }
+
     static final class SendPart {
         private boolean cancelled;
         private Waiter wsig;
@@ -743,7 +812,7 @@ public final class StreamSend {
         return st.snd.ext;
     }
 
-    /** Requests a priority for the peer's sending part with PRIORITY_UPDATE (EXTENSIONS.md 5). */
+    /** Requests a priority for the peer's sending part with PRIORITY_UPDATE. */
     static void requestPriority(Stream st, int urgency, boolean incremental) {
         Ext x = ext(st);
         x.reqPrio = true;
@@ -770,7 +839,7 @@ public final class StreamSend {
     }
 
 
-    /** A stream's PRIORITY_UPDATE requests and capacity waiters (EXTENSIONS.md 5); allocated on first use. */
+    /** A stream's PRIORITY_UPDATE requests and capacity waiters; allocated on first use. */
     static final class Ext {
         private long reqSeq;
         private long reqSent;

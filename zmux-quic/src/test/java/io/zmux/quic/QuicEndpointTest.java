@@ -11,8 +11,9 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(60)
 class QuicEndpointTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
-    static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(6).withAuth(PipeAuth.psk(new byte[32])).withProbation(Duration.ZERO).withScheduler(Scheduler.SPREAD_ETA)).build();
+    static ZmuxConfig config(EventLoops loops) { return builder(loops).build(); }
+    static ZmuxConfig.Builder builder(EventLoops loops) {
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(6).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).scheduler(Scheduler.SPREAD_ETA);
     }
     static void closed(ZmuxSession a, ZmuxSession b) throws Exception {
         a.close(); b.close(); a.awaitClosed(); b.awaitClosed();
@@ -41,9 +42,9 @@ class QuicEndpointTest {
                 var carrier = server.openPipe(shared).thenApply(pipe -> {
                     assertFalse(shared.eventLoop().inEventLoop(),"application callback ran on the native loop"); return pipe;
                 }).toCompletableFuture().get(5,TimeUnit.SECONDS);
-                var joined = b.paths().add(carrier,PipeOptions.defaults()); assertTrue(joined.id()>0);
-                assertEquals(2,a.paths().list().size());
-                a.paths().list().stream().filter(p -> p.id()==0).findFirst().orElseThrow().abort();
+                var joined = b.addPipe(carrier,PipeOptions.defaults()); assertTrue(joined.id()>0);
+                assertEquals(2,a.pipes().size());
+                a.pipes().stream().filter(p -> p.id()==0).findFirst().orElseThrow().abort();
                 QuicTest.transfer(workers,a,b,4,128<<10); QuicTest.transfer(workers,b,a,4,64<<10);
                 assertTrue(shared.isActive(),"aborting pipe 0 must not close its shared QUIC connection");
                 assertNull(local.accept(Duration.ofMillis(20)),"join created an application session");
@@ -62,9 +63,9 @@ class QuicEndpointTest {
                 var b = remote.accept(Duration.ofSeconds(5)); assertNotNull(b);
                 var original = client.connections().getFirst(); var originalRemote = server.connections().getFirst();
                 var joined = client.openPipe(server.address(),"localhost",a).toCompletableFuture().get(5,TimeUnit.SECONDS);
-                a.paths().add(joined,PipeOptions.defaults());
+                a.addPipe(joined,PipeOptions.defaults());
                 var fresh = server.connections().stream().filter(c -> c != originalRemote).findFirst().orElseThrow();
-                b.paths().add(server.openPipe(fresh).toCompletableFuture().get(5,TimeUnit.SECONDS),PipeOptions.defaults());
+                b.addPipe(server.openPipe(fresh).toCompletableFuture().get(5,TimeUnit.SECONDS),PipeOptions.defaults());
                 original.close().sync();
                 QuicTest.transfer(workers,a,b,4,128<<10); QuicTest.transfer(workers,b,a,4,64<<10); closed(a,b);
             }

@@ -17,9 +17,9 @@ public enum HttpClass {
     WEBSOCKET,
     /** An extended CONNECT for webtransport-h3 (or webtransport, the name of earlier drafts). */
     WEBTRANSPORT,
-    /** A GET with Zmux-Pipe-Pair or Zmux-Pipe-Join. */
+    /** A GET with Zmux-Pipe-Pair. */
     DOWNLINK,
-    /** A POST with Zmux-Pipe-Pair (a split bootstrap's uplink), or one without a Content-Length that carries Zmux-Pipe-Join. */
+    /** A POST with Zmux-Pipe-Pair: a split carrier's uplink. */
     UPLINK,
     /** A POST with a Content-Length: one exchange of the exchange carrier. */
     EXCHANGE,
@@ -58,7 +58,7 @@ public enum HttpClass {
         switch (r.method()) {
             case "GET" -> {
                 if (r.version() == 1 && hasToken(h.header("Upgrade"), "websocket")) return WEBSOCKET;
-                if (present(h, JoinHint.PAIR_HEADER) || present(h, JoinHint.JOIN_HEADER)) return DOWNLINK;
+                if (present(h, JoinHint.PAIR_HEADER)) return DOWNLINK;
             }
             case "CONNECT" -> {
                 String p = r.protocol();
@@ -71,7 +71,6 @@ public enum HttpClass {
             case "POST" -> {
                 if (present(h, JoinHint.PAIR_HEADER)) return UPLINK;
                 if (r.contentLength() >= 0) return EXCHANGE;
-                if (present(h, JoinHint.JOIN_HEADER)) return UPLINK;
                 return BIDIRECTIONAL;
             }
             default -> { }

@@ -17,7 +17,7 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** Datagrams on a carrier's datagram channel (EXTENSIONS.md Section 6.8): wire format, choice, receiving, holding. */
+/** Datagrams on a carrier's datagram channel: wire format, choice, receiving, holding. */
 @Timeout(30)
 class ChannelDatagramTest {
     /** A fake channel: a Pipe Stream ID and the current maximum. */
@@ -207,7 +207,7 @@ class ChannelDatagramTest {
             if (c.shaped) p.a.setPipeShaper(0, new io.zmux.shaping.Shaper() {
                 @Override public Set<io.zmux.shaping.Capability> capabilities() { return Set.of(); }
                 @Override public void plan(io.zmux.shaping.RecordView view, io.zmux.shaping.RecordPlan plan) {}
-                @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Reply reply) {}
+                @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Effects effects) {}
             });
             p.recordsA.clear();
             p.a.sendDatagram(null, 0, bytes(c.size, 2));

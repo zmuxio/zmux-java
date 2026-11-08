@@ -6,20 +6,25 @@ import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
 /**
- * A snapshot of one attachment (API.md Section 7.2), taken on the session's loop. A field that
+ * A snapshot of one attachment, taken on the session's loop. A field that
  * can be absent is null (objects and durations) or an empty {@link OptionalLong} (counts,
  * positions, IDs, rates and points in time). Rates are bytes per second; {@link #deliveryRate()} is a sender
  * estimate, not guaranteed bandwidth. Points in time are {@link System#nanoTime()} values. The
- * pipe's addresses are carrier metadata (API.md Section 4.1), not statistics.
+ * pipe's addresses are carrier metadata, not statistics.
  *
  * @param pipe the pipe ID
+ * @param recordMode who protects the carrier's records ({@link RecordMode#UNMANAGED} for a first pipe without the secure carrier)
  * @param local this endpoint joined the attachment (the dialer, for the bootstrap pipe)
  * @param fateGroup its fate group, 0 for none
  * @param label the label the application gave its carrier, or null
  * @param carrier its carrier's kind, or null when the adapter declares none
+ * @param variant the host's name of the carrier transform the pipe runs, as its pipe input declares
+ *     it ({@link io.zmux.carrier.PipeIo#withVariant}); "" without one
  * @param outbound the outbound direction's state, or null without one
  * @param inbound the inbound direction's state, or null without one
  * @param attachedFor time since the attachment was made
+ * @param peerAttached the peer has attached it; always true for pipe 0
+ *     and for pipes the peer joined
  * @param suspectCount times the outbound pipe became suspect
  * @param failureCount 0 or 1: whether the attachment failed
  * @param failure why it failed, or null
@@ -81,9 +86,9 @@ import java.util.OptionalLong;
  * @param lanesRefused own lanes of the outbound direction the peer refused
  * @param lanes per lane, for a pipe with lanes; empty without
  */
-public record PipeStats(long pipe, boolean local, long fateGroup, String label, CarrierKind carrier,
-                        PipeState.Outbound outbound, PipeState.Inbound inbound, Duration attachedFor,
-                        long suspectCount, long failureCount, Failure failure,
+public record PipeStats(long pipe, RecordMode recordMode, boolean local, long fateGroup, String label, CarrierKind carrier,
+                        String variant, PipeState.Outbound outbound, PipeState.Inbound inbound, Duration attachedFor,
+                        boolean peerAttached, long suspectCount, long failureCount, Failure failure,
                         long sendPriority, SettingSource sendPrioritySource, boolean standby, SettingSource standbySource,
                         long receivePriority, boolean receiveStandby, long requestSeq, PeerRequest peerRequest, long weight,
                         OptionalLong probationUntil, boolean inProbation, boolean revalidating, boolean eligible,

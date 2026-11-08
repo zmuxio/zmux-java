@@ -78,8 +78,8 @@ class QuicTest {
                 assertEquals("qmux-02", client.info().applicationProtocol());
                 assertTrue(listener.memoryUsed() >= options.connectionWindow());
                 transfer(workers, client, accepted, 16, 256 << 10);
-                assertTrue(client.paths().stats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
-                var laneStats = client.paths().stats().getFirst();
+                assertTrue(client.pipeStats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
+                var laneStats = client.pipeStats().getFirst();
                 assertEquals(laneStats.lanesOut(), laneStats.lanes().size());
                 assertEquals(laneStats.bytesSent(), laneStats.lanes().stream().mapToLong(l -> l.positionSent().orElseThrow()).sum(),
                         "the pipe's position is the sum over its lanes");
@@ -101,7 +101,7 @@ class QuicTest {
                 lanes.add(view.lane());
                 plan.delayNanos(200_000);
             }
-            @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Reply reply) {}
+            @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Effects effects) {}
         };
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var ccfg = ZmuxConfig.builder().eventLoops(loops).shaper(delayAll).build();
@@ -113,8 +113,8 @@ class QuicTest {
                 ZmuxSession client = endpoint.connect(server.address(), "localhost", ccfg).toCompletableFuture().get(10, TimeUnit.SECONDS);
                 ZmuxSession accepted = listener.accept(Duration.ofSeconds(10)); assertNotNull(accepted);
                 transfer(workers, client, accepted, 16, 256 << 10);
-                assertTrue(client.paths().stats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
-                var laneStats = client.paths().stats().getFirst();
+                assertTrue(client.pipeStats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
+                var laneStats = client.pipeStats().getFirst();
                 assertEquals(laneStats.lanesOut(), laneStats.lanes().size());
                 assertEquals(laneStats.bytesSent(), laneStats.lanes().stream().mapToLong(l -> l.positionSent().orElseThrow()).sum(),
                         "the pipe's position is the sum over its lanes");
@@ -145,7 +145,7 @@ class QuicTest {
                 assertFalse(seenClient.isEmpty()); assertFalse(seenServer.isEmpty());
                 for (var p : seenClient) assertEquals(CarrierKind.QUIC, p.carrier(), p.toString());
                 for (var p : seenServer) assertEquals(CarrierKind.QUIC, p.carrier(), p.toString());
-                assertEquals(CarrierKind.QUIC, client.paths().list().getFirst().stats().orElseThrow().carrier());
+                assertEquals(CarrierKind.QUIC, client.pipes().getFirst().stats().orElseThrow().carrier());
                 client.close(); accepted.awaitClosed(); client.awaitClosed();
             }
         }
@@ -153,7 +153,7 @@ class QuicTest {
 
     @Test void joinsOnAnotherConnectionAndSurvivesItsPeerConnectionLoss() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(3).withAuth(PipeAuth.psk(new byte[32])).withScheduler(Scheduler.SPREAD_ETA).withProbation(Duration.ZERO)).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).probation(Duration.ZERO).build();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
@@ -165,8 +165,8 @@ class QuicTest {
                     assertFalse(original.eventLoop().inEventLoop(), "application callback ran on the native event loop");
                     return value;
                 }).toCompletableFuture().get(10, TimeUnit.SECONDS);
-                ZmuxPipe joined = client.paths().add(pipe, PipeOptions.defaults());
-                assertTrue(joined.id() > 0); assertEquals(2, client.paths().list().size());
+                ZmuxPipe joined = client.addPipe(pipe, PipeOptions.defaults());
+                assertTrue(joined.id() > 0); assertEquals(2, client.pipes().size());
                 transfer(workers, client, accepted, 8, 256 << 10);
                 original.close().sync();
                 transfer(workers, client, accepted, 4, 256 << 10);

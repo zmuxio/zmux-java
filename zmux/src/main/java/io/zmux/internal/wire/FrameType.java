@@ -1,6 +1,6 @@
 package io.zmux.internal.wire;
 
-/** Frame type codepoints (REGISTRY.md Section 3). */
+/** Frame type codepoints. */
 public final class FrameType {
     public static final long PADDING = 0x00;
     public static final long RESET_STREAM = 0x04;
@@ -28,12 +28,15 @@ public final class FrameType {
     public static final long PING_RESPONSE = 0x348c67529ef8c7beL;
     public static final long GOAWAY = 0x1911f43eL;
     public static final long PRIORITY_UPDATE = 0x073d08cfL;
-    public static final long PIPE_JOIN = 0x1a24de36L;
     public static final long PIPE_ACK = 0x0b2b3eebL;
     public static final long PIPE_LANE = 0x3a05a1c9L;
+
+    /** The frame types that may begin a carrier's first record. */
+    public static final long[] FIRST_FRAME_TYPES = {TRANSPORT_PARAMETERS, PIPE_LANE};
     public static final long PIPE_PING = 0x269b43e6L;
     public static final long PIPE_ABANDON = 0x23b35b74L;
     public static final long PIPE_STATUS = 0x227b2811L;
+    public static final long SESSION_EPOCH = 0x024e93ebL;
 
     private FrameType() {}
 }

@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import java.util.Arrays;
 
 /**
- * R_p of one outbound pipe (SCHEDULER.md Section 2.3): delivery-rate samples, a
+ * R_p of one outbound pipe: delivery-rate samples, a
  * windowed maximum over the last 10 round trips within 10 s, and the
  * application-limited rules (the bottleneck observation and the bubble).
  */
@@ -54,7 +54,7 @@ final class RateEstimator {
     /** Whether the pipe's carrier is not writable now (a sample taken now is a bottleneck sample). */
     void blockedNow(boolean v) { blockedNow = v; }
 
-    /** Opportunistic penalization (MULTIPATH.md 7.5.1): R_p halves and its samples are discarded. */
+    /** Opportunistic penalization: R_p halves and its samples are discarded. */
     void penalize() {
         double v = value();
         sn = 0;
@@ -77,9 +77,12 @@ final class RateEstimator {
         return false;
     }
 
-    /** Feeds one sample; returns its value when it is a bottleneck sample, else 0. */
-    double sample(double rate, boolean bubbleFlag, long epoch, long now) {
-        boolean bottleneck = !bubbleFlag && (epoch != blockEpoch || blockedNow);
+    /**
+     * Feeds one sample; returns its value when it is a bottleneck sample, else 0. A queue-proven
+     * sample (proven) is a bottleneck sample whatever the writability and bubbles said.
+     */
+    double sample(double rate, boolean bubbleFlag, long epoch, boolean proven, long now) {
+        boolean bottleneck = proven || !bubbleFlag && (epoch != blockEpoch || blockedNow);
         if (!bottleneck && rate <= value()) return 0;
         hasSample = true;
         if (bottleneck) measured = true;

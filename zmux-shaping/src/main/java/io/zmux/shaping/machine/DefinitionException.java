@@ -1,10 +1,27 @@
 package io.zmux.shaping.machine;
 
-/** A definition that cannot be read or does not validate. */
-public final class DefinitionException extends Exception {
-    public DefinitionException(String message) { super(message); }
+import java.io.Serial;
 
-    DefinitionException(String context, DefinitionException cause) {
-        super(context + ": " + cause.getMessage(), cause);
+/** A definition or a configuration bundle that does not load; {@link #category()} names the kind of error. */
+public final class DefinitionException extends Exception {
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /** The kinds of error. */
+    public enum Category {
+        SYNTAX, DUPLICATE_KEY, UNKNOWN_MEMBER, TYPE, RANGE, TABLE, SCOPE, CONFLICT, REFERENCE, UNREACHABLE, CYCLE,
+        ZERO_DELAY_CYCLE, LIMIT, NO_DEFAULT, NO_CANDIDATE;
+
+        /** The lower case name, as in {@code zero_delay_cycle}. */
+        public String id() { return name().toLowerCase(java.util.Locale.ROOT); }
     }
+
+    private final transient Category category;
+
+    public DefinitionException(Category category, String message) {
+        super(category.id() + ": " + message);
+        this.category = category;
+    }
+
+    public Category category() { return category; }
 }

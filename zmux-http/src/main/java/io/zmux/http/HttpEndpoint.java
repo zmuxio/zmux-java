@@ -31,7 +31,7 @@ import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
- * Serves HTTP carriers into a {@link ZmuxListener} on Netty (API.md Section 4.8). Each request is classified by its head alone
+ * Serves HTTP carriers into a {@link ZmuxListener} on Netty. Each request is classified by its head alone
  * ({@link HttpClass#classify}) and served by the adapter of its class: streaming carriers
  * (downlinks, uplinks, bidirectional requests), the exchange carrier, WebSockets. Each adapter
  * is enabled on its own; an endpoint with one enabled is that adapter alone. A request of a class
@@ -188,7 +188,7 @@ public final class HttpEndpoint implements AutoCloseable {
 
         private Builder(ZmuxListener listener) { this.listener = Objects.requireNonNull(listener); }
 
-        /** Serves streaming carriers: downlinks, uplinks (split bootstrap, out-of-band joins) and bidirectional requests. */
+        /** Serves streaming carriers: downlinks, uplinks (split carriers) and bidirectional requests. */
         public Builder streaming() { streaming = true; return this; }
 
         /** Serves the exchange carrier with config. */

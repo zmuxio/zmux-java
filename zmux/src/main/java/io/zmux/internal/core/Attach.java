@@ -2,27 +2,35 @@ package io.zmux.internal.core;
 
 import io.zmux.internal.wire.TransportError;
 
-/** The per-attachment state of a multipath session (MULTIPATH.md, SCHEDULER.md). */
+/** The per-attachment state of a multipath session. */
 final class Attach {
-    // Outbound pipe states (STATE_MACHINE.md 3.1).
+    // Outbound pipe states.
     static final int OUT_NONE = 0, OUT_JOINING = 1, OUT_ACTIVE = 2, OUT_SUSPECT = 3, OUT_DRAINING = 4, OUT_FAILED = 5,
             OUT_CLOSED = 6;
     static final PipeInfo.Out[] OUT_STATES = PipeInfo.Out.values();
-    // Inbound pipe states (STATE_MACHINE.md 3.2).
+    // Inbound pipe states.
     static final int IN_NONE = 0, IN_JOINING = 1, IN_OPEN = 2, IN_ENDED = 3;
     static final PipeInfo.In[] IN_STATES = PipeInfo.In.values();
 
     final boolean joinerLocal;
-    /** MULTIPATH 5.1 direction from the joiner: 0 up, 1 down, 2 bidirectional. */
+    /** The direction of a join pipe from the joiner: 0 up, 1 down, 2 bidirectional. */
     final int dir;
     final long fate;
-    /** Whether the PIPE_JOIN travels out of band. */
-    final boolean oob;
-    final long suspectFloor;
-    final long deadTimeout;
+    /** The carrier's record mode; pipe 0 keeps it in the session. */
+    private io.zmux.internal.join.Mode mode;
+    /** The Join handshake is running: nothing but it on the carrier. */
+    private boolean handshaking;
+    private byte[] binding;
+    private io.zmux.internal.join.Joiner joiner;
+    private io.zmux.internal.join.Framing joinFraming;
+    private boolean tpSkipped;
+    private long suspectFloor;
+    private long deadTimeout;
+    /** What a pipe keeps from when it turned suspect, once the settings were replaced; -1: none. */
+    private long keptFloor = -1, keptDead = -1;
     /** The pipe's probe interval k, 0: off, -1: the session's; its probe jitter, NaN: the session's. */
-    final long probeInterval;
-    final double probeJitter;
+    private long probeInterval;
+    private double probeJitter;
     final RttEstimator rtt = new RttEstimator();
 
     // The per-component state of the attachment; each part is written only by its component.
@@ -35,12 +43,11 @@ final class Attach {
     final Retention.Slot ret;
     final Resume.Slot res;
 
-    Attach(boolean joinerLocal, int dir, long fate, boolean oob, long suspectFloor, long deadTimeout, long probeInterval, double probeJitter, int out, int in, boolean firstRecord,
+    Attach(boolean joinerLocal, int dir, long fate, long suspectFloor, long deadTimeout, long probeInterval, double probeJitter, int out, int in, boolean firstRecord,
            long now) {
         this.joinerLocal = joinerLocal;
         this.dir = dir;
         this.fate = fate;
-        this.oob = oob;
         this.suspectFloor = suspectFloor;
         this.deadTimeout = deadTimeout;
         this.probeInterval = probeInterval;
@@ -55,6 +62,32 @@ final class Attach {
         res = new Resume.Slot();
     }
 
+    /** The Group asked for this join; 0 for the default. */
+    private long group;
+
+    long group() { return group; }
+
+    void group(long g) { group = g; }
+
+    void startHandshake(io.zmux.internal.join.Mode m, byte[] b) { mode = m; binding = b; handshaking = true; }
+    void endHandshake() { handshaking = false; joiner = null; binding = null; verified = null; }
+
+    /** A Reply that verified and is not yet acted on: the attachment is still joining. */
+    private io.zmux.internal.join.ReplyPayload verified;
+    io.zmux.internal.join.ReplyPayload verified() { return verified; }
+    void verified(io.zmux.internal.join.ReplyPayload r) { verified = r; }
+    void mode(io.zmux.internal.join.Mode m) { mode = m; }
+    io.zmux.internal.join.Mode mode() { return mode; }
+    boolean handshaking() { return handshaking; }
+    /** A handshake that still runs; a failed one stays handshaking, since nothing else was allowed on its carrier. */
+    boolean joining() { return handshaking && health.out() != OUT_FAILED && health.in() != IN_ENDED; }
+    byte[] binding() { return binding; }
+    io.zmux.internal.join.Joiner joiner() { return joiner; }
+    io.zmux.internal.join.Framing joinFraming() { return joinFraming; }
+    void joiner(io.zmux.internal.join.Joiner j, io.zmux.internal.join.Framing f) { joiner = j; joinFraming = f; }
+    boolean tpSkipped() { return tpSkipped; }
+    void tpSkipped(boolean v) { tpSkipped = v; }
+
     int out() {
         return health.out();
     }
@@ -65,6 +98,13 @@ final class Attach {
 
     boolean retired() {
         return health.retired();
+    }
+
+    /** The attachment failed, closed or is draining: no direction will carry data again. */
+    boolean ended(boolean hasOut) {
+        int out = health.out();
+        if (hasOut) return out == OUT_DRAINING || out == OUT_FAILED || out == OUT_CLOSED;
+        return health.in() == IN_ENDED;
     }
 
     boolean liveOut() {
@@ -85,6 +125,23 @@ final class Attach {
         return rtt.has() ? rtt.min() : rtt.smoothed();
     }
 
+    long suspectFloor() { return suspectFloor; }
+    long deadTimeout() { return deadTimeout; }
+    long probeInterval() { return probeInterval; }
+    double probeJitter() { return probeJitter; }
+    long keptFloor() { return keptFloor; }
+    long keptDead() { return keptDead; }
+
+    void kept(long floor, long dead) { keptFloor = floor; keptDead = dead; }
+
+    /** Replaces the pipe's own liveness settings. */
+    void liveness(long suspectFloor, long deadTimeout, long probeInterval, double probeJitter) {
+        this.suspectFloor = suspectFloor;
+        this.deadTimeout = deadTimeout;
+        this.probeInterval = probeInterval;
+        this.probeJitter = probeJitter;
+    }
+
     /** Whether bytes sent at sent may give estimator samples (E2). */
     boolean sampleOk(long sent) {
         return !health.noSample() || sent > health.noSampleAt();
@@ -101,7 +158,7 @@ final class Attach {
         return Math.max(link.lastAdvance(), link.lastRecord());
     }
 
-    /** Whether a graceful self-removal puts its PIPE_ABANDON on its own pipe (MULTIPATH 8.1). */
+    /** Whether a graceful self-removal puts its PIPE_ABANDON on its own pipe. */
     boolean selfGraceful(boolean hasOut) {
         return health.abandonCode() == TransportError.NO_ERROR && hasOut && liveOut() && !health.drainSuspect();
     }

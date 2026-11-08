@@ -25,14 +25,14 @@ import org.junit.jupiter.params.provider.MethodSource;
 @Timeout(90)
 class ShapingInterop {
     static final String RECORDS = """
-            {"version": 1, "machines": [
-             {"states": [{"record": {"max_len": {"range": [200, 1400]}, "pad": {"range": [0, 64]}}}]},
-             {"states": [{"enter": [{"op": "inject", "len": {"range": [50, 300]}, "after": {"const": 0.01}}], "next": [{"on": "injected", "to": 0}]}]}
+            {"machines": [
+             {"start": 0, "states": [{"record": {"max_len": {"t": [[1, 200, 1400]]}, "pad": {"t": [[1, 0, 64]]}}}]},
+             {"start": 0, "states": [{"enter": [{"op": "inject", "len": {"t": [[1, 50, 300]]}, "after": 10000}], "next": [{"on": "injected", "to": 0}]}]}
             ]}""";
     static final String DELAYED = """
-            {"version": 1, "machines": [
-             {"states": [{"record": {"max_len": {"range": [200, 1400]}, "pad": {"range": [0, 64]}, "delay": {"range": [0, 0.002]}}}]},
-             {"states": [{"enter": [{"op": "inject", "len": {"range": [50, 300]}, "after": {"const": 0.01}}], "next": [{"on": "injected", "to": 0}]}]}
+            {"machines": [
+             {"start": 0, "states": [{"record": {"max_len": {"t": [[1, 200, 1400]]}, "pad": {"t": [[1, 0, 64]]}, "delay": {"t": [[1, 0, 2000]]}}}]},
+             {"start": 0, "states": [{"enter": [{"op": "inject", "len": {"t": [[1, 50, 300]]}, "after": 10000}], "next": [{"on": "injected", "to": 0}]}]}
             ]}""";
 
     @TempDir Path dir;

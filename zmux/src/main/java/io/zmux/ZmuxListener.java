@@ -29,17 +29,19 @@ import java.util.function.Supplier;
 import javax.net.ssl.SSLEngine;
 
 /**
- * Accepts sessions, and the pipes that join them, on a TCP or TLS port (MULTIPATH.md 5.4
- * to 5.6). A new carrier is classified by its first record: it starts a session, which
+ * Accepts sessions, and the pipes that join them, on a TCP or TLS port. A new carrier is classified by its first record: it starts a session, which
  * {@link #accept()} offers once established (at most {@code backlog} wait, later ones are
- * refused), or it joins the session its PIPE_JOIN names. The listener's sessions share one
- * memory budget.
+ * refused), or it joins the session its Hello names. The listener's sessions share one
+ * memory budget. A listener without a socket ({@link Zmux#listener}) runs nothing of its own
+ * until its first carrier; one with a socket runs its acceptor from creation. Either must be
+ * {@link #close() closed}, which stops its tasks and ends its sessions.
  */
 public final class ZmuxListener implements AutoCloseable {
     private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
     private final ServerSocketChannel server;
     private final ZmuxConfig cfg;
     private final Supplier<SSLEngine> tls;
+    private final boolean tlsSecure;
     private final InetSocketAddress localAddress;
     private final int backlog;
     /**
@@ -47,10 +49,10 @@ public final class ZmuxListener implements AutoCloseable {
      * a backlog slot, a permit per queued session wakes one acceptor.
      */
     private final ConcurrentLinkedQueue<ZmuxSession> ready = new ConcurrentLinkedQueue<>();
-    private final AtomicInteger queued = new AtomicInteger();
+    final AtomicInteger queued = new AtomicInteger();
     private final Semaphore available = new Semaphore(0);
     private final MemoryBudget budget;
-    private final ListenerHub hub;
+    final ListenerHub hub;
     private final Admission admission;
     private final Thread acceptor;
     /** Accept is closed: by {@link #shutdown} or {@link #close}. */
@@ -74,6 +76,8 @@ public final class ZmuxListener implements AutoCloseable {
     private ZmuxListener(ServerSocketChannel server, ListenerConfig o) {
         this.server = server;
         this.cfg = o.session();
+        // The whole configuration is checked here, never first on a carrier: what does not depend on the carrier.
+        cfg.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER);
         InetSocketAddress local = null;
         if (server != null) {
             try { local = (InetSocketAddress) server.getLocalAddress(); } catch (IOException e) { throw new java.io.UncheckedIOException(e); }
@@ -82,6 +86,7 @@ public final class ZmuxListener implements AutoCloseable {
         TlsOptions t = o.tls();
         String[] protos = ZmuxConfig.withAliases(cfg.alpn()).toArray(String[]::new);
         this.tls = t == null ? null : () -> t.serverEngine(protos);
+        tlsSecure = t != null && t.secure();
         this.backlog = o.backlog();
         this.pressureListener = o.memoryPressureListener();
         this.budget = new MemoryBudget(o.memoryBudget().orElse(io.zmux.internal.core.CoreConfig.UNLIMITED), this::memoryChanged);
@@ -90,27 +95,44 @@ public final class ZmuxListener implements AutoCloseable {
             public io.zmux.internal.loop.DriverHooks hooks() { return cfg.hooks; }
 
             @Override
+            public void log(System.Logger.Level level, String message, Throwable error) {
+                if (o.logger() != null) io.zmux.internal.loop.DriverHooks.log(o.logger(), level, message, error);
+                else cfg.hooks.log(level, message, error);
+            }
+
+            @Override
             public CoreConfig config() {
                 return cfg.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER);
             }
 
             @Override
-            public void started(SessionRuntime d, String alpn) {
-                offerWhenEstablished(d, new ZmuxSession(d, d.core(), alpn, cfg.credential()));
+            public ListenerHub.Chosen choose(Admission.CarrierInfo info, Object admitted) {
+                ZmuxConfig c = o.sessionConfigs() == null ? null : o.sessionConfigs().choose(info, admitted);
+                if (c == null) c = cfg;
+                return new ListenerHub.Chosen(c.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER), c.hooks, c.credential());
+            }
+
+            @Override
+            public void started(SessionRuntime d, String alpn, Credential credential) {
+                offerWhenEstablished(d, new ZmuxSession(d, d.core(), alpn, credential));
             }
         }, budget, o.instanceId(), o.maxPendingPerSource(), ZmuxConfig.nanos(o.firstRecordTimeout()), o.maxSuspended());
         Admission adm = o.admission();
         admission = adm;
-        if (adm != null) {
-            long stallMax = ZmuxConfig.nanos(adm.stallMax()), stallMin = ZmuxConfig.nanos(adm.stallMin());
-            if (stallMax == 0) {
-                stallMax = draw(30_000_000_000L, 120_000_000_000L);
-                stallMin = draw(stallMax / 4, stallMax * 3 / 4);
-            }
-            long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
-            hub.admission(adm.decider(), adm.peek(), peekTimeout, stallMin, stallMax, forward(o.fallback()));
+        // A refused Establish stalls at most this long, with or without an admission.
+        long stallMax = adm == null ? 0 : ZmuxConfig.nanos(adm.stallMax()), stallMin = adm == null ? 0 : ZmuxConfig.nanos(adm.stallMin());
+        if (stallMax == 0) {
+            stallMax = draw(30_000_000_000L, 120_000_000_000L);
+            stallMin = draw(stallMax / 4, stallMax * 3 / 4);
         }
-        hub.inbound(o.inboundTransform(), o.answerUnknownJoins());
+        hub.rejectStallMax(stallMax);
+        if (adm != null) {
+            long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
+            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, stallMin, stallMax, forward(o.fallback()));
+        }
+        hub.inbound(o.inboundTransform());
+        hub.onReject(o.onReject());
+        hub.maxPendingPerSession(o.maxPendingPerSession());
         this.acceptor = server == null ? null : Thread.ofVirtual().name("zmux-acceptor").start(this::acceptLoop);
     }
 
@@ -198,7 +220,7 @@ public final class ZmuxListener implements AutoCloseable {
          */
         public Handled handle(PipeIo io, JoinHint hint, Admission.Fallback fallback) {
             take();
-            return transfer(io, new JoinHint(hint.join(), hint.pairing(), hint.uplink(), source, peer, hint.request()), false, null, fallback);
+            return transfer(io, new JoinHint(hint.pairing(), hint.uplink(), source, peer, hint.request()), false, null, fallback);
         }
 
         /** The entry gave the carrier up before handing it over (its connection ended unused): the slot goes, counted nowhere. */
@@ -274,7 +296,7 @@ public final class ZmuxListener implements AutoCloseable {
         });
         try {
             String protocol = io.capabilities().applicationProtocol();
-            if (!acceptsProtocol(protocol) || !hint.pairing().isEmpty() && !hint.join().isEmpty()) {
+            if (!acceptsProtocol(protocol)) {
                 hub.release(hint.source());
                 hub.counts().rejected();
                 returnCarrier(io, new javax.net.ssl.SSLHandshakeException("carrier refused"));
@@ -344,7 +366,7 @@ public final class ZmuxListener implements AutoCloseable {
         SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
         var loop = cfg.nextLoop();
         SocketChannel channel = Zmux.dial(address, cfg.handshakeNanos());
-        return Zmux.established(Bootstrap.tls(loop, core, channel, engine, cfg.hooks, hub::register, Zmux.presenter(cfg.credential(), address)), cfg);
+        return Zmux.established(Bootstrap.tls(loop, core, channel, engine, tls.secure(), cfg.hooks, hub::register, Zmux.presenter(cfg.credential(), address)), cfg);
     }
 
     /**
@@ -419,7 +441,12 @@ public final class ZmuxListener implements AutoCloseable {
         d.eventSink(e -> {
             if (e.kind() == Event.Kind.ESTABLISHED && !offered[0]) {
                 offered[0] = true;
-                if (!offer(s)) s.close(new ApplicationError(0x02, "listener backlog"));
+                if (offer(s)) return;
+                if (closed) s.close(new ApplicationError(0x02, "listener closed"));
+                else {
+                    hub.counts().sessionRefused();
+                    d.post(() -> d.core().refuse("backlog"));
+                }
             }
         });
     }
@@ -446,7 +473,7 @@ public final class ZmuxListener implements AutoCloseable {
             }
             var loop = cfg.nextLoop();
             if (tls == null) hub.socket(loop, ch, peer);
-            else hub.tls(loop, ch, tls.get(), hto, peer);
+            else hub.tls(loop, ch, tls.get(), hto, tlsSecure, peer);
         }
     }
 
@@ -470,7 +497,12 @@ public final class ZmuxListener implements AutoCloseable {
      */
     public void countSetupFailure() { hub.counts().setupFailed(); }
 
-    /** The listener's outcome counts (API.md Section 7.2); any thread, no lock. */
+    /** The listener's outcome counts; any thread, no lock. */
+    public java.util.List<Admission.VariantStat> variantStats() {
+        return hub.counts().variantStats();
+    }
+
+    /** The listener's counts; any thread. */
     public ListenerStats stats() {
         var c = hub.counts();
         return new ListenerStats(c.sessions(), c.joins(), c.setupFailures(), c.rejectedCount(), c.refusedCount(), c.timedOutCount(),

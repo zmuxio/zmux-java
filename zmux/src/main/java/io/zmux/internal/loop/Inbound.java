@@ -33,6 +33,9 @@ public interface Inbound {
     /** The output half's writability changed. */
     default void writable(Transport t, boolean on) {}
 
+    /** The transport's write side is shut: FIN, close_notify or a stream FIN went to the carrier. */
+    default void outputShut(Transport t) {}
+
     /** The outcome of the write of b this inbound handed over. */
     default void written(Transport t, Batch b, Throwable cause) { b.discard(); }
 

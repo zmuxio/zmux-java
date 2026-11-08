@@ -21,28 +21,37 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** Datagrams on the QUIC connection's datagram channel (EXTENSIONS.md Section 6.8). */
+/** Datagrams on the QUIC connection's datagram channel. */
 @Timeout(60)
 class QuicChannelTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
 
     static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
     }
 
     /**
-     * Forwards UDP between one client and a server with a one-way delay, and drops the next
-     * client-to-server packets of at least 1000 bytes when armed.
+     * Forwards UDP between one client and a server with a one-way delay. When armed it drops the
+     * next client-to-server packets of at least 1000 bytes, and holds every later one of that size
+     * until released: the lost stream data stays missing at the server, whatever its timers do.
      */
     static final class LossyRelay implements AutoCloseable {
         final DatagramSocket front = new DatagramSocket(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
         final DatagramSocket back = new DatagramSocket(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
         final SocketAddress server;
         final long delayNanos;
-        final AtomicInteger drop = new AtomicInteger(), dropped = new AtomicInteger();
+        final AtomicInteger dropped = new AtomicInteger();
         volatile SocketAddress client;
         final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         final List<Thread> pumps = new ArrayList<>();
+        // Guarded by this.
+        private int drop;
+        private boolean holding;
+        private final List<byte[]> held = new ArrayList<>();
+        /** Client packets received, and of them those settled: sent on to the server or dropped. */
+        private long fromClient, toServer;
+        private long barrierAt = -1;
+        private CompletableFuture<Void> barrier;
 
         LossyRelay(SocketAddress server, Duration delay) throws Exception {
             this.server = server;
@@ -53,25 +62,70 @@ class QuicChannelTest {
 
         InetSocketAddress address() { return (InetSocketAddress) front.getLocalSocketAddress(); }
 
-        private void pump(boolean toServer) {
-            DatagramSocket in = toServer ? front : back;
+        /** Drops the next n large client packets and holds the later ones. */
+        synchronized void arm(int n) { drop = n; holding = true; }
+
+        /** Sends the held packets on, in order, and holds no more. */
+        void release() {
+            List<byte[]> out;
+            synchronized (this) {
+                holding = false;
+                out = new ArrayList<>(held);
+                held.clear();
+            }
+            for (byte[] b : out) forward(b, true);
+        }
+
+        /**
+         * Completes once the server answered after every client packet received so far (and not
+         * held) reached it: the server has processed them.
+         */
+        synchronized CompletableFuture<Void> barrier() {
+            barrierAt = fromClient - held.size();
+            barrier = new CompletableFuture<>();
+            return barrier;
+        }
+
+        private void pump(boolean up) {
+            DatagramSocket in = up ? front : back;
             byte[] buf = new byte[65536];
             while (!in.isClosed()) {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
                 try { in.receive(p); } catch (Exception e) { return; }
-                if (toServer) client = p.getSocketAddress();
-                if (toServer && p.getLength() >= 1000 && drop.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
-                    dropped.incrementAndGet();
-                    continue;
-                }
                 byte[] copy = Arrays.copyOf(p.getData(), p.getLength());
-                SocketAddress to = toServer ? server : client;
-                DatagramSocket out = toServer ? back : front;
-                try {
-                    timer.schedule(() -> {
-                        try { out.send(new DatagramPacket(copy, copy.length, to)); } catch (Exception ignored) { }
-                    }, delayNanos, TimeUnit.NANOSECONDS);
-                } catch (RejectedExecutionException e) { return; }
+                if (up) {
+                    client = p.getSocketAddress();
+                    synchronized (this) {
+                        fromClient++;
+                        if (copy.length >= 1000 && drop > 0) {
+                            drop--;
+                            dropped.incrementAndGet();
+                            toServer++; // settled: it never reaches the server
+                            continue;
+                        }
+                        if (copy.length >= 1000 && holding) { held.add(copy); continue; }
+                    }
+                } else {
+                    CompletableFuture<Void> b = null;
+                    synchronized (this) {
+                        if (barrier != null && toServer >= barrierAt) { b = barrier; barrier = null; }
+                    }
+                    if (b != null) b.complete(null);
+                }
+                forward(copy, up);
+            }
+        }
+
+        private void forward(byte[] copy, boolean up) {
+            SocketAddress to = up ? server : client;
+            DatagramSocket out = up ? back : front;
+            try {
+                timer.schedule(() -> {
+                    try { out.send(new DatagramPacket(copy, copy.length, to)); } catch (Exception ignored) { }
+                    if (up) synchronized (this) { toServer++; }
+                }, delayNanos, TimeUnit.NANOSECONDS);
+            } catch (RejectedExecutionException ignored) {
+                // Closed.
             }
         }
 
@@ -87,18 +141,30 @@ class QuicChannelTest {
         return ByteBuffer.allocate(100).putLong(System.nanoTime()).put((byte) seq).array();
     }
 
-    static long latencyMillis(byte[] b) {
-        return (System.nanoTime() - ByteBuffer.wrap(b).getLong()) / 1_000_000;
-    }
-
     /** The stream burst: within the initial congestion window of the QUIC stack, so that only the lost packets delay anything. */
     static final int BURST = 8 << 10;
 
-    record Run(List<Long> latencies, SessionStats client, int dropped) {}
+    /**
+     * Of the datagrams sent right after a stream burst whose first large packets were lost:
+     * those the server received while the lost stream data was still held back, and in all.
+     */
+    record Run(int whileHeld, int received, SessionStats client, int dropped) {}
+
+    /** Waits until relay dropped the burst's first n large packets. */
+    static void awaitDropped(LossyRelay relay, int n) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (relay.dropped.get() < n) {
+            assertTrue(System.nanoTime() < deadline, "the burst's head was not lost");
+            Thread.sleep(1);
+        }
+    }
 
     /**
      * A session through a relay with one-way delay d: a burst of stream data whose first large
-     * packets are lost, then datagrams right after it; their latencies and the client's counts.
+     * packets are lost and whose later ones (retransmissions among them) are held at the relay,
+     * then 10 datagrams. With channel datagrams they are waited for before the relay lets the
+     * stream go on; otherwise the server's count is taken once it has processed every packet
+     * that carried them.
      */
     static Run lossLatencies(Duration d, QuicOptions clientOptions) throws Exception {
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -116,29 +182,34 @@ class QuicChannelTest {
                     ZmuxStream in = s.acceptStream();
                     Future<byte[]> read = workers.submit(() -> QuicTest.read(in));
                     for (int i = 0; i < 5; i++) {
-                        c.datagrams().send(ByteBuffer.wrap(stamp(i)));
+                        c.datagrams().send(ByteBuffer.wrap(new byte[100]));
                         assertNotNull(s.datagrams().receive(Duration.ofSeconds(5)));
                     }
-                    Thread.sleep(4 * d.toMillis());
-                    relay.drop.set(2);
+                    relay.arm(2);
                     st.write(ByteBuffer.wrap(new byte[BURST]));
-                    Thread.sleep(5); // the burst is on the wire, its head lost
-                    for (int i = 0; i < 10; i++) {
-                        c.datagrams().send(ByteBuffer.wrap(stamp(i)));
-                        Thread.sleep(1);
+                    awaitDropped(relay, 2);
+                    for (int i = 0; i < 10; i++) c.datagrams().send(ByteBuffer.wrap(new byte[100]));
+                    relay.barrier().get(10, TimeUnit.SECONDS);
+                    int whileHeld = 0;
+                    if (clientOptions.datagrams()) {
+                        for (; whileHeld < 10; whileHeld++) {
+                            try { s.datagrams().receive(Duration.ofSeconds(2)); }
+                            catch (java.net.SocketTimeoutException e) { break; }
+                        }
+                    } else {
+                        whileHeld = (int) (s.stats().datagramsReceived() - 5);
                     }
-                    List<Long> lat = new ArrayList<>();
-                    for (int i = 0; i < 10; i++) {
-                        byte[] p;
-                        try { p = s.datagrams().receive(Duration.ofSeconds(2)); }
+                    relay.release();
+                    int received = clientOptions.datagrams() ? whileHeld : 0;
+                    for (; received < 10; received++) {
+                        try { s.datagrams().receive(Duration.ofSeconds(clientOptions.datagrams() ? 1 : 10)); }
                         catch (java.net.SocketTimeoutException e) { break; }
-                        lat.add(latencyMillis(p));
                     }
                     st.finish();
-                    assertEquals((BURST) + 4, read.get(20, TimeUnit.SECONDS).length);
+                    assertEquals(BURST + 4, read.get(20, TimeUnit.SECONDS).length);
                     in.close();
                     st.close();
-                    return new Run(lat, c.stats(), relay.dropped.get());
+                    return new Run(whileHeld, received, c.stats(), relay.dropped.get());
                 } finally {
                     QuicEndpointTest.closed(c, s);
                 }
@@ -146,22 +217,20 @@ class QuicChannelTest {
         }
     }
 
-    /** Channel datagrams are not held behind a lost packet of the pipe's stream; datagrams in records are. */
     @Test void channelDatagramsAvoidHeadOfLineBlocking() throws Exception {
         Duration d = Duration.ofMillis(40);
         Run channel = lossLatencies(d, QuicOptions.defaults());
-        assertTrue(channel.dropped > 0, "no packet lost");
+        assertEquals(2, channel.dropped);
         assertTrue(channel.client.datagramsSentChannel() >= 15, "not on the channel: " + channel.client);
-        assertTrue(channel.latencies.size() >= 5, channel.latencies.size() + " datagrams arrived");
-        for (long l : channel.latencies) assertTrue(l < 2 * d.toMillis(), "channel datagram took " + l + " ms: " + channel.latencies);
+        // They arrive while the stream's lost data is still missing.
+        assertTrue(channel.whileHeld >= 5, channel.whileHeld + " datagrams arrived while the stream was held");
 
         Run records = lossLatencies(d, QuicOptions.defaults().withDatagrams(false));
-        assertTrue(records.dropped > 0, "no packet lost");
+        assertEquals(2, records.dropped);
         assertEquals(0, records.client.datagramsSentChannel());
-        assertEquals(10, records.latencies.size(), records.latencies.toString());
-        // Each waits for the retransmission of the stream's lost packet: at least a round trip more.
-        for (long l : records.latencies) assertTrue(l >= 2 * d.toMillis(), "a datagram in records was not held: " + records.latencies);
-        System.out.println("channel " + channel.latencies + " records " + records.latencies);
+        // In records they wait behind the stream's lost data, however long it is missing.
+        assertEquals(0, records.whileHeld, "a datagram in records was not held");
+        assertEquals(10, records.received);
     }
 
     /** Larger datagrams, a peer without QUIC datagrams and sessions without datagrams use records. */

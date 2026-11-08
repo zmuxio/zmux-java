@@ -45,7 +45,7 @@ public final class QuicServer implements AutoCloseable {
     public QuicServer(InetSocketAddress address, QuicSslContextBuilder tlsBuilder, QuicOptions options, ZmuxListener listener,
                       Fallback fallback) throws IOException {
         try {
-            QuicSslContext tls = tlsBuilder.earlyData(false).build();
+            QuicSslContext tls = tlsBuilder.earlyData(false).keylog(QuicExporter.KEYLOG).build();
             if (tls.isClient()) throw new IllegalArgumentException("server TLS builder required");
             ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(tls)
                     .handler(new ChannelInitializer<QuicChannel>() {

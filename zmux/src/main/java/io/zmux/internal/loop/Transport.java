@@ -85,10 +85,34 @@ public interface Transport {
      */
     Transport moveTo(SessionHost to);
 
-    /** The TLS exporter of this carrier's handshake, or null. */
+    /** The exporter of this carrier's innermost end-to-end handshake, read now; null without one or while it is incomplete. Any thread. */
     default byte[] export(String label, byte[] context, int length) { return null; }
 
-    /** The datagram channel of the carrier (EXTENSIONS.md Section 6.8), the same as its info's; null when it has none. */
+    /** Whether this carrier declares the Bound contract; an exporter alone is no such declaration. */
+    default boolean secure() { return false; }
+
+    /** Whether a Bound Join can run here: a split carrier cannot at present. */
+    default boolean bindable() { return secure() && info().carrier().kind() != io.zmux.CarrierKind.SPLIT; }
+
+    /** The record mode of an Establish that ran on this carrier, which is then a secure first pipe; null (or UNMANAGED) otherwise. */
+    default io.zmux.RecordMode firstPipeMode() { return null; }
+
+    /** The peer an Establish on this carrier authenticated, the session's host value; null otherwise. */
+    default Object carrierPeer() { return null; }
+
+    /** The padding bytes a handshake run on the carrier before this transport added. */
+    default long handshakePadding() { return 0; }
+
+    /** Whether this carrier has an exporter, whether or not its value exists yet. */
+    default boolean hasExporter() { return false; }
+
+    /** The TLS session of the handshake this process ran for the carrier; null without one. */
+    default javax.net.ssl.SSLSession tlsSession() { return null; }
+
+    /** The admission's bound of a first message ({@link io.zmux.carrier.PipeReader#limitFirstMessage}), before it starts. */
+    default void limitFirstMessage(int limit) {}
+
+    /** The datagram channel of the carrier, the same as its info's; null when it has none. */
     default CarrierChannel channel() { return null; }
 
     /** Opens an independent outbound lane on the same connection, or null when the carrier cannot. */
@@ -124,8 +148,9 @@ public interface Transport {
      */
     static Transport of(SessionHost host, io.zmux.carrier.PipeIo io) {
         Transport t = claim(io);
-        if (t == null) return new ExternalTransport(host, io);
-        return t.loop() == host ? t : t.moveTo(host);
+        if (t == null) t = new ExternalTransport(host, io);
+        else if (t.loop() != host) t = t.moveTo(host);
+        return t == null || io.capabilities().seal() == null ? t : new SealedTransport(t, io.capabilities().seal(), io.capabilities().exporter());
     }
 
     /** The input's own transport (on its own host, not started), or null. */

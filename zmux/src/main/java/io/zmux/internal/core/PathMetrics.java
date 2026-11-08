@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 
 /**
  * Stateless estimates over the pipes of a multipath session that several path components share: one-way delay, PTO,
- * carrier openness, rates and ready bytes (MULTIPATH.md 6.5, 7.1; SCHEDULER.md 5).
+ * carrier openness, rates and ready bytes.
  */
 final class PathMetrics {
     static final long NOTSENT_LOWAT = 32 << 10;
@@ -59,7 +59,7 @@ final class PathMetrics {
     }
 
     /**
-     * Q_p (SCHEDULER.md 4): over p's outbound lanes, the bytes of the batch whose write call is
+     * Q_p: over p's outbound lanes, the bytes of the batch whose write call is
      * in progress plus the carrier's unsent bytes where the adapter reports them. Bytes are
      * assigned to a pipe only when written, so nothing waits ahead of the carrier.
      */

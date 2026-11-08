@@ -56,15 +56,15 @@ class RefusedCarrierTest {
         try (var f = fixture(seen)) {
             for (String join : new String[] {"not-a-join", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}) {
                 byte[] body = ("uplink bytes for " + join).getBytes();
-                String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nZmux-Pipe-Join: " + join
+                String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nZmux-Pipe-Pair: " + join
                         + "\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(body).getBytes());
                 assertTrue(got.endsWith("host"), got);
                 var s = seen.poll(2, TimeUnit.SECONDS);
                 assertNotNull(s, join);
                 assertArrayEquals(body, s.body());
             }
-            // A downlink with an unknown join, which has no body.
-            String got = RawHttp.send(f.base, "GET /z HTTP/1.1\r\nHost: x\r\nZmux-Pipe-Join: not-a-join\r\n\r\n", null);
+            // A downlink with an bad pairing token, which has no body.
+            String got = RawHttp.send(f.base, "GET /z HTTP/1.1\r\nHost: x\r\nZmux-Pipe-Pair: not-a-join\r\n\r\n", null);
             assertTrue(got.endsWith("host"), got);
             assertEquals("GET", seen.poll(2, TimeUnit.SECONDS).method());
         }

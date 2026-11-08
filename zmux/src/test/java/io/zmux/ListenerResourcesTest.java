@@ -15,7 +15,7 @@ class ListenerResourcesTest {
     }
 
     static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.psk(new byte[32])).withResumeTimeout(Duration.ofSeconds(30))).build();
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(30)).build();
     }
 
     @Test void maxSuspendedEvictsTheOldestAndReleasesResources() throws Exception {
@@ -24,7 +24,7 @@ class ListenerResourcesTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).maxSuspended(0).build())) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cfg); var s = accepted.get();
-                c.paths().list().getFirst().abort();
+                c.pipes().getFirst().abort();
                 assertInstanceOf(SessionError.ResumeTimeout.class, s.awaitClosed());
                 c.close(); c.awaitClosed();
                 until(() -> listener.memoryUsed() == 0);
@@ -53,7 +53,7 @@ class ListenerResourcesTest {
                 var b = c2.openStream(); b.write(new byte[96 << 10]);
                 var held2 = s2.acceptStream();
                 until(() -> enter.get() > 0);
-                c1.paths().list().getFirst().abort();
+                c1.pipes().getFirst().abort();
                 assertInstanceOf(SessionError.ResumeTimeout.class, s1.awaitClosed());
                 // Consuming the other session brings the shared budget below its hysteresis.
                 byte[] bytes = new byte[96 << 10];

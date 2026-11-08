@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 import org.opentest4j.TestAbortedException;
 
-/** The application steps of TRACES.md Section 5.3. */
+/** The application steps of a trace. */
 final class TraceApi {
     private final TraceRunner r;
 
@@ -159,6 +159,7 @@ final class TraceApi {
                 case "shutdown" -> s.shutdown(getU(args, "code"), null);
                 case "close" -> s.close(getU(args, "code"), args.get("reason") instanceof String rs ? hex(rs) : null);
                 case "add_pipe" -> res = r.addPipe(args);
+                case "advance_epoch" -> s.advanceEpoch();
                 case "set_pipe_status" -> {
                     Tiers.PipeSettings.Builder o = Tiers.PipeSettings.builder();
                     if (args.get("send_priority") != null) o.sendPriority(num(args.get("send_priority")));

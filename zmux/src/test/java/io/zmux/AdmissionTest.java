@@ -195,9 +195,9 @@ class AdmissionTest {
         var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 1, 0);
         var stallFor = Duration.ofMillis(300);
         try (EventLoops loops = EventLoops.create(2)) {
-            var multipath = MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.insecure());
-            var cfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath).build();
-            var dialer = ZmuxConfig.builder().eventLoops(loops).multipath(multipath).credential(auth).build();
+            var multipath = PipeAuth.psk(new byte[32]).withEndToEnd();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
+            var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).credential(auth).build();
             var lc = ListenerConfig.builder().session(cfg)
                     .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(2))
                             .withStall(stallFor, stallFor)).build();
@@ -205,7 +205,7 @@ class AdmissionTest {
                 assertEquals(stallFor, l.stallDuration(new java.net.InetSocketAddress("127.0.0.1", 0)));
                 try (var c = Zmux.connect(l.localAddress(), dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
-                    assertTrue(c.paths().add(l.localAddress(), PipeOptions.defaults()).id() > 0, "a session's own TCP pipe presents the credential");
+                    assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id() > 0, "a session's own TCP pipe presents the credential");
                     try (var st = c.openStream()) {
                         st.write(new byte[] {1, 2, 3});
                         st.finish();
@@ -559,9 +559,9 @@ class AdmissionTest {
         var verifier = auth.verifier();
         var seen = new LinkedBlockingQueue<String>();
         try (EventLoops loops = EventLoops.create(2)) {
-            var multipath = MultipathConfig.defaults().withMaxPipes(4).withAuth(PipeAuth.insecure());
-            var cfg = ZmuxConfig.builder().eventLoops(loops).multipath(multipath).build();
-            var dialer = ZmuxConfig.builder().eventLoops(loops).multipath(multipath).credential(auth).build();
+            var multipath = PipeAuth.psk(new byte[32]).withEndToEnd();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
+            var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).credential(auth).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()))
                     .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
                         seen.add(info.serverName() + " " + info.tls() + " " + info.head() + " " + info.header(PrefixAuth.HEADER_FIELD));
@@ -573,7 +573,7 @@ class AdmissionTest {
                 try (var c = Zmux.connectTls(l.localAddress(), tls, dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "accepted with the credential");
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
-                    assertTrue(c.paths().addTls(l.localAddress(), tls, PipeOptions.defaults()).id() > 0,
+                    assertTrue(c.addTlsPipe(l.localAddress(), tls, PipeOptions.defaults()).id() > 0,
                             "a session's own TLS pipe presents the credential too");
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
                 }
@@ -632,16 +632,12 @@ class AdmissionTest {
         }
     }
 
-    @Test void joinHintsOfARequestTakeTheJoinAndPairingFields() {
-        var r = RequestHead.of(java.util.Map.of("zmux-pipe-join", java.util.List.of("j"), "Zmux-Pipe-Pair", java.util.List.of("p")), false);
+    @Test void joinHintsOfARequestTakeThePairingField() {
+        var r = RequestHead.of(java.util.Map.of("Zmux-Pipe-Pair", java.util.List.of("p")), false);
         var h = JoinHint.of(r, true, TestAddr.peer("s"));
-        assertEquals("j", h.join());
         assertEquals("p", h.pairing());
         assertTrue(h.uplink());
         assertSame(r, h.request());
-        var twice = RequestHead.of(java.util.Map.of("Zmux-Pipe-Join", java.util.List.of("a", "b")), false);
-        assertNull(io.zmux.internal.core.CarrierAdmission.decodeJoinHeader(JoinHint.of(twice, false, TestAddr.peer("s")).join()),
-                "a repeated join field does not decode");
         assertEquals(RequestHead.NONE, JoinHint.inBand(TestAddr.peer("s")).request());
     }
 
@@ -676,7 +672,7 @@ class AdmissionTest {
         for (int loopsCount : new int[] {1, 4}) {
             try (EventLoops loops = EventLoops.create(loopsCount)) {
                 var cfg = ZmuxConfig.builder().eventLoops(loops)
-                        .multipath(MultipathConfig.defaults().withMaxPipes(8).withAuth(PipeAuth.insecure())).build();
+                        .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
                 var lc = ListenerConfig.builder().session(cfg)
                         .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(5))).build();
                 var plain = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
@@ -689,7 +685,7 @@ class AdmissionTest {
                         for (int i = 0; i < 6; i++) {
                             var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
                             l.handle(pipe[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
-                            assertTrue(c.paths().add(prefixed(pipe[0], auth.prefix(plain)), PipeOptions.defaults()).id() > 0);
+                            assertTrue(c.addPipe(prefixed(pipe[0], auth.prefix(plain)), PipeOptions.defaults()).id() > 0);
                         }
                         try (var st = c.openStream()) {
                             st.write(new byte[] {1, 2, 3});

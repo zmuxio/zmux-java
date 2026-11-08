@@ -5,7 +5,7 @@ import java.util.ArrayList;
 
 /**
  * Received, unread data of one receiving part as disjoint pieces sorted by
- * offset (IMPLEMENTATION.md Section 3): pieces below {@link #REF_THRESHOLD} are
+ * offset: pieces below {@link #REF_THRESHOLD} are
  * copied, larger ones reference the read buffer.
  */
 final class RecvBuffer {

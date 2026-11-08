@@ -84,10 +84,10 @@ public interface PoolPolicy {
             Objects.requireNonNull(recheck);
             if (recheck.isPresent() && recheck.get().isNegative()) throw new IllegalArgumentException("negative recheck");
             Objects.requireNonNull(probeInterval);
-            probeInterval.ifPresent(d -> MultipathConfig.probeInterval(d, "probeInterval"));
+            probeInterval.ifPresent(d -> ZmuxConfig.probeIntervalOf(d, "probeInterval"));
             if (idleProbesOff && probeInterval.isPresent()) throw new IllegalArgumentException("probeInterval with idle probes off");
             Objects.requireNonNull(probeJitter);
-            if (probeJitter.isPresent()) MultipathConfig.jitter(probeJitter.getAsDouble(), "probeJitter");
+            if (probeJitter.isPresent()) ZmuxConfig.jitter(probeJitter.getAsDouble(), "probeJitter");
         }
 
         public Decision withCount(int n) { return new Decision(OptionalInt.of(n), dialAfter, retire, recheck, probeInterval, idleProbesOff, probeJitter); }

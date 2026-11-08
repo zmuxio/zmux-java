@@ -116,15 +116,16 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     /** First attempt: the mailbox delivers it on the loop. */
     @Override
     public void run() {
-        if (deadline != Long.MAX_VALUE && (int) STATE.getVolatile(this) == QUEUED) {
-            long left = deadline - System.nanoTime();
-            if (left <= 0) { settle(new SocketTimeoutException("timed out")); return; }
-            timer = new TimerHeap.Timer() {
-                @Override void fire(long now) { timer = null; if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); }
-            };
-            driver.loop.schedule(timer, Time.add(Clock.now(), left));
-        }
+        boolean timed = deadline != Long.MAX_VALUE && (int) STATE.getVolatile(this) == QUEUED;
+        // Attempted once before the deadline is judged: a zero timeout still sees what holds now.
         attempt();
+        if (!timed || isDone()) return;
+        long left = deadline - System.nanoTime();
+        if (left <= 0) { if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); return; }
+        timer = new TimerHeap.Timer() {
+            @Override void fire(long now) { timer = null; if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); }
+        };
+        driver.loop.schedule(timer, Time.add(Clock.now(), left));
     }
 
     /** The core woke the operation, at the end of a loop round. */
@@ -153,7 +154,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
             r = body.attempt(this);
         } catch (CoreException e) {
             r = e;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | AssertionError | StackOverflowError e) {
             driver.internalError(e);
             r = e;
         }
@@ -336,6 +337,28 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     }
 
     /**
+     * Waits for the outcome until deadline (System.nanoTime based) without cancelling: an
+     * interruption neither ends the wait nor is lost (the flag is set again on return). Whether
+     * the outcome was decided. Never on a loop or completion thread.
+     */
+    public boolean awaitUninterruptibly(long deadline) {
+        driver.checkBlocking();
+        boolean interrupted = false;
+        joiner = Thread.currentThread();
+        try {
+            while (!isDone()) {
+                long left = deadline - System.nanoTime();
+                if (left <= 0) return false;
+                LockSupport.parkNanos(this, left);
+                if (Thread.interrupted()) interrupted = true;
+            }
+            return true;
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
      * Waits for the outcome until deadline (System.nanoTime based; Long.MAX_VALUE: none).
      * On timeout or interruption the operation is cancelled; when that cancellation wins the
      * result is SocketTimeoutException or InterruptedIOException (the interrupt flag stays
@@ -350,6 +373,8 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
                 if (deadline == Long.MAX_VALUE) { LockSupport.park(this); continue; }
                 long left = deadline - System.nanoTime();
                 if (left > 0) { LockSupport.parkNanos(this, left); continue; }
+                // Expired before the loop attempted it: the loop judges the deadline after its first attempt.
+                if ((int) STATE.getVolatile(this) == QUEUED) { LockSupport.parkNanos(this, 1_000_000); continue; }
             }
             // Interrupted or expired: give up unless the outcome won the race.
             if (cancel()) {

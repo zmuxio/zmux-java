@@ -1,6 +1,6 @@
 package io.zmux.internal.core;
 
-/** A stream-level outcome (STATE_MACHINE.md Section 2.5). */
+/** A stream-level outcome. */
 public record StreamError(Kind kind, long streamId, long code, long reliableSize, boolean remote) {
 
     /** Outcome kinds. */

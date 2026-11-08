@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Timeout;
 /** Explicitly selected reproduction; intentionally excluded from the default *Test suite. */
 @Timeout(600)
 class QuicStartupProbe {
-    private static void forceLegacyPortCollision(QuicPoolTest.Fixture f) throws Exception {
+    private static void forcePortCollision(QuicPoolTest.Fixture f) throws Exception {
         int targetPort = f.server.address().getPort();
         java.nio.channels.DatagramChannel selected = null;
         for (int i = 0; i < 200000; i++) {
@@ -32,7 +32,7 @@ class QuicStartupProbe {
             replacement = new io.netty.bootstrap.Bootstrap().group(original.eventLoop())
                     .channelFactory(() -> new io.netty.channel.socket.nio.NioDatagramChannel(chosen)).handler(codec).register().sync().channel();
             endpoints.put(io.netty.channel.socket.SocketProtocolFamily.INET,CompletableFuture.completedFuture(replacement)); original.close().sync();
-            System.out.println("FORCED_LEGACY_COLLISION,client="+replacement.localAddress()+",server="+f.server.address());
+            System.out.println("FORCED_COLLISION,client="+replacement.localAddress()+",server="+f.server.address());
         } catch (Exception error) { if (replacement != null) replacement.close(); else selected.close(); throw error; }
     }
     @Test void freshEndpointFirstPooledStream() throws Exception {
@@ -49,7 +49,7 @@ class QuicStartupProbe {
         for (int i = 0; i < count; i++) {
             if (scenario.equals("collision")) {
                 try (var f = new QuicPoolTest.Fixture(); var pool = f.pool(1,2,java.time.Duration.ZERO)) {
-                    forceLegacyPortCollision(f);
+                    forcePortCollision(f);
                     assertThrows(TimeoutException.class,() -> QuicPoolTest.firstPipe(f,pool));
                 }
             } else if (!scenario.equals("fresh")) {

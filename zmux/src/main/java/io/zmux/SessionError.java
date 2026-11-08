@@ -1,6 +1,6 @@
 package io.zmux;
 
-/** Why a session ended (API.md Section 5.3); the first cause wins (SPEC.md Section 6.5). */
+/** Why a session ended; the first cause wins. */
 public sealed interface SessionError {
     /** Whether the peer caused it. */
     boolean remote();
@@ -47,13 +47,23 @@ public sealed interface SessionError {
         @Override public String message() { return "early data rejected"; }
     }
 
-    /** The resume grace period expired. */
+    /**
+     * Resume could not continue safely: the data in flight is in an unknown state
+     * (CONNECTION_CLOSE with ZMUX_RESUME_FAILED); local or remote.
+     */
+    record ResumeFailed(boolean remote) implements SessionError {
+        @Override public String message() {
+            return "resume failed (" + (remote ? "remote" : "local") + ")";
+        }
+    }
+
+    /** The resume grace period expired; lastPipeError is the error of the last pipe lost, or null. */
     record ResumeTimeout(Throwable lastPipeError) implements SessionError {
         @Override public boolean remote() { return false; }
         @Override public String message() { return "resume timeout"; }
     }
 
-    /** Every pipe in a direction was lost, or the single carrier failed. */
+    /** Every pipe in a direction was lost, or the single carrier failed; lastPipeError is the error of the last pipe lost, or null. */
     record PipesLost(Throwable lastPipeError) implements SessionError {
         @Override public boolean remote() { return false; }
         @Override public String message() {

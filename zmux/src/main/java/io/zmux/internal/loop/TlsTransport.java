@@ -17,7 +17,7 @@ import javax.net.ssl.SSLException;
 /**
  * A TLS carrier: an {@link SSLEngine} over a non-blocking socket on the loop. The handshake
  * runs on the loop (delegated tasks on a pool, resumed on the loop); records are wrapped
- * from the batch's segments without flattening (IMPLEMENTATION.md Section 4).
+ * from the batch's segments without flattening.
  */
 final class TlsTransport extends AbstractTransport implements EventLoop.IoHandler {
     /** Runs the engine's delegated tasks; the common pool is borrowed, never closed. */
@@ -61,9 +61,10 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     /** Runs the handshake of engine over ch on loop; done receives the carrier or the failure, on the loop. */
-    static Runnable handshake(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout,
+    static Runnable handshake(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout, boolean secure,
                           BiConsumer<TlsTransport, Throwable> done) {
         TlsTransport c = new TlsTransport(loop, ch, engine);
+        c.declaredSecure = secure;
         c.onHandshake = done;
         if (!loop.tryExecute(() -> {
             try {
@@ -90,7 +91,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
 
     @Override
     public TransportInfo info() {
-        if (info == null) info = new TransportInfo(INFO, applicationProtocol(), null, 0, 0, 32);
+        if (info == null) info = new TransportInfo(INFO, applicationProtocol(), null, 0, 0);
         return info;
     }
 
@@ -121,6 +122,25 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         if (names != null) for (var name : names) if (name instanceof javax.net.ssl.SNIHostName host) return host.getAsciiName();
         return "";
     }
+
+    @Override
+    public boolean hasExporter() { return true; }
+
+    @Override
+    public boolean secure() {
+        // The host's word for the path; the version is judged here.
+        if (!declaredSecure || handshaking) return false;
+        String v = engine.getSession().getProtocol();
+        return v.equals("TLSv1.3") || v.equals("TLSv1.2");
+    }
+
+    @Override
+    public javax.net.ssl.SSLSession tlsSession() {
+        return handshaking ? null : engine.getSession();
+    }
+
+    /** Whether the host declared the Bound contract for this connection. */
+    private boolean declaredSecure;
 
     @Override
     public byte[] export(String label, byte[] context, int length) {
@@ -434,6 +454,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
                         closeNotifyPending = false;
                         if (!flushNet()) return;
                         shutSocket();
+                        outputShutDone(); // close_notify went to the socket, then FIN
                     }
                     continue;
                 }

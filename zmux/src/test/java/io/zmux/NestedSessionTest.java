@@ -65,14 +65,14 @@ class NestedSessionTest {
     }
     @Test void nestedLanesShareAnOuterCreditLeaseAndDoNotWait() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.insecure())).limits(Limits.defaults().withIncomingStreams(8)).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).incomingStreams(8).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 PipeIo first = client.openPipeStream();
                 assertThrows(ExecutionException.class, () -> first.capabilities().laneOpener().open()
                         .toCompletableFuture().get(2, TimeUnit.SECONDS)); // A single TCP path gains no independence.
-                client.paths().add(listener.localAddress(), PipeOptions.defaults());
+                client.addPipe(listener.localAddress(), PipeOptions.defaults());
                 {
                     PipeIo second = client.openPipeStream();
                     var cancelled = new CompletableFuture<Void>();
@@ -105,13 +105,13 @@ class NestedSessionTest {
 
     @Test void nestedLanesCarryIndependentStreamsOverMultipathOuterSession() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var outerConfig = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.insecure())).build();
-            var innerConfig = ZmuxConfig.builder().eventLoops(loops).limits(Limits.defaults().withLanes(4)).build();
+            var outerConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+            var innerConfig = ZmuxConfig.builder().eventLoops(loops).maxLanes(4).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(outerConfig));
                  var outerClient = Zmux.connect(listener.localAddress(), outerConfig);
                  var outerServer = listener.accept(Duration.ofSeconds(5));
                  var innerListener = Zmux.listener(ListenerConfig.of(innerConfig))) {
-                outerClient.paths().add(listener.localAddress(), PipeOptions.defaults());
+                outerClient.addPipe(listener.localAddress(), PipeOptions.defaults());
                 var routing = workers.submit(() -> {
                     try {
                         while (true) innerListener.handle(outerServer.acceptStream().asPipe(), JoinHint.inBand(TestAddr.peer("nested"))).closed();
@@ -121,8 +121,8 @@ class NestedSessionTest {
                      var server = innerListener.accept(Duration.ofSeconds(5))) {
                     client.ping();
                     long ackDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (client.paths().stats().getFirst().bytesAcked().orElse(0) == 0 && System.nanoTime() < ackDeadline) Thread.sleep(10);
-                    assertTrue(client.paths().stats().getFirst().bytesAcked().orElse(0) > 0, "lane 0 must be acknowledged before requesting lanes");
+                    while (client.pipeStats().getFirst().bytesAcked().orElse(0) == 0 && System.nanoTime() < ackDeadline) Thread.sleep(10);
+                    assertTrue(client.pipeStats().getFirst().bytesAcked().orElse(0) > 0, "lane 0 must be acknowledged before requesting lanes");
                     // Keep several directions live at once, to request lanes after lane 0 is acknowledged.
                     var streams = new java.util.ArrayList<ZmuxStream>();
                     var peers = new java.util.ArrayList<ZmuxStream>();
@@ -136,8 +136,8 @@ class NestedSessionTest {
                         ByteBuffer b = ByteBuffer.allocate(1); assertEquals(1, peer.read(b)); peers.add(peer);
                     }
                     long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (client.paths().list().getFirst().stats().orElseThrow().lanesOut() < 2 && System.nanoTime() < until) Thread.sleep(10);
-                    assertTrue(client.paths().list().getFirst().stats().orElseThrow().lanesOut() > 1);
+                    while (client.pipes().getFirst().stats().orElseThrow().lanesOut() < 2 && System.nanoTime() < until) Thread.sleep(10);
+                    assertTrue(client.pipes().getFirst().stats().orElseThrow().lanesOut() > 1);
                     for (int i = 0; i < streams.size(); i++) {
                         streams.get(i).write(new byte[] {42}); streams.get(i).finish();
                         assertArrayEquals(new byte[] {42}, SessionTest.readAll(peers.get(i)));
@@ -154,10 +154,10 @@ class NestedSessionTest {
 
     @Test void addingAPipeThroughTheSameSessionIsRejectedWithoutBreakingTheSession() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.psk(new byte[32]))).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (var outer = Pair.memory(config)) {
                 var carrier = outer.client().openPipeStream();
-                assertThrows(PipeRefusedException.class, () -> outer.client().paths().add(carrier, PipeOptions.defaults()));
+                assertThrows(PipeRefusedException.class, () -> outer.client().addPipe(carrier, PipeOptions.defaults()));
                 assertNotNull(outer.client().ping());
             }
             assertEquals(0, loops.outstandingBuffers());

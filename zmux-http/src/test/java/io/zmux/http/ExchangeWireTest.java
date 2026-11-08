@@ -115,26 +115,25 @@ class ExchangeWireTest {
         assertNull(Exchange.decodeBase64(ascii("aGVsbB==")), "stray bits");
     }
 
-    @Test void configNeedsAPskOrInsecure() {
+    @Test void configNeedsAPsk() {
         assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().build());
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[] {1}).allowInsecure(true).build());
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().allowInsecure(true).upPieceSize(100).upStoreLimit(1000).build(),
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[32]).upPieceSize(100).upStoreLimit(1000).build(),
                 "store below twice the largest UP piece");
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().allowInsecure(true).upPieceSize(3 << 20).upStoreLimit((6 << 20) - 1).build());
-        assertEquals(2 << 20, ExchangeConfig.builder().allowInsecure(true).upStoreLimit(2 << 20).build().upStoreLimit());
-        assertEquals(8 << 20, ExchangeConfig.builder().allowInsecure(true).upPieceSize(4 << 20).build().upStoreLimit(), "default raised");
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().allowInsecure(true)
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[32]).upPieceSize(3 << 20).upStoreLimit((6 << 20) - 1).build());
+        assertEquals(2 << 20, ExchangeConfig.builder().psk(new byte[32]).upStoreLimit(2 << 20).build().upStoreLimit());
+        assertEquals(8 << 20, ExchangeConfig.builder().psk(new byte[32]).upPieceSize(4 << 20).build().upStoreLimit(), "default raised");
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[32])
                 .backoff(java.time.Duration.ofSeconds(3), java.time.Duration.ofSeconds(1)).build(), "maximum below minimum");
-        var zero = ExchangeConfig.builder().allowInsecure(true).backoff(java.time.Duration.ZERO, java.time.Duration.ZERO)
+        var zero = ExchangeConfig.builder().psk(new byte[32]).backoff(java.time.Duration.ZERO, java.time.Duration.ZERO)
                 .holdTime(java.time.Duration.ZERO).goneMemory(java.time.Duration.ZERO).build();
         assertEquals(java.time.Duration.ZERO, zero.backoffMax(), "0 as it is");
         assertEquals(java.time.Duration.ZERO, zero.holdTime());
         assertEquals(java.time.Duration.ZERO, zero.goneMemory());
-        assertEquals(java.time.Duration.ofSeconds(20), ExchangeConfig.builder().allowInsecure(true).build().holdTime());
+        assertEquals(java.time.Duration.ofSeconds(20), ExchangeConfig.builder().psk(new byte[32]).build().holdTime());
         assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().downRequests(-1));
         assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().requestTimeout(java.time.Duration.ofNanos(-1)));
-        assertEquals(java.time.Duration.ofMillis(2), ExchangeConfig.builder().allowInsecure(true).build().coalesce());
-        assertEquals(java.time.Duration.ZERO, ExchangeConfig.builder().allowInsecure(true).coalesce(java.time.Duration.ZERO).build().coalesce(), "0: no wait");
+        assertEquals(java.time.Duration.ofMillis(2), ExchangeConfig.builder().psk(new byte[32]).build().coalesce());
+        assertEquals(java.time.Duration.ZERO, ExchangeConfig.builder().psk(new byte[32]).coalesce(java.time.Duration.ZERO).build().coalesce(), "0: no wait");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> ExchangeConfig.builder().coalesce(java.time.Duration.ofMillis(-1)));
     }

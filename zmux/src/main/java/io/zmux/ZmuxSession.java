@@ -6,6 +6,7 @@ import io.zmux.internal.core.Event;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.core.SessionState;
 import io.zmux.internal.core.Stream;
+import io.zmux.internal.loop.Bootstrap;
 import io.zmux.internal.loop.Operation;
 import io.zmux.internal.loop.LaneTable;
 import io.zmux.internal.loop.SessionRuntime;
@@ -31,7 +32,8 @@ import javax.net.ssl.SSLEngine;
 /**
  * A zmux session: streams and datagrams multiplexed over its pipes. All methods are
  * thread-safe. Blocking methods park the calling thread (virtual threads are a good fit)
- * and must not be called on a zmux event-loop thread; {@link #close()} never blocks.
+ * and must not be called on a zmux event-loop thread; {@link #close()} blocks at most one
+ * second, for the hand-off of CONNECTION_CLOSE, and there only starts the close.
  *
  * <p>The futures of a session's asynchronous operations complete one at a time, in the order
  * the session settled them, on one callback thread of the session (never an event loop).
@@ -51,9 +53,128 @@ public final class ZmuxSession implements AutoCloseable {
     /** The carrier selection report ({@link #reportCarrier}); guarded by itself. */
     private final java.util.ArrayList<CandidateResult> carrierTries = new java.util.ArrayList<>(0);
     private CarrierKind carrier;
+    private String carrierVariant = "";
 
     /** The application's designation of the bootstrap dialer, or null. */
     Boolean designatedDialer() { return designatedDialer; }
+
+    /**
+     * Supplies the {@link PipeAuth#deferred() deferred PSK}, at least 16 bytes, once: the join keys
+     * are derived from it (with the exporter when both are selected) and the peer's held joins go
+     * on. Before establishment it is kept for the negotiation, and dropped and cleared when that
+     * does not select it. The caller keeps psk.
+     *
+     * @throws IllegalArgumentException without a deferred PSK or for a shorter PSK
+     * @throws JoinSecretSetException when it was supplied already
+     * @throws NotNegotiatedException after an establishment that did not select the PSK
+     */
+    public void setJoinSecret(byte[] psk) throws IOException {
+        if (psk == null || psk.length < 16) throw new IllegalArgumentException("PSK shorter than 16 bytes");
+        if (!core.config().deferredPsk()) throw new IllegalArgumentException("setJoinSecret without a deferred PSK");
+        byte[] copy = psk.clone();
+        try {
+            run(op -> {
+                driver.setJoinSecret(copy);
+                return Boolean.TRUE;
+            });
+        } finally {
+            java.util.Arrays.fill(copy, (byte) 0);
+        }
+    }
+
+    /**
+     * Keying material (RFC 5705, RFC 8446 Section 7.5) of the innermost end-to-end handshake of
+     * the bootstrap carrier, its {@link io.zmux.carrier.PipeIo.Capabilities#exporter() exporter};
+     * for a split bootstrap over two connections the uplink's value followed by the downlink's,
+     * 2 × length bytes. Both ends obtain the same value.
+     *
+     * @throws IllegalArgumentException for a negative length or a label of zmux's own ({@code EXPORTER-zmux-})
+     * @throws NoExporterException when the carrier has none
+     * @throws IOException while its handshake is incomplete
+     */
+    public byte[] exportKeyingMaterial(String label, byte[] context, int length) throws IOException {
+        java.util.Objects.requireNonNull(label, "label");
+        if (label.startsWith("EXPORTER-zmux-")) throw new IllegalArgumentException("exporter label " + label + " is reserved");
+        if (length < 0) throw new IllegalArgumentException("negative exporter length");
+        if (!driver.bootHasExporter()) throw new NoExporterException();
+        byte[] v = driver.exportKeyingMaterial(label, context, length);
+        if (v == null) throw new IOException("the carrier's handshake is incomplete");
+        return v;
+    }
+
+    /**
+     * A 32-byte value that identifies this session, the same at both ends, to include in an
+     * authentication transcript; public, no secret. Empty before
+     * establishment and when multipath is not in use.
+     */
+    public Optional<byte[]> sessionBinding() throws IOException {
+        return Optional.ofNullable((byte[]) run(op -> core.sessionBinding()));
+    }
+
+    /** The session's liveness settings in effect: setting them changes nothing. */
+    public Liveness liveness() throws IOException {
+        return (Liveness) run(op -> {
+            var l = core.config().live();
+            return Liveness.of(l.keepAlive() < 0 ? null : Duration.ofNanos(l.keepAlive()), Duration.ofNanos(l.suspectFloor()),
+                    l.deadTimeout() <= 0 ? null : Duration.ofNanos(l.deadTimeout()),
+                    l.standbyProbe() <= 0 ? null : Duration.ofNanos(l.standbyProbe()), l.probeInterval() <= 0 ? null : Duration.ofNanos(l.probeInterval()),
+                    l.probeJitter());
+        });
+    }
+
+    /**
+     * Replaces the session's liveness settings as a whole, under the rules of the configuration:
+     * a setting not written is its default, not the value the session started with. The timers rearm at once; a
+     * pipe already suspect keeps the floor and dead timeout it turned suspect under; a pipe's own
+     * settings keep winning. Nothing is sent.
+     */
+    public void setLiveness(Liveness l) throws IOException {
+        java.util.Objects.requireNonNull(l, "l");
+        var v = new io.zmux.internal.core.CoreConfig.Live(
+                l.keepAlive().map(ZmuxConfig::nanos).orElse(io.zmux.internal.core.CoreConfig.OFF),
+                ZmuxConfig.nanos(l.suspectFloor()),
+                l.deadTimeout().map(ZmuxConfig::nanos).orElse(0L),
+                l.standbyProbe().map(ZmuxConfig::nanos).orElse(0L),
+                l.probeInterval().map(ZmuxConfig::nanos).orElse(0L),
+                l.probeJitter());
+        run(op -> { core.setLiveness(v); return Boolean.TRUE; });
+    }
+
+    /**
+     * Raises the bidirectional and unidirectional streams the peer may have open while the
+     * session runs, and sends the credit. It only grows: a value at or below the
+     * current one leaves that type as it is, so 0 raises nothing. While unidirectional credit is
+     * staged, uni raises the value the first accept moves it to. After GOAWAY no credit is sent.
+     *
+     * @throws IllegalArgumentException outside [0, 2^60]
+     */
+    public void raiseIncomingStreams(long bidi, long uni) throws IOException {
+        if (bidi < 0 || uni < 0 || bidi > 1L << 60 || uni > 1L << 60) throw new IllegalArgumentException("raiseIncomingStreams outside [0, 2^60]");
+        run(op -> {
+            core.raiseIncomingStreams(true, bidi);
+            core.raiseIncomingStreams(false, uni);
+            return Boolean.TRUE;
+        });
+    }
+
+    /** The session's shaping readings. */
+    public io.zmux.shaping.ShapingMeters shapingMeters() throws IOException {
+        return (io.zmux.shaping.ShapingMeters) run(op -> core.shapingMeters());
+    }
+
+    /** The session's shaping limits. */
+    public io.zmux.shaping.ShapingLimits shapingLimits() throws IOException {
+        return (io.zmux.shaping.ShapingLimits) run(op -> core.shapingLimits());
+    }
+
+    /**
+     * Replaces the session's shaping limits, tightened or loosened; they are never sent. What was
+     * spent stays spent.
+     */
+    public void setShapingLimits(io.zmux.shaping.ShapingLimits l) throws IOException {
+        java.util.Objects.requireNonNull(l, "l");
+        run(op -> { core.setShapingLimits(l); return Boolean.TRUE; });
+    }
 
     /** Identifies the bootstrap dialer for a symmetric carrier; a known designation cannot be reversed. */
     public void designateDialer(boolean local) throws IOException {
@@ -83,6 +204,84 @@ public final class ZmuxSession implements AutoCloseable {
         this.core = core;
         this.applicationProtocol = applicationProtocol;
         this.credential = credential;
+        driver.host(this);
+        var redial = driver.hooks().redial();
+        if (redial != null) Redialer.start(this, (ZmuxConfig.Redial) redial.hook(), redial.minBackoff(), redial.maxBackoff());
+    }
+
+    /**
+     * States that the host has proven pipe 0 end to end: local, sends nothing. Until
+     * then a session without a secure first pipe has no join keys: local joins fail with
+     * {@link JoinPendingException} and the peer's are held. With a secure first pipe, a no-op.
+     */
+    public void declareEndToEnd() throws IOException {
+        run(op -> { driver.declareEndToEnd(); return null; });
+    }
+
+    /**
+     * Starts a session epoch exchange at once when the session is
+     * Stable, or right after the one in progress; {@link SessionEvent.EpochCommitted} and
+     * {@link SessionEvent.EpochDeleted} report it. Ordinary rotation also follows the policy
+     * ({@link ZmuxConfig.Builder#epochPeriod}, {@link ZmuxConfig.Builder#epochJoins},
+     * {@link ZmuxConfig.Builder#epochAfterFirstPipe}, {@link ZmuxConfig.Builder#epochAfterResume}).
+     *
+     * @throws NotNegotiatedException without multipath
+     * @throws JoinPendingException before the session has its join keys
+     */
+    public void advanceEpoch() throws IOException {
+        run(op -> { core.advanceEpoch(); return null; });
+    }
+
+    /** The epoch new local joins use. */
+    public long epoch() throws IOException {
+        return (Long) run(op -> core.epoch());
+    }
+
+    /**
+     * Advances the epoch as {@link #advanceEpoch} does and then replaces every carrier the session
+     * had, through the {@link ZmuxConfig.Builder#redial redial hook}, within deadline: a new pipe
+     * joins with the new epoch and the old one is removed gracefully. It serves only a suspected
+     * leak of a session-level secret; ordinary rotation is {@link #advanceEpoch} or the policy.
+     *
+     * @throws IllegalStateException without a redial hook
+     * @throws SocketTimeoutException when deadline passes first
+     */
+    public void forceEpochAdvance(Duration deadline) throws IOException {
+        var redial = driver.hooks().redial();
+        if (redial == null) throw new IllegalStateException("forceEpochAdvance without a redial hook");
+        long until = deadline(java.util.Objects.requireNonNull(deadline, "deadline"));
+        List<ZmuxPipe> old = pipes();
+        long next = epoch() + 1;
+        advanceEpoch();
+        try {
+            call(op -> core.waitEpoch(next, op) ? Boolean.TRUE : Operation.PENDING, core::cancelEpochWait, until);
+        } catch (SocketTimeoutException e) {
+            throw new SocketTimeoutException("forceEpochAdvance: epoch " + next + " not in use");
+        }
+        ZmuxConfig.Redial hook = (ZmuxConfig.Redial) redial.hook();
+        try (Cancellation cancel = new Cancellation()) {
+            for (ZmuxPipe p : old) {
+                var st = p.stats().orElse(null);
+                if (st == null) continue; // gone already: nothing to replace
+                PipeOptions.Direction dir = st.inbound() == null ? PipeOptions.Direction.SEND_ONLY
+                        : st.outbound() == null ? PipeOptions.Direction.RECEIVE_ONLY : PipeOptions.Direction.BIDIRECTIONAL;
+                if (System.nanoTime() - until >= 0) throw new SocketTimeoutException("forceEpochAdvance: deadline");
+                io.zmux.carrier.PipeIo io;
+                try {
+                    io = hook.dial(dir, cancel);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.InterruptedIOException("forceEpochAdvance interrupted");
+                }
+                addPipe(io, PipeOptions.builder().direction(dir).build());
+                p.close();
+            }
+        }
+    }
+
+    /** The weakest record mode of the session's unretired pipes and pipe 0, which counts for life. */
+    public RecordMode weakestRecordMode() throws IOException {
+        return (RecordMode) run(op -> io.zmux.internal.join.Mode.record(core.weakestMode()));
     }
 
     static long deadline(Duration timeout) {
@@ -162,7 +361,7 @@ public final class ZmuxSession implements AutoCloseable {
 
     /**
      * Opens a bidirectional stream marked PIPE_CARRIER and returns it as a pipe input of a
-     * nested session (API.md Section 4.6); nothing is sent until the nested session's first record.
+     * nested session; nothing is sent until the nested session's first record.
      */
     public io.zmux.carrier.PipeIo openPipeStream(List<Preamble.Tlv> tlvs) throws IOException {
         List<Preamble.Tlv> values = List.copyOf(tlvs);
@@ -299,13 +498,10 @@ public final class ZmuxSession implements AutoCloseable {
     }
 
     private final Datagrams datagramView = new Datagrams(this);
-    private final Paths pathView = new Paths(this);
 
     /** Session datagrams; operations throw {@link NotNegotiatedException} unless both sides enabled them. */
     public Datagrams datagrams() { return datagramView; }
 
-    /** Multipath: pipes beyond the bootstrap carrier. */
-    public Paths paths() { return pathView; }
 
     // ---- datagrams ----
 
@@ -366,48 +562,103 @@ public final class ZmuxSession implements AutoCloseable {
         }, op -> core.datagrams().cancelReceiveWait(op), deadline(timeout));
     }
 
-    // ---- pipes (MULTIPATH.md 5) ----
+    // ---- pipes ----
 
     /**
-     * Joins a new TCP connection to address as a pipe and waits until the join is confirmed.
-     * A join that the attachment cap holds waits for room.
+     * Joins a new TCP connection to address as a pipe and waits until the peer attached it
+     * ({@link ZmuxPipe#awaitPeerAttached}), or with {@link PipeOptions.Builder#noWaitAttached}
+     * until the Reply verified; the join timeout ({@link ZmuxConfig.Builder#joinTimeout}) bounds
+     * the whole call, from its start. A pipe still unattached then is aborted and
+     * {@link SocketTimeoutException} thrown; interruption aborts it as well
+     * ({@link InterruptedIOException}); a pipe that fails or is removed first gives
+     * {@link PipeGoneException}, a refused join {@link JoinRefusedException}, the session's end the
+     * session's exception. A failed call leaves no pipe: its abort waits for the event loop at most one
+     * second, as a close does, and a loop that does not answer by then gets the abort queued (it runs when the
+     * loop does, or the session's end releases the pipe) while the call throws its failure. A send-only pipe is attached by a PIPE_ACK
+     * that arrives on another pipe: without one that receives, the wait lasts until the deadline.
+     * A join that the attachment cap or the refusal backoff holds waits for room. The connection
+     * starts with the prefix of the session configuration's {@link ZmuxConfig#credential()}.
+     * Needs multipath ({@link NotNegotiatedException} otherwise).
      */
-    ZmuxPipe addPipe(InetSocketAddress address, PipeOptions o) throws IOException {
+    public ZmuxPipe addPipe(InetSocketAddress address, PipeOptions o) throws IOException {
         driver.checkBlocking();
-        if (o.carrierBound) throw new IllegalArgumentException("carrierBound needs a TLS carrier");
-        SocketChannel ch = Zmux.dial(address, core.handshakeTimeout());
+        long deadline = joinDeadline();
+        SocketChannel ch = Zmux.dial(address, remaining(deadline));
         Zmux.present(ch, credential, address);
-        return joined(driver.addPipe(ch, o.join()));
+        return attached(joined(driver.addPipe(ch, o.join()), deadline), o, deadline);
     }
 
-    /** Joins a new TLS connection (server name verified, the session's ALPN offered) as a pipe. */
-    ZmuxPipe addPipeTls(InetSocketAddress address, TlsOptions tls, PipeOptions o) throws IOException {
+    /**
+     * Joins a new TLS connection (server name verified, the session's ALPN offered) as a pipe,
+     * returning as {@link #addPipe(InetSocketAddress, PipeOptions)} does; after the handshake it
+     * presents the session configuration's {@link ZmuxConfig#credential()}.
+     */
+    public ZmuxPipe addTlsPipe(InetSocketAddress address, TlsOptions tls, PipeOptions o) throws IOException {
         driver.checkBlocking();
-        SocketChannel ch = Zmux.dial(address, core.handshakeTimeout());
+        long deadline = joinDeadline();
+        SocketChannel ch = Zmux.dial(address, remaining(deadline));
         String alpn = applicationProtocol.isEmpty() ? ZmuxConfig.DEFAULT_ALPN : applicationProtocol;
-        SSLEngine engine = tls.clientEngine(address.getPort(), List.of(alpn));
-        return joined(driver.addPipe(ch, engine, core.handshakeTimeout(), o.join(), Zmux.presenter(credential, address)));
-    }
-
-    /** Reserves a pipe for an out-of-band PIPE_JOIN header, before opening its carrier. */
-    PipeReservation reservePipe(PipeOptions options) throws IOException {
-        Objects.requireNonNull(options);
-        if (options.carrierBound) throw new IllegalArgumentException("a reservation cannot bind to a handshake that does not exist yet");
-        var reserved = (io.zmux.internal.core.Joins.Reservation) run(op -> { var r = driver.reservePipe(options.join()); driver.refreshPipes(); return r; });
-        return new PipeReservation(this, reserved.id(), Base64.getUrlEncoder().withoutPadding().encodeToString(reserved.frame()));
-    }
-
-    /** Joins a pipe input as a pipe. */
-    ZmuxPipe addPipe(PipeIo io, PipeOptions o) throws IOException {
-        if (io.carrier() == CarrierKind.SPLIT && io.reader() != null && io.writer() != null) {
-            // Its pairing makes pipe pair 0 only (SPEC.md 6.1.1): a further pipe joins as an uplink and a downlink.
-            throw new IllegalArgumentException("a split bootstrap carrier cannot join a session; join an uplink and a downlink");
+        SSLEngine engine;
+        try {
+            engine = tls.clientEngine(address.getPort(), List.of(alpn));
+        } catch (RuntimeException e) {
+            ch.close();
+            throw e;
         }
-        driver.checkBlocking();
-        return joined(driver.addPipe(io, o.join()));
+        return attached(joined(driver.addPipe(ch, engine, remaining(deadline), tls.secure(), o.join(), Zmux.presenter(credential, address)), deadline),
+                o, deadline);
     }
 
-    ZmuxPipe joined(CompletableFuture<Long> f) throws IOException {
+    /**
+     * Joins a pipe input as a pipe, returning as {@link #addPipe(InetSocketAddress, PipeOptions)}
+     * does. The pipe input belongs to zmux from the call on, whatever the outcome: zmux closes it
+     * on every failure, the caller never does.
+     */
+    public ZmuxPipe addPipe(PipeIo io, PipeOptions o) throws IOException {
+        try {
+            driver.checkBlocking();
+        } catch (RuntimeException e) {
+            Bootstrap.discard(io, e);
+            throw e;
+        }
+        long deadline = joinDeadline();
+        return attached(joined(driver.addPipe(io, o.join()), deadline), o, deadline);
+    }
+
+    /** The nanoseconds left until deadline (System.nanoTime), at least 1. */
+    private static long remaining(long deadline) {
+        return deadline == Long.MAX_VALUE ? io.zmux.internal.core.Time.NEVER : Math.max(1, deadline - System.nanoTime());
+    }
+
+    /** The deadline (System.nanoTime) of a join called now: the join timeout from now. */
+    private long joinDeadline() {
+        long t = System.nanoTime(), d = t + core.joinDeadline();
+        return d < t ? Long.MAX_VALUE : d;
+    }
+
+    /**
+     * Waits until the peer attached a joined pipe, unless o says not to, within the
+     * call's deadline. A pipe still unattached at the deadline, or when the wait is interrupted,
+     * is aborted (PIPE_ABANDON(ZMUX_PIPE_FAILED)); one that fails or is removed first fails the
+     * call with {@link PipeGoneException}, the session's end with the session's exception.
+     */
+    private ZmuxPipe attached(ZmuxPipe p, PipeOptions o, long deadline) throws IOException {
+        if (o.noWaitAttached) return p;
+        Object r = new Operation<>(driver, p.attachedStep(), core::cancelPeerAttachedWait).submit().await(deadline);
+        // The core fails a join still unattached at the join deadline, which runs from JOINING,
+        // after this call's deadline: past it, the pipe is gone because the wait timed out.
+        if (r == ZmuxPipe.MISSING && deadline != Long.MAX_VALUE && System.nanoTime() - deadline >= 0) r = new SocketTimeoutException();
+        if (r == ZmuxPipe.MISSING) throw new PipeGoneException(p.id());
+        if (r instanceof SocketTimeoutException) {
+            cancelJoinedPipe(p.id());
+            throw new SocketTimeoutException("pipe " + p.id() + " not attached by the peer within the join deadline");
+        }
+        if (r instanceof InterruptedIOException) cancelJoinedPipe(p.id());
+        Errors.check(r);
+        return p;
+    }
+
+    ZmuxPipe joined(CompletableFuture<Long> f, long deadline) throws IOException {
         long id;
         try {
             id = f.get();
@@ -428,8 +679,9 @@ public final class ZmuxSession implements AutoCloseable {
         } catch (ExecutionException e) {
             throw Errors.failure(e.getCause());
         }
-        // No deadline here: the core fails a local join still unconfirmed after handshakeTimeout
-        // (PathSession timers), which reports GONE through the pipe-state wake-up.
+        // The core also fails a local join still unconfirmed after its deadline (PathSession
+        // timers), which reports GONE through the pipe-state wake-up; the call's deadline, from
+        // its start, bounds it here as well.
         Object r = new Operation<>(driver, op -> switch (core.joinProgress(id)) {
             case CONFIRMED -> { driver.refreshPipes(); yield Boolean.TRUE; }
             case GONE -> Boolean.FALSE;
@@ -438,7 +690,7 @@ public final class ZmuxSession implements AutoCloseable {
                 driver.waitPipe(op);
                 yield Operation.PENDING;
             }
-        }, driver::cancelPipeWait).submit().await(Long.MAX_VALUE);
+        }, driver::cancelPipeWait).submit().await(deadline);
         if (r instanceof Throwable) {
             cancelJoinedPipe(id);
             Errors.check(r);
@@ -447,12 +699,42 @@ public final class ZmuxSession implements AutoCloseable {
         return new ZmuxPipe(this, id);
     }
 
-    private void cancelJoinedPipe(long id) {
+    /**
+     * Aborts a joined pipe whose call failed, waiting for the loop at most as long as a close
+     * does (one second): a loop stuck longer cannot hold the calling thread. The abort is queued
+     * on the loop either way and runs when the loop does (or the session's end releases the
+     * pipe); the caller's own failure is reported regardless. True when it ran within the bound.
+     */
+    boolean cancelJoinedPipe(long id) {
         var done = new CompletableFuture<Void>();
-        if (driver.executeCarrier(() -> {
+        CompletableFuture<?> wait = driver.executeCarrier(() -> {
             try { abandon(id); done.complete(null); } catch (Throwable error) { done.completeExceptionally(error); }
-        })) done.join();
-        else driver.closedFuture().join();
+        }) ? done : driver.closedFuture();
+        return awaitBounded(wait, closeHandOffLimit);
+    }
+
+    /** Waits for f at most nanos (uninterruptibly, keeping the flag); true when it completed. */
+    static boolean awaitBounded(CompletableFuture<?> f, long nanos) {
+        boolean interrupted = false;
+        long end = System.nanoTime() + nanos;
+        try {
+            while (true) {
+                long left = end - System.nanoTime();
+                if (left <= 0) return f.isDone();
+                try {
+                    f.get(left, TimeUnit.NANOSECONDS);
+                    return true;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                } catch (ExecutionException e) {
+                    return true;
+                } catch (TimeoutException e) {
+                    return false;
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     private void abandon(long id) {
@@ -463,49 +745,61 @@ public final class ZmuxSession implements AutoCloseable {
         }
     }
 
-    /** The attachments as of the loop's last round. */
-    List<ZmuxPipe> pipes() {
+    /** The attachments as of the loop's last round; no I/O. Works on every session. */
+    public List<ZmuxPipe> pipes() {
         return driver.pipeSnapshot().stream().map(i -> new ZmuxPipe(this, i.pipe())).toList();
     }
 
     /** Maintains one route's joined pipes; closing the handle stops maintenance, preserving existing traffic. */
-    PipeMaintenance maintainPipes(PipePool pool, Cancellation cancellation) throws IOException {
+    public PipeMaintenance maintainPipes(PipePool pool, Cancellation cancellation) throws IOException {
         return PipeMaintenance.start(this, pool, cancellation);
     }
 
+    /** {@link #maintainPipes(PipePool, Cancellation)} without a cancellation. */
+    public PipeMaintenance maintainPipes(PipePool pool) throws IOException { return maintainPipes(pool, null); }
+
     /** Whether the maintenance target and join admission permit dialing another pipe now. */
-    boolean joinReady() throws IOException {
+    public boolean joinReady() throws IOException {
         return (Boolean) run(op -> core.joinReady());
     }
 
     /** Re-checks every pipe after a suspected path change. */
-    void revalidatePipes() throws IOException {
+    public void revalidatePipes() throws IOException {
         run(op -> {
             core.revalidatePipes(0, true);
             return Boolean.TRUE;
         });
     }
 
+    /**
+     * Ends {@link ZmuxConfig.Builder#holdFirstFlight}: everything queued so far is built into
+     * records and written to the bootstrap carrier in one write, as far as one batch holds it.
+     * Calls after the first, and on a session without the hold, do nothing. It never blocks.
+     */
+    public void releaseFirstFlight() {
+        driver.post(() -> core.releaseFirstFlight(io.zmux.internal.loop.Clock.now()));
+    }
+
     /** Changes the session's scheduling policy. */
-    void setScheduler(Scheduler s) {
+    public void setScheduler(Scheduler s) {
         Objects.requireNonNull(s);
         driver.post(() -> driver.pickers.install(null, Scheduling.policy(s), Scheduling.picker(s)));
     }
 
     /** Snapshots as of the loop's last round, including pipe 0. */
-    List<PipeStats> pipeStats() {
+    public List<PipeStats> pipeStats() {
         return driver.pipeSnapshot();
     }
 
     /** The default quality event band of outbound pipes. */
-    void setQualityBand(QualityBand band) throws IOException {
+    public void setQualityBand(QualityBand band) throws IOException {
         Objects.requireNonNull(band);
         run(op -> { core.setQualityBand(-1, ZmuxConfig.nanos(band.rtt()), band.rateRatio(),
                 ZmuxConfig.nanos(band.minInterval())); return Boolean.TRUE; });
     }
 
     /** The outbound capacity floor, with hysteresis. */
-    void setCapacityFloor(CapacityFloor floor) throws IOException {
+    public void setCapacityFloor(CapacityFloor floor) throws IOException {
         Objects.requireNonNull(floor);
         run(op -> { core.setCapacityFloor(floor.rate(), floor.recoveryRatio()); return Boolean.TRUE; });
     }
@@ -519,8 +813,18 @@ public final class ZmuxSession implements AutoCloseable {
      * check for I/O between them, so a shaper that sets deadlines at a high rate trades CPU
      * time on the loop for timing precision.
      */
-    public void setShaper(io.zmux.shaping.ShaperFactory factory) {
-        driver.post(() -> core.setShaper(factory));
+    public void setShaper(io.zmux.shaping.ShaperFactory factory) { setShaper(factory, null); }
+
+    /**
+     * Installs factory as {@link #setShaper(io.zmux.shaping.ShaperFactory)} does, with a shaping configuration's budget:
+     * budget is called once, here, off the session; null: none. The account carries over.
+     */
+    public void setShaper(io.zmux.shaping.ShaperFactory factory, java.util.function.Supplier<io.zmux.shaping.ShapingBudget> budget) {
+        var b = ZmuxConfig.askBudget(budget);
+        driver.post(() -> {
+            core.setShapingBudget(b);
+            core.setShaper(factory);
+        });
     }
 
     /**
@@ -601,25 +905,98 @@ public final class ZmuxSession implements AutoCloseable {
         };
     }
 
+    /** The fixed bound of a close's hand-off of CONNECTION_CLOSE to the carriers; tests shorten it. */
+    static volatile long closeHandOffLimit = TimeUnit.SECONDS.toNanos(1);
+
     /**
-     * Closes with code 0 at once (CONNECTION_CLOSE, then linger). The close is only queued:
-     * this method returns before the session has closed. Use {@link #awaitClosed()} to wait for
-     * the end, or {@link #shutdown(Duration)} to close gracefully and wait.
+     * Closes with code 0 at once, discarding data not yet sent; like {@link #close(ApplicationError)}.
+     * Unlike a socket's close it does not flush: {@link #shutdown(Duration)} lets the peer read what
+     * was written.
      */
     @Override
     public void close() {
         close(ApplicationError.NONE);
     }
 
-    /** Closes with an application error at once; queued like {@link #close()}, without waiting. */
+    /**
+     * Closes with an application error at once, discarding data not yet sent. CONNECTION_CLOSE
+     * is written to the carrier of every usable outbound pipe (for a socket, taken into its send
+     * buffer), followed by the end of the carrier's sending direction; the session then reads and
+     * discards what the peer still sends until the peer ends its direction or the linger timeout
+     * (min(2 s, max(250 ms, 3 &times; SRTT))) passes, and only then closes the carriers. Returns
+     * once that drain is over, or at the latest after one second in all, the rest of the
+     * linger running in the background; at once when no pipe can carry CONNECTION_CLOSE. A
+     * carrier that has not taken it within the second is closed with the others and the session
+     * ends locally. The process may exit once it returned. A repeated or concurrent call sends nothing more and returns no later than the
+     * first; on an ended session it returns at once. Interruption does not cut the wait short
+     * (the flag is kept). On the session's event-loop or callback thread it only starts the
+     * close. {@link #awaitClosed()} waits for the session's whole end.
+     */
     public void close(ApplicationError error) {
+        if (!driver.mayBlock()) {
+            startClose(error);
+            return;
+        }
         byte[] r = error.reason().getBytes(StandardCharsets.UTF_8);
-        driver.post(() -> core.close(error.code(), r));
+        long limit = closeHandOffLimit;
+        long deadline = System.nanoTime() + limit;
+        // The hand-off yields the linger timeout, read on the loop.
+        var op = new Operation<>(driver, o -> {
+            core.closeBounded(error.code(), r, limit, io.zmux.internal.loop.Clock.now());
+            return core.waitCloseHandedOff(o) ? (Object) core.lingerTimeout() : Operation.PENDING;
+        }, core::cancelCloseHandOffWait);
+        op.submit();
+        if (!op.awaitUninterruptibly(deadline)) {
+            // The loop's own bound ends the close as well; this covers a loop that lags behind it.
+            driver.post(core::endClose);
+            op.awaitUninterruptibly(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50));
+            op.cancel();
+            return;
+        }
+        // CONNECTION_CLOSE and FIN are out; the session drains the peer's data until its FIN or
+        // the linger timeout. Wait for that within the bound, so that a process exiting on
+        // return leaves no unread data behind (which would abort the carrier with a RST and
+        // could take the CONNECTION_CLOSE with it); the rest of the linger runs on the loop.
+        if (op.outcome() instanceof Long linger) {
+            long wait = Math.min(linger, deadline - System.nanoTime());
+            if (wait > 0) awaitClosedUninterruptibly(wait);
+        }
+    }
+
+    private void awaitClosedUninterruptibly(long nanos) {
+        boolean interrupted = false;
+        long end = System.nanoTime() + nanos;
+        try {
+            while (true) {
+                long left = end - System.nanoTime();
+                if (left <= 0) return;
+                try {
+                    driver.closedFuture().get(left, TimeUnit.NANOSECONDS);
+                    return;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                } catch (TimeoutException | ExecutionException e) {
+                    return;
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Starts {@link #close(ApplicationError)} without waiting; the loop still bounds the hand-off. */
+    private void startClose(ApplicationError error) {
+        byte[] r = error.reason().getBytes(StandardCharsets.UTF_8);
+        long limit = closeHandOffLimit;
+        driver.post(() -> core.closeBounded(error.code(), r, limit, io.zmux.internal.loop.Clock.now()));
     }
 
     /**
      * Closes gracefully: GOAWAY when in use, then CONNECTION_CLOSE once no stream remains;
-     * after timeout it closes at once. Returns when the session is closed.
+     * after timeout it closes at once, through {@link #close()}'s hand-off. Returns when the
+     * session is closed. A stream remains until both its parts have ended: the application has
+     * read its end (FIN or reset) and the peer has acknowledged the sending part's end
+     * ({@link ZmuxStream#finish()} or a reset); its handle need not be closed.
      */
     public void shutdown(Duration timeout) throws IOException {
         driver.checkBlocking();
@@ -631,8 +1008,8 @@ public final class ZmuxSession implements AutoCloseable {
             close();
             awaitClosed();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
             close();
+            Thread.currentThread().interrupt();
             throw new InterruptedIOException("interrupted");
         } catch (ExecutionException e) {
             throw Errors.failure(e.getCause());
@@ -644,7 +1021,7 @@ public final class ZmuxSession implements AutoCloseable {
         Objects.requireNonNull(timeout);
         driver.post(() -> core.shutdown(0, null));
         closed().orTimeout(Math.max(1, timeout.toMillis()), TimeUnit.MILLISECONDS)
-                .exceptionally(error -> { close(); return null; });
+                .exceptionally(error -> { startClose(ApplicationError.NONE); return null; });
         return closed();
     }
 
@@ -677,11 +1054,22 @@ public final class ZmuxSession implements AutoCloseable {
         return e == null ? Optional.empty() : Optional.of(Errors.session(e));
     }
 
+    /** The largest datagram payload the peer accepts before a flow prefix, as of the loop's last round. */
+    int datagramLimit() {
+        return driver.info().datagramLimit();
+    }
+
     /** The negotiation results as of the session loop's last round: a snapshot, no I/O. */
     public ConnectionInfo info() {
         var i = driver.info();
-        return new ConnectionInfo(i.established(), i.initiator(), i.peerIsZmux(), applicationProtocol, i.goAway(), i.preamble(),
-                i.priority(), i.datagramFlows(), i.pipeAck(), i.multipath(), i.lanesToPeer(), i.maxDatagramPayload());
+        long[] g = i.goAway();
+        return new ConnectionInfo(i.established(), i.initiator(), ConnectionInfo.QMUX_VERSION, applicationProtocol,
+                Optional.ofNullable(driver.bootstrapTls()), i.peerIsZmux(), i.localDatagrams(), i.peerDatagrams(),
+                i.localResetStreamAt(), i.peerResetStreamAt(), i.multipath(), i.pipeAck(), i.resume(),
+                i.joinSecurityUnavailable(), i.joinPending(), i.suspended(),
+                g == null ? Optional.empty() : Optional.of(new ConnectionInfo.GoAway(g[0], g[1], g[2])),
+                Math.max(0, i.datagramLimit() - (i.datagramFlows() ? 1 : 0)),
+                i.preamble(), i.priority(), i.datagramFlows(), i.lanesToPeer());
     }
 
     /**
@@ -701,18 +1089,21 @@ public final class ZmuxSession implements AutoCloseable {
     /** The carrier kind a carrier mode chose last; null: none. */
     CarrierKind carrierKind() { synchronized (carrierTries) { return carrier; } }
 
+    /** The variant a carrier mode chose last; "" before a choice or without a label. */
+    String carrierVariant() { synchronized (carrierTries) { return carrierVariant; } }
+
     private java.util.List<CandidateResult> carrierTries() { synchronized (carrierTries) { return java.util.List.copyOf(carrierTries); } }
 
     /** Records tries of candidates and, when chosen is not null, the choice of kind: in the statistics and as events. */
-    void reportCarrier(java.util.List<CandidateResult> results, CarrierKind chosen) {
+    void reportCarrier(java.util.List<CandidateResult> results, CarrierKind chosen, String variant) {
         synchronized (carrierTries) {
             carrierTries.addAll(results);
             if (carrierTries.size() > CARRIER_TRIES_KEPT) carrierTries.subList(0, carrierTries.size() - CARRIER_TRIES_KEPT).clear();
-            if (chosen != null) carrier = chosen;
+            if (chosen != null) { carrier = chosen; carrierVariant = variant; }
         }
         driver.post(() -> {
             for (CandidateResult r : results) driver.addApplicationEvent(r.kind(), new SessionEvent.CarrierCandidate(r));
-            if (chosen != null) driver.addApplicationEvent(SessionEvent.CarrierChosen.class, new SessionEvent.CarrierChosen(chosen));
+            if (chosen != null) driver.addApplicationEvent(SessionEvent.CarrierChosen.class, new SessionEvent.CarrierChosen(chosen, variant));
         });
     }
 

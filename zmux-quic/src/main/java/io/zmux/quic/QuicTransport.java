@@ -50,6 +50,9 @@ final class QuicTransport extends AbstractTransport {
     @Override public TransportInfo info() { return info; }
     @Override public io.zmux.internal.loop.CarrierChannel channel() { return channel; }
     @Override public boolean closed() { return closed; }
+    @Override public boolean hasExporter() { return true; }
+    @Override public boolean secure() { return true; }
+    @Override public byte[] export(String label, byte[] context, int length) { return carrier.export(label, context, length); }
     @Override public boolean ownsHalf(Object half) { return carrier.owns(half); }
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return carrier.whenClosed(); }
     @Override public java.util.concurrent.CompletionStage<Boolean> whenTaken() { return carrier.taken.stage(); }
@@ -193,6 +196,7 @@ final class QuicTransport extends AbstractTransport {
         if (writing()) { shutAfterWrite = true; return; }
         outputShut = true;
         carrier.closeOutput(false);
+        outputShutDone();
     }
 
     @Override

@@ -1,7 +1,7 @@
 package io.zmux;
 
 /**
- * How a splice ended (API.md Section A.2): per direction the stream bytes and datagram bytes forwarded (together what
+ * How a splice ended: per direction the stream bytes and datagram bytes forwarded (together what
  * was charged to the direction's limiter), the datagrams dropped, and the event that ended it. A queued datagram is
  * not an acknowledgement of peer delivery. Cancelling the stage is the cancellation of the splice: it then has no
  * result.

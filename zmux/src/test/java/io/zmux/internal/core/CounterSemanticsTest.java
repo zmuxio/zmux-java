@@ -5,7 +5,7 @@ import io.zmux.internal.wire.TransportParams;
 import java.nio.ByteBuffer;
 import org.junit.jupiter.api.Test;
 
-/** penalties, bytes_opportunistic and pings_answered (API.md Section 7.2) follow what the core does. */
+/** penalties, bytes_opportunistic and pings_answered follow what the core does. */
 class CounterSemanticsTest {
     static SessionStats.Snapshot snap(Session s) { return s.stats().snapshot(0, null); }
 
@@ -29,7 +29,10 @@ class CounterSemanticsTest {
             CoreConfig.Role role = i == 0 ? CoreConfig.Role.INITIATOR : CoreConfig.Role.RESPONDER;
             CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role).maxPipes(2).headroom(8);
             c.local().present |= TransportParams.MULTIPATH;
-            c.local().secretFlags |= TransportParams.SECRET_INSECURE;
+            c.local().secretFlags |= TransportParams.SECRET_PSK;
+            c.local().present |= TransportParams.SESSION_CRYPTO;
+            c.local().sessionCrypto = io.zmux.internal.join.SessionCrypto.supported();
+            c.psk(new byte[32]).declaredEndToEnd(true);
             ends[i] = new Session(c.build(), 0);
             CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
             ends[i].attachBootstrap(info, info, null);
@@ -119,5 +122,29 @@ class CounterSemanticsTest {
         assertEquals(KeepAlive.BUDGET_CAP, ka.budgetTokens());
         for (long i = 0; i <= KeepAlive.BUDGET_CAP; i++) ka.charge(0); // the last charge goes below 0
         assertEquals(0, ka.budgetTokens(), "the charge that closes the session leaves the gauge at 0");
+    }
+
+    /** New bytes of a first batch are sent: session credit counts them once, and they go again as reinjected data. */
+    @Test void aFirstBatchCountsItsNewBytesOnce() throws Exception {
+        Session s = established();
+        Stream st = s.streams.openStream(true);
+        s.sending().write(st, ByteBuffer.allocate(6000), false);
+        long sessionBefore = s.conn.sent(), retainedBefore = s.path().retained();
+        byte[] first = s.sending().firstBatch(4000, s.tx::canSendNow, s.path());
+        assertNotNull(first);
+        long carried = st.snd.sent();
+        assertTrue(carried > 0 && carried < 6000, "carried " + carried);
+        assertEquals(sessionBefore + carried, s.conn.sent());
+        assertEquals(retainedBefore + carried, s.path().retained());
+        s.sending().firstBatch(4000, s.tx::canSendNow, s.path());
+        assertEquals(carried, st.snd.sent(), "the same bytes again are not new");
+        assertEquals(sessionBefore + carried, s.conn.sent());
+        Batch b = new Batch();
+        java.util.List<HeldControlTest.Sent> sent = new java.util.ArrayList<>();
+        for (int i = 0; i < 8 && s.pollTransmit(0, 0, b, Session.DEFAULT_BATCH, 0); i++) {
+            HeldControlTest.decode(BatchFixture.flat(b), sent);
+            s.writeDone(b, null, 0);
+        }
+        assertTrue(sent.stream().anyMatch(f -> f.off() == 0 && f.len() >= carried), "what it carried goes again: " + sent);
     }
 }

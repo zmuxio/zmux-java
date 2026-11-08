@@ -74,6 +74,8 @@ public final class RecvLane {
     private Piece tail;
     private boolean ended;
     private boolean endReported;
+    /** The application is done with this part: it saw the end, or stopped it; on the loop. */
+    boolean appDone;
     private Runnable hostReader;
     /** Told a failed end (reset, local stop, session end) once it is pushed; loop only. */
     private java.util.function.Consumer<CoreException> endWatcher;
@@ -421,6 +423,8 @@ public final class RecvLane {
         if (endSeen && !endReported) {
             endReported = true;
             core.receiving().laneEnded(st);
+            appDone = true;
+            driver.post(() -> driver.lanes.partEnded(st)); // after this step, not inside it
         }
     }
 

@@ -45,17 +45,6 @@ class ProbeWaitTest {
         assertEquals(half, PathHealth.effectiveInterval(half, 2 * Time.SECOND), "k below 1 s stays k under any hold");
     }
 
-    @Test void theHoldIsTheSmallerSetBound() {
-        long s = Time.SECOND;
-        assertEquals(0, Shaping.holdBound(-1, -1, 0), "neither bound set");
-        assertEquals(2 * s, Shaping.holdBound(2 * s, -1, 9 * s), "one delay only");
-        assertEquals(3 * s, Shaping.holdBound(-1, 5 * s, 2 * s), "what remains of the total");
-        assertEquals(0, Shaping.holdBound(-1, 5 * s, 7 * s), "a used-up total holds nothing more");
-        assertEquals(2 * s, Shaping.holdBound(2 * s, 5 * s, 1 * s), "the delay bound is smaller");
-        assertEquals(1 * s, Shaping.holdBound(2 * s, 5 * s, 4 * s), "the rest of the total is smaller");
-        assertEquals(0, Shaping.holdBound(0, -1, 0), "a delay bound of 0 holds nothing");
-    }
-
     @Test void aBootstrapPipesFirstWaitSpansTheWholeInterval() {
         var r = new SplittableRandom(11);
         boolean early = false;

@@ -1,6 +1,6 @@
 package io.zmux;
 
-/** The peer reset its sending part: reads fail with its code; a reset stream is never complete (SPEC.md 7.5). */
+/** The peer reset its sending part: reads fail with its code; a reset stream is never complete. */
 public final class StreamResetException extends StreamException {
     private final long code;
     private final long reliableSize;

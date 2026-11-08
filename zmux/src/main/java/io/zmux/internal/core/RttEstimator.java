@@ -22,7 +22,7 @@ final class RttEstimator {
 
     /**
      * Takes one sample and returns the adjusted value. A quiet sample (taken while a multipath session is quiet)
-     * enters the minimum only when there is none yet (SCHEDULER.md 2.1).
+     * enters the minimum only when there is none yet.
      */
     long update(long sample, long ackDelay, long maxAckDelay, long now, boolean quiet) {
         latest = sample;

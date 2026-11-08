@@ -63,6 +63,10 @@ final class SinglePath implements PathLayer {
     @Override public PipeInfo.States pipeState(Pipe p) { return PipeInfo.States.SINGLE; }
     @Override public Session.JoinProgress joinProgress(Pipe p) { return Session.JoinProgress.CONFIRMED; }
     @Override public boolean pipeUsable(Pipe p) { return true; }
+    @Override public boolean peerAttached(Pipe p) { return true; }
+    @Override public void waitPeerAttached(Waiter w) {}
+    @Override public void cancelPeerAttachedWait(Waiter w) {}
+    @Override public void wakePeerAttachedWaiters() {}
     @Override public long nextPipeId() { return 0; }
     @Override public boolean joinReady() { return false; }
     @Override public void policyChanged() {}

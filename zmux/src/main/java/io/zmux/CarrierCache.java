@@ -29,7 +29,7 @@ public final class CarrierCache {
     private final Duration successTtl, backoffMin, backoffMax;
     private final HashMap<Key, Entry> entries = new HashMap<>();
 
-    private record Key(String key, CarrierKind kind) {}
+    private record Key(String key, CarrierKind kind, String variant) {}
 
     /** Times in System.nanoTime, NONE when absent. */
     private static final class Entry {
@@ -83,14 +83,14 @@ public final class CarrierCache {
     public Duration backoffMax() { return backoffMax; }
 
     /** Whether kind was usable for key within the success TTL (and has not failed since), as of now (System.nanoTime). */
-    synchronized boolean good(String key, CarrierKind kind, long now) {
-        Entry e = entries.get(new Key(key, kind));
+    synchronized boolean good(String key, CarrierKind kind, String variant, long now) {
+        Entry e = entries.get(new Key(key, kind, variant));
         return e != null && !failing(e, now) && e.goodUntil != NONE && now - e.goodUntil < 0;
     }
 
     /** When kind's backoff under key ends (System.nanoTime), or Long.MIN_VALUE when it is not backing off. */
-    synchronized long failUntil(String key, CarrierKind kind, long now) {
-        Entry e = entries.get(new Key(key, kind));
+    synchronized long failUntil(String key, CarrierKind kind, String variant, long now) {
+        Entry e = entries.get(new Key(key, kind, variant));
         return e != null && failing(e, now) ? e.failUntil : NONE;
     }
 
@@ -98,29 +98,83 @@ public final class CarrierCache {
         return e.failUntil != NONE && now - e.failUntil < 0;
     }
 
+    /** The final URL redirects led kind to under key; "" for the base URL. */
+    synchronized String url(String key, CarrierKind kind, String variant) {
+        Entry e = entries.get(new Key(key, kind, variant));
+        return e == null ? "" : e.url;
+    }
+
     /** Records an outcome of kind under key at now (System.nanoTime); a failure forgets the kind's final URL. */
-    synchronized void record(String key, CarrierKind kind, boolean ok, long now) {
-        Entry e = entries.computeIfAbsent(new Key(key, kind), k -> new Entry());
+    synchronized void record(String key, CarrierKind kind, String variant, boolean ok, long now) {
+        record(key, kind, variant, ok, now, null);
+    }
+
+    /**
+     * Records an outcome as {@link #record(String, CarrierKind, String, boolean, long)}; with the
+     * candidate's target, a usable outcome keeps the URL redirects led it to, and a failure starts
+     * the target at its base URL again. Without one, a usable outcome keeps the URL known.
+     */
+    synchronized void record(String key, CarrierKind kind, String variant, boolean ok, long now, HttpTarget target) {
+        Entry e = entries.computeIfAbsent(new Key(key, kind, variant), k -> new Entry());
         if (ok) {
             e.goodUntil = now + successTtl.toNanos();
             e.failUntil = NONE;
             e.backoff = 0;
+            if (target != null) e.url = target.url().equals(target.base()) ? "" : target.url();
             return;
         }
+        if (target != null) target.reset();
         e.backoff = Math.clamp(2 * e.backoff, backoffMin.toNanos(), backoffMax.toNanos()); // min <= max: constructor
         e.goodUntil = NONE;
         e.failUntil = now + e.backoff;
         e.url = "";
     }
 
-    /** Whether kind is backing off under key now. */
-    public boolean backingOff(String key, CarrierKind kind) {
-        return failUntil(key, kind, System.nanoTime()) != NONE;
+    /** A definite outcome the host learnt after a dial ({@link #report}). */
+    public enum Outcome {
+        /** As a chosen candidate. */
+        USABLE,
+        /** An ordinary failure: the backoff doubles. */
+        FAILED,
+        /** A definite verdict of the host, such as a binding check that proves the path unsuitable: skipped for the maximum backoff. */
+        REJECTED
     }
 
-    /** Whether kind is remembered as usable under key now. */
+    /**
+     * Records an outcome the host learnt after the dial; key is the {@link ModePolicy#key()} in
+     * use. It goes into the same table as the automatic ones, under the same rules.
+     */
+    public synchronized void report(String key, CarrierKind kind, String variant, Outcome o) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(o, "o");
+        long now = System.nanoTime();
+        record(key, kind, variant == null ? "" : variant, o == Outcome.USABLE, now);
+        if (o == Outcome.REJECTED) {
+            Entry e = entries.get(new Key(key, kind, variant == null ? "" : variant));
+            e.backoff = backoffMax.toNanos();
+            e.failUntil = now + e.backoff;
+        }
+    }
+
+    /** Whether kind of no variant is backing off under key now. */
+    public boolean backingOff(String key, CarrierKind kind) {
+        return backingOff(key, kind, "");
+    }
+
+    /** Whether kind with variant is backing off under key now. */
+    public boolean backingOff(String key, CarrierKind kind, String variant) {
+        return failUntil(key, kind, variant, System.nanoTime()) != NONE;
+    }
+
+    /** Whether kind of no variant is remembered as usable under key now. */
     public boolean usable(String key, CarrierKind kind) {
-        return good(key, kind, System.nanoTime());
+        return usable(key, kind, "");
+    }
+
+    /** Whether kind with variant is remembered as usable under key now. */
+    public boolean usable(String key, CarrierKind kind, String variant) {
+        return good(key, kind, variant, System.nanoTime());
     }
 
     /** The entries that have not expired, with their times on the wall clock, by key and kind. */
@@ -134,10 +188,10 @@ public final class CarrierCache {
                 Entry e = m.getValue();
                 if (e.expired(now, hi)) continue;
                 out.add(new Snapshot.Entry(m.getKey().key(), m.getKey().kind(), wall(e.goodUntil, now, wall), wall(e.failUntil, now, wall),
-                        Duration.ofNanos(e.backoff), e.url));
+                        Duration.ofNanos(e.backoff), e.url, m.getKey().variant()));
             }
         }
-        out.sort(Comparator.comparing(Snapshot.Entry::key).thenComparing(e -> e.kind().toString()));
+        out.sort(Comparator.comparing(Snapshot.Entry::key).thenComparing(e -> e.kind().toString()).thenComparing(Snapshot.Entry::variant));
         return new Snapshot(out);
     }
 
@@ -161,7 +215,7 @@ public final class CarrierCache {
                 e.failUntil = bound(mono(s.failUntil(), now, wall), now + hi);
                 e.backoff = s.backoff().isZero() ? 0 : s.backoff().compareTo(backoffMax) > 0 ? hi : Math.max(lo, s.backoff().toNanos());
                 e.url = s.url();
-                if (!e.expired(now, hi)) merge(merged, new Key(s.key(), s.kind()), e);
+                if (!e.expired(now, hi)) merge(merged, new Key(s.key(), s.kind(), s.variant()), e);
             }
             merged.forEach((k, e) -> merge(entries, k, e));
         }
@@ -203,9 +257,16 @@ public final class CarrierCache {
          * @param failUntil until when the kind is held as failed; null: not
          * @param backoff the current backoff; zero: no failure in a row
          * @param url the final URL redirects led the kind to; empty: the base URL
+         * @param variant the candidate's variant; empty: none
          */
-        public record Entry(String key, CarrierKind kind, Instant goodUntil, Instant failUntil, Duration backoff, String url) {
+        public record Entry(String key, CarrierKind kind, Instant goodUntil, Instant failUntil, Duration backoff, String url, String variant) {
+            /** An entry of no variant. */
+            public Entry(String key, CarrierKind kind, Instant goodUntil, Instant failUntil, Duration backoff, String url) {
+                this(key, kind, goodUntil, failUntil, backoff, url, "");
+            }
+
             public Entry {
+                Objects.requireNonNull(variant, "variant");
                 Objects.requireNonNull(key, "key");
                 Objects.requireNonNull(kind, "kind");
                 Objects.requireNonNull(url, "url");
@@ -215,7 +276,7 @@ public final class CarrierCache {
 
         /**
          * The JSON form: {@code {"version":1,"entries":[...]}}, each entry's members in the order
-         * key, kind, good_until, fail_until, backoff_ms, url, those that are empty left out, times
+         * key, kind, good_until, fail_until, backoff_ms, url, variant, those that are empty left out, times
          * in RFC 3339 UTC.
          */
         public String toJson() {
@@ -234,6 +295,10 @@ public final class CarrierCache {
                 if (!e.url().isEmpty()) {
                     b.append(",\"url\":");
                     SnapshotJson.writeString(b, e.url());
+                }
+                if (!e.variant().isEmpty()) {
+                    b.append(",\"variant\":");
+                    SnapshotJson.writeString(b, e.variant());
                 }
                 b.append('}');
             }
@@ -279,7 +344,7 @@ public final class CarrierCache {
         /** One entry of the JSON form; null: an entry of an unknown kind, skipped. */
         private static Entry entry(SnapshotJson.Value item) {
             if (!(item instanceof SnapshotJson.Obj o)) throw new InvalidSnapshotException("an entry not an object");
-            String key = string(o, "key"), kind = string(o, "kind"), url = string(o, "url");
+            String key = string(o, "key"), kind = string(o, "kind"), url = string(o, "url"), variant = string(o, "variant");
             Instant good = time(o, "good_until"), fail = time(o, "fail_until");
             Duration backoff = switch (o.get("backoff_ms")) {
                 case null -> Duration.ZERO;
@@ -288,7 +353,7 @@ public final class CarrierCache {
                 default -> throw new InvalidSnapshotException("backoff_ms not a non-negative integer");
             };
             CarrierKind k = kind(kind);
-            return k == null ? null : new Entry(key, k, good, fail, backoff, url);
+            return k == null ? null : new Entry(key, k, good, fail, backoff, url, variant);
         }
 
         private static String string(SnapshotJson.Obj o, String name) {

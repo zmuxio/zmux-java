@@ -7,6 +7,16 @@ import static io.zmux.internal.core.TraceFrames.list;
 import static io.zmux.internal.core.TraceFrames.map;
 import static io.zmux.internal.core.TraceFrames.num;
 
+import io.zmux.internal.join.Acceptor;
+import io.zmux.internal.join.Hello;
+import io.zmux.internal.join.HelloPayload;
+import io.zmux.carrier.SecureCarrierException;
+import io.zmux.internal.join.JoinPipe;
+import io.zmux.internal.join.Joiner;
+import io.zmux.internal.join.Kdf;
+import io.zmux.internal.join.Mode;
+import io.zmux.internal.join.ReplyPayload;
+import io.zmux.internal.join.Suite;
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameDecoder;
 import io.zmux.internal.wire.FrameKind;
@@ -19,10 +29,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
-import org.opentest4j.TestAbortedException;
 
-/** Drives one core session through a trace (TRACES.md Section 7) on a virtual clock. */
+/** Drives one core session through a trace  on a virtual clock. */
 final class TraceRunner {
     static final class Failure extends RuntimeException {
         Failure(String m) {
@@ -47,6 +57,10 @@ final class TraceRunner {
         boolean in;
         boolean out;
         boolean writable = true;
+        boolean joining;
+        byte[] hello;
+        Acceptor acc;
+        byte[] replyIn = new byte[0];
 
         RPipe(long id) {
             this.id = id;
@@ -62,10 +76,15 @@ final class TraceRunner {
         String via;
         String dir;
         byte[] binding;
-        Frame pendJoin;
-        byte[] pendMac;
-        boolean pendInband;
-        boolean held;
+        Hello heldHello;
+        Joins.PeerJoin pj;
+        Joiner joiner;
+        boolean confirm;
+        byte[] reply;
+        String outcome = "";
+        int decision;
+        long hsDeadline;
+        final List<byte[]> msgs = new ArrayList<>();
         java.net.InetSocketAddress source;
         long deadline;
         Framing framing = Framing.BYTES;
@@ -82,6 +101,8 @@ final class TraceRunner {
 
     final Map<String, Object> header;
     final Session s;
+    final CoreConfig config;
+    Set<String> modes;
     long now;
     final Map<String, Stream> streams = new HashMap<>();
     final TreeMap<Long, RPipe> pipes = new TreeMap<>();
@@ -121,6 +142,8 @@ final class TraceRunner {
         }
         Map<String, Object> th = merge(p.get("test"), ov.get("test"));
         CoreConfig.Builder cfg = CoreConfig.builder();
+        // Exchanges start only when a trace asks for one.
+        cfg.epochs(CoreConfig.Epochs.MANUAL);
         io.zmux.internal.wire.Preamble.Tlv greaseTlv = null;
         long pingSeqStart = 0, testRtt = 0;
         int pipeCap = 0;
@@ -176,7 +199,12 @@ final class TraceRunner {
                 case "early_data" -> {
                     Map<String, Object> m = map(v);
                     cfg.earlyZmuxPeer(getB(m, "zmux_peer"));
-                    cfg.earlyReplayable(getB(m, "replayable"));
+                    if (getB(m, "replayable")) throw new IllegalStateException("no carrier early data in Java");
+                }
+                case "declared_end_to_end" -> cfg.declaredEndToEnd((Boolean) v);
+                case "record_modes" -> {
+                    modes = new java.util.HashSet<>();
+                    for (Object x : list(v)) modes.add((String) x);
                 }
                 case "pipe_auth" -> {
                     Map<String, Object> m = map(v);
@@ -185,8 +213,11 @@ final class TraceRunner {
                 default -> { }
             }
         }
-        cfg.test(new CoreConfig.TestHooks(true, greaseTlv, pingSeqStart, testRtt, pipeRtt, pipeCap));
-        s = new Session(cfg.build(), 0);
+        cfg.test(new CoreConfig.TestHooks(true, greaseTlv, pingSeqStart, testRtt, pipeRtt, pipeCap,
+                th.containsKey("epoch_locator_prefix") ? hex(th.get("epoch_locator_prefix")) : null));
+        cfg.joinEarlyHello(8 << 10);
+        config = cfg.build();
+        s = new Session(config, 0);
         enc = new TraceFrames.Encoder((pipe, lane) -> {
             RPipe rp = pipes.get(pipe);
             return rp == null ? 0 : rp.lane(lane).written;
@@ -210,12 +241,18 @@ final class TraceRunner {
                 return;
             }
             case "peer_send" -> { peerSend(st); return; }
+            case "peer_join" -> { peerJoin(st); return; }
+            case "peer_epoch" -> { peerEpoch(st); return; }
+            case "peer_join_finish" -> { peerJoinFinish(st); return; }
+            case "peer_confirm" -> { peerConfirm(st); return; }
+            case "peer_join_reply" -> { peerJoinReply(st); return; }
             case "api" -> { new TraceApi(this).call(st); return; }
             case "advance" -> { advance(ms(st.get("ms"))); return; }
             default -> { }
         }
         flush();
         switch (op) {
+            case "expect_join_hello" -> expectJoinHello(st);
             case "expect_frames" -> expectFrames(st);
             case "expect_no_frames" -> expectNoFrames(st);
             case "expect_close" -> expectClose(st);
@@ -249,7 +286,7 @@ final class TraceRunner {
             listenerUp(st);
             return;
         }
-        if (via != null && !via.equals("bootstrap")) throw new TestAbortedException("pipe_up via " + via);
+        if (via != null && !via.equals("bootstrap")) throw fail("pipe_up via " + via);
         long id = num(st.get("pipe"));
         RPipe p = new RPipe(id);
         if ("records".equals(st.get("framing"))) p.framing = Framing.RECORDS;
@@ -279,7 +316,10 @@ final class TraceRunner {
             RLane l = pipes.get(id).lane(lane);
             s.pipeEnded(id, lane, how.equals("eof"), l.in.length > 0, null, now);
         }
-        if (dir.equals("out") || dir.equals("bidi")) s.writeFailed(id, lane, new java.io.IOException("carrier failed"), now);
+        if (dir.equals("out") || dir.equals("bidi")) {
+            s.setNow(now);
+            s.pipeWriteFailed(id, lane, new java.io.IOException("carrier failed"));
+        }
         drainEvents();
     }
 
@@ -296,6 +336,11 @@ final class TraceRunner {
         long id = num(st.get("pipe"));
         RPipe p = pipes.get(id);
         if (p == null) throw fail("no pipe " + id);
+        if (p.joining) {
+            byte[] data = st.get("hex") instanceof String h ? hex(h) : st.get("records") != null ? enc.records(list(st.get("records"))) : new byte[0];
+            joinerFeed(p, data);
+            return;
+        }
         if (st.containsKey("messages") || st.containsKey("messages_hex")) {
             List<byte[]> msgs = new ArrayList<>();
             if (st.containsKey("messages")) for (Object m : list(st.get("messages"))) msgs.add(enc.body(m));
@@ -340,7 +385,7 @@ final class TraceRunner {
         drainEvents();
     }
 
-    /** Delivers bytes on an inbound lane carrier: the first record is routed by its PIPE_LANE (MULTIPATH.md 5.8). */
+    /** Delivers bytes on an inbound lane carrier: the first record is routed by its PIPE_LANE. */
     void carrierSend(RCarrier c, Map<String, Object> st) {
         if (c == null) throw fail("unknown carrier");
         byte[] data = st.get("hex") instanceof String h ? hex(h) : enc.records(list(st.get("records")));
@@ -406,6 +451,9 @@ final class TraceRunner {
         s.handleTimeout(now);
         drainEvents();
         for (RCarrier c : carriers.values()) {
+            if (!c.rejected && !c.attached && c.hsDeadline != 0 && now >= c.hsDeadline) closeCarrier(c, "reject");
+        }
+        for (RCarrier c : carriers.values()) {
             if (c.source != null && !c.rejected && now >= c.deadline) {
                 admission.release(c.source);
                 c.source = null;
@@ -414,11 +462,10 @@ final class TraceRunner {
         }
     }
 
-    // ---- listener carriers (MULTIPATH.md 5.4-5.6) ----
+    // ---- listener carriers  ----
 
     final CarrierAdmission admission = new CarrierAdmission(0, 0);
     final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing(0, 0);
-    final List<RCarrier> held = new ArrayList<>();
 
     void listenerUp(Map<String, Object> st) {
         RCarrier c = new RCarrier();
@@ -456,82 +503,500 @@ final class TraceRunner {
             c.source = a;
             c.deadline = admission.deadline(now);
         }
-        if (st.get("oob_join") instanceof String oob) {
-            byte[] b = hex(oob);
-            Frame f = CarrierAdmission.parseJoin(b);
-            if (f == null) {
-                c.rejected = true;
-                return;
-            }
-            tryJoin(c, f, CarrierAdmission.joinMac(f), false);
-        }
     }
 
     CarrierInfo carrierInfo(RCarrier c) {
         return new CarrierInfo(c.framing, false, true, c.conn != null, true);
     }
 
-    void tryJoin(RCarrier c, Frame f, byte[] mac, boolean inband) {
-        if (!java.util.Arrays.equals(CarrierAdmission.joinLocator(f), s.locator())) {
-            c.rejected = true;
+    private static final Map<String, Integer> DIRS = Map.of("up", 0, "down", 1, "bidi", 2);
+    private static final List<String> DIR_NAMES = List.of("up", "down", "bidi");
+    /** The keys of the wire examples, for a Hello written before the peer's parameters reached the session. */
+    private static final byte[] VECTOR_INIT = hex("00112233445566778899aabbccddeeff"), VECTOR_RESP = hex("ffeeddccbbaa99887766554433221100");
+
+    private static Mode mode(Object name) {
+        return Mode.valueOf(((String) name).toUpperCase(java.util.Locale.ROOT));
+    }
+
+    private static io.zmux.internal.join.Framing joinFraming(Framing f) {
+        return f == Framing.RECORDS ? io.zmux.internal.join.Framing.MESSAGE : io.zmux.internal.join.Framing.STREAM;
+    }
+
+    private boolean localInitiator() {
+        return s.roleKnown() ? s.initiator() : !"responder".equals(header.get("local_role"));
+    }
+
+    /** join_psk of a role and epoch, from the secrets both ends derive. */
+    private byte[] joinPsk(boolean initiatorRole, long epoch) {
+        byte[][] k = sessionKeys();
+        try {
+            return Kdf.joinPsk(Suite.AES, epoch > 0 ? epochSecrets.get(epoch) : k[0], initiatorRole, k[1]);
+        } catch (SecureCarrierException e) {
+            throw fail("join psk: " + e);
+        }
+    }
+
+    /** The session secret and session_crypto, from the local parameters and the peer's, as both ends compute them. */
+    private byte[][] sessionKeys() {
+        var local = s.localParams();
+        byte[] i = local.sessionNonce, r = VECTOR_RESP;
+        var setI = local.sessionCrypto;
+        io.zmux.internal.join.SessionCrypto setR;
+        try {
+            // Before its parameters, the peer of a trace declares the minimal sets.
+            setR = io.zmux.internal.join.SessionCrypto.of(new long[] {Suite.AES.id()}, new long[] {2});
+        } catch (SecureCarrierException e) {
+            throw new AssertionError(e);
+        }
+        boolean li = localInitiator();
+        var peer = s.peerParams();
+        if (peer != null) {
+            r = peer.sessionNonce;
+            setR = peer.sessionCrypto;
+        } else if (!li) {
+            r = VECTOR_INIT;
+        }
+        if (!li) {
+            byte[] tn = i; i = r; r = tn;
+            var ts = setI; setI = setR; setR = ts;
+        }
+        byte[] secret = Kdf.sessionSecret(i, r, new byte[0], config.psk() == null ? new byte[0] : config.psk());
+        return new byte[][] {secret, io.zmux.internal.join.SessionCrypto.session(setI, setR)};
+    }
+
+    // ---- epochs: the peer's side of the exchange, with Group 2 ----
+
+    private static final io.zmux.internal.join.Group EPOCH_GROUP = io.zmux.internal.join.Group.X25519_MLKEM768;
+    /** Every epoch secret derived. */
+    private final Map<Long, byte[]> epochSecrets = new HashMap<>();
+    /** The peer's offers: private values and body, by epoch. */
+    private final Map<Long, io.zmux.internal.join.KeyShare.Initiator> peerOffers = new HashMap<>();
+    private final Map<Long, byte[]> peerOfferBodies = new HashMap<>();
+    /** The local endpoint's offers: share and body, by epoch. */
+    private final Map<Long, byte[][]> localOffers = new HashMap<>();
+    /** The last body of each phase and epoch, by "phase/epoch", the local endpoint's and the peer's frames. */
+    private final Map<String, byte[]> localBodies = new HashMap<>();
+    private final Map<String, Map<String, Object>> peerFrames = new HashMap<>();
+
+    /** The latest derived epoch of a key phase, 0 for none. */
+    private long latestEpoch(int phase) {
+        long best = 0;
+        for (long n : epochSecrets.keySet()) if ((n & 1) == phase && n > best) best = n;
+        return best;
+    }
+
+    private void deriveEpoch(long n, byte[] offerBody, byte[] answerBody, byte[][] ss) {
+        byte[][] k = sessionKeys();
+        byte[] prev = n > 1 ? epochSecrets.get(n - 1) : k[0];
+        if (prev == null) throw fail("no secret of epoch " + (n - 1));
+        epochSecrets.put(n, Kdf.nextEpochSecret(prev, n, k[1], offerBody, answerBody, ss));
+    }
+
+    /** A SESSION_EPOCH the local endpoint wrote: whether it repeats its previous one, and the secret of an answer to the peer's offer. */
+    private void localEpoch(Frame f, Map<String, Object> o) {
+        byte[] body = f.bodyBytes();
+        String key = f.phase + "/" + f.value;
+        byte[] prev = localBodies.put(key, body);
+        o.put("same_as_previous", prev != null && java.util.Arrays.equals(prev, body));
+        if (f.phase == 0) {
+            localOffers.put(f.value, new byte[][] {f.dataBytes(), body});
+        } else {
+            var off = peerOffers.remove(f.value);
+            if (off != null) {
+                try {
+                    deriveEpoch(f.value, peerOfferBodies.get(f.value), body, off.finish(f.dataBytes()));
+                } catch (SecureCarrierException e) {
+                    throw fail("the local answer's share: " + e);
+                }
+            }
+        }
+    }
+
+    void peerEpoch(Map<String, Object> st) {
+        String phase = (String) st.get("phase");
+        long n = num(st.get("epoch"));
+        String key = ("offer".equals(phase) ? 0 : 1) + "/" + n;
+        Map<String, Object> fr;
+        if (getB(st, "repeat")) {
+            fr = peerFrames.get(key);
+            if (fr == null) throw fail("no previous " + phase + " of epoch " + n + " to repeat");
+        } else {
+            String loc = st.get("locator") instanceof String l ? l : "";
+            byte[] share;
+            try {
+                switch (phase) {
+                    case "offer" -> {
+                        var off = io.zmux.internal.join.KeyShare.initiate(EPOCH_GROUP, null, null);
+                        share = off.share().share();
+                        peerOffers.put(n, off);
+                        peerOfferBodies.put(n, io.zmux.internal.wire.FrameEncoder.sessionEpochBody(0, n, share, hex(loc)));
+                    }
+                    case "answer" -> {
+                        byte[][] lo = localOffers.get(n);
+                        if (lo != null) {
+                            var r = io.zmux.internal.join.KeyShare.respond(new io.zmux.internal.join.KeyShare(EPOCH_GROUP, lo[0]), null, null);
+                            share = r.share().share();
+                            deriveEpoch(n, lo[1], io.zmux.internal.wire.FrameEncoder.sessionEpochBody(1, n, share, hex(loc)), r.secrets());
+                        } else {
+                            share = new byte[EPOCH_GROUP.shareLength(false)];
+                        }
+                    }
+                    default -> throw fail("peer_epoch phase " + phase);
+                }
+            } catch (SecureCarrierException e) {
+                throw fail("peer_epoch: " + e);
+            }
+            if (st.containsKey("share_len")) share = new byte[(int) num(st.get("share_len"))];
+            fr = new LinkedHashMap<>();
+            fr.put("type", "SESSION_EPOCH");
+            fr.put("phase", phase);
+            fr.put("epoch", n);
+            fr.put("share", TraceFrames.hex(share));
+            fr.put("locator", loc);
+            peerFrames.put(key, fr);
+        }
+        Map<String, Object> send = new HashMap<>();
+        send.put("pipe", st.get("pipe"));
+        send.put("records", List.of(List.of(fr)));
+        peerSend(send);
+    }
+
+    void closeCarrier(RCarrier c, String outcome) {
+        c.rejected = true;
+        c.outcome = outcome;
+        c.buf = new byte[0];
+        c.msgs.clear();
+        c.heldHello = null;
+        c.pj = null;
+        if (c.source != null) {
+            admission.release(c.source);
+            c.source = null;
+        }
+    }
+
+    private Joins.JoinCarrier joinCarrier(RCarrier c) {
+        CarrierInfo info = carrierInfo(c);
+        return new Joins.JoinCarrier(!"out".equals(c.dir), !"in".equals(c.dir), info, info, null, false);
+    }
+
+    /** The acceptor's handling from a parsed Hello on; a held join stays pending and is offered again. */
+    void offerHello(RCarrier c, Hello h) {
+        if (c.hsDeadline == 0) c.hsDeadline = Time.add(now, config.handshakeTimeout());
+        if (!s.acceptsLocator(h.locator())) {
+            closeCarrier(c, "reject");
             return;
         }
-        boolean hasIn = !"out".equals(c.dir), hasOut = !"in".equals(c.dir);
-        CarrierInfo info = carrierInfo(c);
-        Joins.JoinResult res = s.acceptJoin(f, mac, c.binding, new Joins.JoinCarrier(hasIn, hasOut, info, info, null, false));
+        Joins.Opened o = s.openHello(h, joinFraming(c.framing), c.binding == null ? new byte[0] : c.binding);
         drainEvents();
-        switch (res) {
-            case HOLD -> {
-                c.held = true;
-                c.pendJoin = f;
-                c.pendMac = mac;
-                c.pendInband = inband;
-                held.add(c);
+        switch (o.result()) {
+            case HOLD, KEY_WAIT -> {
+                c.heldHello = h;
                 return;
             }
-            case CLOSE, REFUSED -> {
-                c.rejected = true;
-                c.buf = new byte[0];
+            case ACCEPTED -> { }
+            default -> {
+                closeCarrier(c, s.error() != null ? "fatal" : "reject");
                 return;
             }
-            default -> { }
         }
-        c.held = false;
+        c.heldHello = null;
+        if (modes != null && !modes.contains(o.join().mode().name().toLowerCase(java.util.Locale.ROOT))) {
+            closeCarrier(c, "reject"); // Local policy: the Pipe ID's bit stays clear.
+            return;
+        }
+        Joins.Claimed cl = s.claimHello(o.join(), joinCarrier(c), io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, 1 << 20);
+        drainEvents();
+        switch (cl.result()) {
+            case ACCEPTED -> {
+                c.reply = cl.reply();
+                c.pj = o.join();
+                c.outcome = "accept";
+                c.pipe = o.join().pipe().id();
+                peerReadsReply(c);
+                if (c.joiner != null && c.confirm) writeConfirm(c);
+            }
+            case REFUSED -> {
+                c.reply = cl.reply();
+                peerReadsReply(c);
+                closeCarrier(c, "refuse");
+            }
+            default -> closeCarrier(c, "reject");
+        }
+    }
+
+    private void peerReadsReply(RCarrier c) {
+        if (c.joiner == null) return;
+        try {
+            c.decision = (int) c.joiner.readReply(c.reply, 0, c.reply.length).decision();
+        } catch (SecureCarrierException e) {
+            throw fail("carrier " + c.name + ": the peer cannot read the Reply: " + e);
+        }
+    }
+
+    private void writeConfirm(RCarrier c) {
+        try {
+            readConfirm(c, c.joiner.writeConfirm(0));
+        } catch (SecureCarrierException e) {
+            throw fail("carrier " + c.name + ": confirmation: " + e);
+        }
+    }
+
+    /** Feeds confirmation bytes to an Unconfirmed carrier and attaches the pipe once Confirmed. */
+    private void readConfirm(RCarrier c, byte[] b) {
+        try {
+            c.pj.readConfirm(b, 0, b.length);
+        } catch (SecureCarrierException e) {
+            if (e.code() != SecureCarrierException.Code.INCOMPLETE) closeCarrier(c, "reject");
+            return;
+        }
+        Joins.PeerJoin pj = c.pj;
+        Joins.JoinCarrier jc = joinCarrier(c);
+        Joins.JoinResult res = s.confirmJoin(pj, jc);
+        drainEvents();
+        if (res != Joins.JoinResult.ACCEPTED) {
+            closeCarrier(c, c.outcome);
+            return;
+        }
+        c.pj = null;
         c.attached = true;
-        c.pipe = f.join.pipeId;
         c.lane = 0;
-        RPipe p = new RPipe(f.join.pipeId);
+        if (c.source != null) {
+            admission.release(c.source);
+            c.source = null;
+        }
+        JoinPipe j = pj.pipe();
+        RPipe p = new RPipe(j.id());
         p.framing = c.framing;
-        p.in = hasIn && f.join.direction != 1;
-        p.out = hasOut && f.join.direction != 0;
-        pipes.put(f.join.pipeId, p);
-        if (c.conn != null) s.pipes().setCarrierConn(f.join.pipeId, c.conn);
-        if (inband) s.pipes().skipJoinFrame(f.join.pipeId);
+        p.in = jc.hasIn() && j.direction() != 1;
+        p.out = jc.hasOut() && j.direction() != 0;
+        pipes.put(p.id, p);
+        if (c.conn != null) s.pipes().setCarrierConn(p.id, c.conn);
         feedCarrier(c);
     }
 
-    /** Offers held joins again (after establishment). */
+    /** Offers held joins again. */
     void retryHeld() {
-        List<RCarrier> h = new ArrayList<>(held);
-        held.clear();
-        for (RCarrier c : h) {
-            if (c.held && !c.rejected) {
-                c.held = false;
-                tryJoin(c, c.pendJoin, c.pendMac, c.pendInband);
-            }
+        for (RCarrier c : new ArrayList<>(carriers.values())) {
+            if (c.heldHello != null && !c.rejected) offerHello(c, c.heldHello);
         }
     }
 
     void feedCarrier(RCarrier c) {
-        if (!c.attached || c.buf.length == 0) return;
-        RPipe p = pipes.get(c.pipe);
-        if (p != null && p.framing == Framing.RECORDS) return;
+        if (!c.attached) return;
+        for (byte[] m : c.msgs) {
+            ByteBuffer bb = ByteBuffer.wrap(m);
+            s.receiveMessage(c.pipe, 0, new ReadBuf(bb, null), bb, 0, m.length, now);
+            drainEvents();
+        }
+        c.msgs.clear();
+        if (c.buf.length == 0) return;
         ByteBuffer bb = ByteBuffer.wrap(c.buf);
         int n = s.receive(c.pipe, c.lane, new ReadBuf(bb, null), bb, 0, c.buf.length, now);
         c.buf = java.util.Arrays.copyOfRange(c.buf, n, c.buf.length);
         drainEvents();
     }
 
+    /** The Group a joiner takes by default: Group 1 when both ends declare it, otherwise Group 2. */
+    private io.zmux.internal.join.Group defaultGroup() {
+        var local = s.localParams().sessionCrypto;
+        // Before the peer's parameters only Group 2 is sure to be usable.
+        var peer = s.peerParams() != null ? s.peerParams().sessionCrypto : null;
+        boolean one = local != null && peer != null && local.hasGroup(1) && peer.hasGroup(1);
+        return one ? io.zmux.internal.join.Group.X25519 : io.zmux.internal.join.Group.X25519_MLKEM768;
+    }
+
+    void peerJoin(Map<String, Object> st) {
+        RCarrier c = carriers.get((String) st.get("carrier"));
+        if (c == null) throw fail("unknown carrier");
+        Mode m = st.get("mode") != null ? mode(st.get("mode")) : Mode.TRUSTED;
+        int phase = (int) getU(st, "phase");
+        byte[] psk = joinPsk(!localInitiator(), latestEpoch(phase));
+        if (getB(st, "bad_key")) psk[0] ^= (byte) 0xff;
+        byte[] hello;
+        try {
+            io.zmux.internal.join.Group group = st.get("group") != null ? io.zmux.internal.join.Group.of(num(st.get("group"))) : defaultGroup();
+            Joiner j = Joiner.create(Suite.AES, m, joinFraming(c.framing), hex(st.get("locator")), psk,
+                    st.get("binding") instanceof String b ? hex(b) : new byte[0], group, phase);
+            JoinPipe pipe = new JoinPipe(num(st.get("pipe")), DIRS.get((String) st.get("direction")), getU(st, "fate_group"), getU(st, "priority"), getB(st, "standby"));
+            HelloPayload payload = new HelloPayload(pipe, st.get("batch") != null ? enc.body(st.get("batch")) : null, 0);
+            hello = switch (st.get("key_share") instanceof String k ? k : "") {
+                case "" -> j.writeHello(payload);
+                case "missing" -> j.writeHelloWithShare(payload, null);
+                case "bad_length" -> j.writeHelloWithShare(payload, new io.zmux.internal.join.KeyShare(group, new byte[group.shareLength(true) - 1]));
+                case "low_order" -> j.writeHelloWithShare(payload, new io.zmux.internal.join.KeyShare(group, new byte[group.shareLength(true)]));
+                default -> throw fail("key_share " + st.get("key_share"));
+            };
+            c.joiner = j;
+            c.confirm = !(st.get("confirm") instanceof Boolean v) || v;
+            if (c.rejected) {
+                checkOutcome(c, st);
+                return;
+            }
+            offerHello(c, Hello.parse(hello, 0, hello.length, joinFraming(c.framing)));
+        } catch (SecureCarrierException e) {
+            throw fail("peer_join: " + e);
+        }
+        if (getB(st, "hold")) {
+            if (c.heldHello == null) throw fail("carrier " + c.name + ": the join was not held");
+            return;
+        }
+        checkOutcome(c, st);
+    }
+
+    private void checkOutcome(RCarrier c, Map<String, Object> st) {
+        String want = (String) st.get("outcome");
+        if (!want.equals(c.outcome)) throw fail("carrier " + c.name + ": outcome '" + c.outcome + "', want '" + want + "' (held " + (c.heldHello != null) + ")");
+        switch (want) {
+            case "accept", "refuse" -> {
+                if ((c.decision == 1) != want.equals("refuse")) throw fail("carrier " + c.name + ": decision " + c.decision + ", want " + want);
+            }
+            default -> {
+                if (c.reply != null && c.reply.length != 0) throw fail("carrier " + c.name + ": wrote a Reply, want " + want);
+            }
+        }
+    }
+
+    void peerJoinFinish(Map<String, Object> st) {
+        RCarrier c = carriers.get((String) st.get("carrier"));
+        if (c == null) throw fail("unknown carrier");
+        retryHeld();
+        if (c.heldHello != null) throw fail("carrier " + c.name + ": the join is still held");
+        checkOutcome(c, st);
+    }
+
+    void peerConfirm(Map<String, Object> st) {
+        RCarrier c = carriers.get((String) st.get("carrier"));
+        if (c == null || c.pj == null) throw fail("carrier " + st.get("carrier") + " is not Unconfirmed");
+        writeConfirm(c);
+    }
+
+    /** Every local join writes its Hello once allowed. */
+    void writeHellos() {
+        for (RPipe p : new ArrayList<>(pipes.values())) {
+            if (!p.joining || p.hello != null) continue;
+            try {
+                if (s.joinPrepare(p.id, now) != null) p.hello = s.joinHello(p.id, joinFraming(p.framing), io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, now);
+            } catch (SecureCarrierException | CoreException e) {
+                p.joining = false;
+            }
+            drainEvents();
+        }
+    }
+
+    private HelloPayload readHello(RPipe p) {
+        if (p.hello == null) throw fail("pipe " + p.id + ": no Hello written");
+        try {
+            Hello h = Hello.parseExact(p.hello, 0, p.hello.length, joinFraming(p.framing));
+            helloRead = h;
+            p.acc = Acceptor.accept(h, joinFraming(p.framing), joinPsk(localInitiator(), latestEpoch(h.phase())), new byte[0]);
+            return p.acc.payload();
+        } catch (SecureCarrierException e) {
+            throw fail("pipe " + p.id + ": Hello does not verify: " + e);
+        }
+    }
+
+    private Hello helloRead;
+
+    void expectJoinHello(Map<String, Object> st) {
+        RPipe p = pipes.get(num(st.get("pipe")));
+        if (p == null) throw fail("no pipe " + st.get("pipe"));
+        HelloPayload pl = readHello(p);
+        RLane l = p.lanes.get(0L);
+        if (l != null && !l.frames.isEmpty()) throw fail("frames besides the Hello:\n" + TraceMatch.dump(l.frames));
+        JoinPipe got = pl.pipe();
+        if (got.id() != p.id || !DIR_NAMES.get(got.direction()).equals(st.get("direction")) || got.fateGroup() != getU(st, "fate_group")
+                || got.priority() != getU(st, "priority") || got.standby() != getB(st, "standby")) {
+            throw fail("Hello fields " + got);
+        }
+        if (!java.util.Arrays.equals(helloRead.locator(), hex(st.get("locator")))) throw fail("Hello locator");
+        if (helloRead.mode() != mode(st.get("mode"))) throw fail("Hello mode " + helloRead.mode());
+        if (helloRead.phase() != getU(st, "phase")) throw fail("Hello key phase " + helloRead.phase());
+        if (st.get("batch") instanceof List<?> fs) {
+            List<Map<String, Object>> frames = new ArrayList<>(), pats = new ArrayList<>();
+            byte[] b = pl.firstBatch() == null ? new byte[0] : pl.firstBatch();
+            ByteBuffer bb = ByteBuffer.wrap(b);
+            for (int i = 0; i < b.length; ) {
+                Frame f = new Frame();
+                try {
+                    i += decoder.decode(bb, i, b.length, f);
+                } catch (WireException e) {
+                    throw fail("first batch: " + e.getMessage());
+                }
+                frames.add(TraceFrames.frameObj(f));
+            }
+            for (Object x : fs) pats.add(map(x));
+            String err = TraceMatch.match("exact", pats, frames);
+            if (err != null) throw fail("first batch: " + err + "\nframes:\n" + TraceMatch.dump(frames));
+        }
+    }
+
+    void peerJoinReply(Map<String, Object> st) {
+        RPipe p = pipes.get(num(st.get("pipe")));
+        if (p == null) throw fail("no pipe " + st.get("pipe"));
+        if (p.acc == null) readHello(p);
+        byte[] reply;
+        try {
+            reply = p.acc.writeReply(new ReplyPayload((int) getU(st, "decision"), null, 0));
+        } catch (SecureCarrierException e) {
+            throw fail("Reply: " + e);
+        }
+        if (getB(st, "leading_parameters")) {
+            ByteBuffer blk = ByteBuffer.allocate(2048), tp = ByteBuffer.allocate(4096);
+            s.localParams().encode(blk);
+            io.zmux.internal.wire.FrameEncoder.transportParameters(tp, java.util.Arrays.copyOf(blk.array(), blk.position()));
+            byte[] rec = java.util.Arrays.copyOf(tp.array(), tp.position());
+            if (p.framing == Framing.RECORDS) {
+                joinerFeed(p, rec);
+            } else {
+                ByteBuffer out = ByteBuffer.allocate(rec.length + reply.length + 8);
+                VarInt.put(out, rec.length);
+                out.put(rec).put(reply);
+                reply = java.util.Arrays.copyOf(out.array(), out.position());
+            }
+        }
+        joinerFeed(p, reply);
+    }
+
+    /** Runs the handshake over bytes read from a JOINING carrier and checks the confirmation of a Reply with decision 0. */
+    void joinerFeed(RPipe p, byte[] data) {
+        if (!p.joining) return;
+        byte[] in = new byte[p.replyIn.length + data.length];
+        System.arraycopy(p.replyIn, 0, in, 0, p.replyIn.length);
+        System.arraycopy(data, 0, in, p.replyIn.length, data.length);
+        p.replyIn = in;
+        while (p.joining) {
+            Joins.JoinStep step = s.verifyReply(p.id, p.replyIn, 0, p.replyIn.length, now);
+            Joins.Finished finished = step.status() == Joins.Step.PROVEN ? s.joinFinish(p.id, io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, now) : null;
+            drainEvents();
+            p.replyIn = java.util.Arrays.copyOfRange(p.replyIn, step.consumed(), p.replyIn.length);
+            switch (step.status()) {
+                case MORE -> {
+                    if (step.consumed() == 0) return;
+                }
+                case PROVEN -> {
+                    p.joining = false;
+                    if (p.acc != null) {
+                        try {
+                            p.acc.readConfirm(finished.confirm(), 0, finished.confirm().length);
+                        } catch (SecureCarrierException e) {
+                            throw fail("pipe " + p.id + ": confirmation: " + e);
+                        }
+                    }
+                    if (p.replyIn.length > 0) {
+                        byte[] rest = p.replyIn;
+                        p.replyIn = new byte[0];
+                        feed(p.id, p.lane(0), rest);
+                    }
+                }
+                default -> {
+                    p.joining = false;
+                    p.replyIn = new byte[0];
+                }
+            }
+        }
+    }
+
+    /** Bytes on a listener carrier: classified first, then the handshake's, and after Confirmed the attached pipe's. */
     void listenerSend(RCarrier c, Map<String, Object> st) {
         if (c.framing == Framing.RECORDS) {
             List<byte[]> msgs = new ArrayList<>();
@@ -539,18 +1004,22 @@ final class TraceRunner {
             else if (st.get("messages_hex") instanceof List<?> mh) for (Object m : mh) msgs.add(hex(m));
             for (byte[] m : msgs) {
                 if (c.rejected) return;
-                if (!c.attached) {
-                    Frame f = CarrierAdmission.parseJoin(m);
-                    if (f == null) {
-                        c.rejected = true;
-                        return;
-                    }
-                    tryJoin(c, f, CarrierAdmission.joinMac(f), true);
-                    if (!c.attached) continue;
+                if (c.attached) {
+                    ByteBuffer bb = ByteBuffer.wrap(m);
+                    s.receiveMessage(c.pipe, 0, new ReadBuf(bb, null), bb, 0, m.length, now);
+                    drainEvents();
+                    continue;
                 }
-                ByteBuffer bb = ByteBuffer.wrap(m);
-                s.receiveMessage(c.pipe, 0, new ReadBuf(bb, null), bb, 0, m.length, now);
-                drainEvents();
+                if (c.pj != null || c.heldHello != null) {
+                    c.msgs.add(m);
+                    continue;
+                }
+                try {
+                    offerHello(c, Hello.parse(m, 0, m.length, io.zmux.internal.join.Framing.MESSAGE));
+                } catch (SecureCarrierException e) {
+                    closeCarrier(c, "reject");
+                    return;
+                }
             }
             return;
         }
@@ -564,15 +1033,26 @@ final class TraceRunner {
             feedCarrier(c);
             return;
         }
-        if (c.held) return;
+        if (c.pj != null || c.heldHello != null) return;
         CarrierAdmission.Classified cl = CarrierAdmission.classify(ByteBuffer.wrap(c.buf), 0, c.buf.length, 65535);
         switch (cl.kind()) {
             case REJECT, SESSION -> {
-                c.rejected = true;
-                c.buf = new byte[0];
+                closeCarrier(c, "reject");
                 return;
             }
             case MORE -> {
+                return;
+            }
+            case JOIN -> {
+                Hello h;
+                try {
+                    h = Hello.parse(c.buf, 0, c.buf.length, io.zmux.internal.join.Framing.STREAM);
+                } catch (SecureCarrierException e) {
+                    if (e.code() != SecureCarrierException.Code.INCOMPLETE) closeCarrier(c, "reject");
+                    return;
+                }
+                c.buf = java.util.Arrays.copyOfRange(c.buf, h.consumed(), c.buf.length);
+                offerHello(c, h);
                 return;
             }
             default -> { }
@@ -582,19 +1062,8 @@ final class TraceRunner {
             admission.release(c.source);
             c.source = null;
         }
-        if (cl.kind() == CarrierAdmission.Kind.LANE) {
-            c.via = "lane";
-            carrierSend(c, Map.of("hex", ""));
-            return;
-        }
-        int sn = VarInt.lengthOf(c.buf[0]);
-        Frame f = CarrierAdmission.parseJoin(java.util.Arrays.copyOfRange(c.buf, sn, cl.firstRecordLength()));
-        if (f == null) {
-            c.rejected = true;
-            c.buf = new byte[0];
-            return;
-        }
-        tryJoin(c, f, CarrierAdmission.joinMac(f), true);
+        c.via = "lane";
+        carrierSend(c, Map.of("hex", ""));
     }
 
     /** add_pipe: a local join. */
@@ -614,8 +1083,7 @@ final class TraceRunner {
                     default -> 2;
                 })
                 .fateGroup(getU(args, "fate_group"))
-                .oob(getB(args, "oob"))
-                .carrierBound(getB(args, "carrier_bound"))
+                .mode(Mode.TRUSTED)
                 .recvPriority(getU(args, "receive_priority"))
                 .recvStandby(getB(args, "receive_standby"))
                 .weight(args.containsKey("weight") ? getU(args, "weight") : 1)
@@ -623,13 +1091,12 @@ final class TraceRunner {
         if (args.get("send_priority") != null) ob.sendPriority(num(args.get("send_priority")));
         if (args.get("send_standby") instanceof Boolean b) ob.sendStandby(b);
         if (args.get("probation") != null) ob.probation(ms(args.get("probation")));
-        if (getB(args, "carrier_bound") && args.get("carrier_binding") instanceof String b) ob.binding(hex(b));
-        Joins.JoinOptions o = ob.build();
         RPipe p = new RPipe(id);
+        p.joining = true;
         p.in = !dir.equals("out");
         p.out = !dir.equals("in");
         pipes.put(id, p);
-        long r = s.addPipe(o);
+        long r = s.addPipe(ob.build());
         return r < 0 ? Map.of("pending", true) : Map.of("ok", true);
     }
 
@@ -638,6 +1105,7 @@ final class TraceRunner {
         s.outbox().takeWakes(new ArrayList<>());
         List<Action> acts = new ArrayList<>();
         s.outbox().takeActions(acts);
+        List<long[]> shut = new ArrayList<>();
         for (Action a : acts) {
             RPipe p = pipes.get(a.pipe());
             if (p == null) continue;
@@ -645,6 +1113,7 @@ final class TraceRunner {
                 case SHUTDOWN -> {
                     RLane l = p.lane(a.lane());
                     if (l.closed.isEmpty()) l.closed = "graceful";
+                    shut.add(new long[] {a.pipe(), a.lane()});
                 }
                 case ABORT -> {
                     if (p.lanes.isEmpty()) p.lane(0);
@@ -660,10 +1129,16 @@ final class TraceRunner {
                 }
             }
         }
+        // A driver's carrier reports its write side shut once the shutdown went out.
+        if (!shut.isEmpty()) {
+            for (long[] x : shut) s.outputShut(x[0], x[1], now);
+            drainEvents();
+        }
     }
 
     /** Polls every writable outbound lane until nothing comes out. */
     void flush() {
+        writeHellos();
         for (int i = 0; i < 64; i++) {
             boolean matched = false;
             for (RPipe p : new ArrayList<>(pipes.values())) {
@@ -724,6 +1199,7 @@ final class TraceRunner {
                     throw fail("local endpoint wrote an undecodable frame: " + e.getMessage());
                 }
                 Map<String, Object> o = TraceFrames.frameObj(f);
+                if (f.kind == FrameKind.SESSION_EPOCH) localEpoch(f, o);
                 if (System.getenv("ZTRACE") != null) System.err.println("pipe " + p.id + " lane " + lane + " t=" + now / 1_000_000 + ": " + o);
                 if (f.kind == FrameKind.CONNECTION_CLOSE) closesSent.add(o);
                 l.frames.add(o);
@@ -857,10 +1333,6 @@ final class TraceRunner {
                 o.put("code", e.code());
                 yield "goaway_received";
             }
-            case DATAGRAM_DROPPED -> {
-                o.put("count", e.count());
-                yield "datagram_dropped";
-            }
             case SUSPENDED -> "suspended";
             case RESUMED -> "resumed";
             case PIPE_STATE -> {
@@ -872,11 +1344,6 @@ final class TraceRunner {
                 o.put("reason", e.reason());
                 yield "join_auth_failed";
             }
-            case OOB_JOIN -> {
-                o.put("pipe", e.pipe());
-                o.put("frame", hex(e.frame()));
-                yield "oob_join";
-            }
             default -> "other";
         };
         return Map.entry(name, o);
@@ -884,6 +1351,14 @@ final class TraceRunner {
 
     void expectEvent(Map<String, Object> st, boolean want) {
         String name = (String) st.get("event");
+        if (name.equals("datagram_dropped")) {
+            // Dropped datagrams are reported by the statistics, not as an event.
+            long n = s.stats.datagramsDroppedRecv();
+            if (want != (n > 0) || st.get("fields") instanceof Map<?, ?> f && f.get("count") instanceof Number c && c.longValue() != n) {
+                throw fail("datagrams dropped " + n);
+            }
+            return;
+        }
         int start = evSeen.getOrDefault(name, 0);
         for (int i = start; i < events.size(); i++) {
             var eo = eventObj(events.get(i));

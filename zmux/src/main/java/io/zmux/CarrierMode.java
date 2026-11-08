@@ -3,8 +3,7 @@ package io.zmux;
 import java.util.List;
 
 /**
- * How {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} chooses the carrier (API.md Section
- * 4.8), or a pool's members ({@link PipePool#mode}): one kind only ({@link #explicit}) or among
+ * How {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} chooses the carrier, or a pool's members ({@link PipePool#mode}): one kind only ({@link #explicit}) or among
  * candidates ({@link #auto}), each of its own kind.
  */
 public final class CarrierMode {

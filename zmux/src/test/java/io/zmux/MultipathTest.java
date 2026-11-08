@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(120)
 class MultipathTest {
     private static ZmuxConfig.Builder mp(EventLoops loops, PipeAuth auth) {
-        return ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(4).withAuth(auth));
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(auth);
     }
 
     /** Opens n streams of size bytes from c; s echoes each one's digest. during runs mid-transfer. */
@@ -69,7 +69,7 @@ class MultipathTest {
     @Test
     void joinAndSpreadOverTcp() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.insecure()).multipath(MultipathConfig.of(4, PipeAuth.insecure()).withScheduler(Scheduler.SPREAD_ETA)).build();
+            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).build();
             var lo = ListenerConfig.builder().session(cfg).instanceId(new byte[] {1, 2, 3, 4, 5, 6, 7, 8}).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), lo);
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -77,12 +77,12 @@ class MultipathTest {
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get();
                 assertTrue(c.info().multipath());
-                ZmuxPipe p1 = c.paths().add(l.localAddress(), PipeOptions.defaults());
-                ZmuxPipe p2 = c.paths().add(l.localAddress(), PipeOptions.defaults());
-                assertEquals(3, c.paths().list().size());
+                ZmuxPipe p1 = c.addPipe(l.localAddress(), PipeOptions.defaults());
+                ZmuxPipe p2 = c.addPipe(l.localAddress(), PipeOptions.defaults());
+                assertEquals(3, c.pipes().size());
                 assertEquals(PipeState.Outbound.ACTIVE, p1.state().orElseThrow().outbound());
                 exchange(ex, c, s, 8, 2 << 20, null);
-                assertEquals(3, s.paths().list().size());
+                assertEquals(3, s.pipes().size());
                 p2.close();
                 exchange(ex, c, s, 2, 1 << 20, null);
                 closeBoth(c, s);
@@ -94,14 +94,14 @@ class MultipathTest {
     @Test
     void transferSurvivesLosingThePipeItStartedOn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32])).build();
+            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get();
-                c.paths().add(l.localAddress(), PipeOptions.defaults());
-                ZmuxPipe zero = c.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
+                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                ZmuxPipe zero = c.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
                 exchange(ex, c, s, 4, 4 << 20, () -> {
                     Thread.sleep(20);
                     zero.abort();
@@ -111,7 +111,7 @@ class MultipathTest {
                 assertTrue(zero.state().isEmpty());
                 assertTrue(zero.stats().isEmpty());
                 assertThrows(PipeGoneException.class, zero::revalidate);
-                assertEquals(1, c.paths().list().size());
+                assertEquals(1, c.pipes().size());
                 closeBoth(c, s);
             }
             assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
@@ -119,15 +119,15 @@ class MultipathTest {
     }
 
     @Test
-    void carrierBoundJoinOverTls() throws Exception {
+    void boundJoinOverTls() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.exporter()).build();
-            try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build());
+            ZmuxConfig cfg = mp(loops, PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> mode == RecordMode.BOUND).build();
+            try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()).withSecure()).build());
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connectTls(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), cfg);
                 ZmuxSession s = sf.get();
-                ZmuxPipe p = c.paths().addTls(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), PipeOptions.builder().carrierBound(true).build());
+                ZmuxPipe p = c.addTlsPipe(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost").withSecure(), PipeOptions.builder().mode(RecordMode.BOUND).build());
                 assertTrue(p.id() > 0);
                 exchange(ex, c, s, 4, 1 << 20, null);
                 closeBoth(c, s);
@@ -139,7 +139,7 @@ class MultipathTest {
     @Test
     void addPipeWithoutMultipathFails() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.insecure()).build();
+            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
@@ -150,7 +150,7 @@ class MultipathTest {
                 Future<ZmuxSession> sf2 = ex.submit((Callable<ZmuxSession>) l::accept);
                 ZmuxSession c2 = Zmux.connect(l.localAddress(), single);
                 ZmuxSession s2 = sf2.get();
-                assertThrows(NotNegotiatedException.class, () -> c2.paths().add(l.localAddress(), PipeOptions.defaults()));
+                assertThrows(NotNegotiatedException.class, () -> c2.addPipe(l.localAddress(), PipeOptions.defaults()));
                 closeBoth(c2, s2);
                 exchange(ex, c, s, 1, 1 << 16, null);
                 closeBoth(c, s);
@@ -161,15 +161,13 @@ class MultipathTest {
 
     @Test
     void configValidation() {
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().multipath(MultipathConfig.defaults().withMaxPipes(2)).build());
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().multipath(MultipathConfig.defaults().withResumeTimeout(Duration.ofSeconds(1))).build());
-        assertThrows(IllegalArgumentException.class, () -> PipeAuth.psk(new byte[8]));
-        assertThrows(IllegalArgumentException.class, () -> new PipeAuth(new byte[16], false, true));
-        assertThrows(IllegalArgumentException.class, () -> new PipeAuth(null, false, false));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().multipath(MultipathConfig.defaults().withSuspectFloor(Duration.ofMillis(10))));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().multipath(MultipathConfig.defaults().withDeadTimeout(Duration.ofMillis(500))));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().multipath(MultipathConfig.defaults().withMaxPipes(0)));
+        assertThrows(IllegalArgumentException.class, () -> PipeAuth.psk(new byte[8]).withEndToEnd());
+        assertThrows(IllegalArgumentException.class, () -> new PipeAuth(new byte[16], false, true, false));
+        org.junit.jupiter.api.Assertions.assertFalse(PipeAuth.none().hasSource(), "no source is a value; a session that needs one fails to start");
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().suspectFloor(Duration.ofMillis(10)));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().deadTimeout(Duration.ofMillis(500)));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(0));
         assertThrows(IllegalArgumentException.class, () -> PipeOptions.builder().suspectFloor(Duration.ofMillis(1)));
-        assertTrue(ZmuxConfig.builder().multipath(MultipathConfig.defaults().withResumeTimeout(Duration.ofSeconds(5)).withAuth(PipeAuth.insecure())).build().multipath());
+        assertTrue(ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build().multipath());
     }
 }

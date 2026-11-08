@@ -15,7 +15,7 @@ public final class Stream {
             RECV_RESET_RECVD = 4, RECV_RESET_READ = 5;
 
     final StreamSend.SendPart snd = new StreamSend.SendPart();
-    /** The stream's own counters of API.md Section 7.2 that its parts do not keep. */
+    /** The stream's own statistics counters that its parts do not keep. */
     final Counters counters = new Counters();
     /** The final statistics, taken when the session released the stream; null before. */
     private volatile io.zmux.StreamStats released;
@@ -36,8 +36,6 @@ public final class Stream {
     /** Whether this endpoint can receive on the stream. */
     public boolean hasRecv() { return hasRecv; }
 
-    /** Whether the peer may have sent the frames as replayable early data; read from any thread. */
-    private volatile boolean replayable;
     final StreamTable.Ident tab = new StreamTable.Ident();
 
     Stream(boolean bidi, boolean local) {
@@ -79,7 +77,7 @@ public final class Stream {
         if (off + n > from) counters.bytesSent += off + n - from;
     }
 
-    /** The stream's statistics now (API.md Section 7.2); on its session's loop. */
+    /** The stream's statistics now; on its session's loop. */
     public io.zmux.StreamStats stats() {
         long sent = 0, acked = 0, sendBuffered = 0, written = 0;
         java.util.OptionalLong pipe = java.util.OptionalLong.empty();
@@ -115,7 +113,7 @@ public final class Stream {
         return tab.pre() == null ? 1 : tab.pre().toPreamble(null).encodedSize();
     }
 
-    /** The most a "small" stream direction holds (IMPLEMENTATION.md Section 6.4). */
+    /** The most a "small" stream direction holds. */
     static final long SMALL_HELD = 64 << 10;
 
     /**
@@ -149,19 +147,13 @@ public final class Stream {
         if (unsent() > 0) return true;
         if (snd.mps() != null && (snd.mps().ret.resend().size() > 0 || snd.mps().ret.finResend())) return true;
         if (snd.finWritten() && !snd.finSent() && !snd.reset()) return true;
-        return tab.pinned() && !tab.opened() || (!tab.idSet() && (snd.finWritten() || snd.q().end() > snd.q().base()));
+        return (tab.pinned() || tab.openWant()) && !tab.opened() || (!tab.idSet() && (snd.finWritten() || snd.q().end() > snd.q().base()));
     }
 
     public long id() { return tab.id(); }
     public boolean idSet() { return tab.idSet(); }
     public boolean local() { return local; }
     public boolean bidi() { return bidi; }
-    public boolean replayable() { return replayable; }
-
-    /** Set when the stream opens while the peer's data could be replayed; cleared once the handshake completes. */
-    void replayable(boolean r) {
-        replayable = r;
-    }
     /** The peer's preamble, or null. */
     public boolean bidirectional() { return bidi; }
 

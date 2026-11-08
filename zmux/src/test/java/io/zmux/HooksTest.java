@@ -78,8 +78,8 @@ class HooksTest {
     @Test void datagramLimitersRunOffLoopAndChargeAcceptedPayloads() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             Budget send = new Budget(), receive = new Budget();
-            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(send, null).build();
-            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(null, receive).build();
+            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiters(send, null).build();
+            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiters(null, receive).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
@@ -109,7 +109,7 @@ class HooksTest {
             CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), closed = new CountDownLatch(1);
             AtomicLong dropped = new AtomicLong(); AtomicBoolean blocked = new AtomicBoolean();
             AtomicReference<ZmuxSession> ref = new AtomicReference<>();
-            var cfg = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.insecure())).observer(new SessionObserver() {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
                         @Override public void established() {
                             entered.countDown();
                             try { assertTrue(release.await(5, TimeUnit.SECONDS)); } catch (InterruptedException e) { throw new AssertionError(e); }
@@ -119,12 +119,12 @@ class HooksTest {
                         @Override public void closed(SessionError error) { closed.countDown(); }
                     }, 1).build();
             // Trace only the client, so both contexts cannot wait on the same gate.
-            var serverConfig = ZmuxConfig.builder().eventLoops(loops).multipath(MultipathConfig.defaults().withMaxPipes(2).withAuth(PipeAuth.insecure())).build();
+            var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(serverConfig))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cfg); ref.set(c); var s = accepted.get();
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
-                var pipe = c.paths().list().getFirst();
+                var pipe = c.pipes().getFirst();
                 for (int i=0; i<20; i++) pipe.setSendPriority(i);
                 assertTrue(c.ping().toNanos() > 0);
                 release.countDown();

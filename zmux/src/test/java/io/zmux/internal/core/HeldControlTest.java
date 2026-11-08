@@ -12,22 +12,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Stream-level control frames of a local stream wait for its opening frame (SPEC.md 7.2,
- * EXTENSIONS.md 4.4): before it they would name an identifier the peer has not seen, or
+ * Stream-level control frames of a local stream wait for its opening frame: before it they would name an identifier the peer has not seen, or
  * none at all.
  */
 @Timeout(30)
 class HeldControlTest {
     record Sent(FrameKind kind, long id, long off, int len) {}
 
-    static Session session(CoreConfig.Role role, boolean early) {
-        return session(role, early, 0);
+    static Session session(CoreConfig.Role role) {
+        return session(role, 0);
     }
 
-    static Session session(CoreConfig.Role role, boolean early, long maxData) {
+    static Session session(CoreConfig.Role role, long maxData) {
         CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role);
-        // Carrier 0-RTT under remembered parameters: the early sends are kept until the carrier decides.
-        if (early) c.earlyRemembered(CoreConfig.builder().role(CoreConfig.Role.RESPONDER).build().local()).earlyReplayable(true);
         if (maxData > 0) c.local().initialMaxData = maxData;
         Session s = new Session(c.build(), 0);
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
@@ -106,7 +103,7 @@ class HeldControlTest {
 
     /** The peer's stream 0 is open; the responder stops reading a new stream before writing it. */
     @Test void responderStopBeforeOpeningLeavesThePeersStreamZeroAlone() throws Exception {
-        Session a = session(CoreConfig.Role.INITIATOR, false), b = session(CoreConfig.Role.RESPONDER, false);
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
         Stream s0 = a.streams().openStream(true);
         a.sending().write(s0, ByteBuffer.wrap(new byte[] {1}), false);
         pump(a, b);
@@ -124,7 +121,7 @@ class HeldControlTest {
 
     /** The initiator's second stream is stopped before it opens: its own stream 0 stays whole. */
     @Test void initiatorStopBeforeOpeningUsesTheRealIdentifier() throws Exception {
-        Session a = session(CoreConfig.Role.INITIATOR, false), b = session(CoreConfig.Role.RESPONDER, false);
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
         pump(a, b);
         Stream first = a.streams().openStream(true);
         a.receiving().stop(first, 7);
@@ -143,7 +140,7 @@ class HeldControlTest {
 
     /** A larger window set before the stream opens is advertised after its opening frame. */
     @Test void receiveWindowBeforeOpeningFollowsTheOpeningFrame() throws Exception {
-        Session a = session(CoreConfig.Role.INITIATOR, false), b = session(CoreConfig.Role.RESPONDER, false);
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
         Stream s0 = a.streams().openStream(true);
         a.sending().write(s0, ByteBuffer.wrap(new byte[] {1}), false);
         pump(a, b);
@@ -159,9 +156,9 @@ class HeldControlTest {
         assertOpenedFirst(sent, 1, FrameKind.MAX_STREAM_DATA);
     }
 
-    /** A preamble beyond the session credit takes its identifier without opening; STOP_SENDING waits. */
-    @Test void stopOnAStreamWhosePreambleExceedsTheCreditWaits() throws Exception {
-        Session a = session(CoreConfig.Role.INITIATOR, false, 1000), b = session(CoreConfig.Role.RESPONDER, false);
+    /** A preamble beyond the session credit takes its identifier without opening; STOP_SENDING goes, naming it. */
+    @Test void stopOnAStreamWhosePreambleExceedsTheCreditGoesAtOnce() throws Exception {
+        Session a = session(CoreConfig.Role.INITIATOR, 1000), b = session(CoreConfig.Role.RESPONDER);
         Stream s0 = a.streams().openStream(true);
         a.sending().write(s0, ByteBuffer.wrap(new byte[] {1}), false);
         pump(a, b);
@@ -179,7 +176,9 @@ class HeldControlTest {
         assertNull(b.error(), "responder alive");
         assertNull(a.sending().writeError(s0), "the peer's stream 0 is untouched");
         assertEquals(-1, index(sent, FrameKind.STOP_SENDING, 0), "nothing names stream 0: " + sent);
-        // Reading frees the credit: the stream opens, and only then its STOP_SENDING goes.
+        int stop = index(sent, FrameKind.STOP_SENDING, 1);
+        assertTrue(stop >= 0, "STOP_SENDING before the blocked opening frame: " + sent);
+        // Reading frees the credit: the stream opens.
         ByteBuffer sink = ByteBuffer.allocate(1 << 16);
         while (a.receiving().readable(s0) > 0) {
             sink.clear();
@@ -188,24 +187,67 @@ class HeldControlTest {
         sent.addAll(pump(a, b)[1]);
         assertNull(a.error());
         assertNull(b.error());
-        assertOpenedFirst(sent, 1, FrameKind.STOP_SENDING);
+        assertTrue(index(sent, FrameKind.STREAM, 1) >= 0, "opened: " + sent);
     }
 
-    /** A rejected 0-RTT sends the opening frame again; the STOP_SENDING queued meanwhile waits for it. */
-    @Test void stopWaitsForTheOpeningFrameAgainWhenEarlyDataIsRejected() throws Exception {
-        Session a = session(CoreConfig.Role.INITIATOR, true);
+    /** Scenario A: an identifier without an opening frame (no session credit), then a reset: RESET_STREAM goes at once. */
+    @Test void resetAfterAllocationWithoutOpening() throws Exception {
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER, 1);
+        pump(a, b);
+        Stream fill = a.streams().openStream(true);
+        a.sending().write(fill, ByteBuffer.wrap(new byte[] {1}), false);
+        pump(a, b);
         Stream st = a.streams().openStream(true);
-        a.sending().write(st, ByteBuffer.wrap(new byte[] {1}), false);
-        a.receiving().stop(st, 7);
-        List<Sent> lost = pump(a, null)[0];
-        assertEquals(FrameKind.STREAM, lost.get(index(lost, FrameKind.STREAM, 0)).kind(), "opened early: " + lost);
-        assertEquals(-1, index(lost, FrameKind.STOP_SENDING, 0), "early data carries no control: " + lost);
-        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
-        assertTrue(a.restartEarly(info, 0));
-        Session b = session(CoreConfig.Role.RESPONDER, false);
+        a.sending().write(st, ByteBuffer.wrap(new byte[] {2, 3}), false);
+        pump(a, b);
+        assertTrue(st.idSet(), "the identifier is allocated");
+        a.sending().reset(st, 9);
         List<Sent> sent = pump(a, b)[0];
+        assertTrue(index(sent, FrameKind.RESET_STREAM_AT, st.id()) >= 0, "RESET_STREAM_AT: " + sent);
+        assertEquals(0, ControlQueue.bits(st), "no bits left");
         assertNull(a.error());
         assertNull(b.error());
-        assertOpenedFirst(sent, 0, FrameKind.STOP_SENDING);
+    }
+
+    /** Scenario B: a preamble beyond the stream credit reports STREAM_DATA_BLOCKED at once, and the peer's credit opens it. */
+    @Test void preambleBeyondStreamCreditReportsBlocked() throws Exception {
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
+        pump(a, b);
+        a.peer().maxStreamDataBidiRemote = 8;
+        Stream st = a.streams().openStream(true);
+        a.streams().setOpenInfo(st, new byte[64]);
+        a.sending().write(st, ByteBuffer.wrap(new byte[] {1}), true);
+        List<Sent> sent = pump(a, b)[0];
+        assertTrue(st.idSet());
+        assertTrue(index(sent, FrameKind.STREAM_DATA_BLOCKED, st.id()) >= 0, "blocked report: " + sent);
+        assertEquals(-1, index(sent, FrameKind.STREAM, st.id()), "the opening frame waits: " + sent);
+        a.send.onSendCredit(st, 1 << 16);
+        sent = pump(a, b)[0];
+        assertTrue(index(sent, FrameKind.STREAM, st.id()) >= 0, "credit lets it finish: " + sent);
+        assertNotNull(b.streams().acceptStream(true), "the opening frame delivers the preamble");
+        assertNull(a.error());
+        assertNull(b.error());
+    }
+
+    /** Data before flush goes in the opening frame; a stream opened with nothing written sends an empty one. */
+    @Test void flushSendsTheOpeningFrame() throws Exception {
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
+        pump(a, b);
+        Stream empty = a.streams().openStream(true);
+        Waiter none = new Waiter() { @Override public void wake() { } };
+        long target = a.streams().flush(empty);
+        assertFalse(a.sending().flushDone(empty, target, none), "not sent yet");
+        List<Sent> sent = pump(a, b)[0];
+        assertTrue(a.sending().flushDone(empty, target, none), "sent");
+        assertTrue(index(sent, FrameKind.STREAM, empty.id()) >= 0, "the opening frame: " + sent);
+        assertNotNull(b.streams().acceptStream(true));
+        Stream full = a.streams().openStream(true);
+        a.sending().write(full, ByteBuffer.wrap(new byte[] {1, 2}), false);
+        target = a.streams().flush(full);
+        sent = pump(a, b)[0];
+        Sent first = sent.get(index(sent, FrameKind.STREAM, full.id()));
+        assertEquals(0, first.off());
+        assertEquals(3, first.len(), "the preamble and the data written before go in the opening frame");
+        assertTrue(a.sending().flushDone(full, target, none));
     }
 }

@@ -156,7 +156,10 @@ final class ExternalTransport extends AbstractTransport {
                         if (input.end) c.ended(input.error);
                         else if (input.data != null) c.received(input.data, input.owned == null ? null : input.owned.buf);
                     }
-                    if (input.data != null && (!c.ready || input.data.hasRemaining() && owner != c)) {
+                    // After admission what was taken goes back to the reader even in a pause: a carrier whose write reports
+                    // when its peer read it would otherwise wait on this side's pause, while this side waits on that write.
+                    boolean keep = input.data != null && (!c.closed || owner != c) && (input.data.hasRemaining() ? !c.ready || owner != c : !c.ready && strict);
+                    if (keep) {
                         Input rest = input.data.hasRemaining() ? input : new Input(null, input.release, input.owned, false, null, cost);
                         queue.addFirst(rest); transferred = true;
                     }
@@ -210,6 +213,19 @@ final class ExternalTransport extends AbstractTransport {
     }
 
     private final ByteBuffer header = ByteBuffer.allocate(8);
+
+    @Override public boolean hasExporter() { return pio.capabilities().exporter() != null; }
+
+    @Override public boolean secure() { return pio.capabilities().secure(); }
+
+    @Override public io.zmux.RecordMode firstPipeMode() { return pio.capabilities().recordMode(); }
+
+    @Override public Object carrierPeer() { return pio.capabilities().peer(); }
+    @Override public long handshakePadding() { return pio.capabilities().handshakePadding(); }
+
+    @Override public void limitFirstMessage(int limit) {
+        if (messages && pio.reader() != null) pio.reader().limitFirstMessage(limit);
+    }
 
     @Override protected boolean accepting() { return ready && !inEnded && !closed; }
 
@@ -323,18 +339,32 @@ final class ExternalTransport extends AbstractTransport {
         if (writing()) { shutAfterWrite = true; return; }
         outputShut = true; closeWriter(null);
     }
+    /** A half's close is the host's code: it never runs on the loop, where it could hold up every session there. */
     private void closeWriter(Throwable cause) {
         if (writerDone || pio.writer() == null) return;
         writerDone = true;
-        try { if (cause != null) pio.writer().abort(cause); else pio.writer().close(); }
-        catch (RuntimeException ignored) { /* Already closing. */ }
+        PipeWriter w = pio.writer();
+        writerClosing = java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try { if (cause != null) w.abort(cause); else w.close(); }
+            catch (RuntimeException ignored) { /* Already closing. */ }
+        }, Callbacks.EXECUTOR);
+        // A graceful close ends the writer's direction once its close returned.
+        if (cause == null) writerClosing.thenRun(() -> loop.tryExecute(() -> { if (!closed) outputShutDone(); }));
     }
+
+    private static final java.util.concurrent.CompletableFuture<Void> DONE = java.util.concurrent.CompletableFuture.completedFuture(null);
+
+    private java.util.concurrent.CompletableFuture<Void> readerClosing = DONE, writerClosing = DONE;
+
     @Override public void shutdownInput() {
         if (readerClosed) return;
         inEnded = true;
         if (pio.reader() != null) {
             readerClosed = true;
-            try { pio.reader().close(); } catch (RuntimeException ignored) { /* Already closing. */ }
+            PipeReader r = pio.reader();
+            readerClosing = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try { r.close(); } catch (RuntimeException ignored) { /* Already closing. */ }
+            }, Callbacks.EXECUTOR);
         }
         inbox.discard();
         if (reader != null) reader.release();
@@ -343,8 +373,9 @@ final class ExternalTransport extends AbstractTransport {
         if (closed) return;
         closed = true;
         inbox.taken.decide(false); // Not taken before: the listener refused it.
-        shutdownInput(); closeWriter(cause);
-        Callbacks.EXECUTOR.execute(() -> inbox.closed.complete(null));
+        shutdownInput();
+        closeWriter(cause);
+        java.util.concurrent.CompletableFuture.allOf(readerClosing, writerClosing).whenCompleteAsync((v, e) -> inbox.closed.complete(null), Callbacks.EXECUTOR);
         // An in-flight batch belongs to its completion, even after the carrier closes.
     }
 }

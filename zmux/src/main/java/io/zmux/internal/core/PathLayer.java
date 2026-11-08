@@ -5,7 +5,7 @@ import io.zmux.internal.wire.WireException;
 import java.util.List;
 
 /**
- * The single fork between single-pipe and multipath sessions (IMPLEMENTATION.md Section 2.6).
+ * The single fork between single-pipe and multipath sessions.
  * A session holds exactly one: {@link SinglePath} until multipath is negotiated, then
  * {@link PathSession}. Everything that differs between the two goes through here; the session
  * contains no other single/multipath branch.
@@ -22,7 +22,7 @@ sealed interface PathLayer permits SinglePath, PathSession {
     /** PIPE_ACK rides with the session's control frames (single pipe) rather than the path layer's. */
     boolean acksInControl();
 
-    /** MAX_DATA went out; peerWaiting: the peer is or may be blocked on it (MULTIPATH.md 6.5 copies). */
+    /** MAX_DATA went out; peerWaiting: the peer is or may be blocked on it. */
     void maxDataSent(boolean peerWaiting);
 
     /** MAX_STREAM_DATA of st went out; peerWaiting as for {@link #maxDataSent}. */
@@ -34,7 +34,7 @@ sealed interface PathLayer permits SinglePath, PathSession {
     /** Data of st prefers the urgent (first) lane. */
     boolean urgentLane(Stream st);
 
-    // ---- retention (MULTIPATH.md 7.4) ----
+    // ---- retention ----
 
     /** The effective session send buffer, given the configured one. */
     long sendBuffer(long configured);
@@ -44,6 +44,9 @@ sealed interface PathLayer permits SinglePath, PathSession {
 
     /** n new stream bytes were sent. */
     void retain(long n);
+
+    /** A first batch carried n bytes of st from off: they go again as reinjected information. */
+    default void batchCarried(Stream st, long off, long n) { }
 
     /** n sent stream bytes are no longer retained (their stream reached a terminal send state). */
     void unretain(long n);
@@ -88,14 +91,31 @@ sealed interface PathLayer permits SinglePath, PathSession {
 
     Session.JoinProgress joinProgress(Pipe p);
 
-    /** Physical readiness of p, independent of the scheduler's tier and standby selection. */
+    /**
+     * Physical readiness of p, independent of the scheduler's tier and standby selection. It
+     * says nothing of whether the peer holds the attachment yet: see {@link #peerAttached}.
+     */
     boolean pipeUsable(Pipe p);
+
+    /** Whether the peer is known to hold p's attachment; the one definition of "attached". */
+    boolean peerAttached(Pipe p);
+
+    /** Registers w to be woken when some pipe may have become attached, changed state or retired. */
+    void waitPeerAttached(Waiter w);
+
+    void cancelPeerAttachedWait(Waiter w);
+
+    /** Wakes the waiters of {@link #waitPeerAttached}. */
+    void wakePeerAttachedWaiters();
 
     /** The ID the next local join takes; 0 without multipath. */
     long nextPipeId();
 
     /** Whether maintenance has target room and a local join may start now. */
     boolean joinReady();
+
+    /** A pool that dials for the session started (+1) or stopped (-1). */
+    default void attend(int delta) {}
 
     /** The scheduling policy changed. */
     void policyChanged();

@@ -5,7 +5,7 @@ import java.util.Iterator;
 
 /**
  * Probation of new and recovered pipes, its history per pipe or fate group, revalidation and the busy mark that
- * paces standby probes (SCHEDULER.md 11).
+ * paces standby probes.
  */
 final class Probation {
     /** What Probation asks of the rest of the path layer and the session. */
@@ -189,7 +189,7 @@ final class Probation {
         return next;
     }
 
-    /** Revalidation of one pipe (all false) or of every live outbound pipe (API.md 4.2); false when unknown. */
+    /** Revalidation of one pipe (all false) or of every live outbound pipe; false when unknown. */
     boolean revalidate(long id, boolean all) {
         if (!all && pipes.get(id) == null) return false;
         for (Pipe p : pipes.all()) {
@@ -277,7 +277,7 @@ final class Probation {
         p.mp().prob.probOn = false;
     }
 
-    /** The probation and revalidation state of one attachment (SCHEDULER.md). */
+    /** The probation and revalidation state of one attachment. */
     static final class Slot {
         private long probStart;
         private int probK;

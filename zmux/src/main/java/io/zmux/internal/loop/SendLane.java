@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The sending direction of one stream between its writers and the session's loop
- * (IMPLEMENTATION.md Section 6.4 send buffer; the bridge's write lease). The core grants a
+ * (the send buffer; the bridge's write lease). The core grants a
  * lease of the stream's send-buffer share; the holder of the direction's {@link Turn}
  * copies application bytes into lane-owned blocks within the lease and publishes them on
  * an SPSC ring without involving the loop. The loop moves ring entries into the core's
@@ -71,6 +71,8 @@ public final class SendLane {
     private final AtomicLong lease = new AtomicLong();
     /** The core outcome every later write reports; set on the loop. */
     private volatile CoreException terminal;
+    /** The application is done with this part: it finished or reset it; on the loop. */
+    boolean appDone;
     @SuppressWarnings("unused") private volatile Resumable waiter;
     private final AtomicBoolean dirty = new AtomicBoolean();
     private final Mailbox.Command drain = this::drain;
@@ -430,6 +432,10 @@ public final class SendLane {
                 CoreException t = terminal;
                 if (t == null) {
                     try { core.sending().finish(st); } catch (CoreException x) { t = x; terminate(x); }
+                }
+                if (t == null) {
+                    appDone = true;
+                    driver.post(() -> driver.lanes.partEnded(st)); // after this step, not inside it
                 }
                 e.fin.settle(t == null ? Boolean.TRUE : t);
             } else if (!e.block()) {

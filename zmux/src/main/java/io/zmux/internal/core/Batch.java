@@ -228,7 +228,7 @@ public final class Batch implements io.zmux.carrier.OutboundBatch {
         pins.clear();
     }
 
-    /** Bytes a record of {@code size} frame bytes counts in positions (MULTIPATH.md Section 6.1). */
+    /** Bytes a record of {@code size} frame bytes counts in positions. */
     static int positionBytes(int size) {
         return VarInt.length(size) + size;
     }

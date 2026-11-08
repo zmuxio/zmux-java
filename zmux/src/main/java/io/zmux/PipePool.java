@@ -50,8 +50,6 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
     public PipePool {
         Objects.requireNonNull(join); Objects.requireNonNull(options); Objects.requireNonNull(rotation); Objects.requireNonNull(backoff);
         if (count < 1) throw new IllegalArgumentException("count must be positive");
-        if (join instanceof InBandDial && options.direction == PipeOptions.Direction.RECEIVE_ONLY)
-            throw new IllegalArgumentException("receive-only pools need a Dial using Attempt.reserve");
         nanos(inspectionInterval, false); if (attemptTimeout != null) nanos(attemptTimeout, false);
     }
     static long nanos(Duration duration, boolean zero) {
@@ -78,7 +76,6 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         /** The candidate a mode pool's attempt dials; -1 outside mode pools. */
         final int kind;
         private final Thread owner;
-        private PipeReservation reservation;
         private ZmuxPipe made;
         /** The pipes the attempt produced, aborted when the pool rejects them. */
         private java.util.List<ZmuxPipe> group = java.util.List.of();
@@ -86,6 +83,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         Attempt(ZmuxSession session, PipeOptions options, Cancellation cancellation, int kind) {
             this.session = session; this.options = options; this.cancellation = cancellation; this.kind = kind; owner = Thread.currentThread();
         }
+        /** The options to join with: the pool's, with {@link PipeOptions.Builder#noWaitAttached} set. */
         public PipeOptions options() { return options; }
         /** The session a {@link Join} adds its pipes to. */
         public ZmuxSession session() { return session; }
@@ -97,18 +95,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         public ZmuxPipe join(PipeIo io) throws IOException { begin(); return made = session.addPipe(io, options); }
         public ZmuxPipe join(java.net.InetSocketAddress address) throws IOException { begin(); return made = session.addPipe(address, options); }
         public ZmuxPipe joinTls(java.net.InetSocketAddress address, TlsOptions tls) throws IOException {
-            begin(); return made = session.addPipeTls(address, tls, options);
-        }
-        public Reserved reserve() throws IOException { begin(); reservation = session.reservePipe(options); return new Reserved(); }
-        public final class Reserved implements AutoCloseable {
-            private Reserved() {}
-            public long id() { return reservation.id(); }
-            public String header() { return reservation.header(); }
-            public ZmuxPipe attach(PipeIo io) throws IOException {
-                if (Thread.currentThread() != owner) throw new IllegalStateException("reservation belongs to the dial worker");
-                return made = reservation.attach(io);
-            }
-            @Override public void close() { reservation.close(); }
+            begin(); return made = session.addTlsPipe(address, tls, options);
         }
         /**
          * Takes the attempt's result: every pipe belongs to the session and, when the attempt created one
@@ -123,7 +110,6 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
             return true;
         }
         void finish(boolean accepted) {
-            if (reservation != null) reservation.close();
             if (accepted) return;
             if (made != null && !group.contains(made)) made.abortQueued();
             for (ZmuxPipe p : group) p.abortQueued();
@@ -155,7 +141,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         }
     }
     /**
-     * A pool whose members come from mode (API.md Section 4.8): each member is dialled over the
+     * A pool whose members come from mode: each member is dialled over the
      * kind the policy's cache holds most robust, the outcome is recorded in the cache, and a
      * member not of the most preferred kind is upgraded, make before break, to a more preferred
      * kind not backing off: the new member replaces it once it has been usable for the policy's

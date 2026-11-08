@@ -3,10 +3,13 @@ package io.zmux.internal.core;
 /**
  * One core event for the driver; fields not used by the kind are zero or null.
  *
- * @param dir {@link Action#DIR_IN} or {@link Action#DIR_OUT}, for PIPE_STATE; {@link Action#DIR_BIDI} for the retirement
- * @param code GOAWAY code, tier priority (TIER_SATURATION) or effective priority (PIPE_PRIORITY)
- * @param count datagrams dropped so far, or the weight (PIPE_PRIORITY)
+ * @param dir {@link Action#DIR_IN} or {@link Action#DIR_OUT}, for PIPE_STATE and the application's pipe kinds;
+ *     {@link Action#DIR_BIDI} for the retirement
+ * @param code the epoch (EPOCH_*), GOAWAY code, tier priority (TIER_SATURATION) or effective priority (PIPE_PRIORITY)
+ * @param count the weight (PIPE_PRIORITY)
+ * @param frame the Locator (LOCATOR_*)
  * @param flag saturated (TIER_SATURATION) or standby (PIPE_PRIORITY)
+ * @param initiator for PIPE_PRIORITY: the peer's request changed the settings, not a local setting
  * @param rtt smoothed RTT (PIPE_QUALITY), nanoseconds
  * @param rate delivery rate (PIPE_QUALITY, CAPACITY_*), bytes per second
  * @param carrier the pipe's carrier kind, for the pipe kinds; null when undeclared
@@ -17,9 +20,18 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
 
     /** Event kinds. */
     public enum Kind {
-        ESTABLISHED, CLOSED, GOAWAY_RECEIVED, PIPE_STATE, JOIN_AUTH_FAILED, SUSPENDED, RESUMED, DATAGRAM_DROPPED,
-        OOB_JOIN, JOIN_SECURITY_UNAVAILABLE, TIER_SATURATION, PIPE_PRIORITY, PIPE_QUALITY, CAPACITY_BELOW,
-        CAPACITY_RESTORED
+        ESTABLISHED, CLOSED, GOAWAY_RECEIVED,
+        /** Every state of a pipe direction, for the driver and the retirement; not an application event. */
+        PIPE_STATE,
+        /** The application's pipe events, one direction each. */
+        PIPE_ADDED, PIPE_JOINED, PIPE_SUSPECT, PIPE_RECOVERED, PIPE_FAILED, PIPE_CLOSED,
+        JOIN_AUTH_FAILED, SUSPENDED, RESUME_UNATTENDED, RESUMED,
+        TIER_SATURATION, PIPE_PRIORITY, PIPE_QUALITY, CAPACITY_BELOW,
+        CAPACITY_RESTORED,
+        /** A session epoch (code) was committed or deleted. */
+        EPOCH_COMMITTED, EPOCH_DELETED,
+        /** A local Locator (frame) joins may now name, or no longer name; not an application event. */
+        LOCATOR_ADDED, LOCATOR_REMOVED
     }
 
     static Event simple(Kind k) {
@@ -38,28 +50,37 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
         return new Event(Kind.GOAWAY_RECEIVED, 0, 0, null, null, maxBidi, maxUni, code, 0, null, null, null, false, false, 0, 0, null);
     }
 
-    static Event datagramDropped(long total) {
-        return new Event(Kind.DATAGRAM_DROPPED, 0, 0, null, null, 0, 0, 0, total, null, null, null, false, false, 0, 0, null);
+    static Event pipe(Kind k, long pipe, io.zmux.CarrierKind carrier, int dir) {
+        return new Event(k, pipe, dir, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier);
+    }
+
+    /** Whether this is an application pipe event of a terminal state (failed or closed). */
+    public boolean pipeTerminal() {
+        return kind == Kind.PIPE_FAILED || kind == Kind.PIPE_CLOSED;
     }
 
     static Event pipeState(long pipe, io.zmux.CarrierKind carrier, int dir, Enum<?> state) {
         return new Event(Kind.PIPE_STATE, pipe, dir, state, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier);
     }
 
-    static Event oobJoin(long pipe, byte[] frame) {
-        return new Event(Kind.OOB_JOIN, pipe, 0, null, null, 0, 0, 0, 0, frame, null, null, false, false, 0, 0, null);
-    }
-
     static Event joinAuthFailed(String reason) {
         return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 0, null, reason, null, false, false, 0, 0, null);
+    }
+
+    static Event epoch(Kind k, long n) {
+        return new Event(k, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null);
+    }
+
+    static Event locator(Kind k, byte[] locator) {
+        return new Event(k, 0, 0, null, null, 0, 0, 0, 0, locator, null, null, false, false, 0, 0, null);
     }
 
     static Event tierSaturation(long prio, boolean saturated) {
         return new Event(Kind.TIER_SATURATION, 0, 0, null, null, 0, 0, prio, 0, null, null, null, false, saturated, 0, 0, null);
     }
 
-    static Event pipePriority(long pipe, io.zmux.CarrierKind carrier, long prio, boolean standby, long weight) {
-        return new Event(Kind.PIPE_PRIORITY, pipe, 0, null, null, 0, 0, prio, weight, null, null, null, false, standby, 0, 0, carrier);
+    static Event pipePriority(long pipe, io.zmux.CarrierKind carrier, long prio, boolean standby, long weight, boolean peer) {
+        return new Event(Kind.PIPE_PRIORITY, pipe, 0, null, null, 0, 0, prio, weight, null, null, null, peer, standby, 0, 0, carrier);
     }
 
     static Event pipeQuality(long pipe, io.zmux.CarrierKind carrier, long rtt, double rate) {

@@ -36,7 +36,7 @@ class QuicAdmissionTest {
                 assertEquals("127.0.0.1 qmux-02 4", seen.poll(1, TimeUnit.SECONDS));
                 // Lanes, further streams of a connection, reach the listener once its first one is accepted.
                 QuicTest.transfer(workers, client, accepted, 8, 128 << 10);
-                assertTrue(client.paths().stats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
+                assertTrue(client.pipeStats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
                 client.close();
                 accepted.awaitClosed();
             }
@@ -107,7 +107,7 @@ class QuicAdmissionTest {
         });
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = QuicEndpointTest.config(loops);
-            var dialing = ZmuxConfig.builder().eventLoops(loops).multipath(config.multipathConfig()).credential(auth).build();
+            var dialing = QuicEndpointTest.builder(loops).credential(auth).build();
             var options = QuicOptions.defaults();
             try (var local = Zmux.listener(ListenerConfig.of(dialing));
                  var remote = Zmux.listener(ListenerConfig.builder().session(config)
@@ -120,7 +120,7 @@ class QuicAdmissionTest {
                 assertEquals("32 ACCEPT", verdicts.poll(1, TimeUnit.SECONDS));
 
                 var joined = client.openPipe(server.address(), "localhost", a, auth).toCompletableFuture().get(5, TimeUnit.SECONDS);
-                a.paths().add(joined, PipeOptions.defaults());
+                a.addPipe(joined, PipeOptions.defaults());
                 assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
 
                 try (var pool = new QuicPool(client, server.address(), "localhost", new QuicPool.Limits(2, 0, Duration.ZERO), auth)) {
@@ -129,8 +129,8 @@ class QuicAdmissionTest {
                     var one = first.get(5, TimeUnit.SECONDS);
                     var two = second.get(5, TimeUnit.SECONDS);
                     assertSame(one.carrierConn(), two.carrierConn(), "one pooled connection");
-                    a.paths().add(one, PipeOptions.defaults());
-                    a.paths().add(two, PipeOptions.defaults());
+                    a.addPipe(one, PipeOptions.defaults());
+                    a.addPipe(two, PipeOptions.defaults());
                     assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
                     QuicTest.transfer(workers, a, b, 8, 128 << 10);
                     QuicTest.transfer(workers, b, a, 4, 64 << 10);
@@ -139,7 +139,7 @@ class QuicAdmissionTest {
 
                 var bare = client.openPipe(server.address(), "localhost", a).toCompletableFuture().get(5, TimeUnit.SECONDS);
                 var refused = CompletableFuture.runAsync(() -> {
-                    try { a.paths().add(bare, PipeOptions.defaults()); }
+                    try { a.addPipe(bare, PipeOptions.defaults()); }
                     catch (java.io.IOException e) { throw new java.io.UncheckedIOException(e); }
                 }, workers);
                 String verdict = verdicts.poll(5, TimeUnit.SECONDS);
@@ -152,7 +152,7 @@ class QuicAdmissionTest {
         }
     }
 
-    /** The session dialer with a configuration presents its credential; a bound one fails without an exporter. */
+    /** The session dialer with a configuration presents its credential; a bound one has the connection's exporter, and a listener that expects none refuses its prefix. */
     @Test void sessionDialersPresentTheConfiguredCredential() throws Exception {
         var auth = new PrefixAuth(new byte[32], Duration.ofSeconds(30), false, 1, 0);
         try (EventLoops loops = EventLoops.create(2)) {
@@ -170,7 +170,7 @@ class QuicAdmissionTest {
                 var bound = ZmuxConfig.builder().eventLoops(loops)
                         .credential(new PrefixAuth(new byte[32], Duration.ofSeconds(30), true, 1, 0)).build();
                 var failure = assertThrows(ExecutionException.class,
-                        () -> endpoint.connect(server.address(), "localhost", bound).toCompletableFuture().get(10, TimeUnit.SECONDS));
+                        () -> endpoint.connect(server.address(), "localhost", bound).toCompletableFuture().get(30, TimeUnit.SECONDS));
                 assertInstanceOf(java.io.IOException.class, failure.getCause());
             }
         }

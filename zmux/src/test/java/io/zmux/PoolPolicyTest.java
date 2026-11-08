@@ -14,7 +14,7 @@ class PoolPolicyTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
             var count = new AtomicInteger(3); var retire = new AtomicLong(-1);
             PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withCount(count.get()).withRetire(retire.get() < 0 ? Set.of() : Set.of(retire.get()));
-            var run = f.client.paths().maintain(PipePoolTest.fast(f.dial()).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 3);
             var doomed = run.pipes().get(1);
             retire.set(doomed.id()); count.set(2);
@@ -32,7 +32,7 @@ class PoolPolicyTest {
                 seen.add(v);
                 return retire.get() < 0 ? PoolPolicy.Decision.KEEP : PoolPolicy.Decision.KEEP.withRetire(Set.of(retire.get()));
             };
-            var run = f.client.paths().maintain(PipePoolTest.fast(f.dial()).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 1);
             long old = run.pipes().getFirst().id();
             PipePoolTest.await(() -> seen.stream().anyMatch(v -> v.members().size() == 1 && v.members().getFirst().usable()));
@@ -48,7 +48,7 @@ class PoolPolicyTest {
             var dials = new ConcurrentLinkedQueue<Long>();
             PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withDialAfter(Duration.ofMillis(200));
             PipePool.Dial dial = attempt -> { dials.add(System.nanoTime()); return f.dial().open(attempt); };
-            var run = f.client.paths().maintain(PipePoolTest.fast(dial).withBackoff(new PipePool.Backoff(Duration.ofMillis(10), Duration.ofSeconds(1), 0)).withCount(2).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(dial).withBackoff(new PipePool.Backoff(Duration.ofMillis(10), Duration.ofSeconds(1), 0)).withCount(2).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             run.close();
             run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
@@ -62,7 +62,7 @@ class PoolPolicyTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
             var calls = new AtomicInteger(); var recheck = new java.util.concurrent.atomic.AtomicReference<>(Duration.ofMillis(20));
             PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolPolicy.Decision.KEEP.withRecheck(recheck.get()); };
-            var run = f.client.paths().maintain(PipePoolTest.fast(f.dial()).withCount(1).withInspectionInterval(Duration.ofSeconds(5)).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withCount(1).withInspectionInterval(Duration.ofSeconds(5)).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 1);
             int before = calls.get(); Thread.sleep(300); int n = calls.get() - before;
             assertTrue(n >= 5 && n <= 20, n + " decisions in 300 ms at a 20 ms recheck");
@@ -79,7 +79,7 @@ class PoolPolicyTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
             var calls = new AtomicInteger();
             PoolPolicy policy = v -> { calls.incrementAndGet(); throw new IllegalStateException("policy failure"); };
-            var run = f.client.paths().maintain(PipePoolTest.fast(f.dial()).withCount(2).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withCount(2).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
@@ -92,7 +92,7 @@ class PoolPolicyTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
             var dials = new ConcurrentLinkedQueue<Long>();
             PipePool.Dial dial = attempt -> { dials.add(System.nanoTime()); return f.dial().open(attempt); };
-            var run = f.client.paths().maintain(PipePoolTest.fast(dial).withCount(2)
+            var run = f.client.maintainPipes(PipePoolTest.fast(dial).withCount(2)
                     .withBackoff(new PipePool.Backoff(Duration.ofMillis(300), Duration.ofSeconds(1), 0)));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             run.close();
@@ -104,27 +104,21 @@ class PoolPolicyTest {
     }
 
     @Test void aRejectedDecisionKeepsThePoolIsReportedAndTheRunGoesOn() throws Exception {
-        var logger = java.util.logging.Logger.getLogger(PipeMaintenance.class.getName());
-        var reports = new ConcurrentLinkedQueue<java.util.logging.LogRecord>();
-        var handler = new java.util.logging.Handler() {
-            @Override public void publish(java.util.logging.LogRecord r) { reports.add(r); }
-            @Override public void flush() {}
-            @Override public void close() {}
-        };
-        logger.addHandler(handler);
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
+        var logger = new CapturingLogger();
+        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(ZmuxConfig.builder().eventLoops(loops).maxPipes(8)
+                .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).logger(logger).build())) {
             var calls = new AtomicInteger();
             // Decision refuses a negative count: the policy's answer is rejected.
             PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolPolicy.Decision.KEEP.withCount(-1); };
-            var run = f.client.paths().maintain(PipePoolTest.fast(f.dial()).withCount(2).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withCount(2).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             int before = calls.get();
             PipePoolTest.await(() -> calls.get() > before + 2);
-            assertFalse(reports.isEmpty(), "the rejection was not reported");
-            assertInstanceOf(IllegalArgumentException.class, reports.peek().getThrown());
+            assertFalse(logger.entries.isEmpty(), "the rejection was not reported");
+            assertInstanceOf(IllegalArgumentException.class, logger.entries.peek().thrown());
             run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertEquals(2, result.pipes().size());
-        } finally { logger.removeHandler(handler); }
+        }
     }
 }

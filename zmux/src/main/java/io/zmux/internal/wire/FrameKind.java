@@ -7,8 +7,9 @@ public enum FrameKind {
     MAX_STREAMS("MAX_STREAMS"), DATA_BLOCKED("DATA_BLOCKED"), STREAM_DATA_BLOCKED("STREAM_DATA_BLOCKED"),
     STREAMS_BLOCKED("STREAMS_BLOCKED"), CONNECTION_CLOSE("CONNECTION_CLOSE"), DATAGRAM("DATAGRAM"),
     TRANSPORT_PARAMETERS("QX_TRANSPORT_PARAMETERS"), PING("QX_PING"), GOAWAY("GOAWAY"),
-    PRIORITY_UPDATE("PRIORITY_UPDATE"), PIPE_JOIN("PIPE_JOIN"), PIPE_ACK("PIPE_ACK"), PIPE_LANE("PIPE_LANE"),
-    PIPE_PING("PIPE_PING"), PIPE_ABANDON("PIPE_ABANDON"), PIPE_STATUS("PIPE_STATUS");
+    PRIORITY_UPDATE("PRIORITY_UPDATE"), PIPE_ACK("PIPE_ACK"), PIPE_LANE("PIPE_LANE"),
+    PIPE_PING("PIPE_PING"), PIPE_ABANDON("PIPE_ABANDON"), PIPE_STATUS("PIPE_STATUS"),
+    SESSION_EPOCH("SESSION_EPOCH");
 
     private final String wireName;
 
@@ -21,7 +22,7 @@ public enum FrameKind {
         return wireName;
     }
 
-    /** Whether a frame of this kind elicits a PIPE_ACK (SPEC.md Section 1.4). */
+    /** Whether a frame of this kind elicits a PIPE_ACK. */
     public boolean ackEliciting() {
         return this != PADDING && this != PIPE_ACK && this != CONNECTION_CLOSE;
     }

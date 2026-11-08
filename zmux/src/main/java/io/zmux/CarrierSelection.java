@@ -10,7 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
-/** {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)}: carrier selection (API.md Section 4.8). */
+/** {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)}: carrier selection. */
 final class CarrierSelection {
     private CarrierSelection() {}
 
@@ -22,14 +22,14 @@ final class CarrierSelection {
             Candidate c = cands.getFirst();
             Started st = start(c, cfg, cred, null);
             if (st.session == null) throw new ModeException(List.of(st.result));
-            st.session.reportCarrier(List.of(st.result), c.kind());
+            st.session.reportCarrier(List.of(st.result), c.kind(), c.variant());
             return st.session;
         }
         ModePolicy p = src.policy();
         ZmuxConfig acfg = cfg.withoutEarlyData();
         long now = System.nanoTime();
         List<Integer> order = src.usable(now);
-        boolean join = !p.noJoin() && cfg.multipathConfig().maxPipes() > 1;
+        boolean join = !p.noJoin() && cfg.maxPipes() > 1;
         if (join) {
             int base = src.base(order, now);
             var seq = new ArrayList<Integer>();
@@ -41,14 +41,15 @@ final class CarrierSelection {
         for (int i : order) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("interrupted");
             Candidate c = cands.get(i);
+            src.prime(i);
             Started st = start(c, acfg, cred, p);
             results.add(st.result);
             src.record(i, st.session != null);
             if (st.session == null) continue;
             ZmuxSession s = st.session;
-            s.reportCarrier(results, c.kind());
+            s.reportCarrier(results, c.kind(), c.variant());
             long chosen = System.nanoTime();
-            ZmuxPipe pipe0 = join && s.info().multipath() ? s.paths().list().stream().filter(x -> x.id() == 0).findFirst().orElse(null) : null;
+            ZmuxPipe pipe0 = join && s.info().multipath() ? s.pipes().stream().filter(x -> x.id() == 0).findFirst().orElse(null) : null;
             if (pipe0 != null) {
                 // Every later upgrade, fallback and retry is this pool's.
                 try {
@@ -78,19 +79,19 @@ final class CarrierSelection {
         long t0 = System.nanoTime();
         PipeIo io;
         try {
-            io = c.dialer().dial(cred, bound).withCarrier(c.kind());
+            io = c.dialer().dial(cred, bound).withCarrier(c.kind()).withVariant(c.variant());
         } catch (InterruptedIOException e) {
             throw e;
         } catch (IOException | RuntimeException e) {
-            return new Started(null, new CandidateResult(c.kind(), outcomeOf(e), false, e));
+            return failed(c, e);
         }
         if (p == null) {
             try {
-                return new Started(Zmux.open(io, Role.CLIENT, cfg), new CandidateResult(c.kind(), CandidateOutcome.USABLE, false, null));
+                return new Started(Zmux.open(io, Role.CLIENT, cfg), usable(c));
             } catch (InterruptedIOException e) {
                 throw e;
             } catch (IOException | RuntimeException e) {
-                return new Started(null, new CandidateResult(c.kind(), outcomeOf(e), false, e));
+                return failed(c, e);
             }
         }
         long deadline = System.nanoTime() + p.timer(Duration.ofNanos(System.nanoTime() - t0)).toNanos();
@@ -101,9 +102,9 @@ final class CarrierSelection {
         } catch (InterruptedIOException e) {
             throw e;
         } catch (IOException | RuntimeException e) {
-            return new Started(null, new CandidateResult(c.kind(), outcomeOf(e), false, e));
+            return failed(c, e);
         }
-        Started usable = new Started(s, new CandidateResult(c.kind(), CandidateOutcome.USABLE, false, null));
+        Started usable = new Started(s, usable(c));
         try {
             s.awaitEstablished(deadline);
             return usable;
@@ -116,20 +117,32 @@ final class CarrierSelection {
             }
             if (!abandoned) return usable; // established meanwhile
             var err = new SocketTimeoutException(c.kind() + " carrier: no transport parameters within the timer");
-            return new Started(null, new CandidateResult(c.kind(), CandidateOutcome.TIMED_OUT, false, err));
+            return new Started(null, new CandidateResult(c.kind(), CandidateOutcome.TIMED_OUT, false, err, c.variant()));
         } catch (InterruptedIOException e) {
             s.close();
             throw e;
         } catch (IOException e) {
             s.close();
-            return new Started(null, new CandidateResult(c.kind(), outcomeOf(e), false, e));
+            return failed(c, e);
         }
+    }
+
+    /** The result of a candidate that started a session. */
+    private static CandidateResult usable(Candidate c) {
+        return new CandidateResult(c.kind(), CandidateOutcome.USABLE, false, null, c.variant());
+    }
+
+    /** No session from a candidate that failed with e. */
+    private static Started failed(Candidate c, Throwable e) {
+        return new Started(null, new CandidateResult(c.kind(), outcomeOf(e), false, e, c.variant()));
     }
 
     /** Classifies the failure of a try. */
     static CandidateOutcome outcomeOf(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof HttpStatusException || t instanceof java.net.ConnectException) return CandidateOutcome.REFUSED;
+            if (t instanceof HttpStatusException || t instanceof HttpRedirectException || t instanceof java.net.ConnectException) {
+                return CandidateOutcome.REFUSED;
+            }
             if (t instanceof SocketTimeoutException || t instanceof TimeoutException) return CandidateOutcome.TIMED_OUT;
             if (t instanceof SessionClosedException sc && sc.error() instanceof SessionError.HandshakeTimeout) return CandidateOutcome.TIMED_OUT;
             // A carrier that opened at once and failed later (an HTTP response refusing it): its pipe's error.

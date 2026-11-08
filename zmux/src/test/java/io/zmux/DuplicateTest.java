@@ -169,7 +169,7 @@ class DuplicateTest {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             try (Pair one = plainPair(cfg); Pair two = plainPair(cfg); Held held = Held.open(two)) {
-                assertFalse(two.client().info().goAway());
+                assertFalse(two.client().info().peerIsZmux());
                 var resolved = Zmux.resolveDuplicate(one.server(),two.client(),ids(2,1));
                 assertSame(two.client(),resolved.loser());
                 assertThrows(GoingAwayException.class,two.client()::openStream);
@@ -180,7 +180,7 @@ class DuplicateTest {
     }
     @Test void losingSessionWakesAlreadyBlockedOpeners() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).limits(Limits.defaults().withIncomingStreams(4)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build();
             try (Pair one = Pair.memory(cfg); Pair two = Pair.memory(cfg); Held held = Held.open(two);
                  Held second = Held.open(two); Held third = Held.open(two); Held fourth = Held.open(two)) {
                 var blocked = workers.submit(() -> two.client().openStream());

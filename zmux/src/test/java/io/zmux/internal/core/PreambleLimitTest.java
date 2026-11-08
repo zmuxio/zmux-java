@@ -5,7 +5,7 @@ import java.nio.ByteBuffer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** The preamble bound (API.md Section 4.4): checked when set, and again when the stream takes its identifier. */
+/** The preamble bound: checked when set, and again when the stream takes its identifier. */
 @Timeout(30)
 class PreambleLimitTest {
     static Session session(CoreConfig.Role role, int maxPreamble) {

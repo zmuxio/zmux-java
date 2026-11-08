@@ -88,7 +88,7 @@ class FuzzTest {
         } catch (WireException expected) {
             // rejected input
         }
-        new Records.FirstRecordCheck(65535, true, true).feed(b, pos, end);
+        new Records.FirstRecordCheck(65535, true).feed(b, pos, end);
     }
 
     @Test

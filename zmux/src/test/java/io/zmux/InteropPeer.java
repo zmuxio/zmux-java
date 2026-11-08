@@ -10,12 +10,15 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Scripted test peer; command contract is shared with zmux-rs/interop/peer. No wire parser. */
+/**
+ * Scripted test peer; command contract is shared with zmux-rs/interop/peer. No wire parser.
+ * The quic- modes run io.zmux.quic.QuicInteropPeer, of the QUIC module's test classes, with this peer's script.
+ */
 public final class InteropPeer {
     private static final byte[] PSK = "zmux interop pre-shared key 0123".getBytes(StandardCharsets.US_ASCII);
     private InteropPeer() {}
     public static void main(String[] args) throws Exception {
-        if (args.length < 1) throw new IllegalArgumentException("server|client|mp-server|mp-client [address]");
+        if (args.length < 1) throw new IllegalArgumentException("server|client|mp-server|mp-client [address] | quic-server [sessions] | quic-client address");
         Thread watchdog = Thread.ofPlatform().daemon(true).start(() -> {
             try { Thread.sleep(Duration.ofSeconds(90)); Runtime.getRuntime().halt(124); }
             catch (InterruptedException expected) { /* completed */ }
@@ -26,14 +29,28 @@ public final class InteropPeer {
         int split = text.lastIndexOf(':');
         return new InetSocketAddress(text.substring(0, split), Integer.parseInt(text.substring(split + 1)));
     }
+    /** The QUIC drivers' contract: close replies "closing", whose FIN goes before the close that could overtake it. */
+    private static volatile boolean closeReply;
+    private static void quic(String[] args) throws Exception {
+        closeReply = true;
+        java.util.function.Consumer<ZmuxSession> script = session -> {
+            try { serve(session); } catch (RuntimeException | Error e) { throw e; } catch (Exception e) { throw new IllegalStateException(e); }
+        };
+        try {
+            Class.forName("io.zmux.quic.QuicInteropPeer").getMethod("run", String[].class, java.util.function.Consumer.class).invoke(null, args, script);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause() instanceof Exception cause ? cause : e;
+        }
+    }
     private static void run(String[] args) throws Exception {
+        if (args[0].startsWith("quic-")) { quic(args); return; }
         boolean mp = args[0].startsWith("mp-");
         String mode = mp ? args[0].substring(3) : args[0];
         if (!List.of("server", "client").contains(mode)) throw new IllegalArgumentException("unknown mode");
         var remote = address(args.length > 1 ? args[1] : "127.0.0.1:0");
-        try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).limits(Limits.defaults().withIncomingUniStreams(16));
-            if (mp) builder.multipath(MultipathConfig.of(4, PipeAuth.psk(PSK)));
+        try (var loops = EventLoops.create(2)) {
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingUniStreams(16);
+            if (mp) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
             try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : Zmux.listener(ListenerConfig.of(config))) {
                 ZmuxSession session;
@@ -43,37 +60,41 @@ public final class InteropPeer {
                     if (session == null) throw new IOException("no session");
                 } else {
                     session = endpoint.connect(remote);
-                    if (mp) session.paths().add(remote, PipeOptions.defaults());
+                    if (mp) session.addPipe(remote, PipeOptions.defaults());
                 }
-                try (session) {
-                    System.out.println("ESTABLISHED");
-                    var failure = new AtomicReference<Throwable>();
-                    submit(session, jobs, failure, () -> {
-                        try { while (true) { var stream = session.acceptStream(); submit(session, jobs, failure, () -> handle(session, stream)); } }
-                        catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
-                    });
-                    submit(session, jobs, failure, () -> {
-                        try {
-                            while (true) {
-                                var stream = session.acceptReceiveStream();
-                                submit(session, jobs, failure, () -> {
-                                    try (stream; var output = session.openSendStream(Preamble.EMPTY)) {
-                                        output.write(read(stream)); output.finish();
-                                    }
-                                });
-                            }
-                        } catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
-                    });
-                    submit(session, jobs, failure, () -> {
-                        try { while (true) session.datagrams().send(ByteBuffer.wrap(session.datagrams().receive())); }
-                        catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
-                    });
-                    var error = session.awaitClosed(); System.out.println("CLOSED " + error.message());
-                    jobs.shutdown();
-                    if (!jobs.awaitTermination(5, TimeUnit.SECONDS)) throw new IOException("peer workers did not terminate");
-                    if (failure.get() != null) throw new IOException("scripted peer failed", failure.get());
-                }
+                serve(session);
             }
+        }
+    }
+    /** Answers the script on session until it closes, then closes it. */
+    private static void serve(ZmuxSession session) throws Exception {
+        try (session; var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
+            System.out.println("ESTABLISHED");
+            var failure = new AtomicReference<Throwable>();
+            submit(session, jobs, failure, () -> {
+                try { while (true) { var stream = session.acceptStream(); submit(session, jobs, failure, () -> handle(session, stream)); } }
+                catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
+            });
+            submit(session, jobs, failure, () -> {
+                try {
+                    while (true) {
+                        var stream = session.acceptReceiveStream();
+                        submit(session, jobs, failure, () -> {
+                            try (stream; var output = session.openSendStream(Preamble.EMPTY)) {
+                                output.write(read(stream)); output.finish();
+                            }
+                        });
+                    }
+                } catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
+            });
+            submit(session, jobs, failure, () -> {
+                try { while (true) session.datagrams().send(ByteBuffer.wrap(session.datagrams().receive())); }
+                catch (IOException closed) { if (!(closed instanceof SessionClosedException)) throw closed; }
+            });
+            var error = session.awaitClosed(); System.out.println("CLOSED " + error.message());
+            jobs.shutdown();
+            if (!jobs.awaitTermination(5, TimeUnit.SECONDS)) throw new IOException("peer workers did not terminate");
+            if (failure.get() != null) throw new IOException("scripted peer failed", failure.get());
         }
     }
     private static byte[] read(ZmuxReceiveStream stream) throws IOException {
@@ -100,6 +121,10 @@ public final class InteropPeer {
                     reply(stream, "info=" + command + ";prio=" + (preamble != null && preamble.hasPriority()
                             ? preamble.urgency() + "," + preamble.incremental() : "none"));
                 }
+                case "early" -> {
+                    boolean replayable = stream.isReplayable();
+                    reply(stream, "early=" + new String(read(stream), StandardCharsets.UTF_8) + ";replayable=" + replayable);
+                }
                 case "reset" -> {
                     String result;
                     try { read(stream); result = "fin"; }
@@ -124,10 +149,11 @@ public final class InteropPeer {
                     read(stream); reply(stream, "dgram-done");
                 }
                 case "schedule" -> { if (!arg.equals("round-robin")) throw new IOException("unknown policy"); session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN); reply(stream, "scheduled"); }
-                case "drop-bootstrap" -> { session.paths().list().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
+                case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
                 case "goaway" -> { session.run(op -> { session.core.shutdown(Long.parseLong(arg), null); return Boolean.TRUE; }); read(stream); reply(stream, "draining"); }
                 case "close" -> {
                     String[] close = arg.split(":", 2); read(stream);
+                    if (closeReply) { reply(stream, "closing"); Thread.sleep(50); }
                     session.close(new ApplicationError(Long.parseLong(close[0]), close.length > 1 ? close[1] : ""));
                 }
                 default -> reply(stream, "unknown=" + command);
@@ -140,7 +166,7 @@ public final class InteropPeer {
             try { work.run(); }
             catch (SessionClosedException expected) { /* pending operations end with the session */ }
             catch (Throwable error) {
-                failure.compareAndSet(null, error);
+                if (failure.compareAndSet(null, error)) error.printStackTrace();
                 session.close(new ApplicationError(1, "scripted peer failed"));
             }
         });

@@ -12,10 +12,17 @@ import java.io.IOException;
  */
 public abstract sealed class ZmuxException extends IOException
         permits SessionClosedException, StreamException, PipeException, NotNegotiatedException,
-        DatagramTooLargeException, NotEstablishedException, DuplicateResolutionException {
+        DatagramTooLargeException, NotEstablishedException, DuplicateResolutionException,
+        JoinPendingException, JoinSecretSetException, NoExporterException,
+        io.zmux.seal.NoReplyException, io.zmux.seal.CredentialsFailedException, io.zmux.seal.VerifierUnavailableException {
 
     ZmuxException(String message) {
         super(message);
+    }
+
+    /** For the permitted subclasses outside this package. */
+    protected ZmuxException(String message, Throwable cause) {
+        super(message, cause);
     }
 
     /** Whether the operation may succeed on a retry, possibly on another session (rejected, going away). */

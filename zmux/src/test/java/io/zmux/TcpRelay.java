@@ -7,10 +7,13 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -30,6 +33,8 @@ final class TcpRelay implements AutoCloseable {
     volatile boolean refuse;
     /** Swallow every byte, keeping connections open. */
     volatile boolean blackhole;
+    /** Hold each byte this many ms in each direction; 0: forward at once. Read when a connection opens. */
+    volatile long delayMs;
     final AtomicInteger accepted = new AtomicInteger(), idleCuts = new AtomicInteger(), ageCuts = new AtomicInteger();
 
     private final class Link {
@@ -43,6 +48,8 @@ final class TcpRelay implements AutoCloseable {
             try { upstream.close(); } catch (IOException ignored) { }
         }
         void pump(InputStream in, OutputStream out) {
+            long delay = delayMs;
+            if (delay > 0) { delayedPump(in, out, delay * 1_000_000); return; }
             byte[] b = new byte[16384];
             try {
                 for (int n; (n = in.read(b)) >= 0;) {
@@ -52,6 +59,30 @@ final class TcpRelay implements AutoCloseable {
                 }
             } catch (IOException ignored) { }
             close();
+        }
+        private record Held(long at, byte[] bytes) { }
+        void delayedPump(InputStream in, OutputStream out, long delayNanos) {
+            var held = new LinkedBlockingQueue<Held>();
+            workers.submit(() -> {
+                try {
+                    while (true) {
+                        Held h = held.take();
+                        if (h.bytes.length == 0) break;
+                        long wait = h.at - System.nanoTime();
+                        if (wait > 0) Thread.sleep(Duration.ofNanos(wait));
+                        out.write(h.bytes);
+                    }
+                } catch (IOException | InterruptedException ignored) { }
+                close();
+            });
+            byte[] b = new byte[16384];
+            try {
+                for (int n; (n = in.read(b)) >= 0;) {
+                    last = System.nanoTime();
+                    held.add(new Held(last + delayNanos, Arrays.copyOf(b, n)));
+                }
+            } catch (IOException ignored) { }
+            held.add(new Held(0, new byte[0]));
         }
     }
 

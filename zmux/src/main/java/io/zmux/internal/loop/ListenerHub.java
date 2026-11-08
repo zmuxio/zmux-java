@@ -7,7 +7,6 @@ import io.zmux.internal.core.CoreConfig;
 import io.zmux.internal.core.ReadBuf;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.core.Time;
-import io.zmux.internal.wire.JoinCrypto;
 import io.zmux.internal.wire.TransportParams;
 import io.zmux.carrier.VarInt;
 import java.net.InetSocketAddress;
@@ -20,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import javax.net.ssl.SSLEngine;
 
 /**
- * The listener side of carriers (MULTIPATH.md 5.4 to 5.6): a new carrier is classified by
+ * The listener side of carriers: a new carrier is classified by
  * its first record on the loop that accepted it, then starts a session there, or moves to
  * the loop of the session it joins. Sessions are found by locator. Thread-safe: the
  * admission state is guarded by this hub, the locator map is concurrent, and a carrier is
@@ -34,17 +33,33 @@ public final class ListenerHub {
 
         DriverHooks hooks();
 
+        /** Logs a warning of the listener itself; a failing logger is ignored. */
+        default void log(System.Logger.Level level, String message, Throwable error) { hooks().log(level, message, error); }
+
+        /** The configuration and hooks of a new session on this carrier; an exception closes it, counted rejected. */
+        default Chosen choose(Admission.CarrierInfo info, Object admitted) { return new Chosen(config(), hooks(), null); }
+
         /** A session was started on its loop (on that loop, before its first round). */
-        void started(SessionRuntime d, String applicationProtocol);
+        void started(SessionRuntime d, String applicationProtocol, io.zmux.Credential credential);
+    }
+
+    /** A new session's configuration, and the credential its dialled pipes present (or null). */
+    public record Chosen(CoreConfig config, DriverHooks hooks, io.zmux.Credential credential) {}
+
+    /** What an accepted carrier carries on: the admission's value and its label of the carrier. */
+    private record Admitted(Object value, String variant) {
+        static final Admitted NONE = new Admitted(null, "");
     }
 
     private static final long MAX_FIRST_RECORD = 65535;
+    /** The joins held in all, for the deferred PSK or the session's establishment; a newer one closes the oldest. */
+    static final int MAX_HELD_JOINS = 64;
 
     private final Owner owner;
     private final MemoryBudget budget;
 
     /**
-     * The listener's outcome counts (API.md Section 7.2): each pipe input handed to the listener (a carrier, a lane,
+     * The listener's outcome counts: each pipe input handed to the listener (a carrier, a lane,
      * or the two halves of a split pipe once paired) counts once, when its outcome is decided, in sessions, joins,
      * rejected, refused or timedOut; setupFailures counts connections that never became a pipe input.
      */
@@ -53,11 +68,37 @@ public final class ListenerHub {
                 joins = new java.util.concurrent.atomic.AtomicLong(), setupFailures = new java.util.concurrent.atomic.AtomicLong(),
                 rejected = new java.util.concurrent.atomic.AtomicLong(), refused = new java.util.concurrent.atomic.AtomicLong(),
                 timedOut = new java.util.concurrent.atomic.AtomicLong();
-        /** The admission's outcomes (API.md Section 7.2): each carrier past its source slot once. */
+        /** The admission's outcomes: each carrier past its source slot once. */
         final java.util.concurrent.atomic.AtomicLong accepted = new java.util.concurrent.atomic.AtomicLong(),
                 fallback = new java.util.concurrent.atomic.AtomicLong(), stalled = new java.util.concurrent.atomic.AtomicLong(),
                 closed = new java.util.concurrent.atomic.AtomicLong(), stallOverflow = new java.util.concurrent.atomic.AtomicLong(),
                 peekTimedOut = new java.util.concurrent.atomic.AtomicLong(), handshakeFailed = new java.util.concurrent.atomic.AtomicLong();
+
+        /** Per variant: accepted, fallback, stalled, closed. */
+        static final int ACCEPTED = 0, FALLBACK = 1, STALLED = 2, CLOSED = 3;
+        private final java.util.Map<String, long[]> variants = new java.util.TreeMap<>();
+        private long[] variantOverflow;
+
+        synchronized void variant(String name, int which) {
+            if (name.isEmpty()) return;
+            long[] c = variants.get(name);
+            if (c == null) {
+                if (variants.size() < Admission.MAX_VARIANTS) variants.put(name, c = new long[4]);
+                else c = variantOverflow == null ? (variantOverflow = new long[4]) : variantOverflow;
+            }
+            c[which]++;
+        }
+
+        /** A copy sorted by name, a bucket of further labels last. */
+        public synchronized java.util.List<Admission.VariantStat> variantStats() {
+            var out = new java.util.ArrayList<Admission.VariantStat>(variants.size() + 1);
+            variants.forEach((n, c) -> out.add(new Admission.VariantStat(n, false, c[0], c[1], c[2], c[3])));
+            if (variantOverflow != null) {
+                long[] c = variantOverflow;
+                out.add(new Admission.VariantStat("", true, c[0], c[1], c[2], c[3]));
+            }
+            return out;
+        }
 
         void session() { sessions.incrementAndGet(); }
         void joined() { joins.incrementAndGet(); }
@@ -65,6 +106,8 @@ public final class ListenerHub {
         public void setupFailed() { setupFailures.incrementAndGet(); }
         public void rejected() { rejected.incrementAndGet(); }
         public void refused() { refused.incrementAndGet(); }
+        /** A started session the backlog had no room for: refused instead of a session. */
+        public void sessionRefused() { refused.incrementAndGet(); sessions.decrementAndGet(); }
         void timedOut() { timedOut.incrementAndGet(); }
         void count(Outcome o) {
             switch (o) {
@@ -89,7 +132,7 @@ public final class ListenerHub {
     private final Counts counts = new Counts();
 
     /** How an input that started no session and joined nothing ended. */
-    private enum Outcome { REJECTED, REFUSED, TIMED_OUT }
+    enum Outcome { REJECTED, REFUSED, TIMED_OUT }
 
     /** The listener's outcome counts; any thread. */
     public Counts counts() { return counts; }
@@ -173,7 +216,7 @@ public final class ListenerHub {
     /** Prepares all sessions owned by this endpoint before their transport parameters can be emitted. */
     public synchronized CoreConfig prepare(CoreConfig cfg) {
         if (closed || draining) throw new IllegalStateException("listener closed");
-        cfg = cfg.toBuilder().budget(budget).build();
+        cfg = cfg.toBuilder().budget(budget).epochs(cfg.epochs().withLocatorPrefix(instanceId)).build();
         if (cfg.local().has(TransportParams.MULTIPATH)) {
             byte[] loc = new byte[16]; random.nextBytes(loc);
             System.arraycopy(instanceId, 0, loc, 0, instanceId.length);
@@ -204,7 +247,8 @@ public final class ListenerHub {
             }
             reconcile();
         });
-        Runnable remove = driver.watchClosed(error -> registration.close());
+        driver.locatorListener((loc, added) -> registration.locator(HexFormat.of().formatHex(loc), added));
+                Runnable remove = driver.watchClosed(error -> registration.close());
         if (!registration.observer.compareAndSet(null, remove)) remove.run();
         return registration::close;
     }
@@ -214,9 +258,25 @@ public final class ListenerHub {
         final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
         final java.util.concurrent.atomic.AtomicReference<Runnable> observer = new java.util.concurrent.atomic.AtomicReference<>();
         Registration(SessionRuntime driver, String locator, String lane) { this.driver = driver; this.locator = locator; this.lane = lane; }
+        /** The Locators of later epochs: joins find the session by every accepted one. */
+        final java.util.Set<String> more = new java.util.HashSet<>();
+
+        void locator(String loc, boolean added) {
+            synchronized (ListenerHub.this) {
+                if (closed.get()) return;
+                if (added) {
+                    if (sessions.putIfAbsent(loc, driver) == null) more.add(loc);
+                } else if (more.remove(loc) || loc.equals(locator)) {
+                    sessions.remove(loc, driver);
+                }
+            }
+        }
+
         void close() {
             if (!closed.compareAndSet(false, true)) return;
             synchronized (ListenerHub.this) {
+                for (String l : more) sessions.remove(l, driver);
+                more.clear();
                 if (locator != null) sessions.remove(locator, driver);
                 if (lane != null) laneSessions.remove(lane, driver);
                 resources.remove(driver); registrations.remove(this);
@@ -254,11 +314,14 @@ public final class ListenerHub {
     public void close() {
         java.util.List<PairHalf> halves;
         java.util.List<Registration> registered;
+        java.util.List<JoinSlot> offered;
         synchronized (this) {
             closed = true; drained = null;
             halves = java.util.List.copyOf(pendingPairs); registered = java.util.List.copyOf(registrations);
+            offered = java.util.List.copyOf(offeredSlots);
         }
         for (Registration registration : registered) registration.close();
+        for (JoinSlot slot : offered) slot.listenerClosing();
         for (PairHalf half : halves) half.fail(Outcome.REFUSED);
         // The decisions under way are cancelled: the listener takes no carrier any more.
         for (Transformed t : java.util.List.copyOf(transforming)) t.abandon();
@@ -279,14 +342,14 @@ public final class ListenerHub {
     /**
      * Takes an external carrier whose source slot was reserved ({@link #reserve}): the
      * admission, if configured and the carrier was not admitted with its connection, then
-     * its classification: by hint's out-of-band join or pairing, or by its first record.
+     * its classification: by hint's pairing, or by its first record.
      * verdict (or null) receives the admission's verdict code, off the loop; fallback (or
      * null) takes a carrier the admission does not accept. Returns the carrier, for its
      * {@link Transport#whenTaken} and {@link Transport#whenClosed}.
      */
     public Transport external(SessionHost loop, io.zmux.carrier.PipeIo io, io.zmux.JoinHint hint, boolean admitted,
                               Object admittedValue, Forward fallback, CompletableFuture<Decided> verdict) {
-        boolean pair = !hint.pairing().isEmpty(), oob = !hint.join().isEmpty();
+        boolean pair = !hint.pairing().isEmpty();
         Transport carrier = pair ? new ExternalTransport(loop, io) : carrier(loop, io);
         var info = info(carrier, io, hint);
         InetSocketAddress source = hint.source();
@@ -294,24 +357,16 @@ public final class ListenerHub {
         if (pair) {
             byte[] key = decodePairToken(hint.pairing());
             boolean shaped = carrier.directions() == (hint.uplink() ? Action.DIR_IN : Action.DIR_OUT);
-            next = transformed(hint, info, (c, value) -> {
+            next = (c, value) -> {
                 release(source); // the pairing bounds a waiting half
                 if (key == null || !shaped) { c.close(null); counts.rejected(); return false; }
-                return new PairHalf((ExternalTransport) c, key, hint.uplink(), source, value).begin();
-            });
-        } else if (oob) {
-            byte[] body = CarrierAdmission.decodeJoinHeader(hint.join());
-            next = transformed(hint, info, (c, value) -> {
-                release(source);
-                if (body == null) { c.close(null); counts.rejected(); return false; }
-                join(c, body, false, value);
-                return true;
-            });
+                return new PairHalf((ExternalTransport) c, key, hint, source, value, info).begin();
+            };
         } else {
             String alpn = io.capabilities().applicationProtocol();
-            next = transformed(hint, info, (c, value) -> gate(c, source, alpn, value, ignored -> {}, true) != null);
+            next = transformed(hint, info, (c, value) -> gate(c, source, alpn, value, info, ignored -> {}, true) != null);
         }
-        if (!carrier.loop().tryExecute(() -> admit(carrier, info, admitted, admittedValue, fallback, verdict, oob, next))) {
+        if (!carrier.loop().tryExecute(() -> admit(carrier, info, admitted, new Admitted(admittedValue, ""), fallback, verdict, false, next))) {
             release(source);
             carrier.close(null);
             report(verdict, Admit.CLOSE, null);
@@ -330,7 +385,7 @@ public final class ListenerHub {
     private static Admission.CarrierInfo info(Transport carrier, io.zmux.carrier.PipeIo io, io.zmux.JoinHint hint) {
         var caps = io.capabilities();
         return new Admission.CarrierInfo(hint.source(), hint.peer(), caps.applicationProtocol(), caps.serverName(),
-                caps.exporter() == null ? null : carrier::export, hint.request());
+                caps.exporter() == null ? null : carrier::export, hint.request(), io.terminatedTls());
     }
 
     private static byte[] decodePairToken(String value) {
@@ -345,9 +400,11 @@ public final class ListenerHub {
         final ExternalTransport carrier;
         final byte[] token;
         final boolean uplink;
+        final io.zmux.JoinHint hint;
         final InetSocketAddress source;
         /** The half's admission value. */
-        final Object admitted;
+        final Admitted admitted;
+        final Admission.CarrierInfo info;
         final Runnable shutdown = this::shutdownCarrier;
         final TimerHeap.Timer first = new TimerHeap.Timer() { @Override void fire(long now) { fail(Outcome.TIMED_OUT); } };
         final TimerHeap.Timer expiry = new TimerHeap.Timer() { @Override void fire(long now) { fail(Outcome.TIMED_OUT); } };
@@ -356,8 +413,9 @@ public final class ListenerHub {
         boolean transferRequested;
         boolean done;
 
-        PairHalf(ExternalTransport carrier, byte[] token, boolean uplink, InetSocketAddress source, Object admitted) {
-            this.carrier = carrier; this.token = token; this.uplink = uplink; this.source = source; this.admitted = admitted;
+        PairHalf(ExternalTransport carrier, byte[] token, io.zmux.JoinHint hint, InetSocketAddress source, Admitted admitted, Admission.CarrierInfo info) {
+            this.info = info; this.hint = hint;
+            this.carrier = carrier; this.token = token; this.uplink = hint.uplink(); this.source = source; this.admitted = admitted;
         }
         /** False when the half was refused (its carrier is closed). */
         boolean begin() {
@@ -377,9 +435,11 @@ public final class ListenerHub {
             if (refused != null) { carrier.close(null); counts.count(refused); return false; }
             carrier.loop().onShutdown(shutdown);
             carrier.loop().schedule(expiry, Time.add(Clock.now(), owner.config().handshakeTimeout()));
-            if (uplink) {
+            // A transform runs on the pair and reads the first bytes itself, an Establish among them.
+            if (uplink && transform != null) {
+                synchronized (ListenerHub.this) { firstReady = true; }
+            } else if (uplink) {
                 carrier.boundPendingInput(MAX_FIRST_RECORD + 8);
-                carrier.loop().schedule(first, Time.add(Clock.now(), firstRecordTimeout));
                 carrier.start(this);
             }
             tryPair();
@@ -413,12 +473,18 @@ public final class ListenerHub {
         }
         void tryPair() {
             PairHalf up;
+            boolean ready;
             synchronized (ListenerHub.this) {
                 if (done || other == null) return;
                 up = uplink ? this : other;
-                if (!up.firstReady) return;
+                ready = up.firstReady;
             }
-            if (!up.carrier.loop().tryExecute(up::combine)) up.fail(Outcome.REFUSED);
+            // The first record is timed from the pairing; a half alone ends at the handshake timeout.
+            if (!up.carrier.loop().tryExecute(ready ? up::combine : up::armFirst)) up.fail(Outcome.REFUSED);
+        }
+        void armFirst() {
+            synchronized (ListenerHub.this) { if (done || firstReady) return; }
+            carrier.loop().schedule(first, Time.add(Clock.now(), firstRecordTimeout));
         }
         void combine() {
             PairHalf down;
@@ -456,13 +522,19 @@ public final class ListenerHub {
             Runnable forget = () -> { synchronized (ListenerHub.this) { pairing.forget(token); } };
             combined.whenClosed().whenComplete((value, error) -> { if (!adopted.get()) forget.run(); });
             // The session's admission value is the uplink's, the half that carries the client's parameters.
-            gate(combined, source, combined.info().applicationProtocol(), admitted,
-                    driver -> { adopted.set(true); driver.closedFuture().whenComplete((value, error) -> forget.run()); }, false);
+            PairHalf up = uplink ? this : down;
+            String alpn = combined.info().applicationProtocol();
+            Admission.CarrierInfo paired = new Admission.CarrierInfo(up.info.source(), up.info.peer(), alpn, up.info.serverName(),
+                    combined.hasExporter() ? combined::export : null, up.info.request(), info.terminatedTls() && down.info.terminatedTls());
+            Next session = (c, value) -> gate(c, source, alpn, value, paired,
+                    driver -> { adopted.set(true); driver.closedFuture().whenComplete((v, error) -> forget.run()); }, false) != null;
+            if (transform == null) session.start(combined, up.admitted);
+            else new Transformed(up.hint, paired, session, false).start(combined, up.admitted);
         }
         @Override public int bytes(Transport c, ReadBuf buf, ByteBuffer bytes, int pos, int lim) {
             var record = CarrierAdmission.classify(bytes, pos, lim, MAX_FIRST_RECORD);
             if (record.kind() == CarrierAdmission.Kind.MORE || record.kind() == CarrierAdmission.Kind.SESSION && record.firstRecordLength() == 0) return 0;
-            if (record.kind() != CarrierAdmission.Kind.SESSION) { fail(Outcome.REJECTED); return Inbound.GONE; }
+            if (record.kind() != CarrierAdmission.Kind.SESSION && record.kind() != CarrierAdmission.Kind.JOIN) { fail(Outcome.REJECTED); return Inbound.GONE; }
             carrier.loop().schedule(first, Time.NEVER); carrier.pauseInput();
             synchronized (ListenerHub.this) { firstReady = true; }
             tryPair(); return 0;
@@ -507,8 +579,7 @@ public final class ListenerHub {
     /** What an accepted carrier continues with, on its loop; false when the carrier was closed. */
     @FunctionalInterface
     private interface Next {
-        /** admitted: the carrier's admission value, or null. */
-        boolean start(Transport c, Object admitted);
+        boolean start(Transport c, Admitted admitted);
     }
 
     /** The outcome of a carrier's admission: a verdict code and an accept's value. */
@@ -516,7 +587,7 @@ public final class ListenerHub {
 
     private Admission.Decider decider;
     private Forward socketFallback;
-    private int peek;
+    private int peek, maxPeek;
     private long peekTimeout, stallMin, stallMax;
     private final byte[] stallKey = new byte[32];
     /** The admissions waiting for their decision, cancelled when the listener stops taking carriers. */
@@ -528,7 +599,8 @@ public final class ListenerHub {
      * Configures the admission of every new carrier, before the first one; times in
      * nanoseconds. fallback (or null) is the target of socket and TLS carriers.
      */
-    public void admission(Admission.Decider d, int peek, long peekTimeout, long stallMin, long stallMax, Forward fallback) {
+    public void admission(Admission.Decider d, int peek, int maxPeek, long peekTimeout, long stallMin, long stallMax, Forward fallback) {
+        this.maxPeek = maxPeek;
         decider = d;
         socketFallback = fallback;
         this.peek = peek;
@@ -555,12 +627,28 @@ public final class ListenerHub {
         try { ch.close(); } catch (java.io.IOException ignored) { /* Gone. */ }
     }
 
+    /**
+     * Takes a slot of peer for an accepted socket; false when there is none. A source over its pending limit
+     * (the first check of a join) goes to the reject policy as pending_limit; a stall needs a slot of this
+     * same source, so while it has none the carrier is closed at once.
+     */
+    private boolean slotOrReject(EventLoop loop, SocketChannel ch, InetSocketAddress peer) {
+        boolean ok, open;
+        synchronized (this) { open = !closed; ok = open && admission.admit(peer); }
+        if (ok) return true;
+        if (!open || !loop.tryExecute(() -> rejectFirst(new SocketTransport(loop, ch), 0, null, "pending_limit", peer, establishStall()))) {
+            closeQuietly(ch);
+            counts.refused();
+        }
+        return false;
+    }
+
     /** Takes a TCP carrier from peer: its slot, the admission, the first record. */
     public void socket(EventLoop loop, SocketChannel ch, InetSocketAddress peer) {
-        if (!reserve(peer)) { closeQuietly(ch); return; }
+        if (!slotOrReject(loop, ch, peer)) return;
         var info = new Admission.CarrierInfo(peer, peer, "", "", null, io.zmux.RequestHead.NONE);
-        Next next = transformed(io.zmux.JoinHint.inBand(peer), info, (c, value) -> gate(c, peer, "", value, ignored -> {}, true) != null);
-        if (!loop.tryExecute(() -> admit(new SocketTransport(loop, ch), info, false, null, socketFallback, null, false, next))) {
+        Next next = transformed(io.zmux.JoinHint.inBand(peer), info, (c, value) -> gate(c, peer, "", value, info, ignored -> {}, true) != null);
+        if (!loop.tryExecute(() -> admit(new SocketTransport(loop, ch), info, false, Admitted.NONE, socketFallback, null, false, next))) {
             release(peer);
             closeQuietly(ch);
             counts.refused();
@@ -568,14 +656,14 @@ public final class ListenerHub {
     }
 
     /** Takes a TLS carrier from peer: its slot, the handshake within handshakeTimeout, the admission, the first record. */
-    public void tls(EventLoop loop, SocketChannel ch, SSLEngine engine, long handshakeTimeout, InetSocketAddress peer) {
-        if (!reserve(peer)) { closeQuietly(ch); return; }
-        TlsTransport.handshake(loop, ch, engine, handshakeTimeout, (c, err) -> {
+    public void tls(EventLoop loop, SocketChannel ch, SSLEngine engine, long handshakeTimeout, boolean secure, InetSocketAddress peer) {
+        if (!slotOrReject(loop, ch, peer)) return;
+        TlsTransport.handshake(loop, ch, engine, handshakeTimeout, secure, (c, err) -> {
             if (err != null) { handshakeFailed(peer); return; }
             String alpn = c.info().applicationProtocol();
-            var info = new Admission.CarrierInfo(peer, peer, alpn, c.serverName(), c::export, io.zmux.RequestHead.NONE);
-            admit(c, info, false, null, socketFallback, null, false,
-                    transformed(io.zmux.JoinHint.inBand(peer), info, (x, value) -> gate(x, peer, alpn, value, ignored -> {}, true) != null));
+            var info = new Admission.CarrierInfo(peer, peer, alpn, c.serverName(), c::export, io.zmux.RequestHead.NONE, true);
+            admit(c, info, false, Admitted.NONE, socketFallback, null, false,
+                    transformed(io.zmux.JoinHint.inBand(peer), info, (x, value) -> gate(x, peer, alpn, value, info, ignored -> {}, true) != null));
         });
     }
 
@@ -589,11 +677,11 @@ public final class ListenerHub {
      * deferred next moves the carrier, so it runs only once the skipped bytes are consumed.
      * A carrier decided on its request head is decided at once, without a prefix.
      */
-    private void admit(Transport c, Admission.CarrierInfo info, boolean admitted, Object admittedValue, Forward fallback,
+    private void admit(Transport c, Admission.CarrierInfo info, boolean admitted, Admitted admittedValue, Forward fallback,
                        CompletableFuture<Decided> verdict, boolean deferred, Next next) {
         if (decider == null || admitted) {
-            Object value = decider == null ? null : admittedValue;
-            report(verdict, 0, value);
+            Admitted value = decider == null ? Admitted.NONE : admittedValue;
+            report(verdict, 0, value.value());
             next.start(c, value);
             return;
         }
@@ -610,7 +698,10 @@ public final class ListenerHub {
         c.loop().onShutdown(a.shutdown);
         c.loop().schedule(a, a.due);
         if (peek == 0 || info.head() || (c.directions() & Action.DIR_IN) == 0) a.decide();
-        else c.start(a);
+        else {
+            if (a.messages) c.limitFirstMessage(Math.max(peek, maxPeek));
+            c.start(a);
+        }
     }
 
     /** Holds a carrier's input until a deferred next has run; closes it when the input ends first. */
@@ -632,12 +723,19 @@ public final class ListenerHub {
         final Forward fallback;
         final CompletableFuture<Decided> verdict;
         final Next next;
-        /** The accept's value. */
-        private Object value;
+        /** The accept's value and label. */
+        private Admitted value = Admitted.NONE;
         final long due;
         /** A copy of every byte seen so far, still unconsumed in the read buffer until the input ends. */
         private byte[] seen = new byte[0];
-        private int prefixLength;
+        /** The prefix shown to the decider: its offset in seen (past a message's length header), and its length. */
+        private int prefixAt, prefixLength;
+        /** The prefix length asked for; on a byte stream the peek, then each {@link Admission.Verdict#MORE}'s need. */
+        private int want = peek;
+        final boolean messages;
+        /** The first message is longer than the limit: its decision is closing. */
+        private boolean oversized;
+        private boolean timedOut;
         private boolean decidingNow, done, paused, ended, graceful = true;
         private CompletableFuture<Admission.Decision> pending;
         final Runnable shutdown;
@@ -653,6 +751,25 @@ public final class ListenerHub {
             this.next = next;
             this.due = due;
             shutdown = () -> abandon(counts.closed);
+            messages = c.info().carrier().framing() == io.zmux.internal.core.Framing.RECORDS;
+        }
+
+        /** Whether what was seen is enough to decide: a whole first message, or the prefix asked for. */
+        private boolean enough() {
+            if (!messages) {
+                prefixAt = 0;
+                return seen.length >= want;
+            }
+            if (seen.length == 0) return false;
+            int sn = VarInt.lengthOf(seen[0]);
+            if (seen.length < sn) return false;
+            long len = VarInt.get(ByteBuffer.wrap(seen), 0, seen.length);
+            prefixAt = sn;
+            if (len > Math.max(peek, maxPeek)) {
+                oversized = true;
+                return true;
+            }
+            return seen.length >= sn + len;
         }
 
         @Override
@@ -660,7 +777,7 @@ public final class ListenerHub {
             if (done) return 0;
             seen = new byte[lim - pos];
             data.get(pos, seen);
-            if (!decidingNow && seen.length >= peek) {
+            if (!decidingNow && enough()) {
                 c.pauseInput();
                 paused = true;
                 decide();
@@ -671,8 +788,12 @@ public final class ListenerHub {
         @Override
         void fire(long now) {
             if (done) return;
-            if (!decidingNow) decide(); // what was read is the prefix; the deadline passed
-            else abandon(counts.peekTimedOut);
+            if (!decidingNow) { // the deadline passed
+                // A prefix the decider said is too short gets no second decision.
+                if (want > peek) { abandon(counts.peekTimedOut); return; }
+                timedOut = true; // what was read is the prefix
+                decide();
+            } else abandon(counts.peekTimedOut);
         }
 
         @Override
@@ -686,8 +807,12 @@ public final class ListenerHub {
         /** Asks the decider, outside every lock; its stage completes on any thread. */
         void decide() {
             decidingNow = true;
-            prefixLength = Math.min(peek, seen.length);
-            ByteBuffer prefix = ByteBuffer.wrap(seen, 0, prefixLength).slice().asReadOnlyBuffer();
+            if (oversized) {
+                decided(Admission.Decision.CLOSE);
+                return;
+            }
+            prefixLength = messages ? messagePrefix() : Math.min(want, seen.length);
+            ByteBuffer prefix = ByteBuffer.wrap(seen, prefixAt, prefixLength).slice().asReadOnlyBuffer();
             var deadline = new Admission.Deadline(System.nanoTime() + Math.max(0, due - Clock.now()));
             CompletableFuture<Admission.Decision> f;
             try {
@@ -705,6 +830,34 @@ public final class ListenerHub {
             f.whenComplete((d, e) -> {
                 if (!carrier.loop().tryExecute(() -> decided(e == null ? d : null))) carrier.close(null);
             });
+        }
+
+        /** The first message's length as far as it was read; a part of one is shown too, when the carrier ended or the time passed. */
+        private int messagePrefix() {
+            if (seen.length == 0 || seen.length < VarInt.lengthOf(seen[0])) {
+                prefixAt = 0;
+                return 0;
+            }
+            prefixAt = VarInt.lengthOf(seen[0]);
+            return (int) Math.min(seen.length - prefixAt, VarInt.get(ByteBuffer.wrap(seen), 0, seen.length));
+        }
+
+        /** Asks the decider again for a longer prefix; false when the verdict stands as closing. */
+        private boolean more(Admission.Decision d) {
+            if (messages || ended || timedOut || d.need() <= prefixLength || d.need() > maxPeek) return false;
+            deciding.remove(this);
+            pending = null;
+            decidingNow = false;
+            want = d.need();
+            if (enough()) {
+                decide();
+            } else if (paused) {
+                paused = false;
+                carrier.resumeInput();
+            } else {
+                carrier.redeliver();
+            }
+            return true;
         }
 
         /** Ends the admission undecided: cancelled, timed out, or the listener stopped. */
@@ -734,31 +887,36 @@ public final class ListenerHub {
         /** Acts on the decision (null: none, a failure), on the carrier's loop. */
         void decided(Admission.Decision d) {
             if (done) return;
+            if (d != null && d.verdict() == Admission.Verdict.MORE && more(d)) return;
             finish();
-            if (d != null && d.verdict() == Admission.Verdict.ACCEPT) value = d.value();
+            String variant = d == null ? "" : d.variant();
+            if (d != null && d.verdict() == Admission.Verdict.ACCEPT) value = new Admitted(d.value(), variant);
             int v = d == null ? Admit.CLOSE : switch (d.verdict()) {
-                case ACCEPT -> d.skip() < 0 || d.skip() > prefixLength ? Admit.CLOSE : d.skip();
+                case ACCEPT -> skip(d.skip());
                 case FALLBACK -> fallback == null ? Admit.STALL : Admit.FALLBACK;
                 case STALL -> Admit.STALL;
-                case CLOSE -> Admit.CLOSE;
+                case CLOSE, MORE -> Admit.CLOSE;
             };
             if (v == Admit.CLOSE) {
                 counts.closed.incrementAndGet();
+                counts.variant(variant, Counts.CLOSED);
                 release(source);
                 carrier.close(null);
-                report(verdict, v, value);
+                report(verdict, v, null);
                 return;
             }
             if (v == Admit.STALL) {
                 // A fallback without a target stalls but counts as a fallback.
-                var counter = d.verdict() == Admission.Verdict.FALLBACK ? counts.fallback : counts.stalled;
+                boolean asFallback = d.verdict() == Admission.Verdict.FALLBACK;
+                var counter = asFallback ? counts.fallback : counts.stalled;
                 if (ended) {
                     // The peer already ended it: the stall is over at once.
                     counter.incrementAndGet();
+                    counts.variant(variant, asFallback ? Counts.FALLBACK : Counts.STALLED);
                     release(source);
                     carrier.shutdownOutput();
                     carrier.close(null);
-                    report(verdict, v, value);
+                    report(verdict, v, null);
                     return;
                 }
                 boolean room;
@@ -770,13 +928,15 @@ public final class ListenerHub {
                 }
                 if (!room) {
                     counts.stallOverflow.incrementAndGet();
+                    counts.variant(variant, Counts.STALLED);
                     release(source);
                     carrier.close(null);
                     report(verdict, Admit.CLOSE, null);
                     return;
                 }
                 counter.incrementAndGet();
-                report(verdict, v, value);
+                counts.variant(variant, asFallback ? Counts.FALLBACK : Counts.STALLED);
+                report(verdict, v, value.value());
                 carrier.loop().onShutdown(s.shutdown);
                 carrier.loop().schedule(s, Time.add(Clock.now(), stallDuration(source)));
                 carrier.start(s);
@@ -784,7 +944,8 @@ public final class ListenerHub {
                 return;
             }
             (v == Admit.FALLBACK ? counts.fallback : counts.accepted).incrementAndGet();
-            report(verdict, v, value);
+            counts.variant(variant, v == Admit.FALLBACK ? Counts.FALLBACK : Counts.ACCEPTED);
+            report(verdict, v, value.value());
             if (v == Admit.FALLBACK) {
                 release(source);
                 // The bytes read stay in the read buffer (or, once the input ended, in seen).
@@ -860,6 +1021,14 @@ public final class ListenerHub {
             c.inbound().ended(c, graceful, used < len);
         }
 
+        /** The raw bytes an accept skips, or {@link Admit#CLOSE}: a message goes whole or not at all. */
+        private int skip(int n) {
+            if (n < 0 || n > prefixLength) return Admit.CLOSE;
+            if (!messages) return n;
+            if (n == 0) return 0;
+            return n == prefixLength ? prefixAt + n : Admit.CLOSE;
+        }
+
         /** Drops the first n input bytes, then proceeds. */
         private final class Skip implements Inbound {
             private int n;
@@ -929,7 +1098,7 @@ public final class ListenerHub {
      * reserved: the carrier holds its source's slot already; otherwise it takes one now.
      * started observes a session the carrier starts.
      */
-    private Pending gate(Transport c, InetSocketAddress source, String alpn, Object admitted,
+    private Pending gate(Transport c, InetSocketAddress source, String alpn, Admitted admitted, Admission.CarrierInfo info,
                          java.util.function.Consumer<SessionRuntime> started, boolean reserved) {
         boolean ok;
         synchronized (this) {
@@ -937,11 +1106,17 @@ public final class ListenerHub {
             else if (!(ok = !closed)) admission.release(source);
         }
         if (!ok) {
-            c.close(null);
-            counts.refused();
+            if (closed) {
+                c.close(null);
+                counts.refused();
+            } else {
+                // The pending limit of the source, the first check of a join, goes to the reject policy; a
+                // stall needs a slot of this same source, so while it has none the carrier is closed at once.
+                rejectFirst(c, 0, null, "pending_limit", source, establishStall());
+            }
             return null;
         }
-        Pending p = new Pending(c, source, alpn, admitted, started);
+        Pending p = new Pending(c, source, alpn, admitted, info, started);
         c.loop().onShutdown(p.shutdown);
         c.loop().schedule(p, Time.add(Clock.now(), firstRecordTimeout));
         c.start(p);
@@ -953,12 +1128,14 @@ public final class ListenerHub {
         final Transport carrier;
         final InetSocketAddress source;
         final String alpn;
-        final Object admitted;
+        final Admitted admitted;
+        final Admission.CarrierInfo info;
         final java.util.function.Consumer<SessionRuntime> started;
         boolean done;
         final Runnable shutdown = () -> ended(null, false, false);
 
-        Pending(Transport carrier, InetSocketAddress source, String alpn, Object admitted, java.util.function.Consumer<SessionRuntime> started) {
+        Pending(Transport carrier, InetSocketAddress source, String alpn, Admitted admitted, Admission.CarrierInfo info, java.util.function.Consumer<SessionRuntime> started) {
+            this.info = info;
             this.carrier = carrier;
             this.source = source;
             this.alpn = alpn;
@@ -966,14 +1143,17 @@ public final class ListenerHub {
             this.started = started;
         }
 
-        /** Ends the pending phase: the slot and the timer go. */
-        private void decided() {
+        /** Ends the pending phase: the timer goes. */
+        private void classified() {
             done = true;
             carrier.loop().schedule(this, Time.NEVER);
             carrier.loop().removeShutdownHook(shutdown);
-            synchronized (ListenerHub.this) {
-                admission.release(source);
-            }
+        }
+
+        /** Ends the pending phase of a carrier that holds no join: the slot goes too. */
+        private void decided() {
+            classified();
+            release(source);
         }
 
         @Override
@@ -995,6 +1175,29 @@ public final class ListenerHub {
 
         @Override
         public int bytes(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim) {
+            int helloAt = helloOffset(c, data, pos, lim);
+            if (helloAt == HELLO_MORE) return 0;
+            if (helloAt >= 0) {
+                io.zmux.internal.join.Framing f = helloAt > pos ? io.zmux.internal.join.Framing.MESSAGE : io.zmux.internal.join.Framing.STREAM;
+                byte[] b = new byte[lim - helloAt];
+                data.get(helloAt, b);
+                io.zmux.internal.join.Hello h = null;
+                String bad = null;
+                try {
+                    h = io.zmux.internal.join.Hello.parseExact(b, 0, b.length, f);
+                } catch (io.zmux.carrier.SecureCarrierException e) {
+                    if (e.code() == io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE) return 0;
+                    bad = "malformed"; // whatever the class: the local reasons of a Join name no parse failure finer
+                }
+                classified(); // The join keeps the slot until it has its result.
+                if (bad != null) {
+                    release(source);
+                    rejectJoin(c, null, bad, source);
+                } else {
+                    join(c, h, lim - pos, admitted, source);
+                }
+                return Inbound.GONE;
+            }
             CarrierAdmission.Classified cl = CarrierAdmission.classify(data, pos, lim, MAX_FIRST_RECORD);
             switch (cl.kind()) {
                 case MORE -> {
@@ -1010,38 +1213,64 @@ public final class ListenerHub {
                     return Inbound.GONE;
                 }
             }
-            decided();
-            if (cl.kind() == CarrierAdmission.Kind.SESSION) return startSession(c, buf, data, pos, lim, alpn, admitted, started);
+            if (cl.kind() == CarrierAdmission.Kind.SESSION) {
+                decided();
+                return startSession(c, buf, data, pos, lim, alpn, admitted, info, started);
+            }
             int sn = VarInt.lengthOf(data.get(pos));
             byte[] body = new byte[cl.firstRecordLength() - sn];
             data.get(pos + sn, body);
-            if (cl.kind() == CarrierAdmission.Kind.LANE) {
-                var frame = CarrierAdmission.parseLane(body);
-                SessionRuntime target = frame == null ? null : laneSessions.get(HexFormat.of().formatHex(CarrierAdmission.laneKey(frame)));
-                if (target == null) { c.close(null); counts.rejected(); } else transferLane(c, body, target);
-            } else if (join(c, body, true, admitted)) return lim - pos; // answered: what follows is discarded
+            decided();
+            var frame = CarrierAdmission.parseLane(body);
+            SessionRuntime target = frame == null ? null : laneSessions.get(HexFormat.of().formatHex(CarrierAdmission.laneKey(frame)));
+            if (target == null) { c.close(null); counts.rejected(); } else transferLane(c, body, target);
             return Inbound.GONE;
         }
     }
 
-    private int startSession(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim, String alpn, Object admitted,
-                             java.util.function.Consumer<SessionRuntime> started) {
-        if (closed || draining || budget != null && budget.pressure()) {
+    private int startSession(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim, String alpn, Admitted admitted,
+                             Admission.CarrierInfo info, java.util.function.Consumer<SessionRuntime> started) {
+        if (closed) {
             c.close(null);
             counts.refused();
             return Inbound.GONE;
         }
+        // Refused by policy: the session starts, unregistered, and ends with CONNECTION_REFUSED
+        // after its own parameters.
+        String refusal = draining ? "draining" : budget != null && budget.pressure() ? "memory budget" : null;
+        Chosen chosen;
         CoreConfig cfg;
-        try { cfg = prepare(owner.config()); }
-        catch (IllegalStateException ended) { c.close(null); counts.refused(); return Inbound.GONE; }
-        if ((cfg.local().secretFlags & TransportParams.SECRET_EXPORTER) != 0)
-            cfg = cfg.toBuilder().exporter(c.export(JoinCrypto.EXPORTER_SESSION, null, c.info().exporterLength())).build();
-        SessionRuntime d = new SessionRuntime(c.loop(), new Session(cfg, Clock.now()), owner.hooks());
-        d.admitted(admitted);
+        try {
+            chosen = owner.choose(info, admitted.value());
+        } catch (RuntimeException failed) {
+            owner.log(System.Logger.Level.WARNING, "the listener's sessionConfigs failed; the carrier is closed", failed);
+            c.close(null);
+            counts.rejected();
+            return Inbound.GONE;
+        }
+        try {
+            cfg = refusal != null ? chosen.config().toBuilder().budget(budget).build() : prepare(chosen.config());
+        } catch (IllegalStateException ended) { c.close(null); counts.refused(); return Inbound.GONE; }
+        try {
+            cfg = Bootstrap.withExporter(cfg, c);
+        } catch (IllegalArgumentException noExporter) {
+            counts.rejected();
+            return Inbound.GONE;
+        }
+        SessionRuntime d = new SessionRuntime(c.loop(), new Session(cfg, Clock.now()), chosen.hooks());
+        // An Establish's peer is the session's host value, in place of the admission's.
+        d.admitted(c.carrierPeer() != null ? c.carrierPeer() : admitted.value());
+        d.bootstrapVariant(admitted.variant());
+        if (refusal != null) {
+            counts.refused();
+            int r = d.attachBootstrap(c).bytes(c, buf, data, pos, lim);
+            d.post(() -> d.core().refuse(refusal));
+            return r;
+        }
         try { register(d); }
-        catch (IllegalStateException ended) { c.close(null); d.failInternal(ended); counts.refused(); return Inbound.GONE; }
+        catch (IllegalStateException ended) { c.close(null); d.failInternalNow(ended); counts.refused(); return Inbound.GONE; }
         counts.session();
-        owner.started(d, alpn);
+        owner.started(d, alpn, chosen.credential());
         started.accept(d);
         return d.attachBootstrap(c).bytes(c, buf, data, pos, lim);
     }
@@ -1082,79 +1311,231 @@ public final class ListenerHub {
             }
             LaneGate gate = new LaneGate();
             driver.loop().onShutdown(gate.shutdown);
-            driver.loop().schedule(gate, Time.add(Clock.now(), driver.core().handshakeTimeout()));
+            driver.loop().schedule(gate, Time.add(Clock.now(), driver.core().joinDeadline()));
             carrier.start(gate);
         })) carrier.close(null);
     }
 
-    /** Hands a joining carrier on; true when the carrier stays here, answered as an unknown join. */
-    private boolean join(Transport c, byte[] body, boolean inband, Object admitted) {
-        if (closed) { c.close(null); counts.refused(); return false; }
-        io.zmux.internal.wire.Frame f = CarrierAdmission.parseJoin(body);
-        byte[] locator = f == null ? null : CarrierAdmission.joinLocator(f);
-        SessionRuntime d = f == null ? null : sessions.get(HexFormat.of().formatHex(locator));
-        if (d == null) {
-            counts.rejected();
-            if (f != null && answerUnknownJoins && startsWith(locator, instanceId)) return new Answering(c).begin();
-            c.close(null);
-            return false;
+    private static final int HELLO_MORE = -2;
+
+    /** Stalls a rejected carrier, silent, for duration (nanoseconds); false when its source has no room. */
+    private boolean stallRejected(Transport c, InetSocketAddress source, long duration) {
+        Stalled s = new Stalled(c, source);
+        boolean room;
+        synchronized (this) {
+            // The join's slot went with its result: a stall holds one of its own.
+            room = !closed && admission.admit(source);
+            if (room && !admission.stall(source)) {
+                admission.release(source);
+                room = false;
+            }
+            if (room) stalls.add(s);
         }
-        byte[] binding = null;
-        if (f.join.carrierBound) {
-            binding = c.export(JoinCrypto.EXPORTER_PIPE, null, 32);
-            if (binding == null) {
-                c.close(null);
-                counts.rejected();
-                return false;
+        if (!room) return false;
+        c.taken();
+        c.loop().onShutdown(s.shutdown);
+        c.loop().schedule(s, Time.add(Clock.now(), duration));
+        c.start(s);
+        c.resumeInput();
+        return true;
+    }
+
+    /**
+     * Where the Hello a carrier starts with begins: its first byte on a byte stream, past the Size
+     * ExternalTransport prepends before admission on a message carrier; -1 when it is no Hello,
+     * HELLO_MORE when the input does not tell yet or the message is not complete.
+     */
+    private static int helloOffset(Transport c, ByteBuffer data, int pos, int lim) {
+        if (lim <= pos) return HELLO_MORE;
+        if (c.info().carrier().framing() != io.zmux.internal.core.Framing.RECORDS) {
+            return (data.get(pos) & 0xff) == io.zmux.internal.join.Hello.PROFILE_JOIN ? pos : -1;
+        }
+        long size = VarInt.get(data, pos, lim);
+        if (size < 0) return HELLO_MORE;
+        int n = VarInt.lengthOf(data.get(pos));
+        if (lim - pos - n < 1) return HELLO_MORE;
+        if ((data.get(pos + n) & 0xff) != io.zmux.internal.join.Hello.PROFILE_JOIN) return -1;
+        return lim - pos - n < size ? HELLO_MORE : pos + n;
+    }
+
+    /**
+     * What the configuration does with a rejected Join, nothing written either way: a stall ends
+     * one join timeout of the listener's session configuration after now, whether or not the
+     * Locator named a session (and whatever that session's own join timeout).
+     */
+    private void rejectJoin(Transport c, io.zmux.RecordMode mode, String reason, InetSocketAddress source) {
+        rejectFirst(c, io.zmux.internal.join.Hello.PROFILE_JOIN, mode, reason, source, owner.config().joinDeadline());
+    }
+
+    /**
+     * What the configuration does with a rejected carrier, nothing written either way. Without
+     * {@link #onReject} an Establish refused before authentication stalls and a Join closes. A
+     * stall lasts stall nanoseconds; one whose source already holds its maximum of stalled
+     * carriers is closed at once as stall_overflow, whatever the reason.
+     */
+    private void rejectFirst(Transport c, int profile, io.zmux.RecordMode mode, String reason, InetSocketAddress source, long stall) {
+        counts.rejected();
+        var f = onReject;
+        io.zmux.RejectInfo.Action act = profile == io.zmux.internal.join.Hello.PROFILE_JOIN
+                ? io.zmux.RejectInfo.Action.CLOSE : io.zmux.RejectInfo.Action.STALL;
+        if (f != null) {
+            try {
+                act = f.apply(new io.zmux.RejectInfo(profile, mode, reason, source));
+            } catch (RuntimeException failed) {
+                act = io.zmux.RejectInfo.Action.CLOSE;
+                owner.log(System.Logger.Level.WARNING, "the listener's onReject failed; the carrier is closed", failed);
             }
         }
+        if (act != io.zmux.RejectInfo.Action.STALL) { c.close(null); return; }
+        if (!stallRejected(c, source, stall)) {
+            counts.stallOverflow.incrementAndGet();
+            c.close(null);
+        }
+    }
+
+    /** The longest stall of a refused Establish (nanoseconds): the configured or drawn maximum stall duration. */
+    private volatile long rejectStallMax = 30 * Time.SECOND;
+
+    /** Sets the bound of an Establish's stall: the admission's maximum stall, or one drawn when none is configured. */
+    public void rejectStallMax(long nanos) { rejectStallMax = nanos; }
+
+    /** A refused Establish stalls until the handshake timeout, never beyond the maximum stall duration. */
+    private long establishStall() {
+        return Math.min(owner.config().handshakeTimeout(), rejectStallMax);
+    }
+
+    private java.util.function.Function<io.zmux.RejectInfo, io.zmux.RejectInfo.Action> onReject;
+
+    private volatile int maxPendingPerSession = 4;
+
+    /** Sets the Unconfirmed join carriers one session keeps, before the first carrier. */
+    public void maxPendingPerSession(int n) { maxPendingPerSession = n; }
+
+    /** Configures the listener's answer to a rejected Hello, before the first carrier. */
+    public void onReject(java.util.function.Function<io.zmux.RejectInfo, io.zmux.RejectInfo.Action> f) { onReject = f; }
+
+    /** Hands a joining carrier to the session its Hello names. */
+    private void join(Transport c, io.zmux.internal.join.Hello h, int skip, Admitted admitted, InetSocketAddress source) {
+        JoinSlot slot = new JoinSlot(source);
+        long slotAt = Clock.now();
+        if (closed) { slot.settled(); c.close(null); counts.refused(); return; }
+        io.zmux.RecordMode mode = io.zmux.internal.join.Mode.record(h.mode());
+        SessionRuntime d = sessions.get(HexFormat.of().formatHex(h.locator()));
+        if (d == null) {
+            slot.settled();
+            rejectJoin(c, mode, "unknown_locator", source);
+            return;
+        }
+        // A carrier without the contract has no Binding: the session refuses the Hello as auth, whatever the joiner mixed.
+        byte[] binding = h.mode() == io.zmux.internal.join.Mode.BOUND && c.bindable() ? c.export(io.zmux.internal.join.Kdf.EXPORTER_JOIN, null, io.zmux.internal.join.Kdf.BINDING_LEN) : null;
         Transport moved = c.moveTo(d.loop());
-        if (moved == null) { counts.rejected(); return false; }
-        byte[] b = binding;
+        if (moved == null) { slot.settled(); counts.rejected(); return; }
+        // Closing the listener ends the handshake.
+        if (!slot.offered(d)) { slot.settled(); moved.close(null); counts.refused(); return; }
         boolean ok = d.loop().tryExecute(() -> {
             // Under pressure only a join that lets a suspended session resume.
             if (budget != null && budget.pressure() && d.core().state() != io.zmux.internal.core.SessionState.SUSPENDED) {
-                moved.close(null);
-                counts.refused();
+                slot.settled();
+                rejectJoin(moved, mode, "memory_pressure", source);
             } else {
-                d.acceptJoin(moved, body, b, inband, admitted, counts);
+                d.acceptHello(new SessionRuntime.OfferedHello(moved, h, skip, binding, admitted.value(), admitted.variant(), counts, slot,
+                        (t, reason) -> rejectJoin(t, mode, reason, source), slotAt, maxPendingPerSession));
             }
         });
-        if (!ok) { moved.close(null); counts.refused(); }
-        return false;
+        if (!ok) { slot.settled(); moved.close(null); counts.refused(); }
     }
 
-    // ---- the inbound transform (API.md 4.4) and the unknown-join answer (MULTIPATH.md 5.4) ----
+    /**
+     * What a join holds of the listener until it has its result: its source's slot and, while
+     * held, a place among the listener's {@link #MAX_HELD_JOINS}. Any thread; idempotent.
+     */
+    final class JoinSlot {
+        private final InetSocketAddress source;
+        private Runnable evict;
+        private boolean settled;
+
+        /** The session handling the join, whose handshake the listener's close ends. */
+        private SessionRuntime session;
+
+        JoinSlot(InetSocketAddress source) { this.source = source; }
+
+        /** The join goes to session; false when the listener closed. */
+        boolean offered(SessionRuntime session) {
+            synchronized (ListenerHub.this) {
+                if (closed || settled) return false;
+                this.session = session;
+                offeredSlots.add(this);
+                return true;
+            }
+        }
+
+        boolean listenerClosed() { return closed; }
+
+        void listenerClosing() {
+            if (!session.loop().tryExecute(() -> session.endOffered(this))) settled();
+        }
+
+        /** The join is held; evict ends it when newer ones take its place. Keeps its place when held again. */
+        void held(Runnable evict) {
+            Runnable oldest = null;
+            synchronized (ListenerHub.this) {
+                if (settled) return;
+                this.evict = evict;
+                if (heldSlots.add(this) && heldSlots.size() > MAX_HELD_JOINS) {
+                    var first = heldSlots.iterator();
+                    oldest = first.next().evict;
+                    first.remove();
+                }
+            }
+            if (oldest != null) oldest.run();
+        }
+
+        /** The join has its result: accepted, refused or closed. */
+        void settled() {
+            synchronized (ListenerHub.this) {
+                if (settled) return;
+                settled = true;
+                heldSlots.remove(this);
+                offeredSlots.remove(this);
+                admission.release(source);
+            }
+        }
+    }
+
+    /** The joins in a session's handshake; guarded by this. */
+    private final java.util.Set<JoinSlot> offeredSlots = new java.util.HashSet<>();
+
+    /** The held joins, oldest first; guarded by this. */
+    private final java.util.LinkedHashSet<JoinSlot> heldSlots = new java.util.LinkedHashSet<>();
+
+    // ---- the inbound transform ----
 
     private io.zmux.InboundTransform transform;
-    private boolean answerUnknownJoins;
     /** The transforms under way, cancelled when the listener stops taking carriers. */
     private final java.util.Set<Transformed> transforming = ConcurrentHashMap.newKeySet();
 
-    /** Configures the inbound transform (or null) and the unknown-join answer, before the first carrier. */
-    public void inbound(io.zmux.InboundTransform t, boolean answerUnknown) {
+    /** Configures the inbound transform (or null), before the first carrier. */
+    public void inbound(io.zmux.InboundTransform t) {
         transform = t;
-        answerUnknownJoins = answerUnknown;
     }
 
     private Next transformed(io.zmux.JoinHint hint, Admission.CarrierInfo info, Next next) {
-        return transform == null ? next : new Transformed(hint, info, next);
+        return transform == null ? next : new Transformed(hint, info, next, true);
     }
 
     /** Whether c waits in a transform's view: its input resumes when the transform reads. */
     private static boolean parked(Transport c) { return c.inbound() instanceof Forwarded; }
 
-    private static boolean startsWith(byte[] a, byte[] prefix) {
-        return a.length >= prefix.length && java.util.Arrays.equals(a, 0, prefix.length, prefix, 0, prefix.length);
-    }
-
     private static void closeIo(io.zmux.carrier.PipeIo io, Throwable cause) {
         if (io == null) return;
-        try { if (io.reader() != null) io.reader().close(); }
-        catch (RuntimeException ignored) { /* Closing anyway. */ }
-        finally {
-            try { if (io.writer() != null) io.writer().abort(cause); } catch (RuntimeException ignored) { /* Closing anyway. */ }
-        }
+        // The host's code: never on the loop.
+        Callbacks.EXECUTOR.execute(() -> {
+            try { if (io.reader() != null) io.reader().close(); }
+            catch (RuntimeException ignored) { /* Closing anyway. */ }
+            finally {
+                try { if (io.writer() != null) io.writer().abort(cause); } catch (RuntimeException ignored) { /* Closing anyway. */ }
+            }
+        });
     }
 
     /**
@@ -1169,22 +1550,24 @@ public final class ListenerHub {
         private Transport carrier;
         private Forwarded view;
         private io.zmux.carrier.PipeIo given;
-        private Object value;
+        private Admitted value;
         private CompletableFuture<io.zmux.carrier.PipeIo> pending;
         private boolean done;
         private final Runnable shutdown = () -> fail(new java.io.IOException("event loop closed"), null);
+        private final boolean holdsSlot;
 
-        Transformed(io.zmux.JoinHint hint, Admission.CarrierInfo info, Next next) {
-            this.hint = hint; this.info = info; this.next = next;
+        /** holdsSlot: the carrier has a source slot to give back; a pair gave its slots to the pairing. */
+        Transformed(io.zmux.JoinHint hint, Admission.CarrierInfo info, Next next, boolean holdsSlot) {
+            this.hint = hint; this.info = info; this.next = next; this.holdsSlot = holdsSlot;
         }
 
-        @Override public boolean start(Transport c, Object v) {
+        @Override public boolean start(Transport c, Admitted v) {
             begin(c, v, null, false, true);
             return true;
         }
 
         /** On the carrier's loop: replay (or null) is what the admission read once the input ended. */
-        void begin(Transport c, Object v, byte[] replay, boolean ended, boolean graceful) {
+        void begin(Transport c, Admitted v, byte[] replay, boolean ended, boolean graceful) {
             carrier = c;
             value = v;
             c.taken(); // the layer may read and write on it
@@ -1192,9 +1575,9 @@ public final class ListenerHub {
             boolean messages = ci.carrier().framing() == io.zmux.internal.core.Framing.RECORDS;
             view = new Forwarded(c, replay, ended, graceful, messages);
             var caps = new io.zmux.carrier.PipeIo.Capabilities(null, info.exporter(), Forwarded.AHEAD, info.applicationProtocol(),
-                    info.serverName(), ci.fateGroup(), ci.carrier().writeOverhead());
+                    info.serverName(), ci.fateGroup(), ci.carrier().writeOverhead(), info.terminatedTls(), c.secure(), null, c.carrierPeer(), null, c.handshakePadding());
             given = view.pipe(info.applicationProtocol()).withCapabilities(caps).withLabel(ci.carrier().label())
-                    .withCarrierConn(ci.connection()).withCarrier(ci.carrier().kind());
+                    .withCarrierConn(ci.connection()).withCarrier(ci.carrier().kind()).withVariant(v.variant());
             c.loop().onShutdown(shutdown);
             long due = Time.add(Clock.now(), owner.config().handshakeTimeout());
             c.loop().schedule(this, due);
@@ -1203,7 +1586,7 @@ public final class ListenerHub {
             var deadline = new Admission.Deadline(System.nanoTime() + Math.max(0, due - Clock.now()));
             CompletableFuture<io.zmux.carrier.PipeIo> f;
             try {
-                var stage = transform.transform(given, new io.zmux.InboundTransform.Context(hint, java.util.Optional.ofNullable(v), deadline));
+                var stage = transform.transform(given, new io.zmux.InboundTransform.Context(hint, java.util.Optional.ofNullable(v.value()), deadline));
                 f = stage == null ? CompletableFuture.completedFuture(null) : stage.toCompletableFuture();
             } catch (RuntimeException e) {
                 f = CompletableFuture.failedFuture(e);
@@ -1239,13 +1622,21 @@ public final class ListenerHub {
             if (!end()) { if (r != null && !same(r)) closeIo(r, cause); return; }
             if (pending != null) pending.cancel(false);
             if (r != null && !same(r)) closeIo(r, cause);
-            release(hint.source());
+            if (holdsSlot) release(hint.source());
             view.abort(cause);
             counts.setupFailed();
         }
 
         private void finish(io.zmux.carrier.PipeIo r, Throwable error) {
             if (done) { if (r != null && !same(r)) closeIo(r, new java.io.IOException("inbound transform ended")); return; }
+            if ((error instanceof java.util.concurrent.CompletionException w ? w.getCause() : error) instanceof io.zmux.RejectError x) {
+                // Not closed by the transform: the carrier goes to the reject policy, nothing written.
+                end();
+                view.release();
+                if (holdsSlot) release(hint.source());
+                rejectFirst(carrier, x.profile(), x.mode(), x.reason(), hint.source(), establishStall());
+                return;
+            }
             if (error != null || r == null) {
                 fail(error != null ? error : new NullPointerException("inbound transform returned null"), null);
                 return;
@@ -1266,57 +1657,7 @@ public final class ListenerHub {
             var ci = c.info();
             io.zmux.carrier.PipeIo io = r.withCarrier(ci.carrier().kind()).withLabel(ci.carrier().label())
                     .withFateGroup(ci.fateGroup());
-            next.start(new ExternalTransport(c.loop(), io), value);
+            next.start(Transport.of(c.loop(), io), value);
         }
     }
-
-    /** The answer to an unknown join: CONNECTION_CLOSE, ZMUX_RESUME_FAILED, frame type 0, no reason, as a record. */
-    private static final byte[] UNKNOWN_JOIN_ANSWER = {0x07, 0x1c, (byte) 0x8f, 0x05, (byte) 0xf7, 0x4e, 0x00, 0x00};
-
-    /**
-     * Writes the unknown-join answer on a carrier and ends it: the sending half gracefully,
-     * then what the joiner sends is discarded until it ends the carrier or the first-record
-     * timeout passes, so that the answer is not lost to a reset over unread data.
-     */
-    private final class Answering extends TimerHeap.Timer implements Inbound {
-        final Transport carrier;
-        final io.zmux.internal.core.Batch batch = new io.zmux.internal.core.Batch();
-        final Runnable shutdown = this::finish;
-        private boolean done;
-
-        Answering(Transport c) { carrier = c; }
-
-        /** True: the carrier stays bound here. */
-        boolean begin() {
-            if ((carrier.directions() & Action.DIR_OUT) == 0) { carrier.close(null); return false; }
-            carrier.taken(); // the listener writes on it
-            carrier.loop().onShutdown(shutdown);
-            carrier.loop().schedule(this, Time.add(Clock.now(), firstRecordTimeout));
-            carrier.start(this);
-            boolean messages = carrier.info().carrier().framing() == io.zmux.internal.core.Framing.RECORDS;
-            ByteBuffer answer = messages ? ByteBuffer.wrap(UNKNOWN_JOIN_ANSWER, 1, 7).slice() : ByteBuffer.wrap(UNKNOWN_JOIN_ANSWER);
-            batch.wrap(io.zmux.carrier.OutboundBatch.of(answer));
-            carrier.write(batch);
-            return !done;
-        }
-
-        @Override public int bytes(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim) { return done ? Inbound.GONE : lim - pos; }
-        @Override public void ended(Transport c, boolean graceful, boolean partial) { finish(); }
-        @Override public void written(Transport c, io.zmux.internal.core.Batch b, Throwable cause) {
-            b.discard();
-            if (cause != null) { finish(); return; }
-            carrier.shutdownOutput();
-            if ((carrier.directions() & Action.DIR_IN) == 0) finish();
-        }
-        @Override void fire(long now) { finish(); }
-
-        private void finish() {
-            if (done) return;
-            done = true;
-            carrier.loop().schedule(this, Time.NEVER);
-            carrier.loop().removeShutdownHook(shutdown);
-            carrier.close(null);
-        }
-    }
-
 }

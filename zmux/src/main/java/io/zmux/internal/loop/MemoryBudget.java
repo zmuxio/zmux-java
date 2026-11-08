@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A memory budget shared by the sessions of a listener (API.md Section 4.4): the sum
+ * A memory budget shared by the sessions of a listener: the sum
  * over them of buffered receive data, retained data and session window growth.
  * Sessions charge it with atomics only; pressure starts at the limit and ends below
  * three quarters of it, and each transition runs {@link #onChange} (which must only

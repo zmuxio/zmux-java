@@ -7,8 +7,7 @@ import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 
 /**
- * The receiving parts of a session's streams (SPEC.md Sections 4.2, 7.1 and 8.3,
- * EXTENSIONS.md Section 4): STREAM and reset frames, the receive buffer and its
+ * The receiving parts of a session's streams: STREAM and reset frames, the receive buffer and its
  * session accounting, the opener's preamble, application reads, STOP_SENDING and
  * stream credit. Effects on the session go through {@link Port}.
  */
@@ -150,7 +149,7 @@ public final class StreamRecv {
         return effect || st.tab.opened();
     }
 
-    /** EXTENSIONS.md Section 4.4 rule 2 once both the preamble size and a reset are known. */
+    /** The check of a reset against the preamble once both the preamble size and a reset are known. */
     private static void checkPreambleReset(Stream st, Features feat) throws WireException {
         StreamRecv.RecvPart r = st.rcv;
         if (st.local || !feat.preamble() || r.stopSent || r.stopped || !r.reset) return;

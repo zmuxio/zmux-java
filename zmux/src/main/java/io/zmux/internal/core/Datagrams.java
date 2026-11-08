@@ -12,7 +12,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 
 /**
- * Datagram queues of one session (EXTENSIONS.md Section 6): the send queue, the session and
+ * Datagram queues of one session: the send queue, the session and
  * per-stream receive queues, the receive byte budget and the receive-limiter tokens. Owned by
  * the session's loop; the session resolves flows to streams and supplies the peer's limits.
  */
@@ -30,8 +30,7 @@ public final class Datagrams {
     }
 
     /**
-     * How DATAGRAM frames may use the datagram channel of the pipe they go to (EXTENSIONS.md
-     * Section 6.8): room 0 when they go in records.
+     * How DATAGRAM frames may use the datagram channel of the pipe they go to: room 0 when they go in records.
      *
      * @param room the largest channel datagram the channel takes now
      * @param id the Pipe Stream ID, or {@link ChannelDatagram#NO_ID}
@@ -47,7 +46,7 @@ public final class Datagrams {
 
     /** The session's view of the pipe DATAGRAM frames go to and its channel. */
     interface Channels {
-        /** The pipe DATAGRAM frames go to now (MULTIPATH.md Section 11.1 rule S7), or null. */
+        /** The pipe DATAGRAM frames go to now, or null. */
         Pipe datagramPipe();
 
         /** How DATAGRAM frames for p may use its carrier's channel. */
@@ -59,7 +58,7 @@ public final class Datagrams {
         @Override public ChannelUse of(Pipe p) { return ChannelUse.NONE; }
     };
 
-    /** A received datagram for a peer stream not opened yet (EXTENSIONS.md Sections 6.4 and 6.8). */
+    /** A received datagram for a peer stream not opened yet. */
     private record Held(long id, byte[] e, long until, boolean channel) {
         /** What it counts against the receive byte limit: its bytes and a fixed overhead, which bounds how many are held. */
         long cost() { return (long) e.length + HELD_COST; }
@@ -144,7 +143,7 @@ public final class Datagrams {
         channels = c;
     }
 
-    /** The peer's parameters are known (SPEC.md Section 6.1). */
+    /** The peer's parameters are known. */
     void peer(long maxDatagramFrame, long maxRecord, boolean flowsNegotiated) {
         peerKnown = true;
         peerMax = maxDatagramFrame;
@@ -255,7 +254,7 @@ public final class Datagrams {
 
     /**
      * Moves the queued datagrams that fit channel ch into dst as channel datagrams, in queue
-     * order (EXTENSIONS.md Section 6.8); they count as sent. Returns how many.
+     * order; they count as sent. Returns how many.
      */
     int pollChannel(ChannelUse ch, java.util.List<byte[]> dst, java.util.List<ChannelSent> sent) {
         if (!peerKnown || send.isEmpty() || ch.room() == 0) return 0;
@@ -326,7 +325,7 @@ public final class Datagrams {
                 long id = flow - 1;
                 Stream st = lookup.flow(id);
                 if (st == null && lookup.unopened(id)) {
-                    // It overtook the stream's opening frame (EXTENSIONS.md 6.4, 6.8): held for at most one
+                    // It overtook the stream's opening frame: held for at most one
                     // smoothed RTT, counted as received once delivered.
                     hold(id, streamDatagram(ctx, b, pos + cn, end), lookup.holdUntil(), channel);
                     return;
@@ -479,7 +478,6 @@ public final class Datagrams {
 
     void dropReceived() {
         stats.datagramDroppedRecv();
-        outbox.event(Event.datagramDropped(stats.datagramsDroppedRecv()));
     }
 
     private void track(Stream stream, byte[] bytes) {

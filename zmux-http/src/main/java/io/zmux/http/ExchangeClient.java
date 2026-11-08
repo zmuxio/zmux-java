@@ -20,6 +20,7 @@ import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.ScheduledFuture;
 import io.zmux.CarrierKind;
 import io.zmux.Chunk;
+import io.zmux.HttpRedirectException;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
@@ -70,6 +71,8 @@ final class ExchangeClient {
     private final byte[] cid = new byte[Exchange.CID];
     private final Exchange.Key key;
     private final Target upTarget, downTarget;
+    /** The loop's: the scheme and authority a pure scheme upgrade led each target's requests to; null: none. */
+    private URI upUpgrade, downUpgrade;
 
     // Every field below is the loop's.
     private Throwable err;
@@ -372,9 +375,20 @@ final class ExchangeClient {
     }
 
     /** What an attempt brought back: none (no result), bad (a verified response that fails the carrier), or flags and data. */
-    private record Result(boolean ok, boolean bad, int flags, ByteBuf data) {
-        static final Result NONE = new Result(false, false, 0, null);
-        static final Result BAD = new Result(true, true, 0, null);
+    private record Result(boolean ok, boolean bad, int flags, ByteBuf data, Throwable error) {
+        static final Result NONE = new Result(false, false, 0, null, null);
+        static final Result BAD = new Result(true, true, 0, null, null);
+        Result(boolean ok, boolean bad, int flags, ByteBuf data) { this(ok, bad, flags, data, null); }
+        /** A refused redirect: the carrier fails. */
+        static Result refused(Throwable e) { return new Result(true, true, 0, null, e); }
+    }
+
+    /** A request's URL: its target's, over the scheme and authority a pure scheme upgrade led its earlier requests to. */
+    private URI requestUri(int kind, byte[] nonce) {
+        URI u = (kind == Exchange.KIND_DOWN ? downTarget : upTarget).build(nonce);
+        URI up = kind == Exchange.KIND_DOWN ? downUpgrade : upUpgrade;
+        if (up == null) return u;
+        return URI.create(up.getScheme() + "://" + up.getRawAuthority() + HttpCarrierClient.target(u));
     }
 
     /** One HTTP exchange of one request. */
@@ -384,7 +398,10 @@ final class ExchangeClient {
         final State st;
         final byte[] nonce = new byte[Exchange.NONCE];
         final ByteBuffer seqRaw;
-        final URI uri;
+        /** The URL of the request; redirects move it, on the loop. */
+        volatile URI uri;
+        int hops;
+        /** The encoded request body, kept until the result to repeat it at a redirect's URL. */
         ByteBuf body;
         /** The loop's: the result was taken (or the attempt cancelled). */
         boolean finished;
@@ -406,19 +423,51 @@ final class ExchangeClient {
                 b = Unpooled.wrappedBuffer(Base64.getEncoder().encode(bin.flip()));
             }
             body = b;
-            uri = (kind == Exchange.KIND_DOWN ? downTarget : upTarget).build(nonce);
+            uri = requestUri(kind, nonce);
         }
 
         void start() {
             timeout = loop.schedule(() -> finish(Result.NONE), cfg.requestTimeout().toNanos(), TimeUnit.NANOSECONDS);
-            http.conns.open(uri, true, false).whenComplete((ch, e) -> {
-                ByteBuf b = body;
-                body = null;
-                if (e != null) { b.release(); loop.execute(() -> finish(Result.NONE)); return; }
+            connect();
+        }
+
+        /** Sends the request at uri on a connection; on the loop. */
+        private void connect() {
+            ByteBuf b = body.retainedDuplicate();
+            URI at = uri;
+            http.conns.open(at, true, false).whenComplete((ch, e) -> {
+                if (e != null) { b.release(); finishOnLoop(Result.NONE); return; }
                 channel = ch;
                 if (cancelled) { b.release(); ch.close(); return; }
                 ChannelLoops.executor(ch).execute(() -> send(ch, b));
             });
+        }
+
+        /**
+         * A redirect of the request: one Redirects.check allows within the origin, a 307 or 308
+         * (a POST does not become a GET), is followed with the body unchanged, up to
+         * Redirects.DEFAULT_MAX hops; any other fails the carrier. A pure scheme upgrade is kept
+         * for the target's later requests. On the loop.
+         */
+        void redirected(int status, String location) {
+            if (finished) return;
+            Throwable refused = null;
+            URI to = null;
+            try {
+                if (status != 307 && status != 308) throw new HttpRedirectException(status, location == null ? "" : location, "would change POST to GET");
+                to = Redirects.check(uri, "POST", status, location);
+                if (hops >= Redirects.DEFAULT_MAX) throw new HttpRedirectException(status, to.toString(), "too many redirects");
+            } catch (HttpRedirectException e) {
+                refused = e;
+            }
+            if (refused != null) { finish(Result.refused(refused)); return; }
+            hops++;
+            if (Redirects.schemeUpgradeOf(uri, to)) {
+                if (kind == Exchange.KIND_DOWN) downUpgrade = to; else upUpgrade = to;
+            }
+            uri = to;
+            channel = null;
+            connect();
         }
 
         private void send(Channel ch, ByteBuf b) {
@@ -434,6 +483,7 @@ final class ExchangeClient {
 
         /** Ends the attempt without taking its result (the carrier ended or the downlink closed). */
         void cancel() {
+            if (!finished && body != null) { body.release(); body = null; }
             finished = true;
             cancelled = true;
             if (timeout != null) timeout.cancel(false);
@@ -441,10 +491,27 @@ final class ExchangeClient {
             if (ch != null) ch.close();
         }
 
+        /** Runs task on the loop unless the group is gone. */
+        void onLoop(Runnable task) {
+            if (loop.isShuttingDown()) return;
+            try { loop.execute(task); } catch (java.util.concurrent.RejectedExecutionException ended) { /* Nobody is left. */ }
+        }
+
+        /** Hands the result to the loop. A connection's end can outlive the group: nobody is left to take it, so it only frees its data. */
+        void finishOnLoop(Result r) {
+            if (loop.isShuttingDown()) { if (r.data != null) r.data.release(); return; }
+            try {
+                loop.execute(() -> finish(r));
+            } catch (java.util.concurrent.RejectedExecutionException ended) {
+                if (r.data != null) r.data.release();
+            }
+        }
+
         /** Takes the attempt's result on the loop. */
         void finish(Result r) {
             if (finished) { if (r.data != null) r.data.release(); return; }
             finished = true;
+            if (body != null) { body.release(); body = null; }
             if (timeout != null) timeout.cancel(false);
             if (r == Result.NONE) { Channel ch = channel; if (ch != null) ch.close(); }
             inflight.remove(this);
@@ -497,6 +564,15 @@ final class ExchangeClient {
                     if (r.status().code() / 100 == 1) return; // an interim response
                     length = HttpUtil.getContentLength(r, -1L);
                     keepAlive = HttpUtil.isKeepAlive(r);
+                    int code = r.status().code();
+                    if (Redirects.isRedirect(code)) {
+                        String location = r.headers().get(HttpHeaderNames.LOCATION);
+                        done = true;
+                        ch.pipeline().remove(this);
+                        ch.close();
+                        a.onLoop(() -> a.redirected(code, location));
+                        return;
+                    }
                     if (r.status().code() != 200 || length < 0) { result(Result.NONE, false); return; }
                     // Over the local limit: a configuration mismatch, never repeated.
                     if (length > limit()) { result(Result.BAD, false); return; }
@@ -524,7 +600,7 @@ final class ExchangeClient {
             ch.pipeline().remove(this);
             if (reusable && !a.cancelled) http.conns.release(a.uri, ch, true);
             else ch.close();
-            loop.execute(() -> a.finish(r));
+            a.finishOnLoop(r);
         }
 
         @Override public void channelInactive(ChannelHandlerContext ctx) {
@@ -545,6 +621,7 @@ final class ExchangeClient {
         if (a.kind == Exchange.KIND_UP) upFlight--;
         if (ended) { if (r.data != null) r.data.release(); return; }
         long now = System.nanoTime();
+        if (r.error != null) { fail(r.error); return; }
         if (!r.ok) { retry(st, now); return; }
         if (r.bad) { fail(new ExchangeException(PROTOCOL)); return; }
         if (r.flags == Exchange.FLAG_GONE) { gone = true; fail(new ExchangeException(GONE)); return; }
