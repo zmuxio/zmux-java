@@ -440,14 +440,15 @@ public final class RecvLane {
             discard();
             turn.leave();
         }
-        if (endWatcher != null) endWatcher.accept(closedOutcome());
+        // An end the reader already took is no failure for the watcher, however the stream is released after it.
+        if (endWatcher != null && !appDone) endWatcher.accept(closedOutcome());
     }
 
     /** Calls watcher (on the loop) with a failed end once it is pushed; null removes it. */
     void watchEnd(java.util.function.Consumer<CoreException> watcher) {
         endWatcher = watcher;
         if (watcher == null) return;
-        if (closed) watcher.accept(closedOutcome());
+        if (closed) { if (!appDone) watcher.accept(closedOutcome()); }
         else if (ended && tail.end instanceof CoreException failure) watcher.accept(failure);
     }
 

@@ -88,8 +88,9 @@ public final class LaneTable {
     private void endSending(Stream st, StreamLanes l) {
         if (l == null || l.send() == null) return;
         CoreException e = driver.core.sending().writeError(st);
+        // A part that finished cleanly ended well: its release is no failure for the lane's watcher.
         l.send().terminate(e != null ? e : CoreException.stream(StreamError.of(
-                StreamError.Kind.CLOSED_LOCALLY, -1)));
+                StreamError.Kind.CLOSED_LOCALLY, -1)), !l.send().appDone);
         l.send().drain();
     }
 

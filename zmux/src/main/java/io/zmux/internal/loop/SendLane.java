@@ -501,7 +501,10 @@ public final class SendLane {
     }
 
     /** Ends the lane with outcome: returns the lease, fails a waiting writer; later writes report it. */
-    void terminate(CoreException outcome) {
+    void terminate(CoreException outcome) { terminate(outcome, true); }
+
+    /** As {@link #terminate(CoreException)}; the end watcher hears of it only when notify, never for a finish the part's owner already saw complete. */
+    void terminate(CoreException outcome, boolean notify) {
         if (terminal != null) return;
         terminal = outcome;
         core.sending().unlease(st, lease.getAndSet(0));
@@ -509,7 +512,7 @@ public final class SendLane {
         Resumable w = (Resumable) WAITER.getAndSet(this, null);
         if (w != null) w.resume();
         wakeSent();
-        if (endWatcher != null) endWatcher.accept(outcome);
+        if (notify && endWatcher != null) endWatcher.accept(outcome);
     }
 
     /**

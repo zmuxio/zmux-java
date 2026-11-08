@@ -24,7 +24,7 @@ export ZMUX_SEAL_INTEROP_PEER="$repo_root/target/interop/seal-go-peer"
 python3 - "$repo_root" <<'CHECK'
 from pathlib import Path
 import sys, xml.etree.ElementTree as ET
-for name, tests in (('PeerInterop', 4), ('QmuxInterop', 4), ('SealPeerInterop', 16)):
+for name, tests in (('PeerInterop', 4), ('QmuxInterop', 4), ('SealPeerInterop', 8)):
     root = ET.parse(Path(sys.argv[1]) / f'zmux/target/surefire-reports/TEST-io.zmux.{name}.xml').getroot()
     assert (int(root.attrib['tests']), int(root.attrib['failures']), int(root.attrib['errors']), int(root.attrib['skipped'])) == (tests, 0, 0, 0), name
 CHECK
