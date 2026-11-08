@@ -21,6 +21,8 @@ final class Splice {
     private volatile boolean dataDone;
     /** Why the first direction to fail tore both streams down; the other direction's local-close faults follow from it. */
     private final AtomicReference<IOException> teardown = new AtomicReference<>();
+    /** The stream whose side was lost in the failure behind {@link #teardown}; guarded by teardown, null when the cause names no side. */
+    private ZmuxStream teardownLost;
     /** The caller's stage: cancelling it cancels the splice. */
     private final CompletableFuture<SpliceResult> result = new CompletableFuture<>() {
         @Override public boolean cancel(boolean mayInterruptIfRunning) {
@@ -106,6 +108,8 @@ final class Splice {
         private volatile Thread worker;
         /** The worker waits for the limiter: a source reset must wake it to read the end. */
         private volatile boolean limiting;
+        /** A source reset arrived: the limiter wait that begins after it must look again too, as it would not be interrupted. */
+        private final AtomicBoolean resetPoke = new AtomicBoolean();
         /** The worker writes taken bytes: a source reset waits for that write. */
         private volatile boolean forwarding;
         /** The worker settles the outcome: watchers no longer interrupt it. */
@@ -139,7 +143,7 @@ final class Splice {
             IOException error = Errors.io(e);
             // A reset is read in order, after the bytes before its Reliable Size; only a
             // worker waiting for the limiter must look again.
-            if (error instanceof StreamResetException) { if (limiting && !settling) interrupt(); return; }
+            if (error instanceof StreamResetException) { resetPoke.set(true); if (limiting && !settling) interrupt(); return; }
             fail(error, true);
         }
         /** The target's sending lane ended (on its loop). */
@@ -179,6 +183,7 @@ final class Splice {
                         CompletableFuture<Integer> ready = Objects.requireNonNull(limiter.ready(min, n)).toCompletableFuture();
                         limiting = true;
                         try {
+                            if (resetPoke.compareAndSet(true, false)) throw new InterruptedException(); // A reset beat the flag above.
                             int allowed = ready.get();
                             if (allowed < 1 || allowed > n) throw new CallbackFailed(new IOException("invalid limiter allowance"));
                             n = allowed;
@@ -277,9 +282,14 @@ final class Splice {
                 end = new SpliceResult.End.Stopped(stopped.code()); source.stop(stopped.code());
             } else {
                 // A lost session, or a carrier failure of one side: the side it came from.
-                boolean downstream = error == writeFault.get() || error != readFault.get() && atTarget;
+                boolean downstream;
+                synchronized (teardown) {
+                    // The other direction's failure tore this one down: its cause names the side that was lost.
+                    if (error == teardown.get() && teardownLost != null) downstream = teardownLost == target;
+                    else downstream = error == writeFault.get() || error != readFault.get() && atTarget;
+                    if (teardown.get() == null) { teardown.set(error); teardownLost = downstream ? target : source; }
+                }
                 end = downstream ? new SpliceResult.End.DownstreamLost() : new SpliceResult.End.UpstreamLost();
-                teardown.compareAndSet(null, error);
                 abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
             }
         }

@@ -145,7 +145,9 @@ public final class RecvLane {
         if (p.end != null) return reachEnd(p);
         int n = 0;
         while (p != null && p.end == null && dst.hasRemaining()) {
-            long lim = Math.min(p.data.remaining(), cut - p.off);
+            long room = cut - p.off; // One read of cut: a reset may lower it after peek took the piece.
+            if (room <= 0) { p = peek(); continue; }
+            long lim = Math.min(p.data.remaining(), room);
             int c = (int) Math.min(lim, dst.remaining());
             dst.put(dst.position(), p.data, p.data.position(), c);
             dst.position(dst.position() + c);
@@ -155,6 +157,7 @@ public final class RecvLane {
             if (p.data.hasRemaining() && p.off < cut) break;
             p = peek();
         }
+        if (n == 0 && p != null && p.end != null) return reachEnd(p); // The cut dropped the rest.
         consumed(n);
         return n;
     }
@@ -165,7 +168,9 @@ public final class RecvLane {
         Piece p = peek();
         if (p == null) return null;
         if (p.end != null) return reachEnd(p);
-        int c = (int) Math.min(Math.min(p.data.remaining(), cut - p.off), max);
+        long room = cut - p.off; // One read of cut: a reset may lower it after peek took the piece.
+        if (room <= 0) return takeChunk(max); // The next peek drops the piece.
+        int c = (int) Math.min(Math.min(p.data.remaining(), room), max);
         ByteBuffer d = p.data.slice(p.data.position(), c);
         ReadBuf buf = p.buf;
         p.data.position(p.data.position() + c);

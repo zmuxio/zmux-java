@@ -96,7 +96,8 @@ class SpliceTest {
                 var splice = Zmux.splice(relay.a, relay.b).toCompletableFuture();
                 try (var peer = relay.destination()) {
                     var sender = tasks.submit(() -> { try { relay.endpoint.write(new byte[32768]); } catch (IOException expected) {} return null; });
-                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                    // Reached within milliseconds; the bound only limits a failure, and a saturated runner may take seconds.
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
                     while (relay.b.sendCapacity() != 0 && System.nanoTime() < until) Thread.sleep(5);
                     assertEquals(0, relay.b.sendCapacity());
                     relay.endpoint.reset(73);
