@@ -10,11 +10,14 @@ import java.util.List;
  */
 public final class Outbox {
     private final ArrayDeque<Event> events = new ArrayDeque<>(2);
+    /** Locator changes, apart from the events: the driver routes them before the round writes anything that names them. */
+    private final ArrayDeque<Event> locators = new ArrayDeque<>(1);
     private final ArrayList<Waiter> wakes = new ArrayList<>(4);
     private final ArrayList<Action> actions = new ArrayList<>(2);
 
     void event(Event e) {
-        events.add(e);
+        if (e.kind() == Event.Kind.LOCATOR_ADDED || e.kind() == Event.Kind.LOCATOR_REMOVED) locators.add(e);
+        else events.add(e);
     }
 
     void action(Action a) {
@@ -35,6 +38,11 @@ public final class Outbox {
 
     public Event pollEvent() {
         return events.poll();
+    }
+
+    /** The next Locator change, or null. */
+    public Event pollLocator() {
+        return locators.poll();
     }
 
     public void takeActions(List<Action> dst) {

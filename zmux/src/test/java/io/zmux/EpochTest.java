@@ -101,6 +101,44 @@ class EpochTest {
         }
     }
 
+    /**
+     * The answerer's new Locator is routable before its answer leaves: the offerer switches on the
+     * answer, and its next join names that Locator while the answerer's loop has not yet run the
+     * round's events. The server's loop is held right after the round that wrote its answer until
+     * the listener has decided that join.
+     */
+    @Test void aLocatorIsRoutableBeforeItsAnswerLeaves() throws Exception {
+        // Own loops for each end; three on the server, taken in turn, so the second join's carrier
+        // is read on a loop other than the held session's.
+        try (EventLoops server = EventLoops.create(3); EventLoops client = EventLoops.create(1)) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config(server))); var c = Zmux.connect(l.localAddress(), config(client)); var s = l.accept(WAIT);
+                 var ex = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                ListenerEntryTest.await(() -> s.pipes().size() == 2);
+                var held = new java.util.concurrent.CountDownLatch(1);
+                var installed = new java.util.concurrent.CompletableFuture<Void>();
+                s.driver.loop().execute(() -> {
+                    s.driver.eventSink(e -> {
+                        if (e.kind() != io.zmux.internal.core.Event.Kind.EPOCH_COMMITTED) return;
+                        held.countDown();
+                        // Bounded only against a hang: the join is decided while the loop waits here.
+                        long end = System.nanoTime() + WAIT.toNanos();
+                        while (l.stats().rejected() == 0 && l.hub.offeredJoins() == 0 && System.nanoTime() < end) Thread.onSpinWait();
+                    });
+                    installed.complete(null);
+                });
+                installed.get(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                c.advanceEpoch(); // the client offers; it uses epoch 1 once the answer arrives
+                ListenerEntryTest.await(() -> epoch(c) == 1);
+                var joined = ex.submit(() -> c.addPipe(l.localAddress(), PipeOptions.defaults()));
+                joined.get(WAIT.toMillis() * 2, java.util.concurrent.TimeUnit.MILLISECONDS);
+                org.junit.jupiter.api.Assertions.assertTrue(held.await(0, java.util.concurrent.TimeUnit.MILLISECONDS));
+                assertEquals(0, l.stats().rejected());
+                ListenerEntryTest.await(() -> s.pipes().size() == 3);
+            }
+        }
+    }
+
     @Test void replacePipesNeedsRedialAndAdvanceNeedsMultipath() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);

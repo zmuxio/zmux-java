@@ -1299,6 +1299,11 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
      * freed a carrier) marks the session for the next round instead of looping here.
      */
     private void drive() {
+        // A Locator the peer can learn from what this round writes (an epoch's answer, or the
+        // acknowledgement that lets the peer switch) is routable first: its next join names it.
+        for (Event e; (e = core.outbox().pollLocator()) != null; ) {
+            if (locatorListener != null) locatorListener.accept(e.frame(), e.kind() == Event.Kind.LOCATOR_ADDED);
+        }
         writeOut();
         boolean picked = pickers.pick();
         core.outbox().takeActions(actions);
@@ -1447,10 +1452,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     public void locatorListener(java.util.function.BiConsumer<byte[], Boolean> l) { locatorListener = l; }
 
     private void deliver(Event e) {
-        if (e.kind() == Event.Kind.LOCATOR_ADDED || e.kind() == Event.Kind.LOCATOR_REMOVED) {
-            if (locatorListener != null) locatorListener.accept(e.frame(), e.kind() == Event.Kind.LOCATOR_ADDED);
-            return;
-        }
         trace(e);
         if (e.kind() == Event.Kind.CLOSED) return;
         if (e.kind() == Event.Kind.RESUME_UNATTENDED) {

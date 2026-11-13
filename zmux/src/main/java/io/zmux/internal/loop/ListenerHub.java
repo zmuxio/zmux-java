@@ -1543,6 +1543,9 @@ public final class ListenerHub {
     /** The joins in a session's handshake; guarded by this. */
     private final java.util.Set<JoinSlot> offeredSlots = new java.util.HashSet<>();
 
+    /** The joins routed to a session and still in its handshake. */
+    public synchronized int offeredJoins() { return offeredSlots.size(); }
+
     // ---- the inbound transform ----
 
     private io.zmux.InboundTransform transform;
