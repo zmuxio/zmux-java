@@ -44,6 +44,13 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     Preamble preamble();
 
     /**
+     * The priority in the PRIORITY TLV of the opener's preamble; empty when it sent none, for a
+     * stream opened locally, and without the preamble extension. Only the opening preamble's
+     * value: a later PRIORITY_UPDATE is not reflected.
+     */
+    java.util.Optional<Priority> preamblePriority();
+
+    /**
      * Whether the opening frame arrived as carrier early data (replayable); it stays true for the
      * stream's life. Always false: no Java carrier accepts TLS 1.3 early data or QUIC 0-RTT.
      */

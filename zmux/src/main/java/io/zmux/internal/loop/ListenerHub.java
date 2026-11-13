@@ -589,6 +589,7 @@ public final class ListenerHub {
     private Forward socketFallback;
     private int peek, maxPeek;
     private long peekTimeout, stallMin, stallMax;
+    private boolean fallbackOnPeekTimeout;
     private final byte[] stallKey = new byte[32];
     /** The admissions waiting for their decision, cancelled when the listener stops taking carriers. */
     private final java.util.Set<Admitting> deciding = ConcurrentHashMap.newKeySet();
@@ -599,7 +600,8 @@ public final class ListenerHub {
      * Configures the admission of every new carrier, before the first one; times in
      * nanoseconds. fallback (or null) is the target of socket and TLS carriers.
      */
-    public void admission(Admission.Decider d, int peek, int maxPeek, long peekTimeout, long stallMin, long stallMax, Forward fallback) {
+    public void admission(Admission.Decider d, int peek, int maxPeek, long peekTimeout, boolean fallbackOnPeekTimeout, long stallMin, long stallMax, Forward fallback) {
+        this.fallbackOnPeekTimeout = fallbackOnPeekTimeout;
         this.maxPeek = maxPeek;
         decider = d;
         socketFallback = fallback;
@@ -608,6 +610,24 @@ public final class ListenerHub {
         this.stallMin = stallMin;
         this.stallMax = stallMax;
         random.nextBytes(stallKey);
+    }
+
+    /**
+     * For a prefix that begins a Join Hello, whether its Locator names a current session. A prefix
+     * that is not a Join, or is malformed, gives (false, 0); one that ends before the head
+     * of the Hello (through R) gives (false, total length needed).
+     */
+    public io.zmux.ZmuxListener.JoinLookup knownJoin(ByteBuffer prefix) {
+        int n = prefix.remaining();
+        if (n == 0 || (prefix.get(prefix.position()) & 0xff) != io.zmux.internal.join.Hello.PROFILE_JOIN) return new io.zmux.ZmuxListener.JoinLookup(false, 0);
+        byte[] b = new byte[n];
+        prefix.get(prefix.position(), b);
+        try {
+            var h = io.zmux.internal.join.Hello.parseHead(b, 0, n, io.zmux.internal.join.Framing.STREAM);
+            return new io.zmux.ZmuxListener.JoinLookup(sessions.containsKey(HexFormat.of().formatHex(h.locator())), 0);
+        } catch (io.zmux.carrier.SecureCarrierException e) {
+            return new io.zmux.ZmuxListener.JoinLookup(false, e.code() == io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE ? e.need() : 0);
+        }
     }
 
     /** The duration of a stall of a carrier from source: a keyed function of the source's client alone. */
@@ -789,6 +809,12 @@ public final class ListenerHub {
         void fire(long now) {
             if (done) return;
             if (!decidingNow) { // the deadline passed
+                // A byte stream whose prefix is late goes to the fallback with the bytes read.
+                if (fallbackOnPeekTimeout && !messages && info.request() == io.zmux.RequestHead.NONE && !ended && seen.length < want) {
+                    counts.peekTimedOut.incrementAndGet();
+                    decided(Admission.Decision.FALLBACK);
+                    return;
+                }
                 // A prefix the decider said is too short gets no second decision.
                 if (want > peek) { abandon(counts.peekTimedOut); return; }
                 timedOut = true; // what was read is the prefix

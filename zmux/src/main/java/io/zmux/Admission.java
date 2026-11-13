@@ -26,13 +26,18 @@ import java.util.concurrent.CompletionStage;
  * @param peekTimeout runs from the end of the outer handshake and bounds the reading of the
  *     prefix and the decision together; zero: drawn once per admission from a secure random
  *     source between 5 s and 30 s
+ * @param fallbackOnPeekTimeout a byte-stream carrier whose prefix has not arrived when the peek timeout
+ *     ends, in the first read or in a {@link Verdict#MORE} round, takes {@link Verdict#FALLBACK} with every
+ *     byte read replayed instead of being closed (without a fallback target it is stalled), counted in both
+ *     {@code peekTimedOut} and {@code fallback}; a message-framed carrier and an HTTP request carrier are
+ *     closed as before, and so is a carrier whose decider has not returned in time
  * @param stallMin lower bound of a {@link Verdict#STALL}'s duration
  * @param stallMax upper bound of a {@link Verdict#STALL}'s duration; when both bounds are
  *     zero (a stall of no duration is {@link Verdict#CLOSE}), stallMax is drawn once between
  *     30 s and 120 s and stallMin between a quarter and three quarters of it
  * @param decider the decision function
  */
-public record Admission(int peek, int maxPeek, Duration peekTimeout, Duration stallMin, Duration stallMax, Decider decider) {
+public record Admission(int peek, int maxPeek, Duration peekTimeout, boolean fallbackOnPeekTimeout, Duration stallMin, Duration stallMax, Decider decider) {
     /** The longest prefix: it is read into the carrier's read buffer, which holds a first record of at most this size. */
     public static final int MAX_PEEK = 65535;
 
@@ -48,13 +53,15 @@ public record Admission(int peek, int maxPeek, Duration peekTimeout, Duration st
 
     /** An admission with drawn timeouts and stall bounds. */
     public static Admission of(int peek, Decider decider) {
-        return new Admission(peek, 0, Duration.ZERO, Duration.ZERO, Duration.ZERO, decider);
+        return new Admission(peek, 0, Duration.ZERO, false, Duration.ZERO, Duration.ZERO, decider);
     }
 
-    public Admission withPeekTimeout(Duration d) { return new Admission(peek, maxPeek, d, stallMin, stallMax, decider); }
-    public Admission withStall(Duration min, Duration max) { return new Admission(peek, maxPeek, peekTimeout, min, max, decider); }
+    public Admission withPeekTimeout(Duration d) { return new Admission(peek, maxPeek, d, fallbackOnPeekTimeout, stallMin, stallMax, decider); }
+    public Admission withStall(Duration min, Duration max) { return new Admission(peek, maxPeek, peekTimeout, fallbackOnPeekTimeout, min, max, decider); }
+    /** This admission with {@link #fallbackOnPeekTimeout} set to on. */
+    public Admission withFallbackOnPeekTimeout(boolean on) { return new Admission(peek, maxPeek, peekTimeout, on, stallMin, stallMax, decider); }
     /** This admission with the bound of {@link Decision#need()}. */
-    public Admission withMaxPeek(int n) { return new Admission(peek, n, peekTimeout, stallMin, stallMax, decider); }
+    public Admission withMaxPeek(int n) { return new Admission(peek, n, peekTimeout, fallbackOnPeekTimeout, stallMin, stallMax, decider); }
     /** The longest prefix a decider can see. */
     public int prefixLimit() { return Math.max(peek, maxPeek); }
 

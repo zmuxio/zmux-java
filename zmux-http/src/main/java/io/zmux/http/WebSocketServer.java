@@ -33,10 +33,13 @@ final class WebSocketServer {
     private final HttpEndpoint ep;
     /** The identifiers accepted, by preference; empty: the listener's. */
     private final List<String> protocols;
+    /** A request without a Sec-WebSocket-Protocol field is accepted ({@link HttpEndpoint.Builder#NO_SUBPROTOCOL} was listed). */
+    private final boolean none;
 
     WebSocketServer(HttpEndpoint ep, List<String> protocols) {
         this.ep = ep;
-        this.protocols = List.copyOf(protocols);
+        this.none = protocols.contains(HttpEndpoint.Builder.NO_SUBPROTOCOL);
+        this.protocols = protocols.stream().filter(p -> !p.equals(HttpEndpoint.Builder.NO_SUBPROTOCOL)).toList();
     }
 
     /** The subprotocol to select among offered: the first accepted identifier offered as it is or as its alias; null: none. */
@@ -63,7 +66,9 @@ final class WebSocketServer {
      */
     WebSocketFrames open(Router router, ChannelHandlerContext ctx, HttpRequest r) {
         ZmuxListener l = ep.listener;
-        String protocol = select(protocols.isEmpty() ? l.config().alpn() : protocols, offered(r));
+        List<String> offered = offered(r);
+        String protocol = offered.isEmpty() && none ? ""
+                : select(protocols.isEmpty() && !none ? l.config().alpn() : protocols, offered);
         if (protocol == null) return null;
         // A request for one of the listener's subprotocols that is no valid upgrade is a failed upgrade.
         if (!HttpClass.hasToken(r.headers().getAll(HttpHeaderNames.CONNECTION), "upgrade")
@@ -74,7 +79,7 @@ final class WebSocketServer {
         }
         Channel ch = ctx.channel();
         WebSocketServerHandshaker hs = new WebSocketServerHandshakerFactory("ws://" + r.headers().get(HttpHeaderNames.HOST, "") + r.uri(),
-                protocol, WebSocketDecoderConfig.newBuilder().maxFramePayloadLength(WebSocketFrames.READ_LIMIT).allowExtensions(false).build())
+                protocol.isEmpty() ? null : protocol, WebSocketDecoderConfig.newBuilder().maxFramePayloadLength(WebSocketFrames.READ_LIMIT).allowExtensions(false).build())
                 .newHandshaker(r);
         if (hs == null) { l.countSetupFailure(); return null; }
         var full = new DefaultFullHttpRequest(r.protocolVersion(), r.method(), r.uri(), Unpooled.EMPTY_BUFFER, r.headers(),
@@ -95,7 +100,8 @@ final class WebSocketServer {
             else self[0].afterWrites(ch::close);
         }, cause -> { ch.close(); return null; });
         self[0] = c;
-        JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers()), true), false, Requests.peer(ch))
+        // A WebSocket carrier is never half of a pair.
+        JoinHint hint = new JoinHint("", false, null, Requests.peer(ch), RequestHead.of(Requests.fields(r.headers()), true))
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
                 .withProtocol(protocol).withCarrier(CarrierKind.WEBSOCKET);

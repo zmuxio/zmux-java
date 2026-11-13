@@ -128,7 +128,7 @@ public final class ZmuxListener implements AutoCloseable {
         hub.rejectStallMax(stallMax);
         if (adm != null) {
             long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
-            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, stallMin, stallMax, forward(o.fallback()));
+            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, adm.fallbackOnPeekTimeout(), stallMin, stallMax, forward(o.fallback()));
         }
         hub.inbound(o.inboundTransform());
         hub.onReject(o.onReject());
@@ -153,6 +153,22 @@ public final class ZmuxListener implements AutoCloseable {
     public java.time.Duration stallDuration(InetSocketAddress source) {
         return java.time.Duration.ofNanos(hub.stallDuration(source));
     }
+
+    /**
+     * For use in an {@link Admission.Decider}: whether prefix begins a Join Hello whose Locator names a
+     * current session of this listener. A prefix that is not a Join or is malformed gives
+     * (false, 0). A prefix that ends before the Hello's head (through the nonce) gives
+     * (false, need): need is the total length to return as {@link Admission.Decision#more}, which
+     * {@link Admission#maxPeek()} must allow (at most 291 for the suites defined). The answer is
+     * advisory: the join still authenticates, and one whose session ended meanwhile is an unknown
+     * Locator for the reject policy.
+     */
+    public JoinLookup knownJoin(java.nio.ByteBuffer prefix) {
+        return hub.knownJoin(prefix);
+    }
+
+    /** The answer of {@link #knownJoin}: whether the Locator is known, and the total prefix length still needed (0: none). */
+    public record JoinLookup(boolean known, int need) {}
 
     static ZmuxListener external(ListenerConfig cfg) {
         return new ZmuxListener(null, cfg);

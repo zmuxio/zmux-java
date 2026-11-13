@@ -58,11 +58,13 @@ public final class HttpCarrierClient implements AutoCloseable {
     private final boolean ownGroup;
     final Connections conns;
     final Duration timeout;
+    private final String pairField;
     /** The exchange carriers not yet ended. */
     final java.util.Set<ExchangeClient> exchanges = java.util.concurrent.ConcurrentHashMap.newKeySet();
     volatile boolean closed;
 
     private HttpCarrierClient(Builder b) throws IOException {
+        pairField = JoinHint.pairField(b.pairField);
         ownGroup = b.group == null;
         group = ownGroup ? new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory()) : b.group;
         SslContextBuilder tls = b.tls;
@@ -118,7 +120,7 @@ public final class HttpCarrierClient implements AutoCloseable {
 
     /**
      * Opens a split bootstrap over two requests, a POST uplink and a GET downlink, paired by a
-     * random pairing token in {@link JoinHint#PAIR_HEADER}, each presenting
+     * random pairing token in {@link JoinHint#PAIR_HEADER} (or {@link Builder#pairField}), each presenting
      * credential as {@link #pipe} does. The carriers must be confidential end to end, or up to a
      * trusted TLS-terminating intermediary.
      */
@@ -130,7 +132,7 @@ public final class HttpCarrierClient implements AutoCloseable {
         byte[] token = new byte[16];
         RANDOM.nextBytes(token);
         Map<String, List<String>> h = new HashMap<>(headers);
-        h.put(JoinHint.PAIR_HEADER, List.of(Base64.getUrlEncoder().withoutPadding().encodeToString(token)));
+        h.put(pairField, List.of(Base64.getUrlEncoder().withoutPadding().encodeToString(token)));
         PipeIo up = StreamingRequest.open(this, url, h, PipeOptions.Direction.SEND_ONLY, credential, target);
         PipeIo down;
         try {
@@ -180,7 +182,8 @@ public final class HttpCarrierClient implements AutoCloseable {
      * own (HTTP/1.1, the form intermediaries forward) and returns it as a pipe with message
      * framing: each binary message is one record's Frames field. protocols are the subprotocols
      * offered, by preference (empty: {@link io.zmux.ZmuxConfig#DEFAULT_ALPN}), followed by their
-     * draft-01 aliases; the selected one is the pipe's application protocol. headers are added to
+     * draft-01 aliases; {@link HttpEndpoint.Builder#NO_SUBPROTOCOL} alone offers none (with other entries it is an
+     * {@link IllegalArgumentException}); the selected one is the pipe's application protocol. headers are added to
      * the upgrade request.
      * credential, when not null, is presented in its header form, bound to the TLS connection of
      * a wss URL. A refused upgrade fails with an {@link HttpStatusException}. A redirect of the
@@ -331,6 +334,7 @@ public final class HttpCarrierClient implements AutoCloseable {
         private SslContextBuilder tls;
         private Connections.Version version = Connections.Version.AUTO;
         private Duration timeout = Duration.ofSeconds(10);
+        private String pairField = "";
 
         private Builder() {}
 
@@ -342,6 +346,13 @@ public final class HttpCarrierClient implements AutoCloseable {
          * the client sets its ALPN protocols (h2, http/1.1).
          */
         public Builder tls(SslContextBuilder b) { tls = b; return this; }
+
+        /**
+         * The request field that pairs the two requests of a split bootstrap (empty: {@link JoinHint#PAIR_HEADER}),
+         * another name only where an intermediary strips unknown fields; the server's
+         * {@link HttpEndpoint.Builder#pairField} must be the same.
+         */
+        public Builder pairField(String field) { pairField = Objects.requireNonNull(field); return this; }
 
         /** HTTP/1.1 only. */
         public Builder http1() { version = Connections.Version.HTTP_1_1; return this; }

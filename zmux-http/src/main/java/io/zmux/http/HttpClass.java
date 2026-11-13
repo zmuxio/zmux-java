@@ -17,9 +17,9 @@ public enum HttpClass {
     WEBSOCKET,
     /** An extended CONNECT for webtransport-h3 (or webtransport, the name of earlier drafts). */
     WEBTRANSPORT,
-    /** A GET with Zmux-Pipe-Pair. */
+    /** A GET with the pairing field. */
     DOWNLINK,
-    /** A POST with Zmux-Pipe-Pair: a split carrier's uplink. */
+    /** A POST with the pairing field: a split carrier's uplink. */
     UPLINK,
     /** A POST with a Content-Length: one exchange of the exchange carrier. */
     EXCHANGE,
@@ -54,11 +54,16 @@ public enum HttpClass {
      * unified endpoint dispatches by it.
      */
     public static HttpClass classify(Head r) {
+        return classify(r, JoinHint.PAIR_HEADER);
+    }
+
+    /** {@link #classify(Head)} with a split half marked by pairField instead of {@link JoinHint#PAIR_HEADER} (see {@link JoinHint#pairField}). */
+    public static HttpClass classify(Head r, String pairField) {
         RequestHead h = r.headers();
         switch (r.method()) {
             case "GET" -> {
                 if (r.version() == 1 && hasToken(h.header("Upgrade"), "websocket")) return WEBSOCKET;
-                if (present(h, JoinHint.PAIR_HEADER)) return DOWNLINK;
+                if (present(h, pairField)) return DOWNLINK;
             }
             case "CONNECT" -> {
                 String p = r.protocol();
@@ -69,7 +74,7 @@ public enum HttpClass {
                 }
             }
             case "POST" -> {
-                if (present(h, JoinHint.PAIR_HEADER)) return UPLINK;
+                if (present(h, pairField)) return UPLINK;
                 if (r.contentLength() >= 0) return EXCHANGE;
                 return BIDIRECTIONAL;
             }

@@ -343,6 +343,12 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     }
 
     @Override
+    public java.util.Optional<Priority> preamblePriority() {
+        io.zmux.internal.wire.Preamble p = st.peerPreamble();
+        return p == null || !p.hasPriority() ? java.util.Optional.empty() : java.util.Optional.of(new Priority(p.urgency(), p.incremental()));
+    }
+
+    @Override
     public boolean isReplayable() {
         return false; // No Java carrier takes carrier early data.
     }

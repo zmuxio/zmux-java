@@ -86,6 +86,34 @@ class WebSocketTest {
         }
     }
 
+    @Test void noSubprotocolAcceptsAndOffersNone() throws Exception {
+        var seen = new LinkedBlockingQueue<HostHandler.Seen>();
+        String upgrade = "GET /z HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n";
+        try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(HttpEndpoint.Builder.NO_SUBPROTOCOL), false, () -> new HostHandler(seen));
+             var c = f.client(b -> b)) {
+            PipeIo p = c.webSocketPipe(ws(f.base), Map.of(), List.of(HttpEndpoint.Builder.NO_SUBPROTOCOL), null);
+            assertEquals("", p.capabilities().applicationProtocol());
+            try (var s = Zmux.open(p, Role.CLIENT, f.config)) { f.echo(s); }
+            // A request that offers subprotocols, none of them accepted, is the host's.
+            assertTrue(RawHttp.send(f.base, upgrade + "Sec-WebSocket-Protocol: qmux-02\r\n\r\n", null).endsWith("host"));
+            var e = assertThrows(HttpStatusException.class, () -> c.webSocketPipe(ws(f.base), Map.of(), List.of(), null));
+            assertEquals(200, e.status());
+            // The marker cannot be offered next to other protocols.
+            assertThrows(IllegalArgumentException.class,
+                    () -> c.webSocketPipe(ws(f.base), Map.of(), List.of(HttpEndpoint.Builder.NO_SUBPROTOCOL, "a-02"), null));
+        }
+        // Without the marker a request with no subprotocol is the host's.
+        try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(), false, () -> new HostHandler(seen))) {
+            assertTrue(RawHttp.send(f.base, upgrade + "\r\n", null).endsWith("host"));
+        }
+        // With it among others, both forms are accepted.
+        try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket("qmux-02", HttpEndpoint.Builder.NO_SUBPROTOCOL), false, null); var c = f.client(b -> b)) {
+            try (var s = Zmux.open(c.webSocketPipe(ws(f.base), Map.of(), List.of(), null), Role.CLIENT, f.config)) { f.echo(s); }
+            try (var s = Zmux.open(c.webSocketPipe(ws(f.base), Map.of(), List.of(HttpEndpoint.Builder.NO_SUBPROTOCOL), null), Role.CLIENT, f.config)) { f.echo(s); }
+        }
+    }
+
     @Test void admissionOnTheUpgradeHead() throws Exception {
         PrefixAuth auth = AdmissionHttpTest.AUTH;
         var verifier = auth.verifier();

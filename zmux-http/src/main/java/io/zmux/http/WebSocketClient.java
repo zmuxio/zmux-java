@@ -75,7 +75,9 @@ final class WebSocketClient {
         boolean secure = Connections.secure(url);
         URI ws = URI.create((secure ? "wss" : "ws") + url.toString().substring(scheme.length()));
         // The client offers its identifiers, then their aliases.
-        List<String> offer = ZmuxConfig.withAliases(protocols.isEmpty() ? List.of(ZmuxConfig.DEFAULT_ALPN) : protocols);
+        boolean none = protocols.contains(HttpEndpoint.Builder.NO_SUBPROTOCOL);
+        if (none && protocols.size() > 1) throw new IllegalArgumentException("NO_SUBPROTOCOL cannot be offered with other protocols");
+        List<String> offer = none ? List.of() : ZmuxConfig.withAliases(protocols.isEmpty() ? List.of(ZmuxConfig.DEFAULT_ALPN) : protocols);
         Channel ch = http.await(http.conns.open(url, false, true), "connect");
         try {
             HttpHeaders h = new DefaultHttpHeaders();
@@ -88,7 +90,7 @@ final class WebSocketClient {
                 h.add(f.name(), f.value());
             }
             WebSocketClientHandshaker hs = WebSocketClientHandshakerFactory.newHandshaker(ws, WebSocketVersion.V13,
-                    String.join(",", offer), false, h, WebSocketFrames.READ_LIMIT, true, false, 10_000, false, false);
+                    offer.isEmpty() ? null : String.join(",", offer), false, h, WebSocketFrames.READ_LIMIT, true, false, 10_000, false, false);
             BodyCarrier[] self = new BodyCarrier[1];
             // Both halves closed: the connection closes once the close frame went out.
             BodyCarrier c = new BodyCarrier(ch, Framing.MESSAGES, true, true, WebSocketFrames.OUT, () -> self[0].afterWrites(ch::close),

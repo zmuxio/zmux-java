@@ -85,6 +85,29 @@ public final class Hello {
      * Later bytes are left to the caller. On a message carrier the input is the whole unit.
      */
     public static Hello parse(byte[] b, int off, int len, Framing f) throws SecureCarrierException {
+        Hello head = parseHead(b, off, len, f);
+        int n = head.consumed;
+        Suite s = head.suite;
+        Mode mode = head.mode;
+        int phase = head.phase;
+        byte[] locator = head.locator, r = head.r, clear = head.clear;
+        if (f == Framing.MESSAGE) {
+            if (len - n > Sealer.MAX_MESSAGE) throw new SecureCarrierException(TOO_LARGE);
+            return new Hello(s, mode, phase, locator, r, Arrays.copyOfRange(b, off + n, off + len), clear, len);
+        }
+        if (len < n + LEN_PREFIX) throw SecureCarrierException.incomplete(n + LEN_PREFIX);
+        int cl = Frames.be16(b, off + n);
+        n += LEN_PREFIX;
+        if (len < n + cl) throw SecureCarrierException.incomplete(n + cl);
+        return new Hello(s, mode, phase, locator, r, Arrays.copyOfRange(b, off + n, off + n + cl), clear, n + cl);
+    }
+
+    /**
+     * Parses the clear head of a Hello, through R, at the start of the input; ciphertext is null
+     * and {@link #consumed()} is the head's length. With {@link SecureCarrierException.Code#INCOMPLETE}
+     * the exception names the smallest total length that can make progress.
+     */
+    public static Hello parseHead(byte[] b, int off, int len, Framing f) throws SecureCarrierException {
         if (len == 0) throw Frames.shortInput(f, 1);
         if ((b[off] & 0xff) != PROFILE_JOIN) throw new SecureCarrierException(UNKNOWN_PROFILE);
         if (len < 2) throw Frames.shortInput(f, 2);
@@ -111,15 +134,7 @@ public final class Hello {
         byte[] r = Arrays.copyOfRange(b, off + n, off + n + s.nonceLen());
         n += s.nonceLen();
         byte[] clear = Arrays.copyOfRange(b, off, off + n);
-        if (f == Framing.MESSAGE) {
-            if (len - n > Sealer.MAX_MESSAGE) throw new SecureCarrierException(TOO_LARGE);
-            return new Hello(s, mode, phase, locator, r, Arrays.copyOfRange(b, off + n, off + len), clear, len);
-        }
-        if (len < n + LEN_PREFIX) throw SecureCarrierException.incomplete(n + LEN_PREFIX);
-        int cl = Frames.be16(b, off + n);
-        n += LEN_PREFIX;
-        if (len < n + cl) throw SecureCarrierException.incomplete(n + cl);
-        return new Hello(s, mode, phase, locator, r, Arrays.copyOfRange(b, off + n, off + n + cl), clear, n + cl);
+        return new Hello(s, mode, phase, locator, r, null, clear, n);
     }
 
     /** {@link #parse} for an acceptor's buffer: a joiner sends nothing after a Hello until it has the Reply. */

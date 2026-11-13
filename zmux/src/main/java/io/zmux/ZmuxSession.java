@@ -361,17 +361,20 @@ public final class ZmuxSession implements AutoCloseable {
 
     /**
      * Opens a bidirectional stream marked PIPE_CARRIER and returns it as a pipe input of a
-     * nested session; nothing is sent until the nested session's first record.
+     * nested session; nothing is sent until the nested session's first record. info is the
+     * OPEN_INFO (null: none) and tlvs are application TLVs of the opening preamble, for example
+     * the destination a relay routes by; both need the preamble extension, and without it
+     * (a plain QMux peer) must be null and empty.
      */
-    public io.zmux.carrier.PipeIo openPipeStream(List<Preamble.Tlv> tlvs) throws IOException {
+    public io.zmux.carrier.PipeIo openPipeStream(byte[] info, List<Preamble.Tlv> tlvs) throws IOException {
         List<Preamble.Tlv> values = List.copyOf(tlvs);
         boolean preamble = (Boolean) run(op -> core.preambleInUse());
-        if (!preamble && !values.isEmpty()) throw new IllegalArgumentException("application TLVs require the preamble extension");
-        return pipeOf(open(true, preamble ? new Preamble(null, values, true) : Preamble.EMPTY, true, null));
+        if (!preamble && (info != null || !values.isEmpty())) throw new IllegalArgumentException("OPEN_INFO and application TLVs require the preamble extension");
+        return pipeOf(open(true, preamble ? new Preamble(info == null ? null : info.clone(), values, true) : Preamble.EMPTY, true, null));
     }
 
-    /** {@link #openPipeStream(List)} without application TLVs. */
-    public io.zmux.carrier.PipeIo openPipeStream() throws IOException { return openPipeStream(List.of()); }
+    /** {@link #openPipeStream(byte[], List)} without OPEN_INFO or application TLVs. */
+    public io.zmux.carrier.PipeIo openPipeStream() throws IOException { return openPipeStream(null, List.of()); }
 
     /** Opens a bidirectional stream without waiting; fails with {@link StreamLimitException} without credit. */
     public ZmuxStream tryOpenStream(Preamble preamble) throws IOException {

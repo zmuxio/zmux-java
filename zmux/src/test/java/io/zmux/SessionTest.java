@@ -61,6 +61,24 @@ class SessionTest {
     }
 
     @Test
+    void preamblePriorityReportsTheOpenersPriority() throws Exception {
+        try (Pair p = Pair.memory(cfg)) {
+            ZmuxStream plain = p.client().openStream();
+            assertTrue(plain.preamblePriority().isEmpty(), "a local stream has none");
+            plain.write("a".getBytes());
+            ZmuxStream ranked = p.client().openStream();
+            ranked.setPeerPriority(new Priority(1, true));
+            ranked.write("b".getBytes());
+            ranked.finish();
+            plain.finish();
+            ZmuxStream first = p.server().acceptStream();
+            ZmuxStream second = p.server().acceptStream();
+            assertTrue(first.preamblePriority().isEmpty(), "the opener sent none");
+            assertEquals(java.util.Optional.of(new Priority(1, true)), second.preamblePriority());
+        }
+    }
+
+    @Test
     void bulkAndManyStreams() throws Exception {
         try (Pair p = Pair.memory(cfg); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             int streams = 32, size = 1 << 20;

@@ -11,7 +11,9 @@ import org.junit.jupiter.api.Timeout;
 /**
  * Queue-proven rate samples: a carrier that takes every byte into a deep buffer never refuses
  * one, so only a range held back by the path (adjusted RTT at least 5 x min_rtt) tells its
- * rate; that also holds for bytes sent before the pipe became SUSPECT.
+ * rate; that also holds for bytes sent before the pipe became SUSPECT. How the maximum ages after
+ * a slowdown is checked on the estimator with explicit times ({@code RateEstimatorTest}): end to end
+ * it depends on queue-proven samples, which the real clock decides.
  */
 @Timeout(60)
 class RateSampleTest {
@@ -60,19 +62,6 @@ class RateSampleTest {
             Thread.sleep(4_000);
             long r = b.rate();
             assertTrue(r > 0 && r < 3 * SLOW, "R_p " + r + " B/s on a " + (long) SLOW + " B/s pipe");
-        }
-    }
-
-    @Test void aPipeThatSlowsDownAndBecomesSuspectDoesNotKeepItsOldRate() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var b = bulk(loops, 5e6)) {
-            Thread.sleep(1_000);
-            long fast = b.rate();
-            b.up().rate(SLOW);
-            // The max filter keeps the fast samples for its 10 s window; then only samples of the
-            // slow ranges are left, which arrive while the pipe is SUSPECT.
-            Thread.sleep(12_000);
-            long r = b.rate();
-            assertTrue(r > 0 && r < fast / 10, "R_p " + r + " B/s after slowing from " + fast + " to " + (long) SLOW + " B/s");
         }
     }
 }

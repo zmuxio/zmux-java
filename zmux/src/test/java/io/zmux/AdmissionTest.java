@@ -354,6 +354,106 @@ class AdmissionTest {
         }
     }
 
+    /** Sends part, waits past the 200 ms peek timeout, sends the rest and returns what the echo fallback wrote back. */
+    private static String lateBytes(ZmuxListener l, String part, String rest) throws Exception {
+        try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
+            ch.write(ByteBuffer.wrap(part.getBytes()));
+            Thread.sleep(500);
+            ch.write(ByteBuffer.wrap(rest.getBytes()));
+            ch.shutdownOutput();
+            return readAll(ch);
+        }
+    }
+
+    @Test void aLatePrefixTakesTheFallbackWithItsBytesWhenAskedTo() throws Exception {
+        var sources = new LinkedBlockingQueue<String>();
+        var decided = new AtomicInteger();
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            Admission.Decider closing = Admission.Decider.immediate((info, prefix) -> {
+                decided.incrementAndGet();
+                return Admission.Decision.CLOSE;
+            });
+            var on = Admission.of(4, closing).withPeekTimeout(Duration.ofMillis(200)).withFallbackOnPeekTimeout(true);
+            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
+                assertEquals("abcdefgh", lateBytes(l, "ab", "cdefgh"));
+                assertEquals(0, decided.get(), "the decider never saw the late prefix");
+                var st = l.stats().admission();
+                assertEquals(1, st.peekTimedOut());
+                assertEquals(1, st.fallback());
+                assertEquals(0, st.closed());
+            }
+            // A prefix complete in time is decided as usual.
+            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
+                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
+                    ch.write(ByteBuffer.wrap("abcd".getBytes()));
+                    assertEquals("", readAll(ch));
+                }
+                assertEquals(1, decided.get());
+                assertEquals(1, l.stats().admission().closed());
+            }
+            // Off: the late prefix goes to the decider as it stood, which here closes.
+            var off = Admission.of(4, closing).withPeekTimeout(Duration.ofMillis(200));
+            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(off).build())) {
+                assertEquals("", lateBytes(l, "ab", "cdefgh"));
+                assertEquals(2, decided.get());
+                assertEquals(0, l.stats().admission().fallback());
+            }
+        }
+    }
+
+    @Test void aLateMoreRoundTakesTheFallbackToo() throws Exception {
+        var sources = new LinkedBlockingQueue<String>();
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var adm = new Admission(4, 8, Duration.ofMillis(200), true, Duration.ZERO, Duration.ZERO,
+                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? Admission.Decision.more(8) : Admission.Decision.CLOSE));
+            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(adm).build())) {
+                assertEquals("abcdefgh", lateBytes(l, "abcd", "efgh"));
+                assertEquals(1, l.stats().admission().peekTimedOut());
+                assertEquals(1, l.stats().admission().fallback());
+            }
+        }
+    }
+
+    @Test void knownJoinTellsAHelloLocatorFromItsHead() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ListenerEndpointTest.config(loops);
+            try (var a = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var b = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                 var client = a.connect(b.localAddress()); var server = b.accept(Duration.ofSeconds(3))) {
+                byte[] known = (byte[]) server.run(op -> server.core.locator().clone());
+                byte[] other = known.clone();
+                other[0] ^= 1;
+                byte[] head = helloHead(known, 1);
+                int total = head.length;
+                assertEquals(new ZmuxListener.JoinLookup(true, 0), b.knownJoin(ByteBuffer.wrap(head)));
+                assertEquals(new ZmuxListener.JoinLookup(true, 0), b.knownJoin(ByteBuffer.wrap(Arrays.copyOf(head, total + 5)).limit(total + 5)), "bytes after the head");
+                assertEquals(new ZmuxListener.JoinLookup(false, 0), a.knownJoin(ByteBuffer.wrap(head)), "another listener's session");
+                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(helloHead(other, 1))));
+                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(helloHead(known, 99))), "unknown suite");
+                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.allocate(0)));
+                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(new byte[] {(byte) 0x80, 1, 2})), "not a join");
+                // A short prefix names the length that can make progress, and that prefix then answers.
+                var cut = b.knownJoin(ByteBuffer.wrap(head, 0, 3));
+                assertFalse(cut.known());
+                assertTrue(cut.need() > 3 && cut.need() <= total);
+                var more = b.knownJoin(ByteBuffer.wrap(head, 0, total - 1));
+                assertEquals(new ZmuxListener.JoinLookup(false, total), more);
+            }
+        }
+    }
+
+    /** The clear head of a Join Hello: profile, suite, mode, locator and a nonce of 32 bytes. */
+    private static byte[] helloHead(byte[] locator, int suite) {
+        byte[] b = new byte[3 + 1 + locator.length + 32];
+        b[0] = 2;
+        b[1] = (byte) suite;
+        b[2] = 0;
+        b[3] = (byte) locator.length;
+        System.arraycopy(locator, 0, b, 4, locator.length);
+        return b;
+    }
+
     @Test void anAcceptAfterThePeekTimeoutSkipsTheBufferedPrefix() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();

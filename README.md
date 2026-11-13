@@ -117,7 +117,7 @@ releases it when it becomes unreachable. Run with
 with the stack that created it) to have such chunks reported, and released,
 when the garbage collector finds them.
 
-`session.openPipeStream(tlvs)` opens a bidirectional stream marked as
+`session.openPipeStream(info, tlvs)` (OPEN_INFO and application TLVs, both optional) opens a bidirectional stream marked as
 PIPE_CARRIER (when the preamble extension is in use) and returns it as a
 `PipeIo`; pass that to `Zmux.open` or a listener to run another session over
 the stream. `PipeIo.ofStream(stream)` converts a stream opened otherwise.
@@ -482,7 +482,7 @@ differ.
 An application that runs its own HTTP server gives each request carrier to
 `listener.handle(io, hint, fallback)`. The `JoinHint` carries the request:
 `JoinHint.of(RequestHead.of(headers, head), uplink, peer)` takes the
-`Zmux-Pipe-Pair` field from the headers, and `head` is
+`Zmux-Pipe-Pair` field from the headers (`JoinHint.of(head, pairField, uplink, peer)` another field), and `head` is
 true for a carrier decided on its request head: an HTTP upgrade (WebSocket,
 WebTransport) or a request without a body. Such a carrier is decided at once,
 without reading a prefix. `withSource(address)` gives the client address the

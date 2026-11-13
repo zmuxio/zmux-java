@@ -63,6 +63,29 @@ class NestedSessionTest {
             assertEquals(0, loops.outstandingBuffers());
         }
     }
+    @Test void openPipeStreamCarriesOpenInfoAndApplicationTlvs() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var config = ZmuxConfig.builder().eventLoops(loops).build();
+            try (var outer = Pair.memory(config)) {
+                var accepted = new CompletableFuture<ZmuxStream>();
+                var accepting = workers.submit(() -> {
+                    ZmuxStream stream = outer.server().acceptStream(Duration.ofSeconds(5));
+                    accepted.complete(stream);
+                    return Zmux.open(PipeIo.ofStream(stream), Role.SERVER, config);
+                });
+                var tlv = new Preamble.Tlv(0x1001, new byte[] {9, 8});
+                var carrier = outer.client().openPipeStream("dst:7".getBytes(), java.util.List.of(tlv));
+                try (var client = Zmux.open(carrier, Role.CLIENT, config); var server = accepting.get(5, TimeUnit.SECONDS)) {
+                    Preamble p = accepted.get().preamble();
+                    assertTrue(p.pipeCarrier());
+                    assertArrayEquals("dst:7".getBytes(), p.openInfo());
+                    assertEquals(1, p.tlvs().size());
+                    assertEquals(0x1001, p.tlvs().getFirst().type());
+                    assertArrayEquals(new byte[] {9, 8}, p.tlvs().getFirst().value());
+                }
+            }
+        }
+    }
     @Test void nestedLanesShareAnOuterCreditLeaseAndDoNotWait() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).incomingStreams(8).build();

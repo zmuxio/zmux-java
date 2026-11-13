@@ -20,6 +20,21 @@ class ClassifyTest {
     }
 
     /** The classification rules of HTTP requests, each case with the first rule that matches. */
+    @Test void aConfiguredPairFieldReplacesTheDefault() {
+        assertEquals(HttpClass.DOWNLINK, HttpClass.classify(head("GET", 1, "", -1, "X-Pair-Id", "t"), "X-Pair-Id"));
+        assertEquals(HttpClass.UPLINK, HttpClass.classify(head("POST", 1, "", -1, "x-pair-id", "t"), "X-Pair-Id"));
+        assertEquals(HttpClass.NONE, HttpClass.classify(head("GET", 1, "", -1, "Zmux-Pipe-Pair", "t"), "X-Pair-Id"));
+        assertEquals(HttpClass.EXCHANGE, HttpClass.classify(head("POST", 1, "", 3, "Zmux-Pipe-Pair", "t"), "X-Pair-Id"));
+        assertEquals("Zmux-Pipe-Pair", io.zmux.JoinHint.pairField(""));
+        assertEquals("X-Pair-Id", io.zmux.JoinHint.pairField("X-Pair-Id"));
+        for (String bad : new String[] {"a b", "a:b", "Host", "Content-Length", "Upgrade", "Sec-WebSocket-Key", "Proxy-Foo", "X-Forwarded-For", "zmux-prefix-auth"}) {
+            assertThrows(IllegalArgumentException.class, () -> io.zmux.JoinHint.pairField(bad), bad);
+        }
+        var hint = io.zmux.JoinHint.of(head("GET", 1, "", -1, "X-Pair-Id", "tok").headers(), "X-Pair-Id", false, null);
+        assertEquals("tok", hint.pairing());
+        assertEquals("", io.zmux.JoinHint.of(head("GET", 1, "", -1, "Zmux-Pipe-Pair", "tok").headers(), "X-Pair-Id", false, null).pairing());
+    }
+
     @Test void requestsAreClassifiedByTheFirstRuleThatMatches() {
         Object[][] cases = {
                 // 1. WebSocket opening handshakes.

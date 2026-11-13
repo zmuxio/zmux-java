@@ -60,6 +60,8 @@ public final class HttpEndpoint implements AutoCloseable {
     final ExchangeServer exchange;
     final WebSocketServer webSocket;
     final TrustedProxies trusted;
+    /** The request field that marks a split half, for classification and pairing. */
+    final String pairField;
 
     /**
      * The source address of the requests of a connection (or of one HTTP/2 stream), for a host
@@ -75,6 +77,11 @@ public final class HttpEndpoint implements AutoCloseable {
         listener = b.listener;
         streaming = b.streaming;
         trusted = b.trusted;
+        pairField = io.zmux.JoinHint.pairField(b.pairField);
+        if (b.exchange != null && !b.exchange.pairField().equalsIgnoreCase(pairField)) {
+            throw new IllegalArgumentException("the endpoint's pairing field (" + pairField + ") and the exchange carrier's ("
+                    + b.exchange.pairField() + ") disagree");
+        }
         exchange = b.exchange == null ? null : new ExchangeServer(this, b.exchange);
         webSocket = b.webSocket == null ? null : new WebSocketServer(this, b.webSocket);
     }
@@ -185,18 +192,32 @@ public final class HttpEndpoint implements AutoCloseable {
         private ExchangeConfig exchange;
         private List<String> webSocket;
         private TrustedProxies trusted;
+        private String pairField = "";
+
+        /** Among {@link #webSocket} or {@link HttpCarrierClient#webSocketPipe}'s protocols: a WebSocket without a subprotocol. */
+        public static final String NO_SUBPROTOCOL = "";
 
         private Builder(ZmuxListener listener) { this.listener = Objects.requireNonNull(listener); }
 
         /** Serves streaming carriers: downlinks, uplinks (split carriers) and bidirectional requests. */
         public Builder streaming() { streaming = true; return this; }
 
+        /**
+         * The request field that pairs the uplink POST and the downlink GET of a split bootstrap (empty:
+         * {@link io.zmux.JoinHint#PAIR_HEADER}), another name only where an intermediary strips unknown
+         * fields; the client uses the same ({@link HttpCarrierClient.Builder#pairField}). The exchange
+         * carrier's {@link ExchangeConfig#pairField()} must be the same: {@link #build} refuses a disagreement.
+         */
+        public Builder pairField(String field) { pairField = Objects.requireNonNull(field); return this; }
+
         /** Serves the exchange carrier with config. */
         public Builder exchange(ExchangeConfig config) { exchange = Objects.requireNonNull(config); return this; }
 
         /**
          * Serves WebSocket carriers (HTTP/1.1 upgrades) with these subprotocols, by preference (none:
-         * the listener's application protocols), each also as its draft-01 alias.
+         * the listener's application protocols), each also as its draft-01 alias. {@link #NO_SUBPROTOCOL}
+         * among them also accepts an upgrade request without a Sec-WebSocket-Protocol field (the carrier's
+         * protocol is then empty); a request that offers subprotocols, none of them accepted, is not accepted.
          */
         public Builder webSocket(String... protocols) { webSocket = List.of(protocols); return this; }
 

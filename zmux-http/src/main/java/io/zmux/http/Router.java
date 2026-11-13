@@ -85,7 +85,7 @@ final class Router extends ChannelInboundHandlerAdapter {
     }
 
     private void begin(HttpRequest r, boolean full) {
-        HttpClass cls = HttpClass.classify(Requests.head(ctx.channel(), r, full));
+        HttpClass cls = HttpClass.classify(Requests.head(ctx.channel(), r, full), ep.pairField);
         boolean served = switch (cls) {
             case DOWNLINK, UPLINK, BIDIRECTIONAL -> ep.streaming;
             case EXCHANGE -> ep.exchange != null;
@@ -194,7 +194,7 @@ final class Router extends ChannelInboundHandlerAdapter {
         if (up) c.keepForReplay(); // until a session takes the carrier or the admission decides
         c.holdEmptyEnd();
         boolean headOnly = !up;
-        JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers()), headOnly), cls == HttpClass.UPLINK, Requests.peer(ch))
+        JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers()), headOnly), ep.pairField, cls == HttpClass.UPLINK, Requests.peer(ch))
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
