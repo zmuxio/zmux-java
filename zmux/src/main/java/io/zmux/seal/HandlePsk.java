@@ -1,13 +1,35 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Kdf;
 
-/** A Handle and pre-shared key derived from one uniformly random secret. Not for passwords: a Handle lets anyone test guesses. */
+/**
+ * A Handle and pre-shared key derived from one uniformly random secret. Not for passwords: a Handle lets anyone test
+ * guesses. Both are copied in and out and compared by content; {@link #toString()} shows neither.
+ */
 public record HandlePsk(byte[] handle, byte[] psk) {
+    public HandlePsk {
+        handle = java.util.Objects.requireNonNull(handle, "handle").clone();
+        psk = java.util.Objects.requireNonNull(psk, "psk").clone();
+    }
+
+    @Override public byte[] handle() { return handle.clone(); }
+
+    @Override public byte[] psk() { return psk.clone(); }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof HandlePsk h && java.util.Arrays.equals(handle, h.handle) && java.security.MessageDigest.isEqual(psk, h.psk);
+    }
+
+    @Override
+    public int hashCode() { return java.util.Arrays.hashCode(handle); }
+
+    @Override
+    public String toString() { return "HandlePsk[handle of " + handle.length + " bytes, psk of " + psk.length + " bytes]"; }
+
     /** The shortest secret. */
     public static final int MIN_SECRET = 16;
 

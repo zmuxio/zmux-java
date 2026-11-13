@@ -171,6 +171,7 @@ public final class StreamRecv {
         }
         outbox.wake(st.rcv.rsig);
         creditChanged(st);
+        table.drainUpdate(st);
     }
 
     /** Processes RESET_STREAM (at false) or RESET_STREAM_AT; returns whether it had an effect. */
@@ -294,6 +295,7 @@ public final class StreamRecv {
         table.bufSub(n);
         creditChanged(st);
         tuner.consumed();
+        table.drainUpdate(st);
     }
 
     /** Consumes up to max contiguous bytes without copying; null when the caller must wait. */
@@ -388,6 +390,7 @@ public final class StreamRecv {
         r.readOff += n;
         table.bufSub(n);
         creditChanged(st);
+        table.drainUpdate(st);
     }
 
     /** The application saw the part's end (FIN or reset): the part is read. */
@@ -485,7 +488,7 @@ public final class StreamRecv {
         long v = r.readOff + r.window;
         if (r.finKnown || r.stopped || !(v > r.adv || st.rcv.forceMaxStreamData)) return true;
         long id = st.tab.id();
-        if (!w.frame(1 + io.zmux.carrier.VarInt.length(id) + io.zmux.carrier.VarInt.length(v), true,
+        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), true,
                 bb -> io.zmux.internal.wire.FrameEncoder.maxStreamData(bb, id, v))) return false;
         w.logFrame(FrameDesc.id(FrameDesc.Kind.MAX_STREAM_DATA, id));
         path.maxStreamDataSent(st, r.highest >= r.adv || r.blockSeen == r.adv && r.blockSeen > 0);
@@ -498,7 +501,7 @@ public final class StreamRecv {
     /** Writes STOP_SENDING for st; false when the batch is full. */
     boolean writeStop(RecordWriter w, Stream st) {
         long id = st.tab.id(), c = st.rcv.stopCode;
-        if (!w.frame(1 + io.zmux.carrier.VarInt.length(id) + io.zmux.carrier.VarInt.length(c), true,
+        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(c), true,
                 bb -> io.zmux.internal.wire.FrameEncoder.stopSending(bb, id, c))) return false;
         w.logFrame(FrameDesc.id(FrameDesc.Kind.STOP, id));
         st.rcv.stopSent = true;

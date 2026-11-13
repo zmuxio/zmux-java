@@ -13,24 +13,22 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(40)
 class ProbeTest {
     static ZmuxConfig config(EventLoops loops, java.util.function.UnaryOperator<ZmuxConfig.Builder> m) {
-        return m.apply(ZmuxConfig.builder().eventLoops(loops).maxPipes(4)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+        return m.apply(ZmuxConfig.builder().eventLoops(loops).maxPipes(4)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
     }
 
     static java.util.function.UnaryOperator<ZmuxConfig.Builder> multipath() { return b -> b; }
 
     @Test void probeSettingsAreValidated() {
-        var b = PipeOptions.builder();
+        var b = PipeLiveness.builder();
         assertThrows(IllegalArgumentException.class, () -> b.probeInterval(Duration.ofMillis(999)));
         b.probeInterval(Duration.ofSeconds(1));
         assertThrows(IllegalArgumentException.class, () -> b.probeJitter(-0.01));
         assertThrows(IllegalArgumentException.class, () -> b.probeJitter(1));
         assertThrows(IllegalArgumentException.class, () -> b.probeJitter(Double.NaN));
         b.probeJitter(0).probeJitter(0.99);
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().probeJitter(1));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().probeJitter(-1));
-        assertEquals(0.5, ZmuxConfig.builder().probeJitter(0.5).build().probeJitter());
-        assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withProbeInterval(Duration.ofMillis(500)));
-        assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withProbeJitter(1));
+        assertThrows(IllegalArgumentException.class, () -> Liveness.builder().probeJitter(1));
+        assertThrows(IllegalArgumentException.class, () -> Liveness.builder().probeJitter(-1));
+        assertEquals(0.5, Liveness.builder().probeJitter(0.5).build().probeJitter());
     }
 
     /** Waits until pipe's PIPE_PING count reaches n, at most ms. */
@@ -42,14 +40,14 @@ class ProbeTest {
     @Test void aPipeProbesAtItsOwnIntervalWithinItsJitter() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             // The session's default without jitter: the bootstrap pipe's first wait is the whole 15 s.
-            var cfg = config(loops, b -> b.probeJitter(0));
+            var cfg = config(loops, b -> b.liveness(Liveness.builder().probeJitter(0).build()));
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
-                var fast = client.addPipe(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
+                var fast = client.addPipe(listener.localAddress(), PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(1)).build()).build());
                 var jittered = client.addPipe(listener.localAddress(),
-                        PipeOptions.builder().probeInterval(Duration.ofSeconds(2)).probeJitter(0.9).build());
-                ZmuxPipe bootstrap = client.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
+                        PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(2)).probeJitter(0.9).build()).build());
+                ZmuxPipe bootstrap = client.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow();
                 long f0 = fast.stats().orElseThrow().pingsSent(), j0 = jittered.stats().orElseThrow().pingsSent(), b0 = bootstrap.stats().orElseThrow().pingsSent();
                 Thread.sleep(6500);
                 long f = fast.stats().orElseThrow().pingsSent() - f0, j = jittered.stats().orElseThrow().pingsSent() - j0;
@@ -65,8 +63,8 @@ class ProbeTest {
 
     @Test void probesNeitherResetSinceLastTrafficNorKeepTheSessionAlive() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofSeconds(4)).disableKeepAlive()
-                    .maxPipes(4).probeInterval(Duration.ofSeconds(1)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofSeconds(4)).liveness(Liveness.builder().noKeepAlive().probeInterval(Duration.ofSeconds(1)).build())
+                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
@@ -98,7 +96,7 @@ class ProbeTest {
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 var dials = new CopyOnWriteArrayList<Long>(); var options = new AtomicReference<PipeOptions>();
-                PoolPolicy policy = view -> PoolPolicy.Decision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(100)).withProbeInterval(Duration.ofSeconds(3)).withProbeJitter(0.25);
+                PoolPolicy policy = view -> PoolPolicy.Decision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(100)).withLiveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(3)).probeJitter(0.25).build());
                 PipePool pool = PipePool.of(attempt -> {
                     dials.add(System.nanoTime()); options.set(attempt.options());
                     if (dials.size() <= 2) throw new java.io.IOException("refused");
@@ -112,8 +110,8 @@ class ProbeTest {
                         long gap = TimeUnit.NANOSECONDS.toMillis(dials.get(i) - dials.get(i - 1));
                         assertTrue(gap >= 90 && gap < 2000, "dial spacing " + gap + " ms, not the 10 s backoff");
                     }
-                    assertEquals(Duration.ofSeconds(3), options.get().probeInterval);
-                    assertEquals(0.25, options.get().probeJitter);
+                    assertEquals(java.util.Optional.of(Duration.ofSeconds(3)), options.get().liveness.probeInterval());
+                    assertEquals(java.util.OptionalDouble.of(0.25), options.get().liveness.probeJitter());
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
@@ -133,13 +131,13 @@ class ProbeTest {
                 try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     Thread.sleep(300); // older than the backoff: the redial goes at once
-                    long old = run.pipes().getFirst().id();
+                    long old = run.pipes().getFirst().id().value();
                     long cut = System.nanoTime();
                     run.pipes().getFirst().abort();
                     while (dials.get() < 2 && System.nanoTime() - cut < TimeUnit.SECONDS.toNanos(5)) Thread.sleep(1);
                     long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cut);
                     assertTrue(dials.get() >= 2 && ms < 500, "redial " + ms + " ms after the failure, not at the 30 s inspection");
-                    PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id() != old);
+                    PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id().value() != old);
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
@@ -159,7 +157,7 @@ class ProbeTest {
             };
             var base = config(loops, multipath());
             var shaped = ZmuxConfig.builder().eventLoops(loops).shaper(factory)
-                    .maxPipes(4).probeInterval(Duration.ofSeconds(1)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+                    .maxPipes(4).liveness(Liveness.builder().probeInterval(Duration.ofSeconds(1)).build()).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(base));
                  var client = Zmux.connect(listener.localAddress(), shaped);
                  var server = listener.accept(Duration.ofSeconds(5))) {

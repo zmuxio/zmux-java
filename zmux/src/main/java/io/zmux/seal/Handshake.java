@@ -2,13 +2,12 @@ package io.zmux.seal;
 
 import io.zmux.internal.kex.MlKem768;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.carrier.SecureCarrierException.Code.PEER_IS_SELF;
-import static io.zmux.carrier.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Code.PEER_IS_SELF;
+import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Kdf;
 import io.zmux.internal.join.Mode;
 import io.zmux.internal.join.Opener;
@@ -101,7 +100,7 @@ final class Handshake {
     /** h after the last token of the latest message, before its payload: h_p, which a proof signs. */
     private byte[] hp;
     /** The bound on the application data of a received message. */
-    private long maxAppData = EstablishPayload.DEFAULT_MAX_APP_DATA;
+    private long maxAppData = ClientConfig.DEFAULT_MAX_APP_DATA;
     private SecureCarrierException failure;
     private boolean finished;
 
@@ -152,9 +151,9 @@ final class Handshake {
         return b.toByteArray();
     }
 
-    /** Bounds the application data of a received message; 0 is the default, 256 bytes, and negative no bound beyond the message. */
-    Handshake maxAppData(int n) {
-        maxAppData = n == 0 ? EstablishPayload.DEFAULT_MAX_APP_DATA : n < 0 ? Long.MAX_VALUE : n;
+    /** Bounds the application data of a received message, in bytes; {@link Long#MAX_VALUE}: no bound beyond the message. */
+    Handshake maxAppData(long limit) {
+        maxAppData = limit;
         return this;
     }
 

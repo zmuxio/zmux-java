@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import io.zmux.ZmuxListener;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.zmux.EarlyData;
@@ -32,12 +33,17 @@ public final class QuicInteropPeer {
     private QuicInteropPeer() {}
 
     public static void run(String[] args, Consumer<ZmuxSession> script) throws Exception {
+        // A last argument "exporter": the join secret from the exporter alone, and KEYS <hex> for each session.
+        boolean exporter = args[args.length - 1].equals("exporter");
         try (var loops = EventLoops.create(2)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).earlyData(EarlyData.ZMUX_PEER)
-                    .maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).build();
+            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4);
+            if (exporter) builder.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
+            else builder.pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
+            var config = builder.build();
+            Consumer<ZmuxSession> serve = exporter ? session -> { printKeysWhenReady(session); script.accept(session); } : script;
             switch (args[0]) {
-                case "quic-server" -> server(args.length > 1 ? Integer.parseInt(args[1]) : 1, config, script);
-                case "quic-client" -> client(args[1], config, script);
+                case "quic-server" -> server(args.length > 1 && !args[1].equals("exporter") ? Integer.parseInt(args[1]) : 1, config, serve);
+                case "quic-client" -> client(args[1], config, serve);
                 default -> throw new IllegalArgumentException("unknown mode");
             }
         }
@@ -45,7 +51,7 @@ public final class QuicInteropPeer {
 
     private static void server(int sessions, ZmuxConfig config, Consumer<ZmuxSession> script) throws Exception {
         TestTls.init();
-        try (var listener = Zmux.listener(ListenerConfig.of(config));
+        try (var listener = ZmuxListener.of(ListenerConfig.of(config));
              var server = new QuicServer(new InetSocketAddress("127.0.0.1", 0), TestTls.server, OPTIONS, listener)) {
             System.out.println("LISTEN 127.0.0.1:" + server.address().getPort());
             for (int i = 0; i < sessions; i++) {
@@ -62,8 +68,8 @@ public final class QuicInteropPeer {
         var remote = new InetSocketAddress(address.substring(0, split), Integer.parseInt(address.substring(split + 1)));
         var tls = QuicSslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).applicationProtocols("qmux-02");
         try (var client = new QuicClient(tls, OPTIONS)) {
-            script.accept(client.connect(remote, "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS));
-            ZmuxSession session = client.connect(remote, "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+            script.accept(client.connectAsync(remote, "localhost", config).get(10, TimeUnit.SECONDS));
+            ZmuxSession session = client.connectAsync(remote, "localhost", config).get(10, TimeUnit.SECONDS);
             try (var stream = session.openStream(Preamble.openInfo("early".getBytes(StandardCharsets.UTF_8)))) {
                 stream.write("early-data".getBytes(StandardCharsets.UTF_8));
                 stream.finish();
@@ -75,6 +81,21 @@ public final class QuicInteropPeer {
             script.accept(session);
             linger();
         }
+    }
+
+    /** Prints the session's exporter value once the carrier's handshake gives it (a session on early data starts before). */
+    private static void printKeysWhenReady(ZmuxSession session) {
+        Thread.ofVirtual().start(() -> {
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (System.nanoTime() - end < 0) {
+                try {
+                    System.out.println("KEYS " + java.util.HexFormat.of().formatHex(session.exportKeyingMaterial("EXPORTER-interop-app", new byte[0], 16)));
+                    return;
+                } catch (IOException notYet) {
+                    try { Thread.sleep(5); } catch (InterruptedException e) { return; }
+                }
+            }
+        });
     }
 
     /** Closing the endpoint at once would overtake the last session's close. */

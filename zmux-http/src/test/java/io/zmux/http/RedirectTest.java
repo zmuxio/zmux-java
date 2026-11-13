@@ -3,10 +3,10 @@ package io.zmux.http;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.CarrierCache;
-import io.zmux.CarrierMode;
+import io.zmux.CarrierChoice;
 import io.zmux.HttpRedirectException;
-import io.zmux.ModeException;
-import io.zmux.ModePolicy;
+import io.zmux.CarrierChoiceException;
+import io.zmux.CarrierChoicePolicy;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
 import io.zmux.Zmux;
@@ -216,8 +216,8 @@ class RedirectTest {
             assertEquals("too many redirects", e.reason());
             assertEquals(Redirects.DEFAULT_MAX + 1, loop.seen.size());
             // A streaming carrier opens at once and fails with the refusal: the dial reports it as refused.
-            var mode = CarrierMode.explicit(c.streamingCandidate(away.base, Map.of()));
-            var me = assertThrows(ModeException.class, () -> Zmux.dial(mode, f.config, null));
+            var mode = CarrierChoice.explicit(c.streamingCandidate(away.base, Map.of()));
+            var me = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(mode, f.config, null));
             assertEquals(io.zmux.CandidateOutcome.REFUSED, me.results().getFirst().outcome(), me.toString());
         }
     }
@@ -227,7 +227,7 @@ class RedirectTest {
              var front = new Front(f.base, 308, u -> "/z")) {
             CarrierCache cache = new CarrierCache();
             var cand = c.streamingCandidate(front.base, Map.of());
-            try (var s = Zmux.dial(CarrierMode.auto(cand), f.config, ModePolicy.of(cache, "k"))) {
+            try (var s = Zmux.dial(CarrierChoice.auto(cand), f.config, CarrierChoicePolicy.of(cache, "k"))) {
                 f.echo(s);
             }
             String fin = front.base.resolve("/z").toString();
@@ -236,7 +236,7 @@ class RedirectTest {
             assertEquals(fin, entry.url());
             // A later carrier starts at the final URL: the front sees no more requests.
             int before = front.seen.size();
-            try (var s = Zmux.dial(CarrierMode.auto(cand), f.config, ModePolicy.of(cache, "k"))) {
+            try (var s = Zmux.dial(CarrierChoice.auto(cand), f.config, CarrierChoicePolicy.of(cache, "k"))) {
                 f.echo(s);
             }
             assertEquals(before, front.seen.size());

@@ -19,13 +19,11 @@ import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.zmux.*;
 import io.zmux.quic.*;
 import java.net.InetSocketAddress;
-import java.util.concurrent.TimeUnit;
 
 var tls = QuicSslContextBuilder.forClient().applicationProtocols("qmux-02");
 try (var endpoint = new QuicClient(tls, QuicOptions.defaults());
      var session = endpoint.connect(new InetSocketAddress("example.com", 9000),
-             "example.com", ZmuxConfig.defaults())
-             .toCompletableFuture().get(10, TimeUnit.SECONDS)) {
+             "example.com", ZmuxConfig.defaults())) {
     try (var stream = session.openStream()) {
         stream.write(request);
         stream.finish();
@@ -36,20 +34,39 @@ try (var endpoint = new QuicClient(tls, QuicOptions.defaults());
 
 The client uses the supplied trust configuration and enforces HTTPS server
 name verification. The negotiated ALPN must match the session configuration.
-`connect` and `openPipe` are cancellable; closing the endpoint fails pending
+`connect` and `openPipe` wait for the session or the carrier; `connectAsync` and
+`openPipeAsync` return a cancellable `ZmuxFuture` instead. Closing the endpoint fails pending
 operations and closes its native connections. Close sessions before their
 endpoint: an endpoint hosts the sessions of its connections on its native event
 loop, so closing it ends them. Blocking zmux calls are refused on that loop, as
 on zmux's own loops; call them from application (for example virtual) threads. `connections()` gives a snapshot of native connections for
 transport-specific statistics and control.
 
+## Closing a connection
+
+A session's end on QUIC is the zmux close on its streams; the QUIC connection
+closes after it, never sooner. Once none of a connection's streams carries a
+pipe any more, each pipe having ended after its zmux close was delivered (the
+peer ended its side) or its linger expired, the side that ended the last
+session (with `close(code, reason)`, `abort` or a local error) closes the
+connection with an application close carrying that session's code; an end
+without an application code (a transport error, an idle timeout) and a
+connection that never carried a session (refused, stalled, fallback) close
+with 0. The other side waits for that close; a client connection of its own
+closes itself 2 s later if it does not come. A `QuicPool` connection stays open
+while other sessions use it and closes as the pool decides, with the code of
+its last session. This is a limit of Netty's QUIC interface, whose close takes a
+32-bit code: a session code above
+2^31 - 1 closes the connection with 0. A session hosted on another loop through
+a stream's `PipeIo` halves does not pass its code on; its connection closes
+with 0.
+
 ## UDP endpoint address families
 
 A client owns an IPv4 UDP endpoint and creates an IPv6 endpoint lazily when
 first needed. Both use the same native event loop; concurrent IPv6 dials share
 one binding, and client close also reclaims an endpoint whose bind finishes
-late. IPv4-mapped addresses use the IPv4 route. Public constructors and pool
-limits are unchanged; one client can still dial both address families.
+late. IPv4-mapped addresses use the IPv4 route. One client can dial both address families.
 
 Selecting the actual address family avoids a macOS dual-stack wildcard port
 allocation corner case: an IPv6 wildcard socket can receive the same ephemeral
@@ -64,10 +81,9 @@ The listener owns the session configuration and advertises its locator before
 bootstrap parameters are sent:
 
 ```java
-try (var listener = Zmux.listener(ListenerConfig.of(config));
+try (var listener = ZmuxListener.of(ListenerConfig.of(config));
      var client = new QuicClient(tls, QuicOptions.defaults(), listener)) {
-    ZmuxSession session = client.connect(peerAddress, serverName)
-            .toCompletableFuture().get(10, TimeUnit.SECONDS);
+    ZmuxSession session = client.connect(peerAddress, serverName);
     // Incoming joined pipes and lanes on every connection use this listener.
 }
 ```
@@ -83,21 +99,20 @@ A server can open a new bidirectional carrier on a connection it already owns:
 
 ```java
 var connection = server.connections().getFirst(); // Choose the authenticated peer.
-var carrier = server.openPipe(connection).toCompletableFuture()
-        .get(10, TimeUnit.SECONDS);
+var carrier = server.openPipe(connection);
 var pipe = session.addPipe(carrier, PipeOptions.defaults());
 ```
 
 The peer's client must use a bound listener to classify the incoming Hello.
-`openPipe` rejects connections owned by another endpoint. Completion delivery
-runs outside the native event loop, in order, in the endpoint's completion context. Cancelling the returned future reclaims only
+`openPipe` rejects connections owned by another endpoint. The completion of `openPipeAsync`
+is delivered outside the native event loop, in order, in the endpoint's completion context. Cancelling its future reclaims only
 the new stream, including a stream created after cancellation; it does not close
 the shared QUIC connection. Once a carrier is returned, transfer it to `session.addPipe`
 or close its halves if it will not be used. This is an explicit carrier opener,
 not a connection pool or an independent-path guarantee. Pipes and lanes on one
 connection share its transport failure and receive-window estimate. When joining
 several pipes of the same joiner on one connection, supply their shared non-zero
-`PipeOptions.fateGroup`. For automatic placement and fate-group assignment,
+`PipeOptions.Builder.fateGroup`. For automatic placement and fate-group assignment,
 use `QuicPool` below.
 
 A listener-backed client's `openPipe(address, serverName, session)` also keeps
@@ -112,7 +127,7 @@ an interrupted wait races a completed future, reclaim the completed carrier too.
 // keys is a configured javax.net.ssl.KeyManagerFactory.
 var tls = QuicSslContextBuilder.forServer(keys, keyPassword)
         .applicationProtocols("qmux-02");
-try (var listener = Zmux.listener(ListenerConfig.of(config));
+try (var listener = ZmuxListener.of(ListenerConfig.of(config));
      var endpoint = new QuicServer(new InetSocketAddress("0.0.0.0", 9000),
              tls, QuicOptions.defaults(), listener)) {
     ZmuxSession session = listener.accept();
@@ -125,9 +140,9 @@ carrier kinds. Its existing admission checks, locator map, Lane Key map,
 source quotas and shared budget govern QUIC streams too. Its `Admission`
 decides on a connection by the client's stream 0, whichever stream arrives
 first; the connection's other streams wait and then reach the listener
-without a new admission. A client presents a `Credential` on stream 0 of
+without a new admission. A client presents a `CarrierCredential` on stream 0 of
 every connection it opens, in 1-RTT data: `connect` takes the session
-configuration's (`ZmuxConfig.credential()`, the bound listener's for a
+configuration's (`ZmuxConfig.carrierCredential()`, the bound listener's for a
 listener-backed client), `openPipe` and `QuicPool` take one per call. A token
 bound to the connection's TLS exporter (`PrefixAuth` with `bindTls`) works here:
 see [Joins and the exporter](#joins-and-the-exporter). A source is the
@@ -137,7 +152,7 @@ already accepted sessions application-owned; endpoint closure closes every
 connection that endpoint owns.
 
 A host that runs its own QUIC endpoint hands each established connection to
-`QuicServer.serve(connection, options, listener, fallback)`, on the
+`QuicServer.serveAsync(connection, options, listener, fallback)`, on the
 connection's loop once its handshake completes: the connection takes a slot of
 its source, its first bidirectional stream the listener's admission, then the
 inbound transform, as on a `QuicServer` endpoint. Its codec hands streams on
@@ -176,18 +191,22 @@ listener-backed client so one connection can route joins and lanes for several
 sessions through the existing listener:
 
 ```java
-try (var listener = Zmux.listener(ListenerConfig.of(config));
+try (var listener = ZmuxListener.of(ListenerConfig.of(config));
      var client = new QuicClient(tls, QuicOptions.defaults(), listener);
      var pool = new QuicPool(client, peerAddress, serverName,
-             new QuicPool.Limits(8, 2000, Duration.ofMinutes(30)))) {
-    var carrier = pool.openPipe().toCompletableFuture().get(10, TimeUnit.SECONDS);
+             QuicPool.Limits.defaults()
+                     .withMaxPipesPerConnection(8)
+                     .withMaxPipesPerConnectionLifetime(2000)
+                     .withMaxConnectionAge(Duration.ofMinutes(30)))) {
+    var carrier = pool.openPipe();
     session.addPipe(carrier, PipeOptions.defaults());
 }
 ```
 
-The limits are concurrent pipes per connection (default 8), pipes over a
-connection's lifetime (default 0, unlimited), and connection age (default zero,
-unlimited). There is no additional connection-count cap. The pool picks the
+The limits are concurrent pipes per connection (`maxPipesPerConnection`, default 8),
+pipes over a connection's lifetime (`maxPipesPerConnectionLifetime`, by default
+unlimited), and connection age (`maxConnectionAge`, by default unlimited).
+`openPipeAsync()` is the non-blocking form of `openPipe()`. There is no additional connection-count cap. The pool picks the
 connection with the most remaining room, considering outstanding creation
 reservations too. When none fits, concurrent callers share one pending dial;
 additional connections are opened as that connection fills. Native stream
@@ -197,8 +216,8 @@ Each pooled connection supplies one non-zero varint62 fate group through its
 `PipeIo` capabilities. `addPipe` uses that group when options leave it
 unset; an explicit application group wins, allowing a broader shared path group.
 Bootstrap pipe 0 keeps its protocol-defined
-group 0. `connections()` returns immutable policy snapshots with the native
-connection, group, active reservation count, total, age and retirement flag.
+group 0. `connections()` returns `PooledConnection` snapshots with the native
+connection, fate group, active reservation count, total, retiring flag and age.
 `total` conservatively includes failed native opening attempts; it counts a
 created stream even if its application notification was cancelled.
 
@@ -230,8 +249,8 @@ endpoint or application listener. To force all underlying connections to stop,
 close their owning client. Use explicit cancellation of an unfinished open and
 return the carrier's halves when it will not be joined.
 
-Pipe maintenance can use `PipePool.carriers` with a factory that awaits
-`pool.openPipe()` and propagates cancellation/interruption to that future. If
+Pipe maintenance can use `PipePool.carriers` with a factory that
+calls `pool.openPipeAsync()`, waits for it and propagates cancellation/interruption to that future. If
 cancellation races a completed open, reclaim the completed carrier too. This
 reuses maintenance's existing scoped ownership and retry policy.
 
@@ -253,7 +272,7 @@ Do not use the explicitly insecure mode on untrusted paths.
 Standalone clients accept reverse unidirectional lanes. Listener-backed clients
 also route server-initiated joined pipes; servers can open them on their accepted
 connections. The connections of an externally owned endpoint are served with
-`QuicServer.serve` (see [Server](#server)).
+`QuicServer.serveAsync` (see [Server](#server)).
 Cross-language interoperability and remote platform validation are separate
 release gates.
 

@@ -1,6 +1,6 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.kex.MlKem768;
 import io.zmux.internal.kex.X25519;
 import java.security.PrivateKey;

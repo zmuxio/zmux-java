@@ -44,7 +44,7 @@ final class Fixture implements AutoCloseable {
     Fixture(Function<ZmuxConfig.Builder, ZmuxConfig.Builder> cfg, Function<ListenerConfig.Builder, ListenerConfig.Builder> lcfg,
             Function<HttpEndpoint.Builder, HttpEndpoint.Builder> ep, boolean tls, Supplier<ChannelHandler> host) throws Exception {
         config = cfg.apply(ZmuxConfig.builder().eventLoops(loops)).build();
-        listener = Zmux.listener(lcfg.apply(ListenerConfig.builder().session(config)).build());
+        listener = ZmuxListener.of(lcfg.apply(ListenerConfig.builder().session(config)).build());
         endpoint = ep.apply(HttpEndpoint.builder(listener)).build();
         SslContext ssl = tls ? HttpEndpoint.serverSsl(SslContextBuilder.forServer(kmf()).sslProvider(SslProvider.JDK)) : null;
         server = new ServerBootstrap().group(group).channel(NioServerSocketChannel.class)

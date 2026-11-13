@@ -1,7 +1,7 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 

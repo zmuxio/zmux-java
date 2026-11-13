@@ -57,7 +57,7 @@ public final class Redirects {
             throw new HttpRedirectException(status, location, "another host");
         }
         if (fromTls && !toTls) throw new HttpRedirectException(status, location, "downgrade to " + to.getScheme());
-        if (fromTls == toTls && port(to, toTls) != port(from, fromTls)) throw new HttpRedirectException(status, location, "another port");
+        if (fromTls.equals(toTls) && port(to, toTls) != port(from, fromTls)) throw new HttpRedirectException(status, location, "another port");
         boolean upgrade = !fromTls && toTls;
         boolean ws = isWs(from.getScheme());
         String scheme = ws ? toTls ? "wss" : "ws" : toTls ? "https" : "http";

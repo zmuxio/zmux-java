@@ -1,6 +1,6 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import java.nio.ByteBuffer;
 
 /**
@@ -8,7 +8,7 @@ import java.nio.ByteBuffer;
  * {@link #sealer} and {@link #opener} are null unless the Mode is Sealed.
  */
 public record Result(Mode mode, Suite suite, Sealer sealer, Opener opener, byte[] exporterSecret)
-        implements io.zmux.carrier.RecordProtection {
+        implements RecordProtection {
 
     /** A copy: the secret stays with this result. */
     @Override public byte[] exporterSecret() {

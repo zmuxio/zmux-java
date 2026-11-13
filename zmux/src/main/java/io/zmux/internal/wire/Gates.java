@@ -1,6 +1,5 @@
 package io.zmux.internal.wire;
 
-import io.zmux.carrier.VarInt;
 
 /**
  * Which frames a receiver accepts in a session:
@@ -20,7 +19,7 @@ public record Gates(long maxDatagram, boolean resetStreamAt, boolean goAway, boo
                 if (maxDatagram == 0) {
                     throw new WireException(TransportError.PROTOCOL_VIOLATION, f.type, "DATAGRAM not advertised", "");
                 }
-                long size = 1 + f.dataLen + (f.hasLength ? VarInt.length(f.dataLen) : 0);
+                long size = 1L + f.dataLen + (f.hasLength ? VarInt.length(f.dataLen) : 0);
                 if (Long.compareUnsigned(size, maxDatagram) > 0) {
                     throw new WireException(TransportError.PROTOCOL_VIOLATION, f.type, "DATAGRAM larger than advertised", "");
                 }

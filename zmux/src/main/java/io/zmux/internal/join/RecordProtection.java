@@ -1,6 +1,6 @@
-package io.zmux.carrier;
+package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import java.nio.ByteBuffer;
 
 /**

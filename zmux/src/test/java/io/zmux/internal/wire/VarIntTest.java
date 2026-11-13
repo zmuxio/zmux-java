@@ -1,4 +1,4 @@
-package io.zmux.carrier;
+package io.zmux.internal.wire;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;

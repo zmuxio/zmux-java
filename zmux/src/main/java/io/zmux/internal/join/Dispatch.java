@@ -1,6 +1,6 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 
 /** What the first bytes of a new carrier begin. */
 public final class Dispatch {

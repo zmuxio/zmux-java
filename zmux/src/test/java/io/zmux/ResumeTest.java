@@ -17,7 +17,7 @@ class ResumeTest {
     }
     @Test void tcpSessionResumesTheSameLogicalStreamAfterLosingEveryCarrier() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).probation(Duration.ZERO).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).noProbation().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
@@ -40,8 +40,8 @@ class ResumeTest {
                 assertTrue(client.stats().suspendedTime().compareTo(early) > 0, "the current suspension counts");
                 sender.write(bytes, 128 << 10, bytes.length - (128 << 10)); sender.finish();
                 var resumed = workers.submit(() -> { event(server, SessionEvent.SessionResumed.class); return null; });
-                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().probation(Duration.ZERO).build());
-                assertTrue(pipe.id() > 0); resumed.get(5, TimeUnit.SECONDS);
+                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().noProbation().build());
+                assertTrue(pipe.id().value() > 0); resumed.get(5, TimeUnit.SECONDS);
                 PipePoolTest.await(() -> client.stats().pipesAdded() == 2 && client.stats().pipesActive() == 1);
                 Duration total = client.stats().suspendedTime();
                 assertTrue(total.toMillis() >= 20);

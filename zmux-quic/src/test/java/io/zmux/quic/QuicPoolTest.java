@@ -67,7 +67,7 @@ class QuicPoolTest {
     }
     static PipeIo firstPipe(Fixture f, QuicPool pool) throws Exception {
         long started = System.nanoTime();
-        var opened = pool.openPipe().toCompletableFuture();
+        var opened = pool.openPipeAsync();
         try { return opened.get(5,TimeUnit.SECONDS); }
         catch (TimeoutException timeout) {
             try { diagnose(started,f,pool,opened); }
@@ -79,7 +79,7 @@ class QuicPoolTest {
     static final class Fixture implements AutoCloseable {
         final EventLoops loops=EventLoops.create(3);
         final ZmuxConfig config=QuicEndpointTest.config(loops);
-        final ZmuxListener local=Zmux.listener(ListenerConfig.of(config)),remote=Zmux.listener(ListenerConfig.of(config));
+        final ZmuxListener local=ZmuxListener.of(ListenerConfig.of(config)),remote=ZmuxListener.of(ListenerConfig.of(config));
         final QuicServer server;
         final QuicClient client;
         Fixture() throws Exception {
@@ -87,17 +87,22 @@ class QuicPoolTest {
             client=new QuicClient(TestTls.client,QuicOptions.defaults(),local);
         }
         QuicPool pool(int concurrent,PoolPolicy policy) {
-            return new QuicPool(client,server.address(),"localhost",new QuicPool.Limits(concurrent,0,Duration.ZERO),null,policy);
+            return new QuicPool(client,server.address(),"localhost",QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent),null,policy);
         }
         QuicPool pool(int concurrent,long lifetime,Duration age) {
-            return new QuicPool(client,server.address(),"localhost",new QuicPool.Limits(concurrent,lifetime,age));
+            return new QuicPool(client,server.address(),"localhost",limits(concurrent, lifetime, age));
+        }
+        static QuicPool.Limits limits(int concurrent, long lifetime, Duration age) {
+            var l = QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent);
+            if (lifetime > 0) l = l.withMaxPipesPerConnectionLifetime(lifetime);
+            return age.isZero() ? l : l.withMaxConnectionAge(age);
         }
         @Override public void close() throws Exception { client.close();server.close();local.close();remote.close();loops.close();assertEquals(0,io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops)); }
     }
     @Test void concurrentRequestsShareDialsAndRespectReservationLimits() throws Exception {
         try (var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO)) {
             var futures=new ArrayList<CompletableFuture<PipeIo>>();
-            for(int i=0;i<12;i++) futures.add(pool.openPipe().toCompletableFuture());
+            for(int i=0;i<12;i++) futures.add(pool.openPipeAsync());
             var carriers=new ArrayList<PipeIo>();
             try {
                 for(var future:futures) carriers.add(future.get(8,TimeUnit.SECONDS));
@@ -113,13 +118,13 @@ class QuicPoolTest {
     }
     @Test void lifetimeRetiresOnlyAfterTheLastStreamAndReusesFreeSlots() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,3,Duration.ZERO)) {
-            var one=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
-            var two=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var one=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
+            var two=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             assertSame(one.carrierConn(),two.carrierConn());assertEquals(one.capabilities().fateGroup(),two.capabilities().fateGroup());
             release(one);until(() -> pool.connections().getFirst().active()==1);
-            var three=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var three=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             assertSame(two.carrierConn(),three.carrierConn());assertTrue(pool.connections().getFirst().retiring());
-            var four=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var four=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             assertNotSame(three.carrierConn(),four.carrierConn());
             var original=(io.netty.handler.codec.quic.QuicChannel)two.carrierConn();assertTrue(original.isActive());
             release(two);release(three);until(() -> !original.isActive());
@@ -128,26 +133,26 @@ class QuicPoolTest {
     }
     @Test void ageRetirementDrainsActiveConnectionsAndClosesIdleOnesWithoutFurtherGets() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ofMillis(150))) {
-            var one=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var one=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             var original=(io.netty.handler.codec.quic.QuicChannel)one.carrierConn();
             until(() -> pool.connections().getFirst().retiring());assertTrue(original.isActive());
-            var two=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);assertNotSame(one.carrierConn(),two.carrierConn());
+            var two=pool.openPipeAsync().get(5,TimeUnit.SECONDS);assertNotSame(one.carrierConn(),two.carrierConn());
             release(one);until(() -> !original.isActive());release(two);until(() -> pool.connections().isEmpty());
         }
     }
     @Test void poolCloseKeepsJoinedTrafficAndReleasesConnectionAfterItsStreamsEnd() throws Exception {
         try(var f=new Fixture();var workers=Executors.newVirtualThreadPerTaskExecutor();var pool=f.pool(2,0,Duration.ZERO)) {
-            var a=f.client.connect(f.server.address(),"localhost").toCompletableFuture().get(8,TimeUnit.SECONDS);
+            var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             try {
                 var bootstrap=f.client.connections().getFirst();
-                var first=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
-                var second=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+                var first=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
+                var second=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
                 a.addPipe(first,PipeOptions.defaults());a.addPipe(second,PipeOptions.defaults());
                 var pooled=(io.netty.handler.codec.quic.QuicChannel)first.carrierConn();
                 pool.close();assertTrue(pooled.isActive());bootstrap.close().sync();
                 QuicTest.transfer(workers,a,b,4,128<<10);QuicTest.transfer(workers,b,a,2,64<<10);
-                assertThrows(ExecutionException.class,() -> pool.openPipe().toCompletableFuture().get(2,TimeUnit.SECONDS));
+                assertThrows(ExecutionException.class,() -> pool.openPipeAsync().get(2,TimeUnit.SECONDS));
                 QuicEndpointTest.closed(a,b);until(() -> pool.connections().isEmpty() && !pooled.isActive());
             } finally { QuicEndpointTest.closed(a,b); }
         }
@@ -161,7 +166,7 @@ class QuicPoolTest {
             connection.eventLoop().execute(() -> { entered.countDown();try { proceed.await(3,TimeUnit.SECONDS); } catch(InterruptedException e) { Thread.currentThread().interrupt(); } });
             assertTrue(entered.await(2,TimeUnit.SECONDS));
             try {
-                var pending=pool.openPipe().toCompletableFuture();assertTrue(pending.cancel(false));
+                var pending=pool.openPipeAsync();assertTrue(pending.cancel(false));
                 assertEquals(1,pool.connections().getFirst().active(),"cancelled notification is not native resource completion");
             } finally { proceed.countDown(); }
             // Disposal closes the channel asynchronously on its event loop; wait for both effects.
@@ -170,21 +175,21 @@ class QuicPoolTest {
     }
     @Test void failedConnectionsAreNotReusedAndOneCancelledWaiterDoesNotCancelOtherDialWaiters() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO)) {
-            var old=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var old=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             ((io.netty.handler.codec.quic.QuicChannel)old.carrierConn()).close().sync();until(() -> pool.connections().isEmpty());
-            var next=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var next=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             assertNotSame(old.carrierConn(),next.carrierConn());assertNotEquals(old.capabilities().fateGroup(),next.capabilities().fateGroup());release(next);
         }
         try(var f=new Fixture();var blackhole=new java.net.DatagramSocket(QuicTest.any());
             var pool=new QuicPool(f.client,(java.net.InetSocketAddress)blackhole.getLocalSocketAddress(),"localhost")) {
-            var one=pool.openPipe().toCompletableFuture();var two=pool.openPipe().toCompletableFuture();
+            var one=pool.openPipeAsync();var two=pool.openPipeAsync();
             assertTrue(one.cancel(false));Thread.sleep(30);assertFalse(two.isDone());
             pool.close();assertThrows(ExecutionException.class,() -> two.get(3,TimeUnit.SECONDS));
         }
     }
     @Test void closingPoolWinsAgainstSuccessWhileFailureNotificationsAreStillRunning() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
-            var warm=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var warm=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             var connection=(io.netty.handler.codec.quic.QuicChannel)warm.carrierConn();release(warm);
             until(() -> pool.connections().getFirst().active()==0);
             var nativeEntered=new CountDownLatch(1);var nativeProceed=new CountDownLatch(1);
@@ -192,7 +197,7 @@ class QuicPoolTest {
             var once=new java.util.concurrent.atomic.AtomicBoolean();
             connection.eventLoop().execute(() -> { nativeEntered.countDown();try { nativeProceed.await(3,TimeUnit.SECONDS); } catch(InterruptedException e) { Thread.currentThread().interrupt(); } });
             assertTrue(nativeEntered.await(2,TimeUnit.SECONDS));
-            var one=pool.openPipe().toCompletableFuture();var two=pool.openPipe().toCompletableFuture();
+            var one=pool.openPipeAsync();var two=pool.openPipeAsync();
             for(var future:java.util.List.of(one,two)) future.whenComplete((value,error) -> {
                 if(error!=null && once.compareAndSet(false,true)) {
                     failed.countDown();try { finishFailure.await(3,TimeUnit.SECONDS); } catch(InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -222,12 +227,12 @@ class QuicPoolTest {
                 }
             };
             field.set(f.client,gate);
-            var one=pool.openPipe().toCompletableFuture();var two=pool.openPipe().toCompletableFuture();
+            var one=pool.openPipeAsync();var two=pool.openPipeAsync();
             CompletableFuture<PipeIo> replacement=null;
             try {
                 assertTrue(entered.await(3,TimeUnit.SECONDS));
                 for(var future:java.util.List.of(one,two)) if(!future.cancel(false)) future.thenAccept(QuicPoolTest::release);
-                replacement=pool.openPipe().toCompletableFuture();
+                replacement=pool.openPipeAsync();
                 assertEquals(2,calls.get(),"new factory started before the cancelled factory returned its handle");
             } finally { proceed.countDown(); }
             if(replacement!=null) release(replacement.get(8,TimeUnit.SECONDS));
@@ -235,7 +240,7 @@ class QuicPoolTest {
     }
     @Test void streamObserverSeesInitializationBeforeRegistrationFailure() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO)) {
-            var warm=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var warm=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             var connection=(io.netty.handler.codec.quic.QuicChannel)warm.carrierConn();
             var carrier=connection.attr(ConnectionCarrier.KEY).get();
             var seen=new CompletableFuture<io.netty.handler.codec.quic.QuicStreamChannel>();
@@ -257,25 +262,25 @@ class QuicPoolTest {
     }
     @Test void oneNativeConnectionServesSeveralSessionsAndClosingOneDoesNotCloseTheOthers() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
-            var first=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var first=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
-            var second=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var second=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
             assertSame(first.carrierConn(),second.carrierConn());
             var c=f.local.open(second, Role.CLIENT);var d=f.remote.accept(Duration.ofSeconds(5));assertNotNull(d);
             try {
                 assertEquals(1,pool.connections().size());assertEquals(2,pool.connections().getFirst().active());
                 QuicEndpointTest.closed(a,b);until(() -> pool.connections().getFirst().active()==1);
                 QuicTest.transfer(workers,c,d,2,128<<10);
-                var third=pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);assertSame(second.carrierConn(),third.carrierConn());release(third);
+                var third=pool.openPipeAsync().get(5,TimeUnit.SECONDS);assertSame(second.carrierConn(),third.carrierConn());release(third);
                 pool.close();QuicTest.transfer(workers,d,c,2,64<<10);QuicEndpointTest.closed(c,d);until(() -> pool.connections().isEmpty());
             } finally { QuicEndpointTest.closed(a,b);QuicEndpointTest.closed(c,d); }
         }
     }
     @Test void maintenanceRefillsFromThePoolWithoutLosingPipeOwnership() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
-            var a=f.client.connect(f.server.address(),"localhost").toCompletableFuture().get(8,TimeUnit.SECONDS);
+            var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
-            var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipe())).withCount(2)
+            var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipeAsync())).withCount(2)
                     .withInspectionInterval(Duration.ofMillis(5)).withBackoff(new PipePool.Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
             try {
                 until(() -> maintenance.pipes().size()==2);assertEquals(1,pool.connections().size());
@@ -290,7 +295,7 @@ class QuicPoolTest {
         }
     }
 
-    static PipeIo get(QuicPool pool) throws Exception { return pool.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS); }
+    static PipeIo get(QuicPool pool) throws Exception { return pool.openPipeAsync().get(5,TimeUnit.SECONDS); }
     @Test void policyCountSpreadsPipesOverThatManyConnections() throws Exception {
         PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withCount(3);
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
@@ -321,7 +326,7 @@ class QuicPoolTest {
     }
     @Test void policyRetireReplacesTheConnectionBeforeItsSessionsEnd() throws Exception {
         var retire=new AtomicLong(-1);
-        PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withRetire(retire.get()<0 ? Set.of() : Set.of(retire.get()));
+        PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withRetireConnections(retire.get()<0 ? Set.of() : Set.of(retire.get()));
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
@@ -355,7 +360,7 @@ class QuicPoolTest {
     @Test void machinePolicyAgeRuleRotatesConnectionsUnderALiveSession() throws Exception {
         PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
                 "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                io.zmux.shaping.machine.Options.defaults());
+                io.zmux.shaping.machine.MachineOptions.defaults());
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
@@ -373,7 +378,7 @@ class QuicPoolTest {
     @Test void machinePolicyAgeRuleRetiresABusyConnectionByRecheckAlone() throws Exception {
         PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
                 "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                io.zmux.shaping.machine.Options.defaults());
+                io.zmux.shaping.machine.MachineOptions.defaults());
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);

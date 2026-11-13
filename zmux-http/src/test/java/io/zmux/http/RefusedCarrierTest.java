@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.AdmissionVerdict;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.Admission;
 import io.zmux.PipeOptions;
@@ -89,7 +90,7 @@ class RefusedCarrierTest {
                     () -> new HostHandler(seen))) {
                 String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes());
                 assertFalse(got.endsWith("host"), d + ": " + got);
-                assertEquals(d.verdict() == Admission.Verdict.ACCEPT, got.startsWith("HTTP/1.1 200"), d + ": " + got);
+                assertEquals(d.verdict() == AdmissionVerdict.ACCEPT, got.startsWith("HTTP/1.1 200"), d + ": " + got);
                 assertNull(seen.poll(300, TimeUnit.MILLISECONDS), d + " reached the host");
             }
         }

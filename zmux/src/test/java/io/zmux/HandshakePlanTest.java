@@ -31,7 +31,7 @@ class HandshakePlanTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).handshakeShaper(shaper).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(
-                    Seal.server(new ServerConfig(SealTest.gate(null), SealTest.NODE, null, shaper))).build();
+                    Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).shaper(shaper).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 InetSocketAddress at = l.localAddress();
                 PipeIo p = SealTest.establish(SealTest.tcp(at), SealTest.client().shaper(shaper).build());
@@ -50,18 +50,18 @@ class HandshakePlanTest {
             try (EventLoops loops = EventLoops.create(2)) {
                 ZmuxConfig cfg = SealTest.sessions(loops).allowRecordMode((c, m, peer) -> true).build();
                 int[] calls = new int[1];
-                var seal = Seal.server(new ServerConfig(SealTest.gate(null), SealTest.NODE, (c, m, peer) -> c.secure(), null));
+                var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, peer) -> c.secure()).build());
                 InboundTransform once = (carrier, ctx) -> { calls[0]++; return seal.transform(carrier, ctx); };
-                try (ZmuxListener l = Zmux.listener(ListenerConfig.builder().session(cfg).inboundTransform(once).build())) {
+                try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(once).build())) {
                     var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                     PipeIo.Exporter eu = (x, y, n) -> new byte[n], ed = (x, y, n) -> { byte[] b = new byte[n]; b[0] = 1; return b; };
                     String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
                     var src = new InetSocketAddress("127.0.0.1", 9);
-                    l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).secure(), JoinHint.pair(token, true, src));
-                    l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).secure(), JoinHint.pair(token, false, src));
-                    PipeIo client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(eu).secure(),
-                            new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(ed).secure());
+                    l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true), JoinHint.pair(token, true, src));
+                    l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true), JoinHint.pair(token, false, src));
+                    PipeIo client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true),
+                            new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true));
                     PipeIo p = Seal.establish(client, SealTest.client().mode(mode).build()).toCompletableFuture().get(10, TimeUnit.SECONDS);
                     try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                         assertEquals(1, calls[0]);
@@ -79,8 +79,8 @@ class HandshakePlanTest {
         PipeIo.Exporter e = (x, y, n) -> new byte[n];
         PipeIo up = new PipeIo(null, a[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(e);
         PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(e);
-        assertFalse(PipeIo.split(up.secure(), down).isSecure());
-        assertFalse(PipeIo.split(up, down.secure()).isSecure());
-        assertTrue(PipeIo.split(up.secure(), down.secure()).isSecure());
+        assertFalse(PipeIo.split(up.withSecure(true), down).isSecure());
+        assertFalse(PipeIo.split(up, down.withSecure(true)).isSecure());
+        assertTrue(PipeIo.split(up.withSecure(true), down.withSecure(true)).isSecure());
     }
 }

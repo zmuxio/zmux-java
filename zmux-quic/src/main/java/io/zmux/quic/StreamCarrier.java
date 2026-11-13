@@ -70,14 +70,16 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     /** The stream's pipe input; a session on the connection's loop takes it over ({@link NativePipe}). */
     PipeIo io(ConnectionCarrier connection) {
         this.connection = connection;
-        if (reader == null) {
+        if (reader == null && writer == null) {
             reader = !receive ? null : new NativeReader();
             writer = !send ? null : new NativeWriter();
+            // A stream a session took is one of the connection's pipes until it closes.
+            taken.stage().thenAccept(t -> { if (t) dispatch(() -> connection.pipeStarted(stream)); });
         }
         return PipeIo.of(reader, writer).withCarrierConn(connection.channel())
                 .withReceiveMemory(connection.options().connectionWindow())
                 .withProtocol(connection.applicationProtocol())
-                .withTerminatedTls(true).withExporter(connection::export).secure() // A QUIC stream is end to end.
+                .withTerminatedTls(true).withExporter(connection::export).withSecure(true) // A QUIC stream is end to end.
                 .withLaneOpener(send ? connection::openLane : null).withCarrier(CarrierKind.QUIC);
     }
 
@@ -95,6 +97,12 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         @Override public int maxChannelDatagram() { return connection.maxDatagram(); }
         @Override public void send(byte[] datagram, Runnable refused) { connection.sendDatagram(datagram, refused); }
         @Override public Runnable receive(Sink sink) { return connection.receiveDatagrams(id, sink); }
+    }
+
+    /** The session on this stream ended with e; the connection keeps its code for its own close. On the loop. */
+    void sessionEnded(io.zmux.internal.core.SessionError e) {
+        ConnectionCarrier c = connection;
+        if (c != null) c.sessionEnded(e);
     }
 
     /** This stream's connection's exporter, read now; null while it is unavailable. */
@@ -154,7 +162,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         PipeIo io = PipeIo.of(r, w).withTerminatedTls(true).withCarrierConn(info.connection()).withReceiveMemory(info.receiveMemory())
                 .withProtocol(info.applicationProtocol()).withFateGroup(info.fateGroup())
                 .withCarrier(CarrierKind.QUIC);
-        io = io.withExporter(connection::export).secure();
+        io = io.withExporter(connection::export).withSecure(true);
         return lanes == null ? io : io.withLaneOpener(lanes);
     }
 

@@ -30,7 +30,7 @@ public final class Sampler {
     }
 
     /** The options' source, or {@link #seeded}. */
-    static Sampler of(Options o) {
+    static Sampler of(MachineOptions o) {
         RandomGenerator r = o.newSource() == null ? null : o.newSource().get();
         return r != null ? new Sampler(r) : seeded();
     }

@@ -1,41 +1,126 @@
 package io.zmux.seal;
 
 import io.zmux.RecordMode;
+import io.zmux.carrier.HandshakeShaper;
+import io.zmux.shaping.ShapingLimits;
 import java.time.Duration;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
 
-/**
- * The client's side of Establish.
- *
- * @param anchor judges the server; required unless allowPskOnly
- * @param allowPskOnly accepts any server that knows the pre-shared key: an explicit bootstrap, which must not
- *     override trust the host already holds
- * @param handle with psk selects a Profile with a pre-shared key; both null selects one without
- * @param psk the pre-shared key
- * @param key the client's static key; null is a key generated once per process
- * @param allowedProfiles the Profiles it may use, the first that fits the key being used; null: the
- *     Profiles of both ciphers, the one with hardware support first. A refusal never makes a client choose another
- *     Profile: that is the host's explicit choice
- * @param mode the carrier's record mode
- * @param credential goes in message 3; null: none
- * @param localContext handed unread to the anchor ({@link VerifyInput#localContext()})
- * @param requirePqAuth fails a server that is not PQ authenticated: no verdict named a PQ proof key whose proof verified
- * @param signer signs the transcript in message 3, for a server whose verdict names a proof key; null: no proof
- * @param appData supplies the application data of message 1, in Profiles 1 and 3 only, and of message 3, after
- *     the server is judged; null: none
- * @param maxAppData bounds the application data of a received message; 0: 256 bytes, negative: no bound beyond the
- *     message. More is too_large
- * @param shaper shapes the handshake; null: none
- * @param timeout bounds the handshake; zero: 10 s, negative: unbounded. A server that stalls a refused carrier
- *     leaves the client waiting until it passes ({@link NoReplyException}), so keep it bounded
- * @param shapingLimits apply to the shaper's plans
- */
-public record ClientConfig(Anchor anchor, boolean allowPskOnly, byte[] handle, byte[] psk, StaticKey key, List<Profile> allowedProfiles,
-                           RecordMode mode, Credential credential, io.zmux.carrier.HandshakeShaper shaper, Duration timeout, io.zmux.shaping.ShapingLimits shapingLimits,
-                           Object localContext, boolean requirePqAuth, Signer signer, AppDataSource appData, int maxAppData) {
+/** The client's side of Establish, built with {@link #builder()}. Immutable. */
+public final class ClientConfig {
+    /** The default bound on the application data of a received message, in bytes. */
+    static final int DEFAULT_MAX_APP_DATA = 256;
+    /** No bound on received application data beyond the message. */
+    static final int NO_BOUND = -1;
+    private static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
+
+    private final Anchor anchor;
+    private final boolean allowPskOnly;
+    private final byte[] handle, psk;
+    private final StaticKey key;
+    private final List<Profile> allowedProfiles;
+    private final RecordMode mode;
+    private final Credential credential;
+    private final Object localContext;
+    private final boolean requirePqAuth;
+    private final Signer signer;
+    private final AppDataSource appData;
+    private final int maxAppData;
+    private final HandshakeShaper shaper;
+    private final Duration handshakeTimeout; // null: none
+    private final ShapingLimits shapingLimits;
+
+    private ClientConfig(Builder b) {
+        anchor = b.anchor;
+        allowPskOnly = b.allowPskOnly;
+        handle = b.handle;
+        psk = b.psk;
+        key = b.key;
+        if (b.allowedProfiles != null) {
+            for (Profile p : b.allowedProfiles) if (p == null) throw new IllegalArgumentException("an unknown or reserved Profile among the allowed ones");
+        }
+        if (b.mode == RecordMode.UNMANAGED) throw new IllegalArgumentException("a handshake has no Unmanaged mode");
+        allowedProfiles = b.allowedProfiles == null ? null : List.copyOf(b.allowedProfiles);
+        mode = b.mode;
+        credential = b.credential;
+        localContext = b.localContext;
+        requirePqAuth = b.requirePqAuth;
+        signer = b.signer;
+        appData = b.appData;
+        maxAppData = b.maxAppData;
+        shaper = b.shaper;
+        handshakeTimeout = b.handshakeTimeout;
+        shapingLimits = b.shapingLimits;
+    }
+
     public static Builder builder() { return new Builder(); }
 
-    /** Builds a {@link ClientConfig}: Sealed, no credential, the defaults above. */
+    /** Judges the server; null only with {@link #isAllowPskOnly()}. */
+    public Anchor anchor() { return anchor; }
+
+    /** Whether any server that knows the pre-shared key is accepted. */
+    public boolean isAllowPskOnly() { return allowPskOnly; }
+
+    /** The Handle of the pre-shared key; null without one. */
+    public byte[] handle() { return handle == null ? null : handle.clone(); }
+
+    /** The pre-shared key; null without one. */
+    public byte[] psk() { return psk == null ? null : psk.clone(); }
+
+    /** Whether a pre-shared key is set. */
+    boolean hasPsk() { return psk != null && psk.length > 0; }
+
+    /** Whether a Handle is set. */
+    boolean hasHandle() { return handle != null; }
+
+    /** The client's static key; null is a key generated once per process. */
+    public StaticKey key() { return key; }
+
+    /** The Profiles the client may use, in order; null: the default list. */
+    public List<Profile> allowedProfiles() { return allowedProfiles; }
+
+    /** The carrier's record mode. */
+    public RecordMode mode() { return mode; }
+
+    /** The credential of message 3; null: none. */
+    public Credential credential() { return credential; }
+
+    /** Handed unread to the anchor ({@link VerifyInput#localContext()}); may be null. */
+    public Object localContext() { return localContext; }
+
+    /** Whether a server that is not PQ authenticated fails. */
+    public boolean isRequirePqAuth() { return requirePqAuth; }
+
+    /** Signs the transcript in message 3; null: no proof. */
+    public Signer signer() { return signer; }
+
+    /** Supplies the application data of messages 1 and 3; null: none. */
+    public AppDataSource appData() { return appData; }
+
+    /** The bound on the application data of a received message, in bytes; empty: no bound beyond the message. */
+    public OptionalInt maxAppData() { return maxAppData == NO_BOUND ? OptionalInt.empty() : OptionalInt.of(maxAppData); }
+
+    /** Shapes the handshake; null: none. */
+    public HandshakeShaper shaper() { return shaper; }
+
+    /** The bound on the handshake; empty: no timeout. */
+    public Optional<Duration> handshakeTimeout() { return Optional.ofNullable(handshakeTimeout); }
+
+    /** The limits on the shaper's plans. */
+    public ShapingLimits shapingLimits() { return shapingLimits; }
+
+    /** The internal form of a bound on received application data: bytes, or {@link Long#MAX_VALUE} for none. */
+    static long appDataLimit(OptionalInt bound) { return bound.isPresent() ? bound.getAsInt() : Long.MAX_VALUE; }
+
+    static int checkMaxAppData(int bytes) {
+        if (bytes < 0) throw new IllegalArgumentException("negative maxAppData; noMaxAppData() sets no bound");
+        return bytes;
+    }
+
+    /** Builds a {@link ClientConfig}: Sealed, no credential, and the defaults each method gives. */
     public static final class Builder {
         private Anchor anchor;
         private boolean allowPskOnly;
@@ -48,26 +133,94 @@ public record ClientConfig(Anchor anchor, boolean allowPskOnly, byte[] handle, b
         private boolean requirePqAuth;
         private Signer signer;
         private AppDataSource appData;
-        private int maxAppData;
-        private io.zmux.carrier.HandshakeShaper shaper;
-        private Duration timeout = Duration.ZERO;
-        private io.zmux.shaping.ShapingLimits shapingLimits = io.zmux.shaping.ShapingLimits.defaults();
+        private int maxAppData = DEFAULT_MAX_APP_DATA;
+        private HandshakeShaper shaper;
+        private Duration handshakeTimeout = DEFAULT_HANDSHAKE_TIMEOUT;
+        private ShapingLimits shapingLimits = ShapingLimits.defaults();
 
+        private Builder() {}
+
+        /** Judges the server; required unless {@link #allowPskOnly}. */
         public Builder anchor(Anchor a) { anchor = a; return this; }
+
+        /**
+         * Accepts any server that knows the pre-shared key: an explicit bootstrap, which must not override trust the
+         * host already holds.
+         */
         public Builder allowPskOnly(boolean on) { allowPskOnly = on; return this; }
-        public Builder psk(byte[] handle, byte[] psk) { this.handle = handle; this.psk = psk; return this; }
+
+        /** Selects a Profile with a pre-shared key, under this Handle; without it, one without a pre-shared key. */
+        public Builder psk(byte[] handle, byte[] psk) {
+            this.handle = handle == null ? null : handle.clone();
+            this.psk = psk == null ? null : psk.clone();
+            return this;
+        }
+
+        /** The client's static key; null (the default) is a key generated once per process. */
         public Builder key(StaticKey k) { key = k; return this; }
-        public Builder allowedProfiles(Profile... p) { allowedProfiles = List.of(p); return this; }
-        public Builder mode(RecordMode m) { mode = m; return this; }
+
+        /**
+         * The Profiles it may use, the first that fits the key being used; none set: the Profiles of both ciphers, the
+         * one with hardware support first. A refusal never makes a client choose another Profile: that is the host's
+         * explicit choice.
+         */
+        public Builder allowedProfiles(Profile... p) { allowedProfiles = java.util.Arrays.asList(p.clone()); return this; }
+
+        /** The carrier's record mode; Sealed unless set. */
+        public Builder mode(RecordMode m) { mode = Objects.requireNonNull(m, "mode"); return this; }
+
+        /** Goes in message 3; null: none. */
         public Builder credential(Credential c) { credential = c; return this; }
+
+        /** Handed unread to the anchor ({@link VerifyInput#localContext()}). */
         public Builder localContext(Object c) { localContext = c; return this; }
+
+        /** Fails a server that is not PQ authenticated: no verdict named a PQ proof key whose proof verified. */
         public Builder requirePqAuth(boolean on) { requirePqAuth = on; return this; }
+
+        /** Signs the transcript in message 3, for a server whose verdict names a proof key; null: no proof. */
         public Builder signer(Signer s) { signer = s; return this; }
+
+        /**
+         * Supplies the application data of message 1, in Profiles 1 and 3 only, and of message 3, after the server is
+         * judged; null: none.
+         */
         public Builder appData(AppDataSource s) { appData = s; return this; }
-        public Builder maxAppData(int n) { maxAppData = n; return this; }
-        public Builder shaper(io.zmux.carrier.HandshakeShaper s) { shaper = s; return this; }
-        public Builder timeout(Duration t) { timeout = t; return this; }
-        public Builder shapingLimits(io.zmux.shaping.ShapingLimits l) { shapingLimits = l; return this; }
-        public ClientConfig build() { return new ClientConfig(anchor, allowPskOnly, handle, psk, key, allowedProfiles, mode, credential, shaper, timeout, shapingLimits, localContext, requirePqAuth, signer, appData, maxAppData); }
+
+        /**
+         * Bounds the application data of a received message, in bytes; 256 unless set. More fails the handshake as
+         * {@code too_large}.
+         *
+         * @throws IllegalArgumentException when negative
+         */
+        public Builder maxAppData(int bytes) { maxAppData = checkMaxAppData(bytes); return this; }
+
+        /** No bound on received application data beyond the message. */
+        public Builder noMaxAppData() { maxAppData = NO_BOUND; return this; }
+
+        /** Shapes the handshake; null: none. */
+        public Builder shaper(HandshakeShaper s) { shaper = s; return this; }
+
+        /**
+         * Bounds the handshake; 10 s unless set. A server that stalls a refused carrier leaves the client waiting until
+         * it passes ({@link NoReplyException}), so keep it bounded.
+         *
+         * @throws IllegalArgumentException unless positive
+         */
+        public Builder handshakeTimeout(Duration t) {
+            if (!Objects.requireNonNull(t, "handshakeTimeout").isPositive()) {
+                throw new IllegalArgumentException("handshakeTimeout must be positive; noHandshakeTimeout() sets none");
+            }
+            handshakeTimeout = t;
+            return this;
+        }
+
+        /** No bound on the handshake: a stalled client waits until the server ends the stall. */
+        public Builder noHandshakeTimeout() { handshakeTimeout = null; return this; }
+
+        /** The limits on the shaper's plans; the defaults unless set. */
+        public Builder shapingLimits(ShapingLimits l) { shapingLimits = Objects.requireNonNull(l, "shapingLimits"); return this; }
+
+        public ClientConfig build() { return new ClientConfig(this); }
     }
 }

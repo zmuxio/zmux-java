@@ -2,6 +2,7 @@ package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.*;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.shaping.*;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
@@ -309,8 +310,8 @@ class ShapingTest {
                 await(() -> events.contains(EventKind.REPLACED) && second.contains(EventKind.START));
                 assertTrue(events.contains(EventKind.REPLACED));
                 assertTrue(second.contains(EventKind.START));
-                assertTrue(p.shaped().setPipeShaper(0, null));
-                assertFalse(p.shaped().setPipeShaper(99, null));
+                assertTrue(p.shaped().setPipeShaper(PipeId.of(0), null));
+                assertFalse(p.shaped().setPipeShaper(PipeId.of(99), null));
                 transfer(p.shaped(), p.other(), 100);
             }
         }

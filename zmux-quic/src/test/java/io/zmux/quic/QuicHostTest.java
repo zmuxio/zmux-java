@@ -21,11 +21,11 @@ class QuicHostTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
             NettyHost serverHost, clientHost;
-            try (var listener = Zmux.listener(ListenerConfig.of(config));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 serverHost = server.host(); clientHost = endpoint.host();
-                var session = endpoint.connect(server.address(), "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                var session = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                 var accepted = listener.accept(Duration.ofSeconds(5));
                 assertNotNull(accepted);
                 // The peer echoes the stream; both directions carry data.length bytes.
@@ -68,7 +68,7 @@ class QuicHostTest {
 
     @Test void quicPipesJoinASessionHostedOnAnotherLoop() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listen(QuicTest.any(), ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
@@ -77,9 +77,9 @@ class QuicHostTest {
                 var client = Zmux.connect(listener.localAddress(), config);
                 var accepted = listener.accept(Duration.ofSeconds(10));
                 assertNotNull(accepted);
-                var pipe = endpoint.openPipe(server.address(), "localhost", client).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                var pipe = endpoint.openPipeAsync(server.address(), "localhost", client).get(10, TimeUnit.SECONDS);
                 ZmuxPipe joined = client.addPipe(pipe, PipeOptions.defaults());
-                assertTrue(joined.id() > 0);
+                assertTrue(joined.id().value() > 0);
                 QuicTest.transfer(workers, client, accepted, 8, 256 << 10);
                 QuicTest.transfer(workers, accepted, client, 4, 64 << 10);
                 client.close(); accepted.close(); client.awaitClosed(); accepted.awaitClosed();
@@ -92,12 +92,12 @@ class QuicHostTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
             NettyHost host;
-            try (var listener = Zmux.listener(ListenerConfig.of(config));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener)) {
                 ZmuxSession client, accepted;
                 try (var endpoint = new QuicClient(TestTls.client, options)) {
                     host = endpoint.host();
-                    client = endpoint.connect(server.address(), "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                    client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                     accepted = listener.accept(Duration.ofSeconds(5));
                     assertNotNull(accepted);
                 }

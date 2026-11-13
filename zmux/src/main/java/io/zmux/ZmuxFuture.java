@@ -26,6 +26,29 @@ import java.util.function.BooleanSupplier;
 public final class ZmuxFuture<T> extends CompletableFuture<T> {
     private final BooleanSupplier operation;
 
+    static {
+        io.zmux.internal.spi.Spi.install(new io.zmux.internal.spi.Spi.Access() {
+            @Override public void handleLane(ZmuxSession session, io.zmux.carrier.PipeIo io) { session.handleLane(io); }
+            @Override public <T> ZmuxFuture<T> future(java.util.concurrent.CompletionStage<T> stage, Runnable cancel) { return of(stage, cancel); }
+        });
+    }
+
+    /**
+     * A future completed as stage is; cancelling it runs cancel (null: nothing). A value that
+     * arrives after the future was cancelled or completed from outside is discarded.
+     */
+    static <T> ZmuxFuture<T> of(java.util.concurrent.CompletionStage<T> stage, Runnable cancel) {
+        ZmuxFuture<T> f = new ZmuxFuture<>(() -> {
+            if (cancel != null) cancel.run();
+            return true;
+        });
+        stage.whenComplete((v, e) -> {
+            if (e == null) f.publishOrDiscard(v);
+            else f.publishFailure(e instanceof java.util.concurrent.CompletionException c && c.getCause() != null ? c.getCause() : e);
+        });
+        return f;
+    }
+
     ZmuxFuture(BooleanSupplier cancelOperation) {
         this.operation = cancelOperation;
     }
@@ -42,9 +65,68 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
         return f;
     }
 
+    /** A blocking body run by {@link #onThread}. */
+    @FunctionalInterface
+    interface Blocking<T> {
+        T call() throws Exception;
+    }
+
+    /**
+     * Runs body on a new virtual thread named name and completes with its result or failure;
+     * cancelling the future interrupts that thread. A value the body returns after the future was
+     * cancelled or completed from outside is discarded.
+     */
+    static <T> ZmuxFuture<T> onThread(String name, Blocking<T> body) {
+        Thread[] runner = new Thread[1];
+        ZmuxFuture<T> f = new ZmuxFuture<>(() -> {
+            Thread t = runner[0];
+            if (t != null) t.interrupt();
+            return true;
+        });
+        runner[0] = Thread.ofVirtual().name(name).unstarted(() -> {
+            try {
+                f.publishOrDiscard(body.call());
+            } catch (Throwable e) {
+                f.publishFailure(e);
+            }
+        });
+        runner[0].start();
+        return f;
+    }
+
     /** Cancels the operation before a completion from outside; whether it was still running does not matter. */
     private void stopOperation() {
-        boolean unused = operation.getAsBoolean();
+        boolean _ = operation.getAsBoolean();
+    }
+
+    /**
+     * Publishes value; when the future was decided already, so that nobody receives value,
+     * releases what it holds: a session is aborted, a pipe input's halves are closed, any other
+     * closeable is closed.
+     */
+    void publishOrDiscard(T value) {
+        if (!super.complete(value)) discard(value);
+    }
+
+    static void discard(Object value) {
+        switch (value) {
+            case ZmuxSession s -> s.abort(0, "operation cancelled");
+            case io.zmux.carrier.PipeIo io -> {
+                try {
+                    if (io.reader() != null) io.reader().close();
+                } finally {
+                    if (io.writer() != null) io.writer().abort(new java.io.IOException("operation cancelled"));
+                }
+            }
+            case AutoCloseable c -> {
+                try {
+                    c.close();
+                } catch (Exception e) {
+                    // Nobody holds the value any more: there is no one to report a failed close to.
+                }
+            }
+            case null, default -> { }
+        }
     }
 
     void publish(T value) {

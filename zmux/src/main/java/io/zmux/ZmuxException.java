@@ -14,7 +14,9 @@ public abstract sealed class ZmuxException extends IOException
         permits SessionClosedException, StreamException, PipeException, NotNegotiatedException,
         DatagramTooLargeException, NotEstablishedException, DuplicateResolutionException,
         JoinPendingException, JoinSecretSetException, NoExporterException,
-        io.zmux.seal.NoReplyException, io.zmux.seal.CredentialsFailedException, io.zmux.seal.VerifierUnavailableException {
+        CarrierChoiceException, CarrierRejectedException, HttpRedirectException, HttpStatusException,
+        io.zmux.seal.NoReplyException, io.zmux.seal.CredentialsFailedException, io.zmux.seal.VerifierUnavailableException,
+        io.zmux.seal.SecureCarrierException {
 
     ZmuxException(String message) {
         super(message);

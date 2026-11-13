@@ -22,7 +22,7 @@ public interface AppDataSource {
      *     {@link VerifyInput} the server was judged by
      * @param verdict for message 3 the server's verdict, null when no anchor judged it; null otherwise
      */
-    record Known(Profile profile, VerifyInput input, Verdict verdict) {}
+    record Known(Profile profile, VerifyInput input, VerifyVerdict verdict) {}
 
     CompletionStage<Optional<byte[]>> data(int message, Known peer);
 }

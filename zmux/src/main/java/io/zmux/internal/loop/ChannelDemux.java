@@ -1,7 +1,7 @@
 package io.zmux.internal.loop;
 
 import io.zmux.internal.wire.ChannelDatagram;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicLong;

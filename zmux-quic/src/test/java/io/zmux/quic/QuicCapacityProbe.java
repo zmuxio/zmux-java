@@ -54,20 +54,20 @@ class QuicCapacityProbe {
             var config = settings.sessionConfig(loops, links);
             var options = settings.nativeOptions();
             results.add("WINDOW_CONFIG," + round + "," + name + "," + settings.describe(links));
-            try (var local = Zmux.listener(settings.listenerConfig(config)); var remote = Zmux.listener(settings.listenerConfig(config));
+            try (var local = ZmuxListener.of(settings.listenerConfig(config)); var remote = ZmuxListener.of(settings.listenerConfig(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, remote);
                  var client = new QuicClient(TestTls.client, options, local);
                  var topology = new Topology(client, server.address(), mode, pipes, link)) {
                 try (var pair = connect(client, server, remote)) {
                     var a = pair.local(); var b = pair.remote();
                     for (int i = 0; i < pipes; i++) {
-                        var io = QuicEndpointTest.awaitPipe(topology.pool(i).openPipe());
+                        var io = QuicEndpointTest.awaitPipe(topology.pool(i).openPipeAsync());
                         a.addPipe(io, PipeOptions.defaults());
                     }
                     // Exclude the separate bootstrap connection from every measured topology.
-                    a.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> a.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes
-                            && b.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).count() == pipes);
+                    a.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
+                    QuicPoolTest.until(() -> a.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).count() == pipes
+                            && b.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).count() == pipes);
                     int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                     assertEquals(mode >= 2 ? pipes : 1, connections);
                     for (int direction = 0; direction < 2; direction++) {
@@ -76,11 +76,11 @@ class QuicCapacityProbe {
                         var receiver = direction == 0 ? b : a;
                         QuicTest.transfer(workers, sender, receiver, 4, 256 << 10);
                         if (trainEachPipe) {
-                            var paths = sender.pipes().stream().filter(p -> p.id() != 0).toList();
+                            var paths = sender.pipes().stream().filter(p -> p.id().value() != 0).toList();
                             try {
                                 for (var selected : paths) {
                                     selected.setSendStandby(false);
-                                    for (var other : paths) if (other.id() != selected.id()) other.setSendStandby(true);
+                                    for (var other : paths) if (other.id().value() != selected.id().value()) other.setSendStandby(true);
                                     long before = selected.stats().orElseThrow().bytesSent();
                                     QuicTest.transfer(workers, sender, receiver, 1, 512 << 10);
                                     assertTrue(selected.stats().orElseThrow().bytesSent() - before >= (512 << 10), "selected pipe did not carry training payload");
@@ -88,7 +88,7 @@ class QuicCapacityProbe {
                             } finally { for (var path : paths) path.setSendStandby(false); }
                             results.add(String.format(Locale.ROOT, "TRAINING_ESTIMATE,%d,%s,%s,%.3f", round, name,
                                     direction == 0 ? "forward" : "reverse", sender.pipeStats().stream()
-                                            .filter(p -> p.pipe() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));
+                                            .filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));
                         }
                         System.out.printf("PROBE_PROGRESS,round=%d,mode=%s,direction=%d,phase=measure%n", round, name, direction);
                         var observed = measureTransfers(workers, List.of(new Traffic(sender, receiver)), bytes);
@@ -162,15 +162,15 @@ class QuicCapacityProbe {
             var prior = before.get(i);
             var after = traffic.get(i).sender().pipeStats();
             for (var old : prior) {
-                if (old.pipe() != 0 && after.stream().noneMatch(p -> p.pipe() == old.pipe()))
-                    pipeTraffic.add(i + "," + old.pipe() + ",-1,-1");
+                if (old.pipeId().value() != 0 && after.stream().noneMatch(p -> p.pipeId().value() == old.pipeId().value()))
+                    pipeTraffic.add(i + "," + old.pipeId().value() + ",-1,-1");
             }
             for (var pipe : after) {
-                if (pipe.pipe() == 0) continue;
-                var old = prior.stream().filter(p -> p.pipe() == pipe.pipe()).findFirst();
+                if (pipe.pipeId().value() == 0) continue;
+                var old = prior.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst();
                 long sent = old.isPresent() ? pipe.bytesSent() - old.get().bytesSent() : -1;
                 long reinjected = old.isPresent() ? pipe.bytesReinjected() - old.get().bytesReinjected() : -1;
-                pipeTraffic.add(i + "," + pipe.pipe() + "," + sent + "," + reinjected);
+                pipeTraffic.add(i + "," + pipe.pipeId().value() + "," + sent + "," + reinjected);
             }
         }
         return new Observed(4L * bytes * traffic.size(), elapsed,
@@ -179,7 +179,7 @@ class QuicCapacityProbe {
     }
 
     private double rateSum(ZmuxSession session) throws Exception {
-        return session.pipeStats().stream().filter(p -> p.pipe() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
     }
 
     private record Pair(ZmuxSession local, ZmuxSession remote) implements AutoCloseable {
@@ -187,7 +187,7 @@ class QuicCapacityProbe {
     }
 
     private Pair connect(QuicClient client, QuicServer server, ZmuxListener listener) throws Exception {
-        var a = client.connect(server.address(), "localhost").toCompletableFuture().get(10, TimeUnit.SECONDS);
+        var a = client.connectAsync(server.address(), "localhost").get(10, TimeUnit.SECONDS);
         try {
             var b = listener.accept(Duration.ofSeconds(5)); assertNotNull(b); return new Pair(a, b);
         } catch (Exception | AssertionError error) { a.close(); throw error; }
@@ -202,7 +202,7 @@ class QuicCapacityProbe {
             var config = settings.sessionConfig(loops, 1);
             var options = settings.nativeOptions();
             results.add("WINDOW_CONFIG," + round + "," + name + "," + settings.describe(1));
-            try (var local = Zmux.listener(settings.listenerConfig(config)); var remote = Zmux.listener(settings.listenerConfig(config));
+            try (var local = ZmuxListener.of(settings.listenerConfig(config)); var remote = ZmuxListener.of(settings.listenerConfig(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, remote);
                  var client = new QuicClient(TestTls.client, options, local);
                  var topology = new Topology(client, server.address(), mode, 2, link);
@@ -211,14 +211,14 @@ class QuicCapacityProbe {
                 Object identity = null;
                 for (int i = 0; i < pairs.size(); i++) {
                     var pair = pairs.get(i);
-                    var io = QuicEndpointTest.awaitPipe(topology.pool(i).openPipe());
+                    var io = QuicEndpointTest.awaitPipe(topology.pool(i).openPipeAsync());
                     if (i == 0) identity = io.carrierConn();
                     else if (mode == 1) assertSame(identity, io.carrierConn());
                     else assertNotSame(identity, io.carrierConn());
                     pair.local().addPipe(io, PipeOptions.defaults());
-                    pair.local().pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> pair.local().pipeStats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible())
-                            && pair.remote().pipeStats().stream().anyMatch(p -> p.pipe() != 0 && p.eligible()));
+                    pair.local().pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
+                    QuicPoolTest.until(() -> pair.local().pipeStats().stream().anyMatch(p -> p.pipeId().value() != 0 && p.eligible())
+                            && pair.remote().pipeStats().stream().anyMatch(p -> p.pipeId().value() != 0 && p.eligible()));
                 }
                 int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                 assertEquals(mode == 1 ? 1 : 2, connections);
@@ -257,7 +257,7 @@ class QuicCapacityProbe {
                     if (link != null) {
                         var relay = new UdpBottleneck(server, link); relays.add(relay); address = relay.address();
                     }
-                    pools.add(new QuicPool(client, address, "localhost", new QuicPool.Limits(mode >= 2 ? 1 : pipes, 0, Duration.ZERO)));
+                    pools.add(new QuicPool(client, address, "localhost", QuicPool.Limits.defaults().withMaxPipesPerConnection(mode >= 2 ? 1 : pipes)));
                 }
             } catch (Exception error) {
                 try { close(); } catch (Exception cleanup) { error.addSuppressed(cleanup); }
@@ -297,6 +297,6 @@ class QuicCapacityProbe {
     }
 
     private long acknowledged(ZmuxSession session) throws Exception {
-        return session.pipeStats().stream().filter(p -> p.pipe() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
     }
 }

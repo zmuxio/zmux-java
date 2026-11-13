@@ -7,8 +7,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One carrier kind that {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} or a
- * {@link PipePool#mode mode pool} may use. Each adapter keeps its own dialer and offers a
+ * One carrier kind that {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} or a
+ * {@link PipePool#choice choice pool} may use. Each adapter keeps its own dialer and offers a
  * candidate that wraps it.
  *
  * @param joiner joins carriers of the kind to an established session, for a kind whose dialer
@@ -53,18 +53,18 @@ public record Candidate(CarrierKind kind, Dialer dialer, Joiner joiner, String v
     @FunctionalInterface
     public interface Dialer {
         /**
-         * Opens a carrier, presenting credential (the session's {@link ZmuxConfig#credential()},
+         * Opens a carrier, presenting credential (the session's {@link ZmuxConfig#carrierCredential()},
          * null: none) for the server's admission, within timeout. The carrier lives until its
          * pipe ends.
          */
-        PipeIo dial(Credential credential, Duration timeout) throws IOException;
+        PipeIo dial(CarrierCredential credential, Duration timeout) throws IOException;
     }
 
     /** Joins carriers of the kind to an established session. */
     @FunctionalInterface
     public interface Joiner {
         /** Joins the kind's carriers to session with options within timeout and returns their pipes. */
-        List<ZmuxPipe> join(ZmuxSession session, PipeOptions options, Credential credential, Duration timeout) throws IOException;
+        List<ZmuxPipe> join(ZmuxSession session, PipeOptions options, CarrierCredential credential, Duration timeout) throws IOException;
     }
 
     /** Wraps a freshly opened carrier ({@link #wrapDial}). */

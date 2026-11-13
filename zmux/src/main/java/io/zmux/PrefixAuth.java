@@ -16,7 +16,7 @@ import javax.crypto.spec.SecretKeySpec;
  * (WebSocket, WebTransport, a request without a body) carries the token in a request header
  * field instead, as {@link #HEADER_LENGTH} characters of base64url without padding. key,
  * slot, bindTls and headerField must be the same on both ends; skew and cacheSize are the
- * verifier's. As a {@link Credential} it presents a fresh token on every carrier.
+ * verifier's. As a {@link CarrierCredential} it presents a fresh token on every carrier.
  *
  * @param key the pre-shared key, not empty
  * @param slot the slot length, a whole number of seconds
@@ -31,7 +31,7 @@ import javax.crypto.spec.SecretKeySpec;
  *     #HEADER_FIELD}), another name only where an intermediary strips unknown fields
  */
 public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, int cacheSize, String headerField)
-        implements Credential {
+        implements CarrierCredential {
     public static final int TOKEN_LENGTH = 32;
     /** The length of a token in the header form: 32 bytes in base64url without padding. */
     public static final int HEADER_LENGTH = 43;
@@ -64,6 +64,21 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
 
     @Override public byte[] key() { return key.clone(); }
 
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof PrefixAuth a && MessageDigest.isEqual(key, a.key) && slot.equals(a.slot) && bindTls == a.bindTls
+                && skew == a.skew && cacheSize == a.cacheSize && headerField.equals(a.headerField);
+    }
+
+    @Override
+    public int hashCode() { return Objects.hash(slot, bindTls, skew, cacheSize, headerField); }
+
+    /** The key never appears in a string. */
+    @Override
+    public String toString() {
+        return "PrefixAuth[slot=" + slot + ", bindTls=" + bindTls + ", skew=" + skew + ", cacheSize=" + cacheSize + ", headerField=" + headerField + "]";
+    }
+
     /** An RFC 9110 token character, as a field name consists of. */
     private static boolean tokenChar(int c) {
         return c > 0x20 && c < 0x7f && "\"(),/:;<=>?@[\\]{}".indexOf(c) < 0;
@@ -85,8 +100,8 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
 
     /** The header form of a fresh token: {@link #headerField()} with the token in base64url without padding. */
     @Override
-    public Credential.HeaderField header(Admission.CarrierInfo info) throws java.io.IOException {
-        return new Credential.HeaderField(headerField, Base64.getUrlEncoder().withoutPadding().encodeToString(prefix(info)));
+    public CarrierCredential.HeaderField header(Admission.CarrierInfo info) throws java.io.IOException {
+        return new CarrierCredential.HeaderField(headerField, Base64.getUrlEncoder().withoutPadding().encodeToString(prefix(info)));
     }
 
     /**
@@ -208,7 +223,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
                 if (MessageDigest.isEqual(tag(m, s, b, token, 0), got)) { found = true; at = s; }
             }
             if (!found) return false;
-            return nonces.check(java.util.Arrays.copyOf(token, NONCE), at * slot * 1000) == ReplayFilter.Verdict.FRESH;
+            return nonces.check(java.util.Arrays.copyOf(token, NONCE), at * slot * 1000) == ReplayVerdict.FRESH;
         }
 
         @Override public java.util.concurrent.CompletionStage<Admission.Decision> decide(Admission.CarrierInfo info, ByteBuffer prefix,

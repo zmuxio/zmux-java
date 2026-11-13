@@ -6,7 +6,7 @@ import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.internal.wire.FrameType;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(60)
 class LivenessTest {
     static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b) {
-        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
+        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     /**
@@ -27,9 +27,9 @@ class LivenessTest {
      */
     @Test void aDeadTimeoutBelowTheSuspicionFailsTheLastPipeInTheSamePass() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()
-                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1))
-                            .suspectFloor(Duration.ofSeconds(2)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noKeepAlive().probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1)).suspectFloor(Duration.ofSeconds(2)).build())
+                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
+                            .build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(relay.address(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 relay.blackhole = true;
@@ -50,13 +50,13 @@ class LivenessTest {
      */
     @Test void anEndWithProbesOffAnswersWithAProbeOfItsOwn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()).probeJitter(0).build();
-            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops).disableKeepAlive()).disableIdleProbes().build();
+            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().probeJitter(0).noKeepAlive().build())).build();
+            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noProbeInterval().noKeepAlive().build())).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(scfg));
                  var client = Zmux.connect(listener.localAddress(), ccfg); var server = listener.accept(Duration.ofSeconds(5))) {
-                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(2)).build());
+                var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(2)).build()).build());
                 Thread.sleep(1000);
-                ZmuxPipe peer = server.pipes().stream().filter(p -> p.id() == pipe.id()).findFirst().orElseThrow();
+                ZmuxPipe peer = server.pipes().stream().filter(p -> p.id().value() == pipe.id().value()).findFirst().orElseThrow();
                 long before = peer.stats().orElseThrow().pingsSent();
                 Thread.sleep(7000);
                 long answers = peer.stats().orElseThrow().pingsSent() - before;
@@ -116,7 +116,7 @@ class LivenessTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).recordPolicy(c -> RecordMode.TRUSTED).build();
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).allowRecordMode((c, m, p) -> true).shaper(ShapingTest.firstDelay(30_000_000, false)).build();
-            try (var l = Zmux.listener(ListenerConfig.of(scfg))) {
+            try (var l = ZmuxListener.of(ListenerConfig.of(scfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                 try (var c = Zmux.open(boot[0], Role.CLIENT, ccfg); var s = l.accept(Duration.ofSeconds(5))) {

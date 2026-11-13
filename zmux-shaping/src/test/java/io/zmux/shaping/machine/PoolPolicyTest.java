@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 
 class PoolPolicyTest {
     static MachinePoolPolicy policy(String json) throws DefinitionException {
-        return Machines.poolPolicy(json.getBytes(StandardCharsets.UTF_8), Options.defaults());
+        return Machines.poolPolicy(json.getBytes(StandardCharsets.UTF_8), MachineOptions.defaults());
     }
 
     static Metrics member(long id, long age, long idle, long pipes, long sent, long received) {
@@ -72,9 +72,9 @@ class PoolPolicyTest {
     @Test void decisionMapsToThePool() throws Exception {
         var p = policy("{\"count\":2,\"dial_after\":[250000],\"retire\":[{\"metric\":\"bytes\",\"above\":10}]}");
         var d = p.decide(new PoolPolicy.View(List.of(
-                new PoolPolicy.Member(4, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false),
-                new PoolPolicy.Member(5, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false)), 0, null));
-        assertEquals(PoolPolicy.Decision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(250)).withRetire(Set.of(4L)), d);
+                new PoolPolicy.Member(io.zmux.PipeId.of(4), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false),
+                new PoolPolicy.Member(io.zmux.PipeId.of(5), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false)), 0, null));
+        assertEquals(PoolPolicy.Decision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(250)).withRetirePipes(Set.of(io.zmux.PipeId.of(4))), d);
     }
 
     @Test void aProbeIntervalBelowOneSecondIsRejectedNotRaised() throws Exception {

@@ -1,11 +1,11 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.AUTH;
-import static io.zmux.carrier.SecureCarrierException.Code.BAD_CONFIRM;
-import static io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE;
-import static io.zmux.carrier.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.carrier.SecureCarrierException.Code.TOO_LARGE;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.AUTH;
+import static io.zmux.seal.SecureCarrierException.Code.BAD_CONFIRM;
+import static io.zmux.seal.SecureCarrierException.Code.INCOMPLETE;
+import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
 
 import java.security.MessageDigest;
 import java.util.Arrays;

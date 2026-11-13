@@ -26,7 +26,7 @@ class PipePoolTest {
                 && (state.inbound() == null || state.inbound() == PipeState.Inbound.ENDED)).orElse(true);
     }
     static ZmuxConfig config(EventLoops loops, int cap) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(cap).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(cap).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
     }
     static PipePool fast(PipePool.Dial dial) {
         return PipePool.of(dial).withInspectionInterval(Duration.ofMillis(5))
@@ -35,7 +35,7 @@ class PipePoolTest {
     static final class Fixture implements AutoCloseable {
         final ZmuxListener listener; final ZmuxSession client, server;
         Fixture(ZmuxConfig cfg) throws Exception {
-            listener = Zmux.listener(ListenerConfig.of(cfg)); var io = MemoryPipe.pair(Framing.BYTE_STREAM);
+            listener = ZmuxListener.of(ListenerConfig.of(cfg)); var io = MemoryPipe.pair(Framing.BYTE_STREAM);
             listener.handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed(); client = Zmux.open(io[0], Role.CLIENT, cfg);
             server = listener.accept(Duration.ofSeconds(3));
         }
@@ -58,8 +58,8 @@ class PipePoolTest {
                 }).withCount(2);
                 var maintenance = client.maintainPipes(pool, cancel);
                 await(() -> maintenance.pipes().size() == 2);
-                long old = maintenance.pipes().getFirst().id(); maintenance.pipes().getFirst().abort();
-                await(() -> maintenance.pipes().size() == 2 && maintenance.pipes().stream().noneMatch(p -> p.id() == old));
+                long old = maintenance.pipes().getFirst().id().value(); maintenance.pipes().getFirst().abort();
+                await(() -> maintenance.pipes().size() == 2 && maintenance.pipes().stream().noneMatch(p -> p.id().value() == old));
                 try (var stream = client.openStream()) {
                     stream.write(new byte[] {1, 2, 3}); stream.finish();
                     try (var peer = server.acceptStream()) { assertArrayEquals(new byte[] {1, 2, 3}, SessionTest.readAll(peer)); peer.finish(); }
@@ -98,7 +98,7 @@ class PipePoolTest {
                 await(() -> maintenance.pipes().size() == 2);
                 var replacement = maintenance.pipes().get(1);
                 assertTrue(replacement.stats().orElseThrow().inProbation()); assertEquals(PipeState.Outbound.ACTIVE, original.stats().orElseThrow().outbound());
-                await(() -> maintenance.pipes().getFirst().id() != original.id());
+                await(() -> maintenance.pipes().getFirst().id().value() != original.id().value());
                 assertFalse(maintenance.pipes().getFirst().stats().orElseThrow().inProbation());
             } finally { maintenance.close(); maintenance.completion().toCompletableFuture().get(3, TimeUnit.SECONDS); }
         }
@@ -149,8 +149,8 @@ class PipePoolTest {
             try {
                 await(() -> run.pipes().size() == 1); var original = run.pipes().getFirst();
                 JoinAttackTest.attached(f.server, original);
-                for (ZmuxPipe q : f.client.pipes()) if (q.id() == 0) q.abort();
-                await(() -> !run.pipes().isEmpty() && run.pipes().getFirst().id() != original.id());
+                for (ZmuxPipe q : f.client.pipes()) if (q.id().value() == 0) q.abort();
+                await(() -> !run.pipes().isEmpty() && run.pipes().getFirst().id().value() != original.id().value());
                 assertFalse(f.client.isClosed(), "rotation retired the last pipe the acceptor had: " + f.client.error());
                 assertFalse(f.server.isClosed(), "acceptor closed: " + f.server.error());
                 assertNotNull(f.client.ping());
@@ -322,9 +322,9 @@ class PipePoolTest {
                     .withAttemptTimeout(Duration.ofSeconds(10)));
             try {
                 assertTrue(rotating.await(3, TimeUnit.SECONDS)); assertEquals(2, run.pipes().size());
-                long lost = run.pipes().get(1).id(); run.pipes().get(1).abort();
+                long lost = run.pipes().get(1).id().value(); run.pipes().get(1).abort();
                 assertTrue(yielded.await(2, TimeUnit.SECONDS)); assertTrue(repaired.await(2, TimeUnit.SECONDS));
-                await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id() == lost));
+                await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id().value() == lost));
             } finally { run.close(); run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS); }
         }
     }
@@ -405,11 +405,11 @@ class PipePoolTest {
             try {
                 await(() -> waiter.getState() == Thread.State.WAITING); waiter.interrupt();
                 assertThrows(TimeoutException.class, () -> finished.get(50, TimeUnit.MILLISECONDS));
-                publication.complete(created.id());
+                publication.complete(created.id().value());
                 assertInstanceOf(java.io.InterruptedIOException.class, finished.get(2, TimeUnit.SECONDS));
                 waiter.join(); assertTrue(interrupted.get());
                 inactive(created);
-            } finally { publication.complete(created.id()); waiter.interrupt(); waiter.join(); }
+            } finally { publication.complete(created.id().value()); waiter.interrupt(); waiter.join(); }
         }
     }
 
@@ -425,7 +425,7 @@ class PipePoolTest {
             try {
                 await(() -> run.pipes().size() == 2); var healthy = run.pipes().getFirst(); var lost = run.pipes().get(1);
                 await(() -> run.pipes().size() == 3); lost.abort();
-                await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id() == lost.id()));
+                await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id().value() == lost.id().value()));
                 assertEquals(PipeState.Outbound.ACTIVE, healthy.stats().orElseThrow().outbound());
             } finally {
                 run.close(); assertEquals(0, run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).rotations());
@@ -473,7 +473,7 @@ class PipePoolTest {
                 await(() -> !replacement.stats().orElseThrow().inProbation()); assertTrue(replacement.stats().orElseThrow().revalidating());
                 Thread.sleep(30); assertEquals(PipeState.Outbound.ACTIVE, original.stats().orElseThrow().outbound());
                 assertEquals(2, run.pipes().size()); held.get().release();
-                await(() -> run.pipes().getFirst().id() == replacement.id());
+                await(() -> run.pipes().getFirst().id().value() == replacement.id().value());
                 assertFalse(replacement.stats().orElseThrow().revalidating());
             } finally {
                 if (held.get() != null) held.get().release();

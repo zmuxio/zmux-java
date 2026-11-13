@@ -19,7 +19,7 @@ class EpochTest {
     }
 
     private static ZmuxConfig.Builder builder(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO)
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                 .resumeTimeout(Duration.ofSeconds(10));
     }
 
@@ -59,16 +59,20 @@ class EpochTest {
         }
     }
 
-    /** Zero is the default of the period and of the count, and a negative value turns either off. */
-    @Test void zeroIsTheDefaultAndNegativeIsOff() {
-        var b = ZmuxConfig.builder().epochPeriod(Duration.ZERO).epochJoins(0);
-        assertEquals(Duration.ZERO, b.build().epochPeriod().orElseThrow());
-        var off = ZmuxConfig.builder().epochPeriod(Duration.ofSeconds(-1)).epochJoins(-1).epochAfterFirstPipe(false).epochAfterResume(false).build();
-        assertEquals(-1, off.epochJoins());
-        assertEquals(false, off.epochAfterFirstPipe());
-        assertEquals(false, off.epochAfterResume());
-        assertEquals(true, ZmuxConfig.builder().build().epochAfterFirstPipe());
-        assertEquals(true, ZmuxConfig.builder().build().epochAfterResume());
+    /** The period and the count have defaults and are turned off with their own methods; zero and negative values are rejected. */
+    @Test void defaultsAndOffSettings() {
+        var d = ZmuxConfig.defaults();
+        assertEquals(java.util.Optional.of(Duration.ofHours(1)), d.epochPeriod());
+        assertEquals(java.util.OptionalLong.of(65536), d.epochJoins());
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().epochPeriod(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().epochJoins(0));
+        var off = ZmuxConfig.builder().noEpochPeriod().noEpochJoins().epochAfterFirstPipe(false).epochAfterResume(false).build();
+        assertEquals(java.util.Optional.empty(), off.epochPeriod());
+        assertEquals(java.util.OptionalLong.empty(), off.epochJoins());
+        assertEquals(false, off.isEpochAfterFirstPipe());
+        assertEquals(false, off.isEpochAfterResume());
+        assertEquals(true, ZmuxConfig.builder().build().isEpochAfterFirstPipe());
+        assertEquals(true, ZmuxConfig.builder().build().isEpochAfterResume());
     }
 
     /**
@@ -97,11 +101,11 @@ class EpochTest {
         }
     }
 
-    @Test void forceNeedsRedialAndAdvanceNeedsMultipath() throws Exception {
+    @Test void replacePipesNeedsRedialAndAdvanceNeedsMultipath() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
-                assertThrows(IllegalStateException.class, () -> c.forceEpochAdvance(WAIT));
+                assertThrows(IllegalStateException.class, () -> c.replacePipes(WAIT));
             }
             var single = ZmuxConfig.builder().eventLoops(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(single)); var c = Zmux.connect(l.localAddress(), single); var s = l.accept(WAIT)) {
@@ -110,10 +114,10 @@ class EpochTest {
         }
     }
 
-    /** A forced advance waits for the new epoch, then replaces every carrier through the redial hook. */
-    @Test void forceAdvanceWaitsForTheEpochAndRedials() throws Exception {
+    /** Replacing the pipes waits for the new epoch, then replaces every pipe through the redial hook. */
+    @Test void replacePipesWaitsForTheEpochAndRedials() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
+            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
             var dials = new java.util.concurrent.atomic.AtomicInteger();
             var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
                 dials.incrementAndGet();
@@ -129,9 +133,68 @@ class EpochTest {
                     listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
                     c.addPipe(joined[0], PipeOptions.defaults());
                     ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    c.forceEpochAdvance(WAIT);
+                    c.replacePipes(WAIT).get(WAIT.toMillis() * 2, java.util.concurrent.TimeUnit.MILLISECONDS);
                     assertEquals(1, c.epoch());
                     assertEquals(2, dials.get());
+                }
+            }
+        }
+    }
+
+    /** replacePipes' timeout bounds the joins of the replacements, not only the dials. */
+    @Test void replacePipesTimeoutBoundsTheJoin() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
+            var client = builder(loops).epochAfterFirstPipe(false).joinTimeout(Duration.ofSeconds(20)).redial((need, cancellation) -> {
+                return MemoryPipe.pair(Framing.BYTE_STREAM)[0]; // nobody answers its Hello
+            }).build();
+            try (listener) {
+                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
+                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
+                try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
+                    var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
+                    c.addPipe(joined[0], PipeOptions.defaults());
+                    ListenerEntryTest.await(() -> s.pipes().size() == 2);
+                    long t0 = System.nanoTime();
+                    var e = assertThrows(java.util.concurrent.ExecutionException.class,
+                            () -> c.replacePipes(Duration.ofMillis(500)).get(10, java.util.concurrent.TimeUnit.SECONDS));
+                    org.junit.jupiter.api.Assertions.assertInstanceOf(java.net.SocketTimeoutException.class, e.getCause());
+                    long ms = (System.nanoTime() - t0) / 1_000_000;
+                    org.junit.jupiter.api.Assertions.assertTrue(ms < 3_000, "took " + ms + " ms");
+                }
+            }
+        }
+    }
+
+    /** Cancelling replacePipes signals the redial hook's cancellation, so a dial in progress can stop. */
+    @Test void cancellingReplacePipesSignalsTheRedialHook() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
+            var dialing = new java.util.concurrent.CountDownLatch(1);
+            var signalled = new java.util.concurrent.CountDownLatch(1);
+            var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
+                cancellation.onCancel(signalled::countDown);
+                dialing.countDown();
+                // A dial that ignores interrupts and stops only on its cancellation.
+                while (true) {
+                    try { if (signalled.await(10, java.util.concurrent.TimeUnit.SECONDS)) break; }
+                    catch (InterruptedException e) { /* Keep dialing. */ }
+                }
+                throw new java.io.IOException("dial cancelled");
+            }).build();
+            try (listener) {
+                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
+                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
+                try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
+                    var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
+                    c.addPipe(joined[0], PipeOptions.defaults());
+                    ListenerEntryTest.await(() -> s.pipes().size() == 2);
+                    var f = c.replacePipes(WAIT);
+                    org.junit.jupiter.api.Assertions.assertTrue(dialing.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
+                    f.cancel(true);
+                    org.junit.jupiter.api.Assertions.assertTrue(signalled.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
                 }
             }
         }

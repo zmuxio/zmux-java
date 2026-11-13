@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportError;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 
 /**

@@ -23,7 +23,7 @@ class SecureCarrierTcpTest {
     private static final Duration WAIT = Duration.ofSeconds(5);
 
     private static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b, PipeAuth auth) {
-        return b.maxPipes(4).pipeAuth(auth).probation(Duration.ZERO);
+        return b.maxPipes(4).pipeAuth(auth).noProbation();
     }
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
@@ -51,12 +51,12 @@ class SecureCarrierTcpTest {
 
     /** The bootstrap pipe dies, so that the data can go only over the added pipe. */
     private static void addedPipeCarries(ZmuxSession c, ZmuxSession s, ZmuxPipe added, RecordMode mode) throws Exception {
-        assertTrue(added.id() > 0);
+        assertTrue(added.id().value() > 0);
         ListenerEntryTest.await(() -> s.pipes().size() == 2);
-        assertEquals(mode, c.pipeStats().stream().filter(p -> p.pipe() == added.id()).findFirst().orElseThrow().recordMode());
-        assertEquals(mode, s.pipeStats().stream().filter(p -> p.pipe() == added.id()).findFirst().orElseThrow().recordMode());
-        c.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
-        ListenerEntryTest.await(() -> c.pipes().stream().noneMatch(p -> p.id() == 0));
+        assertEquals(mode, c.pipeStats().stream().filter(p -> p.pipeId().equals(added.id())).findFirst().orElseThrow().recordMode());
+        assertEquals(mode, s.pipeStats().stream().filter(p -> p.pipeId().equals(added.id())).findFirst().orElseThrow().recordMode());
+        c.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
+        ListenerEntryTest.await(() -> c.pipes().stream().noneMatch(p -> p.id().value() == 0));
         bidi(c, s, 1 << 18);
     }
 
@@ -78,7 +78,7 @@ class SecureCarrierTcpTest {
                 addedPipeCarries(c, s, c.addPipe(l.localAddress(), PipeOptions.defaults()), RecordMode.TRUSTED);
             }
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(strict)); var c = Zmux.connect(l.localAddress(), strict); var s = l.accept(WAIT)) {
-                var trusted = PipeOptions.builder().mode(RecordMode.TRUSTED).build();
+                var trusted = PipeOptions.builder().recordMode(RecordMode.TRUSTED).build();
                 assertThrows(IOException.class, () -> c.addPipe(l.localAddress(), trusted));
                 ListenerEntryTest.await(() -> l.stats().rejected() == 1);
                 bidi(c, s, 1 << 10);
@@ -92,7 +92,7 @@ class SecureCarrierTcpTest {
             var tls = TlsOptions.client(TestTls.client(), "localhost").withSecure();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()).withSecure()).build());
                  var c = Zmux.connectTls(l.localAddress(), tls, cfg); var s = l.accept(WAIT)) {
-                var bound = PipeOptions.builder().mode(RecordMode.BOUND).build();
+                var bound = PipeOptions.builder().recordMode(RecordMode.BOUND).build();
                 addedPipeCarries(c, s, c.addTlsPipe(l.localAddress(), tls, bound), RecordMode.BOUND);
                 assertThrows(Exception.class, () -> c.addPipe(l.localAddress(), bound), "no Secure declaration");
             }
@@ -131,7 +131,7 @@ class SecureCarrierTcpTest {
                 assertEquals(0, readToEnd(ch));
                 assertEquals(1, infos.size());
                 assertEquals("unknown_locator", infos.getFirst().reason());
-                assertEquals(RecordMode.SEALED, infos.getFirst().mode());
+                assertEquals(RecordMode.SEALED, infos.getFirst().recordMode());
             }
             var stall = ListenerConfig.builder().session(cfg).onReject(i -> RejectInfo.Action.STALL).build();
             try (var l = Zmux.listen(NetworkTest.any(), stall); SocketChannel ch = SocketChannel.open(l.localAddress())) {

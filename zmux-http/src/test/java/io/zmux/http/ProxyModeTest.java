@@ -4,8 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.Candidate;
 import io.zmux.CandidateOutcome;
 import io.zmux.CarrierKind;
-import io.zmux.CarrierMode;
-import io.zmux.ModeException;
+import io.zmux.CarrierChoice;
+import io.zmux.CarrierChoiceException;
 import io.zmux.SessionEvent;
 import io.zmux.Zmux;
 import io.zmux.ZmuxSession;
@@ -37,7 +37,7 @@ class ProxyModeTest {
             for (Case k : cases) {
                 try (TestProxy px = k.profile == null ? null : new TestProxy(f.base, k.profile)) {
                     URI url = px == null ? f.base : px.base;
-                    try (var s = Zmux.dial(CarrierMode.auto(ModeHttpTest.candidates(c, url)), f.config, ModeHttpTest.fast(true))) {
+                    try (var s = Zmux.dial(CarrierChoice.auto(ModeHttpTest.candidates(c, url)), f.config, ModeHttpTest.fast(true))) {
                         var tries = s.stats().carrierCandidates();
                         assertEquals(k.want, s.stats().carrier(), k.name + ": " + ModeHttpTest.tries(s));
                         assertEquals(k.tries, tries.size(), k.name + ": " + ModeHttpTest.tries(s));
@@ -66,7 +66,7 @@ class ProxyModeTest {
             List<Candidate> all = ModeHttpTest.candidates(c, px.base);
             // WebSocket last; the exchange carrier, refused, fails at its deadline.
             List<Candidate> order = List.of(all.get(1), all.get(2), all.get(3), all.get(0));
-            try (var s = Zmux.dial(CarrierMode.auto(order), f.config, ModeHttpTest.fast(true))) {
+            try (var s = Zmux.dial(CarrierChoice.auto(order), f.config, ModeHttpTest.fast(true))) {
                 assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier(), ModeHttpTest.tries(s).toString());
                 var tries = s.stats().carrierCandidates();
                 assertEquals(4, tries.size());
@@ -86,13 +86,13 @@ class ProxyModeTest {
             var wc = ModeHttpTest.candidates(c, ws.base);
             var policy = ModeHttpTest.fast(true);
             for (Candidate k : List.of(nc.get(0), nc.get(1), nc.get(2), wc.get(3))) {
-                var e = assertThrows(ModeException.class, () -> Zmux.dial(CarrierMode.explicit(k), f.config, policy), k.kind().toString());
+                var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(k), f.config, policy), k.kind().toString());
                 assertEquals(1, e.results().size(), k.kind() + ": " + e.results());
                 assertEquals(k.kind(), e.results().getFirst().kind());
                 assertNotEquals(CandidateOutcome.USABLE, e.results().getFirst().outcome());
             }
             // Explicit and passing: nothing else is tried.
-            try (ZmuxSession s = Zmux.dial(CarrierMode.explicit(nc.get(3)), f.config, policy)) {
+            try (ZmuxSession s = Zmux.dial(CarrierChoice.explicit(nc.get(3)), f.config, policy)) {
                 assertEquals(CarrierKind.EXCHANGE, s.stats().carrier());
                 assertEquals(1, s.stats().carrierCandidates().size());
                 f.echo(s);

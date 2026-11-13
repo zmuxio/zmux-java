@@ -31,13 +31,13 @@ class QuicServeTest {
                     .admission(Admission.of(0, Admission.Decider.immediate((i, p) -> { decisions.incrementAndGet(); return Admission.Decision.accept(0, "q"); })))
                     .build();
             var served = new CompletableFuture<java.util.concurrent.CompletionStage<Void>>();
-            try (var listener = Zmux.listener(lc)) {
+            try (var listener = ZmuxListener.of(lc)) {
                 QuicOptions options = QuicOptions.defaults();
                 ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
                         .handler(new ChannelInboundHandlerAdapter() {
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                 if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
-                                    served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null));
+                                    served.complete(QuicServer.serveAsync((QuicChannel) ctx.channel(), options, listener, null));
                                 ctx.fireUserEventTriggered(evt);
                             }
                             @Override public boolean isSharable() { return true; }
@@ -46,7 +46,7 @@ class QuicServeTest {
                 Channel udp = new Bootstrap().group(group).channel(NioDatagramChannel.class).handler(codec)
                         .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
                 try (var endpoint = new QuicClient(TestTls.client, options)) {
-                    ZmuxSession client = endpoint.connect((InetSocketAddress) udp.localAddress(), "localhost", config)
+                    ZmuxSession client = endpoint.connectAsync((InetSocketAddress) udp.localAddress(), "localhost", config)
                             .toCompletableFuture().get(10, TimeUnit.SECONDS);
                     ZmuxSession accepted = listener.accept(Duration.ofSeconds(10));
                     assertNotNull(accepted);

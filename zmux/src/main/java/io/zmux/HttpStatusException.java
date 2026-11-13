@@ -1,12 +1,11 @@
 package io.zmux;
 
-import java.io.IOException;
 
 /**
  * An HTTP carrier's request was answered with a status other than 2xx: the server or an
  * intermediary refused the carrier.
  */
-public final class HttpStatusException extends IOException {
+public final class HttpStatusException extends ZmuxException {
     private final int status;
 
     public HttpStatusException(int status, String reason) {

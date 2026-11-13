@@ -1,6 +1,5 @@
 package io.zmux;
 
-import java.io.IOException;
 
 /**
  * A redirect that an HTTP carrier did not follow: to another host, a downgrade from https to
@@ -8,7 +7,7 @@ import java.io.IOException;
  * a POST into a GET, past the bound of hops, after more uplink bytes than a repeat can resend, or
  * without a valid Location. A mode dialer counts the candidate as refused.
  */
-public final class HttpRedirectException extends IOException {
+public final class HttpRedirectException extends ZmuxException {
     private final int status;
     private final String location;
     private final String reason;

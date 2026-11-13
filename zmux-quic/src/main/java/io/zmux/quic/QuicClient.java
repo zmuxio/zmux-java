@@ -11,6 +11,7 @@ import io.zmux.Zmux;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxListener;
 import io.zmux.Role;
+import io.zmux.ZmuxFuture;
 import io.zmux.ZmuxSession;
 import io.zmux.carrier.PipeIo;
 import java.io.IOException;
@@ -18,7 +19,13 @@ import java.net.InetSocketAddress;
 import java.util.Set;
 import java.util.concurrent.*;
 
-/** Owns family-specific UDP endpoints and their QUIC connections. Close it after the sessions that use it. */
+/**
+ * Owns family-specific UDP endpoints and their QUIC connections. Close it after the sessions that use it.
+ *
+ * <p>A connection closes after the zmux close of its last pipe was delivered or lingered, with
+ * an application close carrying the last session's code. Netty's QUIC close takes a 32-bit
+ * code: a session code above 2<sup>31</sup> - 1 closes the connection with 0.
+ */
 public final class QuicClient implements AutoCloseable {
     private static final AttributeKey<String> HOST = AttributeKey.valueOf(QuicClient.class, "host");
     private final EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
@@ -60,24 +67,24 @@ public final class QuicClient implements AutoCloseable {
 
     /**
      * Starts a zmux session on a fresh QUIC connection and its first bidirectional stream,
-     * which starts with the prefix of {@link ZmuxConfig#credential()}.
+     * which starts with the prefix of {@link ZmuxConfig#carrierCredential()}.
      */
-    public CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName, ZmuxConfig config) {
-        if (listener != null) return CompletableFuture.failedFuture(new IllegalStateException("listener-backed clients use connect(address, serverName)"));
+    public ZmuxFuture<ZmuxSession> connectAsync(InetSocketAddress address, String serverName, ZmuxConfig config) {
+        if (listener != null) return future(CompletableFuture.failedFuture(new IllegalStateException("listener-backed clients use connect(address, serverName)")));
         java.util.Objects.requireNonNull(config);
-        return connect(address, serverName, config.credential(), pipe -> {
+        return future(start(address, serverName, config.carrierCredential().orElse(null), pipe -> {
             if (!config.alpn().contains(pipe.capabilities().applicationProtocol())) throw new javax.net.ssl.SSLHandshakeException("unexpected ALPN");
             return Zmux.open(pipe, Role.CLIENT, config);
-        });
+        }));
     }
 
     /**
      * Starts a joinable session using the bound listener's configuration and routing; the
-     * connection presents that configuration's {@link ZmuxConfig#credential()}.
+     * connection presents that configuration's {@link ZmuxConfig#carrierCredential()}.
      */
-    public CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName) {
-        if (listener == null) return CompletableFuture.failedFuture(new IllegalStateException("no listener bound to QUIC client"));
-        return connect(address, serverName, listener.config().credential(), pipe -> listener.open(pipe, Role.CLIENT));
+    public ZmuxFuture<ZmuxSession> connectAsync(InetSocketAddress address, String serverName) {
+        if (listener == null) return future(CompletableFuture.failedFuture(new IllegalStateException("no listener bound to QUIC client")));
+        return future(start(address, serverName, listener.config().carrierCredential().orElse(null), pipe -> listener.open(pipe, Role.CLIENT)));
     }
 
     @FunctionalInterface private interface SessionFactory { ZmuxSession start(PipeIo pipe) throws IOException; }
@@ -85,12 +92,12 @@ public final class QuicClient implements AutoCloseable {
      * As {@link #connect(InetSocketAddress, String, ZmuxConfig)} with a layer that runs on the first stream before the
      * session does, such as an Establish ({@code p -> Seal.establish(p, cfg)}); the layer bounds its own time.
      */
-    public CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName, ZmuxConfig config,
+    public ZmuxFuture<ZmuxSession> connectAsync(InetSocketAddress address, String serverName, ZmuxConfig config,
                                                 java.util.function.Function<PipeIo, CompletionStage<PipeIo>> layer) {
-        if (listener != null) return CompletableFuture.failedFuture(new IllegalStateException("listener-backed clients use connect(address, serverName)"));
+        if (listener != null) return future(CompletableFuture.failedFuture(new IllegalStateException("listener-backed clients use connect(address, serverName)")));
         java.util.Objects.requireNonNull(config);
         java.util.Objects.requireNonNull(layer);
-        return connect(address, serverName, config.credential(), pipe -> {
+        return future(start(address, serverName, config.carrierCredential().orElse(null), pipe -> {
             try {
                 return Zmux.open(layer.apply(pipe).toCompletableFuture().get(), Role.CLIENT, config);
             } catch (InterruptedException e) {
@@ -99,15 +106,15 @@ public final class QuicClient implements AutoCloseable {
             } catch (java.util.concurrent.ExecutionException e) {
                 throw new IOException(e.getCause());
             }
-        });
+        }));
     }
 
-    private CompletionStage<ZmuxSession> connect(InetSocketAddress address, String serverName, io.zmux.Credential credential,
+    private CompletionStage<ZmuxSession> start(InetSocketAddress address, String serverName, io.zmux.CarrierCredential credential,
                                                  SessionFactory factory) {
         CompletableFuture<ZmuxSession> result = track(new CompletableFuture<>());
         CompletableFuture<ZmuxSession> notified = ConnectionCarrier.offLoop(result, completions, ZmuxSession::close);
         if (result.isDone()) return notified;
-        CompletionStage<ConnectionCarrier> establishing = connectCarrier(address, serverName, credential);
+        CompletionStage<ConnectionCarrier> establishing = connectCarrier(address, serverName, credential, ConnectionCarrier.DEDICATED);
         result.whenComplete((value, failure) -> { if (failure != null) establishing.toCompletableFuture().cancel(false); });
         establishing.whenComplete((carrier, error) -> {
             if (error != null) { result.completeExceptionally(error); return; }
@@ -135,23 +142,23 @@ public final class QuicClient implements AutoCloseable {
     }
 
     /** Opens a pipe on a fresh connection for an existing session's addPipe call, without a credential. */
-    public CompletionStage<PipeIo> openPipe(InetSocketAddress address, String serverName, ZmuxSession owner) {
-        return openPipe(address, serverName, owner, null);
+    public ZmuxFuture<PipeIo> openPipeAsync(InetSocketAddress address, String serverName, ZmuxSession owner) {
+        return openPipeAsync(address, serverName, owner, null);
     }
 
     /**
      * Opens a pipe on a fresh connection for an existing session's addPipe call; the pipe, the
      * connection's first stream, starts with credential's prefix (null: none).
      */
-    public CompletionStage<PipeIo> openPipe(InetSocketAddress address, String serverName, ZmuxSession owner,
-                                            io.zmux.Credential credential) {
+    public ZmuxFuture<PipeIo> openPipeAsync(InetSocketAddress address, String serverName, ZmuxSession owner,
+                                            io.zmux.CarrierCredential credential) {
         CompletableFuture<PipeIo> result = track(new CompletableFuture<>());
         CompletableFuture<PipeIo> notified = ConnectionCarrier.offLoop(result, completions, pipe -> {
             if (pipe.reader() != null) pipe.reader().close();
             if (pipe.writer() != null) pipe.writer().abort(new IOException("QUIC operation cancelled"));
         });
-        if (result.isDone()) return notified;
-        CompletionStage<ConnectionCarrier> establishing = connectCarrier(address, serverName, credential);
+        if (result.isDone()) return future(notified);
+        CompletionStage<ConnectionCarrier> establishing = connectCarrier(address, serverName, credential, ConnectionCarrier.DEDICATED);
         result.whenComplete((value, failure) -> { if (failure != null) establishing.toCompletableFuture().cancel(false); });
         establishing.whenComplete((carrier, failure) -> {
             if (failure != null) { result.completeExceptionally(failure); return; }
@@ -164,7 +171,7 @@ public final class QuicClient implements AutoCloseable {
                 else if (!result.complete(pipe)) carrier.channel().close();
             });
         });
-        return notified;
+        return future(notified);
     }
 
     private <T> CompletableFuture<T> track(CompletableFuture<T> result) {
@@ -174,8 +181,11 @@ public final class QuicClient implements AutoCloseable {
         return result;
     }
 
-    /** A new connection to address; its first bidirectional stream starts with credential's prefix (null: none). */
-    CompletionStage<ConnectionCarrier> connectCarrier(InetSocketAddress address, String host, io.zmux.Credential credential) {
+    /**
+     * A new connection to address; its first bidirectional stream starts with credential's prefix
+     * (null: none); closing tells who closes it once its last pipe ended.
+     */
+    CompletionStage<ConnectionCarrier> connectCarrier(InetSocketAddress address, String host, io.zmux.CarrierCredential credential, int closing) {
         CompletableFuture<ConnectionCarrier> result = track(new CompletableFuture<>());
         if (result.isDone()) return result;
         final InetSocketAddress target;
@@ -183,6 +193,7 @@ public final class QuicClient implements AutoCloseable {
         catch (RuntimeException error) { result.completeExceptionally(error); return result; }
         ConnectionCarrier carrier = new ConnectionCarrier(options, listener, null, this.host, completions, credential,
                 literal(host) ? "" : host);
+        carrier.closing(closing);
         result.whenComplete((value, error) -> { if (error != null) carrier.dispose(); });
         SocketProtocolFamily family = target.getAddress() instanceof java.net.Inet6Address
                 ? SocketProtocolFamily.INET6 : SocketProtocolFamily.INET;
@@ -271,10 +282,57 @@ public final class QuicClient implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) return;
         for (CompletableFuture<?> operation : pending) operation.completeExceptionally(new IOException("QUIC endpoint closed"));
         workers.shutdownNow();
-        for (QuicChannel connection : connections) connection.close();
+        for (QuicChannel connection : connections) ConnectionCarrier.close(connection);
         for (var endpoint : datagrams.values()) endpoint.whenComplete((channel,error) -> { if (channel != null) channel.close(); });
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
         if (!ChannelLoops.inLoop(nativeLoop())) termination.awaitUninterruptibly();
+    }
+
+    /** stage as a ZmuxFuture; cancelling it cancels stage. */
+    static <T> ZmuxFuture<T> future(CompletionStage<T> stage) {
+        return io.zmux.internal.spi.Spi.future(stage, () -> stage.toCompletableFuture().cancel(false));
+    }
+
+    /** f's result, waiting for it. */
+    static <T> T await(ZmuxFuture<T> f) throws IOException {
+        try {
+            return f.get();
+        } catch (InterruptedException e) {
+            f.cancel(false);
+            Thread.currentThread().interrupt();
+            throw new java.io.InterruptedIOException("interrupted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable c = e.getCause();
+            if (c instanceof IOException io) throw io;
+            if (c instanceof RuntimeException r) throw r;
+            throw new IOException(c);
+        }
+    }
+
+    /** {@link #connectAsync(InetSocketAddress, String, ZmuxConfig)}, waiting for the session. */
+    public ZmuxSession connect(InetSocketAddress address, String serverName, ZmuxConfig config) throws IOException {
+        return await(connectAsync(address, serverName, config));
+    }
+
+    /** {@link #connectAsync(InetSocketAddress, String)}, waiting for the session. */
+    public ZmuxSession connect(InetSocketAddress address, String serverName) throws IOException {
+        return await(connectAsync(address, serverName));
+    }
+
+    /** {@link #connectAsync(InetSocketAddress, String, ZmuxConfig, java.util.function.Function)}, waiting for the session. */
+    public ZmuxSession connect(InetSocketAddress address, String serverName, ZmuxConfig config,
+                               java.util.function.Function<PipeIo, CompletionStage<PipeIo>> layer) throws IOException {
+        return await(connectAsync(address, serverName, config, layer));
+    }
+
+    /** {@link #openPipeAsync(InetSocketAddress, String, ZmuxSession)}, waiting for the pipe input. */
+    public PipeIo openPipe(InetSocketAddress address, String serverName, ZmuxSession owner) throws IOException {
+        return await(openPipeAsync(address, serverName, owner));
+    }
+
+    /** {@link #openPipeAsync(InetSocketAddress, String, ZmuxSession, io.zmux.CarrierCredential)}, waiting for the pipe input. */
+    public PipeIo openPipe(InetSocketAddress address, String serverName, ZmuxSession owner, io.zmux.CarrierCredential credential) throws IOException {
+        return await(openPipeAsync(address, serverName, owner, credential));
     }
 }

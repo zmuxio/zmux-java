@@ -1,6 +1,6 @@
 package io.zmux.internal.core;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 
 /** A record's length on the carrier against its frames bytes. */
 final class WireLength {

@@ -8,7 +8,7 @@ import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameKind;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;

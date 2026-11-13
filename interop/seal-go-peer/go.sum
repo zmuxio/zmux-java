@@ -1,0 +1,14 @@
+github.com/djylb/netx v0.0.0-20261107123044-7640ba4c50af h1:7AftwubxQYl3SxbEVOEq0/LpPrZP20Hs+55YTsAM3d4=
+github.com/djylb/netx v0.0.0-20261107123044-7640ba4c50af/go.mod h1:8qOo/AF1/Xs8lttgM9zAeDNSPK+vtoMDppEbH6sQabY=
+github.com/djylb/timeshim v0.0.0-20261031100623-0e5ae6a85c7f h1:ApndOPGF7m6Byx+F399FGmNCOgLH6DDZgNyr8MXYokw=
+github.com/djylb/timeshim v0.0.0-20261031100623-0e5ae6a85c7f/go.mod h1:btb4BaMuOhpcFZzNgd0ZiXt621fpdKjgi6uClfmtZek=
+github.com/flynn/noise v1.1.0 h1:KjPQoQCEFdZDiP03phOvGi11+SVVhBG2wOWAorLsstg=
+github.com/flynn/noise v1.1.0/go.mod h1:xbMo+0i6+IGbYdJhF31t2eR1BIU0CYc12+BNAKwUTag=
+github.com/zmuxio/zmux-go v1.4.5-0.20261113164315-b3b7eb4a05d4 h1:DnIPA6+iq+NDyyN3Laxl/6q18Mib7yktORzYYCVC2ss=
+github.com/zmuxio/zmux-go v1.4.5-0.20261113164315-b3b7eb4a05d4/go.mod h1:enzA4U511yIYxAKyEmZDMKryYuzGqeVT0nF5uQRd650=
+github.com/zmuxio/zmux-go/seal v1.4.5-0.20261113170234-4c5ca7f0b61f h1:KbrUAb1CBJ9+QzHBPv4+8LM+QeUJKJrorUo5tvnvFeY=
+github.com/zmuxio/zmux-go/seal v1.4.5-0.20261113170234-4c5ca7f0b61f/go.mod h1:jW1rgKeBuRFnrSDKd2/AGMW7FJHSrqk4sL0HnULbBTc=
+golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
+golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
+golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

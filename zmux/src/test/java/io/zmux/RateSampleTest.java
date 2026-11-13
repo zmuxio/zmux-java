@@ -35,7 +35,7 @@ class RateSampleTest {
     /** A session over one pipe whose client-to-server direction runs through a deep-buffered link. */
     private static Bulk bulk(EventLoops loops, double rate) throws Exception {
         ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
-        var listener = Zmux.listener(ListenerConfig.of(cfg));
+        var listener = ZmuxListener.of(ListenerConfig.of(cfg));
         PipeIo[] io = MemoryPipe.pair(Framing.BYTE_STREAM);
         var up = new SlowPathTest.Link(io[0].writer(), Duration.ofMillis(20), rate, 16 << 20);
         var down = new SlowPathTest.Link(io[1].writer(), Duration.ofMillis(20), 5e6, 16 << 20);

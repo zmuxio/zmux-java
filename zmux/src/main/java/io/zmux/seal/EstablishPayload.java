@@ -1,11 +1,10 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_CREDENTIALS;
-import static io.zmux.carrier.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_CREDENTIALS;
+import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Tlv;
 import java.io.ByteArrayOutputStream;
 
@@ -26,7 +25,6 @@ record EstablishPayload(Credential credential, byte[] appData, byte[] firstBytes
     static final int KNOWN_PROOF = 8;
 
     /** The default bound on the application data of a received message. */
-    static final int DEFAULT_MAX_APP_DATA = 256;
 
     private static final int T_PADDING = 0;
     private static final int T_CREDENTIAL = 1;
@@ -74,17 +72,17 @@ record EstablishPayload(Credential credential, byte[] appData, byte[] firstBytes
 
     /** The value of a credential item: {@code CredType(varint) ‖ Credential}. */
     static byte[] encode(Credential c) throws SecureCarrierException {
-        if (c.type() <= Anchor.CRED_TYPE_NONE || c.type() > io.zmux.carrier.VarInt.MAX) throw new SecureCarrierException(INVALID_CONFIG, "credential type");
+        if (c.type() <= Anchor.CRED_TYPE_NONE || c.type() > io.zmux.internal.wire.VarInt.MAX) throw new SecureCarrierException(INVALID_CONFIG, "credential type");
         ByteArrayOutputStream v = new ByteArrayOutputStream();
         Tlv.putVarint(v, c.type());
-        v.writeBytes(c.data() == null ? new byte[0] : c.data());
+        v.writeBytes(c.raw());
         return v.toByteArray();
     }
 
     /** The length of the encoding without padding: what the message's plaintext holds besides it. */
     int length() {
         int n = 0;
-        if (credential != null) n += item(io.zmux.carrier.VarInt.length(credential.type()) + (credential.data() == null ? 0 : credential.data().length));
+        if (credential != null) n += item(io.zmux.internal.wire.VarInt.length(credential.type()) + credential.raw().length);
         if (hasAppData()) n += item(appData.length);
         if (firstBytes != null) n += item(firstBytes.length);
         if (proof != null) n += item(proof.encode().length);
@@ -92,7 +90,7 @@ record EstablishPayload(Credential credential, byte[] appData, byte[] firstBytes
     }
 
     private static int item(int v) {
-        return 1 + io.zmux.carrier.VarInt.length(v) + v;
+        return 1 + io.zmux.internal.wire.VarInt.length(v) + v;
     }
 
     /**
@@ -112,7 +110,7 @@ record EstablishPayload(Credential credential, byte[] appData, byte[] firstBytes
                 if (val.length == 0) throw new SecureCarrierException(TLV_CREDENTIALS);
                 long t = Tlv.minimalVarint(val, 0, val.length);
                 if (t == Anchor.CRED_TYPE_NONE) throw new SecureCarrierException(TLV_CREDENTIALS, "CredType 0 is no credential");
-                int n = io.zmux.carrier.VarInt.length(t);
+                int n = io.zmux.internal.wire.VarInt.length(t);
                 cred[0] = new Credential(t, java.util.Arrays.copyOfRange(val, n, val.length));
             } else if (type == T_APP_DATA && refuseAppData) {
                 throw new SecureCarrierException(MALFORMED, "application data in an unencrypted message 1");

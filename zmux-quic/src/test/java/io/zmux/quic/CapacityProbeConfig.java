@@ -65,7 +65,7 @@ record CapacityProbeConfig(UdpBottleneck.Config link, int repetitions, int bytes
     }
 
     ZmuxConfig sessionConfig(EventLoops loops, int independentLinks) {
-        var builder = ZmuxConfig.builder().eventLoops(loops).maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(scheduler).probation(Duration.ZERO);
+        var builder = ZmuxConfig.builder().eventLoops(loops).maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(scheduler).noProbation();
         Plan plan = plan(independentLinks);
         if (windows == Windows.BDP) {
             builder.initialStreamReceiveWindow(plan.streamWindow()).maxStreamReceiveWindow(plan.streamWindow())

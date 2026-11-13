@@ -2,9 +2,8 @@ package io.zmux.seal;
 
 import io.zmux.internal.kex.X25519;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
-import io.zmux.carrier.SecureCarrierException;
 import java.security.PrivateKey;
 
 /** An X25519 key pair: a node's or client's static key, or an ephemeral one inside a handshake. */
@@ -23,13 +22,26 @@ public final class StaticKey {
         this.pub = pub;
     }
 
-    /** A new random key, from the operating system's source. */
-    public static StaticKey generate() throws SecureCarrierException {
-        return of(X25519.generate(null));
+    /**
+     * A new random key, from the operating system's source.
+     *
+     * @throws java.io.UncheckedIOException wrapping {@code random_failed} when that source fails
+     */
+    public static StaticKey generate() {
+        try {
+            return random();
+        } catch (SecureCarrierException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
-    /** The key of a 32-byte private scalar. */
-    public static StaticKey of(byte[] scalar) throws SecureCarrierException {
+    /** A new random key; a failure of the source is {@code random_failed}, as a handshake reports it. */
+    static StaticKey random() throws SecureCarrierException {
+        return fromScalar(X25519.generate(null));
+    }
+
+    /** The key of a 32-byte private scalar; another length is {@code invalid_config}. */
+    public static StaticKey fromScalar(byte[] scalar) throws SecureCarrierException {
         if (scalar == null || scalar.length != KEY_LEN) throw new SecureCarrierException(INVALID_CONFIG, "static key");
         PrivateKey priv = X25519.privateKey(scalar);
         return new StaticKey(priv, scalar.clone(), X25519.publicKey(priv));
@@ -43,6 +55,12 @@ public final class StaticKey {
     /** The raw private scalar. */
     public byte[] scalar() {
         return scalar.clone();
+    }
+
+    /** The public key only: the scalar never appears in a string. */
+    @Override
+    public String toString() {
+        return "StaticKey[" + java.util.HexFormat.of().formatHex(pub) + "]";
     }
 
     byte[] publicRaw() {

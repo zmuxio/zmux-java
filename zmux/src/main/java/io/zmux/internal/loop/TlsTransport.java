@@ -360,11 +360,13 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         paused = false;
         if (!started() || inEnded || closed) return;
         if (!feed() || paused || inEnded) return;
+        // Records still held as ciphertext come before a pending end.
+        processInput();
+        if (closed || paused || inEnded) return;
         if (endPending != 0) {
             endInput(endPending == 1);
             return;
         }
-        processInput();
         if (!closed && !paused && !inEnded && key != null && key.isValid()) key.interestOps(key.interestOps() | SelectionKey.OP_READ);
     }
 
@@ -394,6 +396,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
                 netIn.compact();
                 reader.lim = dst.position();
                 if (r.getStatus() == SSLEngineResult.Status.CLOSED) {
+                    netIn.clear(); // Nothing after close_notify is read.
                     if (!feed()) return;
                     endInput(true);
                     return;
@@ -401,6 +404,10 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
                 if (r.getStatus() != SSLEngineResult.Status.OK || r.bytesConsumed() == 0) break;
             }
         } catch (SSLException e) {
+            // The records unwrapped before the bad one still reach the core (a CONNECTION_CLOSE among
+            // them decides how the session ends); the ciphertext after it is worthless.
+            netIn.clear();
+            if (!feed()) return;
             endInput(false);
             return;
         }
@@ -417,7 +424,8 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     private void endInput(boolean graceful) {
-        if (paused && reader.hasPartial()) {
+        // Paused with plaintext or ciphertext not yet delivered: the end waits until resumeInput delivers it.
+        if (paused && (reader.hasPartial() || netIn.position() > 0)) {
             endPending = graceful ? 1 : 2;
             if (key != null && key.isValid()) key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
             return;

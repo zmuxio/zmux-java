@@ -29,8 +29,8 @@ public final class SealTestAccess {
             try {
                 client.readReply(b.array(), 0, b.position());
                 break;
-            } catch (io.zmux.carrier.SecureCarrierException e) {
-                if (e.code() != io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE) throw e;
+            } catch (io.zmux.seal.SecureCarrierException e) {
+                if (e.code() != io.zmux.seal.SecureCarrierException.Code.INCOMPLETE) throw e;
             }
         }
         client.trustPskOnly(null);
@@ -55,6 +55,6 @@ public final class SealTestAccess {
                 return null;
             }
         };
-        return p.withEstablished(RecordMode.TRUSTED, e, null, null);
+        return io.zmux.internal.loop.PipeIoAccess.get().withEstablished(p, RecordMode.TRUSTED, e, null, null);
     }
 }

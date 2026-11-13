@@ -52,7 +52,7 @@ func sessionConfig(sc string) *zmux.Config {
 	c := &zmux.Config{}
 	if multipath(sc) {
 		c.MaxPipes = 4
-		c.AllowRecordMode = func(zmux.CarrierInfo, zmux.RecordMode, any) bool { return true }
+		c.AllowRecordMode = func(zmux.RecordPolicyInput, zmux.RecordMode, any) bool { return true }
 	}
 	return c
 }
@@ -186,9 +186,9 @@ func matrixServer(sc string) {
 	if err != nil {
 		failf("accept: %v", err)
 	}
-	peer, _ := conn.Admitted().(*seal.Peer)
+	peer, _ := zmux.AdmittedAs[*seal.Peer](conn)
 	if peer == nil {
-		failf("no Peer as the session's host value: %T", conn.Admitted())
+		failf("no Peer as the session's host value")
 	}
 	if sc == "appdata" {
 		printAppData(peer.AppData)
@@ -202,14 +202,16 @@ func matrixServer(sc string) {
 		if _, err := io.ReadFull(st, make([]byte, 64<<10)); err != nil {
 			failf("read: %v", err)
 		}
-		_ = conn.CloseWithError(closeCode, closeReason)
+		conn.Abort(closeCode, closeReason)
+		_ = conn.Wait()
 		fmt.Println("CLOSING")
 		fmt.Println("OK")
 		os.Exit(0)
 	}
 	serverExchange(ctx, conn)
 	if sc == "close-idle" {
-		_ = conn.CloseWithError(closeCode, closeReason)
+		conn.Abort(closeCode, closeReason)
+		_ = conn.Wait()
 		fmt.Println("CLOSING")
 		fmt.Println("OK")
 		os.Exit(0)
@@ -363,8 +365,8 @@ func matrixClient(sc string, args []string) {
 		if err != nil {
 			failf("tls dial: %v", err)
 		}
-		bound := zmux.Bound
-		if _, err := conn.AddPipe(ctx, zmux.SecureTLS(tc), zmux.PipeOptions{Mode: &bound}); err != nil {
+		bound := zmux.RecordBound
+		if _, err := conn.AddPipe(ctx, zmux.SecureTLS(tc), zmux.PipeOptions{RecordMode: &bound}); err != nil {
 			failf("bound join: %v", err)
 		}
 		fmt.Printf("PIPES %d\n", len(conn.PipeStats()))

@@ -39,7 +39,7 @@ class ListenerStatsTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).maxPendingPerSource(1).build();
             int inputs = 0;
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 // A split bootstrap: two carriers, one input, one session.
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -91,10 +91,10 @@ class ListenerStatsTest {
             var lc = ListenerConfig.builder().session(cfg)
                     .admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.STALL))
                             .withStall(Duration.ofMillis(300), Duration.ofMillis(300))).build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var admitted = l.handle(p[1], JoinHint.inBand(TestAddr.peer("s")), null);
-                assertEquals(Admission.Verdict.STALL, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
+                assertEquals(AdmissionVerdict.STALL, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
                 assertEquals(0, sum(l.stats()), "an admission's decision is no pipe input");
                 Thread.sleep(500); // the stall ends
@@ -114,7 +114,7 @@ class ListenerStatsTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops)
                     .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofSeconds(10)).build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {

@@ -29,7 +29,7 @@ class JoinReplyCompletionTest {
         });
         try (EventLoops loops = EventLoops.create(1); var readers = Executors.newVirtualThreadPerTaskExecutor()) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO)
+                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
                     .allowRecordMode((c, x, p) -> true).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(Duration.ofSeconds(5))) {
@@ -49,8 +49,8 @@ class JoinReplyCompletionTest {
                 };
                 PipeIo server = new PipeIo(p[1].reader(), late, framing, "memory", null);
                 boolean bound = mode == RecordMode.BOUND;
-                l.handle(bound ? server.withExporter((x, y, n) -> new byte[n]).secure() : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).secure() : p[0], PipeOptions.builder().mode(mode).build());
+                l.handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withSecure(true) : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).withSecure(true) : p[0], PipeOptions.builder().recordMode(mode).build());
                 int streams = 30, size = 8000;
                 var received = readers.submit(() -> {
                     long total = 0;
@@ -77,7 +77,7 @@ class JoinReplyCompletionTest {
                 assertTrue(pipe.stats().orElseThrow().bytesSent() > 0, "the pipe carried records");
                 // Nothing the joiner wrote on it went missing, what a later retransmission would hide.
                 long sent = pipe.stats().orElseThrow().bytesSent();
-                for (var ps : s.pipeStats()) if (ps.pipe() == pipe.id()) assertEquals(sent, ps.bytesReceived(), "bytes of the pipe");
+                for (var ps : s.pipeStats()) if (ps.pipeId().equals(pipe.id())) assertEquals(sent, ps.bytesReceived(), "bytes of the pipe");
             }
         } finally {
             timer.shutdownNow();

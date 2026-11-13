@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Timeout;
 class ListenerEntryTest {
     static ZmuxConfig config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
+                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
     }
 
     static InetSocketAddress ip(String literal, int port) {
@@ -59,7 +59,7 @@ class ListenerEntryTest {
             var lc = ListenerConfig.builder().session(config(loops)).maxPendingPerSource(1)
                     .admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> { seen.add(info); return Admission.Decision.accept(0); })))
                     .build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 var peer = ip("192.0.2.9", 4000);
                 var source = ip("2001:db8:1:2::7", 5000);
                 var one = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -95,7 +95,7 @@ class ListenerEntryTest {
                         deadlines.add(deadline); // after the set: the test reads later once it sees the deadline
                         return f;
                     }).withPeekTimeout(Duration.ofMillis(800))).build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var handled = l.handle(boot[1], JoinHint.inBand(TestAddr.peer("a")));
                 Admission.Deadline d = deadlines.poll(5, TimeUnit.SECONDS);
@@ -105,7 +105,7 @@ class ListenerEntryTest {
                 later.get().complete(Admission.Decision.accept(0)); // off the loop, later
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
-                    assertEquals(Admission.Verdict.ACCEPT, handled.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
+                    assertEquals(AdmissionVerdict.ACCEPT, handled.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 }
                 // A decision past the deadline: cancelled, the carrier closed.
                 var slow = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -131,7 +131,7 @@ class ListenerEntryTest {
                         pending.add(f);
                         return f;
                     }).withPeekTimeout(Duration.ofSeconds(30))).build();
-            var l = Zmux.listener(lc);
+            var l = ZmuxListener.of(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
             l.handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
@@ -157,7 +157,7 @@ class ListenerEntryTest {
                         try { closeDone.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                         return f;
                     }).withPeekTimeout(Duration.ofSeconds(30))).build();
-            var l = Zmux.listener(lc);
+            var l = ZmuxListener.of(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
             l.handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
@@ -179,7 +179,7 @@ class ListenerEntryTest {
                         if (d == null) throw new IllegalStateException("decider failure");
                         return d;
                     })).withStall(Duration.ofSeconds(20), Duration.ofSeconds(20))).build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 java.util.function.Function<Admission.Decision, ZmuxListener.Handled> carrier = d -> {
                     next.set(d);
                     var p = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -188,14 +188,14 @@ class ListenerEntryTest {
                     try { h.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError(e); }
                     return h;
                 };
-                assertEquals(Admission.Verdict.CLOSE, carrier.apply(Admission.Decision.CLOSE).verdict().toCompletableFuture().join());
-                assertEquals(Admission.Verdict.CLOSE, carrier.apply(null).verdict().toCompletableFuture().join()); // a decider that throws closes
-                assertEquals(Admission.Verdict.CLOSE, carrier.apply(Admission.Decision.accept(5)).verdict().toCompletableFuture().join()); // a skip outside the prefix closes
-                assertEquals(Admission.Verdict.FALLBACK, carrier.apply(Admission.Decision.FALLBACK).verdict().toCompletableFuture().join());
-                assertEquals(Admission.Verdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
-                assertEquals(Admission.Verdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.CLOSE).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(null).verdict().toCompletableFuture().join()); // a decider that throws closes
+                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.accept(5)).verdict().toCompletableFuture().join()); // a skip outside the prefix closes
+                assertEquals(AdmissionVerdict.FALLBACK, carrier.apply(Admission.Decision.FALLBACK).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
                 // Two stalls hold two of the source's three slots: a third stall is closed at once.
-                assertEquals(Admission.Verdict.CLOSE, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
                 await(() -> l.stats().admission().stallOverflow() == 1);
                 assertEquals(new AdmissionStats(0, 1, 2, 3, 1, 0, 0), l.stats().admission());
                 assertEquals(0, l.stats().rejected(), "an admission's decision is not a rejection");
@@ -245,12 +245,12 @@ class ListenerEntryTest {
     @Test void aShutdownTakesNoNewSessionButJoinsUntilItsSessionsEnd() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            var l = Zmux.listener(ListenerConfig.of(cfg));
+            var l = ZmuxListener.of(ListenerConfig.of(cfg));
             var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
             l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
             var client = Zmux.open(boot[0], Role.CLIENT, cfg);
             var server = l.accept(Duration.ofSeconds(5));
-            var done = l.shutdown(Duration.ofSeconds(30)).toCompletableFuture();
+            var done = l.shutdownAsync(Duration.ofSeconds(30));
             assertThrows(ClosedChannelException.class, () -> l.accept(Duration.ofMillis(10)));
             // A new session is refused.
             var fresh = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -263,7 +263,7 @@ class ListenerEntryTest {
             // The live session still joins a pipe.
             var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
             l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
-            client.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build());
+            client.addPipe(pair[0], PipeOptions.builder().noProbation().build());
             await(() -> l.stats().joins() == 1);
             assertFalse(done.isDone(), "open while its session lives");
             assertFalse(l.isClosed());

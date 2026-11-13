@@ -1,6 +1,6 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import static io.zmux.internal.join.VectorFiles.errorClass;
 import static io.zmux.internal.join.VectorFiles.fill;
 import static io.zmux.internal.join.VectorFiles.framing;

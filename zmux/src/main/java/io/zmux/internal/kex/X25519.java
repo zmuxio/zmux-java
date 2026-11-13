@@ -1,10 +1,10 @@
 package io.zmux.internal.kex;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.KEX;
-import static io.zmux.carrier.SecureCarrierException.Code.RANDOM_FAILED;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.KEX;
+import static io.zmux.seal.SecureCarrierException.Code.RANDOM_FAILED;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.random.OsRandom;
 import java.math.BigInteger;
 import java.security.GeneralSecurityException;

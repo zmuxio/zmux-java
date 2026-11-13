@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.internal.wire.FrameEncoder;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.shaping.Capability;
 import io.zmux.shaping.RecordPlan;
 import io.zmux.shaping.RecordView;

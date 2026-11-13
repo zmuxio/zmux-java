@@ -7,7 +7,7 @@ import java.util.List;
  * A snapshot of a session, as of its loop's last round. Counts only
  * increase; gauges are current values; RTTs are null before the first sample.
  *
- * @param carrier the carrier kind a carrier mode chose (the latest, after a switch); null for a
+ * @param carrier the carrier kind a carrier choice chose (the latest, after a switch); null for a
  *     session not dialed in a mode
  * @param carrierCandidates the tries of the mode's candidates in order, joins included: the latest 64
  * @param bytesSent bytes of the records passed to the carriers, every frame included

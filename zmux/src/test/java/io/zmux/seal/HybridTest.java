@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Mode;
 import java.util.Arrays;
 import java.util.List;

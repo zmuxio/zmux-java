@@ -1,9 +1,8 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.RANDOM_FAILED;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.RANDOM_FAILED;
 
-import io.zmux.carrier.SecureCarrierException;
 import java.io.Serial;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
@@ -22,13 +21,18 @@ public final class SigningKey implements Signer {
         this.pub = MlDsa44.raw(kp.getPublic());
     }
 
-    /** A new key of alg from the operating system's entropy. */
-    public static SigningKey generate(KeyAlg alg) throws SecureCarrierException {
-        check(alg);
+    /**
+     * A new key of alg from the operating system's entropy.
+     *
+     * @throws IllegalArgumentException when alg does not sign proofs
+     * @throws java.io.UncheckedIOException wrapping {@code random_failed} when key generation fails
+     */
+    public static SigningKey generate(KeyAlg alg) {
+        if (alg != KeyAlg.ML_DSA_44) throw new IllegalArgumentException("KeyAlg " + alg + " does not sign proofs");
         try {
             return new SigningKey(alg, MlDsa44.generate(new SecureRandom()));
         } catch (GeneralSecurityException e) {
-            throw new SecureCarrierException(RANDOM_FAILED, "ML-DSA key generation", e);
+            throw new java.io.UncheckedIOException(new SecureCarrierException(RANDOM_FAILED, "ML-DSA key generation", e));
         }
     }
 
@@ -50,6 +54,12 @@ public final class SigningKey implements Signer {
     @Override public KeyAlg alg() { return alg; }
 
     @Override public byte[] publicKey() { return pub.clone(); }
+
+    /** The public key's algorithm only: the private key never appears in a string. */
+    @Override
+    public String toString() {
+        return "SigningKey[" + alg + "]";
+    }
 
     /** The KeyId of the key, for a verdict or a pin to name. */
     public byte[] keyId() { return KeyId.of(alg, pub); }

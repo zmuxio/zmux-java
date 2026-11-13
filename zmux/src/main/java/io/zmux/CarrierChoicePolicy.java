@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * The local policy of {@link CarrierMode#auto}. Start from {@link #defaults()}
+ * The local policy of {@link CarrierChoice#auto}. Start from {@link #defaults()}
  * or {@link #of}; an item not set with a {@code with} method keeps its default. Values are taken
  * as they are, zero included; a negative, NaN or infinite one is rejected, as is a timerMax
  * below timerMin.
@@ -20,16 +20,16 @@ import java.util.Objects;
  *     kind it replaces are retired (1 s); zero: at once
  * @param dropWindow a carrier kind whose pipes (or session) fail within this long of being chosen
  *     counts as failed (30 s); zero: none does
- * @param noJoin turns off establishing on the most robust candidate and joining the preferred
- *     ones: the candidates are then tried one after another, in order
+ * @param join establishes on the most robust candidate and joins the preferred ones (true, the
+ *     default); false: the candidates are tried one after another, in order
  */
-public record ModePolicy(CarrierCache cache, String key, double timerFactor, Duration timerMin, Duration timerMax,
-                         Duration settle, Duration dropWindow, boolean noJoin) {
+public record CarrierChoicePolicy(CarrierCache cache, String key, double timerFactor, Duration timerMin, Duration timerMax,
+                         Duration settle, Duration dropWindow, boolean join) {
     private static final double TIMER_FACTOR = 3;
     private static final Duration TIMER_MIN = Duration.ofSeconds(1), TIMER_MAX = Duration.ofSeconds(3),
             SETTLE = Duration.ofSeconds(1), DROP_WINDOW = Duration.ofSeconds(30);
 
-    public ModePolicy {
+    public CarrierChoicePolicy {
         if (cache == null) cache = new CarrierCache();
         Objects.requireNonNull(key, "key");
         if (!(timerFactor >= 0) || Double.isInfinite(timerFactor)) throw new IllegalArgumentException("timerFactor negative, NaN or infinite");
@@ -45,17 +45,17 @@ public record ModePolicy(CarrierCache cache, String key, double timerFactor, Dur
     }
 
     /** The defaults, with a cache private to the dial. */
-    public static ModePolicy defaults() { return of(null, ""); }
+    public static CarrierChoicePolicy defaults() { return of(null, ""); }
 
     /** The defaults with cache under key. */
-    public static ModePolicy of(CarrierCache cache, String key) {
-        return new ModePolicy(cache, key, TIMER_FACTOR, TIMER_MIN, TIMER_MAX, SETTLE, DROP_WINDOW, false);
+    public static CarrierChoicePolicy of(CarrierCache cache, String key) {
+        return new CarrierChoicePolicy(cache, key, TIMER_FACTOR, TIMER_MIN, TIMER_MAX, SETTLE, DROP_WINDOW, true);
     }
 
-    public ModePolicy withTimer(double factor, Duration min, Duration max) { return new ModePolicy(cache, key, factor, min, max, settle, dropWindow, noJoin); }
-    public ModePolicy withSettle(Duration d) { return new ModePolicy(cache, key, timerFactor, timerMin, timerMax, d, dropWindow, noJoin); }
-    public ModePolicy withDropWindow(Duration d) { return new ModePolicy(cache, key, timerFactor, timerMin, timerMax, settle, d, noJoin); }
-    public ModePolicy withNoJoin(boolean on) { return new ModePolicy(cache, key, timerFactor, timerMin, timerMax, settle, dropWindow, on); }
+    public CarrierChoicePolicy withTimer(double factor, Duration min, Duration max) { return new CarrierChoicePolicy(cache, key, factor, min, max, settle, dropWindow, join); }
+    public CarrierChoicePolicy withSettle(Duration d) { return new CarrierChoicePolicy(cache, key, timerFactor, timerMin, timerMax, d, dropWindow, join); }
+    public CarrierChoicePolicy withDropWindow(Duration d) { return new CarrierChoicePolicy(cache, key, timerFactor, timerMin, timerMax, settle, d, join); }
+    public CarrierChoicePolicy withJoin(boolean on) { return new CarrierChoicePolicy(cache, key, timerFactor, timerMin, timerMax, settle, dropWindow, on); }
 
     /** A candidate's timer for the round trip of opening its carrier. */
     Duration timer(Duration rtt) {

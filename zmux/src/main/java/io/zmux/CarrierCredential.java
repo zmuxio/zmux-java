@@ -10,7 +10,7 @@ import java.util.Objects;
  * <p>The dialers present it once per carrier, after the carrier's TLS or QUIC handshake
  * completed and before any zmux record: {@link Zmux#connect(java.net.InetSocketAddress, ZmuxConfig)},
  * {@link Zmux#connectTls}, {@link ZmuxListener#connect} and {@link ZmuxListener#connectTls}
- * take {@link ZmuxConfig#credential()}, as the zmux-quic session dialers and a session's own
+ * take {@link ZmuxConfig#carrierCredential()}, as the zmux-quic session dialers and a session's own
  * TCP and TLS pipes ({@link ZmuxSession#addPipe(java.net.InetSocketAddress, PipeOptions)}, {@link ZmuxSession#addTlsPipe}) do; the zmux-quic
  * pipe dialers take one per call. A pipe the application opened itself ({@link Zmux#open},
  * {@link ZmuxListener#open}) presents its credential where it was dialed: the prefix written
@@ -22,7 +22,7 @@ import java.util.Objects;
  * {@link #header}. The methods may be called concurrently, on an event loop: they must not
  * block. An exception fails the dial.
  */
-public interface Credential {
+public interface CarrierCredential {
     /**
      * The bytes a carrier starts with, before any zmux record: a byte stream (TCP, TLS), an
      * HTTP request body, a QUIC connection's first bidirectional stream.

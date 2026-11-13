@@ -2,7 +2,7 @@ package io.zmux.internal.core;
 
 import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportError;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -403,11 +403,12 @@ public final class Tiers {
         else if (o.clearSendStandby) a.tier.sendStandby = null;
         if (o.weight != null) a.tier.weight = o.weight;
         boolean req = false;
-        if (o.recvPriority != null) {
+        // A changed request goes to the peer; one equal to the request in force sends nothing.
+        if (o.recvPriority != null && a.tier.recvPrio != o.recvPriority) {
             a.tier.recvPrio = o.recvPriority;
             req = true;
         }
-        if (o.recvStandby != null) {
+        if (o.recvStandby != null && a.tier.recvStandby != o.recvStandby) {
             a.tier.recvStandby = o.recvStandby;
             req = true;
         }

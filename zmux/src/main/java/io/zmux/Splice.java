@@ -120,7 +120,7 @@ final class Splice {
         private long bytes, datagramBytes, drops;
         /** How the direction ended; null while running, when cancelled, or after a callback failure. */
         private SpliceResult.End end;
-        /** A limiter callback failed: the splice completes with it. */
+        /** A limiter callback failed, and the splice completes with it. Written under the direction's lock by its workers; read once both have ended. */
         private IOException callbackFailure;
         /** The worker is in an operation on the target, so a failure it throws is the downstream side's. */
         private boolean atTarget;
@@ -225,9 +225,7 @@ final class Splice {
             } catch (CallbackFailed failed) {
                 settling = true;
                 Errors.clearInternalWake();
-                callbackFailure = failed.cause;
-                teardown.compareAndSet(null, failed.cause);
-                abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
+                callbackFailed(failed.cause);
             } catch (IOException error) {
                 settling = true;
                 Errors.clearInternalWake();
@@ -241,9 +239,7 @@ final class Splice {
             } catch (RuntimeException error) {
                 settling = true;
                 Errors.clearInternalWake();
-                callbackFailure = new IOException("relay callback failed", error);
-                teardown.compareAndSet(null, callbackFailure);
-                abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
+                callbackFailed(new IOException("relay callback failed", error));
             } finally {
                 settling = true; worker = null; closeRead.run(); closeWrite.run();
             }
@@ -330,9 +326,22 @@ final class Splice {
                         } else drops++;
                     } catch (NotNegotiatedException | DatagramTooLargeException error) { drops++; }
                 }
-            } catch (IOException | RuntimeException error) {
+            } catch (IOException error) {
                 // Stream workers own terminal propagation; datagrams never add a waiting queue.
+            } catch (RuntimeException error) {
+                // A limiter callback (or the relay itself) failed: the splice reports it as a stream worker's would.
+                if (!cancelled.get()) callbackFailed(new IOException("relay callback failed", error));
             } finally { datagramWorker = null; }
+        }
+
+        /**
+         * A callback failed: the splice completes exceptionally with cause (the direction's first such failure, of its stream
+         * or its datagram worker) and both streams are torn down.
+         */
+        private void callbackFailed(IOException cause) {
+            synchronized (this) { if (callbackFailure == null) callbackFailure = cause; }
+            teardown.compareAndSet(null, cause);
+            abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
         }
 
         SpliceResult.Direction result() { return new SpliceResult.Direction(bytes, datagramBytes, drops, end); }

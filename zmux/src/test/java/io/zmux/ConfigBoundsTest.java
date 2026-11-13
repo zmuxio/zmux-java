@@ -18,29 +18,26 @@ class ConfigBoundsTest {
     }
 
     @Test void sessionProbeIntervalBelowOneSecondIsInvalid() {
-        var m = ZmuxConfig.builder();
+        var m = Liveness.builder();
         assertThrows(IllegalArgumentException.class, () -> m.probeInterval(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> m.probeInterval(Duration.ZERO));
-        assertDoesNotThrow(() -> m.disableIdleProbes());
+        assertDoesNotThrow(() -> m.noProbeInterval());
         assertDoesNotThrow(() -> m.probeInterval(Duration.ofSeconds(1)));
     }
 
     @Test void exportedDefaults() {
-        assertEquals(Duration.ofSeconds(15), ZmuxConfig.DEFAULT_KEEP_ALIVE_PERIOD);
+        assertEquals(Duration.ofSeconds(15), Liveness.DEFAULT_KEEP_ALIVE_PERIOD);
         assertEquals(Duration.ofSeconds(30), ZmuxConfig.DEFAULT_MAX_IDLE_TIMEOUT);
-        assertEquals(java.util.Optional.of(ZmuxConfig.DEFAULT_KEEP_ALIVE_PERIOD), ZmuxConfig.defaults().keepAlivePeriod());
+        assertEquals(java.util.Optional.of(Liveness.DEFAULT_KEEP_ALIVE_PERIOD), ZmuxConfig.defaults().liveness().keepAlivePeriod());
         assertEquals(java.util.Optional.of(ZmuxConfig.DEFAULT_MAX_IDLE_TIMEOUT), ZmuxConfig.defaults().maxIdleTimeout());
         assertEquals(16382, RecordPlan.MAX_RECORD_LENGTH);
         assertEquals(64, RecordPlan.MIN_MAX_LENGTH);
-        assertEquals(0.25, ZmuxConfig.DEFAULT_PROBE_JITTER);
-        assertEquals(ZmuxConfig.DEFAULT_PROBE_JITTER, ZmuxConfig.defaults().probeJitter());
+        assertEquals(0.25, Liveness.DEFAULT_PROBE_JITTER);
+        assertEquals(Liveness.DEFAULT_PROBE_JITTER, ZmuxConfig.defaults().liveness().probeJitter());
         assertEquals(Duration.ofSeconds(10), ZmuxConfig.DEFAULT_JOIN_TIMEOUT);
         assertEquals(ZmuxConfig.DEFAULT_JOIN_TIMEOUT, ZmuxConfig.defaults().joinTimeout());
-        assertEquals(Duration.ofSeconds(1), ZmuxConfig.DEFAULT_MIN_BACKOFF);
-        assertEquals(Duration.ofSeconds(60), ZmuxConfig.DEFAULT_MAX_BACKOFF);
-        assertEquals(ZmuxConfig.DEFAULT_MIN_BACKOFF, ZmuxConfig.defaults().redialMinBackoff());
-        assertEquals(ZmuxConfig.DEFAULT_MAX_BACKOFF, ZmuxConfig.defaults().redialMaxBackoff());
-        assertEquals(ZmuxConfig.DEFAULT_MIN_BACKOFF, PipePool.Backoff.defaults().minimum());
-        assertEquals(ZmuxConfig.DEFAULT_MAX_BACKOFF, PipePool.Backoff.defaults().maximum());
+        assertEquals(Duration.ofSeconds(1), PipePool.Backoff.defaults().minimum());
+        assertEquals(Duration.ofSeconds(60), PipePool.Backoff.defaults().maximum());
+        assertEquals(PipePool.Backoff.defaults(), ZmuxConfig.defaults().redialBackoff());
     }
 }

@@ -1,9 +1,9 @@
 package io.zmux.internal.join;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
-import io.zmux.carrier.SecureCarrierException;
-import io.zmux.carrier.VarInt;
+import io.zmux.seal.SecureCarrierException;
+import io.zmux.internal.wire.VarInt;
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 

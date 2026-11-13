@@ -15,4 +15,15 @@ public record Admission(byte[] handle, Peer peer) {
     }
 
     @Override public byte[] handle() { return handle.clone(); }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Admission a && java.util.Arrays.equals(handle, a.handle) && peer.equals(a.peer);
+    }
+
+    @Override
+    public int hashCode() { return java.util.Arrays.hashCode(handle) * 31 + peer.hashCode(); }
+
+    @Override
+    public String toString() { return "Admission[handle of " + handle.length + " bytes, " + peer + "]"; }
 }

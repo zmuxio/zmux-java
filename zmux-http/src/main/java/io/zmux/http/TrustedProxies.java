@@ -16,7 +16,7 @@ import java.util.Objects;
  * any other peer is ignored, so that a client cannot choose its own source.
  *
  * <p>Two mechanisms carry the report, each enabled on its own: the PROXY protocol (version 1 or
- * 2) at the start of every connection from a trusted address ({@link #proxyProtocol()}), and a
+ * 2) at the start of every connection from a trusted address ({@link #isProxyProtocol()}), and a
  * forwarding header field on HTTP requests from a trusted address ({@link #header()}). Immutable.
  */
 public final class TrustedProxies {
@@ -60,7 +60,7 @@ public final class TrustedProxies {
 
     public String header() { return header; }
 
-    public boolean proxyProtocol() { return proxyProtocol; }
+    public boolean isProxyProtocol() { return proxyProtocol; }
 
     /** Whether address is one of the trusted intermediaries. */
     public boolean trusts(InetAddress address) {

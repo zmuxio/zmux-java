@@ -4,7 +4,7 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.FrameType;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.util.ArrayList;
 import java.util.List;
@@ -97,7 +97,7 @@ final class PathSession implements PathLayer {
         this.outbox = outbox;
         Wiring w = new Wiring();
         metrics = new PathMetrics(pipes, ack, feat);
-        joins = new Joins(cfg, stats, peer, initiator, pipes, outbox, metrics, w, exporter, psk);
+        joins = new Joins(cfg, stats, peer, initiator, pipes, outbox, w, exporter, psk);
         health = new PathHealth(cfg, stats, feat, pipes, streams, ack, ka, outbox, metrics, w);
         probation = new Probation(cfg, pipes, metrics, now, w);
         tiers = new Tiers(cfg, conn, sched, pipes, metrics, w);

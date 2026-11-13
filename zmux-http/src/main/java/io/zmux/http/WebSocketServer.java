@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.AdmissionVerdict;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -11,7 +12,6 @@ import io.netty.handler.codec.http.websocketx.WebSocketDecoderConfig;
 import io.netty.handler.codec.http.websocketx.WebSocketServerHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketServerHandshakerFactory;
 import io.zmux.CarrierKind;
-import io.zmux.Admission;
 import io.zmux.JoinHint;
 import io.zmux.RequestHead;
 import io.zmux.ZmuxConfig;
@@ -84,7 +84,7 @@ final class WebSocketServer {
         if (hs == null) { l.countSetupFailure(); return null; }
         var full = new DefaultFullHttpRequest(r.protocolVersion(), r.method(), r.uri(), Unpooled.EMPTY_BUFFER, r.headers(),
                 io.netty.handler.codec.http.EmptyHttpHeaders.INSTANCE);
-        Admission.Verdict[] verdict = new Admission.Verdict[1];
+        AdmissionVerdict[] verdict = new AdmissionVerdict[1];
         BodyCarrier[] self = new BodyCarrier[1];
         BodyCarrier.Out out = new BodyCarrier.Out() {
             @Override public ChannelFuture head() {
@@ -96,7 +96,7 @@ final class WebSocketServer {
         };
         BodyCarrier c = new BodyCarrier(ch, Framing.MESSAGES, true, true, out, () -> {
             if (self[0].detached()) return;
-            if (verdict[0] != Admission.Verdict.ACCEPT || !self[0].started()) ch.close();
+            if (verdict[0] != AdmissionVerdict.ACCEPT || !self[0].started()) ch.close();
             else self[0].afterWrites(ch::close);
         }, cause -> { ch.close(); return null; });
         self[0] = c;
@@ -111,9 +111,9 @@ final class WebSocketServer {
             router.toHost(r, List.of(), true);
         }));
         a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {
-            if (c.detached() || v == Admission.Verdict.FALLBACK) return;
-            verdict[0] = v == null ? Admission.Verdict.CLOSE : v;
-            if (v == Admission.Verdict.ACCEPT) c.start(); // the 101 goes out now, and frames may follow
+            if (c.detached() || v == AdmissionVerdict.FALLBACK) return;
+            verdict[0] = v == null ? AdmissionVerdict.CLOSE : v;
+            if (v == AdmissionVerdict.ACCEPT) c.start(); // the 101 goes out now, and frames may follow
         }));
         return new WebSocketFrames(c);
     }

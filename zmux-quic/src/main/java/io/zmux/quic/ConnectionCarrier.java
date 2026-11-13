@@ -37,11 +37,27 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     /** The handover of the admitted first stream, through which the connection's further streams go. */
     private ZmuxListener.Handled first;
     /** A client's credential, presented on the connection's first bidirectional stream; null: none. */
-    private final io.zmux.Credential credential;
+    private final io.zmux.CarrierCredential credential;
     /** A client's server name, as it sent it; "" when none. */
     private final String serverName;
     /** The largest QUIC datagram payload the connection sends; 0 until both negotiated datagrams. */
     private volatile int maxDatagram;
+    /** The connection's streams that a session took and that have not closed yet; loop only. */
+    private int pipes;
+    /** The application code of the last session that ended on the connection (0 for an end without one); loop only. */
+    private volatile long lastCode;
+    /** Whether that session ended locally (the side that closed it closes the connection); loop only. */
+    private boolean lastLocal;
+    /**
+     * What the connection is, for its close once its last pipe ended: {@link #SERVED} (a
+     * server connection), {@link #DEDICATED} (a client connection of its own) or
+     * {@link #POOLED} (a pool's, which the pool closes).
+     */
+    private volatile int closing;
+    static final int SERVED = 0, DEDICATED = 1, POOLED = 2;
+    /** How long a dedicated connection whose session the peer ended waits for the peer's QUIC close. */
+    private static final long PEER_CLOSE_WAIT_MILLIS = 2_000;
+
     /** The pipes of the connection's datagram channel by Pipe Stream ID. */
     private final io.zmux.internal.loop.ChannelDemux demux = new io.zmux.internal.loop.ChannelDemux();
 
@@ -51,7 +67,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         this(options, listener, fallback, host, completions, null, "", true);
     }
 
-    /** A server connection whose handshake completed before it was handed over ({@link QuicServer#serve}). */
+    /** A server connection whose handshake completed before it was handed over ({@link QuicServer#serveAsync}). */
     static ConnectionCarrier established(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
                                          io.zmux.internal.loop.SerialCallbacks completions) {
         ConnectionCarrier c = new ConnectionCarrier(options, listener, fallback, host, completions);
@@ -61,7 +77,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     /** The handshake was done before the carrier was added. */
     private boolean established;
-    /** No new stream goes to the listener any more ({@link QuicServer#serve} cancelled); loop only. */
+    /** No new stream goes to the listener any more ({@link QuicServer#serveAsync} cancelled); loop only. */
     private boolean stopped;
 
     /** Stops handing the connection's new streams to the listener; they are closed. Any thread. */
@@ -69,12 +85,12 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     /** A client connection's carrier: its first bidirectional stream starts with credential's prefix (null: none). */
     ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
-                      io.zmux.internal.loop.SerialCallbacks completions, io.zmux.Credential credential, String serverName) {
+                      io.zmux.internal.loop.SerialCallbacks completions, io.zmux.CarrierCredential credential, String serverName) {
         this(options, listener, fallback, host, completions, credential, serverName, false);
     }
 
     private ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
-                              io.zmux.internal.loop.SerialCallbacks completions, io.zmux.Credential credential, String serverName,
+                              io.zmux.internal.loop.SerialCallbacks completions, io.zmux.CarrierCredential credential, String serverName,
                               boolean server) {
         this.server = server;
         this.options = options; this.listener = listener; this.fallback = fallback; this.host = host; this.completions = completions;
@@ -177,7 +193,52 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     void dispose() {
         disposed.set(true);
         QuicChannel current = channel;
-        if (current != null) current.close();
+        if (current != null) close(current);
+    }
+
+    // ---- the connection's end ----
+
+    /** Sets who closes the connection once its last pipe ended ({@link #DEDICATED}, {@link #POOLED}). */
+    void closing(int who) { closing = who; }
+
+    /** A session took stream: one more pipe until it closes. On the loop. */
+    void pipeStarted(QuicStreamChannel stream) {
+        pipes++;
+        stream.closeFuture().addListener(done -> pipeEnded());
+    }
+
+    /**
+     * A pipe's stream closed, which its transport does only once the session's CONNECTION_CLOSE
+     * was delivered (the inbound side ended) or its linger expired. With the last one the side
+     * that ended the session closes the connection, so that its QUIC close, with the session's
+     * code, reaches a peer that is still open; a pool's connection stays for the pool. A
+     * dedicated connection whose session the peer ended, or that carried no session to its end,
+     * waits a little for the peer's close, then closes itself.
+     */
+    private void pipeEnded() {
+        if (--pipes > 0) return;
+        int who = closing;
+        if (who == POOLED) return;
+        if (lastLocal) { close(channel); return; }
+        if (who == DEDICATED) channel.eventLoop().schedule(() -> { if (pipes == 0) close(channel); },
+                PEER_CLOSE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    /** A session on one of the connection's pipes ended with e. On the loop. */
+    void sessionEnded(io.zmux.internal.core.SessionError e) {
+        lastCode = e != null && e.kind() == io.zmux.internal.core.SessionError.Kind.APPLICATION ? e.code() : 0;
+        lastLocal = e != null && !e.remote();
+    }
+
+    /**
+     * Closes a connection with the application code of the last session it carried (0 when it
+     * carried none, or that one ended without an application code). The QUIC API takes a
+     * 32-bit code: a code above 2<sup>31</sup> - 1 goes out as 0.
+     */
+    static void close(QuicChannel connection) {
+        ConnectionCarrier c = connection.attr(KEY).get();
+        long code = c == null ? 0 : c.lastCode;
+        connection.close(true, code <= Integer.MAX_VALUE ? (int) code : 0, io.netty.buffer.Unpooled.EMPTY_BUFFER);
     }
 
     void bind(ZmuxSession owner) {
@@ -198,7 +259,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     private void route(StreamCarrier carrier) {
         if (stopped) { carrier.dispose(); return; }
         if (listener == null) {
-            if (carrier.unidirectional()) session.handleLane(carrier.io(this));
+            if (carrier.unidirectional()) io.zmux.internal.spi.Spi.handleLane(session, carrier.io(this));
             else carrier.dispose();
             return;
         }
@@ -237,7 +298,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
                 : listener.handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
         this.first = admitted;
         admitted.verdict().whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
-            if (verdict == io.zmux.Admission.Verdict.ACCEPT) {
+            if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {
                 admission = ACCEPTED;
                 var waiting = new ArrayList<>(held);
                 held.clear();
@@ -247,8 +308,9 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             admission = REFUSED;
             for (StreamCarrier stream : held) stream.dispose();
             held.clear();
-            if (verdict == io.zmux.Admission.Verdict.STALL) admitted.closed().whenComplete((v, e) -> connection.close());
-            else if (verdict != io.zmux.Admission.Verdict.FALLBACK) connection.close();
+            // A connection that carried no session closes with code 0.
+            if (verdict == io.zmux.AdmissionVerdict.STALL) admitted.closed().whenComplete((v, e) -> close(connection));
+            else if (verdict != io.zmux.AdmissionVerdict.FALLBACK) close(connection);
         }));
     }
     /**

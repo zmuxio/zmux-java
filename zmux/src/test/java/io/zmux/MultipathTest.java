@@ -61,7 +61,7 @@ class MultipathTest {
     }
 
     private static void closeBoth(ZmuxSession c, ZmuxSession s) throws Exception {
-        c.close(new ApplicationError(0, "done"));
+        c.abort(0, "done");
         s.awaitClosed();
         c.awaitClosed();
     }
@@ -101,7 +101,7 @@ class MultipathTest {
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get();
                 c.addPipe(l.localAddress(), PipeOptions.defaults());
-                ZmuxPipe zero = c.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow();
+                ZmuxPipe zero = c.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow();
                 exchange(ex, c, s, 4, 4 << 20, () -> {
                     Thread.sleep(20);
                     zero.abort();
@@ -127,8 +127,8 @@ class MultipathTest {
                 Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connectTls(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), cfg);
                 ZmuxSession s = sf.get();
-                ZmuxPipe p = c.addTlsPipe(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost").withSecure(), PipeOptions.builder().mode(RecordMode.BOUND).build());
-                assertTrue(p.id() > 0);
+                ZmuxPipe p = c.addTlsPipe(l.localAddress(), TlsOptions.client(TestTls.client(), "localhost").withSecure(), PipeOptions.builder().recordMode(RecordMode.BOUND).build());
+                assertTrue(p.id().value() > 0);
                 exchange(ex, c, s, 4, 1 << 20, null);
                 closeBoth(c, s);
             }
@@ -164,10 +164,10 @@ class MultipathTest {
         assertThrows(IllegalArgumentException.class, () -> PipeAuth.psk(new byte[8]).withEndToEnd());
         assertThrows(IllegalArgumentException.class, () -> new PipeAuth(new byte[16], false, true, false));
         org.junit.jupiter.api.Assertions.assertFalse(PipeAuth.none().hasSource(), "no source is a value; a session that needs one fails to start");
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().suspectFloor(Duration.ofMillis(10)));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().deadTimeout(Duration.ofMillis(500)));
+        assertThrows(IllegalArgumentException.class, () -> Liveness.builder().suspectFloor(Duration.ofMillis(10)));
+        assertThrows(IllegalArgumentException.class, () -> Liveness.builder().deadTimeout(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(0));
-        assertThrows(IllegalArgumentException.class, () -> PipeOptions.builder().suspectFloor(Duration.ofMillis(1)));
-        assertTrue(ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build().multipath());
+        assertThrows(IllegalArgumentException.class, () -> PipeLiveness.builder().suspectFloor(Duration.ofMillis(1)));
+        assertTrue(ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build().isMultipath());
     }
 }

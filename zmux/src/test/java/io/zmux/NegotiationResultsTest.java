@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Timeout;
 class NegotiationResultsTest {
     @Test void tlsSessionReportsTheCompleteList() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), lc)) {
                 var sf = ex.submit((Callable<ZmuxSession>) l::accept);

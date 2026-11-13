@@ -18,7 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.zmux.internal.join.Framing;
 import io.zmux.internal.join.Frames;
 import io.zmux.internal.join.Hello;
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Joiner;
 import io.zmux.internal.join.Kdf;
 import io.zmux.internal.join.SessionCrypto;
@@ -41,11 +40,28 @@ class SealVectorsTest {
 
     private static Handshake side(Map<String, Object> v, boolean initiator, Profile p, Mode m, byte[] handle) throws SecureCarrierException {
         String who = initiator ? "initiator" : "responder";
-        StaticKey eph = StaticKey.of(hex(v, who + "_ephemeral"));
+        StaticKey eph = StaticKey.fromScalar(hex(v, who + "_ephemeral"));
         // The KEM's randomness: the initiator's key pair seed (d, z), the responder's encapsulation m.
         byte[] kem = hexOrNull(v, initiator ? "initiator_kem_seed" : "responder_encaps_m");
-        return new Handshake(p, m, initiator, handle, hexOrNull(v, "psk"), hexOrNull(v, "binding"),
-                StaticKey.of(hex(v, who + "_static")), () -> eph, kem == null ? null : new FixedRandom(kem));
+        Handshake hs = new Handshake(p, m, initiator, handle, hexOrNull(v, "psk"), hexOrNull(v, "binding"),
+                StaticKey.fromScalar(hex(v, who + "_static")), () -> eph, kem == null ? null : new FixedRandom(kem));
+        hs.maxAppData(ClientConfig.appDataLimit(configured(v).maxAppData()));
+        return hs;
+    }
+
+    /** The vector's local bound on received application data: positive bytes, 0 (or absent) the default 256, negative none. */
+    static int maxAppData(Map<String, Object> v) {
+        Object n = v.get("max_app_data");
+        return n == null ? 0 : Math.toIntExact(((Number) n).longValue());
+    }
+
+    /** The configuration a host writes for the vector's bound: nothing for the default, noMaxAppData() for none, else the value. */
+    static ClientConfig configured(Map<String, Object> v) {
+        int n = maxAppData(v);
+        ClientConfig.Builder b = ClientConfig.builder();
+        if (n < 0) b.noMaxAppData();
+        else if (n > 0) b.maxAppData(n);
+        return b.build();
     }
 
     private static Handshake side(Map<String, Object> v, boolean initiator) throws SecureCarrierException {
@@ -56,7 +72,15 @@ class SealVectorsTest {
     void handshake() throws Exception {
         List<Map<String, Object>> all = VectorFiles.list("handshake.json");
         assertEquals(18, handshakes(all));
-        count("handshake.json", all.size(), 33);
+        count("handshake.json", all.size(), 35);
+        assertEquals(java.util.Set.of(-1, 0, 65466), all.stream().filter(v -> v.containsKey("max_app_data")).map(SealVectorsTest::maxAppData)
+                .collect(java.util.stream.Collectors.toSet()), "every kind of bound is exercised");
+        for (var v : all) {
+            int n = maxAppData(v);
+            java.util.OptionalInt bound = configured(v).maxAppData();
+            if (n < 0) assertTrue(bound.isEmpty(), "noMaxAppData()");
+            else assertEquals(n == 0 ? 256 : n, bound.getAsInt(), "the default or the value");
+        }
     }
 
     private static final int ALL_TYPES = EstablishPayload.KNOWN_CREDENTIAL | EstablishPayload.KNOWN_FIRST_BYTES
@@ -77,14 +101,14 @@ class SealVectorsTest {
         byte[] pin = hexOrNull(want, "pin_id");
         if (pin != null) return new PinAnchor(pin, hexOrNull(want, "pin_proof_id"));
         byte[] proofKey = hexOrNull(want, "proof_key");
-        return in -> new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()), proofKey, null);
+        return in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()), proofKey, null);
     }
 
     /** Judges the peer of message got as a vector's verify_server or verify_client says, and checks the PQ fact. */
     private static void judged(Map<String, Object> want, Handshake rd, Profile p, byte[] handle, EstablishPayload got, boolean server, String name)
             throws Exception {
         if (want == null) return;
-        VerifyInput in = new VerifyInput(server ? VerifyInput.Role.NODE : VerifyInput.Role.CLIENT, p, rd.peerStatic(), handle, got.credential(), List.of(), null);
+        VerifyInput in = new VerifyInput(server ? io.zmux.Role.SERVER : io.zmux.Role.CLIENT, p, rd.peerStatic(), handle, got.credential(), List.of(), null);
         var j = Verification.judge(anchor(want), in, got.proof(), Boolean.TRUE.equals(want.get("require_pq_auth")));
         assertEquals(want.get("pq_authenticated"), j.pqAuthenticated(), name);
     }
@@ -101,9 +125,6 @@ class SealVectorsTest {
             assertArrayEquals(hex(v, "prologue"), Handshake.prologue(p, m, handle, hexOrNull(v, "binding")), name);
             Handshake i = side(v, true);
             Handshake r = side(v, false);
-            // A vector may fill a message with application data; the local bound is the receiver's.
-            i.maxAppData(-1);
-            r.maxAppData(-1);
             List<Map<String, Object>> msgs = items(v, "messages");
             assertEquals(3, msgs.size(), name);
             for (int idx = 0; idx < msgs.size(); idx++) {
@@ -215,8 +236,8 @@ class SealVectorsTest {
                     case "verify" -> {
                         byte[] proofKey = hexOrNull(s, "proof_key");
                         try {
-                            Verification.judge(in -> new Verdict(new Principal(Principal.NODE_KEY, new byte[0]), proofKey, null),
-                                    new VerifyInput(VerifyInput.Role.NODE, Profile.of(num(v, "profile")), hs.peerStatic(), null, last.credential(), List.of(), null),
+                            Verification.judge(in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, new byte[0]), proofKey, null),
+                                    new VerifyInput(io.zmux.Role.SERVER, Profile.of(num(v, "profile")), hs.peerStatic(), null, last.credential(), List.of(), null),
                                     last.proof(), Boolean.TRUE.equals(s.get("require_pq_auth")));
                         } catch (CredentialsFailedException | VerifierUnavailableException e) {
                             assertEquals(steps.size() - 1, i, str(v, "name") + " failed early: " + e.getMessage());
@@ -240,7 +261,7 @@ class SealVectorsTest {
         for (Map<String, Object> v : all) {
             assertEquals(str(v, "error"), run(v), str(v, "name"));
         }
-        count("negative.json", all.size(), 152);
+        count("negative.json", all.size(), 153);
     }
 
     @Test
@@ -306,7 +327,7 @@ class SealVectorsTest {
                     Joiner.create(Suite.lookup(num(v, "suite")), m, Framing.STREAM, hex(v, "handle"), hexOrNull(v, "psk"), hexOrNull(v, "binding"));
                 } else {
                     Profile p = Profile.of(num(v, "profile"));
-                    StaticKey key = StaticKey.of(hex(v, "static"));
+                    StaticKey key = StaticKey.fromScalar(hex(v, "static"));
                     // The public entrance judges the same parameters as the state machine.
                     EstablishClient.create(p, m, Framing.STREAM, hexOrNull(v, "handle"), hexOrNull(v, "psk"), hexOrNull(v, "binding"), key);
                     Handshake hs = new Handshake(p, m, true, hexOrNull(v, "handle"), hexOrNull(v, "psk"), hexOrNull(v, "binding"), key, StaticKey::generate);

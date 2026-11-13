@@ -1,6 +1,5 @@
 package io.zmux.internal.wire;
 
-import io.zmux.carrier.VarInt;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -216,7 +215,7 @@ public final class TransportParams {
             b.get(vp, v);
             try {
                 sessionCrypto = io.zmux.internal.join.SessionCrypto.decode(v);
-            } catch (io.zmux.carrier.SecureCarrierException e) {
+            } catch (io.zmux.seal.SecureCarrierException e) {
                 throw WireException.param("zmux_session_crypto: " + e.getMessage());
             }
         } else if (id == ID_ACK_THRESHOLD) {

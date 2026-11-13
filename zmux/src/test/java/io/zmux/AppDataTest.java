@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.zmux.carrier.PipeIo;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.seal.AppData;
 import io.zmux.seal.AppDataSource;
 import io.zmux.seal.Peer;
@@ -14,7 +14,7 @@ import io.zmux.seal.Principal;
 import io.zmux.seal.Profile;
 import io.zmux.seal.Seal;
 import io.zmux.seal.ServerConfig;
-import io.zmux.seal.Verdict;
+import io.zmux.seal.VerifyVerdict;
 import io.zmux.seal.VerifyInput;
 import java.util.List;
 import java.util.Optional;
@@ -51,16 +51,16 @@ class AppDataTest {
             ZmuxConfig cfg = SealTest.sessions(loops).build();
             List<Asked> client = new CopyOnWriteArrayList<>(), server = new CopyOnWriteArrayList<>();
             List<VerifyInput> judged = new CopyOnWriteArrayList<>();
-            var sc = new ServerConfig(SealTest.gate(null), SealTest.NODE)
-                    .withAnchor(in -> { judged.add(in); return new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic())); }, "edge", false)
-                    .withAppData(answering(server, m -> "two".getBytes()), 0);
+            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE)
+                    .anchor(in -> { judged.add(in); return new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic())); }).localContext("edge")
+                    .appData(answering(server, m -> "two".getBytes())).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc)).build())) {
                 PipeIo p = SealTest.establish(SealTest.tcp(l.localAddress()), SealTest.client().appData(answering(client, m -> new byte[] {(byte) m})).build());
                 List<AppData> fromClient = List.of(new AppData(1, new byte[] {1}, false, false), new AppData(3, new byte[] {3}, true, true));
                 try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
                     same(fromClient, ((Peer) s.admitted().orElseThrow()).appData());
                 }
-                same(List.of(new AppData(2, "two".getBytes(), true, true)), Seal.peerOf(p).appData());
+                same(List.of(new AppData(2, "two".getBytes(), true, true)), Seal.peerOf(p).orElseThrow().appData());
                 // The anchor sees the data before its own verification: none of it is authenticated yet.
                 same(List.of(new AppData(1, new byte[] {1}, false, false), new AppData(3, new byte[] {3}, true, false)), judged.getFirst().peerAppData());
                 assertEquals(2, client.size());
@@ -89,7 +89,7 @@ class AppDataTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).build();
             List<String> reasons = new CopyOnWriteArrayList<>();
-            var sc = new ServerConfig(SealTest.gate(null), SealTest.NODE).withAcceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES);
+            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
                     .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
@@ -104,7 +104,7 @@ class AppDataTest {
                 var e = assertFails(Seal.establish(SealTest.tcp(l.localAddress()), failing).toCompletableFuture());
                 assertTrue(e instanceof java.io.IOException && e.getCause() instanceof IllegalStateException, e.toString());
 
-                var over = SealTest.client().appData((m, peer) -> CompletableFuture.completedFuture(Optional.of(new byte[300]))).timeout(java.time.Duration.ofSeconds(2)).build();
+                var over = SealTest.client().appData((m, peer) -> CompletableFuture.completedFuture(Optional.of(new byte[300]))).handshakeTimeout(java.time.Duration.ofSeconds(2)).build();
                 assertFails(Seal.establish(SealTest.tcp(l.localAddress()), over).toCompletableFuture());
                 long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                 while (!reasons.contains("too_large") && System.nanoTime() < until) Thread.sleep(2);

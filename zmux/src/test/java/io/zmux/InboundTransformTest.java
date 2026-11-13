@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Timeout;
 class InboundTransformTest {
     static ZmuxConfig.Builder builder(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
+                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     static ZmuxConfig config(EventLoops loops) { return builder(loops).build(); }
@@ -43,12 +43,12 @@ class InboundTransformTest {
     /** A carrier whose sending half counts its writes and reports a retransmission count. */
     static PipeIo counted(PipeIo io, List<Integer> writes, long retransmitted) {
         PipeWriter w = io.writer();
-        return new PipeIo(io.reader(), new PipeWriter() {
+        return io.withHalves(io.reader(), new PipeWriter() {
             @Override public void write(OutboundBatch batch, Completion done) { writes.add(batch.bytes()); w.write(batch, done); }
             @Override public OptionalLong retransmitted() { return retransmitted < 0 ? OptionalLong.empty() : OptionalLong.of(retransmitted); }
             @Override public void close() { w.close(); }
             @Override public void abort(Throwable cause) { w.abort(cause); }
-        }, io.framing(), io.label(), io.carrierConn(), io.capabilities(), io.carrier());
+        });
     }
 
     @Test void theTransformSeesTheAdmissionValueAndItsLayerCarriesTheSession() throws Exception {
@@ -64,7 +64,7 @@ class InboundTransformTest {
             var cfg = config(loops);
             var serverCfg = builder(loops).shaper(p -> { shaped.add(p); return null; }).build();
             var lc = ListenerConfig.builder().session(serverCfg).admission(valued("tenant-7")).inboundTransform(t).build();
-            try (var l = Zmux.listener(lc)) {
+            try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")).withRequest(RequestHead.NONE));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
@@ -83,13 +83,13 @@ class InboundTransformTest {
                     // A join carries its own value; zmux does not compare it with the session's.
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
-                    c.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build());
+                    c.addPipe(pair[0], PipeOptions.builder().noProbation().build());
                     ListenerEntryTest.await(() -> l.stats().joins() == 1);
                     assertEquals(Optional.of("tenant-7"), seen.poll(5, TimeUnit.SECONDS).admitted());
                     ListenerEntryTest.await(() -> s.pipes().size() >= 2);
-                    ZmuxPipe joined = s.pipes().stream().filter(x -> x.id() != 0).findFirst().orElseThrow();
+                    ZmuxPipe joined = s.pipes().stream().filter(x -> x.id().value() != 0).findFirst().orElseThrow();
                     assertEquals(Optional.of("tenant-7"), joined.admitted());
-                    assertEquals(Optional.of("tenant-7"), s.pipes().stream().filter(x -> x.id() == 0).findFirst().orElseThrow().admitted());
+                    assertEquals(Optional.of("tenant-7"), s.pipes().stream().filter(x -> x.id().value() == 0).findFirst().orElseThrow().admitted());
                 }
             }
         }
@@ -98,7 +98,7 @@ class InboundTransformTest {
     @Test void aFailingTransformClosesTheCarrierAsASetupFailure() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             InboundTransform t = (carrier, ctx) -> CompletableFuture.failedFuture(new java.io.IOException("no"));
-            try (var l = Zmux.listener(ListenerConfig.builder().session(config(loops)).inboundTransform(t).build())) {
+            try (var l = ZmuxListener.of(ListenerConfig.builder().session(config(loops)).inboundTransform(t).build())) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var ended = ListenerEntryTest.watchEnd(boot[0]);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
@@ -120,7 +120,7 @@ class InboundTransformTest {
                 never.whenComplete((v, e) -> { if (never.isCancelled()) cancelled.complete(null); });
                 return never;
             };
-            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).inboundTransform(t).build())) {
+            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(t).build())) {
                 for (int i = 0; i < 2; i++) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var ended = ListenerEntryTest.watchEnd(boot[0]);
@@ -143,7 +143,7 @@ class InboundTransformTest {
             var downPeer = TestAddr.peer("down");
             var adm = Admission.of(0, Admission.Decider.immediate((info, prefix) ->
                     Admission.Decision.accept(0, info.peer().equals(upPeer) ? "half-up" : "half-down")));
-            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).inboundTransform(t).build())) {
+            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).inboundTransform(t).build())) {
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                 String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
@@ -166,13 +166,13 @@ class InboundTransformTest {
     @Test void anUnknownLocatorGetsNoAnswerAndFailsOnlyThatJoin() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var home = Zmux.listener(ListenerConfig.of(cfg)); var other = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var home = ZmuxListener.of(ListenerConfig.of(cfg)); var other = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 home.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5))) {
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     other.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
-                    assertThrows(Exception.class, () -> c.addPipe(pair[0], PipeOptions.builder().probation(Duration.ZERO).build()));
+                    assertThrows(Exception.class, () -> c.addPipe(pair[0], PipeOptions.builder().noProbation().build()));
                     ListenerEntryTest.await(() -> other.stats().rejected() == 1);
                     assertNotNull(c.info(), "the session lives on");
                 }
@@ -183,7 +183,7 @@ class InboundTransformTest {
     @Test void pipeStatsReportLossAndTheCarriersRetransmissions() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 var writes = java.util.Collections.synchronizedList(new ArrayList<Integer>());

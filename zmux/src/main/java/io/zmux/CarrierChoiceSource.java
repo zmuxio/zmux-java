@@ -13,24 +13,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * A mode's choice of carrier kind for {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} and
- * the members of a {@link PipePool#mode mode pool}: the candidates by index of preference, read
+ * A carrier choice of carrier kind for {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} and
+ * the members of a {@link PipePool#choice choice pool}: the candidates by index of preference, read
  * against and recorded in the policy's cache. Immutable; the cache is safe for concurrent use.
  */
-final class ModeSource {
+final class CarrierChoiceSource {
     private final List<Candidate> cands;
     private final boolean auto;
-    private final ModePolicy policy;
+    private final CarrierChoicePolicy policy;
 
-    ModeSource(CarrierMode mode, ModePolicy policy) {
-        this.cands = mode.candidates();
-        this.auto = mode.isAuto();
-        this.policy = policy == null ? ModePolicy.defaults() : policy;
+    CarrierChoiceSource(CarrierChoice choice, CarrierChoicePolicy policy) {
+        this.cands = choice.candidates();
+        this.auto = choice.isAuto();
+        this.policy = policy == null ? CarrierChoicePolicy.defaults() : policy;
     }
 
     List<Candidate> candidates() { return cands; }
 
-    ModePolicy policy() { return policy; }
+    CarrierChoicePolicy policy() { return policy; }
 
     private CarrierCache cache() { return policy.cache(); }
 
@@ -118,7 +118,7 @@ final class ModeSource {
     }
 
     private List<ZmuxPipe> joinCandidate(ZmuxSession s, Candidate c, PipeOptions options) throws IOException {
-        Credential cred = s.credential();
+        CarrierCredential cred = s.credential();
         if (c.joiner() != null) {
             List<ZmuxPipe> pipes = c.joiner().join(s, options, cred, policy.timerMin());
             if (pipes == null || pipes.isEmpty()) throw new IOException(c.kind() + " joined no pipe");
@@ -139,11 +139,11 @@ final class ModeSource {
             return f.get(timer.toNanos(), TimeUnit.NANOSECONDS);
         } catch (TimeoutException e) {
             // Confirmed late: not usable all the same.
-            f.thenAccept(ModeSource::abort);
+            f.thenAccept(CarrierChoiceSource::abort);
             throw new SocketTimeoutException("join not confirmed within the timer");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            f.thenAccept(ModeSource::abort);
+            f.thenAccept(CarrierChoiceSource::abort);
             throw new InterruptedIOException("interrupted");
         } catch (ExecutionException e) {
             throw e.getCause() instanceof IOException io2 ? io2 : new IOException(e.getCause());

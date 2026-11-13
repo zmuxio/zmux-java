@@ -19,9 +19,6 @@ import java.util.Objects;
  * keys let anyone fill the filter.
  */
 public final class ReplayFilter {
-    /** The outcome of a {@link #check}. */
-    public enum Verdict { FRESH, SEEN, OUTSIDE, FULL }
-
     private final long window, width, notBefore;
     private final int max;
     private final Clock clock;
@@ -36,7 +33,7 @@ public final class ReplayFilter {
     /**
      * @param window how far a stamp may be from the clock, at least 1 ms
      * @param max the keys held, at least 1
-     * @param notBefore stamps before it are {@link Verdict#OUTSIDE}, such as the process start, so
+     * @param notBefore stamps before it are {@link ReplayVerdict#OUTSIDE}, such as the process start, so
      *     that what was sent to an earlier process is not accepted again; null: none
      * @param clock the filter's clock; null: the system's
      */
@@ -60,10 +57,10 @@ public final class ReplayFilter {
     }
 
     /** Checks key stamped tMillis (Unix milliseconds) and records a fresh key; both must have been authenticated together. */
-    public synchronized Verdict check(byte[] key, long tMillis) {
+    public synchronized ReplayVerdict check(byte[] key, long tMillis) {
         Objects.requireNonNull(key, "key");
         long now = clock.millis();
-        if (tMillis < now - window || tMillis > now + window || tMillis < notBefore) return Verdict.OUTSIDE;
+        if (tMillis < now - window || tMillis > now + window || tMillis < notBefore) return ReplayVerdict.OUTSIDE;
         long low = Math.floorDiv(now, width), idx = Math.floorDiv(tMillis + window, width);
         for (Bucket b : buckets) {
             if (b.keys != null && b.idx < low) {
@@ -73,8 +70,8 @@ public final class ReplayFilter {
         }
         // A key with the same stamp sits in one bucket, but a replay may carry another stamp.
         ByteBuffer k = ByteBuffer.wrap(key);
-        for (Bucket b : buckets) if (b.keys != null && b.keys.contains(k)) return Verdict.SEEN;
-        if (size >= max) return Verdict.FULL;
+        for (Bucket b : buckets) if (b.keys != null && b.keys.contains(k)) return ReplayVerdict.SEEN;
+        if (size >= max) return ReplayVerdict.FULL;
         Bucket b = buckets[(int) Math.floorMod(idx, (long) buckets.length)];
         if (b.keys == null) {
             b.idx = idx;
@@ -82,7 +79,7 @@ public final class ReplayFilter {
         }
         b.keys.add(ByteBuffer.wrap(key.clone()));
         size++;
-        return Verdict.FRESH;
+        return ReplayVerdict.FRESH;
     }
 
     /** The keys held. */

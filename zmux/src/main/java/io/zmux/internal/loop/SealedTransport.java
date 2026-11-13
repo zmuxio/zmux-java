@@ -5,9 +5,9 @@ import io.zmux.internal.core.Batch;
 import io.zmux.internal.core.CarrierInfo;
 import io.zmux.internal.core.Framing;
 import io.zmux.internal.core.ReadBuf;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.join.Result;
-import io.zmux.carrier.RecordProtection;
+import io.zmux.internal.join.RecordProtection;
 import io.zmux.internal.join.Suite;
 import java.nio.ByteBuffer;
 
@@ -31,6 +31,9 @@ public final class SealedTransport implements Transport, Inbound {
     private Inbound upper;
     private Batch upperBatch;
     private byte[] scratch;
+    /** The record that failed to open, which ended the input; null while none has. */
+    private Throwable openFailure;
+    private boolean inputEnded;
 
     /** A Join's carrier: its keys and exporter are the handshake's. */
     SealedTransport(Transport lower, Result result) {
@@ -73,7 +76,7 @@ public final class SealedTransport implements Transport, Inbound {
     }
     @Override public void rebind(Inbound in) { upper = in; lower.rebind(this); }
     @Override public Inbound inbound() { return upper; }
-    @Override public Throwable inputError() { return lower.inputError(); }
+    @Override public Throwable inputError() { return openFailure != null ? openFailure : lower.inputError(); }
     @Override public int directions() { return lower.directions(); }
     @Override public void restrict(int required) { lower.restrict(required); }
     @Override public boolean writable() { return upperBatch == null && lower.writable(); }
@@ -179,7 +182,7 @@ public final class SealedTransport implements Transport, Inbound {
     /** Opens one record for the session, into a buffer the session may keep. */
     private boolean open(ByteBuffer ct) {
         if (ct.remaining() < Suite.TAG_LEN) {
-            lower.close(new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+            openFailed(new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
             return false;
         }
         ByteBuffer plain = ByteBuffer.allocate(ct.remaining() - Suite.TAG_LEN);
@@ -187,11 +190,21 @@ public final class SealedTransport implements Transport, Inbound {
         try {
             n = records.open(ct, plain);
         } catch (SecureCarrierException e) {
-            lower.close(e);
+            openFailed(e);
             return false;
         }
         plain.position(0).limit(n);
         return deliver(plain, n);
+    }
+
+    /**
+     * A record failed to open: the carrier closes abortively, and the input ends with that cause,
+     * since closing the lower carrier reports no end of its own.
+     */
+    private void openFailed(SecureCarrierException e) {
+        openFailure = e;
+        lower.close(e);
+        ended(this, false, false);
     }
 
     private boolean deliver(ByteBuffer plain, int n) {
@@ -201,12 +214,16 @@ public final class SealedTransport implements Transport, Inbound {
         }
         // Before admission a record is classified with its Size, as on any message carrier.
         ByteBuffer framed = ByteBuffer.allocate(n + 8);
-        io.zmux.carrier.VarInt.put(framed, n);
+        io.zmux.internal.wire.VarInt.put(framed, n);
         framed.put(plain).flip();
         return upper.bytes(this, new ReadBuf(framed, null), framed, 0, framed.limit()) != GONE;
     }
 
-    @Override public void ended(Transport t, boolean graceful, boolean partial) { upper.ended(this, graceful, partial); }
+    @Override public void ended(Transport t, boolean graceful, boolean partial) {
+        if (inputEnded) return;
+        inputEnded = true;
+        upper.ended(this, graceful, partial);
+    }
     @Override public void writable(Transport t, boolean on) { upper.writable(this, on); }
     @Override public void outputShut(Transport t) { upper.outputShut(this); }
 

@@ -1,15 +1,15 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.AUTH;
-import static io.zmux.carrier.SecureCarrierException.Code.BAD_FIELD;
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.carrier.SecureCarrierException.Code.MISSING_FIELD;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_TRUNCATED;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.AUTH;
+import static io.zmux.seal.SecureCarrierException.Code.BAD_FIELD;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Code.MISSING_FIELD;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_TRUNCATED;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.random.OsRandom;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;

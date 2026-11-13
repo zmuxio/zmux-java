@@ -1,12 +1,10 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
 import io.zmux.internal.join.Framing;
 import io.zmux.internal.join.Frames;
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Mode;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -48,11 +46,11 @@ final class EstablishClient {
      */
     public static EstablishClient create(Profile p, Mode m, Framing f, byte[] handle, byte[] psk, byte[] binding, StaticKey key)
             throws SecureCarrierException {
-        return create(p, m, f, handle, psk, binding, key, StaticKey::generate);
+        return create(p, m, f, handle, psk, binding, key, StaticKey::random);
     }
 
-    /** Bounds the application data of message 2; 0 is the default. */
-    public EstablishClient maxAppData(int n) {
+    /** Bounds the application data of message 2, in bytes; {@link Long#MAX_VALUE}: none. */
+    EstablishClient maxAppData(long n) {
         hs.maxAppData(n);
         return this;
     }
@@ -106,7 +104,7 @@ final class EstablishClient {
     }
 
     private VerifyInput input(Object localContext) {
-        return new VerifyInput(VerifyInput.Role.NODE, profile, hs.peerStatic(), profile.hasPsk() ? handle : null, credential, peerAppData, localContext);
+        return new VerifyInput(io.zmux.Role.SERVER, profile, hs.peerStatic(), profile.hasPsk() ? handle : null, credential, peerAppData, localContext);
     }
 
     /** What is known of the server when message 3 is written: what the anchor judged, and its verdict. */

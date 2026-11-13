@@ -16,7 +16,7 @@ import javax.net.ssl.SSLEngine;
 /**
  * The TLS exporter of a QUIC connection (RFC 8446 Section 7.5). The stack has no call for it, and its key log
  * has the exporter secret: {@link QuicClient} and {@link QuicServer} install {@link #KEYLOG} on their TLS
- * builder, and a host that builds its own codec for {@link QuicServer#serve} passes it to
+ * builder, and a host that builds its own codec for {@link QuicServer#serveAsync} passes it to
  * {@code QuicSslContextBuilder.keylog}, which replaces any other key log. The secret stays in memory
  * for the life of the connection's engine, as the TLS stack's own does. The stack's key log lines carry the
  * connection's traffic secrets too: they are not kept here, but stay on the heap as strings until collected.

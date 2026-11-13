@@ -814,6 +814,11 @@ final class PathHealth {
             return abandonQueued;
         }
 
+        /** Drops a queued, unsent PIPE_ABANDON: the attachment was displaced (MULTIPATH.md Section 5.4). */
+        void dropQueuedAbandon() {
+            abandonQueued = false;
+        }
+
         long abandonCode() {
             return abandonCode;
         }

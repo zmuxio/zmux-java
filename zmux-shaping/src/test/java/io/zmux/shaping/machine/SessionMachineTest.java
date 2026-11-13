@@ -16,22 +16,22 @@ class SessionMachineTest {
     @Test void aTimerOfTheSameDeadlineIsNotReportedAndStillFires() throws Exception {
         String d = "{\"machines\":[{\"start\":0,\"timers\":2,\"states\":[{\"enter\":[{\"op\":\"timer\",\"slot\":0,\"after\":1000}],\"next\":[{\"on\":\"timer\",\"slot\":0,\"to\":1}]},"
                 + "{\"enter\":[{\"op\":\"timer\",\"slot\":1,\"after\":0}],\"next\":[{\"on\":\"timer\",\"slot\":1,\"to\":2}]},{}]}]}";
-        var m = new Machines.Compiled(Definition.parse(d), Sampler.seeded(), Options.defaults()).newShaper();
+        var m = new Machines.Compiled(Definition.parse(d), Sampler.seeded(), MachineOptions.defaults()).newShaper();
         var e = new io.zmux.shaping.Effects();
-        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.START, 0, 0, 0, 0, false, 0), e);
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.START, io.zmux.PipeId.BOOTSTRAP, 0, 0, 0, false, 0), e);
         assertEquals(1_000_000, e.wakeAtNanos());
         e = new io.zmux.shaping.Effects();
-        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, 0, 0, 1_000_000, 0, false, 0), e);
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, io.zmux.PipeId.BOOTSTRAP, 0, 1_000_000, 0, false, 0), e);
         assertEquals(1, m.state(0));
         assertFalse(e.hasWake());
         e = new io.zmux.shaping.Effects();
-        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, 0, 0, 1_000_000, 0, false, 0), e);
+        m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, io.zmux.PipeId.BOOTSTRAP, 0, 1_000_000, 0, false, 0), e);
         assertEquals(2, m.state(0));
-        assertTrue(e.hasWake() && e.wakeNone());
+        assertTrue(e.hasWake() && e.isWakeNone());
     }
 
     @Test void aDefinitionShapesTheRecordsOfASession() throws Exception {
-        var f = Machines.factory("{\"machines\":[{\"start\":0,\"states\":[{\"record\":{\"pad_to\":200}}]}]}", Options.defaults());
+        var f = Machines.factory("{\"machines\":[{\"start\":0,\"states\":[{\"record\":{\"pad_to\":200}}]}]}", MachineOptions.defaults());
         var out = new ByteArrayOutputStream();
         var on = new java.util.concurrent.atomic.AtomicBoolean();
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {

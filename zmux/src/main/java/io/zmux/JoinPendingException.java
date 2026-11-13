@@ -24,8 +24,8 @@ public final class JoinPendingException extends ZmuxException {
     }
 
     /** Whether the end-to-end declaration is missing. */
-    public boolean endToEndMissing() { return endToEndMissing; }
+    public boolean isEndToEndMissing() { return endToEndMissing; }
 
     /** Whether the deferred PSK is missing. */
-    public boolean pskMissing() { return pskMissing; }
+    public boolean isPskMissing() { return pskMissing; }
 }

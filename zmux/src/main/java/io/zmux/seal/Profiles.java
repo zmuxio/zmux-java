@@ -1,8 +1,7 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Suite;
 import java.util.List;
 
@@ -18,8 +17,8 @@ final class Profiles {
 
     /** The Profile a client uses: the first allowed one that fits its pre-shared key. */
     static Profile client(ClientConfig c) throws SecureCarrierException {
-        boolean withPsk = c.psk() != null && c.psk().length > 0;
-        if (c.handle() != null && !withPsk) throw new SecureCarrierException(INVALID_CONFIG, "Handle set without a pre-shared key");
+        boolean withPsk = c.hasPsk();
+        if (c.hasHandle() && !withPsk) throw new SecureCarrierException(INVALID_CONFIG, "Handle set without a pre-shared key");
         List<Profile> list = c.allowedProfiles();
         if (list == null) list = Suite.aesHardware() ? CLIENT_AES : CLIENT;
         for (Profile p : list) {

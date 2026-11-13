@@ -37,7 +37,7 @@ class SplitJoinTest {
                     List<ZmuxPipe> first = run.pipes();
                     var st = first.getFirst().stats().orElseThrow();
                     assertTrue(st.outbound() != null && st.inbound() != null, "one bidirectional attachment");
-                    var old = new HashSet<Long>();
+                    var old = new HashSet<io.zmux.PipeId>();
                     for (ZmuxPipe p : first) old.add(p.id());
                     // The loss of the pipe replaces the member.
                     first.getFirst().abort();

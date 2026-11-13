@@ -15,7 +15,7 @@ import io.netty.handler.codec.http.websocketx.WebSocketVersion;
 import io.netty.util.ReferenceCountUtil;
 import io.zmux.CarrierKind;
 import io.zmux.Admission;
-import io.zmux.Credential;
+import io.zmux.CarrierCredential;
 import io.zmux.HttpStatusException;
 import io.zmux.RequestHead;
 import io.zmux.ZmuxConfig;
@@ -52,7 +52,7 @@ final class WebSocketClient {
      * allows, up to {@link Redirects#DEFAULT_MAX}, each on a new connection with the credential
      * presented anew.
      */
-    static Opened open(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential)
+    static Opened open(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, CarrierCredential credential)
             throws IOException {
         URI cur = url;
         for (int hops = 0; ; hops++) {
@@ -66,7 +66,7 @@ final class WebSocketClient {
         }
     }
 
-    private static PipeIo attempt(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential)
+    private static PipeIo attempt(HttpCarrierClient http, URI url, Map<String, List<String>> headers, List<String> protocols, CarrierCredential credential)
             throws IOException {
         String scheme = url.getScheme() == null ? "" : url.getScheme().toLowerCase(java.util.Locale.ROOT);
         if (!List.of("ws", "wss", "http", "https").contains(scheme) || url.getHost() == null) {
@@ -86,7 +86,7 @@ final class WebSocketClient {
                 var e = Requests.tls(ch);
                 var info = new Admission.CarrierInfo(Connections.address(url), Connections.address(url), "", e == null ? "" : url.getHost(),
                         e == null ? null : Requests.exporter(e), RequestHead.of(Map.of(), true));
-                Credential.HeaderField f = credential.header(info);
+                CarrierCredential.HeaderField f = credential.header(info);
                 h.add(f.name(), f.value());
             }
             WebSocketClientHandshaker hs = WebSocketClientHandshakerFactory.newHandshaker(ws, WebSocketVersion.V13,
@@ -102,8 +102,8 @@ final class WebSocketClient {
             ch.pipeline().addLast(new Handler(hs, frames, done));
             hs.handshake(ch).addListener(f -> { if (!f.isSuccess()) done.completeExceptionally(f.cause()); });
             String protocol = http.await(done, "websocket handshake");
-            return new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch))
-                    .withReceiveMemory(BodyCarrier.RECEIVE_MEMORY).withProtocol(protocol)
+            return Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
+                    .withProtocol(protocol)
                     .withCarrier(CarrierKind.WEBSOCKET);
         } catch (IOException | RuntimeException e) {
             ch.close();

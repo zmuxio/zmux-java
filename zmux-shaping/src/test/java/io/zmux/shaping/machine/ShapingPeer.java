@@ -57,7 +57,7 @@ public final class ShapingPeer {
 
     static ShaperFactory factory(String path) throws IOException, DefinitionException {
         if (path == null || path.isEmpty()) return null;
-        return Machines.factory(Files.readString(Path.of(path)), Options.defaults());
+        return Machines.factory(Files.readString(Path.of(path)), MachineOptions.defaults());
     }
 
     static byte[] payload(int i) {

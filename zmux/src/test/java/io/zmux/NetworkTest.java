@@ -63,7 +63,7 @@ class NetworkTest {
             }
             for (Future<?> f : cs) f.get();
             fs.getFirst().get();
-            c.close(new ApplicationError(0, "done"));
+            c.abort(0, "done");
             assertInstanceOf(SessionError.ApplicationClosed.class, s.awaitClosed());
             c.awaitClosed();
         }
@@ -93,6 +93,58 @@ class NetworkTest {
             }
             assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
         }
+    }
+
+    /**
+     * A record the TLS layer rejects, read together with the peer's CONNECTION_CLOSE, does not hide
+     * it: the records unwrapped before the bad one reach the session first.
+     */
+    @Test
+    void tlsCloseFollowedByABadRecordIsStillApplicationClosed() throws Exception {
+        try (EventLoops loops = EventLoops.create(1)) {
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            try (ZmuxListener l = Zmux.listen(any(), ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).build());
+                 var relay = java.nio.channels.ServerSocketChannel.open().bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
+                var spoil = new java.util.concurrent.atomic.AtomicBoolean();
+                Thread.ofVirtual().start(() -> {
+                    try (var in = relay.accept(); var out = java.nio.channels.SocketChannel.open(l.localAddress())) {
+                        Thread.ofVirtual().start(() -> copy(out, in));
+                        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(1 << 17);
+                        while (in.read(b) >= 0) {
+                            if (spoil.get()) {
+                                // The CONNECTION_CLOSE's record, then one whose MAC cannot verify, in one write.
+                                b.put(new byte[] {0x17, 0x03, 0x03, 0x00, 0x20}).put(new byte[32]);
+                                b.flip();
+                                while (b.hasRemaining()) out.write(b);
+                                return;
+                            }
+                            b.flip();
+                            while (b.hasRemaining()) out.write(b);
+                            b.clear();
+                        }
+                    } catch (Exception ended) { /* The test is over. */ }
+                });
+                ZmuxSession c = Zmux.connectTls((InetSocketAddress) relay.getLocalAddress(), TlsOptions.client(TestTls.client(), "localhost"), cfg);
+                try (ZmuxSession s = l.accept(java.time.Duration.ofSeconds(10))) {
+                    c.openStream().write(new byte[] {1});
+                    s.acceptStream().close();
+                    Thread.sleep(100); // Nothing else is in flight.
+                    spoil.set(true);
+                    c.abort(7, "bye");
+                    var why = s.closed().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    var app = assertInstanceOf(SessionError.ApplicationClosed.class, why, String.valueOf(why));
+                    assertEquals(7, app.code());
+                }
+            }
+            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+        }
+    }
+
+    private static void copy(java.nio.channels.SocketChannel from, java.nio.channels.SocketChannel to) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(1 << 16);
+        try {
+            while (from.read(b) >= 0) { b.flip(); while (b.hasRemaining()) to.write(b); b.clear(); }
+        } catch (java.io.IOException ended) { /* Either side closed. */ }
     }
 
     @Test

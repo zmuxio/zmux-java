@@ -28,7 +28,7 @@ class ShapedPipeTest {
     }
 
     static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b) {
-        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
+        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     /** A server configured with a shaper pads its very first record and every one after. */
@@ -45,7 +45,7 @@ class ShapedPipeTest {
                 ShapingTest.transfer(server, client, 5000);
                 var recs = rec.records();
                 assertFalse(recs.isEmpty());
-                for (int[] r : recs) assertEquals(0, (io.zmux.carrier.VarInt.length(r[0]) + r[0]) % 64, "record of " + r[0] + " frames bytes");
+                for (int[] r : recs) assertEquals(0, (io.zmux.internal.wire.VarInt.length(r[0]) + r[0]) % 64, "record of " + r[0] + " frames bytes");
             }
         }
     }
@@ -56,7 +56,7 @@ class ShapedPipeTest {
             Seen cs = new Seen(), ss = new Seen();
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(cs).build();
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(ss).build();
-            try (var listener = Zmux.listener(ListenerConfig.of(scfg))) {
+            try (var listener = ZmuxListener.of(ListenerConfig.of(scfg))) {
                 var first = MemoryPipe.pair(Framing.MESSAGES);
                 listener.handle(first[1].withCarrier(CarrierKind.WEBSOCKET), JoinHint.inBand(TestAddr.peer("peer")), null);
                 try (var client = Zmux.open(first[0].withCarrier(CarrierKind.WEBSOCKET), Role.CLIENT, ccfg);
@@ -71,7 +71,7 @@ class ShapedPipeTest {
                     assertEquals(Set.of(CarrierKind.WEBSOCKET, CarrierKind.STREAMING), cs.kinds());
                     assertEquals(Set.of(CarrierKind.WEBSOCKET, CarrierKind.STREAMING), ss.kinds());
                     for (ShapedPipe p : cs.pipes) {
-                        assertEquals(p.id() == 0 ? CarrierKind.WEBSOCKET : CarrierKind.STREAMING, p.carrier(), p.toString());
+                        assertEquals(p.id().value() == 0 ? CarrierKind.WEBSOCKET : CarrierKind.STREAMING, p.carrier(), p.toString());
                     }
                     Set<CarrierKind> evented = new HashSet<>();
                     while (!evented.contains(CarrierKind.STREAMING)) {

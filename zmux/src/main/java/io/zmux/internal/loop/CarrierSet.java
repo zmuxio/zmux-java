@@ -128,13 +128,39 @@ final class CarrierSet {
         a.removed = true;
         list.remove(a);
         if (a.channelStop != null) a.channelStop.run();
+        if (rt.core.state().compareTo(io.zmux.internal.core.SessionState.CLOSING) >= 0) a.t.sessionEnded(rt.core.error());
         a.t.close(cause);
         release(a);
+        track(a.t.whenClosed().toCompletableFuture());
     }
 
     /** Detaches and closes every transport (the session ended). */
     void closeAll() {
         for (Attached a : new ArrayList<>(list)) remove(a, null);
+    }
+
+    // ---- the release of closed carriers ----
+
+    /** Closed transports whose carriers are not released yet. */
+    private final java.util.concurrent.atomic.AtomicInteger releasing = new java.util.concurrent.atomic.AtomicInteger();
+    /** Completes once the session ended and every closed carrier was released. */
+    private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+    private volatile boolean ended;
+
+    private void track(java.util.concurrent.CompletableFuture<Void> release) {
+        if (release.isDone()) return;
+        releasing.incrementAndGet();
+        release.whenComplete((v, e) -> { if (releasing.decrementAndGet() == 0 && ended) released.complete(null); });
+    }
+
+    /**
+     * Completes once every transport this session closed has released its carrier (its reader
+     * and writer ended), after {@link #closeAll}; the session's whole end waits for it.
+     */
+    java.util.concurrent.CompletableFuture<Void> released() {
+        ended = true;
+        if (releasing.get() == 0) released.complete(null);
+        return released;
     }
 
     // ---- memory charges, one per connection identity ----

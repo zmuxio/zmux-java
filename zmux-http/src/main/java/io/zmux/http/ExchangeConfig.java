@@ -19,17 +19,18 @@ import java.util.Objects;
 public final class ExchangeConfig {
     private final byte[] psk;
     private final boolean base64, cacheBust;
-    private final Map<String, List<String>> header;
+    private final Map<String, List<String>> headers;
     private final String downUrl, instance, nonceParam;
     private final int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
-    private final Duration requestTimeout, backoffMin, backoffMax, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
+    private final io.zmux.PipePool.Backoff backoff;
+    private final Duration requestTimeout, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
     private ExchangeConfig(Builder b) {
         if (b.psk.length == 0) throw new IllegalArgumentException("an exchange carrier needs a PSK");
         psk = b.psk.clone();
         base64 = b.base64;
-        cacheBust = !b.noCacheBust;
-        header = Map.copyOf(b.header);
+        cacheBust = b.cacheBust;
+        headers = Map.copyOf(b.headers);
         downUrl = b.downUrl;
         instance = b.instance;
         nonceParam = b.nonceParam.isEmpty() ? "n" : b.nonceParam;
@@ -40,9 +41,7 @@ public final class ExchangeConfig {
         downWindow = pos(b.downWindow, 32);
         nonceCacheSize = pos(b.nonceCacheSize, 1 << 18);
         requestTimeout = dur(b.requestTimeout, Duration.ofSeconds(25));
-        backoffMin = b.backoffMin == null ? Duration.ofMillis(20) : b.backoffMin;
-        backoffMax = b.backoffMax == null ? Duration.ofSeconds(2) : b.backoffMax;
-        if (backoffMax.compareTo(backoffMin) < 0) throw new IllegalArgumentException("backoff maximum below its minimum");
+        backoff = b.backoff;
         deadline = dur(b.deadline, Duration.ofSeconds(30));
         holdTime = b.holdTime == null ? Duration.ofSeconds(20) : b.holdTime;
         coalesce = b.coalesce == null ? Duration.ofMillis(2) : b.coalesce;
@@ -55,16 +54,19 @@ public final class ExchangeConfig {
         upStoreLimit = b.upStoreLimit > 0 ? b.upStoreLimit : (int) Math.max(4 << 20, 2L * upLimit());
     }
 
-    // Zero selects the default for the fields with which zero cannot work (no request, piece,
-    // window, store or record; a timeout, deadline or clock skew of zero); negative values are
-    // rejected by the setters.
+    // A field left unset (0 or null here, which no setter accepts) takes its default.
     private static int pos(int v, int d) { return v > 0 ? v : d; }
 
-    private static Duration dur(Duration v, Duration d) { return v != null && v.isPositive() ? v : d; }
+    private static Duration dur(Duration v, Duration d) { return v != null ? v : d; }
 
     private static int count(int n, String what) {
-        if (n < 0) throw new IllegalArgumentException("negative " + what);
+        if (n < 1) throw new IllegalArgumentException(what + " below 1");
         return n;
+    }
+
+    private static Duration positive(Duration d, String what) {
+        if (!Objects.requireNonNull(d, what).isPositive()) throw new IllegalArgumentException(what + " must be positive");
+        return d;
     }
 
     private static Duration time(Duration d, String what) {
@@ -73,11 +75,11 @@ public final class ExchangeConfig {
     }
 
     /**
-     * The default UP and DOWN piece size: the largest whose bodies, with the longest header and
-     * after the body encoding (base64 or not), stay at most 1,000,000 bytes.
+     * The default UP and DOWN piece size: the largest whose bodies, with the authentication header
+     * and Data MAC and after the body encoding (base64 or not), stay at most 1,000,000 bytes.
      */
     public static int defaultPieceSize(boolean base64) {
-        return base64 ? Exchange.BODY_MAX / 4 * 3 - Exchange.REQ_HDR_MAX : Exchange.BODY_MAX - Exchange.REQ_HDR_MAX;
+        return base64 ? Exchange.BODY_MAX / 4 * 3 - Exchange.REQ_OVERHEAD : Exchange.BODY_MAX - Exchange.REQ_OVERHEAD;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -85,11 +87,11 @@ public final class ExchangeConfig {
     public byte[] psk() { return psk.clone(); }
     byte[] pskRef() { return psk; }
     /** Bodies are base64-encoded (standard alphabet, padded). */
-    public boolean base64() { return base64; }
+    public boolean isBase64() { return base64; }
     /** A URL without {nonce} gets the nonce query parameter (client). */
-    public boolean cacheBust() { return cacheBust; }
+    public boolean isCacheBust() { return cacheBust; }
     /** Fields added to every request (client). */
-    public Map<String, List<String>> header() { return header; }
+    public Map<String, List<String>> headers() { return headers; }
     /** The target template of DOWN requests (client); empty: the URL UP requests use. */
     public String downUrl() { return downUrl; }
     /** Replaces {instance} in the URL (client); empty: a random token per carrier. */
@@ -104,8 +106,8 @@ public final class ExchangeConfig {
     public int upStoreLimit() { return upStoreLimit; }
     public int nonceCacheSize() { return nonceCacheSize; }
     public Duration requestTimeout() { return requestTimeout; }
-    public Duration backoffMin() { return backoffMin; }
-    public Duration backoffMax() { return backoffMax; }
+    /** The randomized, doubling delay before a request without a result is repeated (client). */
+    public io.zmux.PipePool.Backoff backoff() { return backoff; }
     public Duration deadline() { return deadline; }
     public Duration holdTime() { return holdTime; }
     public Duration coalesce() { return coalesce; }
@@ -120,17 +122,18 @@ public final class ExchangeConfig {
     int downLimit() { return Math.max(downPieceSize, Exchange.LIMIT); }
 
     /**
-     * Builds an {@link ExchangeConfig}; a value not set keeps its default. Negative values are
-     * rejected. Zero is taken as it is by {@link #backoff}, {@link #holdTime}, {@link #coalesce}
-     * and {@link #goneMemory}; for the others, which cannot work with zero, it selects the default.
+     * Builds an {@link ExchangeConfig}; a value not set keeps its default. A value outside a
+     * setting's range is rejected: counts are at least 1, the timeouts, the deadline and the clock
+     * skew positive; zero is a value for {@link #holdTime}, {@link #coalesce} and {@link #goneMemory}.
      */
     public static final class Builder {
         private byte[] psk = new byte[0];
-        private boolean base64, noCacheBust;
-        private Map<String, List<String>> header = Map.of();
+        private boolean base64, cacheBust = true;
+        private Map<String, List<String>> headers = Map.of();
+        private io.zmux.PipePool.Backoff backoff = new io.zmux.PipePool.Backoff(Duration.ofMillis(20), Duration.ofSeconds(2), 0.5);
         private String downUrl = "", instance = "", nonceParam = "";
         private int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
-        private Duration requestTimeout, backoffMin, backoffMax, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
+        private Duration requestTimeout, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
         private Builder() {}
 
@@ -139,12 +142,13 @@ public final class ExchangeConfig {
         /** Sends every body base64-encoded (standard alphabet, padded). */
         public Builder base64(boolean on) { base64 = on; return this; }
         /**
-         * Leaves a URL without {nonce} unchanged (client), for a server or intermediary that
-         * refuses unknown query parameters when nothing on the path caches POST responses.
+         * Whether a URL without {nonce} gets the nonce query parameter (client; default true).
+         * False suits a server or intermediary that refuses unknown query parameters when nothing
+         * on the path caches POST responses.
          */
-        public Builder noCacheBust(boolean on) { noCacheBust = on; return this; }
+        public Builder cacheBust(boolean on) { cacheBust = on; return this; }
         /** Fields added to every request (client). */
-        public Builder header(Map<String, List<String>> h) { header = Map.copyOf(h); return this; }
+        public Builder headers(Map<String, List<String>> h) { headers = Map.copyOf(h); return this; }
         /** The target template of DOWN requests (client); empty: the URL UP and CLOSE requests use. */
         public Builder downUrl(String url) { downUrl = Objects.requireNonNull(url); return this; }
         /** Replaces {instance} in the URL (client); empty: a random token per carrier. */
@@ -166,11 +170,14 @@ public final class ExchangeConfig {
         /** (Carrier ID, Nonce) pairs the server records within the time window (262144). */
         public Builder nonceCacheSize(int n) { nonceCacheSize = count(n, "nonceCacheSize"); return this; }
         /** Bounds one attempt of one request (25 s); must exceed the server's hold time. */
-        public Builder requestTimeout(Duration d) { requestTimeout = time(d, "requestTimeout"); return this; }
-        /** Bounds of the randomized, doubling delay before a request without a result is repeated (20 ms, 2 s); zero: none. */
-        public Builder backoff(Duration min, Duration max) { backoffMin = time(min, "backoff minimum"); backoffMax = time(max, "backoff maximum"); return this; }
+        public Builder requestTimeout(Duration d) { requestTimeout = positive(d, "requestTimeout"); return this; }
+        /**
+         * The randomized, doubling delay before a request without a result is repeated: its
+         * minimum and maximum (20 ms, 2 s) and its jitter j (0.5): each wait is drawn from [d(1 - j), d], d doubling from the minimum to the maximum.
+         */
+        public Builder backoff(io.zmux.PipePool.Backoff b) { backoff = Objects.requireNonNull(b, "backoff"); return this; }
         /** Fails the carrier when a request has had no result for this long (30 s). */
-        public Builder deadline(Duration d) { deadline = time(d, "deadline"); return this; }
+        public Builder deadline(Duration d) { deadline = positive(d, "deadline"); return this; }
         /** How long the server holds a DOWN request without data (20 s); zero: it answers at once. */
         public Builder holdTime(Duration d) { holdTime = time(d, "holdTime"); return this; }
         /** How long a piece waits for more bytes after its first byte while a request can take it (2 ms unless set; 0: no wait). */
@@ -179,11 +186,11 @@ public final class ExchangeConfig {
             return this;
         }
         /** Fails a server carrier without requests (60 s). */
-        public Builder idleTimeout(Duration d) { idleTimeout = time(d, "idleTimeout"); return this; }
+        public Builder idleTimeout(Duration d) { idleTimeout = positive(d, "idleTimeout"); return this; }
         /** How long the server remembers an ended carrier to answer its late requests with GONE (60 s); zero: not at all. */
         public Builder goneMemory(Duration d) { goneMemory = time(d, "goneMemory"); return this; }
         /** The largest difference between a request's Time and the server's clock accepted (60 s). */
-        public Builder maxClockSkew(Duration d) { maxClockSkew = time(d, "maxClockSkew"); return this; }
+        public Builder maxClockSkew(Duration d) { maxClockSkew = positive(d, "maxClockSkew"); return this; }
 
         public ExchangeConfig build() { return new ExchangeConfig(this); }
     }

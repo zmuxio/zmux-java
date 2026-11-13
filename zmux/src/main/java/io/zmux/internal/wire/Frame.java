@@ -1,6 +1,5 @@
 package io.zmux.internal.wire;
 
-import io.zmux.carrier.VarInt;
 
 import java.nio.ByteBuffer;
 
@@ -74,7 +73,6 @@ public final class Frame {
         return a;
     }
 
-    /** A read-only view of the data range. */
     /** The Locator of a SESSION_EPOCH; empty keeps the sender's current one. */
     public byte[] locatorBytes() {
         byte[] a = new byte[locatorLen];

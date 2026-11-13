@@ -11,6 +11,9 @@ mkdir -p "$repo_root/target/interop"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/interop/rust-target}"
 timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/peer/Cargo.toml"
 timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/qmux-peer/Cargo.toml"
+# The WebSocket and HTTP streaming peers: one crate with two binaries, one Go build with two commands.
+timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/web-peer/Cargo.toml" --target-dir "$CARGO_TARGET_DIR"
+"$ZMUX_GO_ROOT/interop/webpeer/build.sh" "$repo_root/target/interop/web-go"
 (cd "$repo_root/interop/qmux-go-peer" && timeout --kill-after=5s 180s go build -o "$repo_root/target/interop/qmux-go-peer" .)
 # The Establish peer builds against the zmux-go checkout itself, through a workspace.
 printf 'go 1.27\n\nuse (\n\t%s\n\t%s\n\t%s\n)\n' "$repo_root/interop/seal-go-peer" "$ZMUX_GO_ROOT" "$ZMUX_GO_ROOT/seal" > "$repo_root/target/interop/go.work"
@@ -19,6 +22,10 @@ export ZMUX_INTEROP_PEER="$CARGO_TARGET_DIR/release/zmux-interop-peer"
 export ZMUX_QMUX_RS_PEER="$CARGO_TARGET_DIR/release/qmux-peer"
 export ZMUX_QMUX_GO_PEER="$repo_root/target/interop/qmux-go-peer"
 export ZMUX_SEAL_INTEROP_PEER="$repo_root/target/interop/seal-go-peer"
+export ZMUX_RS_WS_PEER="$CARGO_TARGET_DIR/release/zmux-ws-peer"
+export ZMUX_RS_HTTP_PEER="$CARGO_TARGET_DIR/release/zmux-http-peer"
+export ZMUX_GO_WS_PEER="$repo_root/target/interop/web-go/wspeer"
+export ZMUX_GO_HTTP_PEER="$repo_root/target/interop/web-go/httppeer"
 (cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux -am -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
 # Maven must have actually executed every role in both suites.
 python3 - "$repo_root" <<'CHECK'
@@ -28,6 +35,23 @@ for name, tests in (('PeerInterop', 4), ('QmuxInterop', 4), ('SealPeerInterop', 
     root = ET.parse(Path(sys.argv[1]) / f'zmux/target/surefire-reports/TEST-io.zmux.{name}.xml').getroot()
     assert (int(root.attrib['tests']), int(root.attrib['failures']), int(root.attrib['errors']), int(root.attrib['skipped'])) == (tests, 0, 0, 0), name
 CHECK
+# QUIC against the Rust scripted peer (ZMUX_INTEROP_PEER), and WebSocket and HTTP streaming against both peers.
+(cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux-quic,zmux-http -am -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest='QuicPeerInterop,HttpInteropTest#webSocketWith*+streamingWith*' test)
+python3 - "$repo_root" <<'CHECK'
+from pathlib import Path
+import sys, xml.etree.ElementTree as ET
+for module, name, tests in (('zmux-quic', 'io.zmux.quic.QuicPeerInterop', 4), ('zmux-http', 'io.zmux.http.HttpInteropTest', 4)):
+    root = ET.parse(Path(sys.argv[1]) / module / f'target/surefire-reports/TEST-{name}.xml').getroot()
+    assert (int(root.attrib['tests']), int(root.attrib['failures']), int(root.attrib['errors']), int(root.attrib['skipped'])) == (tests, 0, 0, 0), name
+CHECK
 # Existing Go scripted scenarios drive the Java peer in both ordinary and MP roles.
 export ZMUX_INTEROP_PEER="$repo_root/tools/interop-peer.sh"
 (cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 180s go test -race . -run '^TestInterop(Client|Server|MultipathClient|MultipathServer)$' -count=1 -timeout=160s)
+# The TLS exporter, secure carrier Establish and WebSocket carriers of the Go suites, driving the Java peer.
+(cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropTLSExporter' -count=1 -timeout=160s)
+(cd "$ZMUX_GO_ROOT/seal" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropEstablish' -count=1 -timeout=160s)
+# Not run, a gap of the Java library and not of the peer: the 0-RTT cases of zmuxquic (TestInteropQUICServer and the
+# two TestInteropQUICExporterEarly; the QUIC adapter keeps 0-RTT off).
+(cd "$ZMUX_GO_ROOT/zmuxws" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropWSS(Client|Server)$' -count=1 -timeout=160s)
+(cd "$ZMUX_GO_ROOT/zmuxquic" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropQUICClient$' -count=1 -timeout=160s)

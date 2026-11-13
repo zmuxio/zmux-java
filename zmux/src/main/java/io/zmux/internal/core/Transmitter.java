@@ -4,7 +4,7 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.shaping.RecordPlan;
 import io.zmux.internal.wire.FrameType;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 
 /**
  * Builds the batches of outbound lanes: the first record of the

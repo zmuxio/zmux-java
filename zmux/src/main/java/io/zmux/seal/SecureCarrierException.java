@@ -1,9 +1,13 @@
-package io.zmux.carrier;
+package io.zmux.seal;
 
+import io.zmux.ZmuxException;
 import java.io.Serial;
 
-/** A failure of the protocol layer, by the error classes of the secure carrier. */
-public final class SecureCarrierException extends Exception {
+/**
+ * A failure of the protocol layer, by the error classes of the secure carrier: of an Establish, of a Join, or of a
+ * Sealed carrier's records.
+ */
+public final class SecureCarrierException extends ZmuxException {
     @Serial
     private static final long serialVersionUID = 1L;
 
@@ -37,6 +41,8 @@ public final class SecureCarrierException extends Exception {
 
     private final Code code;
     private final int need;
+    /** An {@link Code#INCOMPLETE} of the parsers, ordinary control flow: without a stack trace. */
+    private final transient boolean flow;
 
     public SecureCarrierException(Code code) {
         this(code, code.name().toLowerCase(java.util.Locale.ROOT), null);
@@ -47,15 +53,23 @@ public final class SecureCarrierException extends Exception {
     }
 
     public SecureCarrierException(Code code, String detail, Throwable cause) {
-        super(detail, cause);
         this.code = code;
         this.need = 0;
+        this.flow = false;
+        super(detail, cause);
     }
 
     private SecureCarrierException(int need) {
-        super("incomplete", null, false, false); // ordinary control flow, without a stack trace
+        // Set before the superclass constructor asks fillInStackTrace, which then records nothing.
         this.code = Code.INCOMPLETE;
         this.need = need;
+        this.flow = true;
+        super("incomplete", null);
+    }
+
+    @Override
+    public Throwable fillInStackTrace() {
+        return flow ? this : super.fillInStackTrace();
     }
 
     /** More stream bytes are needed: {@code need} in total. */

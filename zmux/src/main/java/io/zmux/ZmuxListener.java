@@ -32,7 +32,7 @@ import javax.net.ssl.SSLEngine;
  * Accepts sessions, and the pipes that join them, on a TCP or TLS port. A new carrier is classified by its first record: it starts a session, which
  * {@link #accept()} offers once established (at most {@code backlog} wait, later ones are
  * refused), or it joins the session its Hello names. The listener's sessions share one
- * memory budget. A listener without a socket ({@link Zmux#listener}) runs nothing of its own
+ * memory budget. A listener without a socket ({@link #of(ListenerConfig)}) runs nothing of its own
  * until its first carrier; one with a socket runs its acceptor from creation. Either must be
  * {@link #close() closed}, which stops its tasks and ends its sessions.
  */
@@ -54,6 +54,7 @@ public final class ZmuxListener implements AutoCloseable {
     private final MemoryBudget budget;
     final ListenerHub hub;
     private final Admission admission;
+    private final java.time.Duration firstRecordTimeout;
     private final Thread acceptor;
     /** Accept is closed: by {@link #shutdown} or {@link #close}. */
     private volatile boolean closed;
@@ -76,6 +77,7 @@ public final class ZmuxListener implements AutoCloseable {
     private ZmuxListener(ServerSocketChannel server, ListenerConfig o) {
         this.server = server;
         this.cfg = o.session();
+        this.firstRecordTimeout = o.firstRecordTimeout();
         // The whole configuration is checked here, never first on a carrier: what does not depend on the carrier.
         cfg.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER);
         InetSocketAddress local = null;
@@ -109,14 +111,15 @@ public final class ZmuxListener implements AutoCloseable {
             public ListenerHub.Chosen choose(Admission.CarrierInfo info, Object admitted) {
                 ZmuxConfig c = o.sessionConfigs() == null ? null : o.sessionConfigs().choose(info, admitted);
                 if (c == null) c = cfg;
-                return new ListenerHub.Chosen(c.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER), c.hooks, c.credential());
+                return new ListenerHub.Chosen(c.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER), c.hooks, c.carrierCredential);
             }
 
             @Override
-            public void started(SessionRuntime d, String alpn, Credential credential) {
+            public void started(SessionRuntime d, String alpn, CarrierCredential credential) {
                 offerWhenEstablished(d, new ZmuxSession(d, d.core(), alpn, credential));
             }
-        }, budget, o.instanceId(), o.maxPendingPerSource(), ZmuxConfig.nanos(o.firstRecordTimeout()), o.maxSuspended());
+        }, budget, o.instanceId(), o.maxPendingPerSource(), o.maxPending().orElse(-1), ZmuxConfig.nanos(o.firstRecordTimeout()), o.maxSuspended(),
+                o.sourcePrefixV4(), o.sourcePrefixV6());
         Admission adm = o.admission();
         admission = adm;
         // A refused Establish stalls at most this long, with or without an admission.
@@ -146,9 +149,10 @@ public final class ZmuxListener implements AutoCloseable {
     }
 
     /**
-     * The duration of a {@link Admission.Verdict#STALL} for a carrier from source: within the
-     * admission's bounds and the same for every carrier of one client (an IPv6 address
-     * aggregated to its /64, the port ignored) for the listener's lifetime; 0 without an admission.
+     * The duration of a {@link AdmissionVerdict#STALL} for a carrier from source: within the
+     * admission's bounds and the same for every carrier of one client (its source prefix,
+     * {@link ListenerConfig#sourcePrefixV4()} and {@link ListenerConfig#sourcePrefixV6()}, the port
+     * ignored) for the listener's lifetime; 0 without an admission.
      */
     public java.time.Duration stallDuration(InetSocketAddress source) {
         return java.time.Duration.ofNanos(hub.stallDuration(source));
@@ -170,31 +174,32 @@ public final class ZmuxListener implements AutoCloseable {
     /** The answer of {@link #knownJoin}: whether the Locator is known, and the total prefix length still needed (0: none). */
     public record JoinLookup(boolean known, int need) {}
 
-    static ZmuxListener external(ListenerConfig cfg) {
+    /** A listener without a socket: carriers arrive through {@link #handle}. */
+    public static ZmuxListener of(ListenerConfig cfg) {
         return new ZmuxListener(null, cfg);
     }
 
     /**
      * A carrier handed to the listener ({@link #handle}). verdict is the carrier's admission
-     * verdict ({@link Admission.Verdict#ACCEPT} without an admission; a {@link
-     * Admission.Verdict#FALLBACK} without a target is reported as {@link Admission.Verdict#STALL},
-     * a stall beyond its source's share as {@link Admission.Verdict#CLOSE}); closed ends with the
+     * verdict ({@link AdmissionVerdict#ACCEPT} without an admission; a {@link
+     * AdmissionVerdict#FALLBACK} without a target is reported as {@link AdmissionVerdict#STALL},
+     * a stall beyond its source's share as {@link AdmissionVerdict#CLOSE}); closed ends with the
      * carrier's lifetime, which keeps the handler of an HTTP carrier alive. taken completes with
      * true once a session took the carrier, or with false when the carrier ended before one did:
      * the listener (or the admission) refused it, and wrote nothing on it.
      */
     public final class Handled {
-        private final CompletionStage<Admission.Verdict> verdict;
+        private final CompletionStage<AdmissionVerdict> verdict;
         private final CompletionStage<Boolean> taken;
         private final CompletionStage<Void> closed;
         /** The accept's admission value, which the siblings of an accepted carrier share. */
         private volatile Object value;
 
-        private Handled(CompletionStage<Admission.Verdict> verdict, CompletionStage<Boolean> taken, CompletionStage<Void> closed) {
+        private Handled(CompletionStage<AdmissionVerdict> verdict, CompletionStage<Boolean> taken, CompletionStage<Void> closed) {
             this.verdict = verdict; this.taken = taken; this.closed = closed;
         }
 
-        public CompletionStage<Admission.Verdict> verdict() { return verdict; }
+        public CompletionStage<AdmissionVerdict> verdict() { return verdict; }
         public CompletionStage<Boolean> taken() { return taken; }
         public CompletionStage<Void> closed() { return closed; }
 
@@ -202,11 +207,11 @@ public final class ZmuxListener implements AutoCloseable {
          * Hands over a further carrier of the connection this carrier's admission accepted (a
          * further stream of a QUIC connection, admitted by its first): it takes its own source
          * slot and is classified like this one, without being decided again. Only after an
-         * {@link Admission.Verdict#ACCEPT}; a carrier refused at its slot is closed.
+         * {@link AdmissionVerdict#ACCEPT}; a carrier refused at its slot is closed.
          */
         public Handled sibling(PipeIo io, JoinHint hint) {
             var v = verdict.toCompletableFuture();
-            if (!v.isDone() || v.isCompletedExceptionally() || v.join() != Admission.Verdict.ACCEPT)
+            if (!v.isDone() || v.isCompletedExceptionally() || v.join() != AdmissionVerdict.ACCEPT)
                 throw new IllegalStateException("the carrier was not accepted");
             Objects.requireNonNull(io); Objects.requireNonNull(hint);
             if (!hub.reserve(hint.source())) return refused(io);
@@ -215,7 +220,8 @@ public final class ZmuxListener implements AutoCloseable {
     }
 
     /**
-     * A slot of a carrier's source ({@link ListenerConfig#maxPendingPerSource()}), taken by
+     * A slot of a carrier's source ({@link ListenerConfig#maxPendingPerSource()}) with one of
+     * the listener ({@link ListenerConfig#maxPending()}), taken by
      * {@link #reserve} when an entry accepts a connection, before its outer handshake; it is
      * used once, by {@link #handle(PipeIo, JoinHint, Admission.Fallback)}, {@link #handshakeFailed()} or {@link #release()}.
      */
@@ -257,10 +263,12 @@ public final class ZmuxListener implements AutoCloseable {
     }
 
     /**
-     * Takes a slot of source (null: peer) for a carrier an entry just accepted, before its
-     * outer handshake; null when the source has its share of pending carriers, or the listener
-     * takes no carrier any more: the entry then closes the connection at once, without a
-     * handshake, a read or a decision (counted in {@link ListenerStats#refused()}).
+     * Takes a slot of source (null: peer) and one of the listener ({@link
+     * ListenerConfig#maxPending()}) for a carrier an entry just accepted, before its outer
+     * handshake; null when the source has its share of pending carriers or the listener takes
+     * no carrier any more (counted in {@link ListenerStats#refused()}), or when every slot of the
+     * listener is taken and none is stalled (counted in {@link ListenerStats#rejected()}): the
+     * entry then closes the connection at once, without a handshake, a read or a decision.
      */
     public Slot reserve(InetSocketAddress peer, InetSocketAddress source) {
         InetSocketAddress s = source == null ? peer : source;
@@ -293,7 +301,7 @@ public final class ZmuxListener implements AutoCloseable {
         try { if (io.reader() != null) io.reader().close(); }
         finally { if (io.writer() != null) io.writer().close(); }
         // Without an admission every carrier counts as accepted; refused, it was not taken and nothing was written.
-        var v = admission == null ? Admission.Verdict.ACCEPT : Admission.Verdict.CLOSE;
+        var v = admission == null ? AdmissionVerdict.ACCEPT : AdmissionVerdict.CLOSE;
         return new Handled(CompletableFuture.completedFuture(v), CompletableFuture.completedFuture(false),
                 CompletableFuture.completedFuture(null));
     }
@@ -303,12 +311,12 @@ public final class ZmuxListener implements AutoCloseable {
         Objects.requireNonNull(io); Objects.requireNonNull(hint);
         CompletableFuture<ListenerHub.Decided> code = new CompletableFuture<>();
         Handled[] self = new Handled[1];
-        CompletionStage<Admission.Verdict> verdict = code.thenApply(d -> { if (self[0] != null) self[0].value = d.value(); return d.code(); })
+        CompletionStage<AdmissionVerdict> verdict = code.thenApply(d -> { if (self[0] != null) self[0].value = d.value(); return d.code(); })
                 .thenApply(v -> switch (v) {
-            case ListenerHub.Admit.FALLBACK -> Admission.Verdict.FALLBACK;
-            case ListenerHub.Admit.STALL -> Admission.Verdict.STALL;
-            case ListenerHub.Admit.CLOSE -> Admission.Verdict.CLOSE;
-            default -> Admission.Verdict.ACCEPT;
+            case ListenerHub.Admit.FALLBACK -> AdmissionVerdict.FALLBACK;
+            case ListenerHub.Admit.STALL -> AdmissionVerdict.STALL;
+            case ListenerHub.Admit.CLOSE -> AdmissionVerdict.CLOSE;
+            default -> AdmissionVerdict.ACCEPT;
         });
         try {
             String protocol = io.capabilities().applicationProtocol();
@@ -364,30 +372,37 @@ public final class ZmuxListener implements AutoCloseable {
      */
     public Admission admission() { return admission; }
 
+    /**
+     * How long a new carrier may take to send its first record ({@link
+     * ListenerConfig#firstRecordTimeout()}); adapters that read a header of their own before the
+     * listener sees the carrier (an exchange request's authentication header) bound it with this.
+     */
+    public java.time.Duration firstRecordTimeout() { return firstRecordTimeout; }
+
     /** The configuration of this listener's sessions ({@link ListenerConfig#session()}), which its dialers also use. */
     public ZmuxConfig config() { return cfg; }
 
-    /** Dials a session whose peer can join new carriers through this listener; presents {@link ZmuxConfig#credential()}. */
+    /** Dials a session whose peer can join new carriers through this listener; presents {@link ZmuxConfig#carrierCredential()}. */
     public ZmuxSession connect(InetSocketAddress address) throws IOException {
         CoreConfig core = outgoing(CoreConfig.Role.INITIATOR);
         var loop = cfg.nextLoop();
         SocketChannel channel = Zmux.dial(address, cfg.handshakeNanos());
-        Zmux.present(channel, cfg.credential(), address);
+        Zmux.present(channel, cfg.carrierCredential, address);
         return Zmux.established(Bootstrap.socket(loop, core, channel, cfg.hooks, hub::register), cfg);
     }
 
-    /** Dials a TLS session and registers its inbound join route before sending its parameters; presents {@link ZmuxConfig#credential()}. */
+    /** Dials a TLS session and registers its inbound join route before sending its parameters; presents {@link ZmuxConfig#carrierCredential()}. */
     public ZmuxSession connectTls(InetSocketAddress address, TlsOptions tls) throws IOException {
         CoreConfig core = outgoing(CoreConfig.Role.INITIATOR);
         SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
         var loop = cfg.nextLoop();
         SocketChannel channel = Zmux.dial(address, cfg.handshakeNanos());
-        return Zmux.established(Bootstrap.tls(loop, core, channel, engine, tls.secure(), cfg.hooks, hub::register, Zmux.presenter(cfg.credential(), address)), cfg);
+        return Zmux.established(Bootstrap.tls(loop, core, channel, engine, tls.secure(), cfg.hooks, hub::register, Zmux.presenter(cfg.carrierCredential, address)), cfg);
     }
 
     /**
      * Starts a session on an external carrier, with joins routed by this listener: as
-     * {@link Role#CLIENT}, or {@link Role#PEER} (designate its bootstrap dialer before
+     * {@link Role#CLIENT}, or {@link Role#AUTO} (designate its bootstrap dialer before
      * duplicate resolution). Responder carriers go through {@link #handle(PipeIo, JoinHint, Admission.Fallback)}.
      */
     public ZmuxSession open(PipeIo io, Role role) throws IOException {
@@ -458,7 +473,7 @@ public final class ZmuxListener implements AutoCloseable {
             if (e.kind() == Event.Kind.ESTABLISHED && !offered[0]) {
                 offered[0] = true;
                 if (offer(s)) return;
-                if (closed) s.close(new ApplicationError(0x02, "listener closed"));
+                if (closed) s.abort(0x02, "listener closed");
                 else {
                     hub.counts().sessionRefused();
                     d.post(() -> d.core().refuse("backlog"));
@@ -530,13 +545,9 @@ public final class ZmuxListener implements AutoCloseable {
         return take(false, 0);
     }
 
-    /** {@link #accept()} on a virtual thread. */
-    public CompletableFuture<ZmuxSession> acceptAsync() {
-        CompletableFuture<ZmuxSession> f = new CompletableFuture<>();
-        Thread.ofVirtual().name("zmux-accept").start(() -> {
-            try { f.complete(accept()); } catch (Throwable e) { f.completeExceptionally(e); }
-        });
-        return f;
+    /** {@link #accept()} on a virtual thread; cancelling interrupts it. */
+    public ZmuxFuture<ZmuxSession> acceptAsync() {
+        return ZmuxFuture.onThread("zmux-accept", this::accept);
     }
 
     /**
@@ -572,7 +583,7 @@ public final class ZmuxListener implements AutoCloseable {
      * before. Once none of its sessions is left, or when timeout passes first, the listener
      * {@link #close closes}; the stage completes then. Sessions are not closed by it.
      */
-    public CompletionStage<Void> shutdown(Duration timeout) {
+    public ZmuxFuture<Void> shutdownAsync(Duration timeout) {
         Objects.requireNonNull(timeout);
         if (!stopped.get()) {
             closeAccept();
@@ -580,7 +591,19 @@ public final class ZmuxListener implements AutoCloseable {
             CompletableFuture.delayedExecutor(Math.max(0, ZmuxConfig.nanos(timeout)), TimeUnit.NANOSECONDS)
                     .execute(this::closeQuietly);
         }
-        return terminated.copy();
+        return ZmuxFuture.of(terminated, null);
+    }
+
+    /** {@link #shutdownAsync} waiting until the listener closed. */
+    public void shutdown(Duration timeout) throws IOException {
+        try {
+            shutdownAsync(timeout).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.io.InterruptedIOException("interrupted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw Errors.failure(e.getCause());
+        }
     }
 
     /** Ends {@link #accept()} and closes the sessions not yet accepted. */

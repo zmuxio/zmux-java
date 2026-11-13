@@ -6,10 +6,10 @@ package io.zmux.shaping;
  * @param wireLeft what the wire account allows injections now; the largest value when it is not set
  * @param stallLeft reserved; always the largest value
  * @param wireSpent all wire bytes shaping added, saturating
- * @param stallSpent the waits applied, in microseconds
+ * @param stallSpentMicros the waits applied, in microseconds
  * @param sentBytes the bytes this endpoint sent of its own: no padding, injections or copies
  */
-public record ShapingMeters(long wireLeft, long stallLeft, long wireSpent, long stallSpent, long sentBytes) {
+public record ShapingMeters(long wireLeft, long stallLeft, long wireSpent, long stallSpentMicros, long sentBytes) {
     /** What a shaper without {@link Capability#BUDGET} is given. */
     public static final ShapingMeters ZERO = new ShapingMeters(0, 0, 0, 0, 0);
 

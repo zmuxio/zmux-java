@@ -17,7 +17,7 @@ import java.util.OptionalLong;
  * @param bytesRead payload bytes returned to the application
  * @param datagramsSent the stream's datagrams handed to a carrier
  * @param datagramsReceived the stream's datagrams received and queued for the application
- * @param datagramsDroppedRecv the stream's datagrams dropped from its full queue
+ * @param datagramsDroppedRecv the stream's datagrams dropped from its queue, at its count or byte bound
  * @param datagramBytesSent payload bytes of the stream's datagrams handed to a carrier
  * @param datagramBytesReceived payload bytes of the stream's datagrams returned to the application
  * @param sendBuffered gauge: written bytes not yet released (unsent; unacknowledged in multipath)

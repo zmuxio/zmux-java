@@ -75,7 +75,7 @@ class UsabilityTest {
         for (PipeAuth auth : new PipeAuth[] {PipeAuth.psk(PSK), PipeAuth.deferred(), PipeAuth.exporter(), PipeAuth.psk(PSK).withEndToEnd()}) {
             var c = counting();
             var cfg = ZmuxConfig.builder().maxPipes(2).pipeAuth(auth).build();
-            PipeIo secure = c.io.withEstablished(RecordMode.TRUSTED, none, null, null);
+            PipeIo secure = io.zmux.internal.loop.PipeIoAccess.get().withEstablished(c.io, RecordMode.TRUSTED, none, null, null);
             var e = assertThrows(IllegalArgumentException.class, () -> Zmux.open(secure, Role.CLIENT, cfg));
             assertTrue(e.getMessage().contains("secure first pipe"), e.getMessage());
             c.closedUnwritten();
@@ -85,7 +85,7 @@ class UsabilityTest {
     @Test void aServerOrPeerWithoutAListenerRejectsJoinsAndResume() throws Exception {
         var multipath = ZmuxConfig.builder().maxPipes(2).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).build();
         var resume = ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).build();
-        for (Role role : new Role[] {Role.SERVER, Role.PEER}) {
+        for (Role role : new Role[] {Role.SERVER, Role.AUTO}) {
             for (ZmuxConfig cfg : new ZmuxConfig[] {multipath, resume}) {
                 var c = counting();
                 assertThrows(IllegalArgumentException.class, () -> Zmux.open(c.io, role, cfg));
@@ -97,7 +97,7 @@ class UsabilityTest {
     @Test void earlyDataTowardAZmuxPeerWithTheSymmetricRoleIsAnError() throws Exception {
         var c = counting();
         var cfg = ZmuxConfig.builder().earlyData(EarlyData.ZMUX_PEER).build();
-        assertThrows(IllegalArgumentException.class, () -> Zmux.open(c.io, Role.PEER, cfg));
+        assertThrows(IllegalArgumentException.class, () -> Zmux.open(c.io, Role.AUTO, cfg));
         c.closedUnwritten();
     }
 
@@ -107,17 +107,15 @@ class UsabilityTest {
         assertEquals(2, ZmuxConfig.builder().resumeTimeout(Duration.ofMillis(1).plusNanos(1)).pipeAuth(PipeAuth.psk(PSK)).build()
                 .toCore(io.zmux.internal.core.CoreConfig.Role.INITIATOR, io.zmux.internal.core.CoreConfig.Role.INITIATOR).local().resumeGraceMillis,
                 "a fraction of a millisecond is rounded up on the wire");
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().joinEarlyHello(-1));
-        assertEquals(0, ZmuxConfig.builder().joinEarlyHello(0).build().joinEarlyHello(), "0 turns the first batch off");
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().joinEarlyHello(0), "0 is not off");
+        assertEquals(java.util.OptionalInt.empty(), ZmuxConfig.builder().noJoinEarlyHello().build().joinEarlyHello(), "off");
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().joinTimeout(Duration.ZERO));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().joinTimeout(Duration.ofSeconds(-1)));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().joinTimeout(Duration.ofSeconds(61)));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(4).replayWindow(11).build(), "below 4 + 8");
         assertEquals(12, ZmuxConfig.builder().maxPipes(4).replayWindow(12).build().replayWindow().orElseThrow());
         assertThrows(IllegalArgumentException.class,
-                () -> ZmuxConfig.builder().redialMinBackoff(Duration.ofSeconds(2)).redialMaxBackoff(Duration.ofSeconds(1)).build());
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().redialMinBackoff(Duration.ofSeconds(61)).build(),
-                "a minimum above the default maximum");
+                () -> new PipePool.Backoff(Duration.ofSeconds(2), Duration.ofSeconds(1), 0));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().sendBufferMax(1 << 20).build(), "below the send buffer");
         assertEquals(OptionalLong.empty(), ZmuxConfig.defaults().incomingUniStreams(), "unset: staged credit");
         assertEquals(OptionalLong.of(0), ZmuxConfig.builder().incomingUniStreams(0).build().incomingUniStreams(), "none");
@@ -126,8 +124,8 @@ class UsabilityTest {
 
     @Test void theJoinTimeoutBoundsAJoinWhileTheHandshakeHasNone() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).disableHandshakeTimeout()
-                    .joinTimeout(Duration.ofMillis(400)).maxPipes(3).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).noHandshakeTimeout()
+                    .joinTimeout(Duration.ofMillis(400)).maxPipes(3).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
             try (var f = new PipePoolTest.Fixture(cfg)) {
                 long t0 = System.nanoTime();
                 assertThrows(SocketTimeoutException.class, () -> PeerAttachedTest.lateJoin(f, 3_000, PipeOptions.defaults()));
@@ -140,7 +138,7 @@ class UsabilityTest {
     @Test void aFailingRecordPolicyClosesTheJoinsCarrier() throws Exception {
         var logger = new CapturingLogger();
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO)
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                     .recordPolicy(c -> { throw new IllegalStateException("policy failed"); }).logger(logger).build();
             try (var f = new PipePoolTest.Fixture(cfg)) {
                 var c = counting();
@@ -163,8 +161,8 @@ class UsabilityTest {
                 try (var f = new PipePoolTest.Fixture(cfg)) {
                     var c = counting();
                     var e = assertThrows(JoinPendingException.class, () -> f.client.addPipe(c.io, PipeOptions.defaults()));
-                    assertEquals(k.endToEnd(), e.endToEndMissing());
-                    assertEquals(k.psk(), e.pskMissing());
+                    assertEquals(k.endToEnd(), e.isEndToEndMissing());
+                    assertEquals(k.psk(), e.isPskMissing());
                     assertTrue(e.getMessage().contains(k.text()), e.getMessage());
                     c.closedUnwritten();
                 }
@@ -180,7 +178,7 @@ class UsabilityTest {
     }
 
     private static ZmuxConfig.Builder resuming(EventLoops loops, CapturingLogger logger) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO)
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                 .resumeTimeout(Duration.ofSeconds(20)).logger(logger);
     }
 
@@ -188,8 +186,8 @@ class UsabilityTest {
     private record Rejoinable(ZmuxListener serverListener, ZmuxListener clientListener, ZmuxSession client, ZmuxSession server)
             implements AutoCloseable {
         static Rejoinable open(ZmuxConfig server, ZmuxConfig client) throws Exception {
-            var sl = Zmux.listener(ListenerConfig.of(server));
-            var cl = Zmux.listener(ListenerConfig.of(client));
+            var sl = ZmuxListener.of(ListenerConfig.of(server));
+            var cl = ZmuxListener.of(ListenerConfig.of(client));
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
             sl.handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
             var c = cl.open(io[0], Role.CLIENT);
@@ -221,11 +219,22 @@ class UsabilityTest {
         }
     }
 
+    /** A stream with no identifier yet (nothing sent) is open too: removing the last pipe strands it. */
+    @Test void removingTheLastPipeWarnsOfAStreamNotYetSent() throws Exception {
+        var clientLog = new CapturingLogger();
+        try (EventLoops loops = EventLoops.create(2);
+             var r = Rejoinable.open(resuming(loops, new CapturingLogger()).build(), resuming(loops, clientLog).build());
+             var unsent = r.client().openStream()) {
+            r.client().pipes().getFirst().abort();
+            assertTrue(clientLog.has("the last of a direction, while streams are open"));
+        }
+    }
+
     @Test void aRedialHookResumesASuspendedSessionAndLeavesItAttended() throws Exception {
         var logger = new CapturingLogger();
         try (EventLoops loops = EventLoops.create(2)) {
             var server = resuming(loops, new CapturingLogger()).build();
-            var listener = Zmux.listener(ListenerConfig.of(server));
+            var listener = ZmuxListener.of(ListenerConfig.of(server));
             var dials = new AtomicInteger();
             var client = resuming(loops, logger).redial((need, cancellation) -> {
                 dials.incrementAndGet();

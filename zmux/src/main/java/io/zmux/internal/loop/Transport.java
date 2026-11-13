@@ -121,10 +121,22 @@ public interface Transport {
     /** Whether half (a PipeReader or PipeWriter) is one of this transport's carrier halves. */
     default boolean ownsHalf(Object half) { return false; }
 
-    /** Completes once the carrier is released (both halves closed); for carriers of pipe inputs. */
+    /**
+     * Completes once the carrier is released (both halves closed, their tasks ended); at once for
+     * a transport that releases its carrier when it closes.
+     */
     default java.util.concurrent.CompletionStage<Void> whenClosed() {
-        throw new UnsupportedOperationException("not a pipe input's carrier");
+        return RELEASED;
     }
+
+    /** The release of a transport that releases its carrier as it closes. */
+    java.util.concurrent.CompletionStage<Void> RELEASED = java.util.concurrent.CompletableFuture.completedStage(null);
+
+    /**
+     * The session this transport carries ended with e (its close follows): a carrier shared by
+     * several pipes, such as a QUIC connection, learns the code to close itself with. On the loop.
+     */
+    default void sessionEnded(io.zmux.internal.core.SessionError e) {}
 
     /**
      * A session took this carrier: it was attached to the session's carriers ({@link
@@ -150,7 +162,8 @@ public interface Transport {
         Transport t = claim(io);
         if (t == null) t = new ExternalTransport(host, io);
         else if (t.loop() != host) t = t.moveTo(host);
-        return t == null || io.capabilities().seal() == null ? t : new SealedTransport(t, io.capabilities().seal(), io.capabilities().exporter());
+        var records = PipeIoAccess.get().records(io);
+        return t == null || records == null ? t : new SealedTransport(t, records, io.capabilities().exporter());
     }
 
     /** The input's own transport (on its own host, not started), or null. */

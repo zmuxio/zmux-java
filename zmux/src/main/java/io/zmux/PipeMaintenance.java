@@ -23,8 +23,8 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private final ZmuxSession session;
     private final PipePool policy;
-    /** The pool's mode ({@link PipePool#mode}); null: none. */
-    private final ModeSource mode;
+    /** The pool's mode ({@link PipePool#choice}); null: none. */
+    private final CarrierChoiceSource mode;
     private final boolean once;
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final AtomicReference<SessionError> terminal = new AtomicReference<>();
@@ -68,11 +68,10 @@ public final class PipeMaintenance implements AutoCloseable {
         Member(List<ZmuxPipe> pipes, int kind, long added, long bytes, long age) {
             this.pipes = pipes; this.kind = kind; this.added = added; this.bytes = bytes; this.age = age; idleSince = added;
         }
-        /** The member's ID in policy views: that of its first pipe. */
-        long id() { return pipes.getFirst().id(); }
+        PipeId pipeId() { return pipes.getFirst().id(); }
     }
     private PipeMaintenance(ZmuxSession session, PipePool policy, boolean once) {
-        this.session = session; this.policy = policy; this.once = once; mode = policy.modeSource(); backoff = minimumBackoff(); target = policy.count();
+        this.session = session; this.policy = policy; this.once = once; mode = policy.choiceSource(); backoff = minimumBackoff(); target = policy.count();
         started = System.nanoTime();
         dialOptions = policy.options();
     }
@@ -80,10 +79,10 @@ public final class PipeMaintenance implements AutoCloseable {
         return start(session, policy, cancellation, false);
     }
     static PipeMaintenance startOnce(ZmuxSession session, PipePool policy, Cancellation cancellation) throws IOException {
-        return start(session, policy.withCount(1).withRotation(PipePool.Rotation.disabled()).withPolicy(null), cancellation, true);
+        return start(session, policy.withCount(1).withRotation(PipePool.Rotation.none()).withPolicy(null), cancellation, true);
     }
     /**
-     * A mode pool that takes first, a pipe of candidate kind chosen at chosen (System.nanoTime),
+     * A choice pool that takes first, a pipe of candidate kind chosen at chosen (System.nanoTime),
      * as its first member: the pool of a session dialled in auto mode.
      */
     static PipeMaintenance startWith(ZmuxSession session, PipePool policy, ZmuxPipe first, int kind, long chosen) throws IOException {
@@ -167,7 +166,7 @@ public final class PipeMaintenance implements AutoCloseable {
         return true;
     }
     private boolean usable(PipeStats s) throws IOException {
-        return live(s) && (Boolean)session.run(op -> session.core.pipeUsable(s.pipe()));
+        return live(s) && (Boolean)session.run(op -> session.core.pipeUsable(s.pipeId().value()));
     }
     /** A member is usable while all of its pipes are. */
     private boolean usable(List<ZmuxPipe> pipes) throws IOException {
@@ -175,7 +174,7 @@ public final class PipeMaintenance implements AutoCloseable {
         return true;
     }
     private static boolean usableOnOwner(io.zmux.internal.core.Session core, List<ZmuxPipe> pipes) {
-        for (ZmuxPipe p : pipes) if (!core.pipeUsable(p.id())) return false;
+        for (ZmuxPipe p : pipes) if (!core.pipeUsable(p.rawId())) return false;
         return true;
     }
     /**
@@ -187,7 +186,7 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private static boolean takesOverOnOwner(io.zmux.internal.core.Session core, List<ZmuxPipe> pipes) {
         if (!usableOnOwner(core, pipes)) return false;
-        for (ZmuxPipe p : pipes) if (!core.pipePeerAttached(p.id())) return false;
+        for (ZmuxPipe p : pipes) if (!core.pipePeerAttached(p.rawId())) return false;
         return true;
     }
     private static void abort(List<ZmuxPipe> pipes) {
@@ -249,7 +248,7 @@ public final class PipeMaintenance implements AutoCloseable {
                 List<ZmuxPipe> old = m.pipes, replacement = m.replacement;
                 boolean committed = (Boolean)session.run(op -> {
                     if (!rotationReadyOnOwner() || !takesOverOnOwner(session.core, replacement)) return Boolean.FALSE;
-                    for (ZmuxPipe p : old) session.core.removePipe(p.id(), true);
+                    for (ZmuxPipe p : old) session.core.removePipe(p.rawId(), true);
                     return Boolean.TRUE;
                 });
                 if (committed) { members.set(i, successor(m)); settled.add(m.replacementKind); rotations++; changed = true; }
@@ -290,7 +289,7 @@ public final class PipeMaintenance implements AutoCloseable {
             }
             if (idle == Long.MAX_VALUE) idle = now - m.idleSince;
             m.idleSince = now - idle;
-            view.add(new PoolPolicy.Member(m.id(), java.time.Duration.ofNanos(now - m.added), java.time.Duration.ofNanos(idle),
+            view.add(new PoolPolicy.Member(m.pipeId(), 0, java.time.Duration.ofNanos(now - m.added), java.time.Duration.ofNanos(idle),
                     m.pipes.size(), sent, received, usable(m.pipes), m.replacement != null));
         }
         PoolPolicy.Decision d;
@@ -304,10 +303,10 @@ public final class PipeMaintenance implements AutoCloseable {
             d = PoolPolicy.Decision.KEEP;
         }
         target = d.count().orElse(policy.count());
-        decidedAt = now; recheck = d.recheckNanos();
+        decidedAt = now; recheck = d.recheckDelay().map(ZmuxConfig::nanos).orElse(0L);
         dialAfter = d.dialAfter().isEmpty() ? -1 : Math.min(PipePool.nanos(d.dialAfter().get(), true), policy.backoff().maximum().toNanos());
-        dialOptions = policy.options().withProbe(d);
-        for (Member m : members) if (d.retire().contains(m.id())) m.retire = true;
+        dialOptions = policy.options().withLiveness(d.liveness());
+        for (Member m : members) if (d.retirePipes().contains(m.pipeId())) m.retire = true;
         boolean changed = false;
         while (members.size() > target) {
             int k = 0;
@@ -367,7 +366,7 @@ public final class PipeMaintenance implements AutoCloseable {
                 if (cancellation.isCancelled()) throw new InterruptedException("dial cancelled");
                 // A replacement retires its original only once the peer attached it (takesOver), and a
                 // redial must not wait for an acknowledgement only the direction it restores could carry.
-                var scope = new PipePool.Attempt(session, dialOptions.toBuilder().noWaitAttached(true).build(), cancellation, kind);
+                var scope = new PipePool.Attempt(session, dialOptions.toBuilder().returnOnReply(true).build(), cancellation, kind);
                 creation.set(scope);
                 p = Objects.requireNonNull(policy.join().open(scope), "join returned null");
                 if (!scope.adopt(p)) { failure = new IOException("a dial must return the pipes created by its Attempt"); p = null; }

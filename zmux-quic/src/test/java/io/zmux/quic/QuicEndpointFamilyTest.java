@@ -26,7 +26,7 @@ class QuicEndpointFamilyTest {
                         "IPv4 dials must not use an IPv6 wildcard socket");
                 try (var server6 = new QuicServer(ipv6(),TestTls.server,QuicOptions.defaults(),f.remote);
                      var v6 = new QuicPool(f.client,server6.address(),"localhost")) {
-                    var b = v6.openPipe().toCompletableFuture().get(5,TimeUnit.SECONDS);
+                    var b = v6.openPipeAsync().get(5,TimeUnit.SECONDS);
                     var udp6 = ((QuicChannel)b.carrierConn()).parent();
                     try {
                         assertInstanceOf(Inet6Address.class,((InetSocketAddress)udp6.localAddress()).getAddress());
@@ -49,7 +49,7 @@ class QuicEndpointFamilyTest {
             byte[] mapped = new byte[16]; mapped[10] = mapped[11] = (byte)0xff;
             byte[] v4 = f.server.address().getAddress().getAddress(); System.arraycopy(v4,0,mapped,12,4);
             var address = new InetSocketAddress(Inet6Address.getByAddress(null,mapped,-1),f.server.address().getPort());
-            var carrier = f.client.connectCarrier(address,"localhost",null).toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var carrier = f.client.connectCarrier(address,"localhost",null,ConnectionCarrier.DEDICATED).toCompletableFuture().get(5,TimeUnit.SECONDS);
             try { assertInstanceOf(Inet4Address.class,((InetSocketAddress)carrier.channel().parent().localAddress()).getAddress()); }
             finally { carrier.dispose(); }
         }
@@ -57,11 +57,11 @@ class QuicEndpointFamilyTest {
     @Test void simultaneousIpv6DialsReuseOneLazyUdpEndpoint() throws Exception {
         try (var f = new QuicPoolTest.Fixture();
              var server6 = new QuicServer(ipv6(),TestTls.server,QuicOptions.defaults(),f.remote);
-             var pool = new QuicPool(f.client,server6.address(),"localhost",new QuicPool.Limits(2,0,Duration.ZERO))) {
+             var pool = new QuicPool(f.client,server6.address(),"localhost",QuicPool.Limits.defaults().withMaxPipesPerConnection(2))) {
             var futures = new ArrayList<CompletableFuture<PipeIo>>();
             var pipes = new ArrayList<PipeIo>();
             try {
-                for (int i=0;i<8;i++) futures.add(pool.openPipe().toCompletableFuture());
+                for (int i=0;i<8;i++) futures.add(pool.openPipeAsync());
                 for (var future : futures) pipes.add(future.get(5,TimeUnit.SECONDS));
                 var parents = new HashSet<io.netty.channel.Channel>();
                 for (var p : pipes) parents.add(((QuicChannel)p.carrierConn()).parent());
@@ -78,7 +78,7 @@ class QuicEndpointFamilyTest {
             assertTrue(entered.await(2,TimeUnit.SECONDS));
             Future<?> closing = null;
             try {
-                var pending = f.client.connectCarrier(new InetSocketAddress(InetAddress.getByName("::1"),443),"localhost",null).toCompletableFuture();
+                var pending = f.client.connectCarrier(new InetSocketAddress(InetAddress.getByName("::1"),443),"localhost",null,ConnectionCarrier.DEDICATED).toCompletableFuture();
                 assertFalse(pending.isDone());
                 closing = workers.submit(f.client::close);
                 assertThrows(ExecutionException.class,() -> pending.get(2,TimeUnit.SECONDS));

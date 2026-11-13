@@ -26,9 +26,9 @@ class NestedSessionTest {
                 var accepting = workers.submit(() -> {
                     ZmuxStream stream = outer.server().acceptStream();
                     assertTrue(stream.preamble().pipeCarrier());
-                    return Zmux.open(PipeIo.ofStream(stream), Role.SERVER, config);
+                    return Zmux.open(stream.asPipe(), Role.SERVER, config);
                 });
-                var carrier = outer.client().openPipeStream();
+                var carrier = outer.client().openStreamAsPipe();
                 try (var client = Zmux.open(carrier, Role.CLIENT, config);
                      var server = accepting.get(5, TimeUnit.SECONDS)) {
                     assertSame(outer.client().driver.loop(), client.driver.loop());
@@ -71,10 +71,10 @@ class NestedSessionTest {
                 var accepting = workers.submit(() -> {
                     ZmuxStream stream = outer.server().acceptStream(Duration.ofSeconds(5));
                     accepted.complete(stream);
-                    return Zmux.open(PipeIo.ofStream(stream), Role.SERVER, config);
+                    return Zmux.open(stream.asPipe(), Role.SERVER, config);
                 });
                 var tlv = new Preamble.Tlv(0x1001, new byte[] {9, 8});
-                var carrier = outer.client().openPipeStream("dst:7".getBytes(), java.util.List.of(tlv));
+                var carrier = outer.client().openStreamAsPipe("dst:7".getBytes(), java.util.List.of(tlv));
                 try (var client = Zmux.open(carrier, Role.CLIENT, config); var server = accepting.get(5, TimeUnit.SECONDS)) {
                     Preamble p = accepted.get().preamble();
                     assertTrue(p.pipeCarrier());
@@ -92,12 +92,12 @@ class NestedSessionTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
-                PipeIo first = client.openPipeStream();
+                PipeIo first = client.openStreamAsPipe();
                 assertThrows(ExecutionException.class, () -> first.capabilities().laneOpener().open()
                         .toCompletableFuture().get(2, TimeUnit.SECONDS)); // A single TCP path gains no independence.
                 client.addPipe(listener.localAddress(), PipeOptions.defaults());
                 {
-                    PipeIo second = client.openPipeStream();
+                    PipeIo second = client.openStreamAsPipe();
                     var cancelled = new CompletableFuture<Void>();
                     client.driver.executeCarrier(() -> {
                         for (int i = 0; i < 16; i++) first.capabilities().laneOpener().open().toCompletableFuture().cancel(true);
@@ -133,14 +133,14 @@ class NestedSessionTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(outerConfig));
                  var outerClient = Zmux.connect(listener.localAddress(), outerConfig);
                  var outerServer = listener.accept(Duration.ofSeconds(5));
-                 var innerListener = Zmux.listener(ListenerConfig.of(innerConfig))) {
+                 var innerListener = ZmuxListener.of(ListenerConfig.of(innerConfig))) {
                 outerClient.addPipe(listener.localAddress(), PipeOptions.defaults());
                 var routing = workers.submit(() -> {
                     try {
                         while (true) innerListener.handle(outerServer.acceptStream().asPipe(), JoinHint.inBand(TestAddr.peer("nested"))).closed();
                     } catch (IOException expected) { return null; }
                 });
-                try (var client = Zmux.open(outerClient.openPipeStream(), Role.CLIENT, innerConfig);
+                try (var client = Zmux.open(outerClient.openStreamAsPipe(), Role.CLIENT, innerConfig);
                      var server = innerListener.accept(Duration.ofSeconds(5))) {
                     client.ping();
                     long ackDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -179,7 +179,7 @@ class NestedSessionTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (var outer = Pair.memory(config)) {
-                var carrier = outer.client().openPipeStream();
+                var carrier = outer.client().openStreamAsPipe();
                 assertThrows(PipeRefusedException.class, () -> outer.client().addPipe(carrier, PipeOptions.defaults()));
                 assertNotNull(outer.client().ping());
             }

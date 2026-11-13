@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Timeout;
 class PeerAttachedTest {
     static final Duration WAIT = Duration.ofSeconds(3);
     /** Adding returns at the verified Reply, so the wait for the attachment is the test's own. */
-    static final PipeOptions NO_WAIT = PipeOptions.builder().noWaitAttached(true).build();
+    static final PipeOptions NO_WAIT = PipeOptions.builder().returnOnReply(true).build();
 
     static ZmuxPipe lateJoin(PipePoolTest.Fixture f, long delayMillis, PipeOptions options) throws Exception {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -22,12 +22,12 @@ class PeerAttachedTest {
     }
 
     static boolean held(ZmuxSession acceptor, ZmuxPipe p) throws Exception {
-        return acceptor.pipes().stream().anyMatch(q -> q.id() == p.id());
+        return acceptor.pipes().stream().anyMatch(q -> q.id().value() == p.id().value());
     }
 
     @Test void aJoinedPipeIsAttachedOnlyOnceTheAcceptorReadItsConfirm() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
-            for (ZmuxPipe q : f.client.pipes()) if (q.id() == 0) q.awaitPeerAttached(WAIT);
+            for (ZmuxPipe q : f.client.pipes()) if (q.id().value() == 0) q.awaitPeerAttached(WAIT);
             for (ZmuxPipe q : f.server.pipes()) q.awaitPeerAttached(WAIT);
             ZmuxPipe p = lateJoin(f, 300, NO_WAIT);
             var attached = p.peerAttachedAsync(WAIT);
@@ -37,13 +37,13 @@ class PeerAttachedTest {
             assertTrue(held(f.server, p), "attached but the acceptor does not hold the pipe");
             p.awaitPeerAttached(WAIT);
             // The acceptor's view of a pipe the peer joined: attached from the start.
-            for (ZmuxPipe q : f.server.pipes()) if (q.id() == p.id()) q.awaitPeerAttached(Duration.ofMillis(100));
+            for (ZmuxPipe q : f.server.pipes()) if (q.id().value() == p.id().value()) q.awaitPeerAttached(Duration.ofMillis(100));
         }
     }
 
     @Test void aReceiveOnlyJoinIsAttachedByARecord() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
-            ZmuxPipe p = lateJoin(f, 100, PipeOptions.builder().direction(PipeOptions.Direction.RECEIVE_ONLY).noWaitAttached(true).build());
+            ZmuxPipe p = lateJoin(f, 100, PipeOptions.builder().direction(PipeOptions.Direction.RECEIVE_ONLY).returnOnReply(true).build());
             p.awaitPeerAttached(WAIT);
             assertTrue(held(f.server, p));
         }

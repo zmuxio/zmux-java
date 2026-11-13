@@ -122,9 +122,9 @@ final class Forwarded implements Inbound {
         if (all != b) System.arraycopy(b, 0, all, partial.length, b.length);
         int at = 0;
         while (at < all.length) {
-            int sn = io.zmux.carrier.VarInt.lengthOf(all[at]);
+            int sn = io.zmux.internal.wire.VarInt.lengthOf(all[at]);
             if (all.length - at < sn) break;
-            long len = io.zmux.carrier.VarInt.get(ByteBuffer.wrap(all), at, all.length);
+            long len = io.zmux.internal.wire.VarInt.get(ByteBuffer.wrap(all), at, all.length);
             if (len > all.length - at - sn) break;
             deliver(java.util.Arrays.copyOfRange(all, at + sn, at + sn + (int) len));
             at += sn + (int) len;

@@ -28,7 +28,7 @@ class SessionTest {
     @BeforeAll
     static void setUp() {
         loops = EventLoops.create(2);
-        cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+        cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
     }
 
     @AfterAll
@@ -208,7 +208,7 @@ class SessionTest {
         ZmuxStream b0 = p.client().openStream();
         b0.write(new byte[1]);
         ZmuxStream pending = p.server().acceptStream();
-        p.client().close(new ApplicationError(42, "bye"));
+        p.client().abort(42, "bye");
         SessionError e = p.server().awaitClosed();
         SessionError.ApplicationClosed ac = assertInstanceOf(SessionError.ApplicationClosed.class, e);
         assertEquals(42, ac.code());

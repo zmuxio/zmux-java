@@ -1,7 +1,7 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.EXHAUSTED;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.EXHAUSTED;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;

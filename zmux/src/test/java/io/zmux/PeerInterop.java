@@ -42,11 +42,11 @@ class PeerInterop {
     private void run(boolean initiating, boolean multipath) throws Exception {
         String binary = InteropProcess.required("ZMUX_INTEROP_PEER");
         try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingUniStreams(16);
+            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16);
             // The peer joins in Trusted mode, which an end admits only when told to.
             if (multipath) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             var config = builder.build();
-            try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
+            try (var endpoint = initiating ? ZmuxListener.of(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
                  var child = initiating ? new InteropProcess(binary, multipath ? "mp-server" : "server", "127.0.0.1:0")
                          : new InteropProcess(binary, multipath ? "mp-client" : "client", endpoint.localAddress().getHostString() + ":" + endpoint.localAddress().getPort())) {
                 var target = initiating ? address(child.expect("LISTEN ")) : endpoint.localAddress();
@@ -61,13 +61,13 @@ class PeerInterop {
                         session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
                         var before = session.pipeStats(); echo(session, 16 << 20, 1);
                         for (var pipe : session.pipeStats()) {
-                            long prior = before.stream().filter(p -> p.pipe() == pipe.pipe()).findFirst().orElseThrow().bytesSent();
+                            long prior = before.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst().orElseThrow().bytesSent();
                             assertTrue(pipe.bytesSent() - prior >= 1 << 20, "pipe did not carry spread data: " + pipe);
                         }
                         assertEquals("scheduled", command(session, "schedule:round-robin", new byte[0]));
                         var inbound = session.pipeStats(); echo(session, 8 << 20, 2);
                         for (var pipe : session.pipeStats()) {
-                            long prior = inbound.stream().filter(p -> p.pipe() == pipe.pipe()).findFirst().orElseThrow().bytesReceived();
+                            long prior = inbound.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst().orElseThrow().bytesReceived();
                             assertTrue(pipe.bytesReceived() - prior >= 1 << 20, "reverse pipe did not carry spread data: " + pipe);
                         }
                         assertEquals("dropped", command(session, "drop-bootstrap", new byte[0]));

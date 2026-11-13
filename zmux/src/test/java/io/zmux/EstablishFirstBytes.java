@@ -24,7 +24,7 @@ final class EstablishFirstBytes {
     static void run() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).allowRecordMode((c, m, p) -> true).build();
-            var server = new ServerConfig(SealTest.gate(null), SealTest.NODE, (c, m, p) -> true, null);
+            var server = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, p) -> true).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 SocketChannel ch = SocketChannel.open(l.localAddress());

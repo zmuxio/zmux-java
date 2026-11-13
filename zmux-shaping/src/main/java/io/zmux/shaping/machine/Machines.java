@@ -25,18 +25,18 @@ public final class Machines {
     private static final long NANOS = 1000;
 
     /** A factory running d; its shared values are drawn here from the options' source. */
-    public static ShaperFactory factory(Definition d, Options o) {
+    public static ShaperFactory factory(Definition d, MachineOptions o) {
         Compiled c = new Compiled(d, Sampler.of(o), o);
         return pipe -> c.newShaper();
     }
 
     /** Reads a JSON definition and returns its factory. */
-    public static ShaperFactory factory(String json, Options o) throws DefinitionException {
+    public static ShaperFactory factory(String json, MachineOptions o) throws DefinitionException {
         return factory(Definition.parse(json, o.limits()), o);
     }
 
     /** Reads a pool policy; see {@link MachinePoolPolicy}. */
-    public static MachinePoolPolicy poolPolicy(byte[] json, Options o) throws DefinitionException {
+    public static MachinePoolPolicy poolPolicy(byte[] json, MachineOptions o) throws DefinitionException {
         o.limits().check(json.length);
         return MachinePoolPolicy.read(new String(json, StandardCharsets.UTF_8), o);
     }
@@ -46,7 +46,7 @@ public final class Machines {
      * {@code per_sec} up to 2^43, integers), {@code max_delay} (microseconds up to 10^15; 0 the default, negative no bound)
      * and the switches {@code no_padding}, {@code no_pause} and {@code no_injection}. A wire of zeros allows no injection.
      */
-    public static ShapingLimits limits(byte[] json, Options o) throws DefinitionException {
+    public static ShapingLimits limits(byte[] json, MachineOptions o) throws DefinitionException {
         o.limits().check(json.length);
         return DefinitionJson.limits(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)));
     }
@@ -56,9 +56,9 @@ public final class Machines {
         final Definition d;
         final long[] shared;
         final Set<Capability> caps = EnumSet.of(Capability.PLAN);
-        private final Options o;
+        private final MachineOptions o;
 
-        Compiled(Definition d, Sampler compile, Options o) {
+        Compiled(Definition d, Sampler compile, MachineOptions o) {
             this.d = d;
             this.o = o;
             shared = new long[d.sharedSlots];

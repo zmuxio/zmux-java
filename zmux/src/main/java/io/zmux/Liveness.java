@@ -3,181 +3,142 @@ package io.zmux;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalDouble;
 
 /**
- * A session's liveness settings as a whole, for {@link ZmuxSession#setLiveness}, with the meanings,
- * defaults and bounds of the configuration ({@link ZmuxConfig.Builder}). A setting
- * not written is its default, not the value the session started with; a setting that is off has a
- * method of its own. {@link ZmuxSession#liveness()} returns the settings in effect, so that setting
- * them changes nothing. Immutable; each {@code with} or {@code disable} method returns a copy.
+ * The settings that judge whether a session and its pipes are alive, the one place of the
+ * session's keep-alive and probe settings ({@link ZmuxConfig.Builder#liveness}); a pipe's own are
+ * a {@link PipeLiveness}. {@link #defaults()} or {@link #builder()}: not calling a builder method
+ * keeps the default; a setting that is off has a {@code noX()} method of its own. Replaced while
+ * the session runs with {@link ZmuxSession#setLiveness}, which takes the whole object: a setting
+ * left at its default is the default, not the value the session started with.
+ * {@link ZmuxSession#liveness()} returns the settings in effect, so that passing them back
+ * changes nothing. Immutable.
  */
 public final class Liveness {
-    private static final Duration DEFAULT_SUSPECT_FLOOR = Duration.ofMillis(250);
-    private static final Duration DEFAULT_STANDBY_PROBE = Duration.ofSeconds(1);
-    private static final Duration DEFAULT_PROBE_INTERVAL = Duration.ofSeconds(15);
-    private static final Liveness DEFAULTS = new Liveness(ZmuxConfig.DEFAULT_KEEP_ALIVE_PERIOD, DEFAULT_SUSPECT_FLOOR, null,
-            DEFAULT_STANDBY_PROBE, DEFAULT_PROBE_INTERVAL, ZmuxConfig.DEFAULT_PROBE_JITTER);
+    /** The default keep-alive period. */
+    public static final Duration DEFAULT_KEEP_ALIVE_PERIOD = Duration.ofSeconds(15);
+    /** The default floor of failure suspicion. */
+    public static final Duration DEFAULT_SUSPECT_FLOOR = Duration.ofMillis(250);
+    /** The default probe interval of standby pipes while the session is busy. */
+    public static final Duration DEFAULT_STANDBY_PROBE = Duration.ofSeconds(1);
+    /** The default idle probe interval of pipe pairs. */
+    public static final Duration DEFAULT_PROBE_INTERVAL = Duration.ofSeconds(15);
+    /** The default probe jitter. */
+    public static final double DEFAULT_PROBE_JITTER = 0.25;
 
-    private final Duration keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval;
+    private static final Liveness DEFAULTS = builder().build();
+
+    private final Duration keepAlivePeriod, suspectFloor, deadTimeout, standbyProbe, probeInterval; // null: off, deadTimeout derived
     private final double probeJitter;
 
-    private Liveness(Duration keepAlive, Duration suspectFloor, Duration deadTimeout, Duration standbyProbe, Duration probeInterval, double probeJitter) {
-        this.keepAlive = keepAlive;
-        this.suspectFloor = suspectFloor;
-        this.deadTimeout = deadTimeout;
-        this.standbyProbe = standbyProbe;
-        this.probeInterval = probeInterval;
-        this.probeJitter = probeJitter;
+    private Liveness(Builder b) {
+        keepAlivePeriod = b.keepAlivePeriod;
+        suspectFloor = b.suspectFloor;
+        deadTimeout = b.deadTimeout;
+        standbyProbe = b.standbyProbe;
+        probeInterval = b.probeInterval;
+        probeJitter = b.probeJitter;
     }
 
     /** Every setting at its default. */
     public static Liveness defaults() { return DEFAULTS; }
 
-    /** The keep-alive period; empty: off. Default 15 s. */
-    public Optional<Duration> keepAlive() { return Optional.ofNullable(keepAlive); }
+    public static Builder builder() { return new Builder(); }
 
-    /** The floor of failure suspicion, default 250 ms. */
+    /** A builder holding these settings. */
+    public Builder toBuilder() {
+        Builder b = new Builder();
+        b.keepAlivePeriod = keepAlivePeriod; b.suspectFloor = suspectFloor; b.deadTimeout = deadTimeout;
+        b.standbyProbe = standbyProbe; b.probeInterval = probeInterval; b.probeJitter = probeJitter;
+        return b;
+    }
+
+    /** The keep-alive period; empty: off. */
+    public Optional<Duration> keepAlivePeriod() { return Optional.ofNullable(keepAlivePeriod); }
+
+    /** The floor of failure suspicion. */
     public Duration suspectFloor() { return suspectFloor; }
 
-    /** When a silent pipe is declared dead; empty: derived (the default). */
+    /** How long a suspect pipe stays suspect before it fails; empty: derived (the default). */
     public Optional<Duration> deadTimeout() { return Optional.ofNullable(deadTimeout); }
 
-    /** The busy-session probe interval; empty: standby probes off. Default 1 s. */
+    /** The busy-session probe interval of standby and less-preferred pipes; empty: off. */
     public Optional<Duration> standbyProbe() { return Optional.ofNullable(standbyProbe); }
 
-    /** The idle probe interval; empty: idle probes off. Default 15 s. */
+    /** The idle probe interval of pipe pairs; empty: off. */
     public Optional<Duration> probeInterval() { return Optional.ofNullable(probeInterval); }
 
-    /** The probe jitter, from 0 (none) to below 1, default 0.25. */
+    /** The probe jitter, from 0 (none) to below 1. */
     public double probeJitter() { return probeJitter; }
 
-    /** The keep-alive period, at least 1 s. */
-    public Liveness withKeepAlive(Duration d) {
-        return new Liveness(ZmuxConfig.atLeast(d, Duration.ofSeconds(1), "keepAlive"), suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter);
-    }
-
-    /** Keep-alives off. */
-    public Liveness disableKeepAlive() { return new Liveness(null, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter); }
-
-    /** The floor of failure suspicion, at least 50 ms. */
-    public Liveness withSuspectFloor(Duration d) {
-        return new Liveness(keepAlive, ZmuxConfig.atLeast(d, Duration.ofMillis(50), "suspectFloor"), deadTimeout, standbyProbe, probeInterval, probeJitter);
-    }
-
-    /** The dead timeout, at least 1 s. */
-    public Liveness withDeadTimeout(Duration d) {
-        return new Liveness(keepAlive, suspectFloor, ZmuxConfig.atLeast(d, Duration.ofSeconds(1), "deadTimeout"), standbyProbe, probeInterval, probeJitter);
-    }
-
-    /** The busy-session probe interval, at least 1 s. */
-    public Liveness withStandbyProbe(Duration d) {
-        return new Liveness(keepAlive, suspectFloor, deadTimeout, ZmuxConfig.probeIntervalOf(d, "standbyProbe"), probeInterval, probeJitter);
-    }
-
-    /** Standby probes off. */
-    public Liveness disableStandbyProbes() { return new Liveness(keepAlive, suspectFloor, deadTimeout, null, probeInterval, probeJitter); }
-
-    /** The idle probe interval, at least 1 s. */
-    public Liveness withProbeInterval(Duration d) {
-        return new Liveness(keepAlive, suspectFloor, deadTimeout, standbyProbe, ZmuxConfig.probeIntervalOf(d, "probeInterval"), probeJitter);
-    }
-
-    /** Idle probes off. */
-    public Liveness disableIdleProbes() { return new Liveness(keepAlive, suspectFloor, deadTimeout, standbyProbe, null, probeJitter); }
-
-    /** The probe jitter, at least 0 and below 1; 0 is none. */
-    public Liveness withProbeJitter(double j) {
-        return new Liveness(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, ZmuxConfig.jitter(j, "probeJitter"));
-    }
-
-    static Liveness of(Duration keepAlive, Duration suspectFloor, Duration deadTimeout, Duration standbyProbe, Duration probeInterval, double probeJitter) {
-        return new Liveness(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter);
-    }
-
     @Override public boolean equals(Object o) {
-        return o instanceof Liveness l && Objects.equals(keepAlive, l.keepAlive) && suspectFloor.equals(l.suspectFloor)
+        return o instanceof Liveness l && Objects.equals(keepAlivePeriod, l.keepAlivePeriod) && suspectFloor.equals(l.suspectFloor)
                 && Objects.equals(deadTimeout, l.deadTimeout) && Objects.equals(standbyProbe, l.standbyProbe)
                 && Objects.equals(probeInterval, l.probeInterval) && Double.compare(probeJitter, l.probeJitter) == 0;
     }
 
-    @Override public int hashCode() { return Objects.hash(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter); }
+    @Override public int hashCode() { return Objects.hash(keepAlivePeriod, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter); }
 
     @Override public String toString() {
-        return "Liveness[keepAlive=" + keepAlive() + ", suspectFloor=" + suspectFloor + ", deadTimeout=" + deadTimeout()
+        return "Liveness[keepAlivePeriod=" + keepAlivePeriod() + ", suspectFloor=" + suspectFloor + ", deadTimeout=" + deadTimeout()
                 + ", standbyProbe=" + standbyProbe() + ", probeInterval=" + probeInterval() + ", probeJitter=" + probeJitter + "]";
     }
 
-    /**
-     * A pipe's own liveness settings, for {@link ZmuxPipe#setLiveness}, with the meanings of
-     * {@link PipeOptions}: a setting not written follows the session's. Immutable.
-     */
-    public static final class Pipe {
-        private static final Pipe FOLLOW = new Pipe(null, null, null, false, Double.NaN);
+    /** Builds a {@link Liveness}; each method checks its value. */
+    public static final class Builder {
+        private Duration keepAlivePeriod = DEFAULT_KEEP_ALIVE_PERIOD, suspectFloor = DEFAULT_SUSPECT_FLOOR, deadTimeout,
+                standbyProbe = DEFAULT_STANDBY_PROBE, probeInterval = DEFAULT_PROBE_INTERVAL;
+        private double probeJitter = DEFAULT_PROBE_JITTER;
 
-        private final Duration suspectFloor, deadTimeout, probeInterval;
-        private final boolean idleProbesOff;
-        private final double probeJitter; // NaN: the session's
+        private Builder() {}
 
-        private Pipe(Duration suspectFloor, Duration deadTimeout, Duration probeInterval, boolean idleProbesOff, double probeJitter) {
-            this.suspectFloor = suspectFloor;
-            this.deadTimeout = deadTimeout;
-            this.probeInterval = probeInterval;
-            this.idleProbesOff = idleProbesOff;
-            this.probeJitter = probeJitter;
-        }
+        /**
+         * The keep-alive period (QX_PING when idle), default 15 s, at least 1 s. The period in effect
+         * is capped at half the effective idle timeout, and each wait is drawn from [k x (1 - j), k]
+         * with j the probe jitter.
+         */
+        public Builder keepAlivePeriod(Duration d) { keepAlivePeriod = atLeast(d, Duration.ofSeconds(1), "keepAlivePeriod"); return this; }
 
-        /** Every setting follows the session's. */
-        public static Pipe follow() { return FOLLOW; }
+        /** Keep-alive off, which makes the idle timeout a limit on application inactivity. */
+        public Builder noKeepAlive() { keepAlivePeriod = null; return this; }
 
-        /** The pipe's suspicion floor; empty: the session's. */
-        public Optional<Duration> suspectFloor() { return Optional.ofNullable(suspectFloor); }
+        /** The floor of failure suspicion, default 250 ms, at least 50 ms. */
+        public Builder suspectFloor(Duration d) { suspectFloor = atLeast(d, Duration.ofMillis(50), "suspectFloor"); return this; }
 
-        /** The pipe's dead timeout; empty: the session's. */
-        public Optional<Duration> deadTimeout() { return Optional.ofNullable(deadTimeout); }
+        /** How long a suspect pipe stays suspect before it fails, at least 1 s; not calling it: derived. */
+        public Builder deadTimeout(Duration d) { deadTimeout = atLeast(d, Duration.ofSeconds(1), "deadTimeout"); return this; }
 
-        /** The pipe's idle probe interval; empty: the session's, or off when {@link #idleProbesOff()}. */
-        public Optional<Duration> probeInterval() { return Optional.ofNullable(probeInterval); }
+        /** The busy-session probe interval of standby and less-preferred pipes, default 1 s, at least 1 s. */
+        public Builder standbyProbe(Duration d) { standbyProbe = atLeast(d, Duration.ofSeconds(1), "standbyProbe"); return this; }
 
-        /** Whether the pipe's idle probes are off. */
-        public boolean idleProbesOff() { return idleProbesOff; }
+        /** Standby probes off: such pipes are probed at the idle probe interval only. */
+        public Builder noStandbyProbe() { standbyProbe = null; return this; }
 
-        /** The pipe's probe jitter; empty: the session's. */
-        public OptionalDouble probeJitter() { return Double.isNaN(probeJitter) ? OptionalDouble.empty() : OptionalDouble.of(probeJitter); }
+        /** The idle probe interval of pipe pairs, measured to the carrier, default 15 s, at least 1 s. */
+        public Builder probeInterval(Duration d) { probeInterval = atLeast(d, Duration.ofSeconds(1), "probeInterval"); return this; }
 
-        /** The suspicion floor, at least 50 ms. */
-        public Pipe withSuspectFloor(Duration d) {
-            return new Pipe(ZmuxConfig.atLeast(d, Duration.ofMillis(50), "suspectFloor"), deadTimeout, probeInterval, idleProbesOff, probeJitter);
-        }
+        /**
+         * The idle probes of pipe pairs off; answers to the peer's probes, standby probes and the
+         * probes of attachments without an outbound direction at the peer stay.
+         */
+        public Builder noProbeInterval() { probeInterval = null; return this; }
 
-        /** The dead timeout, at least 1 s. */
-        public Pipe withDeadTimeout(Duration d) {
-            return new Pipe(suspectFloor, ZmuxConfig.atLeast(d, Duration.ofSeconds(1), "deadTimeout"), probeInterval, idleProbesOff, probeJitter);
-        }
+        /**
+         * The probe jitter j, at least 0 and below 1 (default 0.25): each probe waits a uniform draw
+         * from [k x (1 - j), k]; 0 gives a fixed schedule. It also spreads the keep-alive waits.
+         */
+        public Builder probeJitter(double j) { probeJitter = jitter(j, "probeJitter"); return this; }
 
-        /** The idle probe interval, at least 1 s. */
-        public Pipe withProbeInterval(Duration d) {
-            return new Pipe(suspectFloor, deadTimeout, ZmuxConfig.probeIntervalOf(d, "probeInterval"), false, probeJitter);
-        }
+        public Liveness build() { return new Liveness(this); }
+    }
 
-        /** The pipe's idle probes off, except without an outbound direction at the peer, where they cannot be. */
-        public Pipe disableIdleProbes() { return new Pipe(suspectFloor, deadTimeout, null, true, probeJitter); }
+    static Duration atLeast(Duration d, Duration min, String what) {
+        if (Objects.requireNonNull(d, what).compareTo(min) < 0) throw new IllegalArgumentException(what + " below " + min);
+        return d;
+    }
 
-        /** The probe jitter, at least 0 and below 1; 0 is none. */
-        public Pipe withProbeJitter(double j) {
-            return new Pipe(suspectFloor, deadTimeout, probeInterval, idleProbesOff, ZmuxConfig.jitter(j, "probeJitter"));
-        }
-
-        @Override public boolean equals(Object o) {
-            return o instanceof Pipe p && Objects.equals(suspectFloor, p.suspectFloor) && Objects.equals(deadTimeout, p.deadTimeout)
-                    && Objects.equals(probeInterval, p.probeInterval) && idleProbesOff == p.idleProbesOff && Double.compare(probeJitter, p.probeJitter) == 0;
-        }
-
-        @Override public int hashCode() { return Objects.hash(suspectFloor, deadTimeout, probeInterval, idleProbesOff, probeJitter); }
-
-        @Override public String toString() {
-            return "Liveness.Pipe[suspectFloor=" + suspectFloor() + ", deadTimeout=" + deadTimeout() + ", probeInterval="
-                    + (idleProbesOff ? "off" : probeInterval()) + ", probeJitter=" + probeJitter() + "]";
-        }
+    static double jitter(double j, String what) {
+        if (!(j >= 0 && j < 1)) throw new IllegalArgumentException(what + " outside [0, 1)");
+        return j;
     }
 }

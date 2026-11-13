@@ -1,13 +1,12 @@
 package io.zmux.internal.core;
 
 import io.zmux.internal.join.Sealer;
-import io.zmux.carrier.HandshakeShaper;
 import io.zmux.carrier.HandshakeShaper.UnitPlan;
 import io.zmux.internal.join.Acceptor;
 import io.zmux.internal.join.Framing;
 import io.zmux.internal.join.Hello;
 import io.zmux.internal.join.HelloPayload;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.join.JoinPipe;
 import io.zmux.internal.join.Joiner;
 import io.zmux.internal.join.Kdf;
@@ -20,7 +19,7 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.FrameType;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -98,7 +97,6 @@ public final class Joins {
     private final CoreConfig cfg;
     private final PipeTable pipes;
     private final Outbox outbox;
-    private final PathMetrics metrics;
     private final boolean initiator;
     private final long[] usable;
     /** The exporter kept while the join keys wait. */
@@ -126,14 +124,13 @@ public final class Joins {
     private int backoffExp;
     private final SessionStats stats;
 
-    Joins(CoreConfig cfg, SessionStats stats, TransportParams peer, boolean initiator, PipeTable pipes, Outbox outbox, PathMetrics metrics, Port port,
+    Joins(CoreConfig cfg, SessionStats stats, TransportParams peer, boolean initiator, PipeTable pipes, Outbox outbox, Port port,
           byte[] exporter, byte[] psk) {
         this.port = port;
         this.cfg = cfg;
         this.stats = stats;
         this.pipes = pipes;
         this.outbox = outbox;
-        this.metrics = metrics;
         this.initiator = initiator;
         TransportParams l = cfg.local();
         ep = new EpochSet(peer.locator);
@@ -335,14 +332,25 @@ public final class Joins {
         }
     }
 
-    /** Whether a held local join may go now. */
+    /**
+     * Whether a held local join may go now. Held joins are judged one by one (MULTIPATH.md Section 5.4 step 9): at the cap, a
+     * suspended joiner lets one that provides a direction it lacks displace an attachment, whatever joins were held before it.
+     */
     boolean joinAllowedFor(Pipe p) {
+        return joinAllowedFor(p, true);
+    }
+
+    /** {@link #joinAllowedFor(Pipe)}; without mayDisplace a join at the cap stays held rather than retire an attachment. */
+    private boolean joinAllowedFor(Pipe p, boolean mayDisplace) {
         Attach a = p.mp();
         if (!a.joining.held) return true;
         if (port.now() < backoffUntil) return false;
         int n = 0;
         for (Pipe q : pipes.all()) if (q != p && q.mp() != null && q.mp().joinerLocal && !q.mp().health.retired() && !q.mp().joining.held) n++;
-        if (n >= ownCap) return false;
+        if (n >= ownCap) {
+            boolean in = p.in() != null, out = p.out() != null;
+            if (!mayDisplace || port.state() != SessionState.SUSPENDED || !lacks(in, out) || !makeRoom(true, in, out)) return false;
+        }
         a.joining.held = false;
         return true;
     }
@@ -354,7 +362,7 @@ public final class Joins {
     /** Maintenance targets exclude failed attachments; headroom is for their retained state. */
     boolean joinReady() {
         if (keysPending || port.now() < backoffUntil) return false;
-        if (ownAttachments() >= ownCap && (port.state() != SessionState.SUSPENDED || roomCandidate(true, true, true) == null)) return false;
+        if (ownAttachments() >= ownCap && (port.state() != SessionState.SUSPENDED || !lacks(true, true) || roomCandidate(true, true, true) == null)) return false;
         int target = 0;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
@@ -379,7 +387,7 @@ public final class Joins {
 
     /** Takes a pipe ID and enters JOINING; returns the ID, -id - 1 when the cap or the backoff holds it. */
     long addPipe(JoinOptions o) {
-        if (port.state() == SessionState.SUSPENDED && ownAttachments() >= ownCap) makeRoom(true, o.dir != 0, o.dir != 1);
+        if (port.state() == SessionState.SUSPENDED && ownAttachments() >= ownCap && lacks(o.dir != 0, o.dir != 1)) makeRoom(true, o.dir != 0, o.dir != 1);
         long id = nextId;
         nextId += 2;
         Attach a = new Attach(true, o.dir, o.fateGroup, o.suspectFloor, o.deadTimeout, o.probeInterval, o.probeJitter, o.dir != 1 ? Attach.OUT_JOINING : Attach.OUT_NONE,
@@ -405,7 +413,8 @@ public final class Joins {
     String joinPrepare(Pipe p, int earlyLimit) throws CoreException {
         Attach a = p == null ? null : p.mp();
         if (a == null || !a.joining()) throw CoreException.of(CoreException.Reason.INVALID);
-        if (!joinAllowedFor(p)) return null;
+        // A join that cannot go before the keys does not displace an attachment for nothing.
+        if (!joinAllowedFor(p, !keysPending)) return null;
         if (keysPending) throw CoreException.joinPending(0);
         boolean early = earlyLimit > 0 && noUsablePipe(p);
         a.joining.early = early;
@@ -416,7 +425,7 @@ public final class Joins {
     static int firstBatchLimit(int limit, int padTo, int base) {
         if (padTo <= 0) return limit;
         // limit is never negative: the configuration rejects a negative joinEarlyHello.
-        return Math.clamp(UnitPlan.fit(padTo - base), 0, limit);
+        return Math.clamp(HandshakePlans.fit(padTo - base), 0, limit);
     }
 
     /** What a Reply may hold: the frames, and the room left for padding, -1 when not limited. */
@@ -429,9 +438,9 @@ public final class Joins {
     static ReplyRoom replyRoom(Mode mode, long received, int base, int wantFrames) {
         if (mode == Mode.TRUSTED) return new ReplyRoom(wantFrames, -1);
         long room = Math.min(3 * received - base, Sealer.MAX_MESSAGE);
-        int fit = UnitPlan.fit((int) Math.max(room, -1));
-        int frames = fit == HandshakeShaper.NO_ITEM ? 0 : Math.min(fit, wantFrames);
-        int used = frames > 0 ? UnitPlan.itemSize(frames) : 0;
+        int fit = HandshakePlans.fit((int) Math.max(room, -1));
+        int frames = fit == HandshakePlans.NO_ITEM ? 0 : Math.min(fit, wantFrames);
+        int used = frames > 0 ? HandshakePlans.itemSize(frames) : 0;
         return new ReplyRoom(frames, (int) Math.max(room - used, 0));
     }
 
@@ -471,12 +480,12 @@ public final class Joins {
         HelloPayload empty = new HelloPayload(pipe, null, 0);
         int limit = a.joining.early ? firstBatchLimit(earlyLimit, plan.padTo(), j.helloLength(empty) + overhead) : 0;
         // The frames item stays within what the Hello's ciphertext holds.
-        if (limit > 0) limit = Math.clamp(UnitPlan.fit(Sealer.MAX_MESSAGE - j.helloCiphertext(empty)), 0, limit);
+        if (limit > 0) limit = Math.clamp(HandshakePlans.fit(Sealer.MAX_MESSAGE - j.helloCiphertext(empty)), 0, limit);
         byte[] batch = limit > 0 ? port.firstBatch(limit) : null;
         HelloPayload bare = new HelloPayload(pipe, batch, 0);
-        int item = plan.item(j.helloLength(bare) + overhead, Sealer.MAX_MESSAGE - j.helloCiphertext(bare));
+        int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, Sealer.MAX_MESSAGE - j.helloCiphertext(bare));
         byte[] hello = j.writeHello(new HelloPayload(pipe, batch, Tlv.paddingField(item)));
-        if (item != HandshakeShaper.NO_ITEM) port.joinPadding(UnitPlan.itemSize(item));
+        if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
         a.joiner(j, framing);
         return hello;
     }
@@ -557,7 +566,7 @@ public final class Joins {
         byte[] confirm;
         Result result;
         try {
-            int fill = plan.fill(j.confirmLength() + overhead, j.confirmRoom());
+            int fill = HandshakePlans.fill(plan, j.confirmLength() + overhead, j.confirmRoom());
             confirm = j.writeConfirm(fill);
             if (fill > 0) port.joinPadding(fill);
             result = j.finish();
@@ -692,9 +701,9 @@ public final class Joins {
             int wire = pj.acceptor.replyLength(bare) + overhead;
             int room = Sealer.MAX_MESSAGE - pj.acceptor.replyCiphertext(bare);
             int limited = replyRoom(pj.mode, received, wire, 0).paddingRoom();
-            int item = plan.item(wire, limited < 0 ? room : Math.min(room, limited));
+            int item = HandshakePlans.item(plan, wire, limited < 0 ? room : Math.min(room, limited));
             byte[] reply = pj.acceptor.writeReply(new ReplyPayload(bare.decision(), null, Tlv.paddingField(item)));
-            if (item != HandshakeShaper.NO_ITEM) port.joinPadding(UnitPlan.itemSize(item));
+            if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
             return new Claimed(refuse ? JoinResult.REFUSED : JoinResult.ACCEPTED, reply);
         } catch (SecureCarrierException failed) {
             return new Claimed(JoinResult.CLOSE, null);
@@ -764,29 +773,49 @@ public final class Joins {
     }
 
     /**
-     * Frees a place among the unretired attachments of one joiner while suspended: the oldest failed attachment is retired locally; when none failed and the new
-     * attachment provides a missing direction, the live attachment with the oldest last
-     * progress is displaced.
+     * The attachment the cap displaces among the unretired ones of one joiner (local: this endpoint's own) while suspended, the
+     * one choice of MULTIPATH.md Section 5.4 step 9 for the acceptor, the joiner and Section 8.4: the oldest failed attachment whose
+     * own PIPE_ABANDON was acknowledged, else the oldest failed one whose PIPE_ABANDON was not; only when none has failed and the
+     * new attachment provides a missing direction (provideIn: the local endpoint reads on it, provideOut: it writes), the live
+     * attachment with the oldest last progress. Held local joins are never chosen; null when nothing may be displaced.
      */
     Pipe roomCandidate(boolean local, boolean provideIn, boolean provideOut) {
+        Pipe acked = null, pending = null;
+        for (Pipe p : pipes.all()) {
+            Attach a = p.mp();
+            if (a == null || a.health.retired() || a.joinerLocal != local || a.joining.held) continue;
+            if (a.liveOut() || a.health.in() == Attach.IN_OPEN || a.health.in() == Attach.IN_JOINING) continue;
+            if (a.health.abandonAcked()) {
+                if (acked == null || a.joining.attachedAt < acked.mp().joining.attachedAt) acked = p;
+            } else if (pending == null || a.joining.attachedAt < pending.mp().joining.attachedAt) {
+                pending = p;
+            }
+        }
+        if (acked != null) return acked;
+        if (pending != null) return pending;
+        if (!lacks(provideIn, provideOut)) return null;
         Pipe oldest = null;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
-            if (a == null || a.health.retired() || a.joinerLocal != local) continue;
-            if (a.liveOut() || a.health.in() == Attach.IN_OPEN || a.health.in() == Attach.IN_JOINING) continue;
-            if (oldest == null || a.joining.attachedAt < oldest.mp().joining.attachedAt) oldest = p;
-        }
-        if (oldest == null) {
-            int[] lc = metrics.liveCounts();
-            if ((!provideOut || lc[0] != 0) && (!provideIn || lc[1] != 0)) return null;
-            for (Pipe p : pipes.all()) {
-                Attach a = p.mp();
-                if (a == null || a.health.retired() || a.joinerLocal != local) continue;
-                if (oldest == null || a.progress() < oldest.mp().progress()) oldest = p;
-            }
-            if (oldest == null) return null;
+            if (a == null || a.health.retired() || a.joinerLocal != local || a.joining.held) continue;
+            if (oldest == null || a.progress() < oldest.mp().progress()) oldest = p;
         }
         return oldest;
+    }
+
+    /**
+     * Whether an attachment providing these directions fills one the endpoint lacks: no unretired attachment has a live outbound
+     * (provideOut) or inbound (provideIn) direction. Held local joins are not live: they have not started.
+     */
+    boolean lacks(boolean provideIn, boolean provideOut) {
+        boolean out = false, in = false;
+        for (Pipe p : pipes.all()) {
+            Attach a = p.mp();
+            if (a == null || a.health.retired() || a.joining.held) continue;
+            out |= p.out() != null && a.liveOut();
+            in |= p.in() != null && (a.health.in() == Attach.IN_JOINING || a.health.in() == Attach.IN_OPEN);
+        }
+        return provideOut && !out || provideIn && !in;
     }
 
     boolean makeRoom(boolean local, boolean provideIn, boolean provideOut) {
@@ -796,15 +825,9 @@ public final class Joins {
         if (a.liveOut() || a.health.in() == Attach.IN_OPEN || a.health.in() == Attach.IN_JOINING) {
             port.failWithoutAbandon(oldest, TransportError.PIPE_FAILED);
         }
-        retireLocally(oldest);
+        a.health.dropQueuedAbandon(); // MULTIPATH.md Section 5.4: a displaced attachment's pending PIPE_ABANDON is dropped
+        port.retire(oldest);
         return true;
-    }
-
-    /** Retires a failed attachment without the PIPE_ABANDON exchange; an owed PIPE_ABANDON stays owed by ID. */
-    void retireLocally(Pipe p) {
-        Attach a = p.mp();
-        if (a.health.abandonQueued() && !a.health.abandonSent()) pendAbandon.put(p.id, a.health.abandonCode());
-        port.retire(p);
     }
 
     /** Whether id is of the local parity and not yet taken. */

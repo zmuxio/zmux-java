@@ -4,7 +4,7 @@ import io.zmux.carrier.OutboundBatch;
 import io.zmux.internal.core.Action;
 import io.zmux.internal.core.Batch;
 import io.zmux.internal.core.ReadBuf;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 
 /**
@@ -123,7 +123,7 @@ public abstract class AbstractTransport implements Transport {
         Forwarded f = new Forwarded(this, null, false, false);
         io.zmux.carrier.PipeIo io = f.pipe(info().applicationProtocol());
         if (hasExporter()) io = io.withExporter(this::export).withTerminatedTls(info().carrier().tls());
-        return secure() ? io.secure() : io;
+        return secure() ? io.withSecure(true) : io;
     }
 
     // ---- input ----

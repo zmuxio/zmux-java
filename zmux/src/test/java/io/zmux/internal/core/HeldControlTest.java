@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 import static org.junit.jupiter.api.Assertions.*;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameDecoder;
 import io.zmux.internal.wire.FrameKind;

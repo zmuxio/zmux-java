@@ -27,7 +27,7 @@ class QuicChannelTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
 
     static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+        return ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
     }
 
     /**
@@ -169,11 +169,11 @@ class QuicChannelTest {
     static Run lossLatencies(Duration d, QuicOptions clientOptions) throws Exception {
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = config(loops);
-            try (var listener = Zmux.listener(ListenerConfig.of(config));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                  var relay = new LossyRelay(server.address(), d);
                  var endpoint = new QuicClient(TestTls.client, clientOptions)) {
-                ZmuxSession c = endpoint.connect(relay.address(), "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                ZmuxSession c = endpoint.connectAsync(relay.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                 ZmuxSession s = listener.accept(Duration.ofSeconds(10));
                 assertNotNull(s);
                 try {
@@ -238,10 +238,10 @@ class QuicChannelTest {
         try (var loops = EventLoops.create(2)) {
             var config = config(loops);
             for (QuicOptions clientOptions : List.of(QuicOptions.defaults(), QuicOptions.defaults().withDatagrams(false))) {
-                try (var listener = Zmux.listener(ListenerConfig.of(config));
+                try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                      var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                      var endpoint = new QuicClient(TestTls.client, clientOptions)) {
-                    ZmuxSession c = endpoint.connect(server.address(), "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                    ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                     ZmuxSession s = listener.accept(Duration.ofSeconds(10));
                     try {
                         byte[] small = {1, 2, 3}, large = new byte[4000];
@@ -262,10 +262,10 @@ class QuicChannelTest {
                 }
             }
             var none = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var listener = Zmux.listener(ListenerConfig.of(none));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(none));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                  var endpoint = new QuicClient(TestTls.client, QuicOptions.defaults())) {
-                ZmuxSession c = endpoint.connect(server.address(), "localhost", none).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", none).get(10, TimeUnit.SECONDS);
                 ZmuxSession s = listener.accept(Duration.ofSeconds(10));
                 try {
                     assertThrows(NotNegotiatedException.class, () -> c.datagrams().send(ByteBuffer.wrap(new byte[1])));
@@ -280,13 +280,13 @@ class QuicChannelTest {
     @Test void sessionsShareTheConnectionsChannel() throws Exception {
         try (var loops = EventLoops.create(2)) {
             var config = config(loops);
-            try (var local = Zmux.listener(ListenerConfig.of(config));
-                 var remote = Zmux.listener(ListenerConfig.of(config));
+            try (var local = ZmuxListener.of(ListenerConfig.of(config));
+                 var remote = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), remote);
                  var endpoint = new QuicClient(TestTls.client, QuicOptions.defaults(), local);
                  var pool = new QuicPool(endpoint, server.address(), "localhost")) {
-                var p1 = pool.openPipe().toCompletableFuture().get(10, TimeUnit.SECONDS);
-                var p2 = pool.openPipe().toCompletableFuture().get(10, TimeUnit.SECONDS);
+                var p1 = pool.openPipeAsync().get(10, TimeUnit.SECONDS);
+                var p2 = pool.openPipeAsync().get(10, TimeUnit.SECONDS);
                 assertSame(p1.carrierConn(), p2.carrierConn());
                 ZmuxSession c1 = Zmux.open(p1, Role.CLIENT, config), c2 = Zmux.open(p2, Role.CLIENT, config);
                 ZmuxSession s1 = remote.accept(Duration.ofSeconds(10)), s2 = remote.accept(Duration.ofSeconds(10));
@@ -326,10 +326,10 @@ class QuicChannelTest {
     @Test void unknownAndMalformedChannelDatagrams() throws Exception {
         try (var loops = EventLoops.create(2)) {
             var config = config(loops);
-            try (var listener = Zmux.listener(ListenerConfig.of(config));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                  var endpoint = new QuicClient(TestTls.client, QuicOptions.defaults())) {
-                ZmuxSession c = endpoint.connect(server.address(), "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                 ZmuxSession s = listener.accept(Duration.ofSeconds(10));
                 try {
                     c.datagrams().send(ByteBuffer.wrap(new byte[] {7}));

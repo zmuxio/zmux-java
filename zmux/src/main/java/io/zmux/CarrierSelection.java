@@ -10,26 +10,26 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
-/** {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)}: carrier selection. */
+/** {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)}: carrier selection. */
 final class CarrierSelection {
     private CarrierSelection() {}
 
-    static ZmuxSession dial(CarrierMode mode, ZmuxConfig cfg, ModePolicy policy) throws IOException {
-        Credential cred = cfg.credential();
-        var src = new ModeSource(mode, policy);
+    static ZmuxSession dial(CarrierChoice choice, ZmuxConfig cfg, CarrierChoicePolicy policy) throws IOException {
+        CarrierCredential cred = cfg.carrierCredential;
+        var src = new CarrierChoiceSource(choice, policy);
         List<Candidate> cands = src.candidates();
-        if (!mode.isAuto()) {
+        if (!choice.isAuto()) {
             Candidate c = cands.getFirst();
             Started st = start(c, cfg, cred, null);
-            if (st.session == null) throw new ModeException(List.of(st.result));
+            if (st.session == null) throw new CarrierChoiceException(List.of(st.result));
             st.session.reportCarrier(List.of(st.result), c.kind(), c.variant());
             return st.session;
         }
-        ModePolicy p = src.policy();
+        CarrierChoicePolicy p = src.policy();
         ZmuxConfig acfg = cfg.withoutEarlyData();
         long now = System.nanoTime();
         List<Integer> order = src.usable(now);
-        boolean join = !p.noJoin() && cfg.maxPipes() > 1;
+        boolean join = p.join() && cfg.maxPipes() > 1;
         if (join) {
             int base = src.base(order, now);
             var seq = new ArrayList<Integer>();
@@ -49,11 +49,11 @@ final class CarrierSelection {
             ZmuxSession s = st.session;
             s.reportCarrier(results, c.kind(), c.variant());
             long chosen = System.nanoTime();
-            ZmuxPipe pipe0 = join && s.info().multipath() ? s.pipes().stream().filter(x -> x.id() == 0).findFirst().orElse(null) : null;
+            ZmuxPipe pipe0 = join && s.info().multipath() ? s.pipes().stream().filter(x -> x.rawId() == 0).findFirst().orElse(null) : null;
             if (pipe0 != null) {
                 // Every later upgrade, fallback and retry is this pool's.
                 try {
-                    PipeMaintenance.startWith(s, PipePool.join(new PipePool.ModeJoin(src)), pipe0, i, chosen);
+                    PipeMaintenance.startWith(s, PipePool.join(new PipePool.ChoiceJoin(src)), pipe0, i, chosen);
                 } catch (IOException | RuntimeException e) {
                     s.close();
                     throw e;
@@ -64,17 +64,17 @@ final class CarrierSelection {
             }
             return s;
         }
-        throw new ModeException(results);
+        throw new CarrierChoiceException(results);
     }
 
     private record Started(ZmuxSession session, CandidateResult result) {}
 
     /**
-     * Opens a carrier of c and starts a session on it. With p (auto mode) the peer's parameters
+     * Opens a carrier of c and starts a session on it. With p (an auto choice) the peer's parameters
      * must arrive within the candidate's timer; a session that misses it is abandoned, which
      * sends nothing.
      */
-    private static Started start(Candidate c, ZmuxConfig cfg, Credential cred, ModePolicy p) throws InterruptedIOException {
+    private static Started start(Candidate c, ZmuxConfig cfg, CarrierCredential cred, CarrierChoicePolicy p) throws InterruptedIOException {
         Duration bound = cfg.handshakeBound();
         long t0 = System.nanoTime();
         PipeIo io;
@@ -98,7 +98,7 @@ final class CarrierSelection {
         ZmuxSession s;
         try {
             CoreConfig.Role r = Zmux.core(Role.CLIENT);
-            s = Zmux.started(Zmux.startExternal(io, cfg, r, r), cfg.credential());
+            s = Zmux.started(Zmux.startExternal(io, cfg, r, r), cfg.carrierCredential);
         } catch (InterruptedIOException e) {
             throw e;
         } catch (IOException | RuntimeException e) {

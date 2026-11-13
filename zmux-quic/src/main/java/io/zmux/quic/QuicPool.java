@@ -18,29 +18,39 @@ import java.util.concurrent.atomic.AtomicLong;
 /** A route's QUIC connection pool. The client endpoint remains application-owned. */
 public final class QuicPool implements AutoCloseable {
     /**
-     * Limits of each connection. maxPipesPerConnectionLifetime 0 and maxConnectionAge zero are no limit:
-     * a connection that may carry no pipe, or live no time, could not serve the pool.
+     * Limits of each connection.
+     *
+     * @param maxPipesPerConnection pipes open on one connection at once, at least 1 (default 8)
+     * @param maxPipesPerConnectionLifetime pipes one connection carries in its life, at least 1; empty: no limit (the default)
+     * @param maxConnectionAge how long one connection takes new pipes, positive; empty: no limit (the default)
      */
-    public record Limits(int maxPipesPerConnection, long maxPipesPerConnectionLifetime, Duration maxConnectionAge) {
+    public record Limits(int maxPipesPerConnection, java.util.OptionalLong maxPipesPerConnectionLifetime, java.util.Optional<Duration> maxConnectionAge) {
         private static final Duration MAX_AGE = Duration.ofNanos(Long.MAX_VALUE);
         public Limits {
+            Objects.requireNonNull(maxPipesPerConnectionLifetime);
             Objects.requireNonNull(maxConnectionAge);
-            if (maxPipesPerConnection < 1 || maxPipesPerConnectionLifetime < 0 || maxConnectionAge.isNegative())
+            if (maxPipesPerConnection < 1 || maxPipesPerConnectionLifetime.isPresent() && maxPipesPerConnectionLifetime.getAsLong() < 1
+                    || maxConnectionAge.isPresent() && !maxConnectionAge.get().isPositive())
                 throw new IllegalArgumentException("invalid connection pool limits");
-            if (maxConnectionAge.compareTo(MAX_AGE) > 0) throw new IllegalArgumentException("age exceeds monotonic clock range");
+            if (maxConnectionAge.isPresent() && maxConnectionAge.get().compareTo(MAX_AGE) > 0) throw new IllegalArgumentException("age exceeds monotonic clock range");
         }
-        public static Limits defaults() { return new Limits(8, 0, Duration.ZERO); }
+        public static Limits defaults() { return new Limits(8, java.util.OptionalLong.empty(), java.util.Optional.empty()); }
+        public Limits withMaxPipesPerConnection(int n) { return new Limits(n, maxPipesPerConnectionLifetime, maxConnectionAge); }
+        public Limits withMaxPipesPerConnectionLifetime(long n) { return new Limits(maxPipesPerConnection, java.util.OptionalLong.of(n), maxConnectionAge); }
+        public Limits withMaxConnectionAge(Duration d) { return new Limits(maxPipesPerConnection, maxPipesPerConnectionLifetime, java.util.Optional.of(d)); }
     }
     /** Active includes streams reserved for creation; total counts created streams and failed native opening attempts, including cancelled creations. */
-    public record ConnectionInfo(QuicChannel connection, long fateGroup, int active, long total, boolean retiring, Duration age) {}
+    public record PooledConnection(QuicChannel connection, long fateGroup, int active, long total, boolean retiring, Duration age) {}
 
     private static final AtomicLong NEXT_FATE = new AtomicLong(ThreadLocalRandom.current().nextLong(1, 1L << 61));
     private final QuicClient client;
     private final InetSocketAddress address;
     private final String serverName;
     private final Limits limits;
-    private final io.zmux.Credential credential;
+    private final io.zmux.CarrierCredential credential;
     private final PoolPolicy policy;
+    /** The limits in nanoseconds and pipes; 0: none. */
+    private final long lifetime, maxAge;
     private boolean dialed;
     private long lastDial;
     private int failures;
@@ -76,16 +86,17 @@ public final class QuicPool implements AutoCloseable {
      * again no later than a decision's recheck, without pipe events. A null decision or an
      * exception from the policy keeps the pool's own behaviour.
      */
-    public QuicPool(QuicClient client, InetSocketAddress address, String serverName, Limits limits, io.zmux.Credential credential,
+    public QuicPool(QuicClient client, InetSocketAddress address, String serverName, Limits limits, io.zmux.CarrierCredential credential,
                     PoolPolicy policy) {
         this.client = Objects.requireNonNull(client);
         if (!client.listenerBacked()) throw new IllegalArgumentException("pooled connections require a listener-backed client for shared incoming routing");
         this.address = Objects.requireNonNull(address);
         this.serverName = Objects.requireNonNull(serverName); this.limits = Objects.requireNonNull(limits);
+        lifetime = limits.maxPipesPerConnectionLifetime().orElse(0); maxAge = limits.maxConnectionAge().map(Duration::toNanos).orElse(0L);
         this.credential = credential;
         this.policy = policy;
     }
-    public QuicPool(QuicClient client, InetSocketAddress address, String serverName, Limits limits, io.zmux.Credential credential) {
+    public QuicPool(QuicClient client, InetSocketAddress address, String serverName, Limits limits, io.zmux.CarrierCredential credential) {
         this(client, address, serverName, limits, credential, null);
     }
     public QuicPool(QuicClient client, InetSocketAddress address, String serverName, Limits limits) { this(client, address, serverName, limits, null); }
@@ -127,7 +138,7 @@ public final class QuicPool implements AutoCloseable {
         @Override public void created(QuicStreamChannel stream) {
             synchronized (QuicPool.this) {
                 if (!settled) { settled = true; entry.pending--; if (entry.total < Long.MAX_VALUE) entry.total++; }
-                if (limits.maxPipesPerConnectionLifetime() > 0 && entry.total >= limits.maxPipesPerConnectionLifetime()) entry.retiring = true;
+                if (lifetime > 0 && entry.total >= lifetime) entry.retiring = true;
             }
             stream.closeFuture().addListener(ignored -> release());
         }
@@ -159,25 +170,29 @@ public final class QuicPool implements AutoCloseable {
     }
 
     /** Opens one pooled carrier. Cancellation reclaims its stream; joined carriers outlive this call and pool close. */
-    public CompletionStage<PipeIo> openPipe() {
+    public io.zmux.ZmuxFuture<PipeIo> openPipeAsync() {
         Request request = new Request(); boolean rejected;
         synchronized (this) { rejected = closed; if (!rejected) requests.add(request); }
         var notification = ConnectionCarrier.offLoop(request.result, client.completions(), QuicPool::discard);
         if (rejected) request.result.completeExceptionally(new IOException("QUIC pool closed")); else acquire(request, true);
-        return notification;
+        return QuicClient.future(notification);
+    }
+
+    /** {@link #openPipeAsync()}, waiting for the pipe input. */
+    public PipeIo openPipe() throws IOException {
+        return QuicClient.await(openPipeAsync());
     }
     private static void discard(PipeIo pipe) {
         try { if (pipe.reader() != null) pipe.reader().close(); }
         finally { if (pipe.writer() != null) pipe.writer().abort(new IOException("pooled operation cancelled")); }
     }
     private void expire(Entry entry) {
-        if (!entry.carrier.channel().isActive() || !limits.maxConnectionAge().isZero()
-                && System.nanoTime() - entry.born >= limits.maxConnectionAge().toNanos()) entry.retiring = true;
+        if (!entry.carrier.channel().isActive() || maxAge > 0 && System.nanoTime() - entry.born >= maxAge) entry.retiring = true;
     }
     private long room(Entry entry) {
         long remaining = limits.maxPipesPerConnection() - entry.active;
-        if (limits.maxPipesPerConnectionLifetime() > 0)
-            remaining = Math.min(remaining, limits.maxPipesPerConnectionLifetime() - Math.min(entry.total,limits.maxPipesPerConnectionLifetime()) - entry.pending);
+        if (lifetime > 0)
+            remaining = Math.min(remaining, lifetime - Math.min(entry.total, lifetime) - entry.pending);
         return remaining;
     }
     /** policyDial: the policy may send the request to a new connection although one has room. */
@@ -225,7 +240,7 @@ public final class QuicPool implements AutoCloseable {
         synchronized (this) { dialed = true; lastDial = System.nanoTime(); }
         // Keep the Opening published until this factory returns a handle and cancellation is propagated.
         CompletableFuture<ConnectionCarrier> dialing;
-        try { dialing = client.connectCarrier(address,serverName,credential).toCompletableFuture(); }
+        try { dialing = client.connectCarrier(address,serverName,credential,ConnectionCarrier.POOLED).toCompletableFuture(); }
         catch (RuntimeException error) {
             synchronized (this) { if (opening == shared) opening = null; failures++; }
             shared.ready.completeExceptionally(error); return;
@@ -251,9 +266,9 @@ public final class QuicPool implements AutoCloseable {
             }
             if (!adopted) { carrier.dispose(); shared.ready.completeExceptionally(new CancellationException()); return; }
             carrier.channel().closeFuture().addListener(ignored -> retire(entry));
-            if (!limits.maxConnectionAge().isZero()) {
+            if (maxAge > 0) {
                 try {
-                    entry.expiry = ChannelLoops.schedule(carrier.channel(), () -> retire(entry), limits.maxConnectionAge().toNanos(), TimeUnit.NANOSECONDS);
+                    entry.expiry = ChannelLoops.schedule(carrier.channel(), () -> retire(entry), maxAge, TimeUnit.NANOSECONDS);
                     if (entry.disposed.get()) entry.expiry.cancel(false);
                 } catch (RejectedExecutionException ended) { retire(entry); }
             }
@@ -289,7 +304,7 @@ public final class QuicPool implements AutoCloseable {
         for (Entry entry : entries) {
             expire(entry);
             if (entry.retiring) continue;
-            view.add(new PoolPolicy.Member(entry.fate, Duration.ofNanos(Math.max(0, now - entry.born)),
+            view.add(new PoolPolicy.Member(null, entry.fate, Duration.ofNanos(Math.max(0, now - entry.born)),
                     entry.active > 0 ? Duration.ZERO : Duration.ofNanos(Math.max(0, now - entry.idleSince)),
                     entry.active, 0, 0, true, false));
         }
@@ -298,10 +313,10 @@ public final class QuicPool implements AutoCloseable {
             decision = policy.decide(new PoolPolicy.View(view, failures, dialed ? Duration.ofNanos(now - lastDial) : null));
             if (decision == null) decision = PoolPolicy.Decision.KEEP;
         } catch (RuntimeException error) { decision = PoolPolicy.Decision.KEEP; }
-        recheckLocked(decision.recheckNanos());
+        recheckLocked(decision.recheckDelay().map(d -> { try { return d.toNanos(); } catch (ArithmeticException tooLong) { return Long.MAX_VALUE; } }).orElse(0L));
         int open = view.size();
         for (Entry entry : entries)
-            if (!entry.retiring && decision.retire().contains(entry.fate)) { entry.retiring = true; open--; replacements++; }
+            if (!entry.retiring && decision.retireConnections().contains(entry.fate)) { entry.retiring = true; open--; replacements++; }
         long after;
         try { after = decision.dialAfter().map(Duration::toNanos).orElse(0L); } catch (ArithmeticException tooLong) { after = Long.MAX_VALUE; }
         return (open < decision.count().orElse(0) || replacements > 0) && (!dialed || now - lastDial >= after);
@@ -350,9 +365,9 @@ public final class QuicPool implements AutoCloseable {
         entry.carrier.dispose();
     }
     /** Current owned connections, including retiring connections held by live streams. */
-    public synchronized List<ConnectionInfo> connections() {
+    public synchronized List<PooledConnection> connections() {
         long now = System.nanoTime();
-        return entries.stream().map(entry -> new ConnectionInfo(entry.carrier.channel(),entry.fate,entry.active,entry.total,
+        return entries.stream().map(entry -> new PooledConnection(entry.carrier.channel(),entry.fate,entry.active,entry.total,
                 entry.retiring,Duration.ofNanos(Math.max(0,now-entry.born)))).toList();
     }
     /** Stops creation, cancels uncommitted requests and drains connections without interrupting handed-out streams. */

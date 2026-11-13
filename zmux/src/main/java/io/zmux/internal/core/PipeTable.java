@@ -141,7 +141,6 @@ public final class PipeTable {
         }
     }
 
-    /** Aborts the carriers of every pipe. */
     /** Closes every pipe's carriers gracefully. */
     void closeAll() {
         for (Pipe p : list) outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_BIDI));

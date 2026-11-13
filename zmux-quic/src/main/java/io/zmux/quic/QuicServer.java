@@ -12,7 +12,13 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-/** Supplies QUIC request and lane carriers to an ordinary zmux listener. The listener remains application-owned. */
+/**
+ * Supplies QUIC request and lane carriers to an ordinary zmux listener. The listener remains application-owned.
+ *
+ * <p>A connection closes after the zmux close of its last pipe was delivered or lingered, with
+ * an application close carrying the last session's code. Netty's QUIC close takes a 32-bit
+ * code: a session code above 2<sup>31</sup> - 1 closes the connection with 0.
+ */
 public final class QuicServer implements AutoCloseable {
     private final EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
     /** The sessions of this endpoint's connections live on its one loop. */
@@ -64,7 +70,7 @@ public final class QuicServer implements AutoCloseable {
             throw new IOException("could not bind QUIC listener", error);
         }
     }
-    /** The hosts of the connections served by {@link #serve}: one per Netty loop, for the loop's lifetime. */
+    /** The hosts of the connections served by {@link #serveAsync}: one per Netty loop, for the loop's lifetime. */
     private static final java.util.Map<EventLoop, NettyHost> HOSTS = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     /**
@@ -83,7 +89,7 @@ public final class QuicServer implements AutoCloseable {
      * nor its sessions are closed. A listener already closed closes the connection, and the
      * stage fails with {@link java.nio.channels.ClosedChannelException}.
      */
-    public static java.util.concurrent.CompletionStage<Void> serve(QuicChannel connection, QuicOptions options, ZmuxListener listener,
+    public static io.zmux.ZmuxFuture<Void> serveAsync(QuicChannel connection, QuicOptions options, ZmuxListener listener,
                                                                   Fallback fallback) {
         java.util.Objects.requireNonNull(connection, "connection");
         java.util.Objects.requireNonNull(options, "options");
@@ -92,7 +98,7 @@ public final class QuicServer implements AutoCloseable {
         if (listener.isClosed()) {
             connection.close();
             result.completeExceptionally(new java.nio.channels.ClosedChannelException());
-            return result;
+            return QuicClient.future(result);
         }
         NettyHost host = HOSTS.computeIfAbsent(connection.eventLoop(), NettyHost::new);
         var carrier = ConnectionCarrier.established(options, listener, fallback, host, new io.zmux.internal.loop.SerialCallbacks());
@@ -104,11 +110,11 @@ public final class QuicServer implements AutoCloseable {
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
         if (ChannelLoops.inLoop(connection)) add.run(); else ChannelLoops.executor(connection).execute(add);
         result.whenComplete((v, e) -> { if (result.isCancelled()) carrier.stop(); });
-        return result;
+        return QuicClient.future(result);
     }
 
     /**
-     * The stream handler of a codec whose connections are given to {@link #serve}: it hands
+     * The stream handler of a codec whose connections are given to {@link #serveAsync}: it hands
      * each stream the peer opens to the zmux carrier of its connection, and closes the streams
      * of a connection that has none.
      */
@@ -128,18 +134,23 @@ public final class QuicServer implements AutoCloseable {
     public java.util.List<QuicChannel> connections() { return java.util.List.copyOf(connections); }
 
     /** Opens a bidi carrier on an owned connection; cancellation returns only that stream, not the connection. */
-    public java.util.concurrent.CompletionStage<io.zmux.carrier.PipeIo> openPipe(QuicChannel connection) {
-        if (closed.get()) return java.util.concurrent.CompletableFuture.failedFuture(new IOException("QUIC endpoint closed"));
+    public io.zmux.ZmuxFuture<io.zmux.carrier.PipeIo> openPipeAsync(QuicChannel connection) {
+        if (closed.get()) return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new IOException("QUIC endpoint closed")));
         if (connection == null || !connections.contains(connection))
-            return java.util.concurrent.CompletableFuture.failedFuture(new IllegalArgumentException("connection is not owned by this endpoint"));
+            return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new IllegalArgumentException("connection is not owned by this endpoint")));
         ConnectionCarrier carrier = connection.attr(ConnectionCarrier.KEY).get();
-        if (carrier == null) return java.util.concurrent.CompletableFuture.failedFuture(new IOException("QUIC connection not ready"));
-        return carrier.openApplicationPipe();
+        if (carrier == null) return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new IOException("QUIC connection not ready")));
+        return QuicClient.future(carrier.openApplicationPipe());
+    }
+
+    /** {@link #openPipeAsync}, waiting for the pipe input. */
+    public io.zmux.carrier.PipeIo openPipe(QuicChannel connection) throws IOException {
+        return QuicClient.await(openPipeAsync(connection));
     }
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        for (QuicChannel connection : connections) connection.close();
+        for (QuicChannel connection : connections) ConnectionCarrier.close(connection);
         datagram.close();
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);

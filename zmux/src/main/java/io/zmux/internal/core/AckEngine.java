@@ -5,7 +5,7 @@ import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.FrameType;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.util.ArrayList;
 import java.util.List;

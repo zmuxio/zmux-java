@@ -14,7 +14,7 @@ import io.zmux.seal.Principal;
 import io.zmux.seal.Seal;
 import io.zmux.seal.ServerConfig;
 import io.zmux.seal.SigningKey;
-import io.zmux.seal.Verdict;
+import io.zmux.seal.VerifyVerdict;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -41,13 +41,13 @@ class ProofTest {
     @Test void mutualProofsGivePqAuthentication() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).build();
-            var sc = new ServerConfig(SealTest.gate(null), SealTest.NODE)
-                    .withAnchor(in -> new Verdict(new Principal(7, new byte[] {7}), CLIENT_PROOF.keyId(), null), null, true)
-                    .withSigner(NODE_PROOF);
+            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE)
+                    .anchor(in -> new VerifyVerdict(new Principal(7, new byte[] {7}), CLIENT_PROOF.keyId(), null)).requirePqAuth(true)
+                    .signer(NODE_PROOF).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc)).build())) {
                 ClientConfig cc = SealTest.client().anchor(pinWithProof()).requirePqAuth(true).signer(CLIENT_PROOF).build();
                 PipeIo p = SealTest.establish(SealTest.tcp(l.localAddress()), cc);
-                assertTrue(Seal.peerOf(p).pqAuthenticated());
+                assertTrue(Seal.peerOf(p).orElseThrow().pqAuthenticated());
                 try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
                     Peer client = (Peer) s.admitted().orElseThrow();
                     assertTrue(client.pqAuthenticated());
@@ -64,15 +64,15 @@ class ProofTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).build();
             List<String> reasons = new CopyOnWriteArrayList<>();
-            var sc = new ServerConfig(SealTest.gate(null), SealTest.NODE)
-                    .withAnchor(in -> new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()), CLIENT_PROOF.keyId(), null), null, false);
+            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE)
+                    .anchor(in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()), CLIENT_PROOF.keyId(), null)).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
                     .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var e = fails(Seal.establish(SealTest.tcp(l.localAddress()), SealTest.client().anchor(pinWithProof()).build()).toCompletableFuture());
                 assertTrue(e instanceof CredentialsFailedException, e.toString());
                 var pq = fails(Seal.establish(SealTest.tcp(l.localAddress()), SealTest.client().requirePqAuth(true).build()).toCompletableFuture());
-                assertEquals(io.zmux.carrier.SecureCarrierException.class, pq.getClass());
+                assertEquals(io.zmux.seal.SecureCarrierException.class, pq.getClass());
                 // The client finishes before the server judges message 3; the server then refuses it.
                 Seal.establish(SealTest.tcp(l.localAddress()), SealTest.client().build()).toCompletableFuture().get(10, TimeUnit.SECONDS)
                         .writer().abort(new java.io.IOException("done"));

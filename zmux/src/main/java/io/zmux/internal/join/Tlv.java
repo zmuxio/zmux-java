@@ -1,12 +1,12 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_NON_MINIMAL;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_ORDER;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_TRUNCATED;
-import static io.zmux.carrier.SecureCarrierException.Code.TLV_UNKNOWN_CRITICAL;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_NON_MINIMAL;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_ORDER;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_TRUNCATED;
+import static io.zmux.seal.SecureCarrierException.Code.TLV_UNKNOWN_CRITICAL;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 

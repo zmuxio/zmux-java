@@ -11,9 +11,9 @@ package io.zmux.shaping;
  * @param nowNanos the session clock, nanoseconds
  * @param meters the session's readings with {@link Capability#BUDGET}, otherwise {@link ShapingMeters#ZERO}
  */
-public record RecordView(long pipe, long lane, long seq, int limit, boolean writeStart, long nowNanos, ShapingMeters meters) {
+public record RecordView(io.zmux.PipeId pipe, long lane, long seq, int limit, boolean writeStart, long nowNanos, ShapingMeters meters) {
     /** A view without readings. */
-    public RecordView(long pipe, long lane, long seq, int limit, boolean writeStart, long nowNanos) {
+    public RecordView(io.zmux.PipeId pipe, long lane, long seq, int limit, boolean writeStart, long nowNanos) {
         this(pipe, lane, seq, limit, writeStart, nowNanos, ShapingMeters.ZERO);
     }
 }

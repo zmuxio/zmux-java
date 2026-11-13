@@ -5,7 +5,7 @@ package io.zmux;
  * join refusal backoff started, so the next join waits. It is no failure of the session.
  */
 public final class JoinRefusedException extends PipeException {
-    JoinRefusedException(long pipeId) {
+    JoinRefusedException(PipeId pipeId) {
         super("join refused by the peer", pipeId);
     }
 }

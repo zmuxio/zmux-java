@@ -1,6 +1,5 @@
 package io.zmux.seal;
 
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Mode;
 import io.zmux.internal.join.Opener;
 import io.zmux.internal.join.Result;

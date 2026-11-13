@@ -13,12 +13,12 @@ class PoolPolicyTest {
     @Test void countOverridesThePoolAndClosesRetiredMembersFirst() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 8))) {
             var count = new AtomicInteger(3); var retire = new AtomicLong(-1);
-            PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withCount(count.get()).withRetire(retire.get() < 0 ? Set.of() : Set.of(retire.get()));
+            PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withCount(count.get()).withRetirePipes(retire.get() < 0 ? Set.of() : Set.of(PipeId.of(retire.get())));
             var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 3);
             var doomed = run.pipes().get(1);
-            retire.set(doomed.id()); count.set(2);
-            PipePoolTest.await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id() == doomed.id()));
+            retire.set(doomed.id().value()); count.set(2);
+            PipePoolTest.await(() -> run.pipes().size() == 2 && run.pipes().stream().noneMatch(p -> p.id().value() == doomed.id().value()));
             PipePoolTest.await(() -> PipePoolTest.isInactive(doomed));
             run.close();
             assertEquals(2, run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).pipes().size());
@@ -30,14 +30,14 @@ class PoolPolicyTest {
             var retire = new AtomicLong(-1); var seen = new ConcurrentLinkedQueue<PoolPolicy.View>();
             PoolPolicy policy = v -> {
                 seen.add(v);
-                return retire.get() < 0 ? PoolPolicy.Decision.KEEP : PoolPolicy.Decision.KEEP.withRetire(Set.of(retire.get()));
+                return retire.get() < 0 ? PoolPolicy.Decision.KEEP : PoolPolicy.Decision.KEEP.withRetirePipes(Set.of(PipeId.of(retire.get())));
             };
             var run = f.client.maintainPipes(PipePoolTest.fast(f.dial()).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 1);
-            long old = run.pipes().getFirst().id();
+            long old = run.pipes().getFirst().id().value();
             PipePoolTest.await(() -> seen.stream().anyMatch(v -> v.members().size() == 1 && v.members().getFirst().usable()));
             retire.set(old);
-            PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id() != old);
+            PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id().value() != old);
             run.close();
             assertEquals(1, run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).rotations());
         }
@@ -106,7 +106,7 @@ class PoolPolicyTest {
     @Test void aRejectedDecisionKeepsThePoolIsReportedAndTheRunGoesOn() throws Exception {
         var logger = new CapturingLogger();
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(ZmuxConfig.builder().eventLoops(loops).maxPipes(8)
-                .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).logger(logger).build())) {
+                .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().logger(logger).build())) {
             var calls = new AtomicInteger();
             // Decision refuses a negative count: the policy's answer is rejected.
             PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolPolicy.Decision.KEEP.withCount(-1); };

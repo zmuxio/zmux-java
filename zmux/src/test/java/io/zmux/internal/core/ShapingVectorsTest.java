@@ -2,7 +2,6 @@ package io.zmux.internal.core;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.zmux.carrier.HandshakeShaper;
 import io.zmux.carrier.HandshakeShaper.UnitPlan;
 import io.zmux.internal.join.Acceptor;
 import io.zmux.internal.join.Frames;
@@ -52,21 +51,23 @@ class ShapingVectorsTest {
 
     @Test void padForLimitsAndFill() throws Exception {
         Map<String, Object> v = pad();
-        for (var c : cases(v, "pad_for")) assertEquals(num(c, "result"), plan(obj(c, "plan")).padFor(num(c, "n")), c.toString());
+        for (var c : cases(v, "pad_for")) assertEquals(num(c, "result"), HandshakePlans.padFor(plan(obj(c, "plan")), num(c, "n")), c.toString());
         for (var c : cases(v, "limits")) {
             var l = obj(c, "limits");
-            ShapingLimits lim = ShapingLimits.defaults().withNoPadding(Boolean.TRUE.equals(l.get("no_padding")))
-                    .withNoPause(Boolean.TRUE.equals(l.get("no_pause"))).withMaxDelay(Duration.ofNanos(num(l, "max_delay") * 1000L));
-            assertEquals(plan(obj(c, "result")), withNull(plan(obj(c, "plan")).limited(lim)), c.toString());
+            long md = num(l, "max_delay");
+            ShapingLimits lim = ShapingLimits.defaults().withPadding(!Boolean.TRUE.equals(l.get("no_padding")))
+                    .withPause(!Boolean.TRUE.equals(l.get("no_pause")));
+            lim = md < 0 ? lim.withNoMaxDelay() : md > 0 ? lim.withMaxDelay(Duration.ofNanos(md * 1000L)) : lim;
+            assertEquals(plan(obj(c, "result")), withNull(HandshakePlans.limited(plan(obj(c, "plan")), lim)), c.toString());
         }
         for (var c : cases(v, "item")) {
-            int item = UnitPlan.itemFor(num(c, "gap"), num(c, "room"));
-            if (c.get("value_len") == null) assertEquals(HandshakeShaper.NO_ITEM, item, c.toString());
+            int item = HandshakePlans.itemFor(num(c, "gap"), num(c, "room"));
+            if (c.get("value_len") == null) assertEquals(HandshakePlans.NO_ITEM, item, c.toString());
             else assertEquals(num(c, "value_len"), item, c.toString());
-            assertEquals(num(c, "added"), item == HandshakeShaper.NO_ITEM ? 0 : UnitPlan.itemSize(item), c.toString());
+            assertEquals(num(c, "added"), item == HandshakePlans.NO_ITEM ? 0 : HandshakePlans.itemSize(item), c.toString());
         }
         for (var c : cases(v, "raw_fill")) {
-            assertEquals(num(c, "fill"), new UnitPlan(0, 0, Math.max(num(c, "gap"), 0), null).fill(0, num(c, "room")), c.toString());
+            assertEquals(num(c, "fill"), HandshakePlans.fill(new UnitPlan(0, 0, Math.max(num(c, "gap"), 0), null), 0, num(c, "room")), c.toString());
         }
     }
 
@@ -78,15 +79,15 @@ class ShapingVectorsTest {
         for (var c : cases(pad(), "unit")) {
             UnitPlan p = plan(obj(c, "plan"));
             int w = num(c, "w"), room = num(c, "room");
-            assertEquals(num(c, "target"), p.padFor(w), c.toString());
+            assertEquals(num(c, "target"), HandshakePlans.padFor(p, w), c.toString());
             int added;
             if ("item".equals(c.get("filler"))) {
-                int item = p.item(w, room);
-                if (c.get("value_len") == null) assertEquals(HandshakeShaper.NO_ITEM, item, c.toString());
+                int item = HandshakePlans.item(p, w, room);
+                if (c.get("value_len") == null) assertEquals(HandshakePlans.NO_ITEM, item, c.toString());
                 else assertEquals(num(c, "value_len"), item, c.toString());
-                added = item == HandshakeShaper.NO_ITEM ? 0 : UnitPlan.itemSize(item);
+                added = item == HandshakePlans.NO_ITEM ? 0 : HandshakePlans.itemSize(item);
             } else {
-                added = p.fill(w, room);
+                added = HandshakePlans.fill(p, w, room);
             }
             assertEquals(num(c, "added"), added, c.toString());
             assertEquals(num(c, "wire"), w + added, c.toString());

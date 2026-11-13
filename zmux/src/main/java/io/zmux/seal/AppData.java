@@ -4,7 +4,8 @@ import java.util.List;
 
 /**
  * Application handshake data of one message: opaque bytes, with the message that
- * carried them and what that message protects.
+ * carried them and what that message protects. The bytes are copied in and out, compared by content, and not shown in
+ * {@link #toString()}.
  *
  * @param message 1, 2 or 3
  * @param data the bytes, never empty
@@ -21,6 +22,20 @@ public record AppData(int message, byte[] data, boolean forwardSecret, boolean a
     }
 
     @Override public byte[] data() { return data.clone(); }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof AppData a && message == a.message && forwardSecret == a.forwardSecret && authenticated == a.authenticated
+                && java.util.Arrays.equals(data, a.data);
+    }
+
+    @Override
+    public int hashCode() { return java.util.Objects.hash(message, forwardSecret, authenticated) * 31 + java.util.Arrays.hashCode(data); }
+
+    @Override
+    public String toString() {
+        return "AppData[message=" + message + ", " + data.length + " bytes, forwardSecret=" + forwardSecret + ", authenticated=" + authenticated + "]";
+    }
 
     /** The data of message msg as received, before any verification; empty without data. */
     static List<AppData> of(int msg, byte[] b) {

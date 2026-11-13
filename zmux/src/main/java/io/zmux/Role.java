@@ -1,11 +1,16 @@
 package io.zmux;
 
-/** The role a session takes on its bootstrap carrier. */
+/**
+ * The role of an endpoint. {@link #CLIENT} is the initiator: the transport client of the bootstrap
+ * carrier (the TCP, TLS, QUIC or HTTP client), which uses the client's stream IDs and the even pipe
+ * IDs; {@link #SERVER} is the responder; {@link #AUTO} negotiates the two over a carrier without
+ * transport roles. The secure carrier's {@link io.zmux.seal.VerifyInput#role()} uses the same values.
+ */
 public enum Role {
-    /** The initiator: the dialling side of the carrier. */
+    /** The initiator: the transport client of the bootstrap carrier. */
     CLIENT,
-    /** The responder: the accepting side of the carrier. */
+    /** The responder: the transport server of the bootstrap carrier. */
     SERVER,
-    /** Negotiated over a symmetric carrier (the zmux_role parameter, auto, with a random nonce). */
-    PEER
+    /** Negotiated over a carrier without transport roles (the zmux_role parameter, with a random nonce). */
+    AUTO
 }

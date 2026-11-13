@@ -36,6 +36,7 @@ public record CoreConfig(
         int datagramReceiveQueue,
         int datagramStreamQueue,
         long datagramReceiveBytes,
+        long datagramStreamBytes,
         boolean datagramReceiveLimited,
         int maxPipes,
         int headroom,
@@ -61,6 +62,9 @@ public record CoreConfig(
         io.zmux.shaping.ShaperFactory shaper,
         Epochs epochs,
         TestHooks test) {
+    /** The per-stream datagram byte bound by default: 32 datagrams of 9000 bytes fit. */
+    public static final long DEFAULT_DATAGRAM_STREAM_BYTES = 512 << 10;
+
 
     /**
      * The policy of session epochs: an exchange after period in Stable ({@link Time#NEVER}: never by time) or
@@ -146,8 +150,7 @@ public record CoreConfig(
     /** An unlimited {@link #memoryBudget()}; 0 is a budget of no byte. */
     public static final long UNLIMITED = Long.MAX_VALUE;
 
-    /** The trace runner's deterministic values. */
-    /** epochLocatorPrefix: when set, the local Locator of epoch e is this prefix and e in decimal ASCII. */
+    /** The trace runner's deterministic values. epochLocatorPrefix: when set, the local Locator of epoch e is this prefix and e in decimal ASCII. */
     public record TestHooks(boolean enabled, Preamble.Tlv greaseTlv, long pingSeqStart, long rtt,
                             Map<Long, Long> pipeRtt, int pipeCap, byte[] epochLocatorPrefix) {
         public static final TestHooks NONE = new TestHooks(false, null, 0, 0, Map.of(), 0, null);
@@ -199,6 +202,7 @@ public record CoreConfig(
         b.datagramReceiveQueue = datagramReceiveQueue;
         b.datagramStreamQueue = datagramStreamQueue;
         b.datagramReceiveBytes = datagramReceiveBytes;
+        b.datagramStreamBytes = datagramStreamBytes;
         b.datagramReceiveLimited = datagramReceiveLimited;
         b.maxPipes = maxPipes;
         b.headroom = headroom;
@@ -273,6 +277,7 @@ public record CoreConfig(
         private int datagramReceiveQueue = 128;
         private int datagramStreamQueue = 32;
         private long datagramReceiveBytes = 1L << 20;
+        private long datagramStreamBytes = DEFAULT_DATAGRAM_STREAM_BYTES;
         private boolean datagramReceiveLimited;
         private int maxPipes = 1;
         private int headroom = 8;
@@ -286,7 +291,7 @@ public record CoreConfig(
         private long overflowDelay = DEFAULT_OVERFLOW_DELAY;
         private long standbyProbe = DEFAULT_STANDBY_PROBE;
         private long probeInterval = DEFAULT_PROBE_INTERVAL;
-        private double probeJitter = io.zmux.ZmuxConfig.DEFAULT_PROBE_JITTER;
+        private double probeJitter = io.zmux.Liveness.DEFAULT_PROBE_JITTER;
         private boolean redundancy = true;
         private byte[] psk;
         private java.util.function.Supplier<byte[]> exporter;
@@ -306,7 +311,7 @@ public record CoreConfig(
         private Builder() { }
 
         public CoreConfig build() {
-            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
+            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
         }
 
         public Builder role(Role v) { role = v; return this; }
@@ -376,6 +381,9 @@ public record CoreConfig(
         public Builder datagramStreamQueue(int v) { datagramStreamQueue = v; return this; }
 
         public Builder datagramReceiveBytes(long v) { datagramReceiveBytes = v; return this; }
+
+        /** Payload bytes queued per stream and direction; -1: no byte bound. */
+        public Builder datagramStreamBytes(long v) { datagramStreamBytes = v; return this; }
 
         /** Received datagrams wait for the driver's receive limiter before they are queued. */
         public Builder datagramReceiveLimited(boolean v) { datagramReceiveLimited = v; return this; }

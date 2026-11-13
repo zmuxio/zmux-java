@@ -1,28 +1,28 @@
 package io.zmux.seal;
 
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
 import io.zmux.InboundTransform;
-import io.zmux.RecordCarrier;
+import io.zmux.RecordPolicyInput;
 import io.zmux.RecordMode;
-import io.zmux.RejectError;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.CarrierRejectedException;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.HandshakeShaper;
 import io.zmux.carrier.PipeIo;
-import io.zmux.carrier.RecordProtection;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.join.RecordProtection;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.core.CarrierAdmission;
+import io.zmux.internal.core.HandshakePlans;
 import io.zmux.internal.join.Dispatch;
 import io.zmux.internal.join.Kdf;
 import io.zmux.internal.join.Mode;
 import io.zmux.internal.join.Tlv;
+import io.zmux.internal.loop.PipeIoAccess;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -34,19 +34,11 @@ import java.util.concurrent.CompletionStage;
 public final class Seal {
     /** Enough for a first record's classification; the listener itself bounds what follows. */
     private static final long MAX_RECORD = 1 << 20;
-    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(10);
 
     private Seal() {}
 
     private static final class ProcessKey {
-        static final StaticKey KEY;
-        static {
-            try {
-                KEY = StaticKey.generate();
-            } catch (SecureCarrierException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
+        static final StaticKey KEY = StaticKey.generate();
     }
 
     /**
@@ -56,8 +48,8 @@ public final class Seal {
      * CredentialsFailedException} when the {@link Anchor} passes no credential of the server, a {@link
      * NoReplyException} when the carrier ends or the timeout passes before the server's reply, a
      * {@link java.util.concurrent.TimeoutException} when it passes later, or with the carrier's own failure.
-     * A server that stalls a refused carrier leaves the client waiting until this timeout, so a negative,
-     * unbounded, timeout waits until the server ends the stall.
+     * A server that stalls a refused carrier leaves the client waiting until this timeout, so without a
+     * handshake timeout the client waits until the server ends the stall.
      */
     public static CompletionStage<PipeIo> establish(PipeIo carrier, ClientConfig cfg) {
         Objects.requireNonNull(carrier, "carrier");
@@ -74,8 +66,8 @@ public final class Seal {
                 f.completeExceptionally(e);
             }
         });
-        Duration limit = cfg.timeout().isZero() ? DEFAULT_TIMEOUT : cfg.timeout();
-        if (!limit.isNegative()) {
+        Duration limit = cfg.handshakeTimeout().orElse(null);
+        if (limit != null) {
             CompletableFuture.delayedExecutor(limit.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS).execute(() -> {
                 var timeout = new java.util.concurrent.TimeoutException("handshake timeout " + limit);
                 f.completeExceptionally(replied.get() ? timeout : new NoReplyException(timeout));
@@ -91,7 +83,7 @@ public final class Seal {
     /**
      * The server's side of Establish as a listener's {@link InboundTransform}. A carrier whose first byte is
      * 02 is a Join and a lane is its session's: both pass on untouched. Anything else that is no Establish, and
-     * every failed authentication, is a {@link RejectError} and goes to {@link io.zmux.ListenerConfig#onReject()}.
+     * every failed authentication, is a {@link CarrierRejectedException} and goes to {@link io.zmux.ListenerConfig#onReject()}.
      * Its reason is local, finer than the protocol's classes: {@code profile_disabled}
      * (not among the accepted Profiles), {@code unknown_handle}, {@code auth},
      * {@code binding_unavailable} (Bound on a carrier without a Binding), {@code record_mode} (a mode not
@@ -117,8 +109,10 @@ public final class Seal {
         };
     }
 
-    /** The peer of a pipe input {@link #establish} returned; null for any other. */
-    public static Peer peerOf(PipeIo io) { return io.capabilities().peer() instanceof Peer p ? p : null; }
+    /** The peer of a pipe input {@link #establish} returned; empty for any other. */
+    public static Optional<Peer> peerOf(PipeIo io) {
+        return PipeIoAccess.get().carrierPeer(Objects.requireNonNull(io, "io")) instanceof Peer p ? Optional.of(p) : Optional.empty();
+    }
 
     private static io.zmux.internal.join.Framing framing(PipeIo p) {
         return p.framing() == Framing.MESSAGES ? io.zmux.internal.join.Framing.MESSAGE : io.zmux.internal.join.Framing.STREAM;
@@ -152,12 +146,12 @@ public final class Seal {
      * The plan of a message under the limits, after its wait: the padding field that takes the message from its length to the
      * planned one, wire and noise being what it is without padding.
      */
-    private static int shape(HandshakeShaper s, io.zmux.shaping.ShapingLimits limits, PipeIo p, Profile profile, String message, int wire, int noise, long[] padded) throws InterruptedIOException {
+    private static int shape(HandshakeShaper s, io.zmux.shaping.ShapingLimits limits, PipeIo p, String message, int wire, int noise, long[] padded) throws InterruptedIOException {
         if (s == null) return 0;
         // Each handshake family has its own name: a plan made for the lengths of one is never applied to another.
-        HandshakeShaper.UnitPlan plan = HandshakeShaper.ask(s, new HandshakeShaper.View(p.carrier(), Profile.HANDSHAKE_ESTABLISH, message), () -> { });
+        HandshakeShaper.UnitPlan plan = HandshakePlans.ask(s, new HandshakeShaper.View(p.carrier(), Profile.HANDSHAKE_ESTABLISH, message), () -> { });
         if (plan == null) return 0;
-        plan = plan.limited(limits);
+        plan = HandshakePlans.limited(plan, limits);
         if (plan.delay() != null && plan.delay().isPositive()) {
             try {
                 Thread.sleep(plan.delay());
@@ -166,8 +160,8 @@ public final class Seal {
                 throw new InterruptedIOException();
             }
         }
-        int item = plan.item(wire + p.capabilities().writeOverhead(), io.zmux.internal.join.Sealer.MAX_MESSAGE - noise);
-        if (item != HandshakeShaper.NO_ITEM) padded[0] += HandshakeShaper.UnitPlan.itemSize(item);
+        int item = HandshakePlans.item(plan, wire + p.capabilities().writeOverhead(), io.zmux.internal.join.Sealer.MAX_MESSAGE - noise);
+        if (item != HandshakePlans.NO_ITEM) padded[0] += HandshakePlans.itemSize(item);
         return Tlv.paddingField(item);
     }
 
@@ -176,41 +170,43 @@ public final class Seal {
 
     private static PipeIo client(PipeIo p, ClientConfig c, java.util.concurrent.atomic.AtomicBoolean replied) throws SecureCarrierException, IOException {
         if (p.reader() == null || p.writer() == null) throw new SecureCarrierException(INVALID_CONFIG, "an Establish needs both halves");
-        if (c.anchor() == null && !c.allowPskOnly()) throw new SecureCarrierException(INVALID_CONFIG, "no Anchor");
-        if (c.requirePqAuth() && c.anchor() == null) throw new SecureCarrierException(INVALID_CONFIG, "requirePqAuth without an Anchor");
-        PinAnchor.checkPqAuth(c.anchor(), c.requirePqAuth());
+        if (c.anchor() == null && !c.isAllowPskOnly()) throw new SecureCarrierException(INVALID_CONFIG, "no Anchor");
+        if (c.isRequirePqAuth() && c.anchor() == null) throw new SecureCarrierException(INVALID_CONFIG, "requirePqAuth without an Anchor");
+        PinAnchor.checkPqAuth(c.anchor(), c.isRequirePqAuth());
         Profile profile = Profiles.client(c);
-        if (c.allowPskOnly() && !profile.hasPsk()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
+        if (c.isAllowPskOnly() && !profile.hasPsk()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
         StaticKey key = c.key() != null ? c.key() : ProcessKey.KEY;
         Mode mode = Mode.of(c.mode());
         byte[] binding = null;
         if (mode == Mode.BOUND && (binding = binding(p)) == null) {
             throw new SecureCarrierException(INVALID_CONFIG, "Bound on a carrier without a Secure declaration or an exporter");
         }
-        var hs = EstablishClient.create(profile, mode, framing(p), c.handle(), c.psk(), binding, key).maxAppData(c.maxAppData());
+        var hs = EstablishClient.create(profile, mode, framing(p), c.handle(), c.psk(), binding, key).maxAppData(ClientConfig.appDataLimit(c.maxAppData()));
         // Message 1 carries application data only under a pre-shared key.
         EstablishPayload first = new EstablishPayload(null, profile.hasPsk() ? appData(c.appData(), 1, new AppDataSource.Known(profile, null, null)) : null, null, 0);
         int noise = Handshake.minLength(profile, 0) + first.length();
         long[] padded = new long[1];
-        int pad = shape(c.shaper(), c.shapingLimits(), p, profile, "hello", EstablishHello.headerLength(profile, c.handle()) + unit(p, noise), noise, padded);
+        int pad = shape(c.shaper(), c.shapingLimits(), p, "hello", EstablishHello.headerLength(profile, c.handle()) + unit(p, noise), noise, padded);
         byte[] hello = hs.writeHello(first.withPadding(pad, false));
         HandshakeIo io = new HandshakeIo(p);
         io.write(hello);
         EstablishClient.Reply reply;
         try {
             reply = readUnit(io, b -> hs.readReply(b, 0, b.length));
+        } catch (SecureCarrierException e) {
+            throw e; // the reply came and failed: no NoReply
         } catch (IOException e) {
             if (e.getClass() == InterruptedIOException.class) throw e; // cancelled, or the timeout, which reports itself
             throw new NoReplyException(e);
         }
         replied.set(true);
-        Verdict verdict = null;
+        VerifyVerdict verdict = null;
         boolean pqAuth = false;
         // The server is judged before anything of this client is written.
         if (c.anchor() != null) {
             Verification.Judged j;
             try {
-                j = hs.verify(c.anchor(), c.localContext(), c.requirePqAuth());
+                j = hs.verify(c.anchor(), c.localContext(), c.isRequirePqAuth());
             } catch (VerifierUnavailableException e) {
                 throw new IOException(e.getMessage(), e);
             }
@@ -223,7 +219,7 @@ public final class Seal {
         EstablishPayload last = new EstablishPayload(c.credential(), appData(c.appData(), 3, hs.known()), null, 0)
                 .withProof(c.signer() == null ? null : Proof.placeholder(c.signer()));
         noise = Handshake.minLength(profile, 2) + last.length();
-        pad = shape(c.shaper(), c.shapingLimits(), p, profile, "finish", unit(p, noise), noise, padded);
+        pad = shape(c.shaper(), c.shapingLimits(), p, "finish", unit(p, noise), noise, padded);
         io.write(hs.writeFinish(last.withPadding(pad, false), c.signer()));
         Established done = hs.finish();
         Peer peer = new Peer(reply.peerStatic(), reply.credential(), verdict, null, profile, c.mode(), hs.peerAppData(), profile.pqConfidential(), pqAuth);
@@ -286,10 +282,10 @@ public final class Seal {
             }
         };
         if (peer.mode() != RecordMode.SEALED) {
-            return io.rest(done.firstBytes()).withEstablished(peer.mode(), exporter, null, peer);
+            return PipeIoAccess.get().withEstablished(io.rest(done.firstBytes()), peer.mode(), exporter, null, peer);
         }
         byte[] first = done.firstBytes();
-        return io.rest(null).withEstablished(peer.mode(), exporter, new RecordProtection() {
+        return PipeIoAccess.get().withEstablished(io.rest(null), peer.mode(), exporter, new RecordProtection() {
             @Override public int seal(ByteBuffer plain, ByteBuffer out) throws SecureCarrierException { return done.sealer().seal(plain, out); }
             @Override public int open(ByteBuffer ct, ByteBuffer out) throws SecureCarrierException { return done.opener().open(ct, out); }
             @Override public byte[] firstBytes() { return first; }
@@ -319,10 +315,10 @@ public final class Seal {
                     switch (CarrierAdmission.classify(b, 0, b.limit(), MAX_RECORD).kind()) {
                         case MORE -> io.fill();
                         case LANE -> { return io.rest(null); }
-                        default -> throw new RejectError(firstByte(io), null, "unknown_profile");
+                        default -> throw new CarrierRejectedException(firstByte(io), null, "unknown_profile");
                     }
                 }
-                default -> throw new RejectError(firstByte(io), null, "unknown_profile");
+                default -> throw new CarrierRejectedException(firstByte(io), null, "unknown_profile");
             }
         }
         EstablishHello h;
@@ -331,14 +327,14 @@ public final class Seal {
                 h = EstablishHello.parseExact(io.buf, 0, io.buf.length, f);
                 break;
             } catch (SecureCarrierException e) {
-                if (e.code() != SecureCarrierException.Code.INCOMPLETE) throw new RejectError(firstByte(io), null, reason(e), e);
-                if (io.messages()) throw new RejectError(firstByte(io), null, "malformed");
+                if (e.code() != SecureCarrierException.Code.INCOMPLETE) throw new CarrierRejectedException(firstByte(io), null, reason(e), e);
+                if (io.messages()) throw new CarrierRejectedException(firstByte(io), null, "malformed");
                 io.fill();
             }
         }
         int wireProfile = (int) h.profile().value();
         RecordMode mode = Mode.record(h.mode());
-        Refuser refuse = (why, cause) -> new RejectError(wireProfile, mode, why, cause);
+        Refuser refuse = (why, cause) -> new CarrierRejectedException(wireProfile, mode, why, cause);
         boolean withPsk = h.profile().hasPsk();
         if (!c.acceptedProfiles().contains(h.profile())) throw refuse.of("profile_disabled", null);
         if (mode != RecordMode.SEALED && c.allowRecordMode() == null) throw refuse.of("record_mode", null);
@@ -357,7 +353,7 @@ public final class Seal {
         io.consume(io.buf.length);
         EstablishServer hs;
         try {
-            hs = EstablishServer.create(h, f, psk, binding, c.key()).maxAppData(c.maxAppData());
+            hs = EstablishServer.create(h, f, psk, binding, c.key()).maxAppData(ClientConfig.appDataLimit(c.maxAppData()));
             hs.readHello();
         } catch (SecureCarrierException e) {
             throw refuse.of(reason(e), e);
@@ -379,7 +375,7 @@ public final class Seal {
         EstablishPayload second = new EstablishPayload(cred, data, null, 0).withProof(c.signer() == null ? null : Proof.placeholder(c.signer()));
         int noise = Handshake.minLength(h.profile(), 1) + second.length();
         long[] padded = new long[1];
-        int pad = shape(c.shaper(), c.shapingLimits(), p, h.profile(), "reply", unit(p, noise), noise, padded);
+        int pad = shape(c.shaper(), c.shapingLimits(), p, "reply", unit(p, noise), noise, padded);
         // The client's e or ek is checked here: a low-order e or an ek coefficient out of range is refused.
         byte[] reply;
         try {
@@ -394,12 +390,12 @@ public final class Seal {
         } catch (SecureCarrierException e) {
             throw refuse.of(reason(e), e);
         }
-        Verdict verdict = null;
+        VerifyVerdict verdict = null;
         boolean pqAuth = false;
         if (c.anchor() != null) {
             Verification.Judged j;
             try {
-                j = hs.verify(c.anchor(), finish, c.localContext(), c.requirePqAuth());
+                j = hs.verify(c.anchor(), finish, c.localContext(), c.isRequirePqAuth());
             } catch (CredentialsFailedException e) {
                 throw refuse.of("credentials_failed", e);
             } catch (VerifierUnavailableException e) {
@@ -412,7 +408,7 @@ public final class Seal {
         Peer early = new Peer(finish.peerStatic(), finish.credential(), verdict, null, h.profile(), mode, clientData, h.profile().pqConfidential(), pqAuth);
         if (c.allowRecordMode() != null) {
             boolean exporter = p.capabilities().exporter() != null;
-            if (!c.allowRecordMode().allow(new RecordCarrier(exporter, p.isSecure(), p.label(), true), mode, early)) throw refuse.of("record_mode", null);
+            if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isSecure(), p.label(), true), mode, early)) throw refuse.of("record_mode", null);
         }
         Object value;
         try {
@@ -430,7 +426,7 @@ public final class Seal {
     }
 
     private interface Refuser {
-        RejectError of(String why, Throwable cause);
+        CarrierRejectedException of(String why, Throwable cause);
     }
 
     private static int firstByte(HandshakeIo io) { return io.buf.length == 0 ? 0 : io.buf[0] & 0xff; }

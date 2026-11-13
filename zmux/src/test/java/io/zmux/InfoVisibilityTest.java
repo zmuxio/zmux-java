@@ -13,7 +13,7 @@ class InfoVisibilityTest {
         try (var loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.of(cfg));
-                 var dialer = Zmux.listener(ListenerConfig.of(cfg))) {
+                 var dialer = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 for (int i = 0; i < 300; i++) {
                     try (var c = dialer.connect(l.localAddress())) {
                         assertTrue(c.info().established(), "connect returned before info() showed established, round " + i);

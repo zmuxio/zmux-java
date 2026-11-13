@@ -1,16 +1,14 @@
 package io.zmux.internal.core;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
 /**
  * The listener's handling of new carriers:
- * classification of the first record, per-source admission of carriers that have not yet
- * delivered it, and the pairing of split bootstraps. Not thread-safe: the owner serialises.
+ * classification of the first record, the per-source and listener-wide slots of carriers
+ * that have not yet entered a session, and the pairing of split bootstraps. Not thread-safe: the owner serialises.
  */
 public final class CarrierAdmission {
     /** The kind of a new carrier. */
@@ -67,62 +65,123 @@ public final class CarrierAdmission {
         return true;
     }
 
-    // ---- per-source bounds of pending carriers ----
+    // ---- the bounds of carriers before a session ----
+
+    /** {@link #take}: a slot of the source and of the listener were taken. */
+    public static final int TAKEN = 0;
+    /** {@link #take}: the source holds its share; nothing was taken. */
+    public static final int SOURCE_FULL = 1;
+    /** {@link #take}: every slot of the listener is taken; nothing was taken. */
+    public static final int FULL = 2;
+
+    /** The default of {@link #CarrierAdmission}'s maxTotal. */
+    public static final int DEFAULT_MAX_TOTAL = 1024;
 
     private final int maxPerSource;
+    /** The source prefixes: the leading bits of an IPv4 and of an IPv6 address that name its client. */
+    private final int prefixV4, prefixV6;
+    /** Negative: unlimited. */
+    private final int maxTotal;
     private final long firstRecordTimeout;
     private final Map<String, Integer> bySource = new HashMap<>();
     private final Map<String, Integer> stalledBySource = new HashMap<>();
+    /** The slots taken in all, and those of stalled carriers. */
+    private int total, stalled;
 
-    /** maxPerSource 0: 8; firstRecordTimeout 0: 2 s. */
-    public CarrierAdmission(int maxPerSource, long firstRecordTimeout) {
+    /** The default IPv4 source prefix: the address on its own. */
+    public static final int DEFAULT_PREFIX_V4 = 32;
+    /** The default IPv6 source prefix. */
+    public static final int DEFAULT_PREFIX_V6 = 64;
+
+    /**
+     * maxPerSource 0: 8; maxTotal 0: {@link #DEFAULT_MAX_TOTAL}, negative: unlimited;
+     * firstRecordTimeout 0: 2 s; prefixV4 (1 to 32) and prefixV6 (1 to 128) 0: their defaults,
+     * validated by the caller.
+     */
+    public CarrierAdmission(int maxPerSource, int maxTotal, long firstRecordTimeout, int prefixV4, int prefixV6) {
+        if (prefixV4 < 0 || prefixV4 > 32 || prefixV6 < 0 || prefixV6 > 128) throw new IllegalArgumentException("source prefix out of range");
+        this.prefixV4 = prefixV4 == 0 ? DEFAULT_PREFIX_V4 : prefixV4;
+        this.prefixV6 = prefixV6 == 0 ? DEFAULT_PREFIX_V6 : prefixV6;
         this.maxPerSource = maxPerSource > 0 ? maxPerSource : 8;
+        this.maxTotal = maxTotal == 0 ? DEFAULT_MAX_TOTAL : maxTotal;
         this.firstRecordTimeout = firstRecordTimeout > 0 ? firstRecordTimeout : 2 * Time.SECOND;
     }
 
-    /** Takes a slot for a new carrier from source; false: close it. */
-    public boolean admit(java.net.InetSocketAddress source) {
+    /**
+     * Takes a slot of source and one of the listener for a new carrier, together: {@link #TAKEN},
+     * or {@link #SOURCE_FULL} or {@link #FULL} with nothing taken. {@link #release} gives both back.
+     */
+    public int take(java.net.InetSocketAddress source) {
         String k = sourceKey(source);
         int n = bySource.getOrDefault(k, 0);
-        if (n >= maxPerSource) return false;
+        if (n >= maxPerSource) return SOURCE_FULL;
+        if (maxTotal > 0 && total >= maxTotal) return FULL;
         bySource.put(k, n + 1);
-        return true;
+        total++;
+        return TAKEN;
     }
 
-    /** Returns the slot of a carrier classified as no join, of a join with its result, of one closed, or one a fallback took. */
+    /** Returns the slots of a carrier that entered a session, was closed or went to a fallback. */
     public void release(java.net.InetSocketAddress source) {
-        bySource.computeIfPresent(sourceKey(source), (k, v) -> v > 1 ? v - 1 : null);
+        String k = sourceKey(source);
+        Integer n = bySource.get(k);
+        if (n == null) return;
+        if (n > 1) bySource.put(k, n - 1); else bySource.remove(k);
+        total--;
     }
 
     /**
-     * Marks a carrier that holds its slot as stalled; false when its source already has
-     * maxPerSource - 1 stalled carriers (one slot always stays for a new attempt).
+     * Marks a carrier that holds its slots as stalled; false when its source already has
+     * maxPerSource - 1 stalled carriers (one slot always stays for a new attempt), or the
+     * stalled carriers hold half of the listener's slots (rounded down).
      */
     public boolean stall(java.net.InetSocketAddress source) {
         String k = sourceKey(source);
         int n = stalledBySource.getOrDefault(k, 0);
-        if (n >= maxPerSource - 1) return false;
+        if (n >= maxPerSource - 1 || maxTotal > 0 && stalled >= maxTotal / 2) return false;
         stalledBySource.put(k, n + 1);
+        stalled++;
         return true;
     }
 
-    /** Ends a stall: its slot goes too. */
+    /** Ends a stall: its slots go too. */
     public void unstall(java.net.InetSocketAddress source) {
-        stalledBySource.computeIfPresent(sourceKey(source), (k, v) -> v > 1 ? v - 1 : null);
+        String k = sourceKey(source);
+        Integer n = stalledBySource.get(k);
+        if (n != null) {
+            if (n > 1) stalledBySource.put(k, n - 1); else stalledBySource.remove(k);
+            stalled--;
+        }
         release(source);
     }
 
+    /** The slots taken in all. */
+    public int taken() { return total; }
+
     /**
-     * The client a source stands for in every per-source limit and keyed duration: an IPv6
-     * address aggregated to its /64, an IPv4 address as it is, the port ignored. The only such
-     * function; an unknown source ("") is one client.
+     * The client a source stands for in everything the listener keeps per source (the per-source
+     * slots, the count of stalled carriers and the stall duration): an IPv4 address aggregated to
+     * its first prefixV4 bits, an IPv6 address to its first prefixV6 bits, an IPv4-mapped IPv6
+     * address as IPv4, the port ignored. The only such function; an unknown source ("") is one
+     * client.
      */
-    public static String sourceKey(java.net.InetSocketAddress source) {
+    public String sourceKey(java.net.InetSocketAddress source) {
         if (source == null) return "";
         java.net.InetAddress a = source.getAddress();
         if (a == null) return source.getHostString();
         byte[] b = a.getAddress();
-        return b.length == 16 ? java.util.HexFormat.of().formatHex(b, 0, 8) + "::/64" : a.getHostAddress();
+        int from = 0, bits = prefixV6;
+        if (b.length == 4 || mapped(b)) { from = b.length - 4; bits = prefixV4; }
+        byte[] key = java.util.Arrays.copyOfRange(b, from, from + Math.ceilDiv(bits, 8));
+        if (bits % 8 != 0) key[key.length - 1] &= (byte) (0xff << (8 - bits % 8));
+        return (b.length - from == 4 ? "4/" : "6/") + bits + "/" + java.util.HexFormat.of().formatHex(key);
+    }
+
+    /** Whether b is an IPv4-mapped IPv6 address (::ffff:a.b.c.d). */
+    private static boolean mapped(byte[] b) {
+        if (b.length != 16 || b[10] != (byte) 0xff || b[11] != (byte) 0xff) return false;
+        for (int i = 0; i < 10; i++) if (b[i] != 0) return false;
+        return true;
     }
 
     /** When a carrier accepted at t must have its first record. */
@@ -132,36 +191,26 @@ public final class CarrierAdmission {
 
     // ---- split bootstrap pairing ----
 
-    /** Pairs the two unidirectional carriers of a split bootstrap by their token. */
+    /**
+     * Pairs the two unidirectional carriers of a split bootstrap by their token. A waiting half
+     * holds its slots of the listener ({@link #take}); the pairing adds no bound of its own.
+     */
     public static final class SplitPairing {
-        /**
-         * The outcome of offering a carrier: wait for the partner, paired (partner given), close (a reused token or
-         * a second half of the same direction), or refuse at the pairing limits.
-         */
-        public enum Result { WAIT, DONE, REJECT, REFUSE }
+        /** The outcome of offering a carrier: wait for the partner, paired (partner given), or close (a reused token or a second half of the same direction). */
+        public enum Result { WAIT, DONE, REJECT }
 
-        private record Waiting(boolean up, String source, long deadline, Object carrier) {}
+        private record Waiting(boolean up, Object carrier) {}
 
-        private final int maxTotal;
-        private final int maxPerSource;
         private final Map<String, Waiting> wait = new HashMap<>();
         private final java.util.Set<String> used = new java.util.HashSet<>();
-        private final Map<String, Integer> bySource = new HashMap<>();
         private Object partner;
-
-        /** 0: the defaults 64 and 8. */
-        public SplitPairing(int maxTotal, int maxPerSource) {
-            this.maxTotal = maxTotal > 0 ? maxTotal : 64;
-            this.maxPerSource = maxPerSource > 0 ? maxPerSource : 8;
-        }
 
         private static String key(byte[] token) {
             return java.util.HexFormat.of().formatHex(token);
         }
 
         /** Offers a carrier (up: the initiator writes on it); on DONE, {@link #partner()} is the other carrier. */
-        public Result offer(byte[] token, boolean up, java.net.InetSocketAddress client, Object carrier, long deadline) {
-            String source = sourceKey(client);
+        public Result offer(byte[] token, boolean up, Object carrier) {
             String k = key(token);
             partner = null;
             if (used.contains(k)) return Result.REJECT;
@@ -169,35 +218,16 @@ public final class CarrierAdmission {
             if (w != null) {
                 if (w.up() == up) return Result.REJECT;
                 wait.remove(k);
-                release(w.source());
                 used.add(k);
                 partner = w.carrier();
                 return Result.DONE;
             }
-            if (wait.size() >= maxTotal || bySource.getOrDefault(source, 0) >= maxPerSource) return Result.REFUSE;
-            wait.put(k, new Waiting(up, source, deadline, carrier));
-            bySource.merge(source, 1, Integer::sum);
+            wait.put(k, new Waiting(up, carrier));
             return Result.WAIT;
         }
 
         public Object partner() {
             return partner;
-        }
-
-        private void release(String source) {
-            bySource.computeIfPresent(source, (s, v) -> v > 1 ? v - 1 : null);
-        }
-
-        /** Drops held carriers whose deadline passed into dst. */
-        public void expire(long now, List<Object> dst) {
-            for (Iterator<Waiting> it = wait.values().iterator(); it.hasNext(); ) {
-                Waiting w = it.next();
-                if (now >= w.deadline()) {
-                    it.remove();
-                    release(w.source());
-                    dst.add(w.carrier());
-                }
-            }
         }
 
         /** Removes a held carrier that gave up; false when a partner already took it. */
@@ -206,7 +236,6 @@ public final class CarrierAdmission {
             Waiting w = wait.get(k);
             if (w == null || w.carrier() != carrier) return false;
             wait.remove(k);
-            release(w.source());
             return true;
         }
 

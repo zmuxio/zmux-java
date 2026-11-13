@@ -5,7 +5,7 @@ import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.internal.core.ReadBuf;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -216,11 +216,11 @@ final class ExternalTransport extends AbstractTransport {
 
     @Override public boolean hasExporter() { return pio.capabilities().exporter() != null; }
 
-    @Override public boolean secure() { return pio.capabilities().secure(); }
+    @Override public boolean secure() { return pio.isSecure(); }
 
-    @Override public io.zmux.RecordMode firstPipeMode() { return pio.capabilities().recordMode(); }
+    @Override public io.zmux.RecordMode firstPipeMode() { return PipeIoAccess.get().recordMode(pio); }
 
-    @Override public Object carrierPeer() { return pio.capabilities().peer(); }
+    @Override public Object carrierPeer() { return PipeIoAccess.get().carrierPeer(pio); }
     @Override public long handshakePadding() { return pio.capabilities().handshakePadding(); }
 
     @Override public void limitFirstMessage(int limit) {

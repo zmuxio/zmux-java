@@ -56,10 +56,11 @@ class ExchangeTest {
 
     static byte[] request(byte[] psk, byte[] cid, int kind, int flags, long seq, long ack, int time, byte[] nonce, byte[] data) {
         var key = Exchange.key(psk, cid);
-        ByteBuffer hdr = Exchange.requestHeader(key, cid, kind, flags, seq, ack, time, nonce, ByteBuffer.wrap(data));
-        byte[] out = new byte[hdr.remaining() + data.length];
-        hdr.get(out, 0, hdr.remaining());
-        System.arraycopy(data, 0, out, out.length - data.length, data.length);
+        var sealed = Exchange.seal(key, cid, kind, flags, seq, ack, time, nonce, ByteBuffer.wrap(data));
+        byte[] out = new byte[Exchange.REQ_OVERHEAD + data.length];
+        sealed.header().get(out, 0, Exchange.HDR);
+        System.arraycopy(data, 0, out, Exchange.HDR, data.length);
+        sealed.dataMac().get(out, Exchange.HDR + data.length, Exchange.MAC);
         return out;
     }
 
@@ -75,14 +76,13 @@ class ExchangeTest {
             byte[] nonce = new byte[Exchange.NONCE];
             RANDOM.nextBytes(nonce);
             byte[] b = request(psk, cid, kind, flags, seq, ack, now(), nonce, data);
-            if (corrupt) b[b.length - data.length - 1] ^= 1;
+            if (corrupt) b[Exchange.HDR - 1] ^= 1; // the Header MAC
             Resp r = post(u, b);
             if (r.status == 200) {
                 // The response MAC binds it to this request.
-                var q = Exchange.parseRequest(ByteBuffer.wrap(b));
                 var key = Exchange.key(psk, cid);
                 ByteBuffer d = ByteBuffer.wrap(r.body, Exchange.RESP_HDR, r.body.length - Exchange.RESP_HDR);
-                assertArrayEquals(key.responseMac(cid, kind, q.seqRaw(), nonce, r.flags(), d), Arrays.copyOf(r.body, Exchange.MAC));
+                assertArrayEquals(key.responseMac(cid, kind, seq, nonce, r.flags(), d), Arrays.copyOf(r.body, Exchange.MAC));
             }
             return r;
         }
@@ -98,10 +98,8 @@ class ExchangeTest {
 
     @Test void vectorsThroughTheServer() throws Exception {
         String[][] vecs = {
-            {"", "000102030405060708090a0b0c0d0e0f010000006955b9000102030405060708507a0b4c9f35406fc018ecb298ac332068656c6c6f",
-             "477e5b04a29e7fc80fd53eb36fd0715400"},
-            {"6b".repeat(32), "000102030405060708090a0b0c0d0e0f010000006955b90001020304050607089b83951cb9d54b75d8d0785f3eb2d3d668656c6c6f",
-             "c5b18d1988c3d46dbfee70883026026000"},
+            {"", ExchangeWireTest.UP_PLAIN, ExchangeWireTest.UP_RESP_PLAIN},
+            {"6b".repeat(32), ExchangeWireTest.UP_PSK, ExchangeWireTest.UP_RESP_PSK},
         };
         for (String[] v : vecs) {
             byte[] psk = HEX.parseHex(v[0]);
@@ -121,6 +119,110 @@ class ExchangeTest {
                 assertEquals(404, post(f.base, late).status);
                 f.endpoint.exchange.seconds = () -> 1767225600L + 60;
                 assertEquals(200, post(f.base, late).status, "within the window");
+            }
+        }
+    }
+
+    /** Opens a request of contentLength on a connection of its own and writes its head and first bytes. */
+    static Socket begin(URI u, int contentLength, byte[] first) throws IOException {
+        Socket s = new Socket(u.getHost(), u.getPort());
+        s.setSoTimeout(10_000);
+        String head = "POST " + u.getRawPath() + " HTTP/1.1\r\nHost: " + u.getHost() + "\r\nContent-Length: " + contentLength
+                + "\r\nConnection: close\r\n\r\n";
+        s.getOutputStream().write(head.getBytes(StandardCharsets.ISO_8859_1));
+        s.getOutputStream().write(first);
+        s.getOutputStream().flush();
+        return s;
+    }
+
+    /** Writes the rest of a request begun with {@link #begin} and reads its response. */
+    static Resp finish(Socket s, byte[] rest) throws IOException {
+        try (s) {
+            s.getOutputStream().write(rest);
+            s.getOutputStream().flush();
+            InputStream in = new BufferedInputStream(s.getInputStream());
+            TestProxy.Head h = TestProxy.head(in);
+            return new Resp(h.status(), TestProxy.body(in, h, true, 0));
+        }
+    }
+
+    static byte[] fresh(byte[] cid, int kind, long seq, byte[] data) {
+        byte[] nonce = new byte[Exchange.NONCE];
+        RANDOM.nextBytes(nonce);
+        return request(PSK, cid, kind, 0, seq, 0, now(), nonce, data);
+    }
+
+    static byte[] newCid() { byte[] cid = new byte[Exchange.CID]; RANDOM.nextBytes(cid); return cid; }
+
+    /**
+     * Section 7.1: the authentication header within the first-record timeout, else the host's
+     * with every byte replayed; the body after it within the handshake timeout; a failure after
+     * the header is a status other than 200 without a body, and changes nothing.
+     */
+    @Test void theHeaderIsAuthenticatedBeforeTheBody() throws Exception {
+        var seen = new java.util.concurrent.LinkedBlockingQueue<HostHandler.Seen>();
+        var c = cfg().holdTime(Duration.ofMillis(50)).build();
+        try (var f = new Fixture(b -> b.handshakeTimeout(Duration.ofMillis(600)), b -> b.firstRecordTimeout(Duration.ofMillis(300)),
+                b -> b.exchange(c), false, () -> new HostHandler(seen))) {
+            // A header that is late: the host's, its bytes replayed in front of the rest.
+            byte[] q = fresh(newCid(), Exchange.KIND_UP, 0, new byte[100]);
+            Socket s = begin(f.base, q.length, Arrays.copyOf(q, 30));
+            Thread.sleep(700);
+            Resp r = finish(s, Arrays.copyOfRange(q, 30, q.length));
+            assertEquals(200, r.status);
+            assertEquals("host", new String(r.body, StandardCharsets.US_ASCII));
+            assertArrayEquals(q, seen.poll(5, TimeUnit.SECONDS).body());
+            assertEquals(0, f.endpoint.exchange.live());
+            // A header that does not verify: the host's, every byte replayed.
+            byte[] bad = fresh(newCid(), Exchange.KIND_UP, 0, new byte[10]);
+            bad[3] ^= 1;
+            assertEquals(200, post(f.base, bad).status);
+            assertArrayEquals(bad, seen.poll(5, TimeUnit.SECONDS).body());
+            // A Data Length that disagrees with Content-Length: the host's.
+            byte[] longer = Arrays.copyOf(fresh(newCid(), Exchange.KIND_UP, 0, new byte[10]), Exchange.REQ_OVERHEAD + 11);
+            assertEquals(200, post(f.base, longer).status);
+            assertArrayEquals(longer, seen.poll(5, TimeUnit.SECONDS).body());
+            // An authenticated header whose Data MAC does not verify: refused without a body, nothing created.
+            byte[] data = fresh(newCid(), Exchange.KIND_UP, 0, new byte[10]);
+            data[Exchange.HDR + 2] ^= 1;
+            r = post(f.base, data);
+            assertEquals(400, r.status);
+            assertEquals(0, r.body.length);
+            assertEquals(0, f.endpoint.exchange.live());
+            // An authenticated header whose body does not arrive within the handshake timeout.
+            byte[] slow = fresh(newCid(), Exchange.KIND_UP, 0, new byte[100]);
+            try (Socket t = begin(f.base, slow.length, Arrays.copyOf(slow, Exchange.HDR + 10))) {
+                InputStream in = new BufferedInputStream(t.getInputStream());
+                TestProxy.Head h = TestProxy.head(in);
+                assertEquals(400, h.status(), "a timeout is 400, not 408");
+                assertEquals(0, TestProxy.body(in, h, true, 0).length);
+            }
+            assertEquals(0, f.endpoint.exchange.live());
+            assertTrue(seen.isEmpty(), "authenticated requests never reach the host");
+        }
+    }
+
+    /** Every request holds a slot of its source and of the listener from its arrival until its header is authenticated. */
+    @Test void aRequestHoldsItsSlotsUntilItsHeaderIsAuthenticated() throws Exception {
+        var c = cfg().holdTime(Duration.ofMillis(50)).build();
+        for (boolean global : new boolean[] {false, true}) {
+            try (var f = new Fixture(b -> b, b -> (global ? b.maxPending(1) : b.maxPendingPerSource(1)).firstRecordTimeout(Duration.ofSeconds(5)),
+                    b -> b.exchange(c), false, null)) {
+                byte[] cid = newCid();
+                // A request whose header is still arriving holds its slots.
+                byte[] first = fresh(cid, Exchange.KIND_CLOSE, 0, NONE);
+                Socket s = begin(f.base, first.length, Arrays.copyOf(first, 10));
+                Thread.sleep(100);
+                long rejected = f.listener.stats().rejected(), refused = f.listener.stats().refused();
+                Resp busy = post(f.base, fresh(newCid(), Exchange.KIND_CLOSE, 0, NONE));
+                assertEquals(503, busy.status, "no slot left: 503, never the host's");
+                assertEquals(0, busy.body.length);
+                assertEquals(global ? rejected + 1 : rejected, f.listener.stats().rejected());
+                assertEquals(global ? refused : refused + 1, f.listener.stats().refused());
+                // Its header authenticated, a CLOSE creates nothing and gives its slots back.
+                Resp r = finish(s, Arrays.copyOfRange(first, 10, first.length));
+                assertEquals(200, r.status);
+                assertEquals(200, post(f.base, fresh(newCid(), Exchange.KIND_CLOSE, 0, NONE)).status, "served once the slot is back");
             }
         }
     }
@@ -218,21 +320,72 @@ class ExchangeTest {
         }
     }
 
-    /** A new carrier takes its source's pending share first: one beyond it is answered BUSY and holds nothing. */
-    @Test void newCarriersTakeTheSourcesPendingShare() throws Exception {
+    /**
+     * Every request takes a slot of its source on arrival, and a request that creates a carrier
+     * keeps it until the carrier enters a session: a request beyond the share is answered 503
+     * and holds nothing; once the carrier gave its slot back, the next one is served.
+     */
+    @Test void requestsTakeTheSourcesPendingShare() throws Exception {
         var c = cfg().holdTime(Duration.ofMillis(50)).build();
-        try (var f = new Fixture(b -> b, b -> b.maxPendingPerSource(1).firstRecordTimeout(Duration.ofSeconds(10)), b -> b.exchange(c), false, null)) {
+        try (var f = new Fixture(b -> b, b -> b.maxPendingPerSource(1).firstRecordTimeout(Duration.ofSeconds(1)), b -> b.exchange(c), false, null)) {
             var x = new Raw(f.base, PSK);
             var y = new Raw(f.base, PSK);
             assertEquals(0, x.flags(Exchange.KIND_UP, 0, 1, 0, NONE));
             assertEquals(1, f.endpoint.exchange.live());
-            assertEquals(Exchange.FLAG_BUSY, y.flags(Exchange.KIND_UP, 0, 1, 0, NONE), "beyond the source's share");
+            assertEquals(503, y.send(Exchange.KIND_UP, 0, 1, 0, NONE, false).status, "beyond the source's share");
+            assertEquals(503, x.send(Exchange.KIND_DOWN, 0, 0, 0, NONE, false).status, "the new carrier holds the share");
             assertEquals(1, f.endpoint.exchange.live());
-            // Not remembered as gone: once the share is free it is served.
-            assertEquals(0, x.flags(Exchange.KIND_CLOSE, 0, 0, 0, NONE));
+            // The carrier sends no first record: the listener closes it, and its slot goes.
             waitFor(() -> {
-                try { return y.flags(Exchange.KIND_UP, 0, 1, 0, NONE) == 0; } catch (Exception e) { throw new RuntimeException(e); }
+                try { return y.send(Exchange.KIND_UP, 0, 1, 0, NONE, false).status == 200; } catch (Exception e) { throw new RuntimeException(e); }
             }, "the second carrier served");
+        }
+    }
+
+    /** HTTP/1.1 requests pipelined in one write are answered in their order, though the first is held. */
+    @Test void pipelinedRequestsAreAnsweredInOrder() throws Exception {
+        var c = cfg().holdTime(Duration.ofMillis(400)).build();
+        try (var f = Fixture.plain(b -> b.exchange(c))) {
+            var x = new Raw(f.base, PSK);
+            assertEquals(0, x.flags(Exchange.KIND_UP, 0, 1, 0, NONE));
+            byte[] nonce = new byte[Exchange.NONCE];
+            RANDOM.nextBytes(nonce);
+            byte[] down = request(PSK, x.cid, Exchange.KIND_DOWN, 0, 0, 0, now(), nonce, NONE);
+            byte[] junk = new byte[Exchange.HDR]; // not authenticated: the host answers it at once
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            for (byte[] b : new byte[][] {down, junk}) {
+                out.writeBytes(("POST " + f.base.getRawPath() + " HTTP/1.1\r\nHost: " + f.base.getHost() + "\r\nContent-Length: " + b.length
+                        + "\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+                out.writeBytes(b);
+            }
+            try (Socket s = new Socket(f.base.getHost(), f.base.getPort())) {
+                s.setSoTimeout(10_000);
+                s.getOutputStream().write(out.toByteArray());
+                s.getOutputStream().flush();
+                InputStream in = new BufferedInputStream(s.getInputStream());
+                TestProxy.Head first = TestProxy.head(in);
+                TestProxy.body(in, first, false, 0);
+                assertEquals(200, first.status(), "the held DOWN answers first");
+                assertNotEquals(200, TestProxy.head(in).status());
+            }
+        }
+    }
+
+    /** Closing the endpoint after a carrier's event loop shut down neither throws nor skips the other carriers. */
+    @Test void closeAfterTheCarriersLoopShutDown() throws Exception {
+        var c = cfg().holdTime(Duration.ofSeconds(1)).build();
+        var f = Fixture.plain(b -> b.exchange(c));
+        try {
+            var x = new Raw(f.base, PSK);
+            assertEquals(0, x.flags(Exchange.KIND_UP, 0, 1, 0, NONE));
+            assertEquals(1, f.endpoint.exchange.live());
+            f.group.shutdownGracefully(0, 0, java.util.concurrent.TimeUnit.MILLISECONDS).syncUninterruptibly();
+            assertDoesNotThrow(f.endpoint::close);
+            assertEquals(0, f.endpoint.exchange.live(), "the carrier of a gone loop is dropped");
+        } finally {
+            // The fixture's own close needs the group this test shut down.
+            f.listener.close();
+            f.loops.close();
         }
     }
 
@@ -251,18 +404,78 @@ class ExchangeTest {
     }
 
     @Test void closedListenerRefusesNewCarriers() throws Exception {
-        var c = ExchangeConfig.builder().psk(new byte[32]).holdTime(Duration.ofSeconds(1)).build();
-        try (var f = Fixture.plain(b -> b.exchange(c))) {
+        var c = cfg().holdTime(Duration.ofSeconds(1)).build();
+        try (var f = new Fixture(b -> b, b -> b.firstRecordTimeout(Duration.ofSeconds(10)), b -> b.exchange(c), false, null)) {
+            // A request that arrived before the listener closed, authenticated after: BUSY, nothing created.
+            byte[] early = fresh(newCid(), Exchange.KIND_UP, 0, new byte[] {1});
+            Socket s = begin(f.base, early.length, Arrays.copyOf(early, 10));
+            Thread.sleep(100);
             f.listener.close();
-            var x = new Raw(f.base, NONE);
+            Resp r = finish(s, Arrays.copyOfRange(early, 10, early.length));
+            assertEquals(200, r.status);
+            assertEquals(Exchange.FLAG_BUSY, r.flags());
+            assertEquals(0, f.endpoint.exchange.live(), "no carrier stays");
+            var x = new Raw(f.base, PSK);
+            // A request to a closed listener is still authenticated, and answered GONE.
             assertEquals(Exchange.FLAG_GONE, x.flags(Exchange.KIND_UP, 0, 0, 0, new byte[] {1}));
-            waitFor(() -> f.endpoint.exchange.live() == 0, "no carrier stays");
+            assertEquals(0, f.endpoint.exchange.live(), "no carrier stays");
+            // One that is not authenticated is the host's.
+            assertEquals(404, x.send(Exchange.KIND_UP, 0, 0, 0, NONE, true).status);
+        }
+    }
+
+    /** An unknown Kind: Data limited to 0, then a malformed request that fails the carrier with GONE. */
+    @Test void unknownKindFailsTheCarrier() throws Exception {
+        var c = cfg().holdTime(Duration.ofMillis(50)).build();
+        try (var f = new Fixture(b -> b, b -> b.firstRecordTimeout(Duration.ofSeconds(10)), b -> b.exchange(c), false, null)) {
+            var x = new Raw(f.base, PSK);
+            assertEquals(0, x.flags(Exchange.KIND_UP, 0, 1, 0, NONE));
+            assertEquals(1, f.endpoint.exchange.live());
+            assertEquals(404, x.send(7, 0, 0, 0, new byte[] {1}, false).status, "Data above the limit 0: not authenticated");
+            assertEquals(1, f.endpoint.exchange.live(), "and nothing changed");
+            assertEquals(Exchange.FLAG_GONE, x.flags(7, 0, 0, 0, NONE));
+            waitFor(() -> f.endpoint.exchange.live() == 0, "the carrier fails");
+            assertEquals(Exchange.FLAG_GONE, x.flags(Exchange.KIND_UP, 0, 2, 0, NONE));
+            assertEquals(Exchange.FLAG_GONE, new Raw(f.base, PSK).flags(7, 0, 0, 0, NONE), "and creates none");
+        }
+    }
+
+    /**
+     * A request after a new carrier's first takes a slot of the same source while the carrier
+     * still holds its own until it enters a session, so the default share must leave room for it.
+     */
+    @Test void theDefaultSourceShareLeavesRoomForACarriersNextRequest() {
+        assertTrue(io.zmux.ListenerConfig.builder().build().maxPendingPerSource() >= 2);
+    }
+
+    /** An authenticated request whose body ends early: 400, no body, nothing created. */
+    @Test void aTruncatedBodyIs400() throws Exception {
+        var c = cfg().holdTime(Duration.ofMillis(50)).build();
+        try (var f = new Fixture(b -> b, b -> b.firstRecordTimeout(Duration.ofSeconds(10)), b -> b.exchange(c), false, null)) {
+            var ch = new io.netty.channel.embedded.EmbeddedChannel();
+            ch.attr(HttpEndpoint.SOURCE).set(new java.net.InetSocketAddress("192.0.2.1", 1));
+            ch.pipeline().addLast(new Router(f.endpoint));
+            byte[] q = fresh(newCid(), Exchange.KIND_UP, 0, new byte[20]);
+            var req = new io.netty.handler.codec.http.DefaultHttpRequest(io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
+                    io.netty.handler.codec.http.HttpMethod.POST, f.base.getRawPath());
+            io.netty.handler.codec.http.HttpUtil.setContentLength(req, q.length);
+            ch.writeInbound(req);
+            ch.writeInbound(new io.netty.handler.codec.http.DefaultLastHttpContent(
+                    io.netty.buffer.Unpooled.wrappedBuffer(Arrays.copyOf(q, q.length - 5))));
+            ch.runPendingTasks();
+            io.netty.handler.codec.http.FullHttpResponse resp = ch.readOutbound();
+            assertNotNull(resp);
+            assertEquals(400, resp.status().code());
+            assertEquals(0, resp.content().readableBytes());
+            resp.release();
+            assertEquals(0, f.endpoint.exchange.live());
+            ch.finishAndReleaseAll();
         }
     }
 
     /** Lost, repeated, delayed and replayed requests and responses through a proxy. */
     @Test void faults() throws Exception {
-        var c = cfg().holdTime(Duration.ofMillis(500)).backoff(Duration.ofMillis(5), Duration.ofMillis(100))
+        var c = cfg().holdTime(Duration.ofMillis(500)).backoff(new io.zmux.PipePool.Backoff(Duration.ofMillis(5), Duration.ofMillis(100), 0.5))
                 .requestTimeout(Duration.ofSeconds(3)).upPieceSize(64 << 10).downPieceSize(64 << 10).build();
         try (var f = Fixture.plain(b -> b.exchange(c));
              var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0), new TestProxy.Faults(0.05, 0.05, 0.1, 0.2, 30, 0.05, null), 7);
@@ -276,7 +489,7 @@ class ExchangeTest {
     /** BUSY makes the client repeat; GONE fails the carrier. */
     @Test void busyAndGone() throws Exception {
         var c = ExchangeConfig.builder().psk(new byte[32]).holdTime(Duration.ofMillis(500))
-                .backoff(Duration.ofMillis(5), Duration.ofMillis(50)).build();
+                .backoff(new io.zmux.PipePool.Backoff(Duration.ofMillis(5), Duration.ofMillis(50), 0.5)).build();
         AtomicInteger busy = new AtomicInteger();
         try (var f = Fixture.plain(b -> b.exchange(c));
              var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0),
@@ -298,8 +511,9 @@ class ExchangeTest {
 
     /** A response to body with flags, computed without a PSK. */
     static byte[] answer(byte[] body, int flags) {
-        var q = Exchange.parseRequest(ByteBuffer.wrap(body));
-        if (q == null || q.kind() == Exchange.KIND_CLOSE) return null;
+        if (body.length < Exchange.HDR) return null;
+        var q = Exchange.parseHeader(ByteBuffer.wrap(body));
+        if (q.kind() == Exchange.KIND_CLOSE) return null;
         var key = Exchange.key(NONE, q.cid());
         ByteBuffer h = Exchange.responseHeader(key, q, flags, ByteBuffer.allocate(0));
         byte[] out = new byte[h.remaining()];
@@ -363,7 +577,7 @@ class ExchangeTest {
     @Test void defaultBodySize() throws Exception {
         for (boolean b64 : new boolean[] {false, true}) {
             int piece = ExchangeConfig.defaultPieceSize(b64);
-            java.util.function.IntUnaryOperator body = n -> b64 ? Exchange.base64Length(Exchange.REQ_HDR_MAX + n) : Exchange.REQ_HDR_MAX + n;
+            java.util.function.IntUnaryOperator body = n -> b64 ? Exchange.base64Length(Exchange.REQ_OVERHEAD + n) : Exchange.REQ_OVERHEAD + n;
             assertTrue(body.applyAsInt(piece) <= 1_000_000 && body.applyAsInt(piece + 3) > 1_000_000, "piece " + piece);
             var c = cfg().base64(b64).holdTime(Duration.ofSeconds(2)).coalesce(Duration.ofMillis(200)).build();
             assertEquals(piece, c.upPieceSize());

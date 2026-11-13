@@ -1,6 +1,5 @@
 package io.zmux.internal.wire;
 
-import io.zmux.carrier.VarInt;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;

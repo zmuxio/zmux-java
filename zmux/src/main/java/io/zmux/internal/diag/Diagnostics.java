@@ -15,6 +15,14 @@ public final class Diagnostics {
         if (groups == null) groups = access;
     }
 
+    /**
+     * Fixes the linger timeout of every session (0: the computed one), so that a test can tell a
+     * close the peer confirmed from one whose linger expired; tests only.
+     */
+    public static void lingerForTests(java.time.Duration d) {
+        io.zmux.internal.core.Session.lingerForTests = d.toNanos();
+    }
+
     /** Read buffers taken from the loops' pools and not yet returned. */
     public static int outstandingBuffers(EventLoops loops) {
         return groups.apply(loops).outstandingBuffers();

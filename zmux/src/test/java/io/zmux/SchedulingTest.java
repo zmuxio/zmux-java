@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Timeout;
 class SchedulingTest {
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     @Test void customPoliciesUseValuesAndCanChangeOnline() throws Exception {
@@ -31,7 +31,7 @@ class SchedulingTest {
                     blocked.set(true);
                 }
                 int selected = 0;
-                for (int i = 0; i < pipes.size(); i++) if (pipes.get(i).id() > pipes.get(selected).id()) selected = i;
+                for (int i = 0; i < pipes.size(); i++) if (pipes.get(i).id().value() > pipes.get(selected).id().value()) selected = i;
                 int pick = selected;
                 return requests.stream().map(q -> Scheduler.Answer.pipe(pick, 16384)).toList();
             });
@@ -42,11 +42,11 @@ class SchedulingTest {
                 session.set(c);
                 ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.builder().weight(0).receivePriority(12).receiveStandby(true).build());
                 assertEquals(0, added.stats().orElseThrow().weight());
-                var peer = s.pipes().stream().filter(p -> p.id() == added.id()).findFirst().orElseThrow().stats().orElseThrow();
+                var peer = s.pipes().stream().filter(p -> p.id().value() == added.id().value()).findFirst().orElseThrow().stats().orElseThrow();
                 assertEquals(12, peer.sendPriority()); assertTrue(peer.standby());
                 assertEquals(PipeStats.SettingSource.PEER, peer.sendPrioritySource()); assertEquals(PipeStats.SettingSource.PEER, peer.standbySource());
                 added.setSendPriority(9);
-                added.setWeight(7);
+                added.update(PipeUpdate.builder().weight(7).build());
                 assertEquals(9, added.stats().orElseThrow().sendPriority());
                 assertEquals(PipeStats.SettingSource.LOCAL, added.stats().orElseThrow().sendPrioritySource());
                 assertEquals(7, added.stats().orElseThrow().weight());
@@ -80,7 +80,7 @@ class SchedulingTest {
                 c.setCapacityFloor(new CapacityFloor(Double.MAX_VALUE, 1.25));
                 boolean below = false;
                 while (!below) below = c.nextEvent() instanceof SessionEvent.CapacityBelow;
-                added.clearSendPriority();
+                added.update(PipeUpdate.builder().clearSendPriority().build());
                 assertEquals(PipeStats.SettingSource.DEFAULT, added.stats().orElseThrow().sendPrioritySource());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }

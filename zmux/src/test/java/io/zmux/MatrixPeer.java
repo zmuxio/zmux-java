@@ -46,8 +46,7 @@ import javax.net.ssl.X509ExtendedTrustManager;
 public final class MatrixPeer {
     private static final Duration WAIT = Duration.ofSeconds(25);
     private static final int A_LEN = 1 << 20, B_LEN = 64 << 10;
-    private static final ApplicationError MATRIX_CLOSE = new ApplicationError(85, "matrix-close");
-    private static final RecordCarrier.Allow ANY_MODE = (c, m, p) -> true;
+    private static final AllowRecordMode ANY_MODE = (c, m, p) -> true;
 
     private static final StaticKey SERVER_KEY = key(0x5a);
     private static final StaticKey CLIENT_KEY = key(0x6b);
@@ -93,15 +92,14 @@ public final class MatrixPeer {
             @Override public io.zmux.seal.Credential credential(byte[] handle, Profile profile, SocketAddress src) { return null; }
             @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "matrix"; }
         };
-        var sc0 = new ServerConfig(gate, SERVER_KEY, List.of(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES, Profile.XXHFS_CHACHA, Profile.XXHFS_AES),
-                s.multipath ? ANY_MODE : null, null, null);
+        var sc0 = ServerConfig.builder(gate, SERVER_KEY).acceptedProfiles(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES, Profile.XXHFS_CHACHA, Profile.XXHFS_AES).allowRecordMode(s.multipath ? ANY_MODE : null).build();
         if (s == Scenario.APPDATA) {
-            sc0 = sc0.withAnchor(new PinAnchor(KeyId.of(KeyAlg.X25519, CLIENT_KEY.publicKey())), null, false)
-                    .withAppData(only(2, "srv-msg2"), 0);
+            sc0 = sc0.toBuilder().anchor(new PinAnchor(KeyId.of(KeyAlg.X25519, CLIENT_KEY.publicKey())))
+                    .appData(only(2, "srv-msg2")).build();
         }
         if (s == Scenario.PROOF) {
             SigningKey proof = SigningKey.generate(KeyAlg.ML_DSA_44);
-            sc0 = sc0.withSigner(proof);
+            sc0 = sc0.toBuilder().signer(proof).build();
             System.out.println("PROOFKEY " + HexFormat.of().formatHex(proof.keyId()));
         }
         var lb = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc0));
@@ -142,7 +140,8 @@ public final class MatrixPeer {
         if (s == Scenario.CLOSE) {
             ZmuxStream st = session.acceptStream(WAIT);
             st.inputStream().readNBytes(B_LEN);
-            session.close(MATRIX_CLOSE);
+            session.abort(85, "matrix-close");
+            try { session.closed().get(3, TimeUnit.SECONDS); } catch (Exception ended) { /* the abort hands over in the background */ }
             System.out.println("CLOSING");
             return 0;
         }
@@ -157,7 +156,8 @@ public final class MatrixPeer {
         }
         if (s == Scenario.EPOCH) System.out.println("EPOCH " + session.epoch());
         if (s == Scenario.CLOSE_IDLE) {
-            session.close(MATRIX_CLOSE);
+            session.abort(85, "matrix-close");
+            try { session.closed().get(3, TimeUnit.SECONDS); } catch (Exception ended) { /* the abort hands over in the background */ }
             System.out.println("CLOSING");
             return 0;
         }
@@ -183,7 +183,7 @@ public final class MatrixPeer {
         if (s == Scenario.PROOF) cc.anchor(new PinAnchor(node, HexFormat.of().parseHex(rest[1]))).requirePqAuth(true);
         PipeIo p = Seal.establish(tcp(at), cc.build())
                 .toCompletableFuture().get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
-        Peer peer = Seal.peerOf(p);
+        Peer peer = Seal.peerOf(p).orElseThrow();
         if (s == Scenario.APPDATA) printAppData(peer);
         if (s == Scenario.PROOF) {
             System.out.println("PQ confidential=" + peer.pqConfidential() + " authenticated=" + peer.pqAuthenticated());
@@ -192,7 +192,7 @@ public final class MatrixPeer {
         try (ZmuxSession session = Zmux.open(p, Role.CLIENT, sessionConfig(s))) {
             if (s == Scenario.JOIN) {
                 var tls = TlsOptions.client(trustAll(), address(rest[1]).getHostString()).withSecure();
-                session.addTlsPipe(address(rest[1]), tls, PipeOptions.builder().mode(RecordMode.BOUND).build());
+                session.addTlsPipe(address(rest[1]), tls, PipeOptions.builder().recordMode(RecordMode.BOUND).build());
                 int n = session.pipes().size();
                 System.out.println("PIPES " + n);
                 if (n < 2) throw new IllegalStateException("pipes " + n);
@@ -203,7 +203,7 @@ public final class MatrixPeer {
                 while (!(session.nextEvent(Duration.ofNanos(Math.max(1, deadline - System.nanoTime()))) instanceof SessionEvent.EpochCommitted)) {
                     if (System.nanoTime() - deadline >= 0) throw new IOException("no EpochCommitted");
                 }
-                session.addPipe(at, PipeOptions.builder().mode(RecordMode.SEALED).build());
+                session.addPipe(at, PipeOptions.builder().recordMode(RecordMode.SEALED).build());
             }
             if (s == Scenario.CLOSE) {
                 ZmuxStream st = session.openStream();
@@ -302,7 +302,7 @@ public final class MatrixPeer {
         byte[] s = new byte[32];
         Arrays.fill(s, (byte) fill);
         try {
-            return StaticKey.of(s);
+            return StaticKey.fromScalar(s);
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }

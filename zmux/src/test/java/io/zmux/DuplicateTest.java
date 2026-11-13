@@ -30,9 +30,9 @@ class DuplicateTest {
     static Pair symmetric(ZmuxConfig cfg) throws Exception {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
         var accepting = CompletableFuture.supplyAsync(() -> {
-            try { return Zmux.open(pair[1], Role.PEER, cfg); } catch(IOException e) { throw new CompletionException(e); }
+            try { return Zmux.open(pair[1], Role.AUTO, cfg); } catch(IOException e) { throw new CompletionException(e); }
         }, r -> Thread.ofVirtual().start(r));
-        return new Pair(Zmux.open(pair[0], Role.PEER, cfg), accepting.get(3,TimeUnit.SECONDS));
+        return new Pair(Zmux.open(pair[0], Role.AUTO, cfg), accepting.get(3,TimeUnit.SECONDS));
     }
     static Pair plainPair(ZmuxConfig cfg) throws Exception {
         var carriers = MemoryPipe.pair(Framing.BYTE_STREAM);

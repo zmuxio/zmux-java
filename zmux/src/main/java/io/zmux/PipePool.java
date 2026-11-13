@@ -36,7 +36,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
             if (maxBytes < 0 || jitter < 0 || jitter > 1 || !Double.isFinite(jitter)) throw new IllegalArgumentException("rotation");
             Objects.requireNonNull(maxAge); nanos(maxAge, true);
         }
-        public static Rotation disabled() { return new Rotation(0, Duration.ZERO, 0); }
+        public static Rotation none() { return new Rotation(0, Duration.ZERO, 0); }
     }
     public record Backoff(Duration minimum, Duration maximum, double jitter) {
         public Backoff {
@@ -66,14 +66,14 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
     }
     /** A pool whose members are groups of pipes joined by join. */
     public static PipePool join(Join join) {
-        return new PipePool(join, 1, PipeOptions.defaults(), Rotation.disabled(), Backoff.defaults(), Duration.ofMillis(250), null, null);
+        return new PipePool(join, 1, PipeOptions.defaults(), Rotation.none(), Backoff.defaults(), Duration.ofMillis(250), null, null);
     }
     /** A single attempt's creation scope; completed resources are committed by maintenance. */
     public static final class Attempt {
         private final ZmuxSession session;
         private final PipeOptions options;
         private final Cancellation cancellation;
-        /** The candidate a mode pool's attempt dials; -1 outside mode pools. */
+        /** The candidate a choice pool's attempt dials; -1 outside choice pools. */
         final int kind;
         private final Thread owner;
         private ZmuxPipe made;
@@ -83,7 +83,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         Attempt(ZmuxSession session, PipeOptions options, Cancellation cancellation, int kind) {
             this.session = session; this.options = options; this.cancellation = cancellation; this.kind = kind; owner = Thread.currentThread();
         }
-        /** The options to join with: the pool's, with {@link PipeOptions.Builder#noWaitAttached} set. */
+        /** The options to join with: the pool's, with {@link PipeOptions.Builder#returnOnReply} set. */
         public PipeOptions options() { return options; }
         /** The session a {@link Join} adds its pipes to. */
         public ZmuxSession session() { return session; }
@@ -105,7 +105,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
             var g = java.util.List.copyOf(pipes);
             if (g.isEmpty()) return false;
             for (ZmuxPipe p : g) if (!p.belongsTo(session)) return false;
-            if (made != null && !(g.size() == 1 && g.getFirst().id() == made.id())) return false;
+            if (made != null && !(g.size() == 1 && g.getFirst().id().value() == made.id().value())) return false;
             group = g; // only the attempt's own pipes are ever aborted
             return true;
         }
@@ -134,27 +134,27 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
             return attempt.join(io);
         }
     }
-    /** A mode pool's member source: the candidate the run chose for the attempt. */
-    record ModeJoin(ModeSource source) implements Join {
+    /** A choice pool's member source: the candidate the run chose for the attempt. */
+    record ChoiceJoin(CarrierChoiceSource source) implements Join {
         @Override public java.util.List<ZmuxPipe> open(Attempt attempt) throws IOException {
             return source.join(attempt.session(), attempt.kind, attempt.options());
         }
     }
     /**
-     * A pool whose members come from mode: each member is dialled over the
+     * A pool whose members come from a carrier choice: each member is dialled over the
      * kind the policy's cache holds most robust, the outcome is recorded in the cache, and a
      * member not of the most preferred kind is upgraded, make before break, to a more preferred
      * kind not backing off: the new member replaces it once it has been usable for the policy's
      * settle time; if its dial fails the old member stays. At most one upgrade per pool is under
-     * way at a time, and it needs a free attachment. Several mode pools may share a cache.
+     * way at a time, and it needs a free attachment. Several choice pools may share a cache.
      *
-     * @param policy null: {@link ModePolicy#defaults()}
+     * @param policy null: {@link CarrierChoicePolicy#defaults()}
      */
-    public static PipePool mode(CarrierMode mode, ModePolicy policy) {
-        return join(new ModeJoin(new ModeSource(Objects.requireNonNull(mode), policy)));
+    public static PipePool choice(CarrierChoice choice, CarrierChoicePolicy policy) {
+        return join(new ChoiceJoin(new CarrierChoiceSource(Objects.requireNonNull(choice), policy)));
     }
-    /** The mode of a {@link #mode} pool; null otherwise. */
-    ModeSource modeSource() { return join instanceof ModeJoin(ModeSource source) ? source : null; }
+    /** The carrier choice of a {@link #choice} pool; null otherwise. */
+    CarrierChoiceSource choiceSource() { return join instanceof ChoiceJoin(CarrierChoiceSource source) ? source : null; }
     /** Adapts a raw carrier factory through the session's existing in-band join operation. */
     public static PipePool carriers(CarrierDial dial) { return join(new InBandDial(Objects.requireNonNull(dial))); }
     public PipePool withCount(int value) { return new PipePool(join, value, options, rotation, backoff, inspectionInterval, attemptTimeout, policy); }

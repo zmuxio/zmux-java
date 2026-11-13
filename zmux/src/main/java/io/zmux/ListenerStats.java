@@ -14,7 +14,9 @@ package io.zmux;
  *     {@link AdmissionStats#handshakeFailed()} instead), a failed HTTP or WebSocket upgrade (adapters with their own
  *     accept loops report them through {@link ZmuxListener#countSetupFailure()})
  * @param rejected inputs closed without a distinguishable reason: unknown, unauthenticated or replayed joins, lanes
- *     that name no pipe, inputs that are not zmux; an admission's decisions are counted in {@code admission} only
+ *     that name no pipe, inputs that are not zmux, and new carriers closed at once because every slot of {@link
+ *     ListenerConfig#maxPending()} was taken and none was stalled (a stalled carrier closed to make room is not
+ *     counted again); an admission's decisions are counted in {@code admission} only
  * @param refused inputs refused at a limit: of the listener (MaxPendingPerSource, the memory budget), of the session
  *     (a join closed with ZMUX_PIPE_RESOURCE_LIMIT), new sessions after the listener was shut down, and every carrier
  *     after it was closed

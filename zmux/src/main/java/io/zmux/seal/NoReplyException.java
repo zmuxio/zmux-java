@@ -9,7 +9,7 @@ import java.io.Serial;
  * or the timeout.
  *
  * <p>A server that stalls a refused carrier rather than closing it leaves the client waiting until the
- * client's own handshake timeout ({@link ClientConfig#timeout()}); give a secure carrier handshake a time
+ * client's own handshake timeout ({@link ClientConfig#handshakeTimeout()}); give a secure carrier handshake a time
  * limit. With no timeout, a stalled client waits until the server ends the stall.
  */
 public final class NoReplyException extends ZmuxException {

@@ -6,7 +6,7 @@ import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.seal.*;
 import io.zmux.seal.Credential;
 import java.net.InetSocketAddress;
@@ -36,7 +36,7 @@ class SealTest {
             HP = HandlePsk.derive(SECRET, "test".getBytes(), null);
             byte[] seed = new byte[32];
             Arrays.fill(seed, (byte) 7);
-            NODE = StaticKey.of(seed);
+            NODE = StaticKey.fromScalar(seed);
         } catch (SecureCarrierException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -54,7 +54,7 @@ class SealTest {
     }
 
     static ZmuxConfig.Builder sessions(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).probation(Duration.ZERO);
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).noProbation();
     }
 
     static ClientConfig.Builder client() {
@@ -101,10 +101,10 @@ class SealTest {
     @Test void multipathOnASecureCarrierWithEndToEndOnly() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = sessions(loops).pipeAuth(PipeAuth.none().withEndToEnd()).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build());
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build());
                  var c = Zmux.open(establish(tcp(l.localAddress()), client().build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                 ZmuxPipe joined = c.addPipe(l.localAddress(), PipeOptions.defaults());
-                assertTrue(joined.id() > 0);
+                assertTrue(joined.id().value() > 0);
                 assertEquals(2, c.pipes().size());
                 echo(c, s);
             }
@@ -118,9 +118,9 @@ class SealTest {
             ZmuxConfig cfg = sessions(loops).logger(recorder(session)).build();
             var lc = ListenerConfig.builder().session(cfg).logger(recorder(listener))
                     .onReject(i -> { throw new IllegalStateException("host failure"); })
-                    .inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
-                var f = Seal.establish(tcp(l.localAddress()), client().psk(new byte[16], new byte[32]).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                var f = Seal.establish(tcp(l.localAddress()), client().psk(new byte[16], new byte[32]).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 for (long end = System.nanoTime() + 5_000_000_000L; listener.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
             }
@@ -141,9 +141,9 @@ class SealTest {
     @Test void establishThenJoinOverTcpWithTheHostValue() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = sessions(loops).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build())) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build())) {
                 PipeIo p = establish(tcp(l.localAddress()), client().build());
-                Peer serverPeer = Seal.peerOf(p);
+                Peer serverPeer = Seal.peerOf(p).orElseThrow();
                 assertArrayEquals(NODE.publicKey(), serverPeer.staticKey());
                 assertEquals(Principal.NODE_KEY, serverPeer.verdict().principal().type());
                 // The Peer's principal is the verdict's: a pin names the node by the KeyId of its key.
@@ -155,7 +155,7 @@ class SealTest {
                     assertEquals("committed", peer.value());
                     echo(c, s);
                     ZmuxPipe joined = c.addPipe(l.localAddress(), PipeOptions.defaults());
-                    assertTrue(joined.id() > 0);
+                    assertTrue(joined.id().value() > 0);
                     assertEquals(RecordMode.SEALED, joined.stats().orElseThrow().recordMode());
                     echo(c, s);
                 }
@@ -167,7 +167,7 @@ class SealTest {
         for (Profile profile : List.of(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES)) {
             try (EventLoops loops = EventLoops.create(1)) {
                 ZmuxConfig cfg = sessions(loops).build();
-                try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build());
+                try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build());
                      var c = Zmux.open(establish(tcp(l.localAddress()), client().allowedProfiles(profile).build()), Role.CLIENT, cfg);
                      var s = l.accept(WAIT)) {
                     assertEquals(profile, ((Peer) s.admitted().orElseThrow()).profile());
@@ -181,13 +181,13 @@ class SealTest {
     @Test void clientsDefaultToHybridAndEveryProfileHolds() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build());
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build());
                  var c = Zmux.open(establish(tcp(l.localAddress()), client().build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                 Profile p = ((Peer) s.admitted().orElseThrow()).profile();
                 assertTrue(p == Profile.XXHFS_PSK0_CHACHA || p == Profile.XXHFS_PSK0_AES, p.toString());
                 echo(c, s);
             }
-            var server = new ServerConfig(gate(null), NODE).withAcceptedProfiles(Profile.values());
+            var server = ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.values()).build();
             for (Profile profile : Profile.values()) {
                 var b = client().allowedProfiles(profile);
                 if (!profile.hasPsk()) b.psk(null, null);
@@ -204,16 +204,16 @@ class SealTest {
     @Test void serverProfilePolicy() throws Exception {
         record Case(String name, Profile client, ServerConfig server, String refused) {}
         var cases = List.of(
-                new Case("no-psk-hybrid-off-by-default", Profile.XXHFS_CHACHA, new ServerConfig(gate(null), NODE), "profile_disabled"),
-                new Case("no-psk-hybrid-allowed", Profile.XXHFS_AES, new ServerConfig(gate(null), NODE).withAcceptedProfiles(Profile.XXHFS_AES), null),
-                new Case("psk-by-default", Profile.XXHFS_PSK0_AES, new ServerConfig(gate(null), NODE), null),
-                new Case("allowed-list", Profile.XXHFS_PSK0_AES, new ServerConfig(gate(null), NODE).withAcceptedProfiles(Profile.XXHFS_PSK0_CHACHA), "profile_disabled"));
+                new Case("no-psk-hybrid-off-by-default", Profile.XXHFS_CHACHA, ServerConfig.builder(gate(null), NODE).build(), "profile_disabled"),
+                new Case("no-psk-hybrid-allowed", Profile.XXHFS_AES, ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_AES).build(), null),
+                new Case("psk-by-default", Profile.XXHFS_PSK0_AES, ServerConfig.builder(gate(null), NODE).build(), null),
+                new Case("allowed-list", Profile.XXHFS_PSK0_AES, ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_PSK0_CHACHA).build(), "profile_disabled"));
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
             for (Case k : cases) {
                 List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
                 var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(k.server())).build();
-                var b = client().allowedProfiles(k.client()).timeout(Duration.ofSeconds(5));
+                var b = client().allowedProfiles(k.client()).handshakeTimeout(Duration.ofSeconds(5));
                 if (!k.client().hasPsk()) b.psk(null, null);
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                     var f = Seal.establish(tcp(l.localAddress()), b.build()).toCompletableFuture();
@@ -247,7 +247,7 @@ class SealTest {
                 @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { seen.set(a); return "value"; }
             };
             Object mine = new Object();
-            var sc = new ServerConfig(recording, NODE).withAnchor(in -> new io.zmux.seal.Verdict(new Principal(9, new byte[] {9}), null, mine), null, false);
+            var sc = ServerConfig.builder(recording, NODE).anchor(in -> new io.zmux.seal.VerifyVerdict(new Principal(9, new byte[] {9}), null, mine)).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc)).build())) {
                 Credential cred = new Credential(5, new byte[] {1, 2});
                 PipeIo p = establish(tcp(l.localAddress()), client().credential(cred)
@@ -276,7 +276,7 @@ class SealTest {
     @Test void aPinOfAnotherKeyIdFailsBeforeAnythingOfTheClientIsWritten() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build())) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build())) {
                 var f = Seal.establish(tcp(l.localAddress()), client().anchor(new PinAnchor(new byte[io.zmux.seal.KeyId.LEN])).build()).toCompletableFuture();
                 var e = assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 var failed = assertInstanceOf(CredentialsFailedException.class, e.getCause());
@@ -291,17 +291,17 @@ class SealTest {
             List<Credential> seen = new CopyOnWriteArrayList<>();
             Anchor recording = in -> {
                 seen.add(in.credential());
-                return new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
+                return new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
             };
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build())) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build())) {
                 establish(tcp(l.localAddress()), client().anchor(recording).build());
                 assertEquals(1, seen.size());
                 assertNull(seen.get(0));
             }
             // A sender does not send type 0: the handshake ends there, with nothing of it on the wire.
             var zero = new Credential(0, new byte[] {1});
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(new ServerConfig(gate(zero), NODE))).build())) {
-                var f = Seal.establish(tcp(l.localAddress()), client().anchor(recording).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(zero), NODE).build())).build())) {
+                var f = Seal.establish(tcp(l.localAddress()), client().anchor(recording).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 assertEquals(0, l.stats().sessions());
             }
@@ -321,14 +321,14 @@ class SealTest {
                     return switch (verdict) {
                         case "reject" -> throw new CredentialsFailedException("unknown client");
                         case "unavailable" -> throw new VerifierUnavailableException("store down", null);
-                        default -> new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
+                        default -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
                     };
                 };
-                var sc = new ServerConfig(gate(null), NODE).withAnchor(anchor, "edge", false);
+                var sc = ServerConfig.builder(gate(null), NODE).anchor(anchor).localContext("edge").build();
                 var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
                         .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
-                    var f = Seal.establish(tcp(l.localAddress()), client().credential(mine).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                    var f = Seal.establish(tcp(l.localAddress()), client().credential(mine).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                     PipeIo p = f.get(10, TimeUnit.SECONDS); // the client is done after message 3
                     if (verdict.equals("pass")) {
                         try (var c = Zmux.open(p, Role.CLIENT, cfg); var srv = l.accept(WAIT)) {
@@ -344,7 +344,7 @@ class SealTest {
                         assertEquals(0, l.stats().sessions());
                     }
                     assertEquals(1, seen.size());
-                    assertEquals(VerifyInput.Role.CLIENT, seen.get(0).role());
+                    assertEquals(io.zmux.Role.CLIENT, seen.get(0).role());
                     assertEquals(9, seen.get(0).credential().type());
                     assertEquals("edge", seen.get(0).localContext());
                 }
@@ -364,23 +364,23 @@ class SealTest {
                 @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "ok"; }
             };
             var anonymous = ClientConfig.builder().anchor(new PinAnchor(io.zmux.seal.KeyId.of(io.zmux.seal.KeyAlg.X25519, NODE.publicKey()))).allowedProfiles(Profile.XXHFS_CHACHA)
-                    .timeout(Duration.ofSeconds(5)).build();
+                    .handshakeTimeout(Duration.ofSeconds(5)).build();
             var byDefault = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; })
-                    .inboundTransform(Seal.server(new ServerConfig(gate, NODE))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), byDefault)) {
                 var f = Seal.establish(tcp(l.localAddress()), anonymous).toCompletableFuture();
                 var e = assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 assertInstanceOf(NoReplyException.class, e.getCause());
                 // An unknown Handle on the default Profiles.
-                var g = Seal.establish(tcp(l.localAddress()), client().timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                var g = Seal.establish(tcp(l.localAddress()), client().handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertInstanceOf(NoReplyException.class, assertThrows(ExecutionException.class, () -> g.get(10, TimeUnit.SECONDS)).getCause());
                 for (long end = System.nanoTime() + 5_000_000_000L; reasons.size() < 2 && System.nanoTime() < end; ) Thread.sleep(10);
                 assertEquals(List.of("profile_disabled", "unknown_handle"), reasons);
             }
             var listed = ListenerConfig.builder().session(cfg)
-                    .inboundTransform(Seal.server(new ServerConfig(gate, NODE).withAcceptedProfiles(Profile.XXHFS_CHACHA))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).acceptedProfiles(Profile.XXHFS_CHACHA).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), listed)) {
-                assertEquals(Profile.XXHFS_CHACHA, Seal.peerOf(establish(tcp(l.localAddress()), anonymous)).profile());
+                assertEquals(Profile.XXHFS_CHACHA, Seal.peerOf(establish(tcp(l.localAddress()), anonymous)).orElseThrow().profile());
                 assertEquals(List.of(Profile.XXHFS_CHACHA), asked);
             }
         }
@@ -396,9 +396,9 @@ class SealTest {
                 @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "ok"; }
             };
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; })
-                    .inboundTransform(Seal.server(new ServerConfig(gate, NODE))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
-                var f = Seal.establish(tcp(l.localAddress()), client().timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                var f = Seal.establish(tcp(l.localAddress()), client().handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertInstanceOf(NoReplyException.class, assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS)).getCause());
                 for (long end = System.nanoTime() + 5_000_000_000L; reasons.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
                 assertEquals(List.of("gate_error"), reasons);
@@ -417,12 +417,12 @@ class SealTest {
             ZmuxConfig cfg = sessions(loops).build();
             List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; })
-                    .inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 // A wrong key: a Hello the Noise AEAD refuses.
                 byte[] other = new byte[32];
                 Arrays.fill(other, (byte) 9);
-                var f = Seal.establish(tcp(l.localAddress()), client().psk(HP.handle(), other).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                var f = Seal.establish(tcp(l.localAddress()), client().psk(HP.handle(), other).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertInstanceOf(NoReplyException.class, assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS)).getCause());
                 // A bad first byte, and a plain session where an Establish is required.
                 for (byte[] first : List.of(new byte[] {7, 0, 0, 0}, new byte[] {0x40, 0x10, (byte) 0xff, 0, 0, 0})) {
@@ -432,14 +432,14 @@ class SealTest {
                     }
                 }
                 // A Trusted Hello on a server that takes only Sealed.
-                var t = Seal.establish(tcp(l.localAddress()), client().mode(RecordMode.TRUSTED).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                var t = Seal.establish(tcp(l.localAddress()), client().mode(RecordMode.TRUSTED).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> t.get(10, TimeUnit.SECONDS));
                 for (long end = System.nanoTime() + 5_000_000_000L; rejected.size() < 4 && System.nanoTime() < end; ) Thread.sleep(10);
                 var reasons = new ArrayList<String>();
                 for (RejectInfo i : rejected) reasons.add(i.reason());
                 assertEquals(List.of("auth", "unknown_profile", "unknown_profile", "record_mode"), reasons);
                 assertEquals(1, rejected.get(0).profile() == 0 ? 0 : 1, "the Hello's profile");
-                assertEquals(RecordMode.TRUSTED, rejected.get(3).mode());
+                assertEquals(RecordMode.TRUSTED, rejected.get(3).recordMode());
                 assertEquals(0, l.stats().sessions());
             }
         }
@@ -450,7 +450,7 @@ class SealTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).handshakeTimeout(Duration.ofMillis(1500)).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).onReject(i -> RejectInfo.Action.STALL)
-                    .inboundTransform(Seal.server(new ServerConfig(gate(null), NODE))).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 long start = System.nanoTime();
                 ch.write(ByteBuffer.wrap(new byte[] {7, 0, 0}));
@@ -465,21 +465,21 @@ class SealTest {
         TestTls.init();
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = sessions(loops).allowRecordMode((c, m, p) -> true).build();
-            var server = new ServerConfig(gate(null), NODE, (c, m, p) -> c.secure() && c.firstPipe(), null);
+            var server = ServerConfig.builder(gate(null), NODE).allowRecordMode((c, m, p) -> c.secure() && c.isFirstPipe()).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()).withSecure()).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var tls = TlsOptions.client(TestTls.client(), "localhost");
                 // Without the client's declaration nothing is sent.
-                PipeIo plain = Zmux.dialTlsPipe(l.localAddress(), tls, cfg).get(10, TimeUnit.SECONDS);
+                PipeIo plain = Zmux.dialTlsPipeAsync(l.localAddress(), tls, cfg).get(10, TimeUnit.SECONDS);
                 var bad = assertThrows(ExecutionException.class, () -> establish0(plain, client().mode(RecordMode.BOUND).build()));
                 assertEquals(SecureCarrierException.Code.INVALID_CONFIG, ((SecureCarrierException) bad.getCause()).code());
-                PipeIo p = Zmux.dialTlsPipe(l.localAddress(), tls.withSecure(), cfg).get(10, TimeUnit.SECONDS);
+                PipeIo p = Zmux.dialTlsPipeAsync(l.localAddress(), tls.withSecure(), cfg).get(10, TimeUnit.SECONDS);
                 assertTrue(p.isSecure());
                 try (var c = Zmux.open(establish(p, client().mode(RecordMode.BOUND).build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertEquals(RecordMode.BOUND, c.weakestRecordMode());
                     assertEquals(RecordMode.BOUND, s.weakestRecordMode());
                     echo(c, s);
-                    ZmuxPipe j = c.addTlsPipe(l.localAddress(), tls.withSecure(), PipeOptions.builder().mode(RecordMode.BOUND).build());
+                    ZmuxPipe j = c.addTlsPipe(l.localAddress(), tls.withSecure(), PipeOptions.builder().recordMode(RecordMode.BOUND).build());
                     assertEquals(RecordMode.BOUND, j.stats().orElseThrow().recordMode());
                     echo(c, s);
                 }
@@ -496,13 +496,13 @@ class SealTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).allowRecordMode((c, m, p) -> true).build();
             List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
-            var server = new ServerConfig(gate(null), NODE, (c, m, p) -> true, null);
+            var server = ServerConfig.builder(gate(null), NODE).allowRecordMode((c, m, p) -> true).build();
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((a, b, n) -> new byte[n]).secure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                PipeIo near = pair[0].withExporter((a, b, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).secure();
-                var f = Seal.establish(near, client().mode(RecordMode.BOUND).timeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                l.handle(pair[1].withExporter((a, b, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                PipeIo near = pair[0].withExporter((a, b, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
+                var f = Seal.establish(near, client().mode(RecordMode.BOUND).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 for (long end = System.nanoTime() + 5_000_000_000L; rejected.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
                 assertEquals("auth", rejected.getFirst().reason());
@@ -529,7 +529,7 @@ class SealTest {
 
     static ListenerConfig profile4(ZmuxConfig cfg, List<RejectInfo> rejected) {
         return ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.STALL; })
-                .inboundTransform(Seal.server(new ServerConfig(gate(null), NODE).withAcceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_AES))).build();
+                .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_AES).build())).build();
     }
 
     /** A Profile 4 or 5 Hello whose e is of low order or whose ek has a coefficient out of range is refused as kex: OnReject and a stall, no byte. */
@@ -586,5 +586,42 @@ class SealTest {
                 assertEquals(1, rejected.size(), "an end is no refusal");
             }
         }
+    }
+
+    /**
+     * A record that fails authentication after the session is up ends the pipe's input: the session
+     * does not wait for a carrier end that the abortive close never reports.
+     */
+    @Test void aForgedRecordEndsTheSessionAtOnce() throws Exception {
+        try (EventLoops loops = EventLoops.create(1);
+             var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(sessions(loops).build())
+                     .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build());
+             var relay = java.nio.channels.ServerSocketChannel.open().bind(new InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0))) {
+            var toServer = new java.util.concurrent.CompletableFuture<SocketChannel>();
+            Thread.ofVirtual().start(() -> {
+                try (SocketChannel in = relay.accept(); SocketChannel out = SocketChannel.open(l.localAddress())) {
+                    toServer.complete(out);
+                    Thread back = Thread.ofVirtual().start(() -> copy(out, in));
+                    copy(in, out);
+                    back.join();
+                } catch (Exception ended) { /* The test is over. */ }
+            });
+            PipeIo p = establish(tcp((InetSocketAddress) relay.getLocalAddress()), client().build());
+            try (var c = Zmux.open(p, Role.CLIENT, sessions(loops).build()); var s = l.accept(WAIT)) {
+                echo(c, s);
+                // A whole record of the stream framing whose tag cannot verify, between two of the client's.
+                ByteBuffer bad = ByteBuffer.allocate(2 + 32).putShort((short) 32);
+                bad.flip();
+                toServer.get(WAIT.toSeconds(), TimeUnit.SECONDS).write(bad);
+                assertNotNull(s.closed().get(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    private static void copy(SocketChannel from, SocketChannel to) {
+        ByteBuffer b = ByteBuffer.allocate(1 << 16);
+        try {
+            while (from.read(b) >= 0) { b.flip(); while (b.hasRemaining()) to.write(b); b.clear(); }
+        } catch (java.io.IOException ended) { /* Either side closed. */ }
     }
 }

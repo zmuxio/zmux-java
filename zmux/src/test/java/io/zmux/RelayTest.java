@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(60)
 class RelayTest {
     static ZmuxConfig.Builder multipath(int pipes) {
-        return ZmuxConfig.builder().maxPipes(pipes).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO);
+        return ZmuxConfig.builder().maxPipes(pipes).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     static ZmuxConfig config(EventLoops loops, ZmuxConfig.Builder m) { return m.eventLoops(loops).build(); }
@@ -41,7 +41,7 @@ class RelayTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 relay.idleLimitMs = 1500;
-                var kept = through(relay, PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).probeJitter(0.3).build());
+                var kept = through(relay, PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(1)).probeJitter(0.3).build()).build());
                 try (var run = client.maintainPipes(kept)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     Thread.sleep(8000);
@@ -60,10 +60,10 @@ class RelayTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 relay.idleLimitMs = 1500;
-                var lost = through(relay, PipeOptions.builder().probeInterval(Duration.ofSeconds(4)).build());
+                var lost = through(relay, PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(4)).build()).build());
                 try (var run = client.maintainPipes(lost)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
-                    long first = run.pipes().getFirst().id();
+                    long first = run.pipes().getFirst().id().value();
                     long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
                     while (relay.idleCuts.get() == 0 && System.nanoTime() < until) Thread.sleep(5);
                     assertTrue(relay.idleCuts.get() > 0, "the relay ended the idle pipe");
@@ -71,7 +71,7 @@ class RelayTest {
                     while (relay.accepted.get() < 2 && System.nanoTime() - cut < TimeUnit.SECONDS.toNanos(4)) Thread.sleep(2);
                     assertTrue(relay.accepted.get() >= 2, "redialled");
                     assertTrue(System.nanoTime() - cut < TimeUnit.SECONDS.toNanos(2), "redial follows the loss, not the 30 s inspection");
-                    PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id() != first);
+                    PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().id().value() != first);
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
@@ -84,11 +84,11 @@ class RelayTest {
             var cfg = config(loops, multipath(4));
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
-                var pipe = client.addPipe(relay.address(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
+                var pipe = client.addPipe(relay.address(), PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(1)).build()).build());
                 Thread.sleep(300);
                 relay.blackhole = true;
                 long start = System.nanoTime();
-                event(client, SessionEvent.PipeFailed.class, e -> e.pipe() == pipe.id(), 8000);
+                event(client, SessionEvent.PipeFailed.class, e -> e.pipeId().equals(pipe.id()), 8000);
                 long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(ms <= 1000 + 2000 + 1500, "failed after " + ms + " ms (k = 1 s, T_fail = 2 s)");
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
@@ -155,18 +155,18 @@ class RelayTest {
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 relay.ageLimitMs = 4000;
-                var thresholds = new ConcurrentHashMap<Long, Long>();
+                var thresholds = new ConcurrentHashMap<PipeId, Long>();
                 PoolPolicy ages = view -> {
-                    var retire = new java.util.HashSet<Long>();
+                    var retire = new java.util.HashSet<PipeId>();
                     for (var m : view.members()) {
-                        long limit = thresholds.computeIfAbsent(m.id(), id -> (long) (2500 * (1 - 0.3 * ThreadLocalRandom.current().nextDouble())));
-                        if (m.age().toMillis() > limit) retire.add(m.id());
+                        long limit = thresholds.computeIfAbsent(m.pipeId(), id -> (long) (2500 * (1 - 0.3 * ThreadLocalRandom.current().nextDouble())));
+                        if (m.age().toMillis() > limit) retire.add(m.pipeId());
                     }
-                    return PoolPolicy.Decision.KEEP.withCount(1).withRetire(retire).withRecheck(Duration.ofMillis(50));
+                    return PoolPolicy.Decision.KEEP.withCount(1).withRetirePipes(retire).withRecheck(Duration.ofMillis(50));
                 };
                 try (var run = client.maintainPipes(through(relay, PipeOptions.defaults()).withPolicy(ages))) {
                     PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().stats().orElseThrow().outbound() == PipeState.Outbound.ACTIVE);
-                    client.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().close();
+                    client.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().close();
                     var echo = ex.submit(() -> {
                         try (var peer = server.acceptStream()) {
                             byte[] b = new byte[1];

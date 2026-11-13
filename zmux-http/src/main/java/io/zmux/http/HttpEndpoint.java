@@ -41,8 +41,10 @@ import java.util.function.Supplier;
  * <p>Every streaming and WebSocket carrier passes the listener's admission
  * ({@link ZmuxListener#admission()}); nothing is written before it is accepted. An exchange
  * carrier is authenticated per request by its {@link ExchangeConfig} PSK instead (the session's
- * credential is not presented on it), and a request that is not authenticated goes to the
- * host's handler with its body replayed. A request that an intermediary forwarded from TLS early data
+ * credential is not presented on it): its authentication header within the listener's
+ * {@link ZmuxListener#firstRecordTimeout()}, before the rest of its body is read. A request that
+ * is not authenticated goes to the host's handler with the bytes read replayed; one that finds no
+ * slot of the listener for it is answered 503 without a body. A request that an intermediary forwarded from TLS early data
  * ({@code Early-Data: 1}) is answered 425 before any admission. A response that carries a
  * downlink is sent with {@code Cache-Control: no-store} and {@code X-Accel-Buffering: no} and
  * without a Content-Length; an HTTP/1.1 connection is closed after a carrier.
@@ -106,7 +108,7 @@ public final class HttpEndpoint implements AutoCloseable {
         return new ChannelInitializer<>() {
             @Override protected void initChannel(Channel ch) {
                 ChannelPipeline p = ch.pipeline();
-                if (trusted != null && trusted.proxyProtocol()) p.addLast(new ProxyProtocolHandler(trusted));
+                if (trusted != null && trusted.isProxyProtocol()) p.addLast(new ProxyProtocolHandler(trusted));
                 if (ssl != null) {
                     p.addLast(ssl.newHandler(ch.alloc()));
                     p.addLast(new ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
@@ -124,6 +126,7 @@ public final class HttpEndpoint implements AutoCloseable {
 
     private void http1(ChannelPipeline p, Supplier<ChannelHandler> host) {
         p.addLast(new HttpServerCodec());
+        p.addLast(new PipelineGate());
         p.addLast(handler());
         p.addLast(host.get());
     }

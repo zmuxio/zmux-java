@@ -19,17 +19,14 @@ public final class PipeOptions {
     final long receivePriority;
     final boolean receiveStandby;
     final long weight;
+    /** null: the session's; {@link Duration#ZERO}: off. */
     final Duration probation;
     final long fateGroup;
-    final Duration suspectFloor;
-    final Duration deadTimeout;
-    final Duration probeInterval;
-    final boolean idleProbesOff;
-    final double probeJitter;
-    final RecordMode mode;
-    /** The Group a join exchanges keys in; 0: Group 1 when usable, otherwise Group 2. */
-    final long group;
-    final boolean noWaitAttached;
+    final PipeLiveness liveness;
+    final RecordMode recordMode;
+    /** The key group a join exchanges keys in; 0: Group 1 when usable, otherwise Group 2. */
+    final long keyGroup;
+    final boolean returnOnReply;
 
     private PipeOptions(Builder b) {
         direction = b.direction;
@@ -40,14 +37,10 @@ public final class PipeOptions {
         weight = b.weight;
         probation = b.probation;
         fateGroup = b.fateGroup;
-        suspectFloor = b.suspectFloor;
-        deadTimeout = b.deadTimeout;
-        probeInterval = b.probeInterval;
-        idleProbesOff = b.idleProbesOff;
-        probeJitter = b.probeJitter;
-        mode = b.mode;
-        group = b.group;
-        noWaitAttached = b.noWaitAttached;
+        liveness = b.liveness;
+        recordMode = b.recordMode;
+        keyGroup = b.keyGroup;
+        returnOnReply = b.returnOnReply;
     }
 
     public static PipeOptions defaults() {
@@ -58,15 +51,12 @@ public final class PipeOptions {
         return new Builder();
     }
 
-    /** These options with the probe settings of a pool decision; unset items keep the current ones. */
-    PipeOptions withProbe(PoolPolicy.Decision d) {
-        java.util.Optional<Duration> interval = d.probeInterval();
-        java.util.OptionalDouble jitter = d.probeJitter();
-        if (interval.isEmpty() && !d.idleProbesOff() && jitter.isEmpty()) return this;
+    /** These options with the liveness settings of a pool decision over their own. */
+    PipeOptions withLiveness(PipeLiveness over) {
+        PipeLiveness l = liveness.over(over);
+        if (l.equals(liveness)) return this;
         Builder b = toBuilder();
-        interval.ifPresent(b::probeInterval);
-        if (d.idleProbesOff()) b.disableIdleProbes();
-        jitter.ifPresent(b::probeJitter);
+        b.liveness = l;
         return b.build();
     }
 
@@ -75,10 +65,10 @@ public final class PipeOptions {
         Builder b = new Builder();
         b.direction = direction; b.sendPriority = sendPriority; b.sendStandby = sendStandby; b.receivePriority = receivePriority;
         b.receiveStandby = receiveStandby; b.weight = weight; b.probation = probation; b.fateGroup = fateGroup;
-        b.suspectFloor = suspectFloor; b.deadTimeout = deadTimeout; b.probeInterval = probeInterval; b.idleProbesOff = idleProbesOff; b.probeJitter = probeJitter;
-        b.mode = mode;
-        b.group = group;
-        b.noWaitAttached = noWaitAttached;
+        b.liveness = liveness;
+        b.recordMode = recordMode;
+        b.keyGroup = keyGroup;
+        b.returnOnReply = returnOnReply;
         return b;
     }
 
@@ -96,12 +86,12 @@ public final class PipeOptions {
                 .weight(weight)
                 .probation(probation == null ? null : ZmuxConfig.nanos(probation))
                 .fateGroup(fateGroup)
-                .suspectFloor(suspectFloor == null ? 0 : ZmuxConfig.nanos(suspectFloor))
-                .deadTimeout(deadTimeout == null ? 0 : ZmuxConfig.nanos(deadTimeout))
-                .probeInterval(idleProbesOff ? 0 : probeInterval == null ? -1 : ZmuxConfig.nanos(probeInterval))
-                .probeJitter(probeJitter)
-                .mode(mode == null ? null : io.zmux.internal.join.Mode.of(mode))
-                .group(group)
+                .suspectFloor(liveness.suspectFloorNanos())
+                .deadTimeout(liveness.deadTimeoutNanos())
+                .probeInterval(liveness.probeIntervalNanos())
+                .probeJitter(liveness.probeJitterRaw())
+                .mode(recordMode == null ? null : io.zmux.internal.join.Mode.of(recordMode))
+                .group(keyGroup)
                 .build();
     }
 
@@ -115,14 +105,10 @@ public final class PipeOptions {
         private long weight = 1;
         private Duration probation;
         private long fateGroup;
-        private Duration suspectFloor;
-        private Duration deadTimeout;
-        private Duration probeInterval;
-        private boolean idleProbesOff;
-        private double probeJitter = Double.NaN;
-        private RecordMode mode;
-        private long group;
-        private boolean noWaitAttached;
+        private PipeLiveness liveness = PipeLiveness.inherit();
+        private RecordMode recordMode;
+        private long keyGroup;
+        private boolean returnOnReply;
 
         private Builder() {}
 
@@ -130,7 +116,7 @@ public final class PipeOptions {
 
         /** The tier of the local outbound direction (lower is preferred); unset: the peer's request. */
         public Builder sendPriority(long tier) {
-            if (tier < 0 || tier > io.zmux.carrier.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
+            if (tier < 0 || tier > io.zmux.internal.wire.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
             sendPriority = tier;
             return this;
         }
@@ -140,7 +126,7 @@ public final class PipeOptions {
 
         /** The tier requested for the peer's outbound direction. */
         public Builder receivePriority(long tier) {
-            if (tier < 0 || tier > io.zmux.carrier.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
+            if (tier < 0 || tier > io.zmux.internal.wire.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
             receivePriority = tier;
             return this;
         }
@@ -155,75 +141,41 @@ public final class PipeOptions {
             return this;
         }
 
-        /** The base of the pipe's probation; zero disables it. Unset: the session's. */
+        /** The base of the pipe's probation, positive; not calling it: the session's. */
         public Builder probation(Duration d) {
-            if (d.isNegative()) throw new IllegalArgumentException("negative probation");
+            if (java.util.Objects.requireNonNull(d, "probation").isNegative() || d.isZero()) throw new IllegalArgumentException("probation must be positive");
             probation = d;
             return this;
         }
 
+        /** The pipe's probation off. */
+        public Builder noProbation() { probation = Duration.ZERO; return this; }
+
         /** Groups pipes that share a path; 0: an independent path. */
         public Builder fateGroup(long g) {
-            if (g < 0 || g > io.zmux.carrier.VarInt.MAX) throw new IllegalArgumentException("fate group exceeds varint62");
+            if (g < 0 || g > io.zmux.internal.wire.VarInt.MAX) throw new IllegalArgumentException("fate group exceeds varint62");
             fateGroup = g;
             return this;
         }
 
-        /** The pipe's suspicion floor, at least 50 ms; unset: the session's. */
-        public Builder suspectFloor(Duration d) {
-            suspectFloor = ZmuxConfig.atLeast(d, Duration.ofMillis(50), "suspectFloor");
-            return this;
-        }
-
-        /** The pipe's dead timeout, at least 1 s; unset: the session's. */
-        public Builder deadTimeout(Duration d) {
-            deadTimeout = ZmuxConfig.atLeast(d, Duration.ofSeconds(1), "deadTimeout");
-            return this;
-        }
+        /** The pipe's own liveness settings; not calling it: every one follows the session's. */
+        public Builder liveness(PipeLiveness l) { liveness = java.util.Objects.requireNonNull(l, "liveness"); return this; }
 
         /**
-         * The probe interval k of the pipe while it is idle, at least 1 s; unset: the session's.
-         * Without an outbound direction at the peer at most 15 s takes effect.
+         * The key group the join exchanges keys in, 1 or 2; not calling it: Group 1 when it is
+         * usable in the session, otherwise Group 2. A key group the session cannot use falls back to
+         * that default.
          */
-        public Builder probeInterval(Duration d) {
-            ZmuxConfig.probeIntervalOf(d, "probeInterval");
-            ZmuxConfig.nanos(d);
-            probeInterval = d;
-            idleProbesOff = false;
+        public Builder keyGroup(long g) {
+            if (g < 1) throw new IllegalArgumentException("keyGroup " + g);
+            keyGroup = g;
             return this;
         }
 
-        /**
-         * The idle probes of the pipe off, except without an outbound direction at the peer,
-         * where they cannot be turned off.
-         */
-        public Builder disableIdleProbes() {
-            probeInterval = null;
-            idleProbesOff = true;
-            return this;
-        }
-
-        /** The probe jitter j of the pipe, {@code 0 <= j < 1}: each probe waits a uniform draw from [k(1 - j), k]; unset: the session's. */
-        public Builder probeJitter(double j) {
-            probeJitter = ZmuxConfig.jitter(j, "probeJitter");
-            return this;
-        }
-
-        /**
-         * The Group the join exchanges keys in; 0, the default:
-         * Group 1 when it is usable in the session, otherwise Group 2. A Group the session cannot use
-         * falls back to that default.
-         */
-        public Builder group(long g) {
-            if (g < 0) throw new IllegalArgumentException("group " + g);
-            group = g;
-            return this;
-        }
-
-        /** The carrier's record mode; null (the default): the configuration's {@link ZmuxConfig.Builder#recordPolicy}, else Sealed. */
-        public Builder mode(RecordMode m) {
-            if (m == RecordMode.UNMANAGED) throw new IllegalArgumentException("a join has no Unmanaged mode");
-            mode = m;
+        /** The carrier's record mode; not calling it: the configuration's {@link ZmuxConfig.Builder#recordPolicy}, else Sealed. */
+        public Builder recordMode(RecordMode m) {
+            if (java.util.Objects.requireNonNull(m, "recordMode") == RecordMode.UNMANAGED) throw new IllegalArgumentException("a join has no Unmanaged record mode");
+            recordMode = m;
             return this;
         }
 
@@ -234,7 +186,7 @@ public final class PipeOptions {
          * unless it resumes: an application that replaces pipes itself waits for the attachment
          * first. Pools and their redials always join this way and judge the attachment themselves.
          */
-        public Builder noWaitAttached(boolean on) { noWaitAttached = on; return this; }
+        public Builder returnOnReply(boolean on) { returnOnReply = on; return this; }
 
         public PipeOptions build() {
             return new PipeOptions(this);

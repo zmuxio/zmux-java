@@ -4,8 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.Candidate;
 import io.zmux.CandidateOutcome;
 import io.zmux.CarrierKind;
-import io.zmux.CarrierMode;
-import io.zmux.ModePolicy;
+import io.zmux.CarrierChoice;
+import io.zmux.CarrierChoicePolicy;
 import io.zmux.PipeAuth;
 import io.zmux.SessionEvent;
 import io.zmux.Zmux;
@@ -25,7 +25,7 @@ import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** The HTTP candidates in the carrier selection of {@link Zmux#dial(CarrierMode, io.zmux.ZmuxConfig, ModePolicy)}. */
+/** The HTTP candidates in the carrier selection of {@link Zmux#dial(CarrierChoice, io.zmux.ZmuxConfig, CarrierChoicePolicy)}. */
 @Timeout(120)
 class ModeHttpTest {
     static final byte[] PSK = ExchangeTest.PSK;
@@ -42,7 +42,7 @@ class ModeHttpTest {
     }
 
     static Function<ZmuxConfig.Builder, ZmuxConfig.Builder> session(boolean multipath, ShaperFactory shaper) {
-        return b -> (multipath ? b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO) : b).shaper(shaper);
+        return b -> (multipath ? b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation() : b).shaper(shaper);
     }
 
     /** The same, its sessions shaped by shaper. */
@@ -68,8 +68,8 @@ class ModeHttpTest {
                 c.splitCandidate(url, Map.of()), c.exchangeCandidate(url.toString(), clientExchange()));
     }
 
-    static ModePolicy fast(boolean noJoin) {
-        return ModePolicy.defaults().withTimer(3, Duration.ofMillis(400), Duration.ofSeconds(1)).withSettle(Duration.ofMillis(200)).withNoJoin(noJoin);
+    static CarrierChoicePolicy fast(boolean noJoin) {
+        return CarrierChoicePolicy.defaults().withTimer(3, Duration.ofMillis(400), Duration.ofSeconds(1)).withSettle(Duration.ofMillis(200)).withJoin(!noJoin);
     }
 
     static List<String> tries(ZmuxSession s) {
@@ -81,7 +81,7 @@ class ModeHttpTest {
     @Test void eachKindExplicitly() throws Exception {
         try (var f = fixture(false); var c = f.client(b -> b)) {
             for (Candidate k : candidates(c, f.base)) {
-                try (var s = Zmux.dial(CarrierMode.explicit(k), f.config, null)) {
+                try (var s = Zmux.dial(CarrierChoice.explicit(k), f.config, null)) {
                     assertEquals(k.kind(), s.stats().carrier());
                     assertEquals(List.of(k.kind() + ":" + CandidateOutcome.USABLE), tries(s));
                     f.echo(s);
@@ -98,7 +98,7 @@ class ModeHttpTest {
                 Seen client = new Seen();
                 server.pipes.clear();
                 var cfg = session(false, client).apply(ZmuxConfig.builder().eventLoops(f.loops)).build();
-                try (var s = Zmux.dial(CarrierMode.explicit(k), cfg, null)) {
+                try (var s = Zmux.dial(CarrierChoice.explicit(k), cfg, null)) {
                     f.echo(s);
                     client.awaitKind(k.kind());
                     server.awaitKind(k.kind());
@@ -114,13 +114,13 @@ class ModeHttpTest {
         Seen server = new Seen(), client = new Seen();
         try (var f = fixture(true, server); var c = f.client(b -> b)) {
             var cfg = session(true, client).apply(ZmuxConfig.builder().eventLoops(f.loops)).build();
-            try (var s = Zmux.dial(CarrierMode.auto(candidates(c, f.base)), cfg, fast(false))) {
+            try (var s = Zmux.dial(CarrierChoice.auto(candidates(c, f.base)), cfg, fast(false))) {
                 assertEquals(CarrierKind.EXCHANGE, s.stats().carrier());
                 client.awaitKind(CarrierKind.WEBSOCKET);
                 server.awaitKind(CarrierKind.WEBSOCKET);
                 assertEquals(CarrierKind.EXCHANGE, client.pipes.getFirst().carrier());
                 assertEquals(CarrierKind.EXCHANGE, server.pipes.getFirst().carrier());
-                for (ShapedPipe p : client.pipes) assertEquals(p.id() == 0, p.carrier() == CarrierKind.EXCHANGE, p.toString());
+                for (ShapedPipe p : client.pipes) assertEquals(p.id().value() == 0, p.carrier() == CarrierKind.EXCHANGE, p.toString());
                 f.echo(s);
             }
         }
@@ -129,7 +129,7 @@ class ModeHttpTest {
     /** Established on the exchange carrier, the session moves to the most preferred kind by joining it, without a second session. */
     @Test void autoJoinsThePreferredKind() throws Exception {
         try (var f = fixture(true); var c = f.client(b -> b)) {
-            try (var s = Zmux.dial(CarrierMode.auto(candidates(c, f.base)), f.config, fast(false))) {
+            try (var s = Zmux.dial(CarrierChoice.auto(candidates(c, f.base)), f.config, fast(false))) {
                 assertEquals(CarrierKind.EXCHANGE, s.stats().carrier(), "established on the exchange carrier");
                 SessionEvent e;
                 do {
@@ -138,8 +138,8 @@ class ModeHttpTest {
                 } while (!(e instanceof SessionEvent.CarrierChosen ch && ch.kind() == CarrierKind.WEBSOCKET));
                 assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier());
                 long until = System.nanoTime() + 5_000_000_000L;
-                while (s.pipes().stream().anyMatch(p -> p.id() == 0) && System.nanoTime() < until) Thread.sleep(10);
-                assertTrue(s.pipes().stream().noneMatch(p -> p.id() == 0), "the exchange pipe retired: " + s.pipes());
+                while (s.pipes().stream().anyMatch(p -> p.id().value() == 0) && System.nanoTime() < until) Thread.sleep(10);
+                assertTrue(s.pipes().stream().noneMatch(p -> p.id().value() == 0), "the exchange pipe retired: " + s.pipes());
                 f.echo(s);
                 assertNull(f.listener.accept(Duration.ofMillis(200)), "a second session");
             }
@@ -149,8 +149,8 @@ class ModeHttpTest {
 
     @Test void anExplicitKindThatIsRefusedIsReported() throws Exception {
         try (var f = new Fixture(b -> b, b -> b, b -> b.streaming(), false, null); var c = f.client(b -> b)) {
-            var e = assertThrows(io.zmux.ModeException.class,
-                    () -> Zmux.dial(CarrierMode.explicit(candidates(c, f.base).getFirst()), f.config, null));
+            var e = assertThrows(io.zmux.CarrierChoiceException.class,
+                    () -> Zmux.dial(CarrierChoice.explicit(candidates(c, f.base).getFirst()), f.config, null));
             assertEquals(1, e.results().size());
             assertEquals(CandidateOutcome.REFUSED, e.results().getFirst().outcome());
         }

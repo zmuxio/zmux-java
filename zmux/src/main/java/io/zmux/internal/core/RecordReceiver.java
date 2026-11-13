@@ -7,7 +7,7 @@ import io.zmux.internal.wire.Gates;
 import io.zmux.internal.wire.Records;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 
@@ -30,13 +30,6 @@ final class RecordReceiver {
 
         /** Applies one decoded frame. */
         void dispatch(Pipe p, Frame f, ReadBuf buf) throws WireException;
-
-        /**
-         * Whether a CONNECTION_CLOSE leading the record would answer an unconfirmed local join
-         * of p: the peer holds no session for its locator.
-         */
-
-    
 
         /** A PIPE_ACK while the session waits for its lanes before CONNECTION_CLOSE. */
         void closingAck(Frame f);

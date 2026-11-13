@@ -13,5 +13,5 @@ public interface Anchor {
     /** The reserved credential type of "no credential", which a sender does not send. */
     long CRED_TYPE_NONE = 0;
 
-    Verdict verify(VerifyInput in) throws CredentialsFailedException, VerifierUnavailableException;
+    VerifyVerdict verify(VerifyInput in) throws CredentialsFailedException, VerifierUnavailableException;
 }

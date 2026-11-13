@@ -10,7 +10,7 @@ import static io.zmux.internal.core.TraceFrames.num;
 import io.zmux.internal.join.Acceptor;
 import io.zmux.internal.join.Hello;
 import io.zmux.internal.join.HelloPayload;
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.join.JoinPipe;
 import io.zmux.internal.join.Joiner;
 import io.zmux.internal.join.Kdf;
@@ -21,7 +21,7 @@ import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameDecoder;
 import io.zmux.internal.wire.FrameKind;
 import io.zmux.internal.wire.TransportError;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -464,8 +464,8 @@ final class TraceRunner {
 
     // ---- listener carriers  ----
 
-    final CarrierAdmission admission = new CarrierAdmission(0, 0);
-    final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing(0, 0);
+    final CarrierAdmission admission = new CarrierAdmission(0, 0, 0, 0, 0);
+    final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing();
 
     void listenerUp(Map<String, Object> st) {
         RCarrier c = new RCarrier();
@@ -477,8 +477,8 @@ final class TraceRunner {
         if (st.get("conn") instanceof String cn) c.conn = cn.intern();
         if (st.get("pairing") instanceof String tok) {
             boolean up = "in".equals(c.dir);
-            CarrierAdmission.SplitPairing.Result res = pairing.offer(hex(tok), up, null, c, Time.add(now, 10 * Time.SECOND));
-            if (res == CarrierAdmission.SplitPairing.Result.REJECT || res == CarrierAdmission.SplitPairing.Result.REFUSE) {
+            CarrierAdmission.SplitPairing.Result res = pairing.offer(hex(tok), up, c);
+            if (res == CarrierAdmission.SplitPairing.Result.REJECT) {
                 c.rejected = true;
             } else if (res == CarrierAdmission.SplitPairing.Result.DONE) {
                 RCarrier o = (RCarrier) pairing.partner();
@@ -496,7 +496,7 @@ final class TraceRunner {
         carriers.put(c.name, c);
         if (st.get("source") instanceof String src) {
             java.net.InetSocketAddress a = io.zmux.TestAddr.literal(src);
-            if (!admission.admit(a)) {
+            if (admission.take(a) != CarrierAdmission.TAKEN) {
                 c.rejected = true;
                 return;
             }

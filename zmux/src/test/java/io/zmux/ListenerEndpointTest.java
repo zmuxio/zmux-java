@@ -53,7 +53,7 @@ class ListenerEndpointTest {
     @Test void initiatedExternalSessionAcceptsJoinsOnEveryFraming() throws Exception {
         try (EventLoops loops = EventLoops.create(4)) {
             var cfg = config(loops);
-            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
                     for (Framing framing : Framing.values()) {
@@ -90,7 +90,7 @@ class ListenerEndpointTest {
                         old.finish(); assertArrayEquals(new byte[] {7},SessionTest.readAll(accepted));
                         accepted.finish(); assertArrayEquals(new byte[0],SessionTest.readAll(old));
                         PipePoolTest.await(() -> a1.pipes().size() > 1);
-                        a1.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort();
+                        a1.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
                         exchange(a1,b1); exchange(b1,a1);
                     }
                 }
@@ -114,7 +114,7 @@ class ListenerEndpointTest {
     @Test void listenerCloseStopsJoiningButKeepsHandedOutSessionsUsable() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops);
-            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(pair[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
                 try (var client = a.open(pair[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
                     assertTrue((Integer)client.run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(client.core)) > 0);
@@ -135,7 +135,7 @@ class ListenerEndpointTest {
     }
     @Test void closeWakesBlockedAcceptAndEveryAcceptThenThrows() throws Exception {
         try (EventLoops loops = EventLoops.create(1); var ex = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
-            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
+            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
             var blocked = ex.submit(() -> listener.accept());
             var timed = ex.submit(() -> listener.accept(Duration.ofSeconds(30)));
             Thread.sleep(20); listener.close();
@@ -147,7 +147,7 @@ class ListenerEndpointTest {
         }
     }
     @Test void failedExternalStartupRollsBackAllRoutingAndResources() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var endpoint = Zmux.listener(ListenerConfig.of(config(loops)))) {
+        try (EventLoops loops = EventLoops.create(2); var endpoint = ZmuxListener.of(ListenerConfig.of(config(loops)))) {
             var readerClosed = new java.util.concurrent.atomic.AtomicInteger();
             var writerClosed = new java.util.concurrent.atomic.AtomicInteger();
             PipeReader reader = new PipeReader() {
@@ -166,7 +166,7 @@ class ListenerEndpointTest {
     @Test void repeatedEndpointSessionsUnregisterWithoutRetainingClosedDrivers() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops);
-            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 for (int i=0;i<20;i++) {
                     var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("repeat"))).closed();
                     try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
@@ -182,7 +182,7 @@ class ListenerEndpointTest {
     @Test void closedLoopGroupRejectsBeforeDialAndReturnsExternalTransportOwnership() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var target = new java.net.ServerSocket()) {
             var cfg = config(loops);
-            try (var endpoint = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var endpoint = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 target.bind(NetworkTest.any()); target.setSoTimeout(100);
                 var address = (java.net.InetSocketAddress)target.getLocalSocketAddress(); loops.close();
                 assertThrows(IllegalStateException.class,() -> endpoint.connect(address));
@@ -199,7 +199,7 @@ class ListenerEndpointTest {
                     };
                     PipeIo carrier = PipeIo.of(reader,writer); int kind = mode;
                     assertThrows(IllegalStateException.class,() -> {
-                        if (kind==0) endpoint.open(carrier, Role.CLIENT); else if (kind==1) endpoint.open(carrier, Role.PEER); else Zmux.open(carrier, Role.CLIENT, cfg);
+                        if (kind==0) endpoint.open(carrier, Role.CLIENT); else if (kind==1) endpoint.open(carrier, Role.AUTO); else Zmux.open(carrier, Role.CLIENT, cfg);
                     });
                     assertEquals(2,closes.get());
                 }
@@ -210,12 +210,12 @@ class ListenerEndpointTest {
     @Test void symmetricSessionsAdvertiseRoutesWithoutEnteringTheAcceptQueue() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops);
-            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var remote = CompletableFuture.supplyAsync(() -> {
-                    try { return b.open(bootstrap[1], Role.PEER); } catch(java.io.IOException e) { throw new CompletionException(e); }
+                    try { return b.open(bootstrap[1], Role.AUTO); } catch(java.io.IOException e) { throw new CompletionException(e); }
                 }, r -> Thread.ofVirtual().start(r));
-                try (var first = a.open(bootstrap[0], Role.PEER); var second = remote.get(3,TimeUnit.SECONDS)) {
+                try (var first = a.open(bootstrap[0], Role.AUTO); var second = remote.get(3,TimeUnit.SECONDS)) {
                     first.designateDialer(true); second.designateDialer(false);
                     assertNull(a.accept(Duration.ofMillis(10))); assertNull(b.accept(Duration.ofMillis(10)));
                     var extra = MemoryPipe.pair(Framing.BYTE_STREAM); a.handle(extra[1], JoinHint.inBand(TestAddr.peer("joined"))).closed();
@@ -230,7 +230,7 @@ class ListenerEndpointTest {
     @Test void inboundClosedLoopAndAlpnRejectionReturnBothHalvesEvenIfReaderCloseFails() throws Exception {
         for (boolean stopped : new boolean[] {false,true}) try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var endpoint = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var endpoint = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 if (stopped) loops.close();
                 var reads = new java.util.concurrent.atomic.AtomicInteger(); var writes = new java.util.concurrent.atomic.AtomicInteger();
                 PipeReader reader = new PipeReader() {

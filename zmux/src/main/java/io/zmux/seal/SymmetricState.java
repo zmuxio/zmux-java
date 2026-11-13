@@ -3,7 +3,6 @@ package io.zmux.seal;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
 import io.zmux.internal.join.CipherState;
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Kdf;
 import io.zmux.internal.join.Suite;
 import java.util.Arrays;

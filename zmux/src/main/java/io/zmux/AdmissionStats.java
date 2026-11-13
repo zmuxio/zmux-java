@@ -6,14 +6,15 @@ package io.zmux;
  * once, when the outcome is decided, in exactly one field. Read without a lock; two counts are
  * not a consistent snapshot.
  *
- * @param accepted carriers decided with {@link Admission.Verdict#ACCEPT}; each is then a pipe
+ * @param accepted carriers decided with {@link AdmissionVerdict#ACCEPT}; each is then a pipe
  *     input counted once more in the listener's other fields
- * @param fallback carriers decided with {@link Admission.Verdict#FALLBACK}, stalled for want of a target included
- * @param stalled carriers decided with {@link Admission.Verdict#STALL} whose stall began (counted when decided)
- * @param closed carriers decided with {@link Admission.Verdict#CLOSE}, a decider that failed,
+ * @param fallback carriers decided with {@link AdmissionVerdict#FALLBACK}, stalled for want of a target included
+ * @param stalled carriers decided with {@link AdmissionVerdict#STALL} whose stall began (counted when decided)
+ * @param closed carriers decided with {@link AdmissionVerdict#CLOSE}, a decider that failed,
  *     a skip outside the prefix, and decisions cancelled when the listener stopped
- * @param stallOverflow carriers decided with {@link Admission.Verdict#STALL} that were closed at
- *     once because their source had its share of stalled carriers
+ * @param stallOverflow carriers decided with {@link AdmissionVerdict#STALL} that were closed at
+ *     once because their source had its share of stalled carriers, or the listener's stalled carriers
+ *     held half of {@link ListenerConfig#maxPending()}
  * @param peekTimedOut carriers whose decision was not taken within the peek timeout
  * @param handshakeFailed carriers whose outer handshake (TLS, QUIC) failed or timed out before a decision
  */

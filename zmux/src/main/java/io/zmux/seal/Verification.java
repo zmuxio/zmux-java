@@ -6,7 +6,7 @@ package io.zmux.seal;
  */
 final class Verification {
     /** A judged peer: the verdict and whether the peer is PQ authenticated. */
-    record Judged(Verdict verdict, boolean pqAuthenticated) {}
+    record Judged(VerifyVerdict verdict, boolean pqAuthenticated) {}
 
     private Verification() {}
 
@@ -18,7 +18,7 @@ final class Verification {
      * proof verified.
      */
     static Judged judge(Anchor anchor, VerifyInput in, Proof proof, boolean requirePqAuth) throws CredentialsFailedException, VerifierUnavailableException {
-        Verdict v;
+        VerifyVerdict v;
         try {
             v = anchor.verify(in);
         } catch (VirtualMachineError e) {
@@ -34,7 +34,7 @@ final class Verification {
     }
 
     /** Checks the proof the verdict's proof key requires; true when that key is PQ. No proof key: false. */
-    private static boolean proofIsPq(Verdict v, Proof proof) throws CredentialsFailedException {
+    private static boolean proofIsPq(VerifyVerdict v, Proof proof) throws CredentialsFailedException {
         byte[] proofKey = v.proofKeyId();
         if (proofKey == null) return false;
         if (proof == null) throw new CredentialsFailedException("no proof by the verdict's proof key");

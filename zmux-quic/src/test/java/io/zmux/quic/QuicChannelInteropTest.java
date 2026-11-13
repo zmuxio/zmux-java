@@ -108,7 +108,7 @@ class QuicChannelInteropTest {
             Duration d = Duration.ofMillis(40);
             try (var relay = lossy ? new QuicChannelTest.LossyRelay(server, d) : null;
                  var endpoint = new QuicClient(TestTls.client, QuicOptions.defaults())) {
-                ZmuxSession c = endpoint.connect(lossy ? relay.address() : server, "localhost", config).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                ZmuxSession c = endpoint.connectAsync(lossy ? relay.address() : server, "localhost", config).get(10, TimeUnit.SECONDS);
                 try {
                     int n = 20;
                     for (int i = 0; i < n; i++) {
@@ -154,7 +154,7 @@ class QuicChannelInteropTest {
     void javaServer(String env) throws Exception {
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = QuicChannelTest.config(loops);
-            try (var listener = Zmux.listener(ListenerConfig.of(config));
+            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                  var peer = new Peer(peer(env), "client", "127.0.0.1:" + server.address().getPort(), "20")) {
                 ZmuxSession s = listener.accept(Duration.ofSeconds(20));

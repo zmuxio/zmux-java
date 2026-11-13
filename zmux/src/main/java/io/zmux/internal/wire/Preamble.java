@@ -1,6 +1,5 @@
 package io.zmux.internal.wire;
 
-import io.zmux.carrier.VarInt;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;

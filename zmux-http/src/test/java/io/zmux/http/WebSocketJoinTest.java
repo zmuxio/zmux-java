@@ -48,7 +48,7 @@ class WebSocketJoinTest {
     }
 
     @Test void aLateReplyReportLosesNothingOnMessages() throws Exception {
-        try (var f = new Fixture(b -> b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO),
+        try (var f = new Fixture(b -> b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation(),
                 b -> b, b -> b.webSocket(), false, null); var c = f.client(b -> b)) {
             var inner = f.endpoint.initializer(null, () -> new HostHandler(new java.util.concurrent.LinkedBlockingQueue<>()));
             Channel late = new ServerBootstrap().group(f.group).channel(NioServerSocketChannel.class).childHandler(new ChannelInitializer<>() {
@@ -60,7 +60,7 @@ class WebSocketJoinTest {
             try (var client = Zmux.open(c.webSocketPipe(WebSocketTest.ws(f.base), Map.of(), List.of(), null), Role.CLIENT, f.config);
                  var server = f.listener.accept(Duration.ofSeconds(5))) {
                 URI url = URI.create("ws://localhost:" + ((InetSocketAddress) late.localAddress()).getPort() + "/z");
-                ZmuxPipe pipe = client.addPipe(c.webSocketPipe(url, Map.of(), List.of(), null), PipeOptions.builder().mode(RecordMode.SEALED).build());
+                ZmuxPipe pipe = client.addPipe(c.webSocketPipe(url, Map.of(), List.of(), null), PipeOptions.builder().recordMode(RecordMode.SEALED).build());
                 long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DELAY * 2);
                 while (System.nanoTime() < end) Fixture.exchange(client, server, 20_000);
                 Thread.sleep(DELAY);

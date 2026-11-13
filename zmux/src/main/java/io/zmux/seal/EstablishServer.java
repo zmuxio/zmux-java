@@ -2,7 +2,6 @@ package io.zmux.seal;
 
 import io.zmux.internal.join.Framing;
 import io.zmux.internal.join.Frames;
-import io.zmux.carrier.SecureCarrierException;
 import java.util.List;
 
 /**
@@ -35,7 +34,7 @@ final class EstablishServer {
      */
     public static EstablishServer create(EstablishHello h, Framing f, byte[] psk, byte[] binding, StaticKey key)
             throws SecureCarrierException {
-        return create(h, f, psk, binding, key, StaticKey::generate);
+        return create(h, f, psk, binding, key, StaticKey::random);
     }
 
     /** With a given source of ephemeral keys, for vectors only. */
@@ -45,8 +44,8 @@ final class EstablishServer {
         return new EstablishServer(hs, h, f);
     }
 
-    /** Bounds the application data of messages 1 and 3; 0 is the default. */
-    public EstablishServer maxAppData(int n) {
+    /** Bounds the application data of messages 1 and 3, in bytes; {@link Long#MAX_VALUE}: none. */
+    EstablishServer maxAppData(long n) {
         hs.maxAppData(n);
         return this;
     }
@@ -59,7 +58,7 @@ final class EstablishServer {
     /** What is known of the client before message 2: its PSK identity and its data of message 1. */
     public AppDataSource.Known known(Object localContext) {
         Profile p = hello.profile();
-        return new AppDataSource.Known(p, new VerifyInput(VerifyInput.Role.CLIENT, p, null, p.hasPsk() ? hello.handle() : null, null, early, localContext), null);
+        return new AppDataSource.Known(p, new VerifyInput(io.zmux.Role.CLIENT, p, null, p.hasPsk() ? hello.handle() : null, null, early, localContext), null);
     }
 
     /**
@@ -86,7 +85,7 @@ final class EstablishServer {
      */
     public Verification.Judged verify(Anchor anchor, Finish finish, Object localContext, boolean requirePqAuth)
             throws CredentialsFailedException, VerifierUnavailableException {
-        return Verification.judge(anchor, new VerifyInput(VerifyInput.Role.CLIENT, hello.profile(), finish.peerStatic(),
+        return Verification.judge(anchor, new VerifyInput(io.zmux.Role.CLIENT, hello.profile(), finish.peerStatic(),
                 hello.profile().hasPsk() ? hello.handle() : null, finish.credential(), finish.appData(), localContext), proof, requirePqAuth);
     }
 

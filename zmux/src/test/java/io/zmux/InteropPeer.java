@@ -12,13 +12,15 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Scripted test peer; command contract is shared with zmux-rs/interop/peer. No wire parser.
- * The quic- modes run io.zmux.quic.QuicInteropPeer, of the QUIC module's test classes, with this peer's script.
+ * The quic- modes run io.zmux.quic.QuicInteropPeer, of the QUIC module's test classes, and the wss- modes
+ * io.zmux.http.WssInteropPeer, of the HTTP module's, with this peer's script; the tls- and seal- modes are
+ * {@link CarrierInteropPeer}.
  */
 public final class InteropPeer {
     private static final byte[] PSK = "zmux interop pre-shared key 0123".getBytes(StandardCharsets.US_ASCII);
     private InteropPeer() {}
     public static void main(String[] args) throws Exception {
-        if (args.length < 1) throw new IllegalArgumentException("server|client|mp-server|mp-client [address] | quic-server [sessions] | quic-client address");
+        if (args.length < 1) throw new IllegalArgumentException("server|client|mp-server|mp-client [address] | quic-server [sessions] [exporter] | quic-client address [exporter] | tls-server | tls-client|tls-split-client address | wss-server | wss-client address | seal-server profiles [address] | seal-client address profile");
         Thread watchdog = Thread.ofPlatform().daemon(true).start(() -> {
             try { Thread.sleep(Duration.ofSeconds(90)); Runtime.getRuntime().halt(124); }
             catch (InterruptedException expected) { /* completed */ }
@@ -31,28 +33,30 @@ public final class InteropPeer {
     }
     /** The QUIC drivers' contract: close replies "closing", whose FIN goes before the close that could overtake it. */
     private static volatile boolean closeReply;
-    private static void quic(String[] args) throws Exception {
-        closeReply = true;
+    private static void delegate(String peerClass, String[] args) throws Exception {
         java.util.function.Consumer<ZmuxSession> script = session -> {
-            try { serve(session); } catch (RuntimeException | Error e) { throw e; } catch (Exception e) { throw new IllegalStateException(e); }
+            try { serve(session, null); } catch (RuntimeException | Error e) { throw e; } catch (Exception e) { throw new IllegalStateException(e); }
         };
         try {
-            Class.forName("io.zmux.quic.QuicInteropPeer").getMethod("run", String[].class, java.util.function.Consumer.class).invoke(null, args, script);
+            Class.forName(peerClass).getMethod("run", String[].class, java.util.function.Consumer.class).invoke(null, args, script);
         } catch (java.lang.reflect.InvocationTargetException e) {
             throw e.getCause() instanceof Exception cause ? cause : e;
         }
     }
     private static void run(String[] args) throws Exception {
-        if (args[0].startsWith("quic-")) { quic(args); return; }
+        // The modes of the other modules' test classes: QUIC, and WebSocket over TLS (zmux-http).
+        if (args[0].startsWith("quic-")) { closeReply = true; delegate("io.zmux.quic.QuicInteropPeer", args); return; }
+        if (args[0].startsWith("wss-")) { delegate("io.zmux.http.WssInteropPeer", args); return; }
+        if (args[0].startsWith("tls-") || args[0].startsWith("seal-")) { CarrierInteropPeer.run(args); return; }
         boolean mp = args[0].startsWith("mp-");
         String mode = mp ? args[0].substring(3) : args[0];
         if (!List.of("server", "client").contains(mode)) throw new IllegalArgumentException("unknown mode");
         var remote = address(args.length > 1 ? args[1] : "127.0.0.1:0");
         try (var loops = EventLoops.create(2)) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingUniStreams(16);
+            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16);
             if (mp) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
-            try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : Zmux.listener(ListenerConfig.of(config))) {
+            try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : ZmuxListener.of(ListenerConfig.of(config))) {
                 ZmuxSession session;
                 if (mode.equals("server")) {
                     var bound = endpoint.localAddress(); System.out.println("LISTEN " + bound.getHostString() + ":" + bound.getPort());
@@ -62,14 +66,18 @@ public final class InteropPeer {
                     session = endpoint.connect(remote);
                     if (mp) session.addPipe(remote, PipeOptions.defaults());
                 }
-                serve(session);
+                serve(session, null);
             }
         }
     }
-    /** Answers the script on session until it closes, then closes it. */
-    private static void serve(ZmuxSession session) throws Exception {
+    /**
+     * Answers the script on session until it closes, then closes it; prints ESTABLISHED first, and
+     * runs afterEstablished (if any) once that line is out.
+     */
+    static void serve(ZmuxSession session, java.util.function.Consumer<ZmuxSession> afterEstablished) throws Exception {
         try (session; var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
             System.out.println("ESTABLISHED");
+            if (afterEstablished != null) afterEstablished.accept(session);
             var failure = new AtomicReference<Throwable>();
             submit(session, jobs, failure, () -> {
                 try { while (true) { var stream = session.acceptStream(); submit(session, jobs, failure, () -> handle(session, stream)); } }
@@ -149,12 +157,13 @@ public final class InteropPeer {
                     read(stream); reply(stream, "dgram-done");
                 }
                 case "schedule" -> { if (!arg.equals("round-robin")) throw new IOException("unknown policy"); session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN); reply(stream, "scheduled"); }
-                case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
+                case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
                 case "goaway" -> { session.run(op -> { session.core.shutdown(Long.parseLong(arg), null); return Boolean.TRUE; }); read(stream); reply(stream, "draining"); }
                 case "close" -> {
                     String[] close = arg.split(":", 2); read(stream);
                     if (closeReply) { reply(stream, "closing"); Thread.sleep(50); }
-                    session.close(new ApplicationError(Long.parseLong(close[0]), close.length > 1 ? close[1] : ""));
+                    session.abort(Long.parseLong(close[0]), close.length > 1 ? close[1] : "");
+                    try { session.closed().get(3, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ended) { /* the abort hands over in the background */ }
                 }
                 default -> reply(stream, "unknown=" + command);
             }
@@ -167,7 +176,7 @@ public final class InteropPeer {
             catch (SessionClosedException expected) { /* pending operations end with the session */ }
             catch (Throwable error) {
                 if (failure.compareAndSet(null, error)) error.printStackTrace();
-                session.close(new ApplicationError(1, "scripted peer failed"));
+                session.abort(1, "scripted peer failed");
             }
         });
     }

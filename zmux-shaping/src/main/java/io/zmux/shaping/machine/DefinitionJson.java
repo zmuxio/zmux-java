@@ -435,7 +435,7 @@ final class DefinitionJson {
         ShapingBudget draw(Sampler s) {
             WireAccount a = WireAccount.NONE;
             if (wire != null) a = new WireAccount(draw(s, wire[0]), draw(s, wire[1]), draw(s, wire[2]));
-            return new ShapingBudget(a, Duration.ofNanos(maxDelay * 1000), wire != null && !a.isSet());
+            return new ShapingBudget(a, maxDelay > 0 ? Duration.ofNanos(maxDelay * 1000) : null, !(wire != null && !a.isSet()));
         }
 
         private static long draw(Sampler s, Value v) { return v == null ? 0 : s.draw(v.segments); }
@@ -451,13 +451,14 @@ final class DefinitionJson {
             a = new WireAccount(constant(w, "initial", Family.COUNTER), constant(w, "per_mb", Family.RATE), constant(w, "per_sec", Family.RATE));
             noInjection |= !a.isSet();
         }
-        Duration maxDelay = Duration.ZERO;
+        Duration maxDelay = ShapingLimits.DEFAULT_MAX_DELAY;
         if (d.containsKey("max_delay")) {
             long n = integer(d.get("max_delay"), "max_delay");
             if (n > Family.TIME.hi) throw err(RANGE, "max_delay");
-            maxDelay = Duration.ofNanos(Math.max(n, -1) * 1000);
+            if (n < 0) maxDelay = null;
+            else if (n > 0) maxDelay = Duration.ofNanos(n * 1000);
         }
-        return new ShapingLimits(a, maxDelay, flag(d, "no_padding"), flag(d, "no_pause"), noInjection);
+        return new ShapingLimits(a, maxDelay, !flag(d, "no_padding"), !flag(d, "no_pause"), !noInjection);
     }
 
     private static long constant(Map<String, Object> w, String k, Family f) throws DefinitionException {

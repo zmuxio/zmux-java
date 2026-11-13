@@ -17,7 +17,7 @@ class ReaderBoundsTest {
         return ("{\"kinds\":{\"default\":[{\"machines\":[" + String.join(",", machines) + "]}]}}").getBytes(StandardCharsets.UTF_8);
     }
 
-    private static DefinitionException.Category failed(byte[] b, Options o) {
+    private static DefinitionException.Category failed(byte[] b, MachineOptions o) {
         return assertThrows(DefinitionException.class, () -> Bundle.parse(b, o)).category();
     }
 
@@ -42,7 +42,7 @@ class ReaderBoundsTest {
     /** The handshake hook and the pool policy take their own locks, so they draw from sources of their own. */
     @Test void theHandshakeHookAndThePoolPolicyDrawFromSourcesOfTheirOwn() throws Exception {
         var overlap = new java.util.concurrent.atomic.AtomicBoolean();
-        var o = Options.defaults().withNewSource(() -> new java.util.random.RandomGenerator() {
+        var o = MachineOptions.defaults().withNewSource(() -> new java.util.random.RandomGenerator() {
             final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean();
             long x;
             @Override public long nextLong() {
@@ -69,7 +69,7 @@ class ReaderBoundsTest {
     }
 
     @Test void slotsOfAllMachinesAreBoundedBeforeAnyPipeAllocatesThem() throws Exception {
-        Options o = Options.defaults();
+        MachineOptions o = MachineOptions.defaults();
         Bundle.parse(bundle(machine(4000, 96)), o);
         assertEquals(DefinitionException.Category.LIMIT, failed(bundle(machine(4000, 97)), o));
         assertEquals(DefinitionException.Category.LIMIT, failed(bundle(machine(4096, 0), machine(0, 1)), o));
@@ -78,11 +78,11 @@ class ReaderBoundsTest {
     }
 
     @Test void theBoundOfSlotsIsConfigured() throws Exception {
-        Options less = Options.defaults().withLimits(SizeLimits.NONE.withMaxSlots(2));
+        MachineOptions less = MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxSlots(2));
         Bundle.parse(bundle(machine(1, 1)), less);
         assertEquals(DefinitionException.Category.LIMIT, failed(bundle(machine(2, 1)), less));
-        Bundle.parse(bundle(machine(5000, 0)), Options.defaults().withLimits(SizeLimits.NONE.withMaxSlots(5000)));
-        Bundle.parse(bundle(machine(10000, 10000)), Options.defaults().withLimits(SizeLimits.NONE.withMaxSlots(-1)));
+        Bundle.parse(bundle(machine(5000, 0)), MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxSlots(5000)));
+        Bundle.parse(bundle(machine(10000, 10000)), MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxSlots(-1)));
         assertEquals(DefinitionException.Category.LIMIT, assertThrows(DefinitionException.class,
                 () -> Definition.parse("{\"machines\":[" + machine(4097, 0) + "]}")).category());
         assertEquals(DefinitionException.Category.LIMIT, assertThrows(DefinitionException.class,
@@ -112,8 +112,8 @@ class ReaderBoundsTest {
     @Test void maxBytesCountsTheTables() throws Exception {
         String pad = " ".repeat(500);
         byte[] b = ("{\"tables\":{\"a\":[[1,1,1]" + pad + "]},\"kinds\":{\"default\":[{}]}}").getBytes(StandardCharsets.UTF_8);
-        assertEquals(DefinitionException.Category.LIMIT, failed(b, Options.defaults().withLimits(SizeLimits.NONE.withMaxBytes(100))));
-        Bundle.parse(b, Options.defaults().withLimits(SizeLimits.NONE.withMaxBytes(b.length)));
+        assertEquals(DefinitionException.Category.LIMIT, failed(b, MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxBytes(100))));
+        Bundle.parse(b, MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxBytes(b.length)));
     }
 
     /** Quadratic checks take minutes at this size. */

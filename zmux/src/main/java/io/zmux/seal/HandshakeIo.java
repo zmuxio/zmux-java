@@ -99,7 +99,7 @@ final class HandshakeIo implements PipeReader.Sink {
             @Override public void start(Sink sink) { hand(prefix, sink); }
             @Override public void close() { io.reader().close(); }
         };
-        return new PipeIo(reader, io.writer(), io.framing(), io.label(), io.carrierConn(), io.capabilities(), io.carrier(), io.variant());
+        return io.withHalves(reader, io.writer());
     }
 
     /** Under the lock, so that nothing of the carrier's passes what was held; a sink here only takes its deliveries. */

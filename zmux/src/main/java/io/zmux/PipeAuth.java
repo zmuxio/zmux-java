@@ -74,4 +74,19 @@ public record PipeAuth(byte[] psk, boolean useExporter, boolean deferredPsk, boo
     public byte[] psk() {
         return psk == null ? null : psk.clone();
     }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof PipeAuth a && (psk == null ? a.psk == null : a.psk != null && java.security.MessageDigest.isEqual(psk, a.psk))
+                && useExporter == a.useExporter && deferredPsk == a.deferredPsk && endToEnd == a.endToEnd;
+    }
+
+    @Override
+    public int hashCode() { return java.util.Objects.hash(psk != null, useExporter, deferredPsk, endToEnd); }
+
+    /** The key never appears in a string. */
+    @Override
+    public String toString() {
+        return "PipeAuth[psk=" + (psk == null ? "none" : "set") + ", useExporter=" + useExporter + ", deferredPsk=" + deferredPsk + ", endToEnd=" + endToEnd + "]";
+    }
 }

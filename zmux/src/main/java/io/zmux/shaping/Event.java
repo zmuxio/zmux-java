@@ -9,9 +9,9 @@ package io.zmux.shaping;
  * @param stream the stream ID ({@link EventKind#STREAM_OPEN}, {@link EventKind#STREAM_END})
  * @param meters the session's readings with {@link Capability#BUDGET}, otherwise {@link ShapingMeters#ZERO}
  */
-public record Event(EventKind kind, long pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream, ShapingMeters meters) {
+public record Event(EventKind kind, io.zmux.PipeId pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream, ShapingMeters meters) {
     /** An event without readings. */
-    public Event(EventKind kind, long pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream) {
+    public Event(EventKind kind, io.zmux.PipeId pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream) {
         this(kind, pipe, lane, nowNanos, length, paddingOnly, stream, ShapingMeters.ZERO);
     }
 }

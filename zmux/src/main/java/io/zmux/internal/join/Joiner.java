@@ -1,10 +1,10 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.carrier.SecureCarrierException.Code.TOO_LARGE;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.io.ByteArrayOutputStream;
 
 /** The joiner's state machine: Pending, HelloSent, Proven, Active. It is not thread-safe. */

@@ -216,14 +216,25 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         session.driver.post(() -> core.streams().setPriority(st, priority.urgency(), priority.incremental()));
     }
 
-    /** This direction's own scheduling policy; null returns it to the session's. */
+    /** This direction's own scheduling policy. */
     public void setScheduler(Scheduler s) {
-        session.driver.post(() -> session.driver.pickers.install(st, s == null ? null : Scheduling.policy(s), Scheduling.picker(s)));
+        Objects.requireNonNull(s, "s");
+        session.driver.post(() -> session.driver.pickers.install(st, Scheduling.policy(s), Scheduling.picker(s)));
     }
 
-    /** Sends this direction's data on two pipes when possible; null returns it to the session's default. */
-    public void setRedundant(Boolean on) {
+    /** This direction follows the session's scheduling policy again. */
+    public void clearScheduler() {
+        session.driver.post(() -> session.driver.pickers.install(st, null, null));
+    }
+
+    /** Whether this direction's data is sent on two pipes when possible, over the session's default. */
+    public void setRedundant(boolean on) {
         session.driver.post(() -> core.setRedundant(st, on));
+    }
+
+    /** This direction follows the session's redundancy again. */
+    public void clearRedundant() {
+        session.driver.post(() -> core.setRedundant(st, null));
     }
 
     @Override
@@ -409,8 +420,8 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         var i = session.info();
         if (!i.datagramFlows()) return 0;
         // The flow prefix: the stream's flow (its ID + 1) and the context, as variable-length integers.
-        int flow = st.idSet() ? io.zmux.carrier.VarInt.length(st.id() + 1) : 8;
-        return Math.max(0, session.datagramLimit() - flow - io.zmux.carrier.VarInt.length(context));
+        int flow = st.idSet() ? io.zmux.internal.wire.VarInt.length(st.id() + 1) : 8;
+        return Math.max(0, session.datagramLimit() - flow - io.zmux.internal.wire.VarInt.length(context));
     }
 
     /**

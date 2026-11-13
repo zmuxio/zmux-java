@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.ReplayVerdict;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
@@ -21,6 +22,8 @@ import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.ReplayFilter;
+import io.zmux.ZmuxListener;
+import javax.crypto.Mac;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -49,16 +52,17 @@ final class ExchangeServer {
     private final ReplayFilter nonces;
     private final ConcurrentHashMap<ByteBuffer, Carrier> carriers = new ConcurrentHashMap<>();
     /** Ended carriers remembered to answer GONE: key and expiry (System.nanoTime). */
-    private final ConcurrentHashMap<ByteBuffer, Gone> gone = new ConcurrentHashMap<>();
+    private final GoneTable<Gone> gone;
     private volatile boolean closed;
     /** The clock of the time window, in seconds since 1970 (tests set it). */
     volatile java.util.function.LongSupplier seconds = () -> System.currentTimeMillis() / 1000;
 
-    private record Gone(Exchange.Key key, long until) {}
+    private record Gone(Exchange.Key key) {}
 
     ExchangeServer(HttpEndpoint ep, ExchangeConfig cfg) {
         this.ep = ep;
         this.cfg = cfg;
+        gone = new GoneTable<>(cfg.goneMemory().toNanos(), System::nanoTime);
         nonces = new ReplayFilter(cfg.maxClockSkew().plusSeconds(1), cfg.nonceCacheSize(), null, new java.time.Clock() {
             @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
             @Override public java.time.Clock withZone(java.time.ZoneId z) { return this; }
@@ -68,124 +72,276 @@ final class ExchangeServer {
 
     /** The encoded body limit of a request. */
     private int limit() {
-        int n = Exchange.REQ_HDR_MAX + cfg.upLimit();
-        return cfg.base64() ? Exchange.base64Length(n) : n;
+        long n = (long) Exchange.REQ_OVERHEAD + cfg.upLimit();
+        return (int) Math.min(Integer.MAX_VALUE, cfg.isBase64() ? Exchange.base64Length((int) n) : n);
+    }
+
+    /** The encoded length of a body with Data of n bytes. */
+    private long encoded(long n) {
+        long b = Exchange.REQ_OVERHEAD + n;
+        return cfg.isBase64() ? (b + 2) / 3 * 4 : b;
+    }
+
+    /** The encoded length of the authentication header: 66 bytes, 88 characters in base64 (66 is a multiple of 3). */
+    private int headerLength() { return cfg.isBase64() ? Exchange.base64Length(Exchange.HDR) : Exchange.HDR; }
+
+    /**
+     * Starts reading a request that {@link HttpClass#classify} found an exchange request; null
+     * when the request is not collected: with no slot of its source or of the listener it is
+     * answered 503 with no body, its body unread and never given to the host; with a
+     * Content-Length below a body of the header and the Data MAC or above the limit it goes to
+     * the host as it is. A request to a closed listener holds no slot: it is still
+     * authenticated, to be answered GONE.
+     */
+    Collect collect(Router router, HttpRequest req) {
+        var ch = router.context().channel();
+        var slot = ep.listener.reserve(Requests.peer(ch), Requests.source(ch, req, ep.trusted));
+        if (slot == null && !ep.listener.isClosed()) {
+            router.refuse(req, HttpResponseStatus.SERVICE_UNAVAILABLE);
+            return null;
+        }
+        long cl = HttpUtil.getContentLength(req, -1L);
+        if (cl < encoded(0) || cl > limit()) {
+            if (slot != null) slot.release();
+            router.toHost(req, List.of(), false);
+            return null;
+        }
+        return new Collect(router, req, (int) cl, slot);
     }
 
     /**
-     * Starts collecting the body of a request that {@link HttpClass#classify} found an exchange
-     * request; null when its body exceeds the limit (the host's then).
+     * One exchange request being read, on its channel's event loop. It holds a slot of the
+     * listener from its arrival: the authentication header is read and verified within the
+     * listener's first-record timeout, and only then is the rest of the body read, within the
+     * handshake timeout. The buffer grows with the bytes received, never with a declared length.
      */
-    Collect collect(Router router, HttpRequest req) {
-        long cl = HttpUtil.getContentLength(req, -1L);
-        if (cl > limit()) return null;
-        return new Collect(router, req, (int) cl);
-    }
-
-    /** One exchange request's body being read, on its channel's event loop. */
     final class Collect {
         private final Router router;
         private final HttpRequest req;
         private final int length;
-        /** The body read so far, allocated with its first bytes. */
-        private ByteBuf body;
+        /**
+         * The listener's slots of the request: given back once its header is authenticated, unless it creates a carrier;
+         * null for a request that arrived at a closed listener.
+         */
+        private ZmuxListener.Slot slot;
+        /** The body read so far, encoded. */
+        private final ByteBuf body;
+        private ScheduledFuture<?> timer;
+        /** Set once the header is authenticated. */
+        private Exchange.Header h;
+        private Exchange.Key key;
+        /** A MAC keyed with key: the header's, then the data's. */
+        private Mac mac;
+        private Carrier car;
+        private Gone g;
+        private boolean done;
 
-        Collect(Router router, HttpRequest req, int length) {
+        Collect(Router router, HttpRequest req, int length, ZmuxListener.Slot slot) {
             this.router = router;
             this.req = req;
             this.length = length;
+            this.slot = slot;
+            body = router.context().alloc().buffer(headerLength(), length);
+            timer = router.context().executor().schedule(this::firstRecordTimedOut,
+                    ep.listener.firstRecordTimeout().toNanos(), TimeUnit.NANOSECONDS);
         }
 
-        private ByteBuf body() {
-            if (body == null) body = router.context().alloc().buffer(length, length);
-            return body;
+        /** Takes body bytes (not consumed); last: the body ended. */
+        void add(ByteBuf b, boolean last) {
+            if (done) return;
+            int n = b.readableBytes();
+            if (n > length - body.readableBytes()) {
+                // Longer than its Content-Length: the host's before the authentication, else refused.
+                if (h == null) {
+                    end();
+                    releaseSlot();
+                    router.toHost(req, List.of(body, b.retainedSlice()), last);
+                } else answerError(HttpResponseStatus.BAD_REQUEST, true);
+                return;
+            }
+            body.writeBytes(b, b.readerIndex(), n);
+            if (h == null && body.readableBytes() >= headerLength() && !authenticate()) { fallback(last); return; }
+            if (body.readableBytes() == length) { complete(); return; }
+            if (last) {
+                // The body ended early.
+                if (h == null) fallback(true); else answerError(HttpResponseStatus.BAD_REQUEST, false);
+            }
         }
 
-        /** Adds body bytes; false when the body is longer than its Content-Length (b is then not taken). */
-        boolean add(ByteBuf b) {
-            if (b.readableBytes() > body().writableBytes()) return false;
-            body.writeBytes(b, b.readerIndex(), b.readableBytes());
+        private void firstRecordTimedOut() {
+            if (!done && h == null) fallback(false);
+        }
+
+        private void handshakeTimedOut() {
+            if (!done) answerError(HttpResponseStatus.BAD_REQUEST, true);
+        }
+
+        /** Gives the slots back, unless the carrier took them. */
+        private void releaseSlot() {
+            if (slot != null) { slot.release(); slot = null; }
+        }
+
+        private void end() {
+            done = true;
+            if (timer != null) { timer.cancel(false); timer = null; }
+            router.endCollect(this);
+        }
+
+        /** The channel ended or the router gave the request up: what it holds goes. */
+        void abandon() {
+            if (done) return;
+            done = true;
+            if (timer != null) { timer.cancel(false); timer = null; }
+            releaseSlot();
+            body.release();
+        }
+
+        /** Not authenticated: the host's, with every byte read replayed; ended: the body ended. */
+        private void fallback(boolean ended) {
+            end();
+            releaseSlot();
+            router.toHost(req, List.of(body), ended);
+        }
+
+        /** Authenticated, the rest failed: nothing changes; close: the body was not read to its end. */
+        private void answerError(HttpResponseStatus status, boolean close) {
+            end();
+            body.release();
+            refuse(status, close);
+        }
+
+        /** Answers with status, without a body, and gives the slots back. */
+        private void refuse(HttpResponseStatus status, boolean close) {
+            releaseSlot();
+            FullHttpResponse resp = new DefaultFullHttpResponse(req.protocolVersion(), status);
+            HttpUtil.setContentLength(resp, 0);
+            boolean keep = !close && HttpUtil.isKeepAlive(req);
+            HttpUtil.setKeepAlive(resp, keep);
+            var f = router.context().writeAndFlush(resp);
+            if (!keep) f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+        }
+
+        /** Authenticates the header (Section 7.1 steps 3 to 6); false: it is not. */
+        private boolean authenticate() {
+            // A copy: the header outlives the body buffer, which moves as it grows.
+            ByteBuffer raw;
+            if (cfg.isBase64()) {
+                raw = Exchange.decodeBase64(body.nioBuffer(body.readerIndex(), headerLength()));
+                if (raw == null) return false;
+            } else {
+                byte[] copy = new byte[Exchange.HDR];
+                body.getBytes(body.readerIndex(), copy);
+                raw = ByteBuffer.wrap(copy);
+            }
+            Exchange.Header hd = Exchange.parseHeader(raw);
+            ByteBuffer cid = ByteBuffer.wrap(hd.cid());
+            Carrier c = carriers.get(cid);
+            Gone gn = c == null ? gone(cid) : null;
+            Exchange.Key k = c != null ? c.key : gn != null ? gn.key : Exchange.key(cfg.pskRef(), hd.cid());
+            Mac m = k.newMac();
+            if (!Exchange.verifyHeader(m, hd)) return false;
+            if (!fresh(hd)) return false;
+            if (hd.dataLength() > hd.dataLimit(cfg.upLimit()) || encoded(hd.dataLength()) != length) return false;
+            h = hd; key = k; mac = m; car = c; g = gn;
+            timer.cancel(false);
+            timer = null;
+            // A request that cannot create a carrier gives its slots back now.
+            if (c != null || gn != null || hd.kind() == Exchange.KIND_CLOSE || !hd.valid((int) hd.dataLength())) releaseSlot();
+            ep.listener.config().handshakeTimeout().ifPresent(d ->
+                    timer = router.context().executor().schedule(this::handshakeTimedOut, d.toNanos(), TimeUnit.NANOSECONDS));
             return true;
         }
 
-        /** The body ended (ended) or overflowed with extra, which goes to the host after it. */
-        void complete(boolean ended, ByteBuf extra) {
-            if (extra != null || !ended || body().readableBytes() != length) {
-                router.toHost(req, extra == null ? List.of(body) : List.of(body, extra), ended);
-                return;
+        /** The whole body is read: verifies the Data MAC, then serves the request. */
+        private void complete() {
+            end();
+            int dl = (int) h.dataLength();
+            ByteBuf data;
+            ByteBuffer dataMac;
+            if (cfg.isBase64()) {
+                ByteBuffer rest = Exchange.decodeBase64(body.nioBuffer(body.readerIndex() + headerLength(), length - headerLength()));
+                body.release();
+                if (rest == null || rest.remaining() != dl + Exchange.MAC) { failData(); return; }
+                data = Unpooled.wrappedBuffer(rest.slice(0, dl));
+                dataMac = rest.slice(dl, Exchange.MAC);
+            } else {
+                data = body.slice(body.readerIndex() + Exchange.HDR, dl);
+                dataMac = body.nioBuffer(body.readerIndex() + Exchange.HDR + dl, Exchange.MAC);
             }
-            serve(this);
+            if (!Exchange.verifyData(mac, h, data.nioBuffer(), dataMac)) { data.release(); failData(); return; }
+            serve(this, data);
         }
 
-        void abandon() { if (body != null) body.release(); }
-
-        /** The host's: the request with the body bytes read. */
-        void fallback() {
-            router.toHost(req, List.of(body()), true);
-        }
+        /** The Data or its MAC did not verify: nothing changes. */
+        private void failData() { refuse(HttpResponseStatus.BAD_REQUEST, false); }
     }
 
-    /** Answers a complete request body. */
-    private void serve(Collect c) {
-        ByteBuf raw = c.body();
-        ByteBuffer bin = raw.nioBuffer();
-        if (cfg.base64()) {
-            bin = Exchange.decodeBase64(bin);
-            if (bin == null) { c.fallback(); return; }
-        }
-        Exchange.Request q = Exchange.parseRequest(bin);
-        if (q == null) { c.fallback(); return; }
+    /** Serves a request whose Data MAC verified; data is its Data, taken. */
+    private void serve(Collect c, ByteBuf data) {
+        Exchange.Header q = c.h;
         ByteBuffer cid = ByteBuffer.wrap(q.cid());
-        Carrier car = carriers.get(cid);
-        Gone g = car == null ? gone(cid) : null;
-        Exchange.Key key = car != null ? car.key : g != null ? g.key : Exchange.key(cfg.pskRef(), q.cid());
-        if (!authentic(key, q)) { c.fallback(); return; }
         ChannelHandlerContext ctx = c.router.context();
-        // The request's fields are views of the body: it lives until the answer was written.
-        ByteBuf hold = cfg.base64() ? Unpooled.wrappedBuffer(bin) : raw;
-        if (cfg.base64()) raw.release();
-        Answer a = new Answer(ctx, c.req, key, q, hold);
-        if (!q.valid()) {
-            if (car != null) car.loop.execute(() -> car.end(new IOException("exchange carrier protocol violation")));
+        Answer a = new Answer(ctx, c.req, c.key, q, data);
+        Carrier car = c.car;
+        // The carrier may have ended or been created since the header was authenticated.
+        if (car == null && c.g == null) car = carriers.get(cid);
+        if (!q.valid(data.readableBytes())) {
+            Carrier bad = car;
+            if (bad != null) {
+                try { bad.loop.execute(() -> bad.end(new IOException("exchange carrier protocol violation"))); }
+                catch (java.util.concurrent.RejectedExecutionException e) { /* Its loop is gone, and the carrier with it. */ }
+            }
+            c.releaseSlot();
             a.send(Exchange.FLAG_GONE, null);
             return;
         }
-        if (car != null) { car.loop.execute(() -> car.serve(a)); return; }
-        if (g != null) { a.send(Exchange.FLAG_GONE, null); return; }
+        if (car != null) { c.releaseSlot(); serveOn(car, a); return; }
+        if (c.g != null || gone(cid) != null) { c.releaseSlot(); a.send(Exchange.FLAG_GONE, null); return; }
         if (q.kind() == Exchange.KIND_CLOSE) {
             // Creates none, and remembers the carrier as gone.
-            remember(cid, key);
+            remember(cid, c.key);
             a.send(0, null);
             return;
         }
-        if (closed || ep.listener.isClosed()) { a.send(Exchange.FLAG_GONE, null); return; }
-        Carrier nc = new Carrier(ctx.channel().eventLoop(), ctx.alloc(), q.cid(), key);
+        // Arrived at a closed listener (or the server is closed): GONE. The listener closed since the request arrived: BUSY.
+        if (closed || c.slot == null) { c.releaseSlot(); a.send(Exchange.FLAG_GONE, null); return; }
+        if (ep.listener.isClosed()) { c.releaseSlot(); a.send(Exchange.FLAG_BUSY, null); return; }
+        Carrier nc = new Carrier(ctx.channel().eventLoop(), ctx.alloc(), q.cid(), c.key);
         Carrier old = carriers.putIfAbsent(cid, nc);
-        if (old != null) { old.loop.execute(() -> old.serve(a)); return; } // created concurrently
+        if (old != null) { c.releaseSlot(); serveOn(old, a); return; } // created concurrently
         if (closed || gone(cid) != null) {
             // Ended (or the server closed) between the lookup and the creation.
             carriers.remove(cid, nc);
+            c.releaseSlot();
             a.send(Exchange.FLAG_GONE, null);
             return;
         }
-        var slot = ep.listener.reserve(Requests.peer(ctx.channel()), Requests.source(ctx.channel(), c.req, ep.trusted));
-        if (slot == null) {
-            // Beyond the source's share of pending carriers: no state is kept and the carrier is
-            // not remembered as gone; the request consumed nothing.
-            carriers.remove(cid, nc);
-            a.send(Exchange.FLAG_BUSY, null);
-            return;
-        }
+        // The request's slots go with the carrier, until it enters a session.
+        var slot = c.slot;
+        c.slot = null;
         PipeIo io = new PipeIo(nc.new Reader(), nc.new Writer(), Framing.BYTE_STREAM, "http exchange", nc)
                 .withReceiveMemory(cfg.upStoreLimit()).withCarrier(CarrierKind.EXCHANGE);
-        slot.handle(io, JoinHint.inBand(slot.peer()), null);
+        // Ended before a session took it while the listener closed: the listener closed before the carrier was established.
+        slot.handle(io, JoinHint.inBand(slot.peer()), null).taken().thenAccept(t -> {
+            if (!t && ep.listener.isClosed()) {
+                try { nc.loop.execute(nc::refused); } catch (java.util.concurrent.RejectedExecutionException ignored) { /* Its loop is gone. */ }
+            }
+        });
         nc.idle();
-        nc.loop.execute(() -> nc.serve(a));
+        serveOn(nc, a);
     }
 
-    /** Authenticates a request: the MAC, the time window, the nonce record. */
-    private boolean authentic(Exchange.Key key, Exchange.Request q) {
-        if (!Exchange.verify(key, q)) return false;
+    /** Hands a to k on its loop; a carrier whose loop shut down is gone, and a gets GONE here. */
+    private void serveOn(Carrier k, Answer a) {
+        try {
+            k.loop.execute(() -> k.serve(a));
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            a.send(Exchange.FLAG_GONE, null);
+        }
+    }
+
+    /** Section 7.1 steps 4 and 5: Time within the window, and the (Carrier ID, Nonce) pair recorded once. */
+    private boolean fresh(Exchange.Header q) {
         long now = seconds.getAsLong();
         long skew = cfg.maxClockSkew().toSeconds();
         long d = q.time() - (int) now; // the int difference, modulo 2^32
@@ -193,19 +349,16 @@ final class ExchangeServer {
         byte[] k = new byte[Exchange.CID + Exchange.NONCE];
         System.arraycopy(q.cid(), 0, k, 0, Exchange.CID);
         System.arraycopy(q.nonce(), 0, k, Exchange.CID, Exchange.NONCE);
-        return nonces.check(k, (now + d) * 1000) == ReplayFilter.Verdict.FRESH;
+        return nonces.check(k, (now + d) * 1000) == ReplayVerdict.FRESH;
     }
 
     private Gone gone(ByteBuffer cid) {
-        Gone g = gone.get(cid);
-        if (g != null && System.nanoTime() - g.until > 0) { gone.remove(cid, g); return null; }
-        return g;
+        return gone.get(cid);
     }
 
     /** Remembers a Carrier ID as gone, for late requests. */
     private void remember(ByteBuffer cid, Exchange.Key key) {
-        gone.putIfAbsent(cid, new Gone(key, System.nanoTime() + cfg.goneMemory().toNanos()));
-        if (gone.size() > 1024) gone.values().removeIf(x -> System.nanoTime() - x.until > 0);
+        gone.remember(cid, new Gone(key));
     }
 
     /** The carriers with state, for tests. */
@@ -213,7 +366,10 @@ final class ExchangeServer {
 
     void close() {
         closed = true;
-        for (Carrier c : carriers.values()) c.loop.execute(() -> c.end(new ClosedChannelException()));
+        for (Carrier c : carriers.values()) {
+            try { c.loop.execute(() -> c.end(new ClosedChannelException())); }
+            catch (java.util.concurrent.RejectedExecutionException e) { carriers.remove(ByteBuffer.wrap(c.cid), c); } // Its loop is gone, and the carrier with it.
+        }
     }
 
     /**
@@ -225,22 +381,27 @@ final class ExchangeServer {
         final ChannelHandlerContext ctx;
         final HttpRequest req;
         final Exchange.Key key;
-        final Exchange.Request q;
-        /** The request's Sequence as sent: a copy, as an UP piece's body may be freed before the answer. */
-        private final ByteBuffer seqRaw;
+        final Exchange.Header q;
+        /** The request's Data length. */
+        final int dataLength;
+        /** The request's Data, until taken or answered. */
         private ByteBuf hold;
         private final boolean h1;
 
-        Answer(ChannelHandlerContext ctx, HttpRequest req, Exchange.Key key, Exchange.Request q, ByteBuf hold) {
-            this.ctx = ctx; this.req = req; this.key = key; this.q = q; this.hold = hold;
-            ByteBuffer s = ByteBuffer.allocate(q.seqRaw().remaining());
-            seqRaw = s.put(q.seqRaw().duplicate()).flip();
+        Answer(ChannelHandlerContext ctx, HttpRequest req, Exchange.Key key, Exchange.Header q, ByteBuf data) {
+            this.ctx = ctx; this.req = req; this.key = key; this.q = q; this.hold = data;
+            dataLength = data.readableBytes();
             h1 = !(ctx.channel() instanceof io.netty.handler.codec.http2.Http2StreamChannel);
-            if (h1) ctx.channel().config().setAutoRead(false);
+            if (h1) {
+                ctx.channel().config().setAutoRead(false);
+                // Requests pipelined behind this one, already decoded, wait for its answer too.
+                PipelineGate gate = PipelineGate.of(ctx);
+                if (gate != null) gate.hold();
+            }
         }
 
-        /** Takes the request's body (the UP piece's bytes) out of the answer. */
-        ByteBuf takeBody() {
+        /** Takes the request's Data (the UP piece's bytes) out of the answer. */
+        ByteBuf takeData() {
             ByteBuf b = hold;
             hold = null;
             return b;
@@ -256,9 +417,9 @@ final class ExchangeServer {
             }
             ByteBuffer d = data == null ? ByteBuffer.allocate(0) : data.nioBuffer();
             ByteBuffer hdr = ByteBuffer.allocate(Exchange.RESP_HDR);
-            hdr.put(key.responseMac(q.cid(), q.kind(), seqRaw, q.nonce(), flags, d)).put((byte) flags).flip();
+            hdr.put(key.responseMac(q.cid(), q.kind(), q.seq(), q.nonce(), flags, d)).put((byte) flags).flip();
             ByteBuf body = data == null ? Unpooled.wrappedBuffer(hdr) : Unpooled.wrappedBuffer(Unpooled.wrappedBuffer(hdr), data.retainedDuplicate());
-            if (cfg.base64()) {
+            if (cfg.isBase64()) {
                 ByteBuffer bin = ByteBuffer.allocate(body.readableBytes());
                 body.getBytes(body.readerIndex(), bin);
                 body.release();
@@ -271,7 +432,11 @@ final class ExchangeServer {
             HttpUtil.setKeepAlive(resp, keep);
             var f = ctx.writeAndFlush(resp);
             if (h1) {
-                if (keep) f.addListener(x -> ctx.channel().config().setAutoRead(true));
+                if (keep) f.addListener(x -> {
+                    PipelineGate gate = PipelineGate.of(ctx);
+                    if (gate != null) gate.release();
+                    ctx.channel().config().setAutoRead(true);
+                });
                 else f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
             }
             if (hold != null) { hold.release(); hold = null; }
@@ -298,6 +463,8 @@ final class ExchangeServer {
         final byte[] cid;
         final Exchange.Key key;
         private boolean ended;
+        /** Ended by the listener's close before a session took it: requests are answered BUSY and nothing is remembered. */
+        private boolean refused;
         private Throwable err;
         private long last = System.nanoTime();
         private ScheduledFuture<?> idleTimer, coalesceTimer;
@@ -345,6 +512,16 @@ final class ExchangeServer {
             idleTimer = loop.schedule(this::onIdle, Math.max(rest, 1_000_000), TimeUnit.NANOSECONDS);
         }
 
+        /** The listener closed before a session took the carrier: it ends as if never created. */
+        void refused() {
+            if (ended) return;
+            refused = true;
+            end(new ClosedChannelException());
+        }
+
+        /** The answer to a request reaching the carrier once it has ended. */
+        private int endedFlags() { return refused ? Exchange.FLAG_BUSY : Exchange.FLAG_GONE; }
+
         /** Ends the carrier (null: completed) and releases what it holds but uplink bytes zmux may still read. */
         void end(Throwable e) {
             if (ended) return;
@@ -355,12 +532,12 @@ final class ExchangeServer {
             for (Piece p : pieces.values()) if (p.data != null) p.data.release();
             pieces.clear();
             if (cur != null) { cur.release(); cur = null; }
-            for (Held h : held) { if (h.timer != null) h.timer.cancel(false); h.a.send(Exchange.FLAG_GONE, null); }
+            for (Held h : held) { if (h.timer != null) h.timer.cancel(false); h.a.send(endedFlags(), null); }
             held.clear();
             if (e != null) dropUplink();
             ByteBuffer id = ByteBuffer.wrap(cid);
             carriers.remove(id, this);
-            remember(id, key);
+            if (!refused) remember(id, key);
             if (blocked != null) { blocked.failed(new ClosedChannelException()); blocked = null; blockedBatch = null; }
             deliver();
         }
@@ -381,9 +558,9 @@ final class ExchangeServer {
 
         /** Serves an authenticated request. */
         void serve(Answer a) {
-            Exchange.Request q = a.q;
+            Exchange.Header q = a.q;
             last = System.nanoTime();
-            if (ended) { a.send(Exchange.FLAG_GONE, null); return; }
+            if (ended) { a.send(endedFlags(), null); return; }
             if (q.ack() > ack) {
                 if (q.ack() > asgEnd) {
                     end(new IOException("exchange carrier protocol violation"));
@@ -419,7 +596,7 @@ final class ExchangeServer {
 
         /** Stores an UP piece; returns the response flags. */
         private int up(Answer a) {
-            Exchange.Request q = a.q;
+            Exchange.Header q = a.q;
             long n = q.seq();
             boolean fin = q.fin();
             if (fin && (upFin >= 0 && upFin != n || upMax > n + 1) || !fin && upFin >= 0 && n > upFin) {
@@ -428,7 +605,7 @@ final class ExchangeServer {
             }
             if (n < upNext || upOoo.containsKey(n)) return 0;
             ByteBuf piece = null;
-            int len = q.data().remaining();
+            int len = a.dataLength;
             boolean ooo = n != upNext;
             int stored = rclosed ? 0 : len;
             if (ooo) {
@@ -440,9 +617,8 @@ final class ExchangeServer {
                 return Exchange.FLAG_BUSY;
             }
             if (stored > 0) {
-                ByteBuf body = a.takeBody();
-                // The data is the end of the request body: a slice of it, zero copy.
-                piece = body.slice(body.readerIndex() + body.readableBytes() - len, len);
+                // The request's Data, zero copy.
+                piece = a.takeData();
                 upLen += len;
             }
             if (fin) upFin = n;

@@ -536,8 +536,8 @@ public final class StreamSend {
         long fin = sp.sent; // at least resetRel here
         long code = sp.resetCode, rel = sp.resetRel;
         boolean at = sp.resetAt;
-        int n = 1 + io.zmux.carrier.VarInt.length(id) + io.zmux.carrier.VarInt.length(code)
-                + io.zmux.carrier.VarInt.length(fin) + (at ? io.zmux.carrier.VarInt.length(rel) : 0);
+        int n = 1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(code)
+                + io.zmux.internal.wire.VarInt.length(fin) + (at ? io.zmux.internal.wire.VarInt.length(rel) : 0);
         if (!w.frame(n, true, bb -> {
             if (at) io.zmux.internal.wire.FrameEncoder.resetStreamAt(bb, id, code, fin, rel);
             else io.zmux.internal.wire.FrameEncoder.resetStream(bb, id, code, fin);
@@ -560,7 +560,7 @@ public final class StreamSend {
         long seq = x.reqSeq;
         int u = x.reqUrgency;
         boolean inc = x.reqIncremental;
-        int n = 4 + io.zmux.carrier.VarInt.length(id) + io.zmux.carrier.VarInt.length(seq) + 1;
+        int n = 4 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(seq) + 1;
         if (!w.frame(n, true, bb -> io.zmux.internal.wire.FrameEncoder.priorityUpdate(bb, id, seq, u, inc))) return false;
         w.logFrame(new FrameDesc(FrameDesc.Kind.PRIORITY, false, false, id, 0, 0, seq));
         x.reqSent = seq;
@@ -572,7 +572,7 @@ public final class StreamSend {
         StreamSend.SendPart sp = st.snd;
         if (sp.blocked != sp.maxData + 1) return true;
         long id = st.tab.id(), v = sp.maxData;
-        if (!w.frame(1 + io.zmux.carrier.VarInt.length(id) + io.zmux.carrier.VarInt.length(v), true,
+        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), true,
                 bb -> io.zmux.internal.wire.FrameEncoder.streamDataBlocked(bb, id, v))) return false;
         w.logFrame(FrameDesc.id(FrameDesc.Kind.STREAM_DATA_BLOCKED, id));
         return true;
@@ -598,7 +598,6 @@ public final class StreamSend {
         if (sp.hasBound) sp.boundary += sp.preLen;
     }
 
-    /** The sending part of a stream (RFC 9000 Section 3.1); written only here. */
     /**
      * Copies at most limit bytes of unsent or unacknowledged stream data as STREAM frames without FIN
      *. New bytes count as sent here, against session credit and the retransmit

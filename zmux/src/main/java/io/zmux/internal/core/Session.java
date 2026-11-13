@@ -192,7 +192,7 @@ public final class Session {
      */
     public void attachBootstrap(CarrierInfo in, CarrierInfo out, Waiter writerWaiter) {
         TransportParams l = cfg.local();
-        if (l.has(TransportParams.DATAGRAM) && (out != null && out.channel() != null || l.has(TransportParams.MULTIPATH))) {
+        if (l.has(TransportParams.DATAGRAM) && (out.channel() != null || l.has(TransportParams.MULTIPATH))) {
             l.present |= TransportParams.CARRIER_DATAGRAMS;
         }
         pipes.attachBootstrap(in, out, writerWaiter);
@@ -398,7 +398,7 @@ public final class Session {
     /** The Hello of a prepared join. */
     //noinspection ClassEscapesItsScope
     public byte[] joinHello(long id, io.zmux.internal.join.Framing f, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t)
-            throws io.zmux.carrier.SecureCarrierException, CoreException {
+            throws io.zmux.seal.SecureCarrierException, CoreException {
         setNow(t);
         if (isClosing()) throw CoreException.of(CoreException.Reason.INVALID);
         return requireMultipath().joins.joinHello(pipes.get(id), f, cfg.joinEarlyHello(), plan, overhead);
@@ -472,7 +472,6 @@ public final class Session {
         }
     }
 
-    /** Whether the join keys wait for the deferred PSK. */
     /** What keeps the join keys back: {@link CoreException#MISSING_END_TO_END} and {@link CoreException#MISSING_PSK}. */
     private int joinMissing() {
         return (declared ? 0 : CoreException.MISSING_END_TO_END) | (cfg.deferredPsk() && !secretSet ? CoreException.MISSING_PSK : 0);
@@ -595,6 +594,23 @@ public final class Session {
     public void cancelClosedWait(Waiter sig) { closedW.remove(sig); }
 
     /**
+     * Whether written stream data (or a written FIN) is still unsent: a graceful close flushes
+     * until this is false or its bound ends, waiting for the peer's credit meanwhile (a peer that
+     * reads opens its windows; one that does not holds the close to its bound). False once
+     * closing, or without a live outbound pipe.
+     */
+    public boolean flushable() {
+        if (isClosing() || !liveDirections()[0]) return false;
+        for (Stream st : streams.live()) {
+            if (!st.hasSend) continue;
+            StreamSend.SendPart sp = st.snd;
+            if (sp.reset() || sp.state() >= Stream.SEND_DATA_SENT) continue;
+            if (st.unsent() > 0 || (sp.finWritten() && !sp.finSent())) return true;
+        }
+        return false;
+    }
+
+    /**
      * The application's close at t: {@link #close} plus the bound limit, from t, on
      * the hand-off of CONNECTION_CLOSE to the carriers; a carrier that has not taken it by then is
      * closed with the others and the session ends locally. A repeated call adds nothing and
@@ -664,8 +680,13 @@ public final class Session {
         return 333 * Time.MILLISECOND;
     }
 
+    /** A fixed linger timeout in nanoseconds for tests (0: none); set through Diagnostics. */
+    public static volatile long lingerForTests;
+
     /** min(2 s, max(250 ms, 3 x SRTT)). */
     public long lingerTimeout() {
+        long fixed = lingerForTests;
+        if (fixed > 0) return fixed;
         return Math.clamp(Time.mul(srtt(), 3), 250 * Time.MILLISECOND, 2 * Time.SECOND);
     }
 
@@ -682,7 +703,16 @@ public final class Session {
         state = SessionState.CLOSING;
         failAllStreams();
         wakeAll();
+        if (closeReceived) streams.startDrain();
         if (fr == null || !pipes.hasLiveOutbound()) {
+            if (closeReceived) {
+                // No pipe takes this side's close, but the peer's was read: the linger runs from
+                // here, for the inbound ends and the application's reads of what came before it.
+                life.linger(Time.add(now, lingerTimeout()));
+                emitClosedEvent();
+                checkLingerDone();
+                return;
+            }
             finishClose();
             return;
         }
@@ -811,6 +841,7 @@ public final class Session {
     }
 
     void failAllStreams() {
+        streams.dropUnaccepted();
         streams.wakeObservers();
         send.wakeCapacity();
     }
@@ -958,8 +989,12 @@ public final class Session {
             e = i < 0 ? SessionError.transport(f.code, f.errorFrameType, reason, "", true)
                     : SessionError.transport(f.code, f.errorFrameType, reason.substring(0, i), reason.substring(i + 1), true);
         }
+        closeReceived = !isClosing();
         closeWith(e, CloseFrame.of(false, TransportError.NO_ERROR, 0, null));
     }
+
+    /** The session ends by the peer's CONNECTION_CLOSE: what arrived before it is drained by the application's reads. */
+    private boolean closeReceived;
 
     /**
      * Reports the end of an inbound lane: graceful (eof) or failed; partial when it ended
@@ -1035,7 +1070,6 @@ public final class Session {
         return tx.poll(pipeId, lane, b, max, t);
     }
 
-    /** Reports that a batch was written (cause null) or failed; releases the batch's references. */
     /** The carrier of pipe's lane shut its write side (after CONNECTION_CLOSE: the close is handed off). */
     public void outputShut(long pipeId, long lane, long t) {
         setNow(t);
@@ -1112,6 +1146,9 @@ public final class Session {
         // The carriers close once the peer ended its directions and this side's write sides are
         // shut (FIN or close_notify out, not only requested); the linger timer bounds the wait.
         if (!pipes.inboundEnded()) return;
+        // After the peer's close, what arrived before it stays readable while the application
+        // reads it, within the same linger bound: the peer's close follows its data.
+        if (closeReceived && streams.unreadHeld()) return;
         if (pipes.closeShut()) {
             finishClose(true);
         } else if (lingerOnHandOff) {
@@ -1270,7 +1307,7 @@ public final class Session {
         boolean peerRequest = peer != null;
         boolean outLive = acks && p.out() != null;
         boolean live = state.out() == PipeInfo.Out.ACTIVE || state.out() == PipeInfo.Out.SUSPECT || state.in() == PipeInfo.In.OPEN;
-        return new io.zmux.PipeStats(id, io.zmux.internal.join.Mode.record(pipeMode(id)), a == null ? initiator() : a.joinerLocal,
+        return new io.zmux.PipeStats(io.zmux.PipeId.of(id), io.zmux.internal.join.Mode.record(pipeMode(id)), a == null ? initiator() : a.joinerLocal,
                 a == null ? 0 : a.fate, p.label(), p.carrier(), p.variant(),
                 state.out().toPublic(), state.in().toPublic(),
                 nanos(a == null ? Time.sub(snapshotTime, start) : Time.sub(snapshotTime, a.joining.attachedAt())),
@@ -1351,6 +1388,7 @@ public final class Session {
             }
         }
         if (life.handOffDue(t)) endClose();
+        if (life.readsCheckDue(t)) checkLingerDone();
         if (state == SessionState.CLOSED) return;
         if (life.lingerDue(t)) {
             finishClose();
@@ -1767,7 +1805,7 @@ public final class Session {
      * session has open streams: an application's removal that suspends or ends the session.
      */
     public boolean removalStrands(long id) {
-        if (!(path instanceof PathSession) || streams.liveCount() == 0) return false;
+        if (!(path instanceof PathSession) || streams.count() == 0) return false;
         Pipe p = pipes.get(id);
         if (p == null || p.mp() == null || p.mp().retired()) return false;
         boolean otherOut = false, otherIn = false;
@@ -1812,7 +1850,6 @@ public final class Session {
         pipes.wakeWriters();
     }
 
-    /** Whether maintenance has target room and a local join may start now. */
     /** A pool that dials for the session started (+1) or stopped (-1); its absence makes a suspension unattended. */
     public void attend(int delta) {
         if (path != null) path.attend(delta);
@@ -1983,6 +2020,9 @@ public final class Session {
         @Override public void reset(Stream st, long code) { send.reset(st, code); }
         @Override public void rejectSend(Stream st) { send.reject(st); }
         @Override public void stopRecv(Stream st, long code) { recv.stopRecv(st, code); }
+        @Override public void unreadDrained() {
+            if (state == SessionState.CLOSING) life.checkReads(now);
+        }
         @Override public void duplicateReceived(long n) {
             stats.duplicateReceived(n);
             Pipe p = rx.rxPipe();

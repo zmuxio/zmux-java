@@ -1,7 +1,7 @@
 package io.zmux.internal.core;
 
 import io.zmux.internal.wire.FrameEncoder;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.function.Consumer;

@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * The PROXY protocol header (version 1 or 2) that a trusted intermediary writes at the start of a
- * connection to report the client's address ({@link TrustedProxies#proxyProtocol()}).
+ * connection to report the client's address ({@link TrustedProxies#isProxyProtocol()}).
  *
  * @param length the header's length in bytes: the connection's own bytes follow it
  * @param source the client's address; null when the header reports none (a LOCAL command, an

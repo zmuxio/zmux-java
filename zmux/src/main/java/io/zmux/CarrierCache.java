@@ -11,10 +11,10 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Remembers which carrier kinds worked per server and local network ({@link ModePolicy#key()}):
+ * Remembers which carrier kinds worked per server and local network ({@link CarrierChoicePolicy#key()}):
  * a usable kind for the success TTL, and a failed one is skipped for a backoff that doubles with
  * every failure in a row, between the backoff bounds. A kind that fails soon after it was chosen
- * ({@link ModePolicy#dropWindow()}) counts as failed, so that a path that lets a kind through only
+ * ({@link CarrierChoicePolicy#dropWindow()}) counts as failed, so that a path that lets a kind through only
  * briefly is not tried again at once. Safe for concurrent use; share one across dials and pools.
  *
  * <p>The cache can be carried across runs with {@link #snapshot()} and {@link #restore}, while
@@ -141,7 +141,7 @@ public final class CarrierCache {
     }
 
     /**
-     * Records an outcome the host learnt after the dial; key is the {@link ModePolicy#key()} in
+     * Records an outcome the host learnt after the dial; key is the {@link CarrierChoicePolicy#key()} in
      * use. It goes into the same table as the automatic ones, under the same rules.
      */
     public synchronized void report(String key, CarrierKind kind, String variant, Outcome o) {

@@ -4,7 +4,7 @@ import java.net.SocketAddress;
 
 /**
  * The server's host: it decides who may establish. {@code src} may be null. An exception from any method
- * refuses the carrier with the reason {@code gate_error}, the exception kept as the {@link io.zmux.RejectError}'s
+ * refuses the carrier with the reason {@code gate_error}, the exception kept as the {@link io.zmux.CarrierRejectedException}'s
  * cause.
  */
 public interface Gate {

@@ -26,7 +26,6 @@ import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
-import io.zmux.carrier.VarInt;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -125,8 +124,8 @@ final class ExchangeClient {
             inst = HEX.formatHex(t);
         }
         String down = cfg.downUrl().isEmpty() ? url : cfg.downUrl();
-        upTarget = new Target(url, cfg.nonceParam(), inst, cfg.cacheBust() && !url.contains("{nonce}"));
-        downTarget = new Target(down, cfg.nonceParam(), inst, cfg.cacheBust() && !down.contains("{nonce}"));
+        upTarget = new Target(url, cfg.nonceParam(), inst, cfg.isCacheBust() && !url.contains("{nonce}"));
+        downTarget = new Target(down, cfg.nonceParam(), inst, cfg.isCacheBust() && !down.contains("{nonce}"));
         upLimit = cfg.upRequests();
         downLimit = cfg.downRequests();
         http.exchanges.add(this);
@@ -261,7 +260,7 @@ final class ExchangeClient {
             State s = downs.get(n);
             if (s == null) {
                 s = new State();
-                s.backoff = cfg.backoffMin().toNanos();
+                s.backoff = cfg.backoff().minimum().toNanos();
                 downs.put(n, s);
             }
             if (s.inflight) continue;
@@ -291,7 +290,7 @@ final class ExchangeClient {
         Up u = new Up(upSeq++, len > 0 ? open : null, wclosed);
         if (len == 0 && open != null) open.release();
         open = null;
-        u.backoff = cfg.backoffMin().toNanos();
+        u.backoff = cfg.backoff().minimum().toNanos();
         finSeal = wclosed;
         ups.add(u);
     }
@@ -397,7 +396,6 @@ final class ExchangeClient {
         final long seq;
         final State st;
         final byte[] nonce = new byte[Exchange.NONCE];
-        final ByteBuffer seqRaw;
         /** The URL of the request; redirects move it, on the loop. */
         volatile URI uri;
         int hops;
@@ -413,10 +411,10 @@ final class ExchangeClient {
             this.kind = kind; this.seq = seq; this.st = st;
             RANDOM.nextBytes(nonce);
             ByteBuffer d = data == null ? ByteBuffer.allocate(0) : data.nioBuffer();
-            ByteBuffer hdr = Exchange.requestHeader(key, cid, kind, flags, seq, ackSent, (int) (System.currentTimeMillis() / 1000), nonce, d);
-            seqRaw = hdr.slice(Exchange.CID + 2, VarInt.length(seq));
-            ByteBuf b = data == null ? Unpooled.wrappedBuffer(hdr) : Unpooled.wrappedBuffer(Unpooled.wrappedBuffer(hdr), data.retainedDuplicate());
-            if (cfg.base64()) {
+            var sealed = Exchange.seal(key, cid, kind, flags, seq, ackSent, (int) (System.currentTimeMillis() / 1000), nonce, d);
+            ByteBuf b = data == null ? Unpooled.wrappedBuffer(sealed.header(), sealed.dataMac())
+                    : Unpooled.wrappedBuffer(Unpooled.wrappedBuffer(sealed.header()), data.retainedDuplicate(), Unpooled.wrappedBuffer(sealed.dataMac()));
+            if (cfg.isBase64()) {
                 ByteBuffer bin = ByteBuffer.allocate(b.readableBytes());
                 b.getBytes(b.readerIndex(), bin);
                 b.release();
@@ -473,7 +471,7 @@ final class ExchangeClient {
         private void send(Channel ch, ByteBuf b) {
             FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, HttpCarrierClient.target(uri), b);
             req.headers().set(HttpHeaderNames.HOST, HttpCarrierClient.authority(uri));
-            cfg.header().forEach((k, vs) -> { for (String v : vs) req.headers().add(k, v); });
+            cfg.headers().forEach((k, vs) -> { for (String v : vs) req.headers().add(k, v); });
             req.headers().set(HttpHeaderNames.CONTENT_TYPE, Requests.OCTETS).set(Requests.CACHE, Requests.NO_STORE)
                     .set(HttpHeaderNames.PRAGMA, "no-cache");
             HttpUtil.setContentLength(req, b.readableBytes());
@@ -523,7 +521,7 @@ final class ExchangeClient {
         /** Verifies a complete response body (encoded); its data stays in body. */
         Result result(ByteBuf raw) {
             ByteBuf b = raw;
-            if (cfg.base64()) {
+            if (cfg.isBase64()) {
                 ByteBuffer dec = Exchange.decodeBase64(raw.nioBuffer());
                 raw.release();
                 if (dec == null) return Result.NONE;
@@ -534,7 +532,7 @@ final class ExchangeClient {
             b.getBytes(b.readerIndex(), mac);
             int fl = b.getUnsignedByte(b.readerIndex() + Exchange.MAC);
             ByteBuf data = b.slice(b.readerIndex() + Exchange.RESP_HDR, b.readableBytes() - Exchange.RESP_HDR);
-            byte[] want = key.responseMac(cid, kind, seqRaw, nonce, fl, data.nioBuffer());
+            byte[] want = key.responseMac(cid, kind, seq, nonce, fl, data.nioBuffer());
             if (!MessageDigest.isEqual(want, mac)) { b.release(); return Result.NONE; }
             if (!Exchange.responseValid(kind, fl, data.readableBytes())) { b.release(); return Result.BAD; }
             if (!data.isReadable()) { b.release(); return new Result(true, false, fl, null); }
@@ -554,7 +552,7 @@ final class ExchangeClient {
 
         private int limit() {
             int n = Exchange.RESP_HDR + cfg.downLimit();
-            return cfg.base64() ? Exchange.base64Length(n) : n;
+            return cfg.isBase64() ? Exchange.base64Length(n) : n;
         }
 
         @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -632,7 +630,7 @@ final class ExchangeClient {
             else downLimit = Math.max(1, downLimit - 1);
             return;
         }
-        st.backoff = cfg.backoffMin().toNanos();
+        st.backoff = cfg.backoff().minimum().toNanos();
         if (a.kind == Exchange.KIND_UP) {
             upLimit = Math.min(cfg.upRequests(), upLimit + 1);
             for (Iterator<Up> it = ups.iterator(); it.hasNext(); ) {
@@ -651,9 +649,9 @@ final class ExchangeClient {
     }
 
     private void retry(State st, long now) {
-        long half = st.backoff / 2;
-        st.retryAt = now + half + ThreadLocalRandom.current().nextLong(half + 1);
-        st.backoff = Math.min(2 * st.backoff, cfg.backoffMax().toNanos());
+        long spread = (long) (st.backoff * cfg.backoff().jitter());
+        st.retryAt = now + st.backoff - spread + ThreadLocalRandom.current().nextLong(spread + 1);
+        st.backoff = Math.min(2 * st.backoff, cfg.backoff().maximum().toNanos());
     }
 
     /** Takes downlink piece n. */

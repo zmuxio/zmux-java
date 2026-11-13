@@ -1,6 +1,6 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.testutil.Json;
 import java.io.IOException;
 import java.math.BigInteger;

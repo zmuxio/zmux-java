@@ -1,4 +1,4 @@
-package io.zmux.carrier;
+package io.zmux.internal.wire;
 
 import java.nio.ByteBuffer;
 

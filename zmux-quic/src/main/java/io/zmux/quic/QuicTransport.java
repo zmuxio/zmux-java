@@ -55,6 +55,7 @@ final class QuicTransport extends AbstractTransport {
     @Override public byte[] export(String label, byte[] context, int length) { return carrier.export(label, context, length); }
     @Override public boolean ownsHalf(Object half) { return carrier.owns(half); }
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return carrier.whenClosed(); }
+    @Override public void sessionEnded(io.zmux.internal.core.SessionError e) { carrier.sessionEnded(e); }
     @Override public java.util.concurrent.CompletionStage<Boolean> whenTaken() { return carrier.taken.stage(); }
     @Override public void taken() { carrier.taken.decide(true); }
     @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() { return lanes == null ? null : lanes.open(); }

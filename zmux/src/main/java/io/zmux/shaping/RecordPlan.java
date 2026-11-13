@@ -43,9 +43,9 @@ public final class RecordPlan {
     public int padTo() { return padTo; }
     public int padMultiple() { return padMultiple; }
     public int pad() { return pad; }
-    public boolean flush() { return flush; }
+    public boolean isFlush() { return flush; }
     public long delayNanos() { return delayNanos; }
-    public boolean stop() { return stop; }
+    public boolean isStop() { return stop; }
 
     /** Resets every field. */
     public void clear() {

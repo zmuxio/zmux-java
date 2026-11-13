@@ -45,6 +45,11 @@ public final class Suite {
         return TAG_LEN;
     }
 
+    /** The cipher, as diagnostics name the Suite. */
+    @Override public String toString() {
+        return transformation;
+    }
+
     boolean isAes() {
         return this == AES;
     }

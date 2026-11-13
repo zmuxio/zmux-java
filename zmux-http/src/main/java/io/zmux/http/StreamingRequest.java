@@ -15,7 +15,7 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.zmux.Admission;
 import io.zmux.CarrierKind;
-import io.zmux.Credential;
+import io.zmux.CarrierCredential;
 import io.zmux.HttpRedirectException;
 import io.zmux.HttpTarget;
 import io.zmux.PipeOptions;
@@ -46,7 +46,7 @@ final class StreamingRequest {
     private final HttpCarrierClient client;
     private final Map<String, List<String>> headers;
     private final boolean get, reads, writes;
-    private final Credential credential;
+    private final CarrierCredential credential;
     private final HttpTarget target;
 
     // Guarded by this.
@@ -70,7 +70,7 @@ final class StreamingRequest {
     private Throwable refusal;
 
     private StreamingRequest(HttpCarrierClient client, URI url, Map<String, List<String>> headers, PipeOptions.Direction dir,
-                             Credential credential, HttpTarget target) {
+                             CarrierCredential credential, HttpTarget target) {
         this.client = client;
         this.url = url;
         this.headers = headers;
@@ -84,7 +84,7 @@ final class StreamingRequest {
 
     /** Opens the carrier at url (target's URL when there is a target). */
     static PipeIo open(HttpCarrierClient client, URI url, Map<String, List<String>> headers, PipeOptions.Direction dir,
-                       Credential credential, HttpTarget target) throws IOException {
+                       CarrierCredential credential, HttpTarget target) throws IOException {
         if (target != null) url = URI.create(target.url());
         StreamingRequest r = new StreamingRequest(client, url, headers, dir, credential, target);
         Channel ch = client.await(client.conns.open(url, false, false), "connect");
@@ -107,7 +107,7 @@ final class StreamingRequest {
     private BodyCarrier request(Channel ch, URI u, List<ByteBuf> replay) throws IOException {
         var info = new Admission.CarrierInfo(Connections.address(u), Connections.address(u), "", "", null, RequestHead.of(Map.of(), get));
         byte[] prefix = null;
-        Credential.HeaderField field = null;
+        CarrierCredential.HeaderField field = null;
         if (credential != null) {
             // Computed afresh for every request: a fresh prefix token.
             if (get) field = credential.header(info);

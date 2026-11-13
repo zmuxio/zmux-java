@@ -17,12 +17,16 @@ public sealed interface Scheduler permits Scheduler.Builtin, Scheduler.Custom {
         AFFINITY, SESSION_AFFINITY, SPREAD_ETA, SPREAD_ROUND_ROBIN, SPREAD_RATE_WEIGHTED
     }
 
-    /** One stream direction waiting for a decision; byte counts exclude already committed data. */
+    /**
+     * One stream direction waiting for a decision; byte counts exclude already committed data.
+     *
+     * @param lastPipe the pipe the direction last sent on; null when none
+     */
     record Request(long streamId, long bytes, long eligibleTier, boolean hasEligibleTier,
-                   long lastPipe, boolean hasLastPipe, int urgency) {}
+                   PipeId lastPipe, int urgency) {}
 
     /** Values only: no mutable session or carrier handle is exposed. Rates are bytes/s. */
-    record Pipe(long id, PipeState.Outbound state, Duration smoothedRtt, Duration rttVariation, long rate,
+    record Pipe(PipeId id, PipeState.Outbound state, Duration smoothedRtt, Duration rttVariation, long rate,
                 long unsentBytes, long bytesInFlight, long priority, long weight, boolean writable,
                 boolean standby, boolean saturated, boolean probation, boolean eligible, boolean shaped,
                 double shapingWeight) {}

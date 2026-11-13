@@ -10,10 +10,10 @@ package io.zmux.shaping;
  *     pipe input declared it ({@link io.zmux.carrier.PipeIo#withWriteOverhead}); 0 when none
  * @param variant the host's label of the transform the carrier runs; "" when none
  */
-public record ShapedPipe(long id, io.zmux.CarrierKind carrier, int writeOverhead, String variant) {
+public record ShapedPipe(io.zmux.PipeId id, io.zmux.CarrierKind carrier, int writeOverhead, String variant) {
     /** A pipe of no variant. */
-    public ShapedPipe(long id, io.zmux.CarrierKind carrier, int writeOverhead) { this(id, carrier, writeOverhead, ""); }
+    public ShapedPipe(io.zmux.PipeId id, io.zmux.CarrierKind carrier, int writeOverhead) { this(id, carrier, writeOverhead, ""); }
 
     /** A pipe whose carrier declares no write overhead. */
-    public ShapedPipe(long id, io.zmux.CarrierKind carrier) { this(id, carrier, 0, ""); }
+    public ShapedPipe(io.zmux.PipeId id, io.zmux.CarrierKind carrier) { this(id, carrier, 0, ""); }
 }

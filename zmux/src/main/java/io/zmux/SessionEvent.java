@@ -19,25 +19,25 @@ public sealed interface SessionEvent {
      */
 
     /** A local outbound pipe direction appeared (joining, or already active). */
-    record PipeAdded(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeAdded(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction became active. */
-    record PipeJoined(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeJoined(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction stopped making progress. */
-    record PipeSuspect(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeSuspect(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** A suspect outbound pipe direction is active again. */
-    record PipeRecovered(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeRecovered(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction failed. */
-    record PipeFailed(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeFailed(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /**
      * A pipe direction ended: the outbound direction CLOSED, the inbound one ENDED. Retirement
      * is reported by {@link PipesRetired}.
      */
-    record PipeClosed(long pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeClosed(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** A tier's saturation state changed. Lower numbered tiers are preferred. */
     record TierSaturation(long priority, boolean saturated) implements SessionEvent {}
@@ -47,11 +47,11 @@ public sealed interface SessionEvent {
      * is {@link PipeStats.SettingSource#LOCAL} for a local setting and
      * {@link PipeStats.SettingSource#PEER} for the peer's request.
      */
-    record PipePriorityChanged(long pipe, CarrierKind carrier, long priority, boolean standby, long weight,
+    record PipePriorityChanged(PipeId pipeId, CarrierKind carrier, long priority, boolean standby, long weight,
                                PipeStats.SettingSource source) implements SessionEvent {}
 
     /** A quality estimate left the configured band; rate is bytes/s. */
-    record PipeQualityChanged(long pipe, CarrierKind carrier, java.time.Duration smoothedRtt, double rate) implements SessionEvent {}
+    record PipeQualityChanged(PipeId pipeId, CarrierKind carrier, java.time.Duration smoothedRtt, double rate) implements SessionEvent {}
 
     /** The sum of measured usable outbound rate estimates fell below the floor, in bytes/s. */
     record CapacityBelow(double rate) implements SessionEvent {}
@@ -60,7 +60,7 @@ public sealed interface SessionEvent {
     record CapacityRestored(double rate) implements SessionEvent {}
 
     /**
-     * A candidate of {@link Zmux#dial(CarrierMode, ZmuxConfig, ModePolicy)} was tried; an unread one is replaced by the next try of the same kind.
+     * A candidate of {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} was tried; an unread one is replaced by the next try of the same kind.
      */
     record CarrierCandidate(CandidateResult result) implements SessionEvent {}
 
@@ -112,5 +112,5 @@ public sealed interface SessionEvent {
      * read and accumulates until read. An application that needs every retired ID compares
      * {@link ZmuxSession#pipes()} with the handles it holds.
      */
-    record PipesRetired(long retired, long failed, long closed, long dropped, java.util.List<Long> last) implements SessionEvent {}
+    record PipesRetired(long retired, long failed, long closed, long dropped, java.util.List<PipeId> last) implements SessionEvent {}
 }

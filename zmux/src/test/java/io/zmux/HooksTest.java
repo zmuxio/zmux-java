@@ -78,8 +78,8 @@ class HooksTest {
     @Test void datagramLimitersRunOffLoopAndChargeAcceptedPayloads() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             Budget send = new Budget(), receive = new Budget();
-            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiters(send, null).build();
-            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiters(null, receive).build();
+            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(send, null).build();
+            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(null, receive).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();

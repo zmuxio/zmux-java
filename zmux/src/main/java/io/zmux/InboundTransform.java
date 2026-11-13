@@ -15,7 +15,7 @@ import java.util.concurrent.CompletionStage;
  * split bootstrap included ({@link JoinHint#pairing()} is set, the carrier has one half only),
  * on the listener's event loop: it must not block, and returns a stage that completes later
  * when the layer takes time (a handshake run on a virtual thread, say). The carrier keeps its
- * slot of {@link ListenerConfig#maxPendingPerSource()} meanwhile, and the session's handshake
+ * slots of {@link ListenerConfig#maxPendingPerSource()} and {@link ListenerConfig#maxPending()} meanwhile, and the session's handshake
  * timeout bounds it: a stage not complete by the deadline is cancelled ({@code
  * toCompletableFuture().cancel(false)}) and the carrier closed, as when the listener closes.
  * The first-record timeout runs from its completion.

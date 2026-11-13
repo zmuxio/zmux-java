@@ -65,11 +65,11 @@ class CarrierSelectionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var dials = new AtomicInteger();
-            var e = assertThrows(ModeException.class, () -> Zmux.dial(CarrierMode.explicit(refused(CarrierKind.WEBSOCKET, dials)), cfg, null));
+            var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(refused(CarrierKind.WEBSOCKET, dials)), cfg, null));
             assertEquals(List.of(new CandidateResult(CarrierKind.WEBSOCKET, CandidateOutcome.REFUSED, false, e.results().getFirst().error())), e.results());
             assertEquals(1, dials.get());
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
-                try (var s = Zmux.dial(CarrierMode.explicit(reaching(CarrierKind.STREAMING, l, dials)), cfg, null)) {
+            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+                try (var s = Zmux.dial(CarrierChoice.explicit(reaching(CarrierKind.STREAMING, l, dials)), cfg, null)) {
                     assertEquals(CarrierKind.STREAMING, s.stats().carrier());
                     assertEquals(CandidateOutcome.USABLE, s.stats().carrierCandidates().getFirst().outcome());
                     echo(s, l);
@@ -92,13 +92,13 @@ class CarrierSelectionTest {
     @Test void aCarrierRefusedAfterItOpenedIsReportedRefused() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var e = assertThrows(ModeException.class, () -> Zmux.dial(CarrierMode.explicit(refusedLater(CarrierKind.STREAMING)), cfg,
-                    ModePolicy.defaults().withTimer(3, Duration.ofSeconds(2), Duration.ofSeconds(2))));
+            var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(refusedLater(CarrierKind.STREAMING)), cfg,
+                    CarrierChoicePolicy.defaults().withTimer(3, Duration.ofSeconds(2), Duration.ofSeconds(2))));
             assertEquals(CandidateOutcome.REFUSED, e.results().getFirst().outcome(), String.valueOf(e.results().getFirst().error()));
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var dials = new AtomicInteger();
-                try (var s = Zmux.dial(CarrierMode.auto(refusedLater(CarrierKind.STREAMING), reaching(CarrierKind.EXCHANGE, l, dials)), cfg,
-                        ModePolicy.defaults().withNoJoin(true))) {
+                try (var s = Zmux.dial(CarrierChoice.auto(refusedLater(CarrierKind.STREAMING), reaching(CarrierKind.EXCHANGE, l, dials)), cfg,
+                        CarrierChoicePolicy.defaults().withJoin(false))) {
                     assertEquals(CandidateOutcome.REFUSED, s.stats().carrierCandidates().getFirst().outcome());
                     assertEquals(CarrierKind.EXCHANGE, s.stats().carrier());
                 }
@@ -109,12 +109,12 @@ class CarrierSelectionTest {
     @Test void autoTriesTheCandidatesInOrderAndRemembersTheOutcomes() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
+            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var cache = new CarrierCache();
-                var policy = ModePolicy.of(cache, "server").withTimer(3, Duration.ofMillis(200), Duration.ofMillis(300));
+                var policy = CarrierChoicePolicy.of(cache, "server").withTimer(3, Duration.ofMillis(200), Duration.ofMillis(300));
                 var ws = new AtomicInteger(); var st = new AtomicInteger(); var ex = new AtomicInteger();
                 var keep = new ArrayList<PipeIo>();
-                var mode = CarrierMode.auto(refused(CarrierKind.WEBSOCKET, ws), silent(CarrierKind.STREAMING, st, keep),
+                var mode = CarrierChoice.auto(refused(CarrierKind.WEBSOCKET, ws), silent(CarrierKind.STREAMING, st, keep),
                         reaching(CarrierKind.EXCHANGE, l, ex));
                 long t0 = System.nanoTime();
                 try (var s = Zmux.dial(mode, cfg, policy)) {
@@ -161,11 +161,11 @@ class CarrierSelectionTest {
 
     @Test void autoEstablishesOnTheRobustKindAndMovesToAPreferredOne() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).probation(Duration.ZERO).build();
-            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
+            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var ws = new AtomicInteger(); var ex = new AtomicInteger();
-                var policy = ModePolicy.defaults().withSettle(Duration.ofMillis(200));
-                try (var s = Zmux.dial(CarrierMode.auto(reaching(CarrierKind.WEBSOCKET, l, ws), reaching(CarrierKind.EXCHANGE, l, ex)), cfg, policy)) {
+                var policy = CarrierChoicePolicy.defaults().withSettle(Duration.ofMillis(200));
+                try (var s = Zmux.dial(CarrierChoice.auto(reaching(CarrierKind.WEBSOCKET, l, ws), reaching(CarrierKind.EXCHANGE, l, ex)), cfg, policy)) {
                     assertEquals(CarrierKind.EXCHANGE, s.stats().carrier(), "established on the exchange carrier");
                     var ev = carrierEvents(s, 4);
                     assertEquals(new SessionEvent.CarrierChosen(CarrierKind.WEBSOCKET), ev.getLast());
@@ -180,9 +180,9 @@ class CarrierSelectionTest {
                     try (var server = l.accept(Duration.ofSeconds(5))) {
                         echo(s, server);
                         long until = System.nanoTime() + 30_000_000_000L;
-                        while (s.pipes().stream().anyMatch(p -> p.id() == 0) && !s.isClosed() && System.nanoTime() < until) Thread.sleep(10);
+                        while (s.pipes().stream().anyMatch(p -> p.id().value() == 0) && !s.isClosed() && System.nanoTime() < until) Thread.sleep(10);
                         assertFalse(s.isClosed(), "session open");
-                        assertTrue(s.pipes().stream().noneMatch(p -> p.id() == 0), "pipe 0 retired: " + s.pipes());
+                        assertTrue(s.pipes().stream().noneMatch(p -> p.id().value() == 0), "pipe 0 retired: " + s.pipes());
                         echo(s, server);
                     }
                     assertEquals(1, ws.get());
@@ -208,9 +208,9 @@ class CarrierSelectionTest {
         assertFalse(c.good("k", CarrierKind.SPLIT, "", t + 10_000_000_000L), "expired");
         c.record("k", CarrierKind.SPLIT, "", false, t);
         assertEquals(t + 60_000_000_000L, c.failUntil("k", CarrierKind.SPLIT, "", t), "a success resets the backoff");
-        assertEquals(Duration.ofSeconds(3), ModePolicy.defaults().timer(Duration.ofSeconds(5)));
-        assertEquals(Duration.ofSeconds(1), ModePolicy.defaults().timer(Duration.ZERO));
-        assertEquals(Duration.ofMillis(1500), ModePolicy.defaults().timer(Duration.ofMillis(500)));
+        assertEquals(Duration.ofSeconds(3), CarrierChoicePolicy.defaults().timer(Duration.ofSeconds(5)));
+        assertEquals(Duration.ofSeconds(1), CarrierChoicePolicy.defaults().timer(Duration.ZERO));
+        assertEquals(Duration.ofMillis(1500), CarrierChoicePolicy.defaults().timer(Duration.ofMillis(500)));
     }
 
     /** A candidate of the same kind and another variant is a change of carrier. */
@@ -218,9 +218,9 @@ class CarrierSelectionTest {
         try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             ZmuxSession c = pair.client();
             Candidate a = refused(CarrierKind.WEBSOCKET, new AtomicInteger()).withVariant("a"), b = a.withVariant("b");
-            new ModeSource(CarrierMode.explicit(a), null).established(c, 0);
+            new CarrierChoiceSource(CarrierChoice.explicit(a), null).established(c, 0);
             assertEquals("a", c.carrierVariant());
-            new ModeSource(CarrierMode.explicit(b), null).established(c, 0);
+            new CarrierChoiceSource(CarrierChoice.explicit(b), null).established(c, 0);
             assertEquals("b", c.carrierVariant());
         }
     }

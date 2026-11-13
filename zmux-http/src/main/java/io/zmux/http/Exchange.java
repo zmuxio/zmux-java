@@ -1,23 +1,25 @@
 package io.zmux.http;
 
-import io.zmux.carrier.VarInt;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
 import java.util.Base64;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
-/** The wire format of the exchange carrier: key derivation, piece sealing and request bodies. */
+/** The wire format of the exchange carrier: key derivation, request authentication and response MACs. */
 final class Exchange {
     private Exchange() {}
 
     static final int KIND_UP = 0x01, KIND_DOWN = 0x02, KIND_CLOSE = 0x03;
     static final int FLAG_FIN = 0x01, FLAG_BUSY = 0x02, FLAG_GONE = 0x04;
     static final int CID = 16, TIME = 4, NONCE = 8, MAC = 16;
-    /** A request header with the longest varints, MAC included. */
-    static final int REQ_HDR_MAX = CID + 2 + 8 + 8 + TIME + NONCE + MAC;
+    /** The authentication header: Carrier ID, Kind, Flags, Sequence, Down Ack, Time, Nonce, Data Length, Header MAC. */
+    static final int HDR = CID + 2 + 8 + 8 + TIME + NONCE + 4 + MAC;
+    /** Where the Header MAC starts: the length of the fields it covers. */
+    static final int HDR_FIELDS = HDR - MAC;
+    /** A request body's bytes besides its Data: the authentication header and the Data MAC. */
+    static final int REQ_OVERHEAD = HDR + MAC;
     static final int RESP_HDR = MAC + 1;
     static final int REASON_MAX = 256;
     /** Every body of the default piece size stays at most this long, after the body encoding. */
@@ -40,28 +42,36 @@ final class Exchange {
         /** K, for tests. */
         byte[] k() { return k.clone(); }
 
-        /** The first 16 bytes of HMAC-SHA256(K, "Q" || hdr || data): a request's MAC, hdr from its Carrier ID through its Nonce. */
-        byte[] requestMac(ByteBuffer hdr, ByteBuffer data) {
-            Mac m = copy(proto);
+        /** A MAC keyed with K, for one thread; doFinal leaves it keyed for the next MAC. */
+        Mac newMac() { return copy(proto); }
+
+        /** HMAC-SHA256(K, "Q" || fields), whose first 16 bytes are the Header MAC: fields are the header from Carrier ID through Data Length. */
+        static byte[] headerMac(Mac m, ByteBuffer fields) {
             m.update((byte) 'Q');
-            m.update(hdr.duplicate());
-            m.update(data.duplicate());
-            return java.util.Arrays.copyOf(m.doFinal(), MAC);
+            m.update(fields.duplicate());
+            return m.doFinal();
         }
 
-        /** The response MAC: "R" || Carrier ID || Kind || Sequence (as sent) || Nonce || Flags || Data. */
-        byte[] responseMac(byte[] cid, int kind, ByteBuffer seqRaw, byte[] nonce, int flags, ByteBuffer data) {
+        /** HMAC-SHA256(K, "D" || Header MAC || data), whose first 16 bytes are the Data MAC. */
+        static byte[] dataMac(Mac m, ByteBuffer headerMac, ByteBuffer data) {
+            m.update((byte) 'D');
+            m.update(headerMac.duplicate());
+            m.update(data.duplicate());
+            return m.doFinal();
+        }
+
+        /** The response MAC: "R" || Carrier ID || Kind || Sequence (8 bytes) || Nonce || Flags || Data. */
+        byte[] responseMac(byte[] cid, int kind, long seq, byte[] nonce, int flags, ByteBuffer data) {
             Mac m = copy(proto);
             m.update((byte) 'R');
             m.update(cid);
             m.update((byte) kind);
-            m.update(seqRaw.duplicate());
+            for (int i = 56; i >= 0; i -= 8) m.update((byte) (seq >>> i));
             m.update(nonce);
             m.update((byte) flags);
             m.update(data.duplicate());
             return java.util.Arrays.copyOf(m.doFinal(), MAC);
         }
-
     }
 
     /** The carrier key of cid under psk (empty: none). */
@@ -93,73 +103,80 @@ final class Exchange {
         }
     }
 
-    /** Appends a request from its Carrier ID through its Nonce, then its MAC over it and data. */
-    static ByteBuffer requestHeader(Key key, byte[] cid, int kind, int flags, long seq, long ack, int time, byte[] nonce, ByteBuffer data) {
-        ByteBuffer b = ByteBuffer.allocate(CID + 2 + VarInt.length(seq) + VarInt.length(ack) + TIME + NONCE + MAC);
-        b.put(cid).put((byte) kind).put((byte) flags);
-        VarInt.put(b, seq);
-        VarInt.put(b, ack);
-        b.putInt(time).put(nonce);
-        ByteBuffer hdr = b.duplicate().flip();
-        b.put(key.requestMac(hdr, data));
-        return b.flip();
+    /**
+     * A request's authentication header and Data MAC: header holds the header (Header MAC
+     * included), dataMac the Data MAC over data. The body is header || data || dataMac.
+     */
+    record Sealed(ByteBuffer header, ByteBuffer dataMac) {}
+
+    /** Seals a request: its authentication header and its Data MAC over data. */
+    static Sealed seal(Key key, byte[] cid, int kind, int flags, long seq, long ack, int time, byte[] nonce, ByteBuffer data) {
+        byte[] h = new byte[HDR];
+        ByteBuffer b = ByteBuffer.wrap(h);
+        b.put(cid).put((byte) kind).put((byte) flags).putLong(seq).putLong(ack).putInt(time).put(nonce).putInt(data.remaining());
+        Mac m = key.newMac();
+        System.arraycopy(Key.headerMac(m, ByteBuffer.wrap(h, 0, HDR_FIELDS)), 0, h, HDR_FIELDS, MAC);
+        byte[] d = Key.dataMac(m, ByteBuffer.wrap(h, HDR_FIELDS, MAC), data);
+        return new Sealed(ByteBuffer.wrap(h), ByteBuffer.wrap(d, 0, MAC));
     }
 
     /**
-     * A parsed request body (binary); its buffers are views of the body.
+     * A parsed authentication header; its buffers are views of the header.
      *
-     * @param valid whether Kind, Flags, Data and the reason follow the request rules
+     * @param dataLength Data Length, unsigned
      */
-    record Request(byte[] cid, int kind, int flags, long seq, long ack, ByteBuffer seqRaw, int time, byte[] nonce,
-                   ByteBuffer hdr, byte[] mac, ByteBuffer data, boolean valid) {
+    record Header(byte[] cid, int kind, int flags, long seq, long ack, int time, byte[] nonce, long dataLength,
+                  ByteBuffer fields, ByteBuffer mac) {
         boolean fin() { return (flags & FLAG_FIN) != 0; }
+
+        /** The largest Data a request of this Kind may carry: upLimit for UP, 0 for DOWN, the reason's for CLOSE. */
+        long dataLimit(int upLimit) {
+            return kind == KIND_UP ? upLimit : kind == KIND_CLOSE ? REASON_MAX : 0;
+        }
+
+        /** Whether Kind, Flags, Sequence and a Data of length n follow the request rules. */
+        boolean valid(int n) {
+            return switch (kind) {
+                case KIND_UP -> (flags & ~FLAG_FIN) == 0;
+                case KIND_DOWN -> flags == 0 && n == 0;
+                case KIND_CLOSE -> flags == 0 && seq == 0 && n <= REASON_MAX;
+                default -> false;
+            };
+        }
     }
 
-    /** Parses a binary request body; null without a complete header. */
-    static Request parseRequest(ByteBuffer body) {
-        ByteBuffer b = body.slice();
-        int n = b.remaining();
-        if (n < CID + 2) return null;
+    /** Parses the {@link #HDR} bytes of an authentication header at b's position. */
+    static Header parseHeader(ByteBuffer b) {
+        ByteBuffer h = b.slice(b.position(), HDR);
         byte[] cid = new byte[CID];
-        b.get(0, cid);
-        int kind = b.get(CID) & 0xff, flags = b.get(CID + 1) & 0xff;
-        int off = CID + 2;
-        long seq = VarInt.get(b, off, n);
-        if (seq < 0) return null;
-        int seqLen = VarInt.lengthOf(b.get(off));
-        ByteBuffer seqRaw = b.slice(off, seqLen);
-        off += seqLen;
-        long ack = VarInt.get(b, off, n);
-        if (ack < 0) return null;
-        off += VarInt.lengthOf(b.get(off));
-        if (n < off + TIME + NONCE + MAC) return null;
-        int time = b.getInt(off);
-        off += TIME;
+        h.get(0, cid);
         byte[] nonce = new byte[NONCE];
-        b.get(off, nonce);
-        off += NONCE;
-        ByteBuffer hdr = b.slice(0, off);
-        byte[] mac = new byte[MAC];
-        b.get(off, mac);
-        ByteBuffer data = b.slice(off + MAC, n - off - MAC);
-        boolean valid = switch (kind) {
-            case KIND_UP -> (flags & ~FLAG_FIN) == 0;
-            case KIND_DOWN -> flags == 0 && !data.hasRemaining();
-            case KIND_CLOSE -> flags == 0 && seq == 0 && data.remaining() <= REASON_MAX;
-            default -> false;
-        };
-        return new Request(cid, kind, flags, seq, ack, seqRaw, time, nonce, hdr, mac, data, valid);
+        h.get(CID + 2 + 16 + TIME, nonce);
+        return new Header(cid, h.get(CID) & 0xff, h.get(CID + 1) & 0xff, h.getLong(CID + 2), h.getLong(CID + 10),
+                h.getInt(CID + 18), nonce, h.getInt(CID + 2 + 16 + TIME + NONCE) & 0xffffffffL,
+                h.slice(0, HDR_FIELDS), h.slice(HDR_FIELDS, MAC));
     }
 
-    /** Whether a request's MAC verifies with key, compared in constant time. */
-    static boolean verify(Key key, Request q) {
-        return MessageDigest.isEqual(key.requestMac(q.hdr(), q.data()), q.mac());
+    /** Whether a header's MAC verifies with m (keyed with the carrier key), compared in constant time. */
+    static boolean verifyHeader(Mac m, Header h) {
+        return equal(Key.headerMac(m, h.fields()), h.mac());
     }
 
-    /** The response header (MAC and Flags) to q with flags and data. */
-    static ByteBuffer responseHeader(Key key, Request q, int flags, ByteBuffer data) {
+    /** Whether a Data MAC verifies with m for header h and data, compared in constant time. */
+    static boolean verifyData(Mac m, Header h, ByteBuffer data, ByteBuffer mac) {
+        return equal(Key.dataMac(m, h.mac(), data), mac);
+    }
+
+    private static boolean equal(byte[] want, ByteBuffer got) {
+        int diff = got.remaining() ^ MAC;
+        for (int i = 0; i < MAC && i < got.remaining(); i++) diff |= want[i] ^ got.get(got.position() + i);
+        return diff == 0;
+    }
+
+    /** The response header (MAC and Flags) to the request h with flags and data. */
+    static ByteBuffer responseHeader(Key key, Header h, int flags, ByteBuffer data) {
         ByteBuffer b = ByteBuffer.allocate(RESP_HDR);
-        b.put(key.responseMac(q.cid(), q.kind(), q.seqRaw(), q.nonce(), flags, data)).put((byte) flags);
+        b.put(key.responseMac(h.cid(), h.kind(), h.seq(), h.nonce(), flags, data)).put((byte) flags);
         return b.flip();
     }
 

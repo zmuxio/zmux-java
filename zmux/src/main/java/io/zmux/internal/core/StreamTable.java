@@ -52,6 +52,9 @@ public final class StreamTable {
 
         /** The stream got its identifier. */
         void opened(Stream st);
+
+        /** The last stream that held unread data after the peer's close was read or dropped. */
+        void unreadDrained();
     }
 
     private static final class LocalCount {
@@ -181,7 +184,63 @@ public final class StreamTable {
 
     /** Accounts n buffered bytes consumed; the only function that lowers the buffered count (C1). */
     void bufSub(long n) {
-        if (n != 0) conn.unbuffer(n, bufferCap(), mem.pressure());
+        if (n == 0) return;
+        conn.unbuffer(n, bufferCap(), mem.pressure());
+    }
+
+    // ---- the read drain after the peer's close ----
+
+    /** Streams the application holds with unread data while the session drains them; -1: no drain. */
+    private int drainUnread = -1;
+
+    /**
+     * Whether st, which the application holds (opened or accepted), has data it has not read:
+     * readable in the buffer, or pushed to its receive lane and not yet consumed there.
+     */
+    private static boolean unread(Stream st) {
+        if (!st.hasRecv || st.rcv.stopped() || (!st.local && !st.tab.accepted)) return false;
+        StreamRecv.RecvPart r = st.rcv;
+        return r.pushOff() > r.readOff() || r.buf().contiguous(r.pushOff()) > r.pushOff();
+    }
+
+    /** Starts the drain after the peer's close: counts the held streams with unread data, once. */
+    void startDrain() {
+        if (drainUnread >= 0) return;
+        drainUnread = 0;
+        for (Stream st : streams.values()) {
+            st.tab.drainUnread = unread(st);
+            if (st.tab.drainUnread) drainUnread++;
+        }
+    }
+
+    /** Re-counts st after its data or reads changed; O(1) outside a drain. */
+    void drainUpdate(Stream st) {
+        if (drainUnread < 0) return;
+        boolean u = !st.tab.discarded && unread(st);
+        if (u == st.tab.drainUnread) return;
+        st.tab.drainUnread = u;
+        drainUnread += u ? 1 : -1;
+        if (drainUnread == 0) port.unreadDrained();
+    }
+
+    /** Whether the drain still waits for the application's reads. */
+    boolean unreadHeld() { return drainUnread > 0; }
+
+    /**
+     * The session closes: streams the application never accepted are dropped with their
+     * buffers, so that accept fails with the session's error and nothing waits for them.
+     */
+    void dropUnaccepted() {
+        for (ArrayDeque<Stream> q : acceptQ) {
+            for (Stream st; (st = q.poll()) != null; ) {
+                if (st.hasRecv) {
+                    long d = st.rcv.buf().clear() + (st.rcv.pushOff() - st.rcv.readOff());
+                    if (d > 0) bufSub(d);
+                    StreamRecv.releaseBuffer(st);
+                }
+                dg.dropStream(st);
+            }
+        }
     }
 
     // ---- establishment ----
@@ -222,9 +281,6 @@ public final class StreamTable {
      * Opens a local stream. Once established it reserves stream-count credit and fails
      * with STREAM_LIMIT without it; before establishment the stream is provisional.
      */
-    /** The streams the session holds, of either direction and either side. */
-    public int liveCount() { return streams.size(); }
-
     public Stream openStream(boolean bidi) throws CoreException {
         openCheck();
         int t = Stream.typeIndex(bidi);
@@ -656,7 +712,7 @@ public final class StreamTable {
     }
 
     /** The largest MAX_STREAMS value. */
-    private static final long MAX_STREAM_COUNT = 1L << 60;
+    private static final long MAX_STREAM_COUNT = io.zmux.Zmux.MAX_STREAM_CREDIT;
 
     /** Raises staged unidirectional credit on the first accept. */
     private void unstageUni() {
@@ -708,6 +764,7 @@ public final class StreamTable {
         if (!sendDone || !recvDone || !released) return;
         st.released(st.stats());
         st.tab.discarded = true;
+        drainUpdate(st);
         streams.remove(st.tab.id);
         sched.remove(st);
         ctl.remove(st);
@@ -813,6 +870,8 @@ public final class StreamTable {
         private boolean releasedRecv;
         private boolean stackReject;
         private boolean discarded;
+        /** Counted by the read drain as holding unread data. */
+        private boolean drainUnread;
         private boolean pinned;
         /** Flush before establishment: the opening frame is owed once the stream may open. */
         private boolean openWant;

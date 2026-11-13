@@ -168,7 +168,8 @@ public final class Bootstrap {
             if (err != null) Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(err));
             else {
                 PipeIo io = c.asPipe();
-                Callbacks.EXECUTOR.execute(() -> f.complete(io));
+                // A dial cancelled meanwhile has nobody to take the connection: close it.
+                Callbacks.EXECUTOR.execute(() -> { if (!f.complete(io)) c.close(null); });
             }
         });
     }
@@ -199,7 +200,8 @@ public final class Bootstrap {
                                                      java.util.function.Function<SessionRuntime, Runnable> registration) {
         Transport carrier = Transport.claim(io);
         if (carrier == null) carrier = new ExternalTransport(loop.get(), io);
-        if (io.capabilities().seal() != null) carrier = new SealedTransport(carrier, io.capabilities().seal(), io.capabilities().exporter());
+        var records = PipeIoAccess.get().records(io);
+        if (records != null) carrier = new SealedTransport(carrier, records, io.capabilities().exporter());
         try {
             cfg = withExporter(cfg, carrier);
         } catch (IllegalArgumentException invalid) {

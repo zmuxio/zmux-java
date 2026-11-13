@@ -1,7 +1,7 @@
 package io.zmux;
 
 import io.zmux.carrier.Framing;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.FrameType;
 import java.util.Objects;
 

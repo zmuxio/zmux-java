@@ -26,20 +26,20 @@ public final class PinAnchor implements Anchor {
     public boolean hasProofKey() { return proofKeyId != null; }
 
     @Override
-    public Verdict verify(VerifyInput in) throws CredentialsFailedException {
+    public VerifyVerdict verify(VerifyInput in) throws CredentialsFailedException {
         byte[] peer = in.peerStatic();
         // A PSK-only profile shows no static key, and there is nothing to pin: the peer is rejected.
         if (peer == null) throw new CredentialsFailedException("no static key to pin");
         byte[] id = KeyId.of(KeyAlg.X25519, peer);
         if (!MessageDigest.isEqual(id, keyId)) throw new CredentialsFailedException("key not pinned");
         // The principal is the pin, not the key bytes: one name for the node however its key is encoded.
-        return new Verdict(new Principal(Principal.NODE_KEY, id), proofKeyId, null);
+        return new VerifyVerdict(new Principal(Principal.NODE_KEY, id), proofKeyId, null);
     }
 
     /** The rule of requirePqAuth: an end that requires it accepts no pin of an X25519 key alone. */
-    static void checkPqAuth(Anchor a, boolean requirePqAuth) throws io.zmux.carrier.SecureCarrierException {
+    static void checkPqAuth(Anchor a, boolean requirePqAuth) throws io.zmux.seal.SecureCarrierException {
         if (requirePqAuth && a instanceof PinAnchor p && !p.hasProofKey()) {
-            throw new io.zmux.carrier.SecureCarrierException(io.zmux.carrier.SecureCarrierException.Code.INVALID_CONFIG, "requirePqAuth with a pin without a proof key");
+            throw new io.zmux.seal.SecureCarrierException(io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG, "requirePqAuth with a pin without a proof key");
         }
     }
 }

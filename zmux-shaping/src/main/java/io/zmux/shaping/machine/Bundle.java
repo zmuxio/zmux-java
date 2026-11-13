@@ -86,7 +86,7 @@ public final class Bundle {
         }
 
         /** Draws the shared values in order: handshakes, machines, pool. */
-        Kind compile(Sampler compile, Options o) {
+        Kind compile(Sampler compile, MachineOptions o) {
             Map<Value, Long> kept = new java.util.IdentityHashMap<>();
             List<Long> shared = new ArrayList<>();
             for (Unit u : units.values()) {
@@ -158,7 +158,7 @@ public final class Bundle {
     }
 
     /** Reads a bundle. */
-    public static Bundle parse(byte[] json, Options o) throws DefinitionException {
+    public static Bundle parse(byte[] json, MachineOptions o) throws DefinitionException {
         o.limits().check(json.length);
         Map<String, Object> d = DefinitionJson.members(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)),
                 Set.of("generated_at", "next_change", "tables", "kinds"), "bundle");

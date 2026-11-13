@@ -3,7 +3,7 @@ package io.zmux.internal.core;
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportParams;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -164,7 +164,7 @@ final class TraceFrames {
                     try {
                         p.sessionCrypto = io.zmux.internal.join.SessionCrypto.of(list(m.get("suites")).stream().mapToLong(TraceFrames::num).toArray(),
                                 list(m.get("groups")).stream().mapToLong(TraceFrames::num).toArray());
-                    } catch (io.zmux.carrier.SecureCarrierException bad) {
+                    } catch (io.zmux.seal.SecureCarrierException bad) {
                         throw new IllegalArgumentException(bad);
                     }
                 }

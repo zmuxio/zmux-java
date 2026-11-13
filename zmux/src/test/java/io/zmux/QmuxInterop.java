@@ -34,8 +34,8 @@ class QmuxInterop {
         String binary = InteropProcess.required(environment);
         try (var loops = EventLoops.create(2)) {
             // Offer zmux extensions: a plain peer must disable them through negotiation.
-            var config = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingUniStreams(16).maxPipes(4).pipeAuth(PipeAuth.psk(PeerInterop.PSK).withEndToEnd()).build();
-            try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config))
+            var config = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16).maxPipes(4).pipeAuth(PipeAuth.psk(PeerInterop.PSK).withEndToEnd()).build();
+            try (var endpoint = initiating ? ZmuxListener.of(ListenerConfig.of(config))
                     : Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.of(config));
                  var child = new InteropProcess(binary, initiating ? "server" : "client",
                          initiating ? "127.0.0.1:0" : endpoint.localAddress().getHostString() + ":" + endpoint.localAddress().getPort())) {
@@ -69,7 +69,7 @@ class QmuxInterop {
                     assertTrue(state.maxDatagramPayload() > 0);
                     session.datagrams().send(ByteBuffer.wrap(text("datagram")));
                     assertArrayEquals(text("datagram"), session.datagrams().receive());
-                    session.close(new ApplicationError(42, "bye"));
+                    session.abort(42, "bye");
                     assertEquals("app 42 bye", child.expect("CLOSED ")); child.awaitExit();
                 }
             }

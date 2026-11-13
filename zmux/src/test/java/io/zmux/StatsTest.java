@@ -28,10 +28,10 @@ class StatsTest {
     @Test
     void streamAndSessionCountsFollowTheirEvents() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).incomingStreams(4).build();
-            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingStreams(4).build();
+            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
             PipeIo[] p = MemoryPipe.pair(Framing.BYTE_STREAM);
-            PipeIo labelled = new PipeIo(p[0].reader(), p[0].writer(), p[0].framing(), "memory-a", p[0].carrierConn(), p[0].capabilities());
+            PipeIo labelled = new PipeIo(p[0].reader(), p[0].writer(), p[0].framing(), "memory-a", p[0].carrierConn()).withCapabilities(p[0].capabilities());
             Future<ZmuxSession> sf = ex.submit(() -> Zmux.open(p[1], Role.SERVER, server));
             try (ZmuxSession c = Zmux.open(labelled, Role.CLIENT, client); ZmuxSession s = sf.get(5, TimeUnit.SECONDS)) {
                 assertEquals(1, c.stats().pipesAdded(), "the bootstrap pair is an attachment");
@@ -123,7 +123,7 @@ class StatsTest {
 
     private static ZmuxConfig.Builder multipath(EventLoops loops, byte[] psk) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(psk).withEndToEnd()).probation(Duration.ZERO);
+                .maxPipes(4).pipeAuth(PipeAuth.psk(psk).withEndToEnd()).noProbation();
     }
 
     @Test
@@ -226,7 +226,7 @@ class StatsTest {
                 long refusedPipe = -1;
                 for (int i = 0; i < 14 && c.stats().joinRefusals() == 0; i++) {
                     try { c.addPipe(l.localAddress(), PipeOptions.defaults()); added++; }
-                    catch (JoinRefusedException refused) { refusedPipe = refused.pipeId(); }
+                    catch (JoinRefusedException refused) { refusedPipe = refused.pipeId().orElseThrow().value(); }
                     catch (IOException failed) { /* Counted below. */ }
                     Thread.sleep(5);
                 }
@@ -249,7 +249,7 @@ class StatsTest {
                 Future<ZmuxSession> sf = ex.submit((java.util.concurrent.Callable<ZmuxSession>) l::accept);
                 ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
-                ZmuxPipe added = c.addPipe(l.localAddress(), PipeOptions.builder().probeInterval(Duration.ofSeconds(1)).build());
+                ZmuxPipe added = c.addPipe(l.localAddress(), PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(1)).build()).build());
                 PipePoolTest.await(() -> added.stats().orElseThrow().pingsAnswered() >= 1);
                 PipeStats st = added.stats().orElseThrow();
                 assertTrue(st.pingsAnswered() <= st.pingsSent());

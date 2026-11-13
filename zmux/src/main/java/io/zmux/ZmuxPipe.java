@@ -16,14 +16,21 @@ import java.util.Optional;
 public final class ZmuxPipe {
     private final ZmuxSession session;
     private final long id;
+    private final PipeId pipeId;
 
     ZmuxPipe(ZmuxSession session, long id) {
         this.session = session;
         this.id = id;
+        this.pipeId = PipeId.of(id);
     }
 
     /** The pipe ID. */
-    public long id() {
+    public PipeId id() {
+        return pipeId;
+    }
+
+    /** The pipe ID's value, for the session's own calls. */
+    long rawId() {
         return id;
     }
 
@@ -52,6 +59,9 @@ public final class ZmuxPipe {
         }));
     }
 
+    /** {@link #admitted()} when it is a type; empty otherwise. */
+    public <T> Optional<T> admitted(Class<T> type) throws IOException { return admitted().filter(type::isInstance).map(type::cast); }
+
     /** The states of the outbound and inbound directions; empty once retired. */
     public Optional<PipeState> state() throws IOException {
         Session core = session.core;
@@ -75,16 +85,70 @@ public final class ZmuxPipe {
     }
 
     /**
-     * Replaces the pipe's own liveness settings as a whole, those it was added with included;
-     * a setting not written follows the session's ({@link ZmuxSession#setLiveness}). A pipe already suspect keeps the floor
-     * and dead timeout it turned suspect under. Nothing is sent.
+     * Changes the pipe's runtime settings together ({@link PipeUpdate}): one call applies all its
+     * settings at once, and one that changes both receive settings sends one PIPE_STATUS. A pipe
+     * already suspect keeps the suspicion floor and dead timeout it turned suspect under. Changes
+     * apply from the next scheduling decision; the settings in force are in {@link #stats()}.
      */
-    public void setLiveness(Liveness.Pipe l) throws IOException {
-        java.util.Objects.requireNonNull(l, "l");
-        long interval = l.idleProbesOff() ? 0 : l.probeInterval().map(ZmuxConfig::nanos).orElse(-1L);
-        double jitter = l.probeJitter().orElse(Double.NaN);
-        gone(() -> session.core.setPipeLiveness(id, l.suspectFloor().map(ZmuxConfig::nanos).orElse(0L), l.deadTimeout().map(ZmuxConfig::nanos).orElse(0L), interval, jitter));
+    public void update(PipeUpdate u) throws IOException {
+        java.util.Objects.requireNonNull(u, "u");
+        Tiers.PipeSettings.Builder b = Tiers.PipeSettings.builder();
+        switch (u.sendPriority) {
+            case SET -> b.sendPriority(u.sendPriorityValue);
+            case CLEAR -> b.clearSendPriority(true);
+            case KEEP -> { }
+        }
+        switch (u.sendStandby) {
+            case SET -> b.sendStandby(u.sendStandbyValue);
+            case CLEAR -> b.clearSendStandby(true);
+            case KEEP -> { }
+        }
+        switch (u.receivePriority) {
+            case SET -> b.recvPriority(u.receivePriorityValue);
+            case CLEAR -> b.recvPriority(0L);
+            case KEEP -> { }
+        }
+        switch (u.receiveStandby) {
+            case SET -> b.recvStandby(u.receiveStandbyValue);
+            case CLEAR -> b.recvStandby(false);
+            case KEEP -> { }
+        }
+        switch (u.weight) {
+            case SET -> b.weight(u.weightValue);
+            case CLEAR -> b.weight(1L);
+            case KEEP -> { }
+        }
+        switch (u.probation) {
+            case SET -> b.probation(u.probationValue == null ? 0L : ZmuxConfig.nanos(u.probationValue));
+            case CLEAR -> b.probation(-1L);
+            case KEEP -> { }
+        }
+        Tiers.PipeSettings settings = u.sendPriority == PipeUpdate.Change.KEEP && u.sendStandby == PipeUpdate.Change.KEEP
+                && u.receivePriority == PipeUpdate.Change.KEEP && u.receiveStandby == PipeUpdate.Change.KEEP
+                && u.weight == PipeUpdate.Change.KEEP && u.probation == PipeUpdate.Change.KEEP ? null : b.build();
+        PipeLiveness l = switch (u.liveness) {
+            case SET -> u.livenessValue;
+            case CLEAR -> PipeLiveness.inherit();
+            case KEEP -> null;
+        };
+        Session core = session.core;
+        gone(() -> {
+            if (settings != null) core.setPipe(id, settings);
+            if (l != null) core.setPipeLiveness(id, l.suspectFloorNanos(), l.deadTimeoutNanos(), l.probeIntervalNanos(), l.probeJitterRaw());
+        });
     }
+
+    /** Sets the tier of the local outbound direction: {@link #update} with that one setting. */
+    public void setSendPriority(long tier) throws IOException { update(PipeUpdate.builder().sendPriority(tier).build()); }
+
+    /** Sets the tier requested for the peer's outbound direction: {@link #update} with that one setting. */
+    public void setReceivePriority(long tier) throws IOException { update(PipeUpdate.builder().receivePriority(tier).build()); }
+
+    /** Sets the local outbound standby: {@link #update} with that one setting. */
+    public void setSendStandby(boolean on) throws IOException { update(PipeUpdate.builder().sendStandby(on).build()); }
+
+    /** Sets the standby requested for the peer's outbound direction: {@link #update} with that one setting. */
+    public void setReceiveStandby(boolean on) throws IOException { update(PipeUpdate.builder().receiveStandby(on).build()); }
 
     /** Overrides the session's quality event band for this outbound pipe. */
     public void setQualityBand(QualityBand band) throws IOException {
@@ -93,55 +157,11 @@ public final class ZmuxPipe {
                 ZmuxConfig.nanos(band.minInterval())));
     }
 
-    private void set(Tiers.PipeSettings o) throws IOException {
-        Session core = session.core;
-        gone(() -> core.setPipe(id, o));
-    }
-
-    public void setSendPriority(long tier) throws IOException {
-        if (tier < 0 || tier > io.zmux.carrier.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
-        set(Tiers.PipeSettings.builder().sendPriority(tier).build());
-    }
-
-    /** The local outbound tier follows the peer's request again. */
-    public void clearSendPriority() throws IOException {
-        set(Tiers.PipeSettings.builder().clearSendPriority(true).build());
-    }
-
-    public void setReceivePriority(long tier) throws IOException {
-        if (tier < 0 || tier > io.zmux.carrier.VarInt.MAX) throw new IllegalArgumentException("tier exceeds varint62");
-        set(Tiers.PipeSettings.builder().recvPriority(tier).build());
-    }
-
-    public void setSendStandby(boolean on) throws IOException {
-        set(Tiers.PipeSettings.builder().sendStandby(on).build());
-    }
-
-    /** The local outbound standby follows the peer's request again. */
-    public void clearSendStandby() throws IOException {
-        set(Tiers.PipeSettings.builder().clearSendStandby(true).build());
-    }
-
-    public void setReceiveStandby(boolean on) throws IOException {
-        set(Tiers.PipeSettings.builder().recvStandby(on).build());
-    }
-
-    public void setWeight(long w) throws IOException {
-        if (w < 0) throw new IllegalArgumentException("negative weight");
-        set(Tiers.PipeSettings.builder().weight(w).build());
-    }
-
-    /** The base of the pipe's probation; zero disables it. */
-    public void setProbation(Duration d) throws IOException {
-        if (d.isNegative()) throw new IllegalArgumentException("negative probation");
-        set(Tiers.PipeSettings.builder().probation(ZmuxConfig.nanos(d)).build());
-    }
-
     /**
      * Waits until the peer is known to hold this pipe: a pipe this side joined
      * counts once a PIPE_ACK on any lane covered more than zero bytes or, receive-only, once a
      * record arrived; pipe 0 and pipes the peer joined are held from the start. Joining waits for
-     * this unless {@link PipeOptions.Builder#noWaitAttached} is set, when it returns once the Reply
+     * this unless {@link PipeOptions.Builder#returnOnReply} is set, when it returns once the Reply
      * verified, before the acceptor read the Confirm: removing the session's other pipes earlier
      * may leave the peer without a live pipe. null timeout: no limit;
      * {@link java.net.SocketTimeoutException} after it, {@link PipeGoneException} once the pipe is
@@ -149,13 +169,13 @@ public final class ZmuxPipe {
      */
     public void awaitPeerAttached(Duration timeout) throws IOException {
         Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, ZmuxSession.deadline(timeout));
-        if (r == MISSING) throw new PipeGoneException(id);
+        if (r == MISSING) throw new PipeGoneException(pipeId);
     }
 
     /** Like {@link #awaitPeerAttached} without blocking; cancelling the future withdraws the wait. */
     public ZmuxFuture<Void> peerAttachedAsync(Duration timeout) {
         return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, ZmuxSession.deadline(timeout), r -> {
-            if (r == MISSING) throw new PipeGoneException(id);
+            if (r == MISSING) throw new PipeGoneException(pipeId);
             return null;
         });
     }
@@ -226,7 +246,7 @@ public final class ZmuxPipe {
             }
             return Boolean.TRUE;
         }, null).submit().await(Long.MAX_VALUE);
-        if (r == MISSING) throw new PipeGoneException(id);
+        if (r == MISSING) throw new PipeGoneException(pipeId);
         Errors.check(r);
     }
 

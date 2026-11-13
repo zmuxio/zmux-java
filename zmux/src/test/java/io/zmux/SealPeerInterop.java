@@ -33,7 +33,7 @@ class SealPeerInterop {
             var b = SealTest.client().allowedProfiles(profile);
             if (!profile.hasPsk()) b.psk(null, null);
             var p = SealTest.establish(SealTest.tcp(at), b.build());
-            assertEquals(profile, Seal.peerOf(p).profile());
+            assertEquals(profile, Seal.peerOf(p).orElseThrow().profile());
             try (var session = Zmux.open(p, Role.CLIENT, cfg)) {
                 assertEquals(Long.toString(profile.value()), child.expect("ESTABLISHED "));
                 byte[] data = new byte[1 << 20];
@@ -54,7 +54,7 @@ class SealPeerInterop {
         String binary = InteropProcess.required("ZMUX_SEAL_INTEROP_PEER");
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var server = new ServerConfig(SealTest.gate(null), SealTest.NODE).withAcceptedProfiles(Profile.values());
+            var server = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.values()).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var child = new InteropProcess(binary, "client", Long.toString(profile.value()), l.localAddress().getHostString() + ":" + l.localAddress().getPort());

@@ -19,13 +19,13 @@ final class Scheduling {
             Scheduler.Request[] req = new Scheduler.Request[n];
             for (int i = 0; i < n; i++) {
                 PathScheduler.PickFrame f = requests.get(i);
-                req[i] = new Scheduler.Request(f.stream(), f.len(), f.eligibleTier(), f.hasTier(), f.lastPipe(),
-                        f.hasLastPipe(), f.urgency());
+                req[i] = new Scheduler.Request(f.stream(), f.len(), f.eligibleTier(), f.hasTier(), f.hasLastPipe() ? PipeId.of(f.lastPipe()) : null,
+                        f.urgency());
             }
             Scheduler.Pipe[] view = new Scheduler.Pipe[pipes.size()];
             for (int i = 0; i < view.length; i++) {
                 PathScheduler.PickPipe p = pipes.get(i);
-                view[i] = new Scheduler.Pipe(p.pipe(), p.state().toPublic(), Duration.ofNanos(p.srtt()), Duration.ofNanos(p.rttvar()),
+                view[i] = new Scheduler.Pipe(PipeId.of(p.pipe()), p.state().toPublic(), Duration.ofNanos(p.srtt()), Duration.ofNanos(p.rttvar()),
                         p.rate(), p.unsent(), p.inFlight(), p.priority(), p.weight(), p.writable(), p.standby(),
                         p.saturated(), p.probation(), p.eligible(), p.shaped(), p.shapingWeight());
             }

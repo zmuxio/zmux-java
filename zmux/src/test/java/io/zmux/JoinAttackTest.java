@@ -38,7 +38,7 @@ class JoinAttackTest {
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO)
+                .maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                 .allowRecordMode((c, m, p) -> true);
     }
 
@@ -57,7 +57,7 @@ class JoinAttackTest {
 
     private static void alive(ZmuxSession c, ZmuxSession s) throws Exception { SealTest.echo(c, s); }
 
-    private static PipeOptions mode(RecordMode m) { return PipeOptions.builder().mode(m).build(); }
+    private static PipeOptions mode(RecordMode m) { return PipeOptions.builder().recordMode(m).build(); }
 
     /** A1 to A5: a third party reads one Hello and nothing else, whatever it answers; nothing of it reaches the session. */
     @Test void aThirdPartyReadsOneHelloAndNothingElse() throws Exception {
@@ -87,7 +87,7 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 SocketChannel near = SocketChannel.open(party.getLocalAddress());
                 PipeIo io = PipeChannel.pipe(near, near, Framing.BYTE_STREAM, 1 << 16);
-                if (m == RecordMode.BOUND) io = io.withExporter((x, y, n) -> new byte[n]).secure();
+                if (m == RecordMode.BOUND) io = io.withExporter((x, y, n) -> new byte[n]).withSecure(true);
                 PipeIo carrier = io;
                 Thread adder = Thread.ofVirtual().start(() -> {
                     try { c.addPipe(carrier, mode(m)); } catch (Exception expected) { /* It never joins. */ }
@@ -103,7 +103,7 @@ class JoinAttackTest {
                     int extra = far.read(ByteBuffer.allocate(16));
                     assertTrue(extra <= 0, what + ": bytes after the Hello");
                     for (var st : c.pipes()) {
-                        if (st.id() != 0) {
+                        if (st.id().value() != 0) {
                             var state = st.state();
                             if (state.isPresent()) assertNotEquals(PipeState.Outbound.ACTIVE, state.get().outbound(), what);
                         }
@@ -171,7 +171,7 @@ class JoinAttackTest {
      */
     static void attached(ZmuxSession acceptor, ZmuxPipe joined) throws Exception {
         joined.awaitPeerAttached(java.time.Duration.ofSeconds(5));
-        assertTrue(acceptor.pipes().stream().anyMatch(q -> q.id() == joined.id()), "the acceptor did not attach the pipe");
+        assertTrue(acceptor.pipes().stream().anyMatch(q -> q.id().value() == joined.id().value()), "the acceptor did not attach the pipe");
     }
 
     @Test void aSealedJoinPassesARelayThatSeesNoPlaintext() throws Exception {
@@ -181,7 +181,7 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT); var relay = new Relay(l.localAddress())) {
                 ZmuxPipe p = c.addPipe(relay.address(), mode(RecordMode.SEALED));
                 attached(s, p);
-                for (ZmuxPipe q : c.pipes()) if (q.id() == 0) q.abort();
+                for (ZmuxPipe q : c.pipes()) if (q.id().value() == 0) q.abort();
                 byte[] marker = "THE-PLAINTEXT-MARKER-0123456789".getBytes();
                 ZmuxStream st = c.openStream();
                 st.write(marker);
@@ -191,7 +191,7 @@ class JoinAttackTest {
                 in.write(marker);
                 in.finish();
                 assertArrayEquals(marker, st.inputStream().readAllBytes());
-                assertTrue(p.id() > 0);
+                assertTrue(p.id().value() > 0);
                 assertFalse(contains(relay.client(), marker), "plaintext towards the server");
                 assertFalse(contains(relay.backward(), marker), "plaintext towards the client");
             }
@@ -283,17 +283,24 @@ class JoinAttackTest {
             ZmuxConfig cfg = config(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT); var relay = new UnitRelay(l.localAddress())) {
+                // The direct pipe is the backup tier, so the data goes over the relayed pipe whatever the schedulers measure.
+                c.pipes().getFirst().setSendPriority(1);
                 ZmuxPipe p = c.addPipe(relay.address(), mode(RecordMode.SEALED));
-                long id = p.id();
+                long id = p.id().value();
                 until("the acceptor's pipe", () -> s.pipes().size() >= 2);
                 ZmuxStream st = c.openStream();
                 st.write(new byte[] {7});
                 ZmuxStream in = s.acceptStream();
-                var read = new java.util.concurrent.CompletableFuture<byte[]>();
+                var read = new java.util.concurrent.CompletableFuture<Long>();
                 Thread.ofVirtual().start(() -> {
-                    try {
-                        read.complete(in.inputStream().readAllBytes());
-                    } catch (Exception e) {
+                    try (var stream = in.inputStream()) {
+                        byte[] buf = new byte[1 << 16];
+                        long n = 0;
+                        for (int k; (k = stream.read(buf)) >= 0; n += k) {
+                            for (int i = 0; i < k; i++) if (buf[i] != 7) throw new AssertionError("a corrupt byte at " + (n + i));
+                        }
+                        read.complete(n);
+                    } catch (Throwable e) {
                         read.completeExceptionally(e);
                     }
                 });
@@ -309,7 +316,7 @@ class JoinAttackTest {
                 relay.fin.set(true);
                 until("the end to fail the pipe", () -> {
                     for (ZmuxPipe q : s.pipes()) {
-                        if (q.id() == id) {
+                        if (q.id().value() == id) {
                             var state = q.state();
                             return state.isEmpty() || state.get().outbound() == PipeState.Outbound.FAILED;
                         }
@@ -321,9 +328,7 @@ class JoinAttackTest {
                 st.write(chunk);
                 total += chunk.length;
                 st.finish();
-                byte[] all = read.get(30, java.util.concurrent.TimeUnit.SECONDS);
-                assertEquals(total, all.length);
-                for (byte b : all) assertEquals(7, b);
+                assertEquals(total, read.get(30, java.util.concurrent.TimeUnit.SECONDS));
                 alive(c, s);
             }
         }
@@ -355,8 +360,8 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 long before = l.stats().rejected();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((x, y, n) -> new byte[n]).secure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                PipeIo near = pair[0].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).secure();
+                l.handle(pair[1].withExporter((x, y, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                PipeIo near = pair[0].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
                 assertThrows(Exception.class, () -> c.addPipe(near, mode(RecordMode.BOUND)));
                 until("the rejection", () -> l.stats().rejected() > before);
                 until("the acceptor's count", () -> s.stats().joinAuthFailures() > 0);
@@ -393,7 +398,7 @@ class JoinAttackTest {
                     assertTrue(l.stats().rejected() > rejected, m + ": refused by the listener");
                     assertEquals(added, s.stats().pipesAdded(), m.name());
                     assertEquals(2, s.pipes().size(), m.name());
-                    assertTrue(p.id() > 0);
+                    assertTrue(p.id().value() > 0);
                     alive(c, s);
                 }
             }
@@ -409,7 +414,7 @@ class JoinAttackTest {
                 byte[] hello = helloFor(c, 40, Mode.BOUND, new byte[32], null);
                 long auth = s.stats().joinAuthFailures(), replays = s.stats().joinReplays();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).secure(),
+                l.handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).withSecure(true),
                         JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeChannel near = PipeChannel.of(pair[0]);
                 near.write(ByteBuffer.wrap(hello));
@@ -566,7 +571,7 @@ class JoinAttackTest {
                     if (what.equals("close")) {
                         c.close();
                     } else {
-                        for (ZmuxPipe q : c.pipes()) if (q.id() != 0) q.abort();
+                        for (ZmuxPipe q : c.pipes()) if (q.id().value() != 0) q.abort();
                     }
                     w.gate.countDown();
                     assertThrows(java.util.concurrent.ExecutionException.class, () -> added.get(5, java.util.concurrent.TimeUnit.SECONDS), what);
@@ -615,8 +620,8 @@ class JoinAttackTest {
                     @Override public void write(OutboundBatch d, Completion done) { writes.incrementAndGet(); a[0].writer().write(d, done); }
                     @Override public void close() { a[0].writer().close(); }
                 };
-                PipeIo up = new PipeIo(null, counted, Framing.BYTE_STREAM, "up", null).withExporter((x, y, n) -> new byte[n]).secure();
-                PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, "down", null).withExporter((x, y, n) -> new byte[n]).secure();
+                PipeIo up = new PipeIo(null, counted, Framing.BYTE_STREAM, "up", null).withExporter((x, y, n) -> new byte[n]).withSecure(true);
+                PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, "down", null).withExporter((x, y, n) -> new byte[n]).withSecure(true);
                 PipeIo split = PipeIo.split(up, down);
                 assertTrue(split.isSecure());
                 assertThrows(Exception.class, () -> c.addPipe(split, mode(RecordMode.BOUND)));
@@ -665,7 +670,7 @@ class JoinAttackTest {
     @Test void aFirstBatchBeyondTheHellosCiphertextStillJoins() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).joinEarlyHello(70_000)
-                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO).build();
+                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 ZmuxStream st = c.openStream();
@@ -676,7 +681,7 @@ class JoinAttackTest {
                     try { st.write(new byte[128 << 10]); } catch (Exception ended) { /* The test is over. */ }
                 });
                 Thread.sleep(50);
-                assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id() > 0);
+                assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id().value() > 0);
                 assertEquals(128 << 10, s.acceptStream().inputStream().readNBytes(128 << 10).length);
             }
         }
@@ -697,7 +702,7 @@ class JoinAttackTest {
     @Test void unconfirmedCarriersDoNotCrowdOutAJoinOrEndASuspension() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).allowRecordMode((c, m, p) -> true)
-                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).probation(Duration.ZERO).build();
+                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 SocketChannel[] held = new SocketChannel[4];
@@ -709,7 +714,7 @@ class JoinAttackTest {
                     }
                     assertEquals(1, s.pipes().size(), "no pipe before Confirmed");
                     ZmuxPipe real = c.addPipe(l.localAddress(), PipeOptions.defaults());
-                    assertTrue(real.id() > 0);
+                    assertTrue(real.id().value() > 0);
                     for (long end = System.nanoTime() + 5_000_000_000L; s.pipes().size() < 2 && System.nanoTime() < end; ) Thread.sleep(5);
                     assertEquals(2, s.pipes().size());
                     alive(c, s);
@@ -760,7 +765,7 @@ class JoinAttackTest {
     /** First-write tampering with the secret flags of a session's parameters on the path. */
     private static PipeIo tampered(PipeIo p, IntUnaryOperator flags) {
         PipeWriter w = p.writer();
-        return new PipeIo(p.reader(), new PipeWriter() {
+        return p.withHalves(p.reader(), new PipeWriter() {
             private boolean done;
             @Override public void write(OutboundBatch batch, Completion c) {
                 if (done) { w.write(batch, c); return; }
@@ -769,13 +774,13 @@ class JoinAttackTest {
                 ByteBuffer to = ByteBuffer.wrap(out);
                 for (int i = 0; i < batch.segmentCount(); i++) to.put(batch.segment(i).duplicate());
                 ByteBuffer id = ByteBuffer.allocate(8);
-                io.zmux.carrier.VarInt.put(id, TransportParams.ID_MULTIPATH);
+                io.zmux.internal.wire.VarInt.put(id, TransportParams.ID_MULTIPATH);
                 byte[] idBytes = Arrays.copyOf(id.array(), id.position());
                 outer:
                 for (int i = 0; i + idBytes.length < out.length; i++) {
                     for (int j = 0; j < idBytes.length; j++) if (out[i + j] != idBytes[j]) continue outer;
                     int at = i + idBytes.length;
-                    at += io.zmux.carrier.VarInt.lengthOf(out[at]); // The value's length.
+                    at += io.zmux.internal.wire.VarInt.lengthOf(out[at]); // The value's length.
                     out[at] = (byte) flags.applyAsInt(out[at] & 0xff);
                     break;
                 }
@@ -783,7 +788,7 @@ class JoinAttackTest {
             }
             @Override public void close() { w.close(); }
             @Override public void abort(Throwable cause) { w.abort(cause); }
-        }, p.framing(), p.label(), p.carrierConn(), p.capabilities(), p.carrier(), p.variant());
+        });
     }
 
     @Test void aClearedSecretFlagClosesTheSessionAndNeverTakesTheIntersection() throws Exception {
@@ -847,7 +852,7 @@ class JoinAttackTest {
                 ZmuxPipe p = c.addPipe(l.localAddress(), PipeOptions.defaults());
                 assertEquals(RecordMode.SEALED, p.stats().orElseThrow().recordMode());
                 attached(s, p);
-                for (ZmuxPipe q : c.pipes()) if (q.id() == 0) q.abort();
+                for (ZmuxPipe q : c.pipes()) if (q.id().value() == 0) q.abort();
                 alive(c, s);
                 assertEquals(RecordMode.UNMANAGED, c.weakestRecordMode());
                 assertEquals(RecordMode.UNMANAGED, s.weakestRecordMode());
@@ -859,7 +864,7 @@ class JoinAttackTest {
     @Test void weakestRecordModeOnTheSecureCarrierFollowsItsPipes() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = SealTest.sessions(loops).allowRecordMode((c, m, p) -> true).build();
-            var lc = ListenerConfig.builder().session(cfg).inboundTransform(io.zmux.seal.Seal.server(new io.zmux.seal.ServerConfig(SealTest.gate(null), SealTest.NODE))).build();
+            var lc = ListenerConfig.builder().session(cfg).inboundTransform(io.zmux.seal.Seal.server(io.zmux.seal.ServerConfig.builder(SealTest.gate(null), SealTest.NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var c = Zmux.open(SealTest.establish(SealTest.tcp(l.localAddress()), SealTest.client().build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                 alive(c, s);
@@ -1038,8 +1043,8 @@ class JoinAttackTest {
                 // Not waiting for the peer's attachment: its proof (an acknowledged record on the
                 // pipe) can only follow the Confirm's late report, after the join deadline.
                 ZmuxPipe p = c.addPipe(new PipeIo(pair[0].reader(), late, Framing.BYTE_STREAM, "late", null),
-                        PipeOptions.builder().mode(RecordMode.SEALED).noWaitAttached(true).build());
-                assertTrue(p.id() > 0);
+                        PipeOptions.builder().recordMode(RecordMode.SEALED).returnOnReply(true).build());
+                assertTrue(p.id().value() > 0);
                 Thread.sleep(300);
                 assertEquals(0, c.stats().pipeFailures(), "joiner");
                 assertEquals(2, c.pipes().size());

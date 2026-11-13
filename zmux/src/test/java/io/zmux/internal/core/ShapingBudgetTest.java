@@ -122,7 +122,7 @@ class ShapingBudgetTest {
     }
 
     @Test void theSwitchesDropInjections() {
-        for (ShapingLimits l : List.of(ShapingLimits.defaults().withNoInjection(true), ShapingLimits.defaults().withNoPadding(true))) {
+        for (ShapingLimits l : List.of(ShapingLimits.defaults().withInjection(false), ShapingLimits.defaults().withPadding(false))) {
             Fixed f = new Fixed(100, null);
             write(session(l, ShapingBudget.NONE, f), 0);
             assertEquals(1, f.dropped, l.toString());
@@ -132,7 +132,7 @@ class ShapingBudgetTest {
     /** One drop at one instant; the kept injection is tried a granularity later. */
     @Test void aDroppedInjectionKeptDoesNotSpin() {
         Fixed f = new Fixed(100, null);
-        Session s = session(ShapingLimits.defaults().withNoInjection(true), ShapingBudget.NONE, f);
+        Session s = session(ShapingLimits.defaults().withInjection(false), ShapingBudget.NONE, f);
         write(s, 0);
         write(s, 0);
         assertEquals(1, f.dropped);
@@ -143,19 +143,19 @@ class ShapingBudgetTest {
     }
 
     @Test void aBudgetCannotWidenTheLimits() {
-        ShapingBudget b = new ShapingBudget(new WireAccount(1000, 1000, 1000), Duration.ofSeconds(5), false);
+        ShapingBudget b = new ShapingBudget(new WireAccount(1000, 1000, 1000), Duration.ofSeconds(5), true);
         ShapingLimits in = ShapingLimits.defaults().withWire(new WireAccount(10, 20, 30)).withMaxDelay(Duration.ofMillis(5)).under(b);
         assertEquals(new WireAccount(10, 20, 30), in.wire());
         assertEquals(Duration.ofMillis(5), in.maxDelay());
-        assertTrue(ShapingLimits.defaults().under(new ShapingBudget(WireAccount.NONE, Duration.ZERO, true)).noInjection());
+        assertFalse(ShapingLimits.defaults().under(new ShapingBudget(WireAccount.NONE, null, false)).injection());
     }
 
     @Test void accountsWithNothingInCommonAllowNoInjection() {
         ShapingLimits l = ShapingLimits.defaults().withWire(new WireAccount(10, 0, 0));
-        ShapingLimits in = l.under(new ShapingBudget(new WireAccount(0, 5, 0), Duration.ZERO, false));
+        ShapingLimits in = l.under(new ShapingBudget(new WireAccount(0, 5, 0), null, true));
         assertFalse(in.wire().isSet());
-        assertTrue(in.noInjection());
-        assertFalse(ShapingLimits.defaults().under(ShapingBudget.NONE).noInjection(), "neither set is no bound");
+        assertFalse(in.injection());
+        assertTrue(ShapingLimits.defaults().under(ShapingBudget.NONE).injection(), "neither set is no bound");
     }
 
     @Test void aSmallBurstIsRaisedToTheLeastRecord() {
@@ -183,12 +183,12 @@ class ShapingBudgetTest {
         assertEquals(Time.SECOND, sh.pause(5 * Time.SECOND));
         assertEquals(1, s.shapingStats().clamped());
         assertEquals(Duration.ofSeconds(1), s.shapingStats().stallSpent());
-        assertEquals(1_000_000, s.shapingMeters().stallSpent());
+        assertEquals(1_000_000, s.shapingMeters().stallSpentMicros());
         assertEquals(Time.SECOND, sh.maxHold(s.pipes().get(0)));
     }
 
     @Test void noBoundLeavesAPauseAndHoldsNothing() {
-        Session s = session(ShapingLimits.defaults().withMaxDelay(Duration.ofNanos(-1)), ShapingBudget.NONE, new Fixed(0, p -> { }));
+        Session s = session(ShapingLimits.defaults().withNoMaxDelay(), ShapingBudget.NONE, new Fixed(0, p -> { }));
         Shaping sh = s.pipes().shaping();
         assertEquals(5 * Time.SECOND, sh.pause(5 * Time.SECOND));
         assertEquals(0, s.shapingStats().clamped());
@@ -200,7 +200,7 @@ class ShapingBudgetTest {
         Shaping.PipeShape ps = s.pipes().shaping().of(s.pipes().get(0));
         ps.apply(new Effects().gate(0, 1, 0));
         assertEquals(1, s.shapingStats().clamped());
-        s.setShapingLimits(ShapingLimits.defaults().withMaxDelay(Duration.ofNanos(-1)));
+        s.setShapingLimits(ShapingLimits.defaults().withNoMaxDelay());
         assertEquals(1, s.shapingStats().clamped(), "no bound, no floor");
     }
 
@@ -220,7 +220,7 @@ class ShapingBudgetTest {
 
     @Test void changingTheBudgetCarriesTheAccountOver() {
         Session s = session(initial(1000), ShapingBudget.NONE, new Fixed(0, null));
-        s.setShapingBudget(new ShapingBudget(new WireAccount(100, 0, 0), Duration.ZERO, false));
+        s.setShapingBudget(new ShapingBudget(new WireAccount(100, 0, 0), null, true));
         assertEquals(100, s.shapingMeters().wireLeft());
         s.setShapingBudget(ShapingBudget.NONE);
         assertEquals(1000, s.shapingMeters().wireLeft());

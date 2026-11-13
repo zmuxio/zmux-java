@@ -67,10 +67,10 @@ final class Shaping {
     }
 
     private void take(ShapingLimits l) {
-        noPadding = l.noPadding();
-        noPause = l.noPause();
-        noInjection = l.noInjection();
-        maxDelay = l.maxDelay().isNegative() ? -1 : nanos(l.maxDelay());
+        noPadding = !l.padding();
+        noPause = !l.pause();
+        noInjection = !l.injection();
+        maxDelay = l.maxDelay() == null ? -1 : nanos(l.maxDelay());
     }
 
     /** Replaces the limits in force; the account carries over, widened or narrowed by the change of its initial value. */
@@ -130,7 +130,7 @@ final class Shaping {
         if (ps == null || ps.gen != gen) {
             Shaper x = null;
             if (factory != null) {
-                try { x = factory.create(new io.zmux.shaping.ShapedPipe(p.id, p.carrier(), writeOverhead(p), p.variant())); } catch (RuntimeException e) { faults++; }
+                try { x = factory.create(new io.zmux.shaping.ShapedPipe(io.zmux.PipeId.of(p.id), p.carrier(), writeOverhead(p), p.variant())); } catch (RuntimeException e) { faults++; }
             }
             ps = install(p, x);
         }
@@ -369,6 +369,8 @@ final class Shaping {
     /** The shaping state of one outbound pipe. */
     final class PipeShape {
         final Pipe p;
+        /** The pipe ID the shaper sees, made once. */
+        final io.zmux.PipeId pid;
         private Shaper sh;
         final long gen;
         private boolean plan, recordIn, streams, budget;
@@ -404,7 +406,7 @@ final class Shaping {
         /** The pipe's weight in scheduler views; 0: none. */
         private long weight;
 
-        PipeShape(Pipe p, Shaper sh, long gen) { this.p = p; this.sh = sh; this.gen = gen; }
+        PipeShape(Pipe p, Shaper sh, long gen) { this.p = p; this.sh = sh; this.gen = gen; pid = io.zmux.PipeId.of(p.id); }
 
         Shaping owner() { return Shaping.this; }
 
@@ -452,7 +454,7 @@ final class Shaping {
             Effects e = effects;
             e.clear();
             try {
-                x.onEvent(new Event(k, p.id, lane, port.now(), n, padOnly, stream, budget ? meters() : ShapingMeters.ZERO), e);
+                x.onEvent(new Event(k, pid, lane, port.now(), n, padOnly, stream, budget ? meters() : ShapingMeters.ZERO), e);
             } catch (RuntimeException failed) {
                 fault();
                 return;
@@ -466,7 +468,7 @@ final class Shaping {
             long now = port.now();
             if (e.hasInject()) {
                 injLen = 0; injAt = Time.NEVER; injDue = injDeferred = false;
-                if (!e.injectNone()) {
+                if (!e.isInjectNone()) {
                     injLen = Math.max(e.injectLength(), 1);
                     injAt = e.injectAtNanos();
                 }
@@ -486,9 +488,9 @@ final class Shaping {
                 }
                 wake = true;
             }
-            if (e.hasWake()) wakeAt = e.wakeNone() ? Time.NEVER : e.wakeAtNanos();
+            if (e.hasWake()) wakeAt = e.isWakeNone() ? Time.NEVER : e.wakeAtNanos();
             if (e.hasWeight() && e.weight() >= 0) weight = e.weight();
-            if (e.stopRequested()) stop(true);
+            if (e.isStopRequested()) stop(true);
             pipes.wakeWriters(p.id);
         }
 
@@ -565,7 +567,7 @@ final class Shaping {
                 extraPad = 0;
                 if (plan) {
                     try {
-                        sh.plan(new RecordView(p.id, w.b().lane(), seq, w.recMax(), w.writeStart(), port.now(), budget ? meters() : ShapingMeters.ZERO), rp);
+                        sh.plan(new RecordView(pid, w.b().lane(), seq, w.recMax(), w.writeStart(), port.now(), budget ? meters() : ShapingMeters.ZERO), rp);
                     } catch (RuntimeException e) {
                         fault();
                         return false;
@@ -653,8 +655,8 @@ final class Shaping {
             planned = false;
             seq++;
             w.cut(0);
-            if (rp.flush()) w.flushBatch();
-            if (rp.stop()) stop(true);
+            if (rp.isFlush()) w.flushBatch();
+            if (rp.isStop()) stop(true);
         }
     }
 }

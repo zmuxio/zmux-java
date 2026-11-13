@@ -41,7 +41,7 @@ class PathLossTest {
     @EnumSource(value = Scheduler.Builtin.class, names = {"AFFINITY", "SPREAD_ETA", "SPREAD_ROUND_ROBIN", "SPREAD_RATE_WEIGHTED"})
     void aSilentFailedPreferredPipeReinjectsOnTheRemainingCarrier(Scheduler policy) throws Exception {
         try (EventLoops loops = EventLoops.create(3); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(policy).probation(Duration.ZERO).suspectFloor(Duration.ofMillis(50)).deadTimeout(Duration.ofSeconds(1)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(policy).noProbation().liveness(Liveness.builder().suspectFloor(Duration.ofMillis(50)).deadTimeout(Duration.ofSeconds(1)).build()).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var proxy = new Blackhole(listener.localAddress())) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(proxy.address(), cfg); var s = accepted.get();
@@ -61,8 +61,8 @@ class PathLossTest {
                 boolean suspect = false;
                 while (!suspect) {
                     SessionEvent event = c.nextEvent();
-                    suspect = event instanceof SessionEvent.PipeSuspect p && p.pipe() == 0
-                            || event instanceof SessionEvent.PipeFailed f && f.pipe() == 0;
+                    suspect = event instanceof SessionEvent.PipeSuspect p && p.pipeId().value() == 0
+                            || event instanceof SessionEvent.PipeFailed f && f.pipeId().value() == 0;
                 }
                 PipePoolTest.await(() -> c.stats().reinjections() >= 1);
                 var st = c.stats();

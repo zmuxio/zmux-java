@@ -267,7 +267,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         final CompletableFuture<Long> future;
         final long due = Time.add(Clock.now(), joinWait());
         final io.zmux.internal.join.Framing framing;
-        boolean prepared, helloSent, helloWritten, verified, confirming, done, inputEnded, endedGracefully;
+        boolean prepared, helloWritten, verified, confirming, done, inputEnded, endedGracefully;
         io.zmux.internal.join.Result result;
         byte[] confirm;
 
@@ -310,11 +310,10 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             byte[] h;
             try {
                 h = core.joinHello(id, framing, plan, c.info().carrier().writeOverhead(), Clock.now());
-            } catch (io.zmux.carrier.SecureCarrierException | CoreException e) {
+            } catch (io.zmux.seal.SecureCarrierException | CoreException e) {
                 fail(e);
                 return;
             }
-            helloSent = true;
             writeUnit(c, h);
             markDirty();
         }
@@ -541,14 +540,14 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         var view = new io.zmux.carrier.HandshakeShaper.View(c.info().carrier().kind(), "join", message);
         completions.execute(() -> {
             boolean[] fault = new boolean[1];
-            var asked = io.zmux.carrier.HandshakeShaper.ask(shaper, view, () -> fault[0] = true);
+            var asked = io.zmux.internal.core.HandshakePlans.ask(shaper, view, () -> fault[0] = true);
             post(() -> {
                 if (fault[0]) core.handshakeFault();
                 else if (asked == null) core.handshakeUnplanned();
                 if (!live.getAsBoolean()) return;
-                var plan = (asked == null ? io.zmux.carrier.HandshakeShaper.UnitPlan.NONE : asked).limited(core.shapingLimitsInForce());
+                var plan = io.zmux.internal.core.HandshakePlans.limited(asked == null ? io.zmux.carrier.HandshakeShaper.UnitPlan.NONE : asked, core.shapingLimitsInForce());
                 markDirty();
-                long wait = plan.delayNanos();
+                long wait = io.zmux.internal.core.HandshakePlans.delayNanos(plan);
                 if (wait <= 0) {
                     next.accept(plan);
                     return;
@@ -641,7 +640,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             try {
                 result = pj.result();
                 res = core.confirmJoin(pj, jc);
-            } catch (io.zmux.carrier.SecureCarrierException e) {
+            } catch (io.zmux.seal.SecureCarrierException e) {
                 result = null;
                 res = Joins.JoinResult.CLOSE;
             }
@@ -683,8 +682,8 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             int n;
             try {
                 n = pj.readConfirm(b, 0, b.length);
-            } catch (io.zmux.carrier.SecureCarrierException e) {
-                if (e.code() == io.zmux.carrier.SecureCarrierException.Code.INCOMPLETE) return 0;
+            } catch (io.zmux.seal.SecureCarrierException e) {
+                if (e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE) return 0;
                 drop(ListenerHub.Outcome.REJECTED);
                 return GONE;
             }
@@ -863,7 +862,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         }
     }
 
-    /** The bootstrap carrier, whose exporter stays readable after it closed. */
     /** The TLS session this process ran for the bootstrap carrier; null without one. */
     private volatile javax.net.ssl.SSLSession bootTls;
 
@@ -875,6 +873,19 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     private String bootstrapVariant = "";
 
     void bootstrapVariant(String v) { bootstrapVariant = v; }
+
+    /** Gives back the listener's slots of the bootstrap carrier; null once given back. */
+    private Runnable bootstrapSlots;
+
+    /** The bootstrap carrier's slots of the listener, given back once established or ended; before the session runs. */
+    void holdSlots(Runnable release) { bootstrapSlots = release; }
+
+    private void releaseSlots() {
+        Runnable r = bootstrapSlots;
+        if (r == null) return;
+        bootstrapSlots = null;
+        r.run();
+    }
 
     /** The exporter of the bootstrap carrier ({@link Transport#export}); null while it is unavailable. Any thread. */
     public byte[] exportKeyingMaterial(String label, byte[] context, int length) {
@@ -946,17 +957,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     private void hold(HeldJoin j) {
         heldJoins.add(j);
-        armHeldJoins();
-        j.o.slot.held(() -> { if (!loop.tryExecute(() -> evictHeld(j.o.slot))) j.o.slot.settled(); });
-    }
-
-    /** Newer joins took the place of this held join; closed silently. */
-    private void evictHeld(ListenerHub.JoinSlot slot) {
-        heldJoins.removeIf(j -> {
-            if (j.o.slot != slot) return false;
-            endHeld(j, ListenerHub.Outcome.REJECTED);
-            return true;
-        });
         armHeldJoins();
     }
 
@@ -1109,7 +1109,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         });
     }
 
-    /** Checks before an application lock or carrier operation can block. */
     /** Whether the calling thread may block on this session: not its event loop or callback thread. */
     public boolean mayBlock() {
         return !SessionHost.onHostThread() && !SerialCallbacks.onContext(this);
@@ -1314,6 +1313,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         boolean pipeChanged = false;
         for (Event e; (e = core.outbox().pollEvent()) != null; ) {
             pipeChanged |= e.kind() == Event.Kind.PIPE_STATE || e.kind() == Event.Kind.ESTABLISHED || e.kind() == Event.Kind.EPOCH_COMMITTED;
+            if (e.kind() == Event.Kind.ESTABLISHED) releaseSlots();
             deliver(e);
         }
         if (pipeChanged) {
@@ -1531,6 +1531,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     private void finish() {
         if (finished) return;
         finished = true;
+        releaseSlots();
         publishSnapshots();
         loop.schedule(timer, io.zmux.internal.core.Time.NEVER);
         loop.schedule(heldTimer, Time.NEVER);
@@ -1549,8 +1550,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         lanes.sessionEnded(ended);
         while (live != null) { Operation<?> op = live; untrack(op); op.settle(ended); }
         events.wakeAll();
-        completions.execute(() -> closed.complete(e));
+        // The whole end: once the closed carriers were released, bounded for a carrier that never reports it.
+        carriers.released().completeOnTimeout(null, RELEASE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .whenComplete((v, x) -> completions.execute(() -> closed.complete(e)));
     }
+
+    /** How long the session's end waits for its closed carriers to be released: the longest linger. */
+    private static final long RELEASE_WAIT_MILLIS = 2000;
 
     boolean finished() { return finished; }
 

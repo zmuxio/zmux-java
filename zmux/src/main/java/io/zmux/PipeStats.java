@@ -12,7 +12,7 @@ import java.util.OptionalLong;
  * estimate, not guaranteed bandwidth. Points in time are {@link System#nanoTime()} values. The
  * pipe's addresses are carrier metadata, not statistics.
  *
- * @param pipe the pipe ID
+ * @param pipeId the pipe ID
  * @param recordMode who protects the carrier's records ({@link RecordMode#UNMANAGED} for a first pipe without the secure carrier)
  * @param local this endpoint joined the attachment (the dialer, for the bootstrap pipe)
  * @param fateGroup its fate group, 0 for none
@@ -86,7 +86,7 @@ import java.util.OptionalLong;
  * @param lanesRefused own lanes of the outbound direction the peer refused
  * @param lanes per lane, for a pipe with lanes; empty without
  */
-public record PipeStats(long pipe, RecordMode recordMode, boolean local, long fateGroup, String label, CarrierKind carrier,
+public record PipeStats(PipeId pipeId, RecordMode recordMode, boolean local, long fateGroup, String label, CarrierKind carrier,
                         String variant, PipeState.Outbound outbound, PipeState.Inbound inbound, Duration attachedFor,
                         boolean peerAttached, long suspectCount, long failureCount, Failure failure,
                         long sendPriority, SettingSource sendPrioritySource, boolean standby, SettingSource standbySource,

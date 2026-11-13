@@ -12,7 +12,8 @@ import java.util.concurrent.CompletionStage;
  * TLS carriers, those given to {@link ZmuxListener#handle} (the HTTP, WebSocket and exchange
  * carriers of an HTTP endpoint, the connections of a QUIC server), joins and resumptions
  * included. A carrier first takes a slot of its source ({@link
- * ListenerConfig#maxPendingPerSource()}), then completes its outer handshake (TLS), then the
+ * ListenerConfig#maxPendingPerSource()}) and one of the listener ({@link
+ * ListenerConfig#maxPending()}), then completes its outer handshake (TLS), then the
  * listener reads up to {@code peek} bytes, never more, and asks the decider; nothing is sent
  * before the decision and nothing is consumed except what an accept skips.
  *
@@ -22,18 +23,18 @@ import java.util.concurrent.CompletionStage;
  *     any peek above 0 reads the first message whole as the prefix, of at most max(peek, maxPeek)
  *     bytes (a longer one is closed, counted once as closed); skip is then 0 (replayed) or its length
  * @param maxPeek bounds {@link Decision#need()}, at most {@link #MAX_PEEK}; 0: peek, so that
- *     {@link Verdict#MORE} is invalid
+ *     {@link AdmissionVerdict#MORE} is invalid
  * @param peekTimeout runs from the end of the outer handshake and bounds the reading of the
  *     prefix and the decision together; zero: drawn once per admission from a secure random
  *     source between 5 s and 30 s
  * @param fallbackOnPeekTimeout a byte-stream carrier whose prefix has not arrived when the peek timeout
- *     ends, in the first read or in a {@link Verdict#MORE} round, takes {@link Verdict#FALLBACK} with every
+ *     ends, in the first read or in a {@link AdmissionVerdict#MORE} round, takes {@link AdmissionVerdict#FALLBACK} with every
  *     byte read replayed instead of being closed (without a fallback target it is stalled), counted in both
  *     {@code peekTimedOut} and {@code fallback}; a message-framed carrier and an HTTP request carrier are
  *     closed as before, and so is a carrier whose decider has not returned in time
- * @param stallMin lower bound of a {@link Verdict#STALL}'s duration
- * @param stallMax upper bound of a {@link Verdict#STALL}'s duration; when both bounds are
- *     zero (a stall of no duration is {@link Verdict#CLOSE}), stallMax is drawn once between
+ * @param stallMin lower bound of a {@link AdmissionVerdict#STALL}'s duration
+ * @param stallMax upper bound of a {@link AdmissionVerdict#STALL}'s duration; when both bounds are
+ *     zero (a stall of no duration is {@link AdmissionVerdict#CLOSE}), stallMax is drawn once between
  *     30 s and 120 s and stallMin between a quarter and three quarters of it
  * @param decider the decision function
  */
@@ -66,7 +67,7 @@ public record Admission(int peek, int maxPeek, Duration peekTimeout, boolean fal
     public int prefixLimit() { return Math.max(peek, maxPeek); }
 
     /**
-     * Decides on a carrier, once per carrier and once more per {@link Verdict#MORE}, and for different carriers concurrently, outside
+     * Decides on a carrier, once per carrier and once more per {@link AdmissionVerdict#MORE}, and for different carriers concurrently, outside
      * every lock of zmux, on the listener's event loop: it must not block, and returns a stage
      * that completes later when the decision takes time. prefix is read-only and valid until
      * the stage completes. The decision is due by deadline (what is left of the peek
@@ -98,66 +99,38 @@ public record Admission(int peek, int maxPeek, Duration peekTimeout, boolean fal
         public boolean expired() { return nanoTime - System.nanoTime() <= 0; }
     }
 
-    /** The outcome of an admission. */
-    public enum Verdict {
-        /** The carrier goes to the listener without the first {@link Decision#skip()} prefix bytes. */
-        ACCEPT,
-        /**
-         * The carrier goes, with every byte read replayed, to the fallback target of the entry
-         * that took it ({@link ListenerConfig#fallback()} for the listener's sockets, the target
-         * given to {@link ZmuxListener#handle}: an HTTP endpoint's host handler, a QUIC
-         * server's fallback); without one it is {@link #STALL}.
-         */
-        FALLBACK,
-        /**
-         * Reads and discards what arrives, sends nothing, and closes the carrier gracefully when
-         * the peer ends it or after a duration that depends on its source alone. A stalled carrier
-         * keeps its slot of {@link ListenerConfig#maxPendingPerSource()} until closed; a source
-         * has at most one fewer stalled carriers than that, a further stall is closed at once.
-         */
-        STALL,
-        /** Closes the carrier at once. */
-        CLOSE,
-        /**
-         * Asks for a longer prefix on a byte stream ({@link Decision#need()}): the listener reads
-         * on, within the same peek timeout, and decides again. A need that does not exceed the
-         * prefix or exceeds the bound, and this verdict on a message-framed carrier or on a
-         * carrier that ended or timed out, are {@link #CLOSE}.
-         */
-        MORE
-    }
 
     /**
-     * A verdict; skip and value apply to {@link Verdict#ACCEPT} only. A skip outside the prefix
-     * is {@link Verdict#CLOSE}.
+     * A verdict; skip and value apply to {@link AdmissionVerdict#ACCEPT} only. A skip outside the prefix
+     * is {@link AdmissionVerdict#CLOSE}.
      *
      * @param value the host's value for an accepted carrier, or null: zmux hands it on without
      *     looking at it to the {@link InboundTransform} ({@link InboundTransform.Context#admitted()})
      *     and to the session ({@link ZmuxSession#admitted()}) or pipe ({@link ZmuxPipe#admitted()})
      *     the carrier makes, and holds it until their state is released. Whether a join comes
      *     from the session's client is the host's to decide: zmux compares no values
-     * @param need with {@link Verdict#MORE}, the total prefix length asked for
+     * @param need with {@link AdmissionVerdict#MORE}, the total prefix length asked for
      * @param variant a short label of the carrier for any verdict, one of a few constants of the
      *     host: counted in {@link ZmuxListener#variantStats()}, and on acceptance the pipe input's
      *     variant unless a transform's result has its own
      */
-    public record Decision(Verdict verdict, int skip, Object value, int need, String variant) {
-        public static final Decision FALLBACK = new Decision(Verdict.FALLBACK, 0, null);
-        public static final Decision STALL = new Decision(Verdict.STALL, 0, null);
-        public static final Decision CLOSE = new Decision(Verdict.CLOSE, 0, null);
+    public record Decision(AdmissionVerdict verdict, int skip, Object value, int need, String variant) {
+        public static final Decision FALLBACK = new Decision(AdmissionVerdict.FALLBACK, 0, null);
+        public static final Decision STALL = new Decision(AdmissionVerdict.STALL, 0, null);
+        public static final Decision CLOSE = new Decision(AdmissionVerdict.CLOSE, 0, null);
         public Decision {
             Objects.requireNonNull(verdict);
             if (variant == null) variant = "";
         }
         /** A verdict without a value. */
-        public Decision(Verdict verdict, int skip) { this(verdict, skip, null); }
+        public Decision(AdmissionVerdict verdict, int skip) { this(verdict, skip, null); }
         /** A verdict with a value and without a variant. */
-        public Decision(Verdict verdict, int skip, Object value) { this(verdict, skip, value, 0, ""); }
-        public static Decision accept(int skip) { return new Decision(Verdict.ACCEPT, skip, null); }
+        public Decision(AdmissionVerdict verdict, int skip, Object value) { this(verdict, skip, value, 0, ""); }
+        public static Decision accept(int skip) { return new Decision(AdmissionVerdict.ACCEPT, skip, null); }
         /** An accept carrying the host's value (null: none). */
-        public static Decision accept(int skip, Object value) { return new Decision(Verdict.ACCEPT, skip, value); }
+        public static Decision accept(int skip, Object value) { return new Decision(AdmissionVerdict.ACCEPT, skip, value); }
         /** Asks for a prefix of need bytes. */
-        public static Decision more(int need) { return new Decision(Verdict.MORE, 0, null, need, ""); }
+        public static Decision more(int need) { return new Decision(AdmissionVerdict.MORE, 0, null, need, ""); }
         /** This decision labelled v. */
         public Decision withVariant(String v) { return new Decision(verdict, skip, value, need, v); }
     }
@@ -182,7 +155,7 @@ public record Admission(int peek, int maxPeek, Duration peekTimeout, boolean fal
     }
 
     /**
-     * The metadata of a carrier, read-only, as far as its adapter has it: an admission decides with it, and a client's {@link Credential} is given it.
+     * The metadata of a carrier, read-only, as far as its adapter has it: an admission decides with it, and a client's {@link CarrierCredential} is given it.
      * Fields that do not apply are empty.
      *
      * @param source the carrier's source, the one authority for every per-source limit: the

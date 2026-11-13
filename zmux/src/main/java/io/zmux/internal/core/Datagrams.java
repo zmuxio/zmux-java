@@ -2,7 +2,7 @@ package io.zmux.internal.core;
 
 import io.zmux.internal.wire.ChannelDatagram;
 import io.zmux.internal.wire.Frame;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
@@ -104,6 +104,10 @@ public final class Datagrams {
     /** One stream's receive queue and its waiters. */
     private static final class PerStream {
         final ArrayDeque<byte[]> q = new ArrayDeque<>(2);
+        /** The payload bytes of this stream's datagrams the core holds (queued and awaiting the limiter). */
+        private long bytes;
+        /** Under a receive limiter: this stream's datagrams the core holds (awaiting the limiter and queued), oldest first. */
+        private final ArrayDeque<byte[]> order = new ArrayDeque<>(0);
         /** Receivers waiting for a datagram; one is woken per datagram, every one on an end. */
         final WaitList waiters = new WaitList();
     }
@@ -121,7 +125,10 @@ public final class Datagrams {
     private final IdentityHashMap<byte[], Limited> pending = new IdentityHashMap<>(4);
     /** Every received datagram still held by the core, oldest first, with its stream (null: session). */
     private final LinkedHashMap<byte[], Stream> received = new LinkedHashMap<>();
+    /** The bytes of the session datagrams in {@link #received}; stream datagrams count against their stream's bound only. */
     private long receivedBytes;
+    /** The bytes of the stream datagrams in {@link #received}, for the memory account. */
+    private long streamBytes;
     /** Received datagrams of peer streams not opened yet, in arrival order (and of expiry), and their cost. */
     private final ArrayDeque<Held> held = new ArrayDeque<>(0);
     private long heldBytes;
@@ -161,7 +168,7 @@ public final class Datagrams {
 
     /** Bytes of received datagrams the core holds (memory accounting). */
     long receivedBytes() {
-        return receivedBytes + heldBytes;
+        return receivedBytes + heldBytes + streamBytes;
     }
 
     // ---- sending ----
@@ -416,8 +423,11 @@ public final class Datagrams {
             limited.add(token);
             pending.put(e, token);
             track(st, e);
-            trimCount(st);
-            trimBytes();
+            if (st != null) trimStream(st);
+            else {
+                trimCount(null);
+                trimBytes();
+            }
             return;
         }
         queue(st, e);
@@ -453,15 +463,13 @@ public final class Datagrams {
                 return;
             }
             PerStream ps = streams.computeIfAbsent(st, k -> new PerStream());
-            if (ps.q.size() >= cfg.datagramStreamQueue()) {
-                untrack(ps.q.poll());
-                dropReceived();
-                st.counters.datagramDropped();
-            }
+            if (ps.q.size() >= cfg.datagramStreamQueue()) dropStreamHead(st, ps);
             ps.q.add(e);
             st.counters.datagramQueued();
             track(st, e);
-            trimBytes();
+            // The count first, then the bytes, oldest first; a single datagram above the bound stays alone.
+            long max = cfg.datagramStreamBytes();
+            while (max >= 0 && ps.bytes > max && ps.q.size() > 1) dropStreamHead(st, ps);
             ps.waiters.wakeFirst(outbox);
             outbox.wake(st.rcv.rsig());
             return;
@@ -480,15 +488,41 @@ public final class Datagrams {
         stats.datagramDroppedRecv();
     }
 
+    /** Drops the oldest datagram of st's queue, counted for the session and the stream. */
+    private void dropStreamHead(Stream st, PerStream ps) {
+        untrack(ps.q.poll());
+        dropReceived();
+        st.counters.datagramDropped();
+    }
+
+    /** The payload bytes of a stream datagram as its queue holds it (after the context ID). */
+    private static int payloadBytes(byte[] e) {
+        return e.length - VarInt.lengthOf(e[0]);
+    }
+
     private void track(Stream stream, byte[] bytes) {
         received.put(bytes, stream);
-        receivedBytes += bytes.length;
+        if (stream == null) receivedBytes += bytes.length;
+        else {
+            streamBytes += bytes.length;
+            PerStream ps = streams.computeIfAbsent(stream, k -> new PerStream());
+            ps.bytes += payloadBytes(bytes);
+            if (cfg.datagramReceiveLimited()) ps.order.add(bytes);
+        }
     }
 
     private void untrack(byte[] bytes) {
         if (!received.containsKey(bytes)) return;
-        received.remove(bytes);
-        receivedBytes -= bytes.length;
+        Stream stream = received.remove(bytes);
+        if (stream == null) receivedBytes -= bytes.length;
+        else {
+            streamBytes -= bytes.length;
+            PerStream ps = streams.get(stream);
+            if (ps != null) {
+                ps.bytes -= payloadBytes(bytes);
+                if (cfg.datagramReceiveLimited()) ps.order.remove(bytes);
+            }
+        }
         Limited token = pending.remove(bytes);
         if (token != null) {
             token.revoke();
@@ -507,12 +541,26 @@ public final class Datagrams {
         }
         untrack(bytes);
         dropReceived();
+        if (stream != null) stream.counters.datagramDropped();
     }
 
+    /**
+     * Under a receive limiter: keeps st's datagrams awaiting the limiter and queued within its
+     * count, then its byte bound, oldest first, leaving at least one.
+     */
+    private void trimStream(Stream stream) {
+        PerStream ps = streams.get(stream);
+        if (ps == null) return;
+        while (ps.order.size() > cfg.datagramStreamQueue()) evict(ps.order.peek(), stream);
+        long max = cfg.datagramStreamBytes();
+        while (max >= 0 && ps.bytes > max && ps.order.size() > 1) evict(ps.order.peek(), stream);
+    }
+
+    /** Under a receive limiter: keeps the session datagrams within the session queue's count, oldest first. */
     private void trimCount(Stream stream) {
         int count = 0;
         for (Stream target : received.values()) if (target == stream) count++;
-        int max = stream == null ? cfg.datagramReceiveQueue() : cfg.datagramStreamQueue();
+        int max = cfg.datagramReceiveQueue();
         while (count > max) {
             for (var entry : received.entrySet()) {
                 if (entry.getValue() == stream) {
@@ -524,12 +572,20 @@ public final class Datagrams {
         }
     }
 
-    /** Keeps received datagrams within the byte limit: the oldest held ones go first, then the oldest received. */
+    /**
+     * Keeps the session datagrams and those held for streams not opened yet within the receive
+     * byte limit: the oldest held ones go first, then the oldest session datagrams. Stream queues
+     * have their own bound.
+     */
     private void trimBytes() {
         while (receivedBytes + heldBytes > cfg.datagramReceiveBytes() && !held.isEmpty()) dropHeldHead();
-        while (receivedBytes > cfg.datagramReceiveBytes() && !received.isEmpty()) {
-            var first = received.firstEntry();
-            evict(first.getKey(), first.getValue());
+        while (receivedBytes > cfg.datagramReceiveBytes()) {
+            byte[] oldest = null;
+            // Without the limiter every session datagram is in recv, oldest first.
+            if (!cfg.datagramReceiveLimited()) oldest = recv.peek();
+            else for (var entry : received.entrySet()) if (entry.getValue() == null) { oldest = entry.getKey(); break; }
+            if (oldest == null) return;
+            evict(oldest, null);
         }
     }
 
@@ -611,5 +667,6 @@ public final class Datagrams {
         send.clear();
         streams.clear();
         receivedBytes = 0;
+        streamBytes = 0;
     }
 }

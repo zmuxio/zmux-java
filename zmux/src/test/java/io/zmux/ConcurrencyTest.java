@@ -30,7 +30,7 @@ class ConcurrencyTest {
     @RepeatedTest(5)
     void randomOperationsRaceClose() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
             Pair p = Pair.memory(cfg);
             AtomicInteger done = new AtomicInteger();
             AtomicInteger served = new AtomicInteger();
@@ -107,7 +107,7 @@ class ConcurrencyTest {
                 long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
                 while (served.get() == 0 && System.nanoTime() < until) Thread.sleep(1);
                 Thread.sleep(seedDelay());
-                p.client().close(new ApplicationError(1, "race"));
+                p.client().abort(1, "race");
                 for (Future<?> f : fs) f.get(60, TimeUnit.SECONDS);
             }
             assertEquals(32, done.get());
@@ -181,7 +181,7 @@ class ConcurrencyTest {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
             Pair p = Pair.memory(cfg);
             ZmuxStream a = p.client().openStream();
-            p.server().close(new ApplicationError(3, "x"));
+            p.server().abort(3, "x");
             p.client().awaitClosed();
             SessionClosedException e = assertThrows(SessionClosedException.class, () -> a.write(new byte[10]));
             assertTrue(e.error() instanceof SessionError.ApplicationClosed ac && ac.code() == 3);

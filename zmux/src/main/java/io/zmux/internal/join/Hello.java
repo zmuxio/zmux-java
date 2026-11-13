@@ -1,15 +1,15 @@
 package io.zmux.internal.join;
 
-import io.zmux.carrier.SecureCarrierException;
-import static io.zmux.carrier.SecureCarrierException.Code.BAD_FLAGS;
-import static io.zmux.carrier.SecureCarrierException.Code.BAD_HANDLE;
-import static io.zmux.carrier.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.carrier.SecureCarrierException.Code.TOO_LARGE;
-import static io.zmux.carrier.SecureCarrierException.Code.TRAILING_BYTES;
-import static io.zmux.carrier.SecureCarrierException.Code.UNKNOWN_PROFILE;
-import static io.zmux.carrier.SecureCarrierException.Code.UNKNOWN_SUITE;
+import io.zmux.seal.SecureCarrierException;
+import static io.zmux.seal.SecureCarrierException.Code.BAD_FLAGS;
+import static io.zmux.seal.SecureCarrierException.Code.BAD_HANDLE;
+import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Code.TRAILING_BYTES;
+import static io.zmux.seal.SecureCarrierException.Code.UNKNOWN_PROFILE;
+import static io.zmux.seal.SecureCarrierException.Code.UNKNOWN_SUITE;
 
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 import java.util.Arrays;
 
 /** A parsed Join Hello; its fields are copies of the input. */

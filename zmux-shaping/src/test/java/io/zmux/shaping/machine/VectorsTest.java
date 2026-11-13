@@ -94,7 +94,7 @@ class VectorsTest {
                 each(cases(f, "compile_order"), "compile_order", v -> {
                     Source s = new Source(obj(v.get("source")));
                     var c = Bundle.Candidate.read(v.get("candidate"), tables(v.get("tables")));
-                    var kind = c.compile(new Sampler(s), Options.defaults().withNewSource(() -> s));
+                    var kind = c.compile(new Sampler(s), MachineOptions.defaults().withNewSource(() -> s));
                     assertEquals(((List<?>) v.get("shared")).stream().map(VectorsTest::num).toList(), compiledShared(kind));
                     assertEquals(num(v.get("consumed")), s.n);
                 })).flatMap(x -> x);
@@ -112,7 +112,7 @@ class VectorsTest {
     @TestFactory Stream<DynamicTest> format() throws Exception {
         Map<String, Object> f = file("format.json");
         return Stream.concat(each(cases(f, "bundles"), "bundles", v -> {
-            Options o = Options.defaults().withFeatures(Set.copyOf(((List<?>) v.get("features")).stream().map(x -> (String) x).toList()))
+            MachineOptions o = MachineOptions.defaults().withFeatures(Set.copyOf(((List<?>) v.get("features")).stream().map(x -> (String) x).toList()))
                     .withAllowUnshaped(Boolean.TRUE.equals(v.get("allow_unshaped")));
             byte[] raw = ((String) v.get("bundle")).getBytes(StandardCharsets.UTF_8);
             if (v.get("error") != null) {
@@ -126,14 +126,14 @@ class VectorsTest {
             assertEquals(v.get("unshaped"), b.unshaped());
         }), each(cases(f, "handshake"), "handshake", v -> {
             byte[] raw = ((String) v.get("bundle")).getBytes(StandardCharsets.UTF_8);
-            Bundle b = Bundle.parse(raw, Options.defaults());
+            Bundle b = Bundle.parse(raw, MachineOptions.defaults());
             String resolved = b.resolve((String) v.get("kind"));
             assertEquals(v.get("resolved"), resolved);
             // One kind compiled alone from the case's source.
             var kinds = obj(obj(DefinitionJson.parse((String) v.get("bundle"))).get("kinds"));
             Object cand = ((List<?>) kinds.get(resolved)).get(0);
             Source s = new Source(obj(v.get("source")));
-            var kind = Bundle.Candidate.read(cand, tables(null)).compile(new Sampler(s), Options.defaults().withNewSource(() -> s));
+            var kind = Bundle.Candidate.read(cand, tables(null)).compile(new Sampler(s), MachineOptions.defaults().withNewSource(() -> s));
             assertEquals(((List<?>) v.get("shared")).stream().map(VectorsTest::num).toList(), kind.shared);
             for (Map<String, Object> call : cases(v, "calls")) {
                 var p = kind.plan((String) call.get("handshake"), (String) call.get("message"));
@@ -144,7 +144,7 @@ class VectorsTest {
                     assertEquals(num(want.get("pad_to")), p.padTo(), call.toString());
                     assertEquals(num(want.get("pad_multiple")), p.padMultiple(), call.toString());
                     assertEquals(num(want.get("pad")), p.pad(), call.toString());
-                    assertEquals(num(want.get("delay")) * 1000, p.delayNanos(), call.toString());
+                    assertEquals(num(want.get("delay")) * 1000, p.delay() == null ? 0 : p.delay().toNanos(), call.toString());
                 }
                 assertEquals(num(call.get("consumed")), s.n, call.toString());
             }
@@ -163,7 +163,7 @@ class VectorsTest {
     static void run(Map<String, Object> v) throws Exception {
         Source s = new Source(obj(v.get("source")));
         Definition d = DefinitionJson.machines(obj(v.get("definition")).get("machines"), tables(v.get("tables")));
-        var compiled = new Machines.Compiled(d, new Sampler(s), Options.defaults().withNewSource(() -> s));
+        var compiled = new Machines.Compiled(d, new Sampler(s), MachineOptions.defaults().withNewSource(() -> s));
         var want = obj(v.get("compile"));
         List<Long> shared = new ArrayList<>();
         for (long x : compiled.shared) shared.add(x);
@@ -182,7 +182,7 @@ class VectorsTest {
             Effects e;
             if (op.equals("plan")) {
                 RecordPlan p = new RecordPlan();
-                sh.plan(new RecordView(0, 0, 0, 65535, true, now, meters(st)), p);
+                sh.plan(new RecordView(io.zmux.PipeId.BOOTSTRAP, 0, 0, 65535, true, now, meters(st)), p);
                 var w = obj(st.get("plan"));
                 String what = st.toString();
                 assertEquals(num(w.get("max_len")), p.maxLength(), what);
@@ -190,8 +190,8 @@ class VectorsTest {
                 assertEquals(num(w.get("pad_multiple")), p.padMultiple(), what);
                 assertEquals(num(w.get("pad")), p.pad(), what);
                 assertEquals(num(w.get("delay")) * 1000, p.delayNanos(), what);
-                assertEquals(w.get("flush"), p.flush(), what);
-                assertEquals(w.get("stop"), p.stop(), what);
+                assertEquals(w.get("flush"), p.isFlush(), what);
+                assertEquals(w.get("stop"), p.isStop(), what);
                 e = p.effects();
             } else {
                 e = new Effects();
@@ -207,7 +207,7 @@ class VectorsTest {
                     case "stream_end" -> event(EventKind.STREAM_END, now, 0, false);
                     default -> throw new AssertionError(op);
                 };
-                sh.onEvent(new Event(base.kind(), 0, 0, now, len, base.paddingOnly(), 0, meters(st)), e);
+                sh.onEvent(new Event(base.kind(), io.zmux.PipeId.BOOTSTRAP, 0, now, len, base.paddingOnly(), 0, meters(st)), e);
             }
             assertEquals(st.get("effects"), effects(e), st.toString());
             assertEquals(num(st.get("consumed")), s.n, st.toString());
@@ -266,7 +266,8 @@ class VectorsTest {
         return Map.of("initial", a.initial(), "per_mb", a.perMb(), "per_sec", a.perSec());
     }
 
-    private static long micros(java.time.Duration d) { return d.isNegative() ? -1 : d.toNanos() / 1000; }
+    /** A bound in the vectors' microseconds; none is -1. */
+    private static long micros(java.time.Duration d) { return d == null ? -1 : d.toNanos() / 1000; }
 
     @TestFactory Stream<DynamicTest> localLimits() throws Exception {
         return each(cases(file("budget.json"), "parse"), "parse", v -> {
@@ -277,10 +278,13 @@ class VectorsTest {
             ShapingLimits l = DefinitionJson.limits(v.get("limits"));
             Map<String, Object> got = new HashMap<>();
             got.put("wire", wire(l.wire()));
-            got.put("max_delay", micros(l.maxDelay()));
-            got.put("no_padding", l.noPadding());
-            got.put("no_pause", l.noPause());
-            got.put("no_injection", l.noInjection());
+            // The format writes the default bound as 0.
+            Object asked = obj(v.get("limits")).get("max_delay");
+            boolean unset = asked == null || num(asked) == 0;
+            got.put("max_delay", unset && ShapingLimits.DEFAULT_MAX_DELAY.equals(l.maxDelay()) ? 0L : micros(l.maxDelay()));
+            got.put("no_padding", !l.padding());
+            got.put("no_pause", !l.pause());
+            got.put("no_injection", !l.injection());
             assertEquals(v.get("want"), got);
         });
     }
@@ -294,11 +298,13 @@ class VectorsTest {
         return each(cases(file("budget.json"), "merge"), "merge", v -> {
             var local = obj(v.get("local"));
             var config = obj(v.get("config"));
-            ShapingLimits l = ShapingLimits.defaults().withWire(account(local.get("wire"))).withMaxDelay(java.time.Duration.ofNanos(num(local.get("max_delay")) * 1000));
-            ShapingLimits in = l.under(new ShapingBudget(account(config.get("wire")), java.time.Duration.ofNanos(num(config.get("max_delay")) * 1000), false));
+            long lm = num(local.get("max_delay")), bm = num(config.get("max_delay"));
+            ShapingLimits l = ShapingLimits.defaults().withWire(account(local.get("wire")));
+            if (lm < 0) l = l.withNoMaxDelay(); else if (lm > 0) l = l.withMaxDelay(java.time.Duration.ofNanos(lm * 1000));
+            ShapingLimits in = l.under(new ShapingBudget(account(config.get("wire")), bm > 0 ? java.time.Duration.ofNanos(bm * 1000) : null, true));
             var want = obj(v.get("want"));
             assertEquals(account(want.get("wire")), in.wire(), v.toString());
-            assertEquals(Boolean.TRUE.equals(want.get("no_injection")), in.noInjection(), v.toString());
+            assertEquals(Boolean.TRUE.equals(want.get("no_injection")), !in.injection(), v.toString());
             assertEquals(num(want.get("max_delay")), micros(in.maxDelay()), v.toString());
         });
     }
@@ -311,26 +317,26 @@ class VectorsTest {
             for (Map<String, Object> d : cases(v, "draws")) {
                 ShapingBudget got = b.draw(sampler);
                 assertEquals(account(d.get("wire")), got.wire(), d.toString());
-                assertEquals(d.get("no_injection"), got.noInjection(), d.toString());
-                assertEquals(num(d.get("max_delay")), micros(got.maxDelay()), d.toString());
+                assertEquals(d.get("no_injection"), !got.injection(), d.toString());
+                assertEquals(num(d.get("max_delay")), got.maxDelay() == null ? 0 : micros(got.maxDelay()), d.toString());
                 assertEquals(num(d.get("consumed")), s.n, d.toString());
             }
         });
     }
 
-    static Event event(EventKind k, long now, int len, boolean padOnly) { return new Event(k, 0, 0, now, len, padOnly, 0); }
+    static Event event(EventKind k, long now, int len, boolean padOnly) { return new Event(k, io.zmux.PipeId.BOOTSTRAP, 0, now, len, padOnly, 0); }
 
     /** Effects in the form of the cases; times in microseconds. */
     static Map<String, Object> effects(Effects e) {
         Map<String, Object> m = new HashMap<>();
         if (e.hasInject()) {
-            Map<String, Object> i = e.injectNone() ? null : new HashMap<>(Map.of("at", e.injectAtNanos() / 1000, "len", (long) e.injectLength()));
+            Map<String, Object> i = e.isInjectNone() ? null : new HashMap<>(Map.of("at", e.injectAtNanos() / 1000, "len", (long) e.injectLength()));
             m.put("inject", i);
         }
-        if (e.hasWake()) m.put("wake", e.wakeNone() ? null : (Object) (e.wakeAtNanos() / 1000));
+        if (e.hasWake()) m.put("wake", e.isWakeNone() ? null : (Object) (e.wakeAtNanos() / 1000));
         if (e.hasGate()) m.put("gate", new HashMap<>(Map.of("pause_until", e.gatePauseUntilNanos() / 1000, "rate", e.gateRate(), "burst", e.gateBurst())));
         if (e.hasWeight()) m.put("weight", e.weight());
-        if (e.stopRequested()) m.put("stop", true);
+        if (e.isStopRequested()) m.put("stop", true);
         return m;
     }
 }

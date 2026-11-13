@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.AdmissionVerdict;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
@@ -50,7 +51,7 @@ final class Router extends ChannelInboundHandlerAdapter {
     /** The request's body ended (CARRIER mode). */
     private boolean requestEnded;
     /** The verdict on the carrier of the request; null while pending. */
-    private Admission.Verdict verdict;
+    private AdmissionVerdict verdict;
 
     Router(HttpEndpoint ep) { this.ep = ep; }
 
@@ -100,17 +101,13 @@ final class Router extends ChannelInboundHandlerAdapter {
             // A request forwarded from early data takes no carrier: the intermediary repeats it. The upgrade
             // failed: a setup failure of the listener.
             ep.listener.countSetupFailure();
-            mode = Mode.DISCARD;
-            FullHttpResponse tooEarly = new DefaultFullHttpResponse(r.protocolVersion(), HttpResponseStatus.valueOf(425));
-            HttpUtil.setContentLength(tooEarly, 0);
-            ctx.writeAndFlush(tooEarly);
+            refuse(r, HttpResponseStatus.valueOf(425));
             return;
         }
         switch (cls) {
             case EXCHANGE -> {
                 collect = ep.exchange.collect(this, r);
-                mode = collect == null ? Mode.HOST : Mode.COLLECT;
-                if (collect == null) ctx.fireChannelRead(r);
+                if (collect != null) mode = Mode.COLLECT;
             }
             case WEBSOCKET -> {
                 frames = ep.webSocket.open(this, ctx, r);
@@ -140,15 +137,7 @@ final class Router extends ChannelInboundHandlerAdapter {
                 carrier.in(c.content().retain());
                 if (last) { requestEnded = true; carrier.inEnd(); }
             }
-            case COLLECT -> {
-                boolean fits = collect.add(c.content());
-                if (!fits || last) {
-                    var col = collect;
-                    collect = null;
-                    mode = Mode.DISCARD;
-                    col.complete(last, fits ? null : c.content().retain());
-                }
-            }
+            case COLLECT -> collect.add(c.content(), last);
             default -> { }
         }
         c.release();
@@ -199,12 +188,12 @@ final class Router extends ChannelInboundHandlerAdapter {
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
         ZmuxListener.Handled a = l.handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> fallback(c, r, given)));
-        a.verdict().thenCombine(a.taken(), (v, taken) -> v == Admission.Verdict.ACCEPT && !taken)
+        a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
                 .whenComplete((no, e) -> refused.complete(Boolean.TRUE.equals(no)));
         a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {
-            if (c.detached() || v == Admission.Verdict.FALLBACK) return; // the fallback replays what was kept
-            verdict = v == null ? Admission.Verdict.CLOSE : v;
-            if (v != Admission.Verdict.ACCEPT) c.keepNoMore();
+            if (c.detached() || v == AdmissionVerdict.FALLBACK) return; // the fallback replays what was kept
+            verdict = v == null ? AdmissionVerdict.CLOSE : v;
+            if (v != AdmissionVerdict.ACCEPT) c.keepNoMore();
             else if (adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
         }));
         a.taken().whenComplete((taken, e) -> ChannelLoops.executor(ch).execute(() -> {
@@ -228,7 +217,7 @@ final class Router extends ChannelInboundHandlerAdapter {
             toHost(r, replay, requestEnded);
             return;
         }
-        if (verdict != Admission.Verdict.ACCEPT) {
+        if (verdict != AdmissionVerdict.ACCEPT) {
             // Stalled, closed or not decided: the request ends without a response.
             ch.close();
             return;
@@ -271,6 +260,21 @@ final class Router extends ChannelInboundHandlerAdapter {
         ctx.fireChannelRead(r);
         for (ByteBuf b : read) ctx.fireChannelRead(new DefaultHttpContent(b));
         if (ended) ctx.fireChannelRead(new DefaultLastHttpContent());
+    }
+
+    /** Answers r with status and no body, without reading the body, which is discarded. */
+    void refuse(HttpRequest r, HttpResponseStatus status) {
+        mode = Mode.DISCARD;
+        FullHttpResponse resp = new DefaultFullHttpResponse(r.protocolVersion(), status);
+        HttpUtil.setContentLength(resp, 0);
+        ctx.writeAndFlush(resp);
+    }
+
+    /** The exchange request c is done with its body: what is left of it is discarded, unless c gave it to the host. */
+    void endCollect(ExchangeServer.Collect c) {
+        if (collect != c) return;
+        collect = null;
+        if (mode == Mode.COLLECT) mode = Mode.DISCARD;
     }
 
     /** The WebSocket handshake went out: frames follow. */

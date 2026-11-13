@@ -17,7 +17,7 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.util.ReferenceCountUtil;
 import io.zmux.Candidate;
 import io.zmux.CarrierKind;
-import io.zmux.Credential;
+import io.zmux.CarrierCredential;
 import io.zmux.HttpStatusException;
 import io.zmux.HttpTarget;
 import io.zmux.JoinHint;
@@ -46,7 +46,7 @@ import javax.net.ssl.TrustManagerFactory;
 /**
  * Opens HTTP carriers on Netty: streaming requests ({@link #pipe}, {@link #splitPipe}), the
  * exchange carrier ({@link #exchangePipe}) and WebSockets ({@link #webSocketPipe}), each also as
- * a {@link Candidate} for {@link io.zmux.Zmux#dial(io.zmux.CarrierMode, io.zmux.ZmuxConfig, io.zmux.ModePolicy)}.
+ * a {@link Candidate} for {@link io.zmux.Zmux#dial(io.zmux.CarrierChoice, io.zmux.ZmuxConfig, io.zmux.CarrierChoicePolicy)}.
  * HTTPS uses HTTP/2 when the server's ALPN offers it and HTTP/1.1 otherwise; cleartext HTTP uses
  * HTTP/1.1, or HTTP/2 by prior knowledge ({@link Builder#http2()}). Streaming carriers over
  * HTTP/1.1 get a connection of their own, which closes with them; over HTTP/2 they are streams
@@ -114,7 +114,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      * request body; a GET, which has none, carries its header form. The connection is not known
      * when the request is built, so a credential bound to TLS is an error.
      */
-    public PipeIo pipe(URI url, Map<String, List<String>> headers, PipeOptions.Direction dir, Credential credential) throws IOException {
+    public PipeIo pipe(URI url, Map<String, List<String>> headers, PipeOptions.Direction dir, CarrierCredential credential) throws IOException {
         return StreamingRequest.open(this, url, headers, Objects.requireNonNull(dir), credential, null);
     }
 
@@ -124,11 +124,11 @@ public final class HttpCarrierClient implements AutoCloseable {
      * credential as {@link #pipe} does. The carriers must be confidential end to end, or up to a
      * trusted TLS-terminating intermediary.
      */
-    public PipeIo splitPipe(URI url, Map<String, List<String>> headers, Credential credential) throws IOException {
+    public PipeIo splitPipe(URI url, Map<String, List<String>> headers, CarrierCredential credential) throws IOException {
         return splitPipe(url, headers, credential, null);
     }
 
-    private PipeIo splitPipe(URI url, Map<String, List<String>> headers, Credential credential, HttpTarget target) throws IOException {
+    private PipeIo splitPipe(URI url, Map<String, List<String>> headers, CarrierCredential credential, HttpTarget target) throws IOException {
         byte[] token = new byte[16];
         RANDOM.nextBytes(token);
         Map<String, List<String>> h = new HashMap<>(headers);
@@ -160,7 +160,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      * {@link io.zmux.PipePool#join pool} keeps such pipes as members:
      * {@code PipePool.join(a -> List.of(client.splitJoin(a.session(), url, headers, cred, a.options())))}.
      */
-    public ZmuxPipe splitJoin(ZmuxSession session, URI url, Map<String, List<String>> headers, Credential credential,
+    public ZmuxPipe splitJoin(ZmuxSession session, URI url, Map<String, List<String>> headers, CarrierCredential credential,
                               PipeOptions options) throws IOException {
         return session.addPipe(splitPipe(url, headers, credential, null), options);
     }
@@ -191,7 +191,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      * hops, each on a new connection with the credential presented anew; a refused one fails
      * with an {@link io.zmux.HttpRedirectException}.
      */
-    public PipeIo webSocketPipe(URI url, Map<String, List<String>> headers, List<String> protocols, Credential credential) throws IOException {
+    public PipeIo webSocketPipe(URI url, Map<String, List<String>> headers, List<String> protocols, CarrierCredential credential) throws IOException {
         return WebSocketClient.open(this, url, headers, protocols, credential).io();
     }
 

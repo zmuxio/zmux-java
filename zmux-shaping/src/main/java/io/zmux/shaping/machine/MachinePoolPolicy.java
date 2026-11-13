@@ -3,6 +3,8 @@ package io.zmux.shaping.machine;
 import static io.zmux.shaping.machine.DefinitionException.Category.*;
 import static io.zmux.shaping.machine.DefinitionJson.err;
 
+import io.zmux.PipeId;
+import io.zmux.PipeLiveness;
 import io.zmux.PoolPolicy;
 import io.zmux.shaping.machine.Definition.Scope;
 import io.zmux.shaping.machine.Definition.Value;
@@ -151,7 +153,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
         return out;
     }
 
-    static MachinePoolPolicy read(String json, Options o) throws DefinitionException {
+    static MachinePoolPolicy read(String json, MachineOptions o) throws DefinitionException {
         Object root = DefinitionJson.parse(json);
         Map<String, Object> tables = Map.of();
         if (root instanceof Map<?, ?> m && m.get("tables") != null) {
@@ -172,21 +174,29 @@ public final class MachinePoolPolicy implements PoolPolicy {
     @Override
     public synchronized Decision decide(View view) {
         List<Metrics> ms = new ArrayList<>(view.members().size());
+        boolean connections = false;
         for (Member m : view.members()) {
-            ms.add(new Metrics(m.id(), micros(m.age()), micros(m.idle()), m.pipes(), m.bytesSent(), m.bytesReceived()));
+            connections |= m.pipeId() == null;
+            long id = m.pipeId() == null ? m.fateGroup() : m.pipeId().value();
+            ms.add(new Metrics(id, micros(m.age()), micros(m.idle()), m.pipes(), m.bytesSent(), m.bytesReceived()));
         }
         Result r = decide(view.failures(), view.sinceLastDial() == null ? null : micros(view.sinceLastDial()), ms);
         if (r.probeInterval() != null && r.probeInterval() != 0 && r.probeInterval() < SECOND_MICROS) {
             throw new IllegalArgumentException("pool probe_interval " + r.probeInterval() + " us outside 0 and [1 s, 10^15 us]");
         }
-        Decision d = Decision.KEEP.withRetire(new LinkedHashSet<>(r.retire()));
+        Decision d = connections ? Decision.KEEP.withRetireConnections(new LinkedHashSet<>(r.retire()))
+                : Decision.KEEP.withRetirePipes(r.retire().stream().map(PipeId::of).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
         if (r.count() != null) d = d.withCount((int) Math.min(r.count(), Integer.MAX_VALUE));
         if (r.dialAfter() != null) d = d.withDialAfter(Duration.ofNanos(r.dialAfter() * 1000));
         if (r.recheck() != null) d = d.withRecheck(Duration.ofNanos(r.recheck() * 1000));
-        if (r.probeInterval() != null) {
-            d = r.probeInterval() == 0 ? d.disableIdleProbes() : d.withProbeInterval(Duration.ofNanos(r.probeInterval() * 1000));
+        if (r.probeInterval() != null || r.probeJitter() != null) {
+            PipeLiveness.Builder l = PipeLiveness.builder();
+            if (r.probeInterval() != null) {
+                if (r.probeInterval() == 0) l.noProbeInterval(); else l.probeInterval(Duration.ofNanos(r.probeInterval() * 1000));
+            }
+            if (r.probeJitter() != null) l.probeJitter(r.probeJitter() / 1e6);
+            d = d.withLiveness(l.build());
         }
-        if (r.probeJitter() != null) d = d.withProbeJitter(r.probeJitter() / 1e6);
         return d;
     }
 

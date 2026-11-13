@@ -2,7 +2,7 @@ package io.zmux.internal.core;
 
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameEncoder;
-import io.zmux.carrier.VarInt;
+import io.zmux.internal.wire.VarInt;
 
 /**
  * The ending of one session: the handshake deadline, the two-phase GOAWAY, the pending CONNECTION_CLOSE with its lane wait, and the linger timer. The session's state machine and what closing does to streams and pipes stay
@@ -122,15 +122,30 @@ final class Lifecycle {
         linger = until;
     }
 
+    /** When to check again whether a close that waits for the application's reads is done; NEVER: no check. */
+    private long readsCheck = Time.NEVER;
+
+    /** Checks again at t whether the linger may end (the application read while the session closes). */
+    void checkReads(long t) {
+        readsCheck = t;
+    }
+
+    /** True once when the check of {@link #checkReads} is due at t. */
+    boolean readsCheckDue(long t) {
+        if (t < readsCheck) return false;
+        readsCheck = Time.NEVER;
+        return true;
+    }
+
     long deadline() {
-        long t = Math.min(Math.min(Math.min(handshake, linger), firstFlight), handOff);
+        long t = Math.min(Math.min(Math.min(Math.min(handshake, linger), firstFlight), handOff), readsCheck);
         if (waitLanes) t = Math.min(t, laneWait);
         return t;
     }
 
     /** CLOSED: no deadline remains. */
     void clearTimers() {
-        handshake = linger = laneWait = firstFlight = handOff = Time.NEVER;
+        handshake = linger = laneWait = firstFlight = handOff = readsCheck = Time.NEVER;
     }
 
     // ---- CONNECTION_CLOSE ----

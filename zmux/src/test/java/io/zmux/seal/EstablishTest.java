@@ -2,6 +2,7 @@ package io.zmux.seal;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -9,7 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.zmux.internal.join.Framing;
-import io.zmux.carrier.SecureCarrierException;
 import io.zmux.internal.join.Mode;
 import java.util.HexFormat;
 import java.util.List;
@@ -76,10 +76,10 @@ class EstablishTest {
         VerifyInput seen;
         int calls;
 
-        @Override public Verdict verify(VerifyInput in) {
+        @Override public VerifyVerdict verify(VerifyInput in) {
             seen = in;
             calls++;
-            return new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
+            return new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
         }
     }
 
@@ -94,7 +94,7 @@ class EstablishTest {
             Recording c = new Recording();
             x.client().verify(c, "client context", false);
             assertEquals(1, c.calls);
-            assertEquals(VerifyInput.Role.NODE, c.seen.role());
+            assertEquals(io.zmux.Role.SERVER, c.seen.role());
             assertEquals(p, c.seen.profile());
             assertArrayEquals(sKey.publicKey(), c.seen.peerStatic());
             assertArrayEquals(p.hasPsk() ? HANDLE : null, c.seen.pskIdentity());
@@ -105,7 +105,7 @@ class EstablishTest {
             EstablishServer.Finish fin = x.server().readFinish(finish, 0, finish.length);
             Recording s = new Recording();
             x.server().verify(s, fin, "listener", false);
-            assertEquals(VerifyInput.Role.CLIENT, s.seen.role());
+            assertEquals(io.zmux.Role.CLIENT, s.seen.role());
             assertArrayEquals(cKey.publicKey(), s.seen.peerStatic());
             assertEquals(1L << 30, s.seen.credential().type());
             assertEquals(0, s.seen.credential().data().length);
@@ -150,7 +150,7 @@ class EstablishTest {
         assertThrows(CredentialsFailedException.class, () -> replied(StaticKey.generate(), null).client()
                 .verify(new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())), null, false));
         // No static key to pin: a rejection, not a failure of the verifier.
-        var none = new VerifyInput(VerifyInput.Role.NODE, Profile.of(1), null, null, null, List.of(), null);
+        var none = new VerifyInput(io.zmux.Role.SERVER, Profile.of(1), null, null, null, List.of(), null);
         assertThrows(CredentialsFailedException.class, () -> new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())).verify(none));
     }
 
@@ -158,12 +158,12 @@ class EstablishTest {
     void theVerdictValueComesBackAndAProofKeyIsRequired() throws Exception {
         StaticKey sKey = StaticKey.generate();
         Object mine = new Object();
-        var j = replied(sKey, null).client().verify(in -> new Verdict(new Principal(5, new byte[] {1}), null, mine), null, false);
+        var j = replied(sKey, null).client().verify(in -> new VerifyVerdict(new Principal(5, new byte[] {1}), null, mine), null, false);
         assertEquals(mine, j.verdict().value());
         // A Reply without a proof: a verdict that names a proof key fails the handshake.
         assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
-                .verify(in -> new Verdict(new Principal(5, new byte[0]), new byte[KeyId.LEN], null), null, false));
-        assertThrows(IllegalArgumentException.class, () -> new Verdict(new Principal(5, new byte[0]), new byte[3], null));
+                .verify(in -> new VerifyVerdict(new Principal(5, new byte[0]), new byte[KeyId.LEN], null), null, false));
+        assertThrows(IllegalArgumentException.class, () -> new VerifyVerdict(new Principal(5, new byte[0]), new byte[3], null));
     }
 
     @Test
@@ -195,19 +195,11 @@ class EstablishTest {
                 () -> EstablishPayload.parse(new byte[] {1, 2, 0, 9}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).code());
     }
 
-    private static final SigningKey SERVER_PROOF, CLIENT_PROOF;
-    static {
-        try {
-            SERVER_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44);
-            CLIENT_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44);
-        } catch (SecureCarrierException e) {
-            throw new ExceptionInInitializerError(e);
-        }
-    }
+    private static final SigningKey SERVER_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44), CLIENT_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44);
 
     /** A verdict that names proofKey. */
     private static Anchor naming(byte[] proofKey) {
-        return in -> new Verdict(new Principal(Principal.NODE_KEY, in.peerStatic()), proofKey, null);
+        return in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()), proofKey, null);
     }
 
     /** Messages 1 and 2, message 2 signed by signer, or with p as it is. */
@@ -285,9 +277,9 @@ class EstablishTest {
             @Override public Credential credential(byte[] h, Profile p, java.net.SocketAddress src) { return null; }
             @Override public Object commit(io.zmux.seal.Admission a, java.net.SocketAddress src) { return null; }
         };
-        var cfg = new ServerConfig(gate, StaticKey.generate());
-        assertThrows(IllegalArgumentException.class, () -> cfg.withAnchor(pin, null, true));
-        assertNotNull(cfg.withAnchor(new PinAnchor(new byte[KeyId.LEN], new byte[KeyId.LEN]), null, true));
+        var cfg = ServerConfig.builder(gate, StaticKey.generate()).build();
+        assertThrows(IllegalArgumentException.class, () -> cfg.toBuilder().anchor(pin).requirePqAuth(true).build());
+        assertNotNull(cfg.toBuilder().anchor(new PinAnchor(new byte[KeyId.LEN], new byte[KeyId.LEN])).requirePqAuth(true).build());
     }
 
     @Test
@@ -314,14 +306,47 @@ class EstablishTest {
             @Override public Object commit(io.zmux.seal.Admission a, java.net.SocketAddress src) { return null; }
         };
         StaticKey key = StaticKey.generate();
-        assertThrows(IllegalArgumentException.class, () -> new ServerConfig(null, key));
-        assertThrows(IllegalArgumentException.class, () -> new ServerConfig(gate, null));
-        ServerConfig ok = new ServerConfig(gate, key);
+        assertThrows(IllegalArgumentException.class, () -> ServerConfig.builder(null, key).build());
+        assertThrows(IllegalArgumentException.class, () -> ServerConfig.builder(gate, null).build());
+        ServerConfig ok = ServerConfig.builder(gate, key).build();
         assertEquals(ServerConfig.DEFAULT_PROFILES, ok.acceptedProfiles());
         assertTrue(ok.acceptedProfiles().stream().allMatch(Profile::hasPsk));
-        assertThrows(IllegalArgumentException.class, () -> ok.withAcceptedProfiles(Profile.XXHFS_AES, Profile.of(6)));
-        assertEquals(List.of(Profile.XXHFS_AES), ok.withAcceptedProfiles(Profile.XXHFS_AES).acceptedProfiles());
-        assertThrows(IllegalArgumentException.class, () -> ok.withAnchor(null, null, true));
+        assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES, Profile.of(6)).build());
+        assertEquals(List.of(Profile.XXHFS_AES), ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES).build().acceptedProfiles());
+        assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().anchor(null).requirePqAuth(true).build());
+        assertEquals(256, ok.maxAppData().getAsInt());
+        assertTrue(ok.toBuilder().noMaxAppData().build().maxAppData().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().maxAppData(-1));
+    }
+
+    @Test
+    void clientConfigSettingsThatAreNotValues() {
+        ClientConfig d = ClientConfig.builder().build();
+        assertEquals(256, d.maxAppData().getAsInt());
+        assertEquals(java.time.Duration.ofSeconds(10), d.handshakeTimeout().orElseThrow());
+        ClientConfig none = ClientConfig.builder().noMaxAppData().noHandshakeTimeout().build();
+        assertTrue(none.maxAppData().isEmpty());
+        assertTrue(none.handshakeTimeout().isEmpty());
+        assertEquals(0, ClientConfig.builder().maxAppData(0).build().maxAppData().getAsInt());
+        assertThrows(IllegalArgumentException.class, () -> ClientConfig.builder().maxAppData(-1));
+        assertThrows(IllegalArgumentException.class, () -> ClientConfig.builder().handshakeTimeout(java.time.Duration.ZERO));
+    }
+
+    @Test
+    void byteFieldsAreCopiedComparedByContentAndKeysStayHidden() throws Exception {
+        byte[] psk = new byte[32];
+        java.util.Arrays.fill(psk, (byte) 0x5a);
+        HandlePsk h = new HandlePsk(new byte[] {1, 2}, psk);
+        psk[0] = 0;
+        assertEquals(0x5a, h.psk()[0]);
+        h.psk()[1] = 0;
+        assertEquals(0x5a, h.psk()[1]);
+        assertEquals(h, new HandlePsk(new byte[] {1, 2}, h.psk()));
+        assertFalse(h.toString().contains("5a5a"));
+        assertEquals(new Credential(3, new byte[] {9}), new Credential(3, new byte[] {9}));
+        assertEquals(new Principal(1, new byte[] {7}).hashCode(), new Principal(1, new byte[] {7}).hashCode());
+        StaticKey k = StaticKey.generate();
+        assertFalse(k.toString().contains(HexFormat.of().formatHex(k.scalar())));
     }
 
     @Test
@@ -337,11 +362,20 @@ class EstablishTest {
     void x25519FollowsRfc7748() throws Exception {
         // RFC 7748 Section 5.2, first vector; its u has the high bit set, which is ignored.
         HexFormat h = HexFormat.of();
-        StaticKey k = StaticKey.of(h.parseHex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"));
+        StaticKey k = StaticKey.fromScalar(h.parseHex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"));
         byte[] out = k.dh(h.parseHex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"));
         assertEquals("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552", h.formatHex(out));
         // A key above 2^255-19 is reduced: the encoding of p + 9 means u = 9.
         byte[] pPlus9 = h.parseHex("f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
         assertArrayEquals(k.publicKey(), k.dh(pPlus9));
+    }
+
+    @Test
+    void incompleteIsControlFlowWithoutAStackTrace() {
+        SecureCarrierException more = SecureCarrierException.incomplete(7);
+        assertEquals(0, more.getStackTrace().length);
+        assertEquals(7, more.need());
+        assertInstanceOf(io.zmux.ZmuxException.class, more);
+        assertTrue(new SecureCarrierException(SecureCarrierException.Code.AUTH).getStackTrace().length > 0);
     }
 }

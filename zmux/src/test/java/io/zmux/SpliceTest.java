@@ -181,7 +181,7 @@ class SpliceTest {
                 @Override public void charge(int n) { fail("limiter denied forwarding"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.left.client().close(new ApplicationError(32, "gone"));
+            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.left.client().abort(32, "gone");
             var result = splice.get(3, TimeUnit.SECONDS);
             assertEquals(new SpliceResult.End.UpstreamLost(), result.aToB().end());
             assertEquals(0, result.aToB().streamBytes()); assertTrue(blocked.isCancelled());
@@ -190,7 +190,7 @@ class SpliceTest {
 
     @Test void datagramsKeepContextsAndUseOnlyTheSessionsQueues() throws Exception {
         try (EventLoops loops = EventLoops.create(3);
-             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
+             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).datagrams(true).build())) {
             var splice = Zmux.splice(relay.a, relay.b).toCompletableFuture();
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
@@ -238,7 +238,7 @@ class SpliceTest {
                 @Override public void charge(int n) { fail("no byte allowed"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.right.client().close(new ApplicationError(31, "gone"));
+            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.right.client().abort(31, "gone");
             var result = splice.get(3, TimeUnit.SECONDS);
             assertEquals(new SpliceResult.End.DownstreamLost(), result.aToB().end()); assertTrue(blocked.isCancelled());
         }
@@ -246,7 +246,7 @@ class SpliceTest {
 
     @Test void datagramsDeniedByTheDirectionLimiterAreCountedWithoutAHelperQueue() throws Exception {
         try (EventLoops loops = EventLoops.create(2);
-             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
+             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).datagrams(true).build())) {
             var dropped = new CountDownLatch(1); var charged = new AtomicInteger();
             Limiter limiter = new Limiter() {
                 @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(max); }
@@ -352,7 +352,7 @@ class SpliceTest {
                                 assertTrue(splice.cancel(true), mode);
                                 assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS), mode);
                             } else {
-                                if (mode.equals("session")) relay.left.client().close(new ApplicationError(32, "gone"));
+                                if (mode.equals("session")) relay.left.client().abort(32, "gone");
                                 if (mode.equals("stop")) { peer.stop(82); peer.finish(); }
                                 var result = splice.get(3, TimeUnit.SECONDS);
                                 assertEquals(mode.equals("stop") ? new SpliceResult.End.Stopped(82) : new SpliceResult.End.UpstreamLost(),
@@ -363,6 +363,25 @@ class SpliceTest {
                     } finally { gate.release(); }
                 }
                 assertEquals(0, loops.outstandingBuffers(), mode);
+            }
+        }
+    }
+
+    @Test void aLimiterFailingOnADatagramFailsTheSplice() throws Exception {
+        try (EventLoops loops = EventLoops.create(2);
+             var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).datagrams(true).build())) {
+            var thrown = new IllegalStateException("datagram limiter broke");
+            Limiter limiter = new Limiter() {
+                @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(max); }
+                @Override public int tryReady(int max) { throw thrown; }
+                @Override public void charge(int n) { }
+            };
+            var splice = Zmux.splice(relay.a, relay.b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
+            try (var peer = relay.destination()) {
+                assertEquals(7, peer.inputStream().read()); relay.endpoint.sendDatagram(4, ByteBuffer.wrap(new byte[] {1, 2}));
+                var failed = assertThrows(ExecutionException.class, () -> splice.get(3, TimeUnit.SECONDS));
+                assertTrue(failed.getCause() instanceof IOException, String.valueOf(failed.getCause()));
+                assertSame(thrown, failed.getCause().getCause());
             }
         }
     }
