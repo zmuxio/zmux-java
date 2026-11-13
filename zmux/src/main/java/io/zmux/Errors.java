@@ -45,7 +45,7 @@ final class Errors {
             case PIPE_REFUSED -> new PipeRefusedException();
             case JOIN_PENDING -> new JoinPendingException((e.max() & CoreException.MISSING_END_TO_END) != 0, (e.max() & CoreException.MISSING_PSK) != 0);
             case JOIN_SECRET_SET -> new JoinSecretSetException();
-            case JOIN_REFUSED -> new JoinRefusedException(-1);
+            case JOIN_REFUSED -> new JoinRefusedException(e.pipe());
             case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException();
         };
     }

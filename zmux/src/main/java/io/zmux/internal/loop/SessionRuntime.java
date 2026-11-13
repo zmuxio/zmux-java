@@ -356,7 +356,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                     if (core.pipeMode(id) == io.zmux.internal.join.Mode.BOUND) finish(io.zmux.carrier.HandshakeShaper.UnitPlan.NONE);
                     else joinPlan(c, "confirm", () -> !done, this::finish);
                 }
-                case DECLINED -> end(CoreException.of(CoreException.Reason.JOIN_REFUSED));
+                case DECLINED -> end(CoreException.joinRefused(id));
                 case FAILED -> end(new java.io.IOException("pipe " + id + " not joined"));
             }
             markDirty();

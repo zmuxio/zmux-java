@@ -24,25 +24,32 @@ public final class CoreException extends Exception {
     private final transient StreamError stream;
     private final transient SessionError session;
     private final int max;
+    private final long pipe;
 
-    private CoreException(Reason reason, StreamError stream, SessionError session, int max) {
+    private CoreException(Reason reason, StreamError stream, SessionError session, int max, long pipe) {
         super(null, null, false, false);
         this.reason = reason;
         this.stream = stream;
         this.session = session;
         this.max = max;
+        this.pipe = pipe;
     }
 
     public static CoreException of(Reason r) {
-        return new CoreException(r, null, null, 0);
+        return new CoreException(r, null, null, 0, -1);
     }
 
     public static CoreException stream(StreamError e) {
-        return new CoreException(Reason.STREAM, e, null, 0);
+        return new CoreException(Reason.STREAM, e, null, 0, -1);
     }
 
     public static CoreException session(SessionError e) {
-        return new CoreException(Reason.SESSION, null, e, 0);
+        return new CoreException(Reason.SESSION, null, e, 0, -1);
+    }
+
+    /** The peer refused the local join of pipe. */
+    public static CoreException joinRefused(long pipe) {
+        return new CoreException(Reason.JOIN_REFUSED, null, null, 0, pipe);
     }
 
     /** What a join-pending session lacks: the end-to-end declaration, the deferred PSK. */
@@ -50,11 +57,11 @@ public final class CoreException extends Exception {
 
     /** A join pending, missing the parts of {@link #MISSING_END_TO_END} and {@link #MISSING_PSK} set in missing. */
     public static CoreException joinPending(int missing) {
-        return new CoreException(Reason.JOIN_PENDING, null, null, missing);
+        return new CoreException(Reason.JOIN_PENDING, null, null, missing, -1);
     }
 
     public static CoreException tooLarge(int max) {
-        return new CoreException(Reason.DATAGRAM_TOO_LARGE, null, null, max);
+        return new CoreException(Reason.DATAGRAM_TOO_LARGE, null, null, max, -1);
     }
 
     public Reason reason() { return reason; }
@@ -62,6 +69,8 @@ public final class CoreException extends Exception {
     public SessionError sessionError() { return session; }
     /** The largest datagram payload for DATAGRAM_TOO_LARGE; what is missing for JOIN_PENDING. */
     public int max() { return max; }
+    /** The pipe of JOIN_REFUSED; -1 otherwise. */
+    public long pipe() { return pipe; }
 
     @Override
     public String getMessage() {

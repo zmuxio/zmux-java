@@ -223,11 +223,15 @@ class StatsTest {
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
                 // The peer's limit is its pipe count and a headroom of 8: joins beyond it are refused.
                 int added = 0;
+                long refusedPipe = -1;
                 for (int i = 0; i < 14 && c.stats().joinRefusals() == 0; i++) {
-                    try { c.addPipe(l.localAddress(), PipeOptions.defaults()); added++; } catch (IOException refused) { /* Counted below. */ }
+                    try { c.addPipe(l.localAddress(), PipeOptions.defaults()); added++; }
+                    catch (JoinRefusedException refused) { refusedPipe = refused.pipeId(); }
+                    catch (IOException failed) { /* Counted below. */ }
                     Thread.sleep(5);
                 }
                 PipePoolTest.await(() -> c.stats().joinRefusals() == 1);
+                assertTrue(refusedPipe > 0, "the refusal names the refused pipe");
                 assertEquals(9, l.stats().joins(), "with the bootstrap pipe, two pipes and the headroom");
                 int joined = added;
                 PipePoolTest.await(() -> l.stats().refused() >= 1 && l.stats().joins() + l.stats().refused() >= joined + 1);
