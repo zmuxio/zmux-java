@@ -20,7 +20,7 @@ public final class ExchangeConfig {
     private final byte[] psk;
     private final boolean base64, cacheBust;
     private final Map<String, List<String>> header;
-    private final String downUrl, instance, nonceParam, pairField;
+    private final String downUrl, instance, nonceParam;
     private final int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
     private final Duration requestTimeout, backoffMin, backoffMax, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
@@ -33,7 +33,6 @@ public final class ExchangeConfig {
         downUrl = b.downUrl;
         instance = b.instance;
         nonceParam = b.nonceParam.isEmpty() ? "n" : b.nonceParam;
-        pairField = io.zmux.JoinHint.pairField(b.pairField);
         downRequests = pos(b.downRequests, 2);
         upRequests = pos(b.upRequests, 2);
         upPieceSize = pos(b.upPieceSize, defaultPieceSize(base64));
@@ -97,11 +96,6 @@ public final class ExchangeConfig {
     public String instance() { return instance; }
     /** The query parameter of the per-request random value (client). */
     public String nonceParam() { return nonceParam; }
-    /**
-     * The request field that makes a request a split half and not an exchange request (server): the
-     * field of the endpoint that serves it, which must agree with {@link HttpEndpoint.Builder#pairField}.
-     */
-    public String pairField() { return pairField; }
     public int downRequests() { return downRequests; }
     public int upRequests() { return upRequests; }
     public int upPieceSize() { return upPieceSize; }
@@ -134,7 +128,7 @@ public final class ExchangeConfig {
         private byte[] psk = new byte[0];
         private boolean base64, noCacheBust;
         private Map<String, List<String>> header = Map.of();
-        private String downUrl = "", instance = "", nonceParam = "", pairField = "";
+        private String downUrl = "", instance = "", nonceParam = "";
         private int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
         private Duration requestTimeout, backoffMin, backoffMax, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
@@ -157,8 +151,6 @@ public final class ExchangeConfig {
         public Builder instance(String s) { instance = Objects.requireNonNull(s); return this; }
         /** The query parameter of the per-request random value when the URL has no {nonce} ("n"). */
         public Builder nonceParam(String s) { nonceParam = Objects.requireNonNull(s); return this; }
-        /** The pairing field of the endpoint that serves the exchange carrier (server), see {@link ExchangeConfig#pairField()}; empty: {@link io.zmux.JoinHint#PAIR_HEADER}. */
-        public Builder pairField(String field) { pairField = Objects.requireNonNull(field); return this; }
         /** DOWN requests the client keeps outstanding (2); lowered while the server answers BUSY. */
         public Builder downRequests(int n) { downRequests = count(n, "downRequests"); return this; }
         /** UP requests outstanding at once (2). */

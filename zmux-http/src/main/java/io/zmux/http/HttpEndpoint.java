@@ -78,10 +78,6 @@ public final class HttpEndpoint implements AutoCloseable {
         streaming = b.streaming;
         trusted = b.trusted;
         pairField = io.zmux.JoinHint.pairField(b.pairField);
-        if (b.exchange != null && !b.exchange.pairField().equalsIgnoreCase(pairField)) {
-            throw new IllegalArgumentException("the endpoint's pairing field (" + pairField + ") and the exchange carrier's ("
-                    + b.exchange.pairField() + ") disagree");
-        }
         exchange = b.exchange == null ? null : new ExchangeServer(this, b.exchange);
         webSocket = b.webSocket == null ? null : new WebSocketServer(this, b.webSocket);
     }
@@ -205,12 +201,13 @@ public final class HttpEndpoint implements AutoCloseable {
         /**
          * The request field that pairs the uplink POST and the downlink GET of a split bootstrap (empty:
          * {@link io.zmux.JoinHint#PAIR_HEADER}), another name only where an intermediary strips unknown
-         * fields; the client uses the same ({@link HttpCarrierClient.Builder#pairField}). The exchange
-         * carrier's {@link ExchangeConfig#pairField()} must be the same: {@link #build} refuses a disagreement.
+         * fields; the client uses the same ({@link HttpCarrierClient.Builder#pairField}). It is the one
+         * field of the whole endpoint: classification and pairing of every adapter, the exchange carrier's
+         * included, use it.
          */
         public Builder pairField(String field) { pairField = Objects.requireNonNull(field); return this; }
 
-        /** Serves the exchange carrier with config. */
+        /** Serves the exchange carrier with config; its requests are classified by the endpoint's {@link #pairField}. */
         public Builder exchange(ExchangeConfig config) { exchange = Objects.requireNonNull(config); return this; }
 
         /**
