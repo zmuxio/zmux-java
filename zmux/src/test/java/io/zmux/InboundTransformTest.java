@@ -138,20 +138,26 @@ class InboundTransformTest {
             var hints = new LinkedBlockingQueue<JoinHint>();
             InboundTransform t = (carrier, ctx) -> { hints.add(ctx.hint()); return CompletableFuture.completedFuture(carrier); };
             var cfg = config(loops);
-            var values = new java.util.concurrent.atomic.AtomicInteger();
-            var adm = Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0, "half-" + values.incrementAndGet())));
+            // Each half's value names the half: the halves are admitted on their own loops, in no set order.
+            var upPeer = TestAddr.peer("up");
+            var downPeer = TestAddr.peer("down");
+            var adm = Admission.of(0, Admission.Decider.immediate((info, prefix) ->
+                    Admission.Decision.accept(0, info.peer().equals(upPeer) ? "half-up" : "half-down")));
             try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).inboundTransform(t).build())) {
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                 String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
                 // The downlink first: the session's value is still the uplink's.
-                l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null), JoinHint.pair(token, false, TestAddr.peer("c")));
-                l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null), JoinHint.pair(token, true, TestAddr.peer("c")));
+                l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null), JoinHint.pair(token, false, downPeer));
+                l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null), JoinHint.pair(token, true, upPeer));
                 var client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null),
                         new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null));
                 try (var c = Zmux.open(client, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertEquals(1, hints.size());
-                    assertEquals(Optional.of("half-2"), s.admitted());
+                    var hint = hints.peek();
+                    assertTrue(hint.uplink(), "the transform sees the uplink's hint");
+                    assertEquals(upPeer, hint.peer());
+                    assertEquals(Optional.of("half-up"), s.admitted());
                 }
             }
         }
