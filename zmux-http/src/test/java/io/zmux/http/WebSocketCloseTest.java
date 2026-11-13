@@ -14,12 +14,34 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import io.netty.util.ResourceLeakDetector;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /** N16 over WebSocket: a coded close delivers the data written before it, then the code. */
 @Timeout(60)
 class WebSocketCloseTest {
+    /*
+     * The close flushes within its fixed bound (one second, SPEC.md Section 6.5), so the 1 MiB
+     * must cross the carrier well inside it. The module's paranoid leak detection records a trace
+     * on every access to a tracked buffer, and WebSocket masking touches each payload word on both
+     * sides: that made the carrier about 25 times slower here (some 600 ms for the 1 MiB on an
+     * idle machine) and let a loaded runner reach the bound. This class runs at Netty's default
+     * level instead; the other WebSocket tests keep the paranoid one.
+     */
+    private static ResourceLeakDetector.Level leakLevel;
+
+    @BeforeAll static void defaultLeakDetection() {
+        leakLevel = ResourceLeakDetector.getLevel();
+        ResourceLeakDetector.setLevel(ResourceLeakDetector.Level.SIMPLE);
+    }
+
+    @AfterAll static void restoreLeakDetection() {
+        ResourceLeakDetector.setLevel(leakLevel);
+    }
+
     static void closeDelivers(ZmuxSession client, ZmuxSession server, long code, String reason) throws Exception {
         byte[] data = new byte[1 << 20];
         new java.util.Random(code).nextBytes(data);
