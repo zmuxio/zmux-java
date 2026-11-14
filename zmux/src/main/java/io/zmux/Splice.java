@@ -119,9 +119,13 @@ final class Splice {
         private final Limiter limiter;
         private final AtomicReference<IOException> readFault = new AtomicReference<>(), writeFault = new AtomicReference<>();
         private volatile Thread worker;
-        /** The worker waits for the limiter: a source reset must wake it to read the end. */
-        private volatile boolean limiting;
-        /** A source reset arrived: the limiter wait that begins after it must look again too, as it would not be interrupted. */
+        /**
+         * The limiter wait in progress, null while none: a source reset completes it so the worker
+         * reads the end. Never an interrupt: one that lands as the limiter answers outlives the wait
+         * and would end a later blocking call as a cancellation.
+         */
+        private final AtomicReference<CompletableFuture<Void>> limitWake = new AtomicReference<>();
+        /** A source reset arrived: the limiter wait that begins after it must look again too, as nothing would complete it. */
         private final AtomicBoolean resetPoke = new AtomicBoolean();
         /** The worker writes taken bytes: a source reset waits for that write. */
         private volatile boolean forwarding;
@@ -173,7 +177,12 @@ final class Splice {
             IOException error = Errors.io(e);
             // A reset is read in order, after the bytes before its Reliable Size; only a
             // worker waiting for the limiter must look again.
-            if (error instanceof StreamResetException) { resetPoke.set(true); if (limiting && !settling) interrupt(); return; }
+            if (error instanceof StreamResetException) {
+                resetPoke.set(true);
+                CompletableFuture<Void> wake = limitWake.get();
+                if (wake != null) wake.complete(null);
+                return;
+            }
             fail(error, true);
         }
         /** The target's sending lane ended (on its loop). */
@@ -218,19 +227,27 @@ final class Splice {
                     if (limiter != null) {
                         int min = Math.min(n, 16384);
                         CompletableFuture<Integer> ready = Objects.requireNonNull(limiter.ready(min, n)).toCompletableFuture();
-                        limiting = true;
+                        var wake = new CompletableFuture<Void>();
+                        limitWake.set(wake);
                         try {
-                            if (resetPoke.compareAndSet(true, false)) throw new InterruptedException(); // A reset beat the flag above.
+                            // A reset that came before the wait was published has nothing to complete.
+                            if (!resetPoke.compareAndSet(true, false)) CompletableFuture.anyOf(ready, wake).get();
+                            boolean poked = resetPoke.getAndSet(false); // Always consumed: a poke left set would repeat the next wait.
+                            if (poked || !ready.isDone()) {
+                                ready.cancel(true); check();
+                                continue; // A source reset: read again, up to its end.
+                            }
                             int allowed = ready.get();
                             if (allowed < 1 || allowed > n) throw new CallbackFailed(new CallbackFailedException("invalid limiter allowance"));
                             n = allowed;
                         } catch (InterruptedException error) {
+                            // Only a cancellation or a side's failure interrupts the worker: check() throws its cause.
                             ready.cancel(true); check();
-                            continue; // A source reset: read again, up to its end.
+                            continue;
                         } catch (ExecutionException error) {
                             throw new CallbackFailed(new CallbackFailedException("limiter failed", error.getCause()));
                         } finally {
-                            limiting = false;
+                            limitWake.set(null);
                         }
                         check();
                     }

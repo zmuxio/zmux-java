@@ -1355,11 +1355,15 @@ public final class ZmuxSession implements AutoCloseable {
         }
     }
 
-    /** Waits until the peer's parameters arrived (or the session ended). */
+    /**
+     * Waits until the peer's parameters arrived; throws when the session ended, also when it ended
+     * at or after their arrival (a failure processing them, such as an exporter read, ends it in the
+     * same step, and an operation submitted after the end fails the same way).
+     */
     void awaitEstablished(long deadline) throws IOException {
         call(op -> {
-            if (core.established()) return true;
             if (core.error() != null) throw CoreException.session(core.error());
+            if (core.established()) return true;
             core.waitEstablished(op);
             return Operation.PENDING;
         }, null, deadline);

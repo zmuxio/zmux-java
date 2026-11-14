@@ -177,11 +177,11 @@ class CarrierHooksTest {
             try (var l = ZmuxListener.of(ListenerConfig.of(good))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1].withExporter((x, y, z) -> new byte[z]), JoinHint.inBand(TestAddr.peer("peer")));
-                try (var c = Zmux.open(p[0].withExporter((x, y, z) -> null), Role.CLIENT, bad)) {
-                    var e = c.awaitClosed();
-                    assertInstanceOf(SessionError.TransportClosed.class, e);
-                    assertEquals("INTERNAL_ERROR", ((SessionError.TransportClosed) e).name());
-                }
+                // The read fails in the step that establishes the session: open never returns it.
+                var thrown = assertThrows(SessionClosedException.class, () -> Zmux.open(p[0].withExporter((x, y, z) -> null), Role.CLIENT, bad));
+                var e = thrown.error();
+                assertInstanceOf(SessionError.TransportClosed.class, e);
+                assertEquals("INTERNAL_ERROR", ((SessionError.TransportClosed) e).name());
             }
         }
     }
