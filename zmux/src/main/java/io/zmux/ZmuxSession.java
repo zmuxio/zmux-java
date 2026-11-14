@@ -73,7 +73,7 @@ public final class ZmuxSession implements AutoCloseable {
         try {
             run(op -> {
                 driver.setJoinSecret(copy);
-                return Boolean.TRUE;
+                return true;
             });
         } finally {
             java.util.Arrays.fill(copy, (byte) 0);
@@ -137,7 +137,7 @@ public final class ZmuxSession implements AutoCloseable {
                 l.standbyProbe().map(ZmuxConfig::nanos).orElse(0L),
                 l.probeInterval().map(ZmuxConfig::nanos).orElse(0L),
                 l.probeJitter());
-        run(op -> { core.setLiveness(v); return Boolean.TRUE; });
+        run(op -> { core.setLiveness(v); return true; });
     }
 
     /**
@@ -154,7 +154,7 @@ public final class ZmuxSession implements AutoCloseable {
         run(op -> {
             core.raiseIncomingStreams(true, bidi);
             core.raiseIncomingStreams(false, uni);
-            return Boolean.TRUE;
+            return true;
         });
     }
 
@@ -174,7 +174,7 @@ public final class ZmuxSession implements AutoCloseable {
      */
     public void setShapingLimits(io.zmux.shaping.ShapingLimits l) throws IOException {
         java.util.Objects.requireNonNull(l, "l");
-        run(op -> { core.setShapingLimits(l); return Boolean.TRUE; });
+        run(op -> { core.setShapingLimits(l); return true; });
     }
 
     /**
@@ -273,7 +273,7 @@ public final class ZmuxSession implements AutoCloseable {
             List<ZmuxPipe> old = pipes();
             long next = epoch() + 1;
             advanceEpoch();
-            call(op -> core.waitEpoch(next, op) ? Boolean.TRUE : Operation.PENDING, core::cancelEpochWait, until);
+            call(op -> core.waitEpoch(next, op) ? true : Operation.PENDING, core::cancelEpochWait, until);
             try (cancel) {
                 for (ZmuxPipe p : old) {
                     var st = p.stats().orElse(null);
@@ -306,15 +306,21 @@ public final class ZmuxSession implements AutoCloseable {
         return setting == null ? Long.MAX_VALUE : deadline(setting);
     }
 
-    /** The deadline (System.nanoTime) of a wait bounded by timeout from now; a bound too far to represent: none. */
+    /**
+     * The deadline (System.nanoTime) of a wait bounded by timeout from now. Zero or negative: already
+     * elapsed (the wait only takes what is ready, else times out); a bound too far to represent: none.
+     */
     static long deadline(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout");
+        long now = System.nanoTime();
+        if (timeout.isNegative() || timeout.isZero()) return now;
+        long nanos;
         try {
-            long d = System.nanoTime() + timeout.toNanos();
-            return d < System.nanoTime() ? Long.MAX_VALUE : d;
+            nanos = timeout.toNanos();
         } catch (ArithmeticException e) {
             return Long.MAX_VALUE;
         }
+        return nanos >= Long.MAX_VALUE / 2 ? Long.MAX_VALUE : now + nanos;
     }
 
     /** Runs step on the loop and waits at most until deadline for its outcome. */
@@ -565,7 +571,7 @@ public final class ZmuxSession implements AutoCloseable {
         int n = payload.remaining();
         var limiter = driver.datagramSendLimiter();
         if (limiter != null && limiter.tryReady(n) < n) {
-            run(op -> { core.datagrams().limitedSend(); return Boolean.TRUE; });
+            run(op -> { core.datagrams().limitedSend(); return true; });
             return false;
         }
         byte[] b = new byte[n];
@@ -575,7 +581,7 @@ public final class ZmuxSession implements AutoCloseable {
                 if (core.error() != null) throw CoreException.session(core.error());
                 core.datagrams().waitSend(op); return Operation.PENDING;
             }
-            core.sendDatagram(stream, context, b); return Boolean.TRUE;
+            core.sendDatagram(stream, context, b); return true;
         }, op -> core.datagrams().cancelSendWait(op), deadline);
         if (limiter != null) limiter.charge(n);
         return true;
@@ -745,8 +751,8 @@ public final class ZmuxSession implements AutoCloseable {
         // timers), which reports GONE through the pipe-state wake-up; the call's deadline, from
         // its start, bounds it here as well.
         Object r = new Operation<>(driver, op -> switch (core.joinProgress(id)) {
-            case CONFIRMED -> { driver.refreshPipes(); yield Boolean.TRUE; }
-            case GONE -> Boolean.FALSE;
+            case CONFIRMED -> { driver.refreshPipes(); yield true; }
+            case GONE -> false;
             case PENDING -> {
                 if (core.error() != null) throw CoreException.session(core.error());
                 driver.waitPipe(op);
@@ -834,7 +840,7 @@ public final class ZmuxSession implements AutoCloseable {
     public void revalidatePipes() throws IOException {
         run(op -> {
             core.revalidatePipes(0, true);
-            return Boolean.TRUE;
+            return true;
         });
     }
 
@@ -882,13 +888,13 @@ public final class ZmuxSession implements AutoCloseable {
     public void setQualityBand(QualityBand band) throws IOException {
         Objects.requireNonNull(band);
         run(op -> { core.setQualityBand(-1, ZmuxConfig.nanos(band.rtt()), band.rateRatio(),
-                ZmuxConfig.nanos(band.minInterval())); return Boolean.TRUE; });
+                ZmuxConfig.nanos(band.minInterval())); return true; });
     }
 
     /** The outbound capacity floor, with hysteresis. */
     public void setCapacityFloor(CapacityFloor floor) throws IOException {
         Objects.requireNonNull(floor);
-        run(op -> { core.setCapacityFloor((double) floor.rate(), floor.recoveryRatio()); return Boolean.TRUE; });
+        run(op -> { core.setCapacityFloor((double) floor.rate(), floor.recoveryRatio()); return true; });
     }
 
     // ---- record shaping ----
@@ -1085,7 +1091,7 @@ public final class ZmuxSession implements AutoCloseable {
             var op = new Operation<>(driver, o -> core.flushable(), null).submit();
             if (!op.awaitUninterruptibly(flushEnd) && op.cancel()) break;
             if (!Boolean.TRUE.equals(op.outcome())) break;
-            java.util.concurrent.locks.LockSupport.parkNanos(Math.max(0, Math.min(pause, flushEnd - System.nanoTime())));
+            java.util.concurrent.locks.LockSupport.parkNanos(Math.clamp(flushEnd - System.nanoTime(), 0, pause));
             pause = Math.min(pause * 2, TimeUnit.MILLISECONDS.toNanos(10));
         }
         // Ends the close at once: on a loop that has not run the hand-off yet it closes as well.
@@ -1101,7 +1107,7 @@ public final class ZmuxSession implements AutoCloseable {
         // The hand-off; the half-close and the linger then run on the loop.
         var op = new Operation<>(driver, o -> {
             core.closeBounded(code, reason, left, io.zmux.internal.loop.Clock.now());
-            return core.waitCloseHandedOff(o) ? Boolean.TRUE : Operation.PENDING;
+            return core.waitCloseHandedOff(o) ? true : Operation.PENDING;
         }, core::cancelCloseHandOffWait);
         op.submit();
         if (!op.awaitUninterruptibly(deadline)) {
@@ -1350,7 +1356,7 @@ public final class ZmuxSession implements AutoCloseable {
     /** Waits until the peer's parameters arrived (or the session ended). */
     void awaitEstablished(long deadline) throws IOException {
         call(op -> {
-            if (core.established()) return Boolean.TRUE;
+            if (core.established()) return true;
             if (core.error() != null) throw CoreException.session(core.error());
             core.waitEstablished(op);
             return Operation.PENDING;

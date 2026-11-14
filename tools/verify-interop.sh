@@ -26,6 +26,7 @@ export ZMUX_RS_WS_PEER="$CARGO_TARGET_DIR/release/zmux-ws-peer"
 export ZMUX_RS_HTTP_PEER="$CARGO_TARGET_DIR/release/zmux-http-peer"
 export ZMUX_GO_WS_PEER="$repo_root/target/interop/web-go/wspeer"
 export ZMUX_GO_HTTP_PEER="$repo_root/target/interop/web-go/httppeer"
+export ZMUX_GO_TLS_FRONT="$repo_root/target/interop/web-go/tlsfront"
 (cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux -am -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
 # Maven must have actually executed every role in both suites.
 python3 - "$repo_root" <<'CHECK'
@@ -35,19 +36,22 @@ for name, tests in (('PeerInterop', 4), ('QmuxInterop', 4), ('SealPeerInterop', 
     root = ET.parse(Path(sys.argv[1]) / f'zmux/target/surefire-reports/TEST-io.zmux.{name}.xml').getroot()
     assert (int(root.attrib['tests']), int(root.attrib['failures']), int(root.attrib['errors']), int(root.attrib['skipped'])) == (tests, 0, 0, 0), name
 CHECK
-# QUIC against the Rust scripted peer (ZMUX_INTEROP_PEER), and WebSocket and HTTP streaming against both peers.
+# QUIC against the Rust scripted peer (ZMUX_INTEROP_PEER), and WebSocket and HTTP streaming against both peers,
+# with the Bound joins over TLS and the Sealed ones behind a TLS front.
 (cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux-quic,zmux-http -am -Dsurefire.failIfNoSpecifiedTests=false \
-  -Dtest='QuicPeerInterop,HttpInteropTest#webSocketWith*+streamingWith*' test)
+  -Dtest='QuicPeerInterop,HttpInteropTest#webSocketWith*+streamingWith*+bound*+sealedBehindTlsFront' test)
 python3 - "$repo_root" <<'CHECK'
 from pathlib import Path
 import sys, xml.etree.ElementTree as ET
-for module, name, tests in (('zmux-quic', 'io.zmux.quic.QuicPeerInterop', 4), ('zmux-http', 'io.zmux.http.HttpInteropTest', 4)):
+for module, name, tests in (('zmux-quic', 'io.zmux.quic.QuicPeerInterop', 4), ('zmux-http', 'io.zmux.http.HttpInteropTest', 7)):
     root = ET.parse(Path(sys.argv[1]) / module / f'target/surefire-reports/TEST-{name}.xml').getroot()
     assert (int(root.attrib['tests']), int(root.attrib['failures']), int(root.attrib['errors']), int(root.attrib['skipped'])) == (tests, 0, 0, 0), name
 CHECK
-# Existing Go scripted scenarios drive the Java peer in both ordinary and MP roles.
+# Packet streams of the Go suite against the Rust peer (PeerInterop covers Java against it).
+(cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 120s go test -race . -run '^TestInteropPackets$' -count=1 -timeout=100s)
+# Existing Go scripted scenarios drive the Java peer in both ordinary and MP roles, and its packet streams.
 export ZMUX_INTEROP_PEER="$repo_root/tools/interop-peer.sh"
-(cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 180s go test -race . -run '^TestInterop(Client|Server|MultipathClient|MultipathServer)$' -count=1 -timeout=160s)
+(cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 180s go test -race . -run '^TestInterop(Client|Server|MultipathClient|MultipathServer|Packets)$' -count=1 -timeout=160s)
 # The TLS exporter, secure carrier Establish and WebSocket carriers of the Go suites, driving the Java peer.
 (cd "$ZMUX_GO_ROOT" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropTLSExporter' -count=1 -timeout=160s)
 (cd "$ZMUX_GO_ROOT/seal" && timeout --kill-after=5s 180s go test -race . -run '^TestInteropEstablish' -count=1 -timeout=160s)

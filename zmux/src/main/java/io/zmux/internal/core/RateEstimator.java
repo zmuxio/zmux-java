@@ -82,7 +82,7 @@ final class RateEstimator {
      * sample (proven) is a bottleneck sample whatever the writability and bubbles said.
      */
     double sample(double rate, boolean bubbleFlag, long epoch, boolean proven, long now) {
-        boolean bottleneck = proven || !bubbleFlag && (epoch != blockEpoch || blockedNow);
+        boolean bottleneck = proven || (!bubbleFlag && (epoch != blockEpoch || blockedNow));
         if (!bottleneck && rate <= value()) return 0;
         hasSample = true;
         if (bottleneck) measured = true;

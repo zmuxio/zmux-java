@@ -25,5 +25,16 @@ public record SpliceResult(Direction aToB, Direction bToA) {
         record DownstreamLost() implements End {}
     }
 
-    public record Direction(long streamBytes, long datagramBytes, long datagramsDropped, End end) {}
+    /**
+     * One direction's counters.
+     *
+     * @param streamBytes stream bytes forwarded
+     * @param datagramBytes datagram payload bytes forwarded (by a packet relay also those it wrote as capsules)
+     * @param datagramsDropped every datagram received and not forwarded
+     * @param datagramsTooLarge those of datagramsDropped above the next hop's {@link ZmuxStream#maxDatagramPayload(long)}
+     *     (0 without datagrams there); a packet relay writes them as capsules instead and counts here only those it could not
+     * @param datagramsLimited those of datagramsDropped the direction's or the next hop's datagram limiter refused
+     */
+    public record Direction(long streamBytes, long datagramBytes, long datagramsDropped, long datagramsTooLarge,
+                            long datagramsLimited, End end) {}
 }

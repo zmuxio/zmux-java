@@ -113,6 +113,7 @@ public final class Session {
         lanes = new Lanes(cfg, pipes, outbox, life, io);
         rx = new RecordReceiver(cfg, stats, life, io);
         tx = new Transmitter(cfg, stats, pipes, lanes, streams, send, recv, sched, ctl, conn, tuner, ka, life, early, dg, io);
+        dg.carrierRecordCap(tx::carrierRecordCap);
         if (early.active()) assume(early.assumed(), early.floor());
         dg.channels(new ChannelsPort());
         if (cfg.shaper() != null) setShaper(cfg.shaper());
@@ -1211,7 +1212,7 @@ public final class Session {
      */
     public Boolean waitPeerAttached(long id, Waiter sig) throws CoreException {
         Pipe p = pipes.get(id);
-        if (p == null || p.mp() != null && p.mp().health.retired()) throw CoreException.of(CoreException.Reason.INVALID);
+        if (p == null || (p.mp() != null && p.mp().health.retired())) throw CoreException.of(CoreException.Reason.INVALID);
         if (path.peerAttached(p)) return Boolean.TRUE;
         // A pipe that failed, closed or is draining is gone for the wait: its retirement may
         // wait for a peer that never learns of it.
@@ -1319,7 +1320,7 @@ public final class Session {
             }
         }
         long until = a != null ? mp().probation.probationEnd(p) : Long.MIN_VALUE;
-        io.zmux.PipeStats.PeerRequest peer = a != null && (a.tier.peerSeq() > 0 || p.id != 0 && !a.joinerLocal)
+        io.zmux.PipeStats.PeerRequest peer = a != null && (a.tier.peerSeq() > 0 || (p.id != 0 && !a.joinerLocal))
                 ? new io.zmux.PipeStats.PeerRequest(a.tier.peerPrio(), a.tier.peerStandby()) : null;
         boolean peerRequest = peer != null;
         boolean outLive = acks && p.out() != null;
@@ -1683,10 +1684,10 @@ public final class Session {
         if (err != null) throw CoreException.session(err);
         if (!cfg.datagrams()) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
         if (st != null) {
-            if (peerSeen && !feat.flows() || !st.bidi) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
+            if ((peerSeen && !feat.flows()) || !st.bidi) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
             if (!st.tab.idSet()) streams.pinId(st);
         }
-        dg.send(st, context, payload, feat.flows() || !peerSeen && cfg.local().has(TransportParams.FLOWS));
+        dg.send(st, context, payload, feat.flows() || (!peerSeen && cfg.local().has(TransportParams.FLOWS)));
         pipes.wakeWriters();
     }
 
@@ -1714,7 +1715,7 @@ public final class Session {
         if (!feat.carrierDatagrams() || p == null || p.out() == null || p.out().failed()) return Datagrams.ChannelUse.NONE;
         Pipe.OutLane l0 = p.out().lane(0);
         DatagramChannel ch = l0 == null ? null : l0.st.info().channel();
-        if (ch == null || pipes.shaping() != null && pipes.shaping().of(p) != null) return Datagrams.ChannelUse.NONE;
+        if (ch == null || (pipes.shaping() != null && pipes.shaping().of(p) != null)) return Datagrams.ChannelUse.NONE;
         int room = ch.maxChannelDatagram();
         return room <= 0 ? Datagrams.ChannelUse.NONE : new Datagrams.ChannelUse(room, ch.channelStreamId());
     }
@@ -1831,7 +1832,7 @@ public final class Session {
             if (q.out() != null && q.mp().liveOut()) otherOut = true;
             if (q.in() != null && liveIn(q.mp().in())) otherIn = true;
         }
-        return p.out() != null && p.mp().liveOut() && !otherOut || p.in() != null && liveIn(p.mp().in()) && !otherIn;
+        return (p.out() != null && p.mp().liveOut() && !otherOut) || (p.in() != null && liveIn(p.mp().in()) && !otherIn);
     }
 
     private static boolean liveIn(int in) { return in == Attach.IN_JOINING || in == Attach.IN_OPEN; }

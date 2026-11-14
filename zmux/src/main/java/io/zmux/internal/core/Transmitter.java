@@ -107,9 +107,25 @@ public final class Transmitter {
     private int recMax(Pipe.OutLane ol) {
         int m = (int) Math.min(peerMaxRecord, 65535);
         if (!port.established()) m = TransportParams.DEFAULT_MAX_RECORD_SIZE;
-        if (ol.st.info().tls() && m > RecordPlan.MAX_RECORD_LENGTH) m = RecordPlan.MAX_RECORD_LENGTH;
+        return Math.min(m, carrierRecordCap(ol));
+    }
+
+    /** The record cap the lane's carrier sets (a TLS record, the carrier's own bound), 65535 when none. */
+    private static int carrierRecordCap(Pipe.OutLane ol) {
+        int m = 65535;
+        if (ol.st.info().tls()) m = Math.min(m, RecordPlan.MAX_RECORD_LENGTH);
         int carrier = ol.st.info().maxRecord();
-        if (carrier > 0 && m > carrier) m = carrier;
+        if (carrier > 0) m = Math.min(m, carrier);
+        return m;
+    }
+
+    /** The smallest carrier record cap of the outbound lanes, any of which may carry a datagram; 65535 when none. */
+    int carrierRecordCap() {
+        int m = 65535;
+        for (Pipe p : pipes.all()) {
+            if (p.out() == null) continue;
+            for (Pipe.OutLane ol : p.out().lanes) m = Math.min(m, carrierRecordCap(ol));
+        }
         return m;
     }
 
@@ -133,7 +149,7 @@ public final class Transmitter {
             return state.compareTo(SessionState.CLOSING) < 0 && (pipes.shaping() == null || !Shaping.delaying(p, port.now()));
         }
         if (!ol.st.confirmed() || state == SessionState.CLOSING) return false;
-        if (!port.established()) return ka.wants() || earlyActive() && dataPendingOn(null, null);
+        if (!port.established()) return ka.wants() || (earlyActive() && dataPendingOn(null, null));
         if (pipes.shaping() != null) {
             if (Shaping.delaying(p, port.now())) return false;
             if (Shaping.wants(p, lane)) return true;
@@ -172,7 +188,7 @@ public final class Transmitter {
     boolean canSendNow(Stream st) {
         if (!st.tab.idSet()) {
             int t = Stream.typeIndex(st.bidi);
-            if (!port.established() && !earlyActive() || !streams.idAvailable(t)) return false;
+            if ((!port.established() && !earlyActive()) || !streams.idAvailable(t)) return false;
             long pre = port.features().preamble() ? st.preSize() : 0;
             return pre == 0 || conn.room() >= pre;
         }
@@ -580,7 +596,7 @@ public final class Transmitter {
         }
         if (pl.n == 0 && !pl.fin && !pl.open) {
             if (pl.avail > 0) blockedOn(st, pl.credit == 0, pl.connCredit == 0);
-            if (!st.sendable() || pl.credit == 0 && pl.avail > 0) sched.remove(st);
+            if (!st.sendable() || (pl.credit == 0 && pl.avail > 0)) sched.remove(st);
             return CHUNK_SKIP;
         }
         if (w.dataRoom() == 0 && (pl.n > 0 || pl.fin)) return CHUNK_FULL;

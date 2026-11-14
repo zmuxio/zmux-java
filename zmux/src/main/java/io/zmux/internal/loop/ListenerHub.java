@@ -82,8 +82,13 @@ public final class ListenerHub {
             if (name.isEmpty()) return;
             long[] c = variants.get(name);
             if (c == null) {
-                if (variants.size() < Admission.MAX_VARIANTS) variants.put(name, c = new long[4]);
-                else c = variantOverflow == null ? (variantOverflow = new long[4]) : variantOverflow;
+                if (variants.size() < Admission.MAX_VARIANTS) {
+                    c = new long[4];
+                    variants.put(name, c);
+                } else {
+                    if (variantOverflow == null) variantOverflow = new long[4];
+                    c = variantOverflow;
+                }
             }
             c[which]++;
         }
@@ -179,7 +184,7 @@ public final class ListenerHub {
             synchronized (ListenerHub.this) {
                 long n = resources.values().stream().filter(v -> v.state() == io.zmux.internal.core.SessionState.SUSPENDED).count();
                 if (driver.core().state() == io.zmux.internal.core.SessionState.SUSPENDED
-                        && (n > maxSuspended || budget != null && budget.pressure())) {
+                        && (n > maxSuspended || (budget != null && budget.pressure()))) {
                     driver.core().closeResumeTimeout();
                     driver.markDirty();
                 }
@@ -235,7 +240,7 @@ public final class ListenerHub {
         Registration registration = new Registration(driver, locator, laneId);
         synchronized (this) {
             if (closed || draining) throw new IllegalStateException("listener closed");
-            if (locator != null && sessions.containsKey(locator) || laneId != null && laneSessions.containsKey(laneId))
+            if ((locator != null && sessions.containsKey(locator)) || (laneId != null && laneSessions.containsKey(laneId)))
                 throw new IllegalStateException("duplicate session routing key");
             if (locator != null) sessions.put(locator, driver);
             if (laneId != null) laneSessions.put(laneId, driver);
@@ -549,7 +554,7 @@ public final class ListenerHub {
         }
         @Override public int bytes(Transport c, ReadBuf buf, ByteBuffer bytes, int pos, int lim) {
             var record = CarrierAdmission.classify(bytes, pos, lim, MAX_FIRST_RECORD);
-            if (record.kind() == CarrierAdmission.Kind.MORE || record.kind() == CarrierAdmission.Kind.SESSION && record.firstRecordLength() == 0) return 0;
+            if (record.kind() == CarrierAdmission.Kind.MORE || (record.kind() == CarrierAdmission.Kind.SESSION && record.firstRecordLength() == 0)) return 0;
             if (record.kind() != CarrierAdmission.Kind.SESSION && record.kind() != CarrierAdmission.Kind.JOIN) { fail(Outcome.REJECTED); return Inbound.GONE; }
             carrier.loop().schedule(first, Time.NEVER); carrier.pauseInput();
             synchronized (ListenerHub.this) { firstReady = true; }
@@ -849,6 +854,7 @@ public final class ListenerHub {
         }
 
         @Override
+        @SuppressWarnings("ReferenceEquality") // RequestHead.NONE is a sentinel
         void fire(long now) {
             if (done) return;
             if (!decidingNow) { // the deadline passed
@@ -1362,7 +1368,7 @@ public final class ListenerHub {
                 @Override void fire(long now) { ended(carrier, false, false); }
                 @Override public int bytes(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim) {
                     var cl = CarrierAdmission.classify(data, pos, lim, MAX_FIRST_RECORD);
-                    if (cl.kind() == CarrierAdmission.Kind.MORE || cl.kind() == CarrierAdmission.Kind.LANE && cl.firstRecordLength() == 0) return 0;
+                    if (cl.kind() == CarrierAdmission.Kind.MORE || (cl.kind() == CarrierAdmission.Kind.LANE && cl.firstRecordLength() == 0)) return 0;
                     stop();
                     if (cl.kind() != CarrierAdmission.Kind.LANE) { c.close(null); return Inbound.GONE; }
                     int size = VarInt.lengthOf(data.get(pos));

@@ -147,7 +147,7 @@ public final class Stream {
         if (unsent() > 0) return true;
         if (snd.mps() != null && (snd.mps().ret.resend().size() > 0 || snd.mps().ret.finResend())) return true;
         if (snd.finWritten() && !snd.finSent() && !snd.reset()) return true;
-        return (tab.pinned() || tab.openWant()) && !tab.opened() || (!tab.idSet() && (snd.finWritten() || snd.q().end() > snd.q().base()));
+        return ((tab.pinned() || tab.openWant()) && !tab.opened()) || (!tab.idSet() && (snd.finWritten() || snd.q().end() > snd.q().base()));
     }
 
     public long id() { return tab.id(); }

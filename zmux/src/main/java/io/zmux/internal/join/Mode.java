@@ -11,18 +11,32 @@ public enum Mode {
 
     /** The public name of a handshake's mode; null: UNMANAGED. */
     public static io.zmux.RecordMode record(Mode m) {
-        return m == null ? io.zmux.RecordMode.UNMANAGED : io.zmux.RecordMode.values()[m.ordinal()];
+        if (m == null) return io.zmux.RecordMode.UNMANAGED;
+        return switch (m) {
+            case SEALED -> io.zmux.RecordMode.SEALED;
+            case BOUND -> io.zmux.RecordMode.BOUND;
+            case TRUSTED -> io.zmux.RecordMode.TRUSTED;
+        };
     }
 
     /** The handshake's mode of a public name. */
     public static Mode of(io.zmux.RecordMode m) {
         if (m == io.zmux.RecordMode.UNMANAGED) throw new IllegalArgumentException("a handshake has no Unmanaged mode");
-        return values()[m.ordinal()];
+        return switch (m) {
+            case SEALED -> Mode.SEALED;
+            case BOUND -> Mode.BOUND;
+            case TRUSTED -> Mode.TRUSTED;
+            case UNMANAGED -> throw new IllegalArgumentException("a handshake has no Unmanaged mode");
+        };
     }
 
     /** The value on the wire. */
     public int wire() {
-        return ordinal();
+        return switch (this) {
+            case SEALED -> 0;
+            case BOUND -> 1;
+            case TRUSTED -> 2;
+        };
     }
 
     /** The mode of a wire value, or null when it is reserved. */

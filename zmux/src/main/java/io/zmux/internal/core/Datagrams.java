@@ -124,6 +124,7 @@ public final class Datagrams {
     private final ArrayDeque<Limited> limited = new ArrayDeque<>(0);
     private final IdentityHashMap<byte[], Limited> pending = new IdentityHashMap<>(4);
     /** Every received datagram still held by the core, oldest first, with its stream (null: session). */
+    @SuppressWarnings("ArrayAsKeyOfSetOrMap") // keyed by the held array itself: the core removes it by identity
     private final LinkedHashMap<byte[], Stream> received = new LinkedHashMap<>();
     /** The bytes of the session datagrams in {@link #received}; stream datagrams count against their stream's bound only. */
     private long receivedBytes;
@@ -138,6 +139,8 @@ public final class Datagrams {
     private long peerMax;
     private long peerMaxRecord;
     private boolean flows;
+    /** The smallest record cap the pipes' carriers set. */
+    private java.util.function.IntSupplier carrierRecordCap = () -> Integer.MAX_VALUE;
 
     Datagrams(CoreConfig cfg, SessionStats stats, Outbox outbox) {
         this.cfg = cfg;
@@ -158,12 +161,28 @@ public final class Datagrams {
         flows = flowsNegotiated;
     }
 
+    void carrierRecordCap(java.util.function.IntSupplier cap) {
+        carrierRecordCap = cap;
+    }
+
+    /**
+     * The largest datagram data (flow prefix included) whose DATAGRAM frame, type and Length
+     * included as the record writer always counts them, fits cap bytes; -1 when none does. The
+     * one computation behind both the advertised maximum and the drop at write time.
+     */
+    static int maxData(long cap) {
+        if (cap < 2) return -1;
+        long d = Math.min(cap, Integer.MAX_VALUE) - 2;
+        while (d > 0 && 1 + VarInt.length(d) + d > cap) d--;
+        return (int) d;
+    }
+
     /** The largest datagram payload the peer accepts now with a flow prefix of flowLen bytes, 0 when none. */
     public int maxPayload(int flowLen) {
         if (!peerKnown || peerMax == 0) return 0;
-        long m = Math.min(peerMax, peerMaxRecord);
-        if (flows) m -= flowLen;
-        return m < 1 ? 0 : (int) (m - 1);
+        int d = maxData(Math.min(Math.min(peerMax, peerMaxRecord), carrierRecordCap.getAsInt()));
+        if (flows) d -= flowLen;
+        return Math.max(0, d);
     }
 
     /** Bytes of received datagrams the core holds (memory accounting). */
@@ -222,7 +241,7 @@ public final class Datagrams {
     boolean sendable() {
         if (!peerKnown || send.isEmpty()) return false;
         ChannelUse ch = channels.of(channels.datagramPipe());
-        for (Out o : send) if (o.dead() || o.ready() && !ch.takes(o.data().length)) return true;
+        for (Out o : send) if (o.dead() || (o.ready() && !ch.takes(o.data().length))) return true;
         return false;
     }
 
@@ -235,7 +254,8 @@ public final class Datagrams {
         ArrayDeque<Out> kept = null;
         while (!send.isEmpty()) {
             Out o = send.peek();
-            if (o.dead() || o.data().length + 1 > peerMax) {
+            // Too large for these records: dropped, never left to hold the datagrams behind it.
+            if (o.dead() || o.data().length > maxData(Math.min(peerMax, w.recordLimit()))) {
                 send.poll();
                 stats.datagramDroppedSend();
                 continue;
@@ -268,7 +288,7 @@ public final class Datagrams {
         int n = 0;
         for (var it = send.iterator(); it.hasNext(); ) {
             Out o = it.next();
-            if (o.dead() || o.data().length + 1 > peerMax) {
+            if (o.dead() || o.data().length > maxData(peerMax)) {
                 it.remove();
                 stats.datagramDroppedSend();
                 continue;
@@ -447,7 +467,7 @@ public final class Datagrams {
         byte[] bytes = p.payload;
         Stream stream = p.stream;
         untrack(bytes);
-        if (drop || closing || stream != null && (stream.tab.discarded() || stream.rcv.stopped())) {
+        if (drop || closing || (stream != null && (stream.tab.discarded() || stream.rcv.stopped()))) {
             if (drop) stats.datagramDroppedLimit();
             dropReceived();
             return false;

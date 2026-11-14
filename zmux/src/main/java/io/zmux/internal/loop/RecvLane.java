@@ -225,7 +225,7 @@ public final class RecvLane {
                 if (self == null) self = new SendLane.Blocked();
                 if (!awaitData(self)) continue;
                 while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0) {
+                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                         if (WAITER.compareAndSet(this, self, null)) throw SendLane.interrupted(0);
                         break;
                     }
@@ -257,7 +257,7 @@ public final class RecvLane {
                 if (self == null) self = new SendLane.Blocked();
                 if (!awaitData(self)) continue;
                 while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0) {
+                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                         if (WAITER.compareAndSet(this, self, null)) throw SendLane.interrupted(0);
                         break;
                     }
@@ -280,7 +280,7 @@ public final class RecvLane {
                 if (self == null) self = new SendLane.Blocked();
                 if (!awaitData(self)) continue;
                 while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0) {
+                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                         if (WAITER.compareAndSet(this, self, null)) throw SendLane.interrupted(0);
                         break;
                     }
@@ -357,7 +357,7 @@ public final class RecvLane {
             }
         }
 
-        private Object asRead(Object r) { return r == StreamRecv.FIN ? (Object) (-1) : r; }
+        private Object asRead(Object r) { return r == StreamRecv.FIN ? Integer.valueOf(-1) : r; }
     }
 
     /**

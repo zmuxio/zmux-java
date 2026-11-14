@@ -74,7 +74,7 @@ final class SnapshotJson {
                 case '[' -> array(depth);
                 case '{' -> object(depth);
                 default -> {
-                    if (c == '-' || c >= '0' && c <= '9') yield number();
+                    if (c == '-' || (c >= '0' && c <= '9')) yield number();
                     throw error("unexpected character");
                 }
             };
@@ -124,7 +124,7 @@ final class SnapshotJson {
             int start = i;
             if (s.charAt(i) == '-') i++;
             int first = i, n = digits();
-            if (n == 0 || n > 1 && s.charAt(first) == '0') throw error("bad number");
+            if (n == 0 || (n > 1 && s.charAt(first) == '0')) throw error("bad number");
             boolean integer = true;
             if (i < s.length() && s.charAt(i) == '.') {
                 i++; integer = false;

@@ -1,6 +1,7 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
+import io.zmux.helper.PacketStream;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -37,6 +38,59 @@ class PeerInterop {
         try (var stream = get(session.openStreamAsync(Preamble.openInfo("echo".getBytes(StandardCharsets.UTF_8))))) {
             var writing = stream.writeAsync(ByteBuffer.wrap(bytes)); var fin = stream.finishAsync();
             assertArrayEquals(bytes, read(stream)); get(writing); get(fin);
+        }
+    }
+    /** Packet streams (EXTENSIONS.md Section 12) against the peer's packets commands. */
+    static void packets(ZmuxSession session) throws Exception {
+        var options = new PacketStream.Options(PacketStream.SendPolicy.PREFER_DATAGRAM, 1 << 20);
+        // Small packets as datagrams, two above the largest datagram as capsules, Context IDs 0 and 5.
+        try (var stream = session.openStream(Preamble.openInfo("packets".getBytes(StandardCharsets.UTF_8)))) {
+            var packets = PacketStream.of(stream, options);
+            int large = stream.maxDatagramPayload(5) + 100;
+            var small = new HashSet<String>(); var big = new HashSet<String>();
+            for (int i = 0; i < 8; i++) { long context = 5 * (i % 2); String payload = "small-" + i; small.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
+            for (int i = 0; i < 2; i++) { long context = 5 * i; String payload = String.valueOf((char) ('A' + i)).repeat(large + i); big.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
+            assertEquals(8, packets.stats().sentAsDatagrams()); assertEquals(2, packets.stats().sentAsCapsules());
+            packets.finishAsync().get(10, TimeUnit.SECONDS);
+            int smallBack = 0;
+            for (StreamDatagram packet; (packet = packets.receive(Duration.ofSeconds(10))) != null;) {
+                String key = packet.context() + "/" + new String(packet.payload(), StandardCharsets.UTF_8);
+                if (big.remove(key)) continue;
+                assertTrue(small.remove(key), "unexpected packet of " + packet.payload().length + " bytes");
+                smallBack++;
+            }
+            assertTrue(big.isEmpty(), "capsule packets lost"); assertTrue(smallBack >= 1, "no datagram packet came back");
+            assertTrue(packets.stats().receivedAsDatagrams() >= 1 && packets.stats().receivedAsCapsules() == 2, packets.stats().toString());
+            packets.close();
+        }
+        // Capsules only, both ways, in order.
+        try (var stream = session.openStream(Preamble.openInfo("packets:stream".getBytes(StandardCharsets.UTF_8)))) {
+            var packets = PacketStream.of(stream, new PacketStream.Options(PacketStream.SendPolicy.STREAM_ONLY, 1 << 20));
+            int[] sizes = {0, 1, 100, 1500, 20000, 65535};
+            for (int i = 0; i < sizes.length; i++) { byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i); packets.send(5 * (i % 2), ByteBuffer.wrap(bytes)); }
+            packets.finishAsync().get(10, TimeUnit.SECONDS);
+            for (int i = 0; i < sizes.length; i++) {
+                var packet = packets.receive(Duration.ofSeconds(10)); assertNotNull(packet);
+                byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i);
+                assertEquals(5 * (i % 2), packet.context()); assertArrayEquals(bytes, packet.payload());
+            }
+            assertNull(packets.receive(Duration.ofSeconds(10)));
+            assertEquals(0, packets.stats().receivedAsDatagrams());
+            packets.close();
+        }
+        // A truncated capsule then FIN: the peer ends the stream with ZMUX_PACKET_ERROR.
+        try (var stream = session.openStream(Preamble.openInfo("packets".getBytes(StandardCharsets.UTF_8)))) {
+            stream.write(new byte[] {0x00, 0x0a, 0x00, (byte) 0xab}); stream.finish();
+            var failure = assertThrows(ExecutionException.class, () -> read(stream));
+            assertEquals(PacketStream.PACKET_ERROR, assertInstanceOf(StreamResetException.class, failure.getCause()).code());
+        }
+        // The peer writes one: this side ends the stream, and the peer reports the code it saw.
+        var report = session.acceptReceiveStreamAsync().orTimeout(10, TimeUnit.SECONDS);
+        try (var stream = session.openStream(Preamble.openInfo("packets-bad".getBytes(StandardCharsets.UTF_8)))) {
+            stream.id(); var packets = PacketStream.of(stream, options);
+            assertThrows(PacketErrorException.class, () -> packets.receive(Duration.ofSeconds(10)));
+            try (var back = get(report)) { assertEquals("packet-error=" + PacketStream.PACKET_ERROR, new String(read(back), StandardCharsets.UTF_8)); }
+            packets.close();
         }
     }
     private void run(boolean initiating, boolean multipath) throws Exception {
@@ -116,6 +170,7 @@ class PeerInterop {
                         var value = stream.receiveDatagram(); assertEquals(5, value.context()); assertArrayEquals(new byte[] {7}, value.payload());
                         stream.finish(); assertEquals("dgram-done", new String(read(stream), StandardCharsets.UTF_8));
                     }
+                    packets(session);
                     try (var stream = session.openStream(Preamble.openInfo("close:42:bye".getBytes(StandardCharsets.UTF_8)))) {
                         stream.finish();
                     }

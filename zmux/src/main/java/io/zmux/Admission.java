@@ -30,7 +30,7 @@ import java.util.concurrent.CompletionStage;
  * @param fallbackOnPeekTimeout a byte-stream carrier whose prefix has not arrived when the peek timeout
  *     ends, in the first read or in a {@link AdmissionVerdict#MORE} round, takes {@link AdmissionVerdict#FALLBACK} with every
  *     byte read replayed instead of being closed (without a fallback target it is stalled), counted in both
- *     {@code peekTimedOut} and {@code fallback}; a message-framed carrier and an HTTP request carrier are
+ *     the peek-timeout and fallback counters; a message-framed carrier and an HTTP request carrier are
  *     closed as before, and so is a carrier whose decider has not returned in time
  * @param stallMin lower bound of a {@link AdmissionVerdict#STALL}'s duration
  * @param stallMax upper bound of a {@link AdmissionVerdict#STALL}'s duration; when both bounds are

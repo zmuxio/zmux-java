@@ -100,6 +100,7 @@ final class EventQueue {
     }
 
     /** The oldest unread event (an Event or the RetiredPipes summary), or null with waiter registered. */
+    @SuppressWarnings("ReferenceEquality") // SUMMARY is a sentinel key
     Object poll(Waiter waiter) {
         Iterator<java.util.Map.Entry<Key, Object>> it = pending.entrySet().iterator();
         if (!it.hasNext()) {

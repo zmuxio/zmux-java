@@ -27,6 +27,8 @@ public final class TransportError {
     public static final long CANCELLED = 0x5a4d0001L;
     /** ZMUX_REJECTED, an application code. */
     public static final long REJECTED = 0x5a4d0002L;
+    /** ZMUX_PACKET_ERROR, an application code: the bytes of a packet stream were malformed. */
+    public static final long PACKET_ERROR = 0x5a4d0004L;
 
     private static final Map<Long, String> NAMES = Map.ofEntries(
             Map.entry(NO_ERROR, "NO_ERROR"), Map.entry(INTERNAL_ERROR, "INTERNAL_ERROR"),

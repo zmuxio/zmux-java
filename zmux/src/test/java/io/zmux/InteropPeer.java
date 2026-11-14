@@ -1,5 +1,6 @@
 package io.zmux;
 
+import io.zmux.helper.PacketStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -155,6 +156,23 @@ public final class InteropPeer {
                     int count = Integer.parseInt(arg);
                     for (int i = 0; i < count; i++) { var value = stream.receiveDatagram(); stream.sendDatagram(value.context() + 1, ByteBuffer.wrap(value.payload())); }
                     read(stream); reply(stream, "dgram-done");
+                }
+                case "packets" -> {
+                    var policy = arg.equals("stream") ? PacketStream.SendPolicy.STREAM_ONLY : PacketStream.SendPolicy.PREFER_DATAGRAM;
+                    var packets = PacketStream.of(stream, new PacketStream.Options(policy, 1 << 20));
+                    try {
+                        for (StreamDatagram packet; (packet = packets.receive()) != null;) packets.send(packet.context(), ByteBuffer.wrap(packet.payload()));
+                        packets.finishAsync().get(10, TimeUnit.SECONDS);
+                    } catch (PacketErrorException malformed) { /* the packet stream reset and stopped the stream */ }
+                    finally { packets.close(); }
+                }
+                case "packets-bad" -> {
+                    // Type 0, Length 10, Context ID 0 and one byte of the payload.
+                    stream.write(new byte[] {0x00, 0x0a, 0x00, (byte) 0xab}); stream.finish();
+                    String result;
+                    try { read(stream); result = "fin"; }
+                    catch (StreamResetException error) { result = Long.toString(error.code()); }
+                    try (var back = session.openSendStream(Preamble.EMPTY)) { back.write(("packet-error=" + result).getBytes(StandardCharsets.UTF_8)); back.finish(); }
                 }
                 case "schedule" -> { if (!arg.equals("round-robin")) throw new IOException("unknown policy"); session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN); reply(stream, "scheduled"); }
                 case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }

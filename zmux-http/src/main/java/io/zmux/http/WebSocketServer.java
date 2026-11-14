@@ -51,6 +51,7 @@ final class WebSocketServer {
     }
 
     /** The subprotocols a request offers, in its order. */
+    @SuppressWarnings("StringSplitter") // empty pieces are skipped below
     static List<String> offered(HttpRequest r) {
         List<String> out = new ArrayList<>();
         for (String v : r.headers().getAll(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL)) {

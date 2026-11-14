@@ -36,6 +36,10 @@ import org.junit.jupiter.api.Timeout;
  *       {@code TestHTTPExchangeInterop};
  *   <li>ZMUX_RS_EXCHANGE_PEER: zmux-rs's {@code exchange_interop} example;
  *   <li>ZMUX_GO_HTTP_PEER, ZMUX_RS_HTTP_PEER: streaming peers ({@code server|client|bad KIND ADDR}, KIND stream, split, stream2 or split2 for h2c): PrefixAuth "right" as the body prefix or header form, a fallback that answers 418;
+ *       KIND tls1 and tls2 (HTTP/1.1 and HTTP/2 over TLS 1.3, multipath, the client joins a second carrier
+ *       in Bound, else Sealed, and prints MODE), behind (that server in cleartext, behind a TLS front)
+ *       and, for the Rust client, wsh2 (a WebSocket over an HTTP/2 extended CONNECT joined in Bound);
+ *   <li>ZMUX_GO_TLS_FRONT: a reverse proxy that terminates TLS ({@code ADDR UPSTREAM}, h2c upstream);
  *   <li>ZMUX_GO_WS_PEER, ZMUX_RS_WS_PEER: WebSocket peers ({@code server|client|bad ADDR}):
  *       PrefixAuth "ws-interop" (30 s slots, skew 1) in the upgrade's header field, a fallback
  *       that answers 418 and prints FALLBACK, a session that echoes one stream;
@@ -180,6 +184,152 @@ class HttpInteropTest {
         }
     }
 
+    // ---- Bound over TLS (bidirectional carriers on TLS 1.3 both ends terminate, and behind a TLS front) ----
+
+    static final byte[] JOIN_PSK = filled(32, (byte) 7);
+
+    static byte[] filled(int n, byte b) {
+        byte[] a = new byte[n];
+        java.util.Arrays.fill(a, b);
+        return a;
+    }
+
+    /** The peers' session configuration: multipath, joins in Bound only on a carrier that declares the contract. */
+    static io.zmux.ZmuxConfig.Builder mp(io.zmux.ZmuxConfig.Builder b) {
+        return b.pipeAuth(io.zmux.PipeAuth.psk(JOIN_PSK).withEndToEnd()).maxPipes(4)
+                .allowRecordMode((c, m, p) -> m == io.zmux.RecordMode.SEALED || m == io.zmux.RecordMode.BOUND && c.isSecure() && c.isExporterPresent());
+    }
+
+    @Test void boundOverTls() throws Exception {
+        String go = System.getenv("ZMUX_GO_HTTP_PEER"), rs = System.getenv("ZMUX_RS_HTTP_PEER");
+        assumeTrue(go != null && !go.isEmpty() && rs != null && !rs.isEmpty(), "ZMUX_GO_HTTP_PEER and ZMUX_RS_HTTP_PEER not set");
+        for (String kind : new String[] {"tls2", "tls1"}) {
+            javaClientTls(go, kind, null, "bound");
+            javaClientTls(rs, kind, null, "bound");
+            javaServerTls(go, kind, null, "bound");
+            javaServerTls(rs, kind, null, "bound");
+            peerPair(rs, go, kind, kind, null, "bound");
+            peerPair(go, rs, kind, kind, null, "bound");
+        }
+    }
+
+    @Test void boundWebSocketOverHttp2() throws Exception {
+        String go = System.getenv("ZMUX_GO_HTTP_PEER"), rs = System.getenv("ZMUX_RS_HTTP_PEER");
+        assumeTrue(go != null && !go.isEmpty() && rs != null && !rs.isEmpty(), "ZMUX_GO_HTTP_PEER and ZMUX_RS_HTTP_PEER not set");
+        // Only the Rust peer's client opens a WebSocket over HTTP/2.
+        peerPair(go, rs, "tls2", "wsh2", null, "bound");
+        peerPair(rs, rs, "tls2", "wsh2", null, "bound");
+    }
+
+    /** Behind a front that terminates TLS the server has no TLS of its own: a Bound join is refused, a Sealed one joins. */
+    @Test void sealedBehindTlsFront() throws Exception {
+        String go = System.getenv("ZMUX_GO_HTTP_PEER"), rs = System.getenv("ZMUX_RS_HTTP_PEER"), front = System.getenv("ZMUX_GO_TLS_FRONT");
+        assumeTrue(go != null && !go.isEmpty() && rs != null && !rs.isEmpty() && front != null && !front.isEmpty(),
+                "ZMUX_GO_HTTP_PEER, ZMUX_RS_HTTP_PEER and ZMUX_GO_TLS_FRONT not set");
+        peerPair(go, rs, "behind", "tls2", front, "sealed");
+        javaClientTls(rs, "behind", front, "sealed");
+        javaServerTls(go, "behind", front, "sealed");
+    }
+
+    /** Starts the TLS front on a free port forwarding to upstream, or returns null without a front. */
+    static Process startFront(String front, String upstream, String[] addr) throws Exception {
+        if (front == null) return null;
+        addr[0] = "127.0.0.1:" + freePort();
+        return startReady(List.of(front, addr[0], upstream));
+    }
+
+    /** The peer's client against the peer's server, directly or through the front; both report the join's mode. */
+    private void peerPair(String server, String client, String serverKind, String clientKind, String front, String want) throws Exception {
+        String addr = "127.0.0.1:" + freePort();
+        String what = client + " -> " + server + " " + clientKind + (front != null ? " via front" : "");
+        // The Go server serves WebSocket over HTTP/2 only with extended CONNECT turned on.
+        Process p = startReady(List.of(server, "server", serverKind, addr), Map.of("GODEBUG", "http2xconnect=1"));
+        String[] via = {addr};
+        Process fp = null;
+        try {
+            fp = startFront(front, addr, via);
+            String out = run(List.of(client, "client", clientKind, via[0]));
+            assertEquals("OK ping", lastLine(out), () -> what + ": " + out);
+            assertTrue(out.lines().anyMatch(l -> l.equals("MODE " + want)), () -> what + ": " + out);
+            awaitOutput(p, "MODE " + want);
+        } finally {
+            if (fp != null) stop(fp);
+            stop(p);
+        }
+    }
+
+    /** A Java client against the peer's server: the join's mode at both ends, then data on the session. */
+    private void javaClientTls(String server, String kind, String front, String want) throws Exception {
+        String addr = "127.0.0.1:" + freePort();
+        Process p = startReady(List.of(server, "server", kind, addr));
+        String[] via = {addr};
+        Process fp = null;
+        try (var f = new Fixture(HttpInteropTest::mp, b -> b, e -> e.streaming(), false, null)) {
+            fp = startFront(front, addr, via);
+            boolean h1 = kind.equals("tls1");
+            var ssl = io.netty.handler.ssl.SslContextBuilder.forClient().sslProvider(io.netty.handler.ssl.SslProvider.JDK)
+                    .trustManager(io.netty.handler.ssl.util.InsecureTrustManagerFactory.INSTANCE).protocols("TLSv1.3");
+            try (var hc = f.client(b -> (h1 ? b.http1() : b.http2()).tls(ssl))) {
+                URI u = URI.create("https://" + via[0] + "/zmux");
+                try (ZmuxSession s = Zmux.open(hc.pipe(u, Map.of(), BIDI, null), Role.CLIENT, f.config)) {
+                    assertEquals("ping", new String(pingPong(s), StandardCharsets.US_ASCII));
+                    assertEquals(want, joinMode(s, () -> hc.pipe(u, Map.of(), BIDI, null)), server + " " + kind);
+                    assertEquals("ping", new String(pingPong(s), StandardCharsets.US_ASCII));
+                }
+            }
+            awaitOutput(p, "MODE " + want);
+        } finally {
+            if (fp != null) stop(fp);
+            stop(p);
+        }
+    }
+
+    /** The peer's client against a Java server over TLS, or in cleartext behind the front. */
+    private void javaServerTls(String client, String kind, String front, String want) throws Exception {
+        var sessions = new LinkedBlockingQueue<ZmuxSession>();
+        try (var f = new Fixture(HttpInteropTest::mp, b -> b, e -> e.streaming(), front == null, null)) {
+            Thread echo = echoSessions(f.listener, sessions);
+            String addr = "127.0.0.1:" + f.base.getPort();
+            String[] via = {addr};
+            Process fp = startFront(front, addr, via);
+            try {
+                String clientKind = front == null ? kind : "tls2";
+                String out = run(List.of(client, "client", clientKind, via[0]));
+                assertEquals("OK ping", lastLine(out), () -> client + " " + kind + ": " + out);
+                assertTrue(out.lines().anyMatch(l -> l.equals("MODE " + want)), () -> client + " " + kind + ": " + out);
+                ZmuxSession s = sessions.poll(5, TimeUnit.SECONDS);
+                assertNotNull(s);
+                assertTrue(s.pipeStats().stream().anyMatch(st -> st.pipeId().value() != 0 && st.recordMode().toString().equalsIgnoreCase(want)),
+                        () -> client + " " + kind + ": " + s.pipeStats());
+            } finally {
+                if (fp != null) stop(fp);
+                f.listener.close();
+                echo.join(5000);
+            }
+        }
+    }
+
+    interface Dial { io.zmux.carrier.PipeIo dial() throws IOException; }
+
+    /** Joins a carrier from dial in Bound and, when that fails, a new one in Sealed; returns the joined pipe's mode. */
+    static String joinMode(ZmuxSession s, Dial dial) throws Exception {
+        try {
+            var p = s.addPipe(dial.dial(), io.zmux.PipeOptions.builder().recordMode(io.zmux.RecordMode.BOUND).build());
+            return p.stats().orElseThrow().recordMode().toString().toLowerCase(java.util.Locale.ROOT);
+        } catch (IOException bound) {
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (true) {
+                try {
+                    var p = s.addPipe(dial.dial(), io.zmux.PipeOptions.builder().recordMode(io.zmux.RecordMode.SEALED).build());
+                    return p.stats().orElseThrow().recordMode().toString().toLowerCase(java.util.Locale.ROOT);
+                } catch (IOException e) {
+                    if (System.nanoTime() - end > 0) throw e;
+                    Thread.sleep(100);
+                }
+            }
+        }
+    }
+
     /** Opens a stream, sends "ping", finishes it and reads the echo. */
     static byte[] pingPong(ZmuxSession s) throws IOException {
         try (ZmuxStream st = s.openStream()) {
@@ -237,7 +387,11 @@ class HttpInteropTest {
 
     /** Starts a peer server and waits for its READY line. */
     static Process startReady(List<String> cmd) throws Exception {
-        Process p = start(cmd, Map.of());
+        return startReady(cmd, Map.of());
+    }
+
+    static Process startReady(List<String> cmd, Map<String, String> env) throws Exception {
+        Process p = start(cmd, env);
         try {
             awaitOutput(p, "READY");
         } catch (AssertionError | Exception e) {
@@ -261,6 +415,11 @@ class HttpInteropTest {
 
     /** Echoes every stream of every session the listener accepts, until it closes. */
     static Thread echoSessions(ZmuxListener l) {
+        return echoSessions(l, null);
+    }
+
+    /** Echoes as {@link #echoSessions(ZmuxListener)} and hands each session to accepted. */
+    static Thread echoSessions(ZmuxListener l, LinkedBlockingQueue<ZmuxSession> accepted) {
         return Thread.ofVirtual().start(() -> {
             while (true) {
                 ZmuxSession s;
@@ -270,6 +429,7 @@ class HttpInteropTest {
                     return;
                 }
                 if (s == null) return;
+                if (accepted != null) accepted.add(s);
                 Thread.ofVirtual().start(() -> {
                     try (s) {
                         while (true) {

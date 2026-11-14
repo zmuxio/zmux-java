@@ -29,7 +29,7 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
     static {
         io.zmux.internal.spi.Spi.install(new io.zmux.internal.spi.Spi.Access() {
             @Override public void handleLane(ZmuxSession session, io.zmux.carrier.PipeIo io) { session.handleLane(io); }
-            @Override public <T> ZmuxFuture<T> future(java.util.concurrent.CompletionStage<T> stage, Runnable cancel) { return of(stage, cancel); }
+            @Override public <V> ZmuxFuture<V> future(java.util.concurrent.CompletionStage<V> stage, Runnable cancel) { return of(stage, cancel); }
         });
     }
 
@@ -95,8 +95,9 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
     }
 
     /** Cancels the operation before a completion from outside; whether it was still running does not matter. */
+    @SuppressWarnings("ReturnValueIgnored")
     private void stopOperation() {
-        boolean _ = operation.getAsBoolean();
+        operation.getAsBoolean();
     }
 
     /**

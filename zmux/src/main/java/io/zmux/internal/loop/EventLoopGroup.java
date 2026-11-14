@@ -55,7 +55,7 @@ public final class EventLoopGroup implements AutoCloseable {
         synchronized (lock) {
             if (closed) throw new IllegalStateException("event loop group closed");
             if (loops[i] == null) {
-                loops[i] = new EventLoop(THREAD_PREFIX + id + "-" + (started++), daemon, idleBufferBytes);
+                loops[i] = new EventLoop(THREAD_PREFIX + id + "-" +  started++, daemon, idleBufferBytes);
                 SessionHost.hostThread(loops[i].thread(), true);
             }
             return loops[i];

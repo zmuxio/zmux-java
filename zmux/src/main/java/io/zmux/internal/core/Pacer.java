@@ -83,6 +83,7 @@ final class Pacer {
     }
 
     /** An acknowledgement advanced p's cumulative point. */
+    @SuppressWarnings("LongDoubleConversion") // the sample is a double by design; a byte count is far below 2^53
     void onAck(Pipe p, long rtt, long rttSentAt, double rate, boolean roundEnd, long now) {
         Limiter l = limiterOf(p, now);
         if (l == null) return;

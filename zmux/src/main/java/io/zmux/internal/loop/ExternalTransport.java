@@ -109,7 +109,7 @@ final class ExternalTransport extends AbstractTransport {
             long total = held.addAndGet(bytes);
             // After admission a batch is always taken while nothing else is queued: a reader
             // that waits for its releases never fails, whatever its batch size.
-            if (total < 0 || total > limit && (strict || total != bytes)) {
+            if (total < 0 || (total > limit && (strict || total != bytes))) {
                 held.addAndGet(-bytes); input.discard();
                 if (overflow.compareAndSet(false, true)) failOwner();
                 return;

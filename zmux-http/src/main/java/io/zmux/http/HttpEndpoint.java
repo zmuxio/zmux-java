@@ -110,7 +110,8 @@ public final class HttpEndpoint implements AutoCloseable {
                 ChannelPipeline p = ch.pipeline();
                 if (trusted != null && trusted.isProxyProtocol()) p.addLast(new ProxyProtocolHandler(trusted));
                 if (ssl != null) {
-                    p.addLast(ssl.newHandler(ch.alloc()));
+                    io.netty.handler.ssl.SslHandler tls = ssl.newHandler(ch.alloc());
+                    p.addLast(tls);
                     p.addLast(new ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
                         @Override protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
                             if (ApplicationProtocolNames.HTTP_2.equals(protocol)) http2(ctx.pipeline(), h);

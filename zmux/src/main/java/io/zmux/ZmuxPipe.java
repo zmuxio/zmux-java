@@ -56,9 +56,7 @@ public final class ZmuxPipe {
      */
     public Optional<Object> admitted() throws IOException {
         if (id == 0) return session.admitted();
-        return Optional.ofNullable(session.run(op -> {
-            return session.core.pipes().admitted(id);
-        }));
+        return Optional.ofNullable(session.run(op -> session.core.pipes().admitted(id)));
     }
 
     /** {@link #admitted()} when it is a type; empty otherwise. */
@@ -261,9 +259,7 @@ public final class ZmuxPipe {
     public ZmuxFuture<Void> closed() {
         Session core = session.core;
         CompletableFuture<Void> done = new CompletableFuture<>();
-        var op = new io.zmux.internal.loop.Operation<>(session.driver, o -> {
-            return core.waitPipeRemoved(id, o) ? Boolean.TRUE : io.zmux.internal.loop.Operation.PENDING;
-        }, core::cancelPipeRemovedWait);
+        var op = new io.zmux.internal.loop.Operation<>(session.driver, o -> core.waitPipeRemoved(id, o) ? true : io.zmux.internal.loop.Operation.PENDING, core::cancelPipeRemovedWait);
         Runnable removed = () -> { if (Boolean.TRUE.equals(op.outcome())) done.complete(null); };
         if (op.onDone(removed)) op.submit(); else removed.run();
         session.driver.closedFuture().whenComplete((v, e) -> done.complete(null));
@@ -342,7 +338,7 @@ public final class ZmuxPipe {
                 if (e.reason() == CoreException.Reason.INVALID) return MISSING;
                 throw e;
             }
-            return Boolean.TRUE;
+            return true;
         }, null).submit().await(Long.MAX_VALUE);
         if (r == MISSING) throw new PipeGoneException(pipeId);
         Errors.check(r);

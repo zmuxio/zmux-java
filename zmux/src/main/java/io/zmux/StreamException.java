@@ -3,7 +3,7 @@ package io.zmux;
 /** A failure of one stream; the session and its other streams go on. */
 public abstract sealed class StreamException extends ZmuxException
         permits StreamResetException, StreamStoppedException, StreamClosedException, StreamRejectedException,
-        StreamLimitException, GoingAwayException, LimitExceededException {
+        StreamLimitException, GoingAwayException, LimitExceededException, PacketErrorException {
     private final long streamId;
 
     StreamException(String message, long streamId) {

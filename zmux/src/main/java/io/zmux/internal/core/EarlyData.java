@@ -82,7 +82,7 @@ final class EarlyData {
         if (a == null) return Outcome.NONE;
         assumed = null;
         if (!sentAny) return Outcome.ADOPT;
-        if (a.isZmux() && !acked || floor && p.maxStreamsBidi == 0) return Outcome.REJECTED;
+        if ((a.isZmux() && !acked) || (floor && p.maxStreamsBidi == 0)) return Outcome.REJECTED;
         return belowAssumed(p, a) ? Outcome.BELOW : Outcome.ADOPT;
     }
 
@@ -91,7 +91,7 @@ final class EarlyData {
         if (p.initialMaxData < a.initialMaxData || p.maxStreamsBidi < a.maxStreamsBidi
                 || p.maxStreamDataBidiRemote < a.maxStreamDataBidiRemote || p.maxRecordSize < a.maxRecordSize) return true;
         if (a.has(TransportParams.PREAMBLE) && (!p.has(TransportParams.PREAMBLE) || p.maxPreambleSize < a.maxPreambleSize)) return true;
-        return a.has(TransportParams.PIPE_ACK) && !p.has(TransportParams.PIPE_ACK)
-                || a.has(TransportParams.RESET_AT) && !p.has(TransportParams.RESET_AT);
+        return (a.has(TransportParams.PIPE_ACK) && !p.has(TransportParams.PIPE_ACK))
+                || (a.has(TransportParams.RESET_AT) && !p.has(TransportParams.RESET_AT));
     }
 }

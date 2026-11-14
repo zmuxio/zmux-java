@@ -424,7 +424,7 @@ final class PathSession implements PathLayer {
         if (ack != null) {
             long now = port.now();
             boolean onPrim = p == prim || prim == null;
-            if (onPrim && (ack.due(now) || ack.unreported() && ctl.creditPending())) {
+            if (onPrim && (ack.due(now) || (ack.unreported() && ctl.creditPending()))) {
                 // The primary acknowledgement; in a busy session with return-pipe liveness.
                 if ((!quiet() || a.link.ackPair) && idleForReturnPing(p, now)) health.requestPing(p, now);
                 snapped = ack.snapshot(w, now);
@@ -480,7 +480,7 @@ final class PathSession implements PathLayer {
         Attach a = p.mp();
         if (a.health.retired() || a.health.out() == Attach.OUT_FAILED || a.health.out() == Attach.OUT_CLOSED || a.handshaking()) return false;
         if (ol.lane == 0) {
-            if (a.link.firstRecord && ack != null && hasEntries() || a.link.ackPair) {
+            if ((a.link.firstRecord && ack != null && hasEntries()) || a.link.ackPair) {
                 return true;
             }
             if (a.health.needPing() && health.pingAllowed(port.now()) && health.oldestPingWaiter(p)) return true;
@@ -488,7 +488,7 @@ final class PathSession implements PathLayer {
             if (ack != null && ack.due(port.now()) && (p == prim || prim == null)) return true;
             if (ackChanged && p == second() && port.now() >= redundantAt) return true;
             for (Pipe q : pipes.all()) {
-                if (q.mp() != null && !q.mp().health.retired() && (q.mp().health.abandonQueued() && abandonGoesOn(q, p, prim) || Tiers.statusReady(q, p))) return true;
+                if (q.mp() != null && !q.mp().health.retired() && ((q.mp().health.abandonQueued() && abandonGoesOn(q, p, prim)) || Tiers.statusReady(q, p))) return true;
             }
             if (joins.owesAbandons() || joins.epochWanted(p)) return true;
             if ((p == prim || prim == null) && tx.controlPending()) return true;
@@ -525,7 +525,7 @@ final class PathSession implements PathLayer {
 
     boolean hasEntries() {
         for (Pipe p : pipes.all()) {
-            if (p.in() == null || p.mp() != null && p.mp().health.retired()) continue;
+            if (p.in() == null || (p.mp() != null && p.mp().health.retired())) continue;
             for (Pipe.InLane il : p.in().lanes) if (il.rx.pos() > 0) return true;
         }
         return false;
@@ -629,9 +629,9 @@ final class PathSession implements PathLayer {
         Attach a = p.mp();
         if (a == null) return Session.JoinProgress.CONFIRMED;
         if (a.health.retired()) return Session.JoinProgress.GONE;
-        if (a.health.out() == Attach.OUT_ACTIVE || a.health.out() == Attach.OUT_SUSPECT || a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_OPEN)
+        if (a.health.out() == Attach.OUT_ACTIVE || a.health.out() == Attach.OUT_SUSPECT || (a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_OPEN))
             return Session.JoinProgress.CONFIRMED;
-        if (a.health.out() == Attach.OUT_JOINING || a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_JOINING) return Session.JoinProgress.PENDING;
+        if (a.health.out() == Attach.OUT_JOINING || (a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_JOINING)) return Session.JoinProgress.PENDING;
         return Session.JoinProgress.GONE;
     }
 

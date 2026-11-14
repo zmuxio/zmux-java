@@ -264,7 +264,7 @@ public final class StreamTable {
 
     /** Sets the initial credit from the peer's parameters and the receive window from the local ones. */
     void applyPeerParams(Stream st) {
-        if (!port.established() && !port.earlyActive() || !st.tab.idSet) return;
+        if ((!port.established() && !port.earlyActive()) || !st.tab.idSet) return;
         TransportParams peer = port.peer();
         if (st.hasSend && st.snd.maxData() == 0) {
             StreamSend.raiseCredit(st, !st.bidi ? peer.maxStreamDataUni : st.local ? peer.maxStreamDataBidiRemote : peer.maxStreamDataBidiLocal);
@@ -395,6 +395,7 @@ public final class StreamTable {
     /** The session's GREASE TLV, chosen once before its first use; it goes in the first preamble sent. */
     private Preamble.Tlv grease;
 
+    @SuppressWarnings("ReferenceEquality") // NO_GREASE is a sentinel
     private Preamble.Tlv grease() {
         if (grease == null) {
             if (cfg.test().enabled()) {
@@ -588,7 +589,7 @@ public final class StreamTable {
             port.opened(st);
             applyPeerParams(st);
             stats.streamOpened(false);
-            if (life.goAwaySent() && i >= life.sentWater(t) || mem.pressure()) {
+            if ((life.goAwaySent() && i >= life.sentWater(t)) || mem.pressure()) {
                 stackReject(st);
             } else if (!port.features().preamble()) {
                 offer(st);
@@ -760,7 +761,7 @@ public final class StreamTable {
         if (st.tab.discarded || !st.tab.idSet) return;
         boolean sendDone = !st.hasSend || st.snd.state() == Stream.SEND_DATA_RECVD || st.snd.state() == Stream.SEND_RESET_RECVD;
         boolean recvDone = !st.hasRecv || st.rcv.state() == Stream.RECV_DATA_READ || st.rcv.state() == Stream.RECV_RESET_READ;
-        boolean released = st.tab.releasedSend && st.tab.releasedRecv || st.tab.stackReject;
+        boolean released = (st.tab.releasedSend && st.tab.releasedRecv) || st.tab.stackReject;
         if (!st.local && !st.tab.offered && !st.tab.stackReject) released = false;
         if (!sendDone || !recvDone || !released) return;
         st.released(st.stats());

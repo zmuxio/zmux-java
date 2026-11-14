@@ -29,8 +29,8 @@ public final class QuicPool implements AutoCloseable {
         public Limits {
             Objects.requireNonNull(maxPipesPerConnectionLifetime);
             Objects.requireNonNull(maxConnectionAge);
-            if (maxPipesPerConnection < 1 || maxPipesPerConnectionLifetime.isPresent() && maxPipesPerConnectionLifetime.getAsLong() < 1
-                    || maxConnectionAge.isPresent() && !maxConnectionAge.get().isPositive())
+            if (maxPipesPerConnection < 1 || (maxPipesPerConnectionLifetime.isPresent() && maxPipesPerConnectionLifetime.getAsLong() < 1)
+                    || (maxConnectionAge.isPresent() && !maxConnectionAge.get().isPositive()))
                 throw new IllegalArgumentException("invalid connection pool limits");
             if (maxConnectionAge.isPresent() && maxConnectionAge.get().compareTo(MAX_AGE) > 0) throw new IllegalArgumentException("age exceeds monotonic clock range");
         }
@@ -187,10 +187,10 @@ public final class QuicPool implements AutoCloseable {
         finally { if (pipe.writer() != null) pipe.writer().abort(new IOException("pooled operation cancelled")); }
     }
     private void expire(Entry entry) {
-        if (!entry.carrier.channel().isActive() || maxAge > 0 && System.nanoTime() - entry.born >= maxAge) entry.retiring = true;
+        if (!entry.carrier.channel().isActive() || (maxAge > 0 && System.nanoTime() - entry.born >= maxAge)) entry.retiring = true;
     }
     private long room(Entry entry) {
-        long remaining = limits.maxPipesPerConnection() - entry.active;
+        long remaining = (long) limits.maxPipesPerConnection() - entry.active;
         if (lifetime > 0)
             remaining = Math.min(remaining, lifetime - Math.min(entry.total, lifetime) - entry.pending);
         return remaining;

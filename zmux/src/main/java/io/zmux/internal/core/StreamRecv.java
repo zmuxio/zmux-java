@@ -65,7 +65,7 @@ public final class StreamRecv {
         StreamRecv.RecvPart r = st.rcv;
         long off = f.offset;
         long end = off + f.dataLen;
-        if (r.finKnown && (end > r.finalSize || f.fin && end != r.finalSize)) {
+        if (r.finKnown && (end > r.finalSize || (f.fin && end != r.finalSize))) {
             throw WireException.withDetails(TransportError.FINAL_SIZE_ERROR, "data beyond the final size", "stream", st.tab.id(),
                     "offset", off, "length", f.dataLen, "limit", r.finalSize);
         }
@@ -87,7 +87,7 @@ public final class StreamRecv {
                         "stream", st.tab.id(), "limit", conn.advertised());
             }
         }
-        boolean effect = end > r.highest || f.fin && !r.finKnown;
+        boolean effect = end > r.highest || (f.fin && !r.finKnown);
         r.highest = Math.max(r.highest, end);
         if (f.fin && !r.finKnown) {
             r.finKnown = true;
@@ -182,7 +182,7 @@ public final class StreamRecv {
         Features feat = port.features();
         StreamRecv.RecvPart r = st.rcv;
         long rel = at ? f.reliableSize : 0;
-        if (r.finKnown && f.finalSize != r.finalSize || f.finalSize < r.highest) {
+        if ((r.finKnown && f.finalSize != r.finalSize) || f.finalSize < r.highest) {
             throw WireException.withDetails(TransportError.FINAL_SIZE_ERROR, "final size changed", "stream", st.tab.id());
         }
         if (f.finalSize > r.adv) {
@@ -421,8 +421,8 @@ public final class StreamRecv {
     public boolean readEnded(Stream st) {
         if (!st.hasRecv) return true;
         StreamRecv.RecvPart r = st.rcv;
-        return r.stopped || r.state == Stream.RECV_DATA_READ || r.finKnown && r.readOff == r.finalSize && !r.reset
-                || r.reset && r.readOff >= r.resetRel || port.error() != null;
+        return r.stopped || r.state == Stream.RECV_DATA_READ || (r.finKnown && r.readOff == r.finalSize && !r.reset)
+                || (r.reset && r.readOff >= r.resetRel) || port.error() != null;
     }
 
     public void waitRead(Stream st, Waiter sig) { st.rcv.rsig = sig; }
@@ -491,7 +491,7 @@ public final class StreamRecv {
         if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), true,
                 bb -> io.zmux.internal.wire.FrameEncoder.maxStreamData(bb, id, v))) return false;
         w.logFrame(FrameDesc.id(FrameDesc.Kind.MAX_STREAM_DATA, id));
-        path.maxStreamDataSent(st, r.highest >= r.adv || r.blockSeen == r.adv && r.blockSeen > 0);
+        path.maxStreamDataSent(st, r.highest >= r.adv || (r.blockSeen == r.adv && r.blockSeen > 0));
         if (r.tune != null && v > r.adv) r.tune.sent(r.adv, now, r.highest == r.adv);
         r.adv = Math.max(r.adv, v);
         st.rcv.forceMaxStreamData = false;

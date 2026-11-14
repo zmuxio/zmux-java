@@ -75,7 +75,7 @@ public final class Chunk implements AutoCloseable {
         private static final java.util.logging.Logger LOG = java.util.logging.Logger.getLogger(Chunk.class.getName());
 
         static Cleaner.Cleanable track(Chunk holder, AtomicReference<StreamRecv.Chunk> value) {
-            if (RATE == 0 || RATE > 1 && java.util.concurrent.ThreadLocalRandom.current().nextInt(RATE) != 0) return null;
+            if (RATE == 0 || (RATE > 1 && java.util.concurrent.ThreadLocalRandom.current().nextInt(RATE) != 0)) return null;
             Throwable site = RATE == 1 ? new Throwable("chunk created here") : null;
             return CLEANER.register(holder, () -> {
                 // Closing or transferring empties value first, so only a dropped chunk reports.

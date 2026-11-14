@@ -16,7 +16,7 @@ final class Errors {
      * nothing to restore, and clearing it lets the teardown that follows block normally.
      */
     static void clearInternalWake() {
-        boolean ignored = Thread.interrupted();
+        Thread.interrupted();
     }
 
     static SessionError session(io.zmux.internal.core.SessionError e) {

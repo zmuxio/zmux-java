@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusions for zmux. Every entry is a reviewed, intentional pattern; fix real findings in code
+  instead of adding entries. Entries name the bug pattern and the class (and method where it is one place).
+  Run: mvn -o -Pstatic-checks test-compile spotbugs:check
+-->
+<FindBugsFilter>
+
+  <!-- Zero-copy handoff. The internal.* packages (exported only to the sibling modules) pass byte arrays,
+       buffers and live objects between the core, the loop and the carriers without copying: a defensive copy on
+       these hot paths would add an allocation and a copy per frame. The ownership of each array is documented where
+       it changes hands. -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
+    <Class name="~io\.zmux\.internal\..*"/>
+  </Match>
+
+  <!-- Public-API values that hold their argument by design: handles (sessions, pipes, carriers), throwables and
+       immutable collections are shared, not copied; the byte arrays of StreamDatagram are documented as not copied
+       (the datagram path moves payloads without a copy). The seal Reply and Finish records belong to
+       package-private classes. -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
+    <Or>
+      <Class name="~io\.zmux\.CandidateResult"/>
+      <Class name="~io\.zmux\.DuplicateResult"/>
+      <Class name="~io\.zmux\.PipeMaintenance\$Result"/>
+      <Class name="~io\.zmux\.PipePool\$Attempt"/>
+      <Class name="~io\.zmux\.PipeStats\$Failure"/>
+      <Class name="~io\.zmux\.SessionError\$(PipesLost|ResumeTimeout)"/>
+      <Class name="~io\.zmux\.SessionEvent\$PipesRetired"/>
+      <Class name="~io\.zmux\.StreamDatagram"/>
+      <Class name="~io\.zmux\.ZmuxPipe"/>
+      <Class name="~io\.zmux\.carrier\.PipeIo"/>
+      <Class name="~io\.zmux\.seal\.EstablishClient\$Reply"/>
+      <Class name="~io\.zmux\.seal\.EstablishServer\$Finish"/>
+      <Class name="~io\.zmux\.seal\.Seal\$1"/>
+      <Class name="~io\.zmux\.seal\.ServerConfig"/>
+      <Class name="~io\.zmux\.shaping\.RecordPlan"/>
+      <Class name="~io\.zmux\.shaping\.machine\.Bundle"/>
+      <Class name="~io\.zmux\.quic\.QuicPool\$PooledConnection"/>
+    </Or>
+  </Match>
+
+  <!-- Read-only constants of the wire layer, read on the frame hot path; nothing writes them. -->
+  <Match>
+    <Bug pattern="MS_MUTABLE_ARRAY"/>
+    <Or>
+      <Class name="io.zmux.internal.wire.FrameType"/>
+      <Class name="io.zmux.internal.wire.Records"/>
+    </Or>
+  </Match>
+
+  <!-- Decoded frame and parameter structs: plain data written by the decoder and read by the core in place,
+       without accessors, to keep the frame path free of allocation. -->
+  <Match>
+    <Bug pattern="PA_PUBLIC_PRIMITIVE_ATTRIBUTE"/>
+    <Or>
+      <Class name="io.zmux.internal.wire.Frame"/>
+      <Class name="io.zmux.internal.wire.TransportParams"/>
+    </Or>
+  </Match>
+
+  <!-- Loop-confined state. These classes belong to one session loop (or one Netty event loop) and are only
+       touched on it: their fields are plain on purpose, and a thread that hands work to the loop goes through the
+       loop's queue, which orders it. The detector sees a lock or a lambda elsewhere in the class and assumes sharing. -->
+  <Match>
+    <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE, AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
+    <Or>
+      <Class name="~io\.zmux\.internal\.core\.(Batch|Session|SendBlock)"/>
+      <Class name="~io\.zmux\.internal\.loop\.(ExternalTransport|Forwarded|Operation|RecvLane|SendLane|SessionHost|SessionRuntime)"/>
+      <Class name="~io\.zmux\.internal\.loop\.ListenerHub(\$Admitting)?"/>
+      <Class name="~io\.zmux\.http\.ExchangeClient\$Attempt"/>
+      <Class name="~io\.zmux\.quic\.(ConnectionCarrier|NettyHost|StreamCarrier)"/>
+    </Or>
+  </Match>
+
+  <!-- Splice.Direction: the counters are written by the one worker of the direction and read in result() after
+       that worker has finished (the future's completion orders the read). -->
+  <Match>
+    <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
+    <Class name="io.zmux.Splice$Direction"/>
+  </Match>
+
+  <!-- A nested helper of a class that uses the outer instance as its monitor on purpose: the inner objects are
+       parts of the outer state machine and take the outer lock for that state. -->
+  <Match>
+    <Bug pattern="USO_UNSAFE_OBJECT_SYNCHRONIZATION"/>
+    <Or>
+      <Class name="~io\.zmux\.internal\.loop\.ListenerHub\$.*"/>
+      <Class name="~io\.zmux\.quic\.QuicPool\$Lease"/>
+      <Class name="~io\.zmux\.http\.StreamingRequest\$(Reader|Writer)(\$1)?"/>
+    </Or>
+  </Match>
+
+  <!-- Best-effort closes and a lost race with a close: the failure has no one to report to and nothing to undo. -->
+  <Match>
+    <Bug pattern="DE_MIGHT_IGNORE"/>
+    <Or>
+      <Class name="io.zmux.StreamPipe$4"/>
+      <Class name="io.zmux.ZmuxPipe"/>
+      <Class name="io.zmux.carrier.PipeChannel"/>
+      <Class name="io.zmux.internal.loop.SessionRuntime$JoinerGate"/>
+      <Class name="io.zmux.internal.loop.SocketTransport"/>
+      <Class name="io.zmux.internal.loop.TlsTransport"/>
+    </Or>
+  </Match>
+
+  <!-- Tri-state results: null is the third answer (unknown scheme; registered and waiting). -->
+  <Match>
+    <Bug pattern="NP_BOOLEAN_RETURN_NULL"/>
+    <Or>
+      <Class name="io.zmux.http.Redirects"/>
+      <Class name="io.zmux.internal.core.Session"/>
+    </Or>
+  </Match>
+
+  <!-- The handle of a further stream of an accepted connection is not needed: the carrier it names is
+       owned by the connection and disposed with it. -->
+  <Match>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_INFERRED"/>
+    <Class name="io.zmux.quic.ConnectionCarrier"/>
+    <Method name="route"/>
+  </Match>
+
+  <!-- The constants are the Builtin enum values; the enum only implements the interface and reads none of
+       its constants while initialising. -->
+  <Match>
+    <Bug pattern="IC_SUPERCLASS_USES_SUBCLASS_DURING_INITIALIZATION"/>
+    <Class name="io.zmux.Scheduler"/>
+  </Match>
+
+  <!-- A shared, stateless and @Sharable handler. -->
+  <Match>
+    <Bug pattern="MS_EXPOSE_REP"/>
+    <Class name="io.zmux.quic.QuicServer"/>
+    <Method name="streamHandler"/>
+  </Match>
+
+</FindBugsFilter>

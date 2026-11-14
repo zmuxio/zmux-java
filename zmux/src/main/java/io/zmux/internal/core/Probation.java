@@ -80,7 +80,7 @@ final class Probation {
     /** The pipe joined, or returned from SUSPECT to ACTIVE. */
     void startProbation(Pipe p) {
         Attach a = p.mp();
-        if (p.out() == null || p.id == 0 && !a.prob.wasSuspect) return;
+        if (p.out() == null || (p.id == 0 && !a.prob.wasSuspect)) return;
         ProbHistory h = hist(p);
         int k = h.nextK();
         a.prob.probOn = probationBase(p) >= 0;
@@ -194,7 +194,7 @@ final class Probation {
         if (!all && pipes.get(id) == null) return false;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
-            if (a == null || p.out() == null || !all && p.id != id || a.prob.reval) continue;
+            if (a == null || p.out() == null || (!all && p.id != id) || a.prob.reval) continue;
             if (a.health.out() != Attach.OUT_ACTIVE && a.health.out() != Attach.OUT_JOINING) continue;
             a.prob.reval = true;
             a.prob.revalPing = true;
@@ -251,7 +251,7 @@ final class Probation {
         if (!quiet || cfg.standbyProbe() <= 0) return;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
-            if (a == null || p.out() == null || a.health.needPing() || a.link.unacked() || a.health.out() != Attach.OUT_ACTIVE && a.health.out() != Attach.OUT_SUSPECT
+            if (a == null || p.out() == null || a.health.needPing() || a.link.unacked() || (a.health.out() != Attach.OUT_ACTIVE && a.health.out() != Attach.OUT_SUSPECT)
                     || !backup(p)) {
                 continue;
             }

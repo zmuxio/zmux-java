@@ -17,7 +17,7 @@ final class Duplicates {
             CoreConfig.Role transport = core.transportRole();
             Boolean designated = session.designatedDialer();
             boolean known = transport != CoreConfig.Role.AUTO || designated != null;
-            boolean dialer = transport == CoreConfig.Role.INITIATOR || transport == CoreConfig.Role.AUTO && Boolean.TRUE.equals(designated);
+            boolean dialer = transport == CoreConfig.Role.INITIATOR || (transport == CoreConfig.Role.AUTO && Boolean.TRUE.equals(designated));
             var params = dialer ? local : peer;
             boolean auto = peer != null && local.has(TransportParams.ROLE) && peer.has(TransportParams.ROLE)
                     && local.role == TransportParams.ROLE_AUTO && peer.role == TransportParams.ROLE_AUTO;
@@ -46,7 +46,7 @@ final class Duplicates {
         ZmuxSession survivor = comparison < 0 ? a : b, loser = comparison < 0 ? b : a;
         boolean dialedLoser = comparison < 0 ? y.localDialer : x.localDialer;
         // Commit on the owner before returning: local openers cannot race a posted shutdown.
-        loser.run(op -> { loser.core.shutdown(0, null); return Boolean.TRUE; });
+        loser.run(op -> { loser.core.shutdown(0, null); return true; });
         PipeMaintenance rejoin = null;
         try {
             if (options.rejoin() != null && dialedLoser && survivor.info().multipath() && survivor.joinReady())

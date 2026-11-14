@@ -198,7 +198,6 @@ class JoinVectorsTest {
 
     private static void assertSchedule(Map<String, Object> v, Schedule s, String name) {
         assertArrayEquals(hex(v, "r_i"), s.ri, name);
-        assertArrayEquals(hex(v, "r_r"), s.rr, name);
         assertArrayEquals(hex(v, "th"), s.th, name);
         assertArrayEquals(hex(v, "th2"), s.th2, name);
         assertArrayEquals(hex(v, "th3"), s.th3, name);

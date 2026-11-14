@@ -49,6 +49,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         }
         catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
     }
+    @SuppressWarnings("StaticAssignmentOfThrowable") // a shared outcome; the stack of its creation is not meaningful
     private static final CancellationException CANCELLED_OUTCOME = new CancellationException("operation cancelled");
 
     private final SessionRuntime driver;

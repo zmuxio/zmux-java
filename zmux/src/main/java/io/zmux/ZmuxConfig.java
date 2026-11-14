@@ -569,7 +569,7 @@ public final class ZmuxConfig {
          * The advertised idle timeout, default 30 s, at least 1 ms (the unit of the transport
          * parameter, a fraction rounded up).
          */
-        public Builder maxIdleTimeout(Duration d) { maxIdleTimeout = atLeast(d, Duration.ofMillis(1), "maxIdleTimeout"); return this; }
+        public Builder maxIdleTimeout(Duration d) { maxIdleTimeout = Liveness.atLeast(d, Duration.ofMillis(1), "maxIdleTimeout"); return this; }
 
         /** No idle timeout; none is announced. */
         public Builder noIdleTimeout() { maxIdleTimeout = null; return this; }
@@ -630,7 +630,7 @@ public final class ZmuxConfig {
          * {@link Zmux#MAX_STREAM_CREDIT}.
          */
         public Builder incomingStreams(long n) {
-            if (n != 0 && n < 4 || n > Zmux.MAX_STREAM_CREDIT)
+            if ((n != 0 && n < 4) || n > Zmux.MAX_STREAM_CREDIT)
                 throw new IllegalArgumentException("incomingStreams must be 0 or from 4 to Zmux.MAX_STREAM_CREDIT");
             incomingStreams = n; return this;
         }
@@ -743,7 +743,7 @@ public final class ZmuxConfig {
          * server, a listener; a client should have a redial source ({@link #redial()} or a pool).
          */
         public Builder resumeTimeout(Duration d) {
-            resumeTimeout = atLeast(d, Duration.ofMillis(1), "resumeTimeout"); return this;
+            resumeTimeout = Liveness.atLeast(d, Duration.ofMillis(1), "resumeTimeout"); return this;
         }
 
         /**
@@ -920,11 +920,6 @@ public final class ZmuxConfig {
 
     static Duration nonNegative(Duration d, String what) {
         if (Objects.requireNonNull(d, what).isNegative()) throw new IllegalArgumentException(what + " must not be negative");
-        return d;
-    }
-
-    static Duration atLeast(Duration d, Duration min, String what) {
-        if (Objects.requireNonNull(d, what).compareTo(min) < 0) throw new IllegalArgumentException(what + " below " + min);
         return d;
     }
 

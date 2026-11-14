@@ -120,6 +120,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
     private final Spec spec;
     private final Sampler sampler;
     /** Shared values, by the value's place. */
+    @SuppressWarnings("IdentityHashMapUsage") // values are told apart by identity: equal values of different declarations are distinct
     private final Map<Value, Long> shared = new java.util.IdentityHashMap<>();
     /** Per member, by rule: the word of its jitter and its kept threshold. */
     private final HashMap<Long, MemberState> members = new HashMap<>();
@@ -172,7 +173,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
     }
 
     @Override
-    public synchronized Decision decide(View view) {
+    public Decision decide(View view) {
         List<Metrics> ms = new ArrayList<>(view.members().size());
         boolean connections = false;
         for (Member m : view.members()) {
@@ -212,7 +213,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
         if (!spec.dialAfter.isEmpty()) {
             long a = val(spec.dialAfter.get(Math.clamp(failures, 0, spec.dialAfter.size() - 1)));
             if (spec.dialJitter != 0) {
-                boolean fresh = !waiting || failures != waitFailures || sinceDial != null && (waitSince == null || sinceDial < waitSince);
+                boolean fresh = !waiting || failures != waitFailures || (sinceDial != null && (waitSince == null || sinceDial < waitSince));
                 if (fresh) {
                     waitWord = sampler.next();
                     waiting = true;

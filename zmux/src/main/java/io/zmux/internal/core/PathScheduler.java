@@ -224,7 +224,7 @@ public final class PathScheduler {
         RateEstimator e = p.out().snd.re();
         double own = e.value();
         Attach a = p.mp();
-        if (e.measured() || a.sched.placedSet && e.round() >= a.sched.placedFrom + PLACEMENT_ROUNDS || !metrics.pipeUsable(p, false)) return own;
+        if (e.measured() || (a.sched.placedSet && e.round() >= a.sched.placedFrom + PLACEMENT_ROUNDS) || !metrics.pipeUsable(p, false)) return own;
         long pr = a.effPrio();
         boolean sb = a.effStandby();
         double fastest = 0;
@@ -258,12 +258,12 @@ public final class PathScheduler {
             for (Pipe q : g.tierPipes(ti)) {
                 if (q == except) continue;
                 double e = eta(q, l);
-                if (a == null || e < ea || e == ea && q.id < a.id) {
+                if (a == null || e < ea || (e == ea && q.id < a.id)) {
                     b = a;
                     eb = ea;
                     a = q;
                     ea = e;
-                } else if (b == null || e < eb || e == eb && q.id < b.id) {
+                } else if (b == null || e < eb || (e == eb && q.id < b.id)) {
                     b = q;
                     eb = e;
                 }
@@ -396,7 +396,8 @@ public final class PathScheduler {
         double[] bv = {0};
         rrWeights(g, ti, byRate, (q, w) -> {
             double v = rrCurrent(st, own, q) + w;
-            if (best[0] == null || v > bv[0] || v == bv[0] && q.id < best[0].id) {
+            int order = Double.compare(v, bv[0]);
+            if (best[0] == null || order > 0 || (order == 0 && q.id < best[0].id)) {
                 best[0] = q;
                 bv[0] = v;
             }
@@ -446,7 +447,7 @@ public final class PathScheduler {
 
     boolean affinityIdle(Stream st) {
         PathStreamState m = st.snd.mps();
-        return m == null || m.ret.acked().prefix() >= st.snd.sent() && m.ret.resend().size() == 0;
+        return m == null || (m.ret.acked().prefix() >= st.snd.sent() && m.ret.resend().size() == 0);
     }
 
     /** The pipe an affinity direction sends on now. */
@@ -491,7 +492,8 @@ public final class PathScheduler {
         for (Pipe q : within) {
             double score = metrics.owd(q) / 1e9;
             if (!small) score += (metrics.queued(q) + affinityLoad(q, st) + e) / Math.max(metrics.rateOf(q), 1);
-            if (best == null || score < bs || score == bs && q.id < best.id) {
+            int order = Double.compare(score, bs);
+            if (best == null || order < 0 || (order == 0 && q.id < best.id)) {
                 best = q;
                 bs = score;
             }
@@ -545,7 +547,7 @@ public final class PathScheduler {
             if (!b.sched.bindSet || b.sched.moving) continue;
             Pipe target = null;
             boolean old = b.sched.bindEpoch < affEpoch && sampled;
-            if (prov && b.sched.provisional || old) {
+            if ((prov && b.sched.provisional) || old) {
                 target = bindingChoice(g, st);
             } else {
                 Pipe q = pipes.get(b.sched.bindPipe);

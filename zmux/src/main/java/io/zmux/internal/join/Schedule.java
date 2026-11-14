@@ -38,7 +38,6 @@ final class Schedule {
     final Framing framing;
     final byte[] psk;
     byte[] ri;
-    byte[] rr;
     byte[] th;
     byte[] th2;
     byte[] th3;
@@ -78,7 +77,6 @@ final class Schedule {
     }
 
     void afterHello(byte[] helloCt, byte[] r) {
-        rr = r;
         th2 = Kdf.hash(th, helloCt, r);
         k1 = Kdf.expandLabel(psk, "reply", th2, suite.keyLen());
     }
@@ -190,7 +188,7 @@ final class Schedule {
     static KeyShare decodeShare(byte[] v, boolean initiator, long[] usable) throws SecureCarrierException {
         long id = Tlv.minimalVarint(v, 0, v.length);
         Group g = Group.of(id);
-        if (g == null || usable != null && java.util.Arrays.stream(usable).noneMatch(u -> u == id)) {
+        if (g == null || (usable != null && java.util.Arrays.stream(usable).noneMatch(u -> u == id))) {
             throw new SecureCarrierException(BAD_FIELD, "key share group");
         }
         int at = VarInt.length(id);

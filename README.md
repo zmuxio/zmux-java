@@ -183,7 +183,7 @@ for (ZmuxPipe p : session.pipes()) System.out.println(p.id() + " " + p.stats());
 Multipath and resume need a secret source: `PipeAuth.psk(secret)` (or
 `PipeAuth.deferred()`, supplied later with `session.setJoinSecret`),
 `PipeAuth.exporter()` (the exporter of the innermost end-to-end handshake, today
-TLS that this process terminates), or both (`PipeAuth.exporter().withPsk(secret)`);
+a TLS 1.3 connection that this process terminates), or both (`PipeAuth.exporter().withPsk(secret)`);
 a session whose first pipe is on the secure carrier takes its secret from the
 Establish and leaves `pipeAuth` unset. Without a source the session fails to
 start with `IllegalArgumentException`, before any byte is written, and so does a
@@ -311,7 +311,7 @@ peer refused while the session tried to resume.
 
 Each joined carrier has a record mode. `RecordMode.SEALED`, the default, protects
 records with the keys of the Join handshake; `BOUND` leaves them to a carrier that
-declares the contract (`PipeIo.withSecure(true)`, and TLS this process terminates) and binds
+declares the contract (`PipeIo.withSecure(true)`, and a TLS 1.3 connection this process terminates) and binds
 its exporter into the handshake; `TRUSTED` leaves them to the deployment.
 `ZmuxConfig.Builder.recordPolicy` or `PipeOptions.Builder.recordMode` chooses the mode of a
 local join; `allowRecordMode` is the acceptor's check and when unset only Sealed passes;
@@ -502,6 +502,26 @@ value is a configuration error.
 returns false when the datagram limiter dropped the payload; `send(payload, timeout)` can wait
 for that space with a deadline, but never waits for limiter tokens. Enable
 datagrams in both peers' configurations before using them.
+
+`io.zmux.helper.PacketStream` carries packets (a context ID and a payload) on
+a bidirectional stream, each as a datagram of the stream's flow or as an
+RFC 9297 DATAGRAM capsule in the stream's bytes:
+
+```java
+PacketStream packets = PacketStream.open(session);          // or PacketStream.of(acceptedStream)
+packets.send(ByteBuffer.wrap(ipPacket));                     // datagram if it fits, else a capsule
+StreamDatagram next = packets.receive();                     // null once the peer closed it
+packets.close();
+```
+
+`Options` choose `PREFER_DATAGRAM` (the default), `STREAM_ONLY` or
+`DATAGRAM_ONLY`, and the largest accepted capsule payload (65535 by default); a
+larger capsule, or a stream ending inside one, resets and stops the stream
+with `PacketStream.PACKET_ERROR`. `finishAsync()` sends the FIN after the queued
+capsules and keeps receiving; `close()` releases the stream. `Zmux.splicePackets(a, b)` relays two packet
+streams like `Zmux.splice`, writing a datagram the next hop cannot take as a
+capsule. Splice results count dropped datagrams in total and by cause
+(`datagramsTooLarge`, `datagramsLimited`).
 
 `ListenerConfig` sets admission, instance-ID, memory and suspended-session
 limits, and the bounds of carriers before a session: `maxPending` (default

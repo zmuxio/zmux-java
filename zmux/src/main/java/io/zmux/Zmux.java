@@ -41,11 +41,31 @@ public final class Zmux {
      * exceptionally with an {@link java.io.IOException} saying so (the cleanup still runs if the loop resumes).
      */
     public static ZmuxFuture<SpliceResult> splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
-        return Splice.start(a, b, options);
+        return Splice.start(a, b, options, false);
     }
 
     public static ZmuxFuture<SpliceResult> splice(ZmuxStream a, ZmuxStream b) {
         return splice(a, b, SpliceOptions.defaults());
+    }
+
+    /**
+     * {@link #splice(ZmuxStream, ZmuxStream, SpliceOptions)} for two packet streams
+     * (EXTENSIONS.md Section 12, {@link io.zmux.helper.PacketStream}): the stream bytes are
+     * capsules, forwarded in chunks with only their headers parsed, unknown types included. A
+     * datagram goes on as a datagram when it fits the next hop's
+     * {@link ZmuxStream#maxDatagramPayload(long)}, otherwise as a DATAGRAM capsule written at the
+     * next capsule boundary; such a capsule counts as a datagram, in bytes and against the
+     * limiter, and a datagram that cannot wait for a boundary (too many already wait, or the
+     * next hop's stream has ended) is dropped as too large. A source that ends inside a capsule
+     * resets the next hop and stops the source with ZMUX_PACKET_ERROR, and the direction ends
+     * {@link SpliceResult.End.Reset} with that code. Ends, limiters and the result are as for splice.
+     */
+    public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+        return Splice.start(a, b, options, true);
+    }
+
+    public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b) {
+        return splicePackets(a, b, SpliceOptions.defaults());
     }
 
     /** Resolves two established sessions the application authenticated as connecting the same endpoints. */

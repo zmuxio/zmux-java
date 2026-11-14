@@ -254,7 +254,7 @@ final class Shaping {
             return;
         }
         w.end();
-        if (!port.peerZmux() && !allowed(now) || off) {
+        if ((!port.peerZmux() && !allowed(now)) || off) {
             dropInject(ps);
             return;
         }

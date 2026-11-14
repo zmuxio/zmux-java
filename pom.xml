@@ -100,6 +100,82 @@
 
     <profiles>
         <profile>
+            <!-- Error Prone on the main sources, not part of the default build: mvn -Perrorprone clean compile;
+                 the check passes when the output has no "[CheckName]" warning other than the module-info lint ones. -->
+            <id>errorprone</id>
+            <properties>
+                <errorprone.version>2.45.0</errorprone.version>
+                <ep.args></ep.args>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <fork>true</fork>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs combine.children="append">
+                                <arg>-XDcompilePolicy=simple</arg>
+                                <arg>--should-stop=ifError=FLOW</arg>
+                                <arg>-Xmaxwarns</arg>
+                                <arg>100000</arg>
+                                <!--
+                                    Checks turned off, each by design:
+                                    - FutureReturnValueIgnored: the library registers completion handlers (whenComplete,
+                                      thenAccept) and fires closes whose outcome is observed elsewhere; the returned stage
+                                      or channel future carries nothing more.
+                                    - ArrayRecordComponent: records carry byte arrays without a copy on purpose (zero-copy
+                                      payload handoff); the arrays' ownership is documented where they change hands.
+                                    - NonApiType: package-private scratch collections of the core are concrete ArrayLists
+                                      by design; no public signature has one.
+                                    - UnnecessaryLambda: Runnable constants and fields are single instances that are
+                                      registered, withdrawn or compared by identity.
+                                -->
+                                <arg>-Xplugin:ErrorProne -XepDisableWarningsInGeneratedCode -Xep:FutureReturnValueIgnored:OFF -Xep:ArrayRecordComponent:OFF -Xep:NonApiType:OFF -Xep:UnnecessaryLambda:OFF ${ep.args}</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</arg>
+                                <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</arg>
+                                <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>
+                                <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</arg>
+                            </compilerArgs>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>com.google.errorprone</groupId>
+                                    <artifactId>error_prone_core</artifactId>
+                                    <version>${errorprone.version}</version>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <!-- Static analysis, not part of the default build: mvn -Pstatic-checks test-compile spotbugs:check -->
+            <id>static-checks</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.github.spotbugs</groupId>
+                        <artifactId>spotbugs-maven-plugin</artifactId>
+                        <version>4.10.4.1</version>
+                        <configuration>
+                            <excludeFilterFile>${maven.multiModuleProjectDirectory}/spotbugs-exclude.xml</excludeFilterFile>
+                            <failOnError>true</failOnError>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>release</id>
             <build>
                 <plugins>

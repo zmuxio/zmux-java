@@ -251,9 +251,9 @@ public final class PipeMaintenance implements AutoCloseable {
             if (m.replacement != null && takesOver(m.replacement) && settleLeft(m, now) == 0) {
                 List<ZmuxPipe> old = m.pipes, replacement = m.replacement;
                 boolean committed = (Boolean)session.run(op -> {
-                    if (!rotationReadyOnOwner() || !takesOverOnOwner(session.core, replacement)) return Boolean.FALSE;
+                    if (!rotationReadyOnOwner() || !takesOverOnOwner(session.core, replacement)) return false;
                     for (ZmuxPipe p : old) session.core.removePipe(p.rawId(), true);
-                    return Boolean.TRUE;
+                    return true;
                 });
                 if (committed) { members.set(i, successor(m)); settled.add(m.replacementKind); rotations++; changed = true; }
             }
@@ -316,7 +316,7 @@ public final class PipeMaintenance implements AutoCloseable {
             int k = 0;
             for (int i = 1; i < members.size(); i++) {
                 Member m = members.get(i), best = members.get(k);
-                if (m.retire && !best.retire || m.retire == best.retire && m.idleSince < best.idleSince) k = i;
+                if ((m.retire && !best.retire) || (m.retire == best.retire && m.idleSince < best.idleSince)) k = i;
             }
             Member m = members.remove(k);
             closeQuietly(m.pipes);
@@ -343,7 +343,7 @@ public final class PipeMaintenance implements AutoCloseable {
             sent += s.bytesSent(); received += s.bytesReceived();
             attached = Math.min(attached, s.attachedFor().toNanos());
         }
-        return r.maxBytes() > 0 && Math.max(sent, received) >= m.bytes || !r.maxAge().isZero() && attached >= m.age;
+        return (r.maxBytes() > 0 && Math.max(sent, received) >= m.bytes) || (!r.maxAge().isZero() && attached >= m.age);
     }
     /** Dials a member; kind: the mode candidate (-1 without a mode). */
     private List<ZmuxPipe> dial(boolean rotating, int kind) throws IOException {

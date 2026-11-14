@@ -53,7 +53,7 @@ public final class PipeChannel implements ByteChannel {
         if (io.reader() == null || !started.compareAndSet(false, true)) return;
         io.reader().start(new PipeReader.Sink() {
             @Override public void onData(ByteBuffer data, Runnable release) { offer(new Item(data, release)); }
-            @Override public void onEnd() { offer(Boolean.TRUE); }
+            @Override public void onEnd() { offer(true); }
             @Override public void onError(Throwable cause) { offer(cause == null ? new IOException("carrier failed") : cause); }
         });
     }

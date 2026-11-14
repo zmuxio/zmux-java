@@ -34,7 +34,7 @@ final class PathMetrics {
     boolean pipeUsable(Pipe p, boolean probOk) {
         Attach a = p.mp();
         if (a == null || p.out() == null || p.out().failed() || a.health.out() != Attach.OUT_ACTIVE || a.health.retired()) return false;
-        return !a.ret.penalized() && (probOk || !a.prob.probOn() && !a.prob.reval());
+        return !a.ret.penalized() && (probOk || (!a.prob.probOn() && !a.prob.reval()));
     }
 
     /** PTO_p (RFC 9002 6.2.1 with the peer's max_ack_delay). */

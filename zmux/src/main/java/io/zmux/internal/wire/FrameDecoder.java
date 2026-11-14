@@ -184,7 +184,7 @@ public final class FrameDecoder {
                 long p = varint(), l = varint();
                 varint();
                 varint();
-                if (!bad && k > 0 && (p < pp || p == pp && l <= pl)) throw WireException.frame(t, "PIPE_ACK entries not increasing");
+                if (!bad && k > 0 && (p < pp || (p == pp && l <= pl))) throw WireException.frame(t, "PIPE_ACK entries not increasing");
                 pp = p;
                 pl = l;
             }

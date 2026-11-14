@@ -138,7 +138,7 @@ public final class CarrierAdmission {
     public boolean stall(java.net.InetSocketAddress source) {
         String k = sourceKey(source);
         int n = stalledBySource.getOrDefault(k, 0);
-        if (n >= maxPerSource - 1 || maxTotal > 0 && stalled >= maxTotal / 2) return false;
+        if (n >= maxPerSource - 1 || (maxTotal > 0 && stalled >= maxTotal / 2)) return false;
         stalledBySource.put(k, n + 1);
         stalled++;
         return true;

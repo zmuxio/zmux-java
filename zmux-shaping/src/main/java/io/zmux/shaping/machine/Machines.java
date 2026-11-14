@@ -212,6 +212,7 @@ public final class Machines {
             }
         }
 
+        @SuppressWarnings("EnumOrdinal") // the queue is an int array; the trigger is stored by ordinal and read back from TRIGGERS
         private void push(int m, Trigger t, int slot) {
             if (qTail + 4 > q.length) {
                 int live = qTail - qHead;

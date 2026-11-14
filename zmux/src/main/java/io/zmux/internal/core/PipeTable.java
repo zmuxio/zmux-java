@@ -173,7 +173,7 @@ public final class PipeTable {
     private static boolean canCarryClose(Pipe p) {
         if (p.out() == null || p.out().failed()) return false;
         Pipe.OutLane l = p.out().lane(0);
-        return l != null && !l.st.shut() && (p.mp() == null || p.mp().liveOut() && !p.mp().health.retired() && !p.mp().handshaking());
+        return l != null && !l.st.shut() && (p.mp() == null || (p.mp().liveOut() && !p.mp().health.retired() && !p.mp().handshaking()));
     }
 
     /** Whether CONNECTION_CLOSE went out on every outbound pipe that takes one. */

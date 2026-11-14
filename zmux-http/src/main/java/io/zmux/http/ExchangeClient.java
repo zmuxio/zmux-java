@@ -214,7 +214,7 @@ final class ExchangeClient {
                 for (State s : downs.values()) next = Math.min(next, check(s, now, dl));
             }
             boolean complete = complete();
-            if (err != null || complete || finSeal && ups.isEmpty() && rclosed) {
+            if (err != null || complete || (finSeal && ups.isEmpty() && rclosed)) {
                 end(complete);
                 return;
             }
@@ -248,7 +248,7 @@ final class ExchangeClient {
         int want = 0;
         long last = ack;
         for (long n = ack; want < downLimit; n++) {
-            if (fin >= 0 && n > fin || n >= deliv + 2L * cfg.downRequests()) break;
+            if ((fin >= 0 && n > fin) || n >= deliv + 2L * cfg.downRequests()) break;
             if (held.containsKey(n)) continue;
             want++;
             last = n;
@@ -280,7 +280,7 @@ final class ExchangeClient {
     private void seal(long now) {
         if (ups.size() >= upLimit || finSeal) return;
         int len = open == null ? 0 : open.readableBytes();
-        boolean due = wclosed || len == cfg.upPieceSize() || len > 0 && now - (openAt + cfg.coalesce().toNanos()) >= 0;
+        boolean due = wclosed || len == cfg.upPieceSize() || (len > 0 && now - (openAt + cfg.coalesce().toNanos()) >= 0);
         if (!due) return;
         Up u = new Up(upSeq++, len > 0 ? open : null, wclosed);
         if (len == 0 && open != null) open.release();
@@ -501,6 +501,7 @@ final class ExchangeClient {
         }
 
         /** Takes the attempt's result on the loop. */
+        @SuppressWarnings("ReferenceEquality") // Result.NONE is a sentinel
         void finish(Result r) {
             if (finished) { if (r.data != null) r.data.release(); return; }
             finished = true;
@@ -652,7 +653,7 @@ final class ExchangeClient {
     /** Takes downlink piece n. */
     private void receive(long n, ByteBuf data, boolean isFin) {
         downs.remove(n);
-        if (held.containsKey(n) || n < ack || fin >= 0 && n > fin || rclosed) {
+        if (held.containsKey(n) || n < ack || (fin >= 0 && n > fin) || rclosed) {
             if (data != null) data.release();
             return;
         }

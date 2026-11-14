@@ -104,7 +104,7 @@ final class AckEngine {
                 }
                 if (il.rx.ended() && il.rx.pos() > il.ack.reported) return true;
             }
-            if (sum >= threshold || sum > 0 && now >= Time.add(first, delay)) return true;
+            if (sum >= threshold || (sum > 0 && now >= Time.add(first, delay))) return true;
         }
         return false;
     }
@@ -127,12 +127,9 @@ final class AckEngine {
      */
     long release() {
         long t = Time.NEVER;
-        for (int i = 0, n = pipes.size(); i < n; i++) {
-            Pipe p = pipes.get(i);
+        for (Pipe p : pipes) {
             if (p.in() == null) continue;
-            ArrayList<Pipe.InLane> lanes = p.in().lanes;
-            for (int j = 0, m = lanes.size(); j < m; j++) {
-                Pipe.InLane il = lanes.get(j);
+            for (Pipe.InLane il : p.in().lanes) {
                 if (il.ack.elicit > 0) t = Math.min(t, Time.add(il.ack.elicitAt, delay));
             }
         }
@@ -151,7 +148,7 @@ final class AckEngine {
      * of the same write (credit: MAX_DATA or MAX_STREAM_DATA is pending).
      */
     void write(RecordWriter w, long now, boolean credit) {
-        if (due(now) || credit && unreported()) snapshot(w, now, true);
+        if (due(now) || (credit && unreported())) snapshot(w, now, true);
     }
 
     /** Whether an inbound lane holds a position not yet reported. */
@@ -178,7 +175,7 @@ final class AckEngine {
         ArrayList<long[]> es = entries;
         es.clear();
         for (Pipe p : pipes) {
-            if (p.in() == null || p.mp() != null && p.mp().health.retired()) continue;
+            if (p.in() == null || (p.mp() != null && p.mp().health.retired())) continue;
             for (Pipe.InLane il : p.in().lanes) {
                 if (il.rx.pos() == 0) continue;
                 long d = Math.max(Time.sub(now, il.rx.posAt()) / Time.MICROSECOND, 0);
@@ -337,7 +334,7 @@ final class AckEngine {
             long minRtt = r.min();
             boolean proven = minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
             boolean sampleOk = p.mp() == null || p.mp().sampleOk(last.sent());
-            boolean rateOk = sampleOk || proven && p.mp().health.out() != Attach.OUT_FAILED;
+            boolean rateOk = sampleOk || (proven && p.mp().health.out() != Attach.OUT_FAILED);
             if (!late && (sampleOk || (last.probe() && ps.paced(i, last, now)))) {
                 sampleRtt = r.update(rtt, Math.min(ad, peerDelay), peerDelay, now, p.mp() != null && port.quiet());
                 sampleSentAt = last.sent();

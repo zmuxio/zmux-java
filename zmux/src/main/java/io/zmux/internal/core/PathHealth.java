@@ -305,7 +305,7 @@ final class PathHealth {
             }
             long ws = writeStall(p);
             boolean wstall = ws != NO_STALL;
-            if (p.out() != null && a.liveOut() && (a.link.unacked() && liveIn || wstall)) {
+            if (p.out() != null && a.liveOut() && ((a.link.unacked() && liveIn) || wstall)) {
                 long stall = a.tref();
                 if (wstall && (!a.link.unacked() || !liveIn || ws < stall)) stall = ws;
                 switch (a.health.out) {
@@ -453,7 +453,7 @@ final class PathHealth {
         for (Pipe q : new ArrayList<>(pipes.all())) {
             Attach qa = q.mp();
             if (q == p || qa == null || qa.health.retired || qa.fate != a.fate || qa.joinerLocal != a.joinerLocal) continue;
-            if (qa.health.draining || qa.health.abandonRecv && qa.health.abandonCodeRecv == TransportError.NO_ERROR) continue;
+            if (qa.health.draining || (qa.health.abandonRecv && qa.health.abandonCodeRecv == TransportError.NO_ERROR)) continue;
             if (qa.health.out == Attach.OUT_ACTIVE) {
                 if (qa.link.unacked()) {
                     makeSuspect(q);
@@ -612,7 +612,7 @@ final class PathHealth {
     void inboundEnded(Pipe p, boolean graceful, Throwable cause) {
         Attach a = p.mp();
         if (a == null || a.health.retired) return;
-        boolean expected = graceful && (a.health.abandonRecv || a.health.abandonSent && a.health.abandonCode == TransportError.NO_ERROR || a.health.draining
+        boolean expected = graceful && (a.health.abandonRecv || (a.health.abandonSent && a.health.abandonCode == TransportError.NO_ERROR) || a.health.draining
                 || port.isClosing());
         ack.ackNow();
         if (expected) {

@@ -27,7 +27,7 @@ public final class CarrierCache {
     private static final long HORIZON = Duration.ofDays(100 * 365).toNanos();
 
     private final Duration successTtl, backoffMin, backoffMax;
-    private final HashMap<Key, Entry> entries = new HashMap<>();
+    private final HashMap<Key, CarrierCache.Entry> entries = new HashMap<>();
 
     private record Key(String key, CarrierKind kind, String variant) {}
 
@@ -84,23 +84,23 @@ public final class CarrierCache {
 
     /** Whether kind was usable for key within the success TTL (and has not failed since), as of now (System.nanoTime). */
     synchronized boolean good(String key, CarrierKind kind, String variant, long now) {
-        Entry e = entries.get(new Key(key, kind, variant));
+        CarrierCache.Entry e = entries.get(new Key(key, kind, variant));
         return e != null && !failing(e, now) && e.goodUntil != NONE && now - e.goodUntil < 0;
     }
 
     /** When kind's backoff under key ends (System.nanoTime), or Long.MIN_VALUE when it is not backing off. */
     synchronized long failUntil(String key, CarrierKind kind, String variant, long now) {
-        Entry e = entries.get(new Key(key, kind, variant));
+        CarrierCache.Entry e = entries.get(new Key(key, kind, variant));
         return e != null && failing(e, now) ? e.failUntil : NONE;
     }
 
-    private static boolean failing(Entry e, long now) {
+    private static boolean failing(CarrierCache.Entry e, long now) {
         return e.failUntil != NONE && now - e.failUntil < 0;
     }
 
     /** The final URL redirects led kind to under key; "" for the base URL. */
     synchronized String url(String key, CarrierKind kind, String variant) {
-        Entry e = entries.get(new Key(key, kind, variant));
+        CarrierCache.Entry e = entries.get(new Key(key, kind, variant));
         return e == null ? "" : e.url;
     }
 
@@ -115,7 +115,7 @@ public final class CarrierCache {
      * the target at its base URL again. Without one, a usable outcome keeps the URL known.
      */
     synchronized void record(String key, CarrierKind kind, String variant, boolean ok, long now, HttpTarget target) {
-        Entry e = entries.computeIfAbsent(new Key(key, kind, variant), k -> new Entry());
+        CarrierCache.Entry e = entries.computeIfAbsent(new Key(key, kind, variant), k -> new CarrierCache.Entry());
         if (ok) {
             e.goodUntil = now + successTtl.toNanos();
             e.failUntil = NONE;
@@ -151,7 +151,7 @@ public final class CarrierCache {
         long now = System.nanoTime();
         record(key, kind, variant == null ? "" : variant, o == Outcome.USABLE, now);
         if (o == Outcome.REJECTED) {
-            Entry e = entries.get(new Key(key, kind, variant == null ? "" : variant));
+            CarrierCache.Entry e = entries.get(new Key(key, kind, variant == null ? "" : variant));
             e.backoff = backoffMax.toNanos();
             e.failUntil = now + e.backoff;
         }
@@ -184,8 +184,8 @@ public final class CarrierCache {
             long now = System.nanoTime();
             Instant wall = Instant.now();
             long hi = backoffMax.toNanos();
-            for (Map.Entry<Key, Entry> m : entries.entrySet()) {
-                Entry e = m.getValue();
+            for (Map.Entry<Key, CarrierCache.Entry> m : entries.entrySet()) {
+                CarrierCache.Entry e = m.getValue();
                 if (e.expired(now, hi)) continue;
                 out.add(new Snapshot.Entry(m.getKey().key(), m.getKey().kind(), wall(e.goodUntil, now, wall), wall(e.failUntil, now, wall),
                         Duration.ofNanos(e.backoff), e.url, m.getKey().variant()));
@@ -208,9 +208,9 @@ public final class CarrierCache {
         synchronized (this) {
             long now = System.nanoTime();
             Instant wall = Instant.now();
-            var merged = new HashMap<Key, Entry>();
+            var merged = new HashMap<Key, CarrierCache.Entry>();
             for (Snapshot.Entry s : snapshot.entries()) {
-                var e = new Entry();
+                var e = new CarrierCache.Entry();
                 e.goodUntil = bound(mono(s.goodUntil(), now, wall), now + successTtl.toNanos());
                 e.failUntil = bound(mono(s.failUntil(), now, wall), now + hi);
                 e.backoff = s.backoff().isZero() ? 0 : s.backoff().compareTo(backoffMax) > 0 ? hi : Math.max(lo, s.backoff().toNanos());
@@ -224,8 +224,8 @@ public final class CarrierCache {
     /** t, at most limit. */
     private static long bound(long t, long limit) { return t == NONE || t - limit <= 0 ? t : limit; }
 
-    private static void merge(Map<Key, Entry> m, Key k, Entry e) {
-        Entry o = m.get(k);
+    private static void merge(Map<Key, CarrierCache.Entry> m, Key k, CarrierCache.Entry e) {
+        CarrierCache.Entry o = m.get(k);
         if (o == null || e.newerThan(o)) m.put(k, e);
     }
 
@@ -244,7 +244,7 @@ public final class CarrierCache {
      * interchange form is JSON ({@link #toJson()}, {@link #fromJson}), the same in every zmux
      * implementation.
      */
-    public record Snapshot(List<Entry> entries) {
+    public record Snapshot(List<Snapshot.Entry> entries) {
         /** The format version this implementation reads and writes. */
         public static final int VERSION = 1;
 
@@ -282,7 +282,7 @@ public final class CarrierCache {
         public String toJson() {
             var b = new StringBuilder("{\"version\":").append(VERSION).append(",\"entries\":[");
             for (int i = 0; i < entries.size(); i++) {
-                Entry e = entries.get(i);
+                Snapshot.Entry e = entries.get(i);
                 if (i > 0) b.append(',');
                 b.append("{\"key\":");
                 SnapshotJson.writeString(b, e.key());
@@ -314,9 +314,9 @@ public final class CarrierCache {
          */
         public static Snapshot fromJson(String text) {
             Objects.requireNonNull(text);
-            var out = new ArrayList<Entry>();
+            var out = new ArrayList<Snapshot.Entry>();
             for (SnapshotJson.Value item : entries(text)) {
-                Entry e = entry(item);
+                Snapshot.Entry e = entry(item);
                 if (e != null) out.add(e);
             }
             return new Snapshot(out);
@@ -342,7 +342,7 @@ public final class CarrierCache {
         }
 
         /** One entry of the JSON form; null: an entry of an unknown kind, skipped. */
-        private static Entry entry(SnapshotJson.Value item) {
+        private static Snapshot.Entry entry(SnapshotJson.Value item) {
             if (!(item instanceof SnapshotJson.Obj o)) throw new InvalidSnapshotException("an entry not an object");
             String key = string(o, "key"), kind = string(o, "kind"), url = string(o, "url"), variant = string(o, "variant");
             Instant good = time(o, "good_until"), fail = time(o, "fail_until");
@@ -353,7 +353,7 @@ public final class CarrierCache {
                 default -> throw new InvalidSnapshotException("backoff_ms not a non-negative integer");
             };
             CarrierKind k = kind(kind);
-            return k == null ? null : new Entry(key, k, good, fail, backoff, url, variant);
+            return k == null ? null : new Snapshot.Entry(key, k, good, fail, backoff, url, variant);
         }
 
         private static String string(SnapshotJson.Obj o, String name) {

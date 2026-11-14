@@ -6,39 +6,47 @@ import io.zmux.internal.core.CoreException;
 import io.zmux.internal.core.ReadBuf;
 import io.zmux.internal.core.StreamRecv;
 import io.zmux.internal.loop.Operation;
+import io.zmux.internal.wire.Capsule;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Owns relay work, never protocol state. All core access goes through the existing owner. */
 final class Splice {
     private final ZmuxStream a, b;
     private final SpliceOptions options;
+    /** A packet relay (EXTENSIONS.md Section 12): the stream bytes are capsules, and datagrams may become capsules. */
+    private final boolean packets;
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private volatile boolean dataDone;
     /** Why the first direction to fail tore both streams down; the other direction's local-close faults follow from it. */
     private final AtomicReference<IOException> teardown = new AtomicReference<>();
-    /** The stream whose side was lost in the failure behind {@link #teardown}; guarded by teardown, null when the cause names no side. */
+    /** The stream whose side was lost in the failure behind {@link #teardown}; guarded by teardownLock, null when the cause names no side. */
     private ZmuxStream teardownLost;
+    /** Guards {@link #teardownLost} and the first set of {@link #teardown}. */
+    private final Object teardownLock = new Object();
     /** The caller's future: cancelling it, or completing it from outside, cancels the splice. */
     private final ZmuxFuture<SpliceResult> result = new ZmuxFuture<>(() -> { cancel(); return true; });
     private final Direction forward, reverse;
 
-    private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
-        this.a = a; this.b = b; this.options = options;
+    private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
+        this.a = a; this.b = b; this.options = options; this.packets = packets;
         forward = new Direction(a, b, options.aToB()); reverse = new Direction(b, a, options.bToA());
     }
 
-    static ZmuxFuture<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+    static ZmuxFuture<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
         Objects.requireNonNull(a); Objects.requireNonNull(b); Objects.requireNonNull(options);
         if (a.session.driver == b.session.driver && a.st == b.st) throw new IllegalArgumentException("cannot splice a stream into itself");
         a.claimIo();
         try { b.claimIo(); } catch (RuntimeException error) { a.unclaimIo(); throw error; }
         try {
-            Splice splice = new Splice(a, b, options);
+            Splice splice = new Splice(a, b, options, packets);
             Thread.ofVirtual().name("zmux-splice").start(splice::run);
             return splice.result;
         } catch (RuntimeException | Error failure) { a.unclaimIo(); b.unclaimIo(); throw failure; }
@@ -111,7 +119,24 @@ final class Splice {
         /** The settling worker waits for the target to transmit before a reset: failures still wake it. */
         private volatile boolean draining;
         private volatile Thread datagramWorker;
-        private long bytes, datagramBytes, drops;
+        private long bytes, datagramBytes, drops, tooLarge, limited;
+        /** Packet relay: the capsule parser of the source's bytes; only the stream worker uses it. */
+        private final Capsule.Header capsule = new Capsule.Header();
+        /** Packet relay: the value bytes of the current capsule not yet read. */
+        private long capsuleRemaining;
+        /**
+         * Packet relay: the target's capsule turn. The stream worker holds it from the first byte of
+         * a capsule it forwards to the capsule's end; whoever holds it at a boundary writes the
+         * datagrams waiting in {@link #converted}.
+         */
+        private final ReentrantLock turn = new ReentrantLock();
+        /** Packet relay: datagrams too large for the target, waiting for a capsule boundary. */
+        private final ConcurrentLinkedQueue<Datagrams.StreamDatagram> converted = new ConcurrentLinkedQueue<>();
+        private final AtomicInteger convertedCount = new AtomicInteger();
+        /** Packet relay: the header of a converted datagram; used by the holder of the turn. */
+        private final ByteBuffer convertedHeader = ByteBuffer.allocate(Capsule.MAX_DATAGRAM_HEADER);
+        /** Packet relay: the target can take no more capsules (finished or failed); guarded by turn. */
+        private volatile boolean targetClosed;
         /** How the direction ended; null while running, when cancelled, or after a callback failure. */
         private SpliceResult.End end;
         /** A limiter callback failed, and the splice completes with it. Written under the direction's lock by its workers; read once both have ended. */
@@ -164,6 +189,8 @@ final class Splice {
                         try { last = source.in.readChunk(1, Long.MAX_VALUE); }
                         catch (CoreException e) { throw Errors.io(e); }
                         if (last != null) { if (last.buf() != null) last.buf().unref(); continue; }
+                        if (packets && !atBoundary()) { end = truncated(); break; }
+                        if (packets) { takeTurn(); closeTurn(); }
                         atTarget = true;
                         try { Errors.check(target.out.finish(Long.MAX_VALUE).await(Long.MAX_VALUE)); }
                         catch (CoreException e) { throw Errors.io(e); }
@@ -172,6 +199,11 @@ final class Splice {
                     }
                     if (available == 0) continue;
                     int n = (int) Math.min(options.chunkSize(), available);
+                    if (packets && !converted.isEmpty()) {
+                        if (atBoundary()) offerTurn();
+                        // Stop at the next capsule boundary, where the waiting datagrams go in.
+                        if (!converted.isEmpty()) n = (int) Math.min(n, capsuleRemaining > 0 ? capsuleRemaining : capsule.idle() ? n : 1);
+                    }
                     if (limiter != null) {
                         int min = Math.min(n, 16384);
                         CompletableFuture<Integer> ready = Objects.requireNonNull(limiter.ready(min, n)).toCompletableFuture();
@@ -197,6 +229,11 @@ final class Splice {
                     if (chunk == null) continue; // The end: the next pass forwards it.
                     forwarding = true;
                     int length = chunk.data().remaining();
+                    if (packets) {
+                        try { takeTurn(); }
+                        catch (InterruptedIOException interrupted) { forwarding = false; if (chunk.buf() != null) chunk.buf().unref(); throw interrupted; }
+                        scan(chunk.data().duplicate());
+                    }
                     ReadBuf held = chunk.buf() != null ? chunk.buf() : new ReadBuf(chunk.data(), null);
                     atTarget = true;
                     try {
@@ -215,6 +252,7 @@ final class Splice {
                         held.unref();
                     }
                     atTarget = false;
+                    if (packets && atBoundary()) giveTurn();
                 }
             } catch (CallbackFailed failed) {
                 settling = true;
@@ -236,7 +274,86 @@ final class Splice {
                 callbackFailed(new CallbackFailedException("relay callback failed", error));
             } finally {
                 settling = true; worker = null; closeRead.run(); closeWrite.run();
+                if (packets) {
+                    if (!turn.isHeldByCurrentThread()) turn.lock();
+                    try { targetClosed = true; } finally { turn.unlock(); }
+                }
             }
+        }
+
+        // ---- packet relay ----
+
+        /** Advances the capsule parser over b, the bytes about to be forwarded. */
+        private void scan(ByteBuffer b) {
+            while (b.hasRemaining()) {
+                if (capsuleRemaining > 0) {
+                    int k = (int) Math.min(capsuleRemaining, b.remaining());
+                    b.position(b.position() + k); capsuleRemaining -= k;
+                } else if (capsule.feed(b)) capsuleRemaining = capsule.length();
+            }
+        }
+
+        private boolean atBoundary() { return capsuleRemaining == 0 && capsule.idle(); }
+
+        /** Takes the capsule turn for the stream worker, unless it holds it already; a watcher's interrupt ends the wait. */
+        private void takeTurn() throws InterruptedIOException {
+            if (turn.isHeldByCurrentThread()) return;
+            try { turn.lockInterruptibly(); }
+            catch (InterruptedException interrupted) { throw new InterruptedIOException("splice interrupted"); }
+        }
+
+        /** At a capsule boundary: writes the waiting datagrams and releases the turn. */
+        private void giveTurn() {
+            try { writeConverted(); } finally { turn.unlock(); }
+            offerTurn();
+        }
+
+        /** Before the target finishes: the waiting datagrams go first; later ones are dropped. */
+        private void closeTurn() {
+            try { writeConverted(); targetClosed = true; } finally { turn.unlock(); }
+        }
+
+        /** Writes the waiting datagrams if the turn is free; a datagram queued after the holder's last look is written by whoever comes next. */
+        private void offerTurn() {
+            if (turn.isHeldByCurrentThread()) return; // Mid-capsule: the boundary writes them.
+            while (!converted.isEmpty() && turn.tryLock()) {
+                try { writeConverted(); } finally { turn.unlock(); }
+            }
+        }
+
+        /** Writes the waiting datagrams as DATAGRAM capsules; holds the turn, at a capsule boundary. */
+        private void writeConverted() {
+            for (Datagrams.StreamDatagram d; (d = converted.poll()) != null; ) {
+                convertedCount.decrementAndGet();
+                int n = d.payload().length;
+                if (targetClosed) { dropTooLarge(); continue; }
+                convertedHeader.clear();
+                Capsule.putDatagramHeader(convertedHeader, d.context(), n);
+                convertedHeader.flip();
+                boolean started = false;
+                try {
+                    target.out.write(convertedHeader, null, null, Long.MAX_VALUE);
+                    started = true;
+                    target.out.write(ByteBuffer.wrap(d.payload()), null, null, Long.MAX_VALUE);
+                    synchronized (this) { datagramBytes += n; }
+                    if (limiter != null) limiter.charge(n);
+                } catch (CoreException | InterruptedIOException error) {
+                    // The target failed or the splice ends: the stream worker reports it. A capsule cut short can be followed by nothing.
+                    if (started) targetClosed = true;
+                    dropTooLarge();
+                    if (error instanceof InterruptedIOException) { targetClosed = true; Thread.currentThread().interrupt(); }
+                }
+            }
+        }
+
+        private synchronized void dropTooLarge() { drops++; tooLarge++; }
+        private synchronized void dropLimited() { drops++; limited++; }
+
+        /** The source ended inside a capsule: the target is reset and the source stopped with ZMUX_PACKET_ERROR. */
+        private SpliceResult.End truncated() {
+            long code = io.zmux.internal.wire.TransportError.PACKET_ERROR;
+            source.stop(code); target.reset(code);
+            return new SpliceResult.End.Reset(code);
         }
         private void finish(IOException error) {
             if (cancelled.get() || error instanceof InterruptedIOException) {
@@ -256,7 +373,7 @@ final class Splice {
                     target.session.run(op -> {
                         target.session.driver.lanes.flushSending(target.st);
                         if (bytes > 0 && code != io.zmux.carrier.PipeIo.CARRIER_FAILED) target.session.core.sending().setReliableBoundary(target.st);
-                        target.session.driver.lanes.resetSending(target.st, code); return Boolean.TRUE;
+                        target.session.driver.lanes.resetSending(target.st, code); return true;
                     });
                 } catch (IOException failure) {
                     Errors.clearInternalWake();
@@ -273,10 +390,10 @@ final class Splice {
             } else {
                 // A lost session, or a carrier failure of one side: the side it came from.
                 boolean downstream;
-                synchronized (teardown) {
+                synchronized (teardownLock) {
                     // The other direction's failure tore this one down: its cause names the side that was lost.
                     if (error == teardown.get() && teardownLost != null) downstream = teardownLost == target;
-                    else downstream = error == writeFault.get() || error != readFault.get() && atTarget;
+                    else downstream = error == writeFault.get() || (error != readFault.get() && atTarget);
                     if (teardown.get() == null) { teardown.set(error); teardownLost = downstream ? target : source; }
                 }
                 end = downstream ? new SpliceResult.End.DownstreamLost() : new SpliceResult.End.UpstreamLost();
@@ -290,12 +407,12 @@ final class Splice {
             Errors.clearInternalWake(); // Internal observer interrupts have already been classified above.
             source.session.run(op -> {
                 if (source.session.core.error() != null) throw CoreException.session(source.session.core.error());
-                return Boolean.TRUE;
+                return true;
             });
             target.session.run(op -> {
                 CoreException failure = target.session.core.sending().writeError(target.st);
                 if (failure != null) throw failure;
-                return Boolean.TRUE;
+                return true;
             });
         }
         void stopDatagrams() { Thread dg = datagramWorker; if (dg != null) dg.interrupt(); }
@@ -311,14 +428,25 @@ final class Splice {
                         if (source.session.core.error() != null) throw CoreException.session(source.session.core.error());
                         source.session.core.datagrams().waitReceive(source.st, op); return Operation.PENDING;
                     }, op -> source.session.core.datagrams().cancelReceiveWait(source.st, op), Long.MAX_VALUE);
-                    if (dataDone || cancelled.get()) { drops++; break; }
+                    if (dataDone || cancelled.get()) { synchronized (this) { drops++; } break; }
                     int n = data.payload().length;
-                    if (limiter != null && limiter.tryReady(n) < n) { drops++; continue; }
-                    try {
-                        if (target.session.sendDatagram(target.st, data.context(), java.nio.ByteBuffer.wrap(data.payload()))) {
-                            datagramBytes += n; if (limiter != null) limiter.charge(n);
-                        } else drops++;
-                    } catch (NotNegotiatedException | DatagramTooLargeException error) { drops++; }
+                    if (limiter != null && limiter.tryReady(n) < n) { dropLimited(); continue; }
+                    int max = target.maxDatagramPayload(data.context());
+                    if (!packets || (max > 0 && n <= max)) {
+                        try {
+                            if (target.session.sendDatagram(target.st, data.context(), ByteBuffer.wrap(data.payload()))) {
+                                synchronized (this) { datagramBytes += n; }
+                                if (limiter != null) limiter.charge(n);
+                            } else dropLimited();
+                            continue;
+                        } catch (NotNegotiatedException | DatagramTooLargeException error) {
+                            if (!packets) { dropTooLarge(); continue; }
+                        }
+                    }
+                    // A packet relay writes it as a capsule at the next boundary; a bounded wait, never a queue of its own.
+                    if (convertedCount.incrementAndGet() > CONVERTED) { convertedCount.decrementAndGet(); dropTooLarge(); continue; }
+                    converted.add(data);
+                    offerTurn();
                 }
             } catch (IOException error) {
                 // Stream workers own terminal propagation; datagrams never add a waiting queue.
@@ -338,8 +466,15 @@ final class Splice {
             abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
         }
 
-        SpliceResult.Direction result() { return new SpliceResult.Direction(bytes, datagramBytes, drops, end); }
+        SpliceResult.Direction result() {
+            synchronized (this) {
+                return new SpliceResult.Direction(bytes, datagramBytes, drops + convertedCount.get(), tooLarge + convertedCount.get(), limited, end);
+            }
+        }
     }
+
+    /** Packet relay: datagrams that wait for a capsule boundary, per direction; more are dropped as too large. */
+    private static final int CONVERTED = 64;
 
     /** A limiter callback failed or broke its contract; carries what the splice completes with. */
     private static final class CallbackFailed extends IOException {

@@ -511,8 +511,8 @@ final class DefinitionJson {
                 case '{' -> { enter(); Object o = obj(); depth--; yield o; }
                 case '[' -> { enter(); Object a = arr(); depth--; yield a; }
                 case '"' -> str();
-                case 't' -> lit("true", Boolean.TRUE);
-                case 'f' -> lit("false", Boolean.FALSE);
+                case 't' -> lit("true", true);
+                case 'f' -> lit("false", false);
                 case 'n' -> lit("null", null);
                 default -> num();
             };

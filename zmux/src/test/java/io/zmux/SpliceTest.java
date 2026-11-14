@@ -259,6 +259,7 @@ class SpliceTest {
                 assertTrue(dropped.await(3, TimeUnit.SECONDS)); relay.endpoint.finish(); peer.finish();
                 var result = splice.get(3, TimeUnit.SECONDS);
                 assertEquals(1, result.aToB().datagramsDropped()); assertEquals(0, result.aToB().datagramBytes());
+                assertEquals(1, result.aToB().datagramsLimited()); assertEquals(0, result.aToB().datagramsTooLarge());
                 assertEquals(result.aToB().streamBytes(), charged.get());
             }
         }

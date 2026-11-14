@@ -18,7 +18,7 @@ public record QualityBand(Duration rtt, double rateRatio, Duration minInterval) 
     public QualityBand {
         Objects.requireNonNull(rtt);
         Objects.requireNonNull(minInterval);
-        if (rtt.isNegative() || !Double.isFinite(rateRatio) || rateRatio != 0 && rateRatio <= 1) {
+        if (rtt.isNegative() || !Double.isFinite(rateRatio) || (rateRatio != 0 && rateRatio <= 1)) {
             throw new IllegalArgumentException("quality band needs a nonnegative RTT and a ratio above 1 (or 0)");
         }
         if (minInterval.isNegative()) throw new IllegalArgumentException("negative minInterval");

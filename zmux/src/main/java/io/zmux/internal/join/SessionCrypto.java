@@ -35,7 +35,7 @@ public final class SessionCrypto {
     private static void check(long[] set, long required, String what) throws SecureCarrierException {
         boolean has = false;
         for (int i = 0; i < set.length; i++) {
-            if (set[i] <= 0 || set[i] > VarInt.MAX || i > 0 && set[i] <= set[i - 1]) {
+            if (set[i] <= 0 || set[i] > VarInt.MAX || (i > 0 && set[i] <= set[i - 1])) {
                 throw new SecureCarrierException(INVALID_CONFIG, what + " not ascending, with zero or a duplicate");
             }
             has |= set[i] == required;

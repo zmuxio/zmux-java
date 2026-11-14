@@ -174,6 +174,7 @@ public final class QuicClient implements AutoCloseable {
         return future(notified);
     }
 
+    @SuppressWarnings("CollectionUndefinedEquality") // pending holds futures, which compare by identity
     private <T> CompletableFuture<T> track(CompletableFuture<T> result) {
         pending.add(result);
         result.whenComplete((value, error) -> pending.remove(result));
@@ -217,7 +218,7 @@ public final class QuicClient implements AutoCloseable {
 
     /** Whether name is an IP address literal, which TLS does not send as a server name. */
     private static boolean literal(String name) {
-        return name.indexOf(':') >= 0 || name.chars().allMatch(c -> c == '.' || c >= '0' && c <= '9');
+        return name.indexOf(':') >= 0 || name.chars().allMatch(c -> c == '.' || (c >= '0' && c <= '9'));
     }
 
     /** A mapped IPv4 address is still an IPv4 route; preserve genuine IPv6 scope IDs. */

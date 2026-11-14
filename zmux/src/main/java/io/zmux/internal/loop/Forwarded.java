@@ -246,7 +246,7 @@ final class Forwarded implements Inbound {
 
     /** Closes the carrier once no write is in flight (abortive with a cause). */
     private void finish(Throwable cause) {
-        if (closed || cause == null && pending != null) return;
+        if (closed || (cause == null && pending != null)) return;
         closed = true;
         carrier.loop().removeShutdownHook(shutdown);
         PipeWriter.Completion done = pending;

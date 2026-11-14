@@ -91,7 +91,12 @@ public final class Definition {
         COUNTER, LEN, SEQ, WIRE_LEFT, STALL_LEFT, WIRE_SPENT, SENT_BYTES, WIRE_PPM;
 
         /** A reading of the session's meters. */
-        boolean metered() { return ordinal() >= WIRE_LEFT.ordinal(); }
+        boolean metered() {
+            return switch (this) {
+                case COUNTER, LEN, SEQ -> false;
+                case WIRE_LEFT, STALL_LEFT, WIRE_SPENT, SENT_BYTES, WIRE_PPM -> true;
+            };
+        }
     }
 
     enum Comparison {

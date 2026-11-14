@@ -343,7 +343,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         boolean incremental = priority.incremental();
         session.run(op -> {
             core.streams().setPeerPriority(st, urgency, incremental);
-            return Boolean.TRUE;
+            return true;
         });
     }
 
@@ -406,7 +406,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         session.call(op -> {
             session.driver.lanes.flushSending(st);
             if (target[0] < 0) target[0] = core.streams().flush(st);
-            return core.sending().flushDone(st, target[0], op) ? Boolean.TRUE : Operation.PENDING;
+            return core.sending().flushDone(st, target[0], op) ? true : Operation.PENDING;
         }, op -> core.sending().cancelWriteWait(st, op), ZmuxSession.until(writeTimeout));
     }
 
@@ -422,8 +422,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
      * As of the loop's last round; no I/O.
      */
     public int maxDatagramPayload(long context) {
-        var i = session.info();
-        if (!i.datagramFlows()) return 0;
+        if (!session.driver.info().datagramFlows()) return 0;
         // The flow prefix: the stream's flow (its ID + 1) and the context, as variable-length integers.
         int flow = st.idSet() ? io.zmux.internal.wire.VarInt.length(st.id() + 1) : 8;
         return Math.max(0, session.datagramLimit() - flow - io.zmux.internal.wire.VarInt.length(context));

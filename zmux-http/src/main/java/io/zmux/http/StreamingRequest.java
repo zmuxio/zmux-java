@@ -53,6 +53,8 @@ final class StreamingRequest {
     private URI url;
     private int hops;
     private BodyCarrier current;
+    /** The connection whose TLS a bidirectional carrier reports; null for a split half. */
+    private Channel boundConn;
     /** Increases with every request: a write's failure on an earlier one is not the carrier's. */
     private int generation;
     /** A redirect is under way: the next request is not ready yet. */
@@ -90,17 +92,20 @@ final class StreamingRequest {
         Channel ch = client.await(client.conns.open(url, false, false), "connect");
         try {
             // Under the lock: a redirect answered on the first request may already be replacing current.
+            //noinspection SynchronizationOnLocalVariableOrMethodParameter
             synchronized (r) {
+                // A bidirectional carrier reports the TLS of this connection: a redirect may only continue it there.
+                if (dir == PipeOptions.Direction.BIDIRECTIONAL) r.boundConn = Requests.connection(ch);
                 r.current = r.request(ch, url, List.of());
             }
         } catch (IOException | RuntimeException e) {
             ch.close();
             throw e;
         }
-        return new PipeIo(r.reads ? r.new Reader() : null, r.writes ? r.new Writer() : null, Framing.BYTE_STREAM, "http " + dir,
-                Requests.connection(ch))
-                .withReceiveMemory(BodyCarrier.RECEIVE_MEMORY)
-                .withCarrier(dir == PipeOptions.Direction.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
+        PipeIo io = new PipeIo(r.reads ? r.new Reader() : null, r.writes ? r.new Writer() : null, Framing.BYTE_STREAM, "http " + dir,
+                Requests.connection(ch));
+        if (dir != PipeOptions.Direction.BIDIRECTIONAL) return io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY).withCarrier(CarrierKind.SPLIT);
+        return Requests.pipe(io, ch).withCarrier(CarrierKind.STREAMING);
     }
 
     /** Sends the request head on ch, then the credential's prefix and replay, and returns its carrier. */
@@ -214,6 +219,9 @@ final class StreamingRequest {
                     // Every byte kept so far, the writes made while redirecting among them, goes
                     // first on the new request, and later writes go to it: one step under the lock.
                     try {
+                        if (boundConn != null && Requests.connection(ch) != boundConn && Requests.tls(boundConn) != null) {
+                            throw new HttpRedirectException(status, u.toString(), "redirect to another TLS connection");
+                        }
                         nc = request(ch, u, kept == null ? List.of() : kept);
                     } catch (IOException | RuntimeException e) {
                         ch.close();

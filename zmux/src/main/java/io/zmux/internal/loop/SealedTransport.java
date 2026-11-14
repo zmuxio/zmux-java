@@ -165,7 +165,7 @@ public final class SealedTransport implements Transport, Inbound {
     public int bytes(Transport t, ReadBuf buf, ByteBuffer data, int pos, int lim) {
         int at = pos;
         while (lim - at >= LEN) {
-            int n = (data.get(at) & 0xff) << 8 | data.get(at + 1) & 0xff;
+            int n = (data.get(at) & 0xff) << 8 | (data.get(at + 1) & 0xff);
             if (lim - at - LEN < n) break;
             if (!open(data.slice(at + LEN, n))) return GONE;
             at += LEN + n;

@@ -181,7 +181,7 @@ public final class KeepAlive {
     }
 
     boolean wants() {
-        return owe || want && outstanding == 0 || requestFirst;
+        return owe || (want && outstanding == 0) || requestFirst;
     }
 
     // ---- writing ----

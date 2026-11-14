@@ -1409,7 +1409,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     void apply(Action a) {
-        if (a.kind() == Action.Kind.ABORT || a.kind() == Action.Kind.CLOSE && a.dir() == Action.DIR_BIDI) {
+        if (a.kind() == Action.Kind.ABORT || (a.kind() == Action.Kind.CLOSE && a.dir() == Action.DIR_BIDI)) {
             JoinerGate g = joinerGates.get(a.pipe());
             if (g != null) {
                 g.end(new java.io.IOException("pipe " + a.pipe() + " not joined"));
@@ -1443,6 +1443,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         }
     }
 
+    @SuppressWarnings("StaticAssignmentOfThrowable") // a shared marker cause; the stack of its creation says nothing
     private static final Throwable ABORTED = new java.io.IOException("pipe aborted");
 
     /** Told of every Locator joins may now name (true) or no longer name (false); the listener's routing. */

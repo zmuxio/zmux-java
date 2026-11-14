@@ -367,7 +367,7 @@ public final class Joins {
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
             if (a == null || !a.joinerLocal || a.health.retired() || a.health.out() == Attach.OUT_FAILED
-                    || a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_ENDED) continue;
+                    || (a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_ENDED)) continue;
             target++;
         }
         return target < Math.max(1, cfg.maxPipes());
@@ -444,12 +444,14 @@ public final class Joins {
         return new ReplyRoom(frames, (int) Math.max(room - used, 0));
     }
 
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+
     /** A key of the process that no joiner has: a Hello of an epoch not accepted opens with it and fails as auth. */
     private static final byte[] NO_EPOCH_KEY = noEpochKey();
 
     private static byte[] noEpochKey() {
         byte[] k = new byte[32];
-        new java.security.SecureRandom().nextBytes(k);
+        RANDOM.nextBytes(k);
         return k;
     }
 
@@ -524,7 +526,7 @@ public final class Joins {
                 return new JoinStep(Step.MORE, len, 0);
             }
             var cl = CarrierAdmission.classify(java.nio.ByteBuffer.wrap(b), off, off + len, 65535);
-            if (cl.kind() == CarrierAdmission.Kind.MORE || cl.kind() == CarrierAdmission.Kind.SESSION && cl.firstRecordLength() == 0) {
+            if (cl.kind() == CarrierAdmission.Kind.MORE || (cl.kind() == CarrierAdmission.Kind.SESSION && cl.firstRecordLength() == 0)) {
                 return new JoinStep(Step.MORE, 0, len + 1);
             }
             if (cl.kind() != CarrierAdmission.Kind.SESSION) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
@@ -695,7 +697,7 @@ public final class Joins {
         }
         port.applyBatch(pj.payload.firstBatch());
         boolean needIn = pj.pipe.direction() != 1, needOut = pj.pipe.direction() != 0;
-        boolean refuse = needIn && !c.hasIn() || needOut && !c.hasOut() || c.refuse() || !capRoom(needIn, needOut);
+        boolean refuse = (needIn && !c.hasIn()) || (needOut && !c.hasOut()) || c.refuse() || !capRoom(needIn, needOut);
         try {
             ReplyPayload bare = new ReplyPayload(refuse ? 1 : 0, null, 0);
             int wire = pj.acceptor.replyLength(bare) + overhead;
@@ -720,7 +722,7 @@ public final class Joins {
         JoinPipe j = pj.pipe;
         long id = j.id();
         boolean needIn = j.direction() != 1, needOut = j.direction() != 0;
-        if (c.refuse() || peerAttachments() >= cap && (port.state() != SessionState.SUSPENDED || !makeRoom(false, needIn, needOut))) {
+        if (c.refuse() || (peerAttachments() >= cap && (port.state() != SessionState.SUSPENDED || !makeRoom(false, needIn, needOut)))) {
             pendAbandon.put(id, TransportError.PIPE_RESOURCE_LIMIT);
             pipes.wakeWriters();
             return JoinResult.REFUSED;
@@ -815,7 +817,7 @@ public final class Joins {
             out |= p.out() != null && a.liveOut();
             in |= p.in() != null && (a.health.in() == Attach.IN_JOINING || a.health.in() == Attach.IN_OPEN);
         }
-        return provideOut && !out || provideIn && !in;
+        return (provideOut && !out) || (provideIn && !in);
     }
 
     boolean makeRoom(boolean local, boolean provideIn, boolean provideOut) {
@@ -1062,7 +1064,6 @@ public final class Joins {
         return b;
     }
 
-    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
 
     private void setFrame(byte[] body) {
         ep.frame = body;

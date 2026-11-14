@@ -341,6 +341,7 @@ final class ExchangeServer {
     }
 
     /** Section 7.1 steps 4 and 5: Time within the window, and the (Carrier ID, Nonce) pair recorded once. */
+    @SuppressWarnings("IntLongMath") // the time difference is taken in 32 bits on purpose: modulo 2^32
     private boolean fresh(Exchange.Header q) {
         long now = seconds.getAsLong();
         long skew = cfg.maxClockSkew().toSeconds();
@@ -599,7 +600,7 @@ final class ExchangeServer {
             Exchange.Header q = a.q;
             long n = q.seq();
             boolean fin = q.fin();
-            if (fin && (upFin >= 0 && upFin != n || upMax > n + 1) || !fin && upFin >= 0 && n > upFin) {
+            if ((fin && ((upFin >= 0 && upFin != n) || upMax > n + 1)) || (!fin && upFin >= 0 && n > upFin)) {
                 end(new IOException("exchange carrier protocol violation"));
                 return Exchange.FLAG_GONE;
             }
@@ -611,7 +612,7 @@ final class ExchangeServer {
             if (ooo) {
                 // Out of order: leave room for the piece zmux waits for, and count each held piece
                 // with a fixed overhead so that empty pieces cannot be held without bound.
-                long room = cfg.upStoreLimit() - cfg.upLimit();
+                long room = (long) cfg.upStoreLimit() - cfg.upLimit();
                 if (upLen + delivered + upOooCost + stored + PIECE_COST > room) return Exchange.FLAG_BUSY;
             } else if (stored > 0 && upLen + delivered + upOooCost + stored > cfg.upStoreLimit()) {
                 return Exchange.FLAG_BUSY;

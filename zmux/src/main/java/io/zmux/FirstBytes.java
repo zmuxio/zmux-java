@@ -43,10 +43,10 @@ public record FirstBytes(Kind kind, int need) {
         if (have == 0) return new FirstBytes(Kind.NEED_MORE, 1);
         if (framing == Framing.MESSAGES) return firstLead(b.get(pos)) ? RECORD : OTHER;
         int first = b.get(pos) & 0xff, l = 1 << (first >> 6);
-        if (l == 8 || l == 1 && first < 9 || l == 4 && have >= 2 && b.get(pos + 1) != 0) return OTHER;
+        if (l == 8 || (l == 1 && first < 9) || (l == 4 && have >= 2 && b.get(pos + 1) != 0)) return OTHER;
         if (have < l) return new FirstBytes(Kind.NEED_MORE, l + 1);
         long size = first & 0x3f;
-        for (int i = 1; i < l; i++) size = size << 8 | b.get(pos + i) & 0xff;
+        for (int i = 1; i < l; i++) size = size << 8 | (b.get(pos + i) & 0xff);
         if (size < 9 || size > MAX_RECORD_SIZE) return OTHER;
         if (have == l) return new FirstBytes(Kind.NEED_MORE, l + 1);
         return firstLead(b.get(pos + l)) ? RECORD : OTHER;

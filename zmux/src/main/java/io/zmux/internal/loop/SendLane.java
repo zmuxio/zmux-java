@@ -217,7 +217,7 @@ public final class SendLane {
                 if (self == null) self = new Blocked();
                 if (!awaitLease(self)) continue;
                 while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0) {
+                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                         if (WAITER.compareAndSet(this, self, null)) throw interrupted(from.position() - start);
                         break; // Resumed meanwhile: take the lease.
                     }
@@ -264,7 +264,7 @@ public final class SendLane {
         Blocked w = new Blocked();
         turn.enqueue(w);
         while (!w.granted()) {
-            if (Thread.currentThread().isInterrupted() || deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0) {
+            if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                 if (w.cancel()) { turn.remove(w); throw interrupted(bytes); }
                 break;
             }
@@ -321,7 +321,7 @@ public final class SendLane {
     private void queueFin(Operation<Void> op) {
         CoreException e = terminal;
         if (e != null) { op.settle(e); return; }
-        if (finished) { op.settle(Boolean.TRUE); return; }
+        if (finished) { op.settle(true); return; }
         finished = true;
         link(new Entry(null, null, 0, 0, op));
         markDirty();
@@ -379,7 +379,7 @@ public final class SendLane {
                 CoreException e = ended();
                 if (e != null) { dropChunk(); finish(e); turn.leave(); return; }
                 if (data != null) fillChunk(data, buf); else fill(src);
-                if (!from.hasRemaining()) { dropChunk(); finish(Boolean.TRUE); turn.leave(); return; }
+                if (!from.hasRemaining()) { dropChunk(); finish(true); turn.leave(); return; }
                 if (awaitLease(this)) return;
                 if (!begin()) { turn.leave(); return; }
             }
@@ -437,7 +437,7 @@ public final class SendLane {
                     appDone = true;
                     driver.post(() -> driver.lanes.partEnded(st)); // after this step, not inside it
                 }
-                e.fin.settle(t == null ? Boolean.TRUE : t);
+                e.fin.settle(t == null ? true : t);
             } else if (!e.block()) {
                 put(e.buf, e.view);
                 e.buf.unref();

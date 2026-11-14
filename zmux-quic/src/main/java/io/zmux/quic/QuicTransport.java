@@ -202,7 +202,7 @@ final class QuicTransport extends AbstractTransport {
 
     @Override
     public void shutdownInput() {
-        if (inEnded && closed || !carrier.receives()) return;
+        if ((inEnded && closed) || !carrier.receives()) return;
         inEnded = true;
         for (ByteBuf b; (b = held.poll()) != null; ) b.release();
         takeUnread();

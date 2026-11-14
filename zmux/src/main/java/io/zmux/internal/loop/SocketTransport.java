@@ -140,6 +140,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         if (!paused) return;
         paused = false;
         if (inEnded || closed || reader == null) return;
+        // redeliver runs the reader, which may pause the input or end it again.
         if (!redeliver(reader) || paused || inEnded) return;
         if (endPending != 0) {
             endInput(endPending == 1);

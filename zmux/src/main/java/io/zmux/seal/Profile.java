@@ -27,6 +27,7 @@ public enum Profile {
 
     private final long value;
     private final boolean psk;
+    @SuppressWarnings("ImmutableEnumChecker") // Suite is an enum of constants
     private final Suite suite;
     private final String cipherName;
 

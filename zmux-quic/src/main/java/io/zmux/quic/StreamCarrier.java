@@ -11,6 +11,7 @@ import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
+import io.zmux.internal.loop.CarrierChannel;
 import io.zmux.internal.loop.NativePipe;
 import io.zmux.internal.loop.Transport;
 import io.zmux.internal.loop.TransportInfo;
@@ -96,7 +97,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         @Override public long channelStreamId() { return id; }
         @Override public int maxChannelDatagram() { return connection.maxDatagram(); }
         @Override public void send(byte[] datagram, Runnable refused) { connection.sendDatagram(datagram, refused); }
-        @Override public Runnable receive(Sink sink) { return connection.receiveDatagrams(id, sink); }
+        @Override public Runnable receive(CarrierChannel.Sink sink) { return connection.receiveDatagrams(id, sink); }
     }
 
     /** The session on this stream ended with e; the connection keeps its code for its own close. On the loop. */
@@ -118,7 +119,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
 
     private final class NativeReader implements PipeReader, NativePipe {
         @Override public Transport claim(PipeIo io) { return StreamCarrier.this.claim(io); }
-        @Override public void start(Sink target) {
+        @Override public void start(PipeReader.Sink target) {
             if (!use.compareAndSet(FRESH, HALVES) && use.get() != HALVES) throw new IllegalStateException("carrier taken over");
             startHalves(target);
         }
@@ -150,7 +151,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
      */
     PipeIo adapter(TransportInfo info, PipeIo.LaneOpener lanes) {
         PipeReader r = !receive ? null : new PipeReader() {
-            @Override public void start(Sink target) { startHalves(target); }
+            @Override public void start(PipeReader.Sink target) { startHalves(target); }
             @Override public void close() { closeHalvesInput(); }
         };
         PipeWriter w = !send ? null : new PipeWriter() {
@@ -282,7 +283,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
 
     /** STOP/RESET need not produce peer FIN; once both owned halves finish, release the local channel explicitly. */
     private void closeIfReleased() {
-        if ((!receive || inputClosed && inputDone) && (!send || outputClosed && outputDone)) stream.close();
+        if ((!receive || (inputClosed && inputDone)) && (!send || (outputClosed && outputDone))) stream.close();
     }
 
     private void dispatch(Runnable action) { dispatch(action, () -> {}); }

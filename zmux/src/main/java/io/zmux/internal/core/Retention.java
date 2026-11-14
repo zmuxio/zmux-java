@@ -483,7 +483,7 @@ final class Retention {
     static boolean streamBlocked(Stream st) {
         StreamSend.SendPart sp = st.snd;
         if (st.tab.discarded() || !st.hasSend || sp.reset() || !st.tab.idSet() || sp.sendEnd() <= Math.max(sp.sent(), sp.q().base())) return false;
-        return sp.sent() >= sp.maxData() || sp.mps() != null && sp.mps().sched.moving();
+        return sp.sent() >= sp.maxData() || (sp.mps() != null && sp.mps().sched.moving());
     }
 
     void opportunistic(PathScheduler.Decision d, RecordWriter w) {

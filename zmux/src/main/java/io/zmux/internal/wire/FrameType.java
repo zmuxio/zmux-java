@@ -32,6 +32,7 @@ public final class FrameType {
     public static final long PIPE_LANE = 0x3a05a1c9L;
 
     /** The frame types that may begin a carrier's first record. */
+    @SuppressWarnings("MutablePublicArray") // a read-only constant; a copy per read would cost on the frame path
     public static final long[] FIRST_FRAME_TYPES = {TRANSPORT_PARAMETERS, PIPE_LANE};
     public static final long PIPE_PING = 0x269b43e6L;
     public static final long PIPE_ABANDON = 0x23b35b74L;

@@ -63,7 +63,7 @@ public record ProxyHeader(int length, InetSocketAddress source) {
         d.get(p, line);
         String[] f = new String(line, StandardCharsets.US_ASCII).split(" ", -1);
         if (f.length >= 2 && f[1].equals("UNKNOWN")) return new ProxyHeader(end + 1, null);
-        if (f.length != 6 || !f[1].equals("TCP4") && !f[1].equals("TCP6")) throw new ProtocolException("PROXY header fields");
+        if (f.length != 6 || (!f[1].equals("TCP4") && !f[1].equals("TCP6"))) throw new ProtocolException("PROXY header fields");
         InetAddress src;
         try {
             src = InetAddress.ofLiteral(f[2]);
@@ -85,7 +85,7 @@ public record ProxyHeader(int length, InetSocketAddress source) {
     }
 
     private static int port(String s) throws ProtocolException {
-        if (s.isEmpty() || s.length() > 5 || !s.chars().allMatch(c -> c >= '0' && c <= '9') || s.length() > 1 && s.charAt(0) == '0') {
+        if (s.isEmpty() || s.length() > 5 || !s.chars().allMatch(c -> c >= '0' && c <= '9') || (s.length() > 1 && s.charAt(0) == '0')) {
             throw new ProtocolException("PROXY header port");
         }
         int v = Integer.parseInt(s);

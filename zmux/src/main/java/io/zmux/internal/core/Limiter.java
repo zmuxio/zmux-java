@@ -291,6 +291,7 @@ final class Limiter {
         rttSample(now, rtt, now - rtt, srtt, p, timeAt(p.slack(rate), rate));
     }
 
+    @SuppressWarnings("LongDoubleConversion") // the sample is a double by design; a nanosecond count is far below 2^53
     void rttSample(long now, long u, long sentAt, long srtt, Params p, long aTime) {
         long gap = hasLastSample ? Time.sub(now, lastSample) : 0;
         recent.update(now, u, Math.max(srtt / 2, gap));

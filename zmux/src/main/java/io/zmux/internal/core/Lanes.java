@@ -79,7 +79,7 @@ public final class Lanes {
             if (sp.bind().laneBound && sp.bind().lanePipe == p.id && sp.bind().lane == x.lane) bound--;
             if (bound == 0) free = true;
             if (best == null || bound < best.boundSt.size()
-                    || bound == best.boundSt.size() && x.tx.pos() - x.ack.acked() < best.tx.pos() - best.ack.acked()) {
+                    || (bound == best.boundSt.size() && x.tx.pos() - x.ack.acked() < best.tx.pos() - best.ack.acked())) {
                 best = x;
             }
         }
@@ -99,6 +99,8 @@ public final class Lanes {
         st.snd.bind().lane = l.lane;
         st.snd.bind().laneBound = true;
         l.boundSt.add(st);
+        // The new lane's writer may already have looked for work under the old binding.
+        outbox.wake(l.lane == 0 ? p.out().sig : l.st.sig());
         return l;
     }
 

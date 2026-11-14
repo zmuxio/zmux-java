@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 /** Record framing and the first-record check. */
 public final class Records {
     /** The first 8 bytes after the Size of a bootstrap pipe's first record. */
+    @SuppressWarnings("MutablePublicArray") // a read-only constant; a copy per read would cost on the frame path
     public static final byte[] TRANSPORT_PARAMETERS_PREFIX = {(byte) 0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a};
     /** The smallest Size of a first record. */
     public static final int MIN_FIRST_RECORD = 9;

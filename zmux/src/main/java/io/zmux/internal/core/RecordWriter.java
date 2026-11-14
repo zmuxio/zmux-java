@@ -263,6 +263,11 @@ final class RecordWriter {
         return true;
     }
 
+    /** The largest Size of this lane's records. */
+    int recordLimit() {
+        return recMax;
+    }
+
     /** Adds a DATAGRAM frame (LEN omitted when it ends its record). */
     boolean datagram(byte[] data) {
         int n = 1 + VarInt.length(data.length) + data.length;
@@ -434,7 +439,7 @@ final class RecordWriter {
      * otherwise: the plan gives way, or the stream never opens.
      */
     boolean waiveCutFor(int head, long preamble) {
-        if (held || cut <= 0 || recBytes + pendLen(false) > 0 && open) return false;
+        if (held || cut <= 0 || (recBytes + pendLen(false) > 0 && open)) return false;
         if (Math.max(Math.min(recMax, budget - sizeCost()) - head, 0) < preamble) return false;
         cutWaived = true;
         return true;

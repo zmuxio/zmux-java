@@ -44,7 +44,7 @@ final class Requests {
             boolean chunked = HttpUtil.isTransferEncodingChunked(r);
             // An HTTP/1.1 request with neither has no body; so has an HTTP/2 request whose
             // HEADERS ended its stream (the codec makes it a full request).
-            if (version == 1 && !chunked || full) cl = 0;
+            if ((version == 1 && !chunked) || full) cl = 0;
         }
         String protocol = r.headers().get(":protocol", "");
         return new HttpClass.Head(r.method().name(), version, protocol, cl, RequestHead.of(fields(r.headers()), false));
@@ -77,8 +77,8 @@ final class Requests {
 
     /**
      * A pipe input on ch's connection with its TLS metadata. The TLS this process runs on the
-     * connection (its own SslHandler) gives the exporter and, once its handshake completed with
-     * TLS 1.2 or 1.3, the Secure declaration of the Bound contract; TLS that ends before this
+     * connection (its own SslHandler) gives the exporter and, once its handshake completed on
+     * TLS 1.3, the Secure declaration of the Bound contract; TLS that ends before this
      * process (a terminating proxy) is not seen here and declares nothing.
      */
     static PipeIo pipe(PipeIo io, Channel ch) {
@@ -93,13 +93,7 @@ final class Requests {
         // A connection whose handshake has not completed counts as without TLS; the exporter reads it late.
         boolean complete = e.getHandshakeStatus() == javax.net.ssl.SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING;
         if (sni.isEmpty() && e.getUseClientMode() && e.getPeerHost() != null) sni = e.getPeerHost();
-        return io.withExporter(x).withServerName(sni).withTerminatedTls(complete).withSecure(complete && boundVersion(e));
-    }
-
-    /** Whether e's session has a TLS version the Bound contract takes. */
-    private static boolean boundVersion(SSLEngine e) {
-        String v = e.getSession().getProtocol();
-        return v.equals("TLSv1.3") || v.equals("TLSv1.2");
+        return io.withExporter(x).withServerName(sni).withTerminatedTls(complete).withSecure(complete && e.getSession().getProtocol().equals("TLSv1.3"));
     }
 
     /** The keying material exporter of a TLS connection (RFC 5705). */

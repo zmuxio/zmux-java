@@ -43,7 +43,7 @@ public record JoinHint(String pairing, boolean uplink, InetSocketAddress source,
         if (field == null || field.isEmpty()) return PAIR_HEADER;
         for (int i = 0; i < field.length(); i++) {
             char c = field.charAt(i);
-            boolean token = c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || "!#$%&'*+-.^_`|~".indexOf(c) >= 0;
+            boolean token = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || "!#$%&'*+-.^_`|~".indexOf(c) >= 0;
             if (!token) throw new IllegalArgumentException("pairing field \"" + field + "\" is not a header field name");
         }
         String l = field.toLowerCase(java.util.Locale.ROOT);

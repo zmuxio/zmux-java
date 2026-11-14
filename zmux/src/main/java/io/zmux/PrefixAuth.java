@@ -112,7 +112,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
         if (value == null || value.length() != HEADER_LENGTH) return null;
         for (int i = 0; i < HEADER_LENGTH; i++) {
             char c = value.charAt(i);
-            if (!(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_')) return null;
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return null;
         }
         // 43 characters carry 258 bits: the last one's low 2 bits are unused and must be zero.
         int last = value.charAt(HEADER_LENGTH - 1);

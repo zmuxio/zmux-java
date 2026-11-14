@@ -47,7 +47,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         Objects.requireNonNull(duration);
         try {
             long n = duration.toNanos();
-            if (n < 0 || !zero && n == 0) throw new IllegalArgumentException("duration must be positive");
+            if (n < 0 || (!zero && n == 0)) throw new IllegalArgumentException("duration must be positive");
             return n;
         } catch (ArithmeticException error) { throw new IllegalArgumentException("duration exceeds the monotonic clock range", error); }
     }
@@ -79,14 +79,18 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         /** The session a {@link Join} adds its pipes to. */
         public ZmuxSession session() { return session; }
         public Cancellation cancellation() { return cancellation; }
+        private ZmuxPipe made(ZmuxPipe pipe) {
+            made = pipe;
+            return pipe;
+        }
         private void begin() {
             if (Thread.currentThread() != owner || started) throw new IllegalStateException("one creation per dial attempt on its worker");
             started = true;
         }
-        public ZmuxPipe join(PipeIo io) throws IOException { begin(); return made = session.addPipe(io, options); }
-        public ZmuxPipe join(java.net.InetSocketAddress address) throws IOException { begin(); return made = session.addPipe(address, options); }
+        public ZmuxPipe join(PipeIo io) throws IOException { begin(); return made(session.addPipe(io, options)); }
+        public ZmuxPipe join(java.net.InetSocketAddress address) throws IOException { begin(); return made(session.addPipe(address, options)); }
         public ZmuxPipe joinTls(java.net.InetSocketAddress address, TlsOptions tls) throws IOException {
-            begin(); return made = session.addTlsPipe(address, tls, options);
+            begin(); return made(session.addTlsPipe(address, tls, options));
         }
         /**
          * Takes the attempt's result: every pipe belongs to the session and, when the attempt created one

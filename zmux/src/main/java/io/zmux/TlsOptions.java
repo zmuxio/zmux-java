@@ -51,7 +51,7 @@ public record TlsOptions(SSLContext context, String serverName, boolean secure) 
 
     /** Whether name is an IP address literal, which TLS does not send as a server name. */
     private static boolean literal(String name) {
-        return name.indexOf(':') >= 0 || name.chars().allMatch(c -> c == '.' || c >= '0' && c <= '9');
+        return name.indexOf(':') >= 0 || name.chars().allMatch(c -> c == '.' || (c >= '0' && c <= '9'));
     }
 
     SSLEngine serverEngine(String[] protocols) {

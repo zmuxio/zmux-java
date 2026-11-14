@@ -302,7 +302,7 @@ public final class StreamSend {
     /** Resets the sending part with code. */
     public void reset(Stream st, long code) {
         StreamSend.SendPart sp = st.snd;
-        if (!st.hasSend || sp.reset || sp.errState != null && sp.errState.kind() != StreamError.Kind.STOPPED
+        if (!st.hasSend || sp.reset || (sp.errState != null && sp.errState.kind() != StreamError.Kind.STOPPED)
                 || sp.state == Stream.SEND_DATA_RECVD || sp.state == Stream.SEND_RESET_RECVD) {
             table.maybeDiscard(st);
             return;
@@ -385,7 +385,7 @@ public final class StreamSend {
         if (!sp.stopped) {
             sp.stopped = true;
             sp.stopCode = code;
-            if (sp.errState == null || sp.errState.kind() == StreamError.Kind.CLOSED_LOCALLY && !sp.reset) {
+            if (sp.errState == null || (sp.errState.kind() == StreamError.Kind.CLOSED_LOCALLY && !sp.reset)) {
                 sp.errState = new StreamError(StreamError.Kind.STOPPED, st.tab.id(), code, 0, true);
             }
         }
@@ -457,7 +457,7 @@ public final class StreamSend {
             return true;
         }
         long c = sendCapacity(st);
-        return c >= Math.max(min, 1) || c > 0 && st.unsent() == 0;
+        return c >= Math.max(min, 1) || (c > 0 && st.unsent() == 0);
     }
 
     /** Wakes and removes the stream's satisfied waiters; true when none remain. */

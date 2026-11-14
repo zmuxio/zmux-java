@@ -248,11 +248,11 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         boolean bidi = stream.type() == QuicStreamType.BIDIRECTIONAL;
         StreamCarrier carrier = new StreamCarrier(stream, host, true, bidi);
         stream.pipeline().addLast(carrier);
-        if (!handshake || listener == null && session == null) pending.add(carrier);
+        if (!handshake || (listener == null && session == null)) pending.add(carrier);
         else route(carrier);
     }
     private void routePending() {
-        if (!handshake || listener == null && session == null) return;
+        if (!handshake || (listener == null && session == null)) return;
         for (StreamCarrier carrier : pending) route(carrier);
         pending.clear();
     }

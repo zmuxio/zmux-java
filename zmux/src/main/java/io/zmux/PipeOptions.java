@@ -77,8 +77,8 @@ public final class PipeOptions {
                     case RECEIVE_ONLY -> 1;
                     case BIDIRECTIONAL -> 2;
                 })
-                .sendPriority(s.sendPriority == PipeUpdate.Change.SET ? Long.valueOf(s.sendPriorityValue) : null)
-                .sendStandby(s.sendStandby == PipeUpdate.Change.SET ? Boolean.valueOf(s.sendStandbyValue) : null)
+                .sendPriority(s.sendPriority == PipeUpdate.Change.SET ? s.sendPriorityValue : null)
+                .sendStandby(s.sendStandby == PipeUpdate.Change.SET ? s.sendStandbyValue : null)
                 .recvPriority(s.receivePriority == PipeUpdate.Change.SET ? s.receivePriorityValue : 0)
                 .recvStandby(s.receiveStandby == PipeUpdate.Change.SET && s.receiveStandbyValue)
                 .weight(s.weight == PipeUpdate.Change.SET ? s.weightValue : 1)

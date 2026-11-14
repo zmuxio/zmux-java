@@ -10,6 +10,6 @@ package io.zmux;
 public record CapacityFloor(long rate, double recoveryRatio) {
     public CapacityFloor {
         if (rate < 0 || !Double.isFinite(recoveryRatio)
-                || recoveryRatio != 0 && recoveryRatio <= 1) throw new IllegalArgumentException("capacity floor");
+                || (recoveryRatio != 0 && recoveryRatio <= 1)) throw new IllegalArgumentException("capacity floor");
     }
 }
