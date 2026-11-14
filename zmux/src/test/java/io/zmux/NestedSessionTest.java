@@ -137,7 +137,7 @@ class NestedSessionTest {
                 outerClient.addPipe(listener.localAddress(), PipeOptions.defaults());
                 var routing = workers.submit(() -> {
                     try {
-                        while (true) innerListener.handle(outerServer.acceptStream().asPipe(), JoinHint.inBand(TestAddr.peer("nested"))).closed();
+                        while (true) innerListener.adapter().handle(outerServer.acceptStream().asPipe(), JoinHint.inBand(TestAddr.peer("nested"))).closed();
                     } catch (IOException expected) { return null; }
                 });
                 try (var client = Zmux.open(outerClient.openStreamAsPipe(), Role.CLIENT, innerConfig);

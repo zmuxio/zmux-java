@@ -329,13 +329,13 @@ class VectorsTest {
     /** Effects in the form of the cases; times in microseconds. */
     static Map<String, Object> effects(Effects e) {
         Map<String, Object> m = new HashMap<>();
-        if (e.hasInject()) {
+        if (e.isInjectSet()) {
             Map<String, Object> i = e.isInjectNone() ? null : new HashMap<>(Map.of("at", e.injectAtNanos() / 1000, "len", (long) e.injectLength()));
             m.put("inject", i);
         }
-        if (e.hasWake()) m.put("wake", e.isWakeNone() ? null : (Object) (e.wakeAtNanos() / 1000));
-        if (e.hasGate()) m.put("gate", new HashMap<>(Map.of("pause_until", e.gatePauseUntilNanos() / 1000, "rate", e.gateRate(), "burst", e.gateBurst())));
-        if (e.hasWeight()) m.put("weight", e.weight());
+        if (e.isWakeSet()) m.put("wake", e.isWakeNone() ? null : (Object) (e.wakeAtNanos() / 1000));
+        if (e.isGateSet()) m.put("gate", new HashMap<>(Map.of("pause_until", e.gatePauseUntilNanos() / 1000, "rate", e.gateRate(), "burst", e.gateBurst())));
+        if (e.isWeightSet()) m.put("weight", e.weight());
         if (e.isStopRequested()) m.put("stop", true);
         return m;
     }

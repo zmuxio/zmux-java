@@ -86,10 +86,10 @@ public final class SealedTransport implements Transport, Inbound {
     @Override public void shutdownOutput() { lower.shutdownOutput(); }
     @Override public void shutdownInput() { lower.shutdownInput(); }
     @Override public void close(Throwable cause) { lower.close(cause); }
-    @Override public boolean closed() { return lower.closed(); }
+    @Override public boolean isClosed() { return lower.isClosed(); }
     @Override public Transport moveTo(SessionHost to) { lower.close(null); return null; }
-    @Override public boolean hasExporter() { return true; }
-    @Override public boolean secure() { return lower.secure(); }
+    @Override public boolean exporterPresent() { return true; }
+    @Override public boolean isSecure() { return lower.isSecure(); }
     @Override public io.zmux.RecordMode firstPipeMode() { return lower.firstPipeMode(); }
     @Override public Object carrierPeer() { return lower.carrierPeer(); }
     @Override public long handshakePadding() { return lower.handshakePadding(); }
@@ -169,7 +169,7 @@ public final class SealedTransport implements Transport, Inbound {
             if (lim - at - LEN < n) break;
             if (!open(data.slice(at + LEN, n))) return GONE;
             at += LEN + n;
-            if (lower.closed()) return GONE;
+            if (lower.isClosed()) return GONE;
         }
         return at - pos;
     }

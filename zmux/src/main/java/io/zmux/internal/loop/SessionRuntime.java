@@ -893,7 +893,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     /** Whether the bootstrap carrier has an exporter; any thread. */
-    public boolean bootHasExporter() { return boot.hasExporter(); }
+    public boolean bootExporterPresent() { return boot.exporterPresent(); }
 
     /** The admission value of the session's bootstrap carrier; set before the session starts. */
     private volatile Object admitted;

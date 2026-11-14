@@ -731,9 +731,10 @@ public final class StreamTable {
 
     // ---- release and discard ----
 
-    /** Drops every handle: an unfinished sending part is reset and an unread receiving part stopped, both with code 0. */
+    /** Drops every handle: an unfinished sending part is reset with ZMUX_CANCELLED and an unread receiving part stopped with code 0 (EXTENSIONS.md 7.4). */
     public void release(Stream st) {
-        if (st.hasSend && !st.snd.finWritten() && !st.snd.reset()) port.reset(st, 0);
+        // A sending part the application did not finish: abandoned, never a clean end (EXTENSIONS.md 7.4).
+        if (st.hasSend && !st.snd.finWritten() && !st.snd.reset()) port.reset(st, TransportError.CANCELLED);
         st.tab.releasedSend = true;
         if (st.hasRecv && st.rcv.state() != Stream.RECV_DATA_READ && st.rcv.state() != Stream.RECV_RESET_READ) {
             port.stopRecv(st, 0);

@@ -122,9 +122,9 @@ final class CarrierInteropPeer {
             int kind = socket.getInputStream().read();
             var peer = (InetSocketAddress) socket.getRemoteSocketAddress();
             switch (kind) {
-                case 'U' -> listener.handle(pipe(socket, true, false), JoinHint.pair(PAIR, true, peer));
-                case 'D' -> listener.handle(pipe(socket, false, true), JoinHint.pair(PAIR, false, peer));
-                default -> listener.handle(pipe(socket, true, true), JoinHint.inBand(peer));
+                case 'U' -> listener.adapter().handle(pipe(socket, true, false), JoinHint.pair(PAIR, true, peer));
+                case 'D' -> listener.adapter().handle(pipe(socket, false, true), JoinHint.pair(PAIR, false, peer));
+                default -> listener.adapter().handle(pipe(socket, true, true), JoinHint.inBand(peer));
             }
         } catch (IOException | RuntimeException e) {
             try { socket.close(); } catch (IOException ignored) { /* gone */ }
@@ -248,7 +248,7 @@ final class CarrierInteropPeer {
         Gate gate = new Gate() {
             @Override public byte[] resolve(byte[] handle, SocketAddress src) { return Arrays.equals(handle, KEYS.handle()) ? KEYS.psk() : null; }
             @Override public io.zmux.seal.Credential credential(byte[] handle, Profile profile, SocketAddress src) { return null; }
-            @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "committed"; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "committed"; }
         };
         Profile[] accepted = Arrays.stream(profiles.split(",")).map(p -> Profile.of(Long.parseLong(p))).toArray(Profile[]::new);
         var server = ServerConfig.builder(gate, NODE).acceptedProfiles(accepted).build();
@@ -265,7 +265,7 @@ final class CarrierInteropPeer {
     private static void sealClient(EventLoops loops, String addr, long value) throws Exception {
         Profile profile = Profile.of(value);
         var cfg = ClientConfig.builder().anchor(new PinAnchor(KeyId.of(KeyAlg.X25519, NODE.publicKey()))).allowedProfiles(profile);
-        if (profile.hasPsk()) cfg.psk(KEYS.handle(), KEYS.psk());
+        if (profile.isPskBased()) cfg.psk(KEYS.handle(), KEYS.psk());
         SocketChannel channel = SocketChannel.open(address(addr));
         PipeIo carrier = io.zmux.carrier.PipeChannel.pipe(channel, channel, io.zmux.carrier.Framing.BYTE_STREAM, 1 << 16);
         PipeIo established = Seal.establish(carrier, cfg.build()).toCompletableFuture().get(10, TimeUnit.SECONDS);

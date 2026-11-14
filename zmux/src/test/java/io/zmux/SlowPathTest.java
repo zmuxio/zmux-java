@@ -22,7 +22,9 @@ class SlowPathTest {
         private record Item(ByteBuffer data, long at) {}
 
         private final PipeWriter out;
-        private final long delayNanos, cap;
+        private final long cap;
+        /** The one-way delay; a test may change it. */
+        volatile long delayNanos;
         /** Nanoseconds per byte; a test may slow the link down. */
         volatile double nanosPerByte;
         private final LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
@@ -32,6 +34,8 @@ class SlowPathTest {
         private volatile boolean closed;
 
         void rate(double bytesPerSecond) { nanosPerByte = 1e9 / bytesPerSecond; }
+
+        void delay(Duration d) { delayNanos = d.toNanos(); }
 
         Link(PipeWriter out, Duration delay, double bytesPerSecond, long cap) {
             this.out = out; delayNanos = delay.toNanos(); nanosPerByte = 1e9 / bytesPerSecond; this.cap = cap;
@@ -132,10 +136,10 @@ class SlowPathTest {
             ZmuxConfig cfg = cb.build();
             try (var listener = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 PipeIo[] slow = linked(Duration.ofMillis(300), 3e4, 16 << 20);
-                listener.handle(slow[1], JoinHint.inBand(TestAddr.peer("slow")));
+                listener.adapter().handle(slow[1], JoinHint.inBand(TestAddr.peer("slow")));
                 try (var client = Zmux.open(slow[0], Role.CLIENT, cfg); var server = listener.accept(Duration.ofSeconds(10))) {
                     PipeIo[] fast = linked(Duration.ofMillis(20), 5e6, 256 << 10);
-                    listener.handle(fast[1], JoinHint.inBand(TestAddr.peer("fast")));
+                    listener.adapter().handle(fast[1], JoinHint.inBand(TestAddr.peer("fast")));
                     client.addPipe(fast[0], PipeOptions.defaults());
                     var echo = Thread.ofVirtual().start(() -> {
                         try (var st = server.acceptStream(Duration.ofSeconds(10))) {

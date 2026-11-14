@@ -1,11 +1,18 @@
 package io.zmux;
 
+import java.util.Objects;
+import java.util.Optional;
+
 /**
  * The description of a carrier that a {@link RecordPolicy} and an {@link AllowRecordMode} see.
  *
- * @param hasExporter the carrier has an exporter
- * @param secure the carrier declares the Bound contract ({@link io.zmux.carrier.PipeIo#isSecure()})
- * @param label the application's label, or null
+ * @param isExporterPresent the carrier has an exporter
+ * @param isSecure the carrier declares the Bound contract ({@link io.zmux.carrier.PipeIo#isSecure()})
+ * @param label the application's label; empty: none
  * @param isFirstPipe the carrier is the session's first
  */
-public record RecordPolicyInput(boolean hasExporter, boolean secure, String label, boolean isFirstPipe) {}
+public record RecordPolicyInput(boolean isExporterPresent, boolean isSecure, Optional<String> label, boolean isFirstPipe) {
+    public RecordPolicyInput {
+        Objects.requireNonNull(label, "label");
+    }
+}

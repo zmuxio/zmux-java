@@ -9,7 +9,6 @@ import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -63,22 +62,22 @@ class ListenerEntryTest {
                 var peer = ip("192.0.2.9", 4000);
                 var source = ip("2001:db8:1:2::7", 5000);
                 var one = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(one[1], JoinHint.inBand(peer).withSource(source));
+                l.adapter().handle(one[1], JoinHint.inBand(peer).withSource(source));
                 var info = seen.poll(5, TimeUnit.SECONDS);
                 assertEquals(source, info.source());
                 assertEquals(peer, info.peer());
                 // Another address of the same /64, another port: the same client, whose one slot is held.
                 var two = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var refused = l.handle(two[1], JoinHint.inBand(peer).withSource(ip("2001:db8:1:2::99", 1)));
+                var refused = l.adapter().handle(two[1], JoinHint.inBand(peer).withSource(ip("2001:db8:1:2::99", 1)));
                 assertFalse(refused.taken().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals(1, l.stats().refused());
                 assertTrue(seen.isEmpty(), "refused at its slot, before a decision");
                 // Without a source the peer is the source.
                 var three = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(three[1], JoinHint.inBand(ip("198.51.100.1", 1)));
+                l.adapter().handle(three[1], JoinHint.inBand(ip("198.51.100.1", 1)));
                 info = seen.poll(5, TimeUnit.SECONDS);
                 assertEquals(info.peer(), info.source());
-                assertEquals(l.stallDuration(ip("2001:db8:1:2::1", 0)), l.stallDuration(ip("2001:db8:1:2::2", 9)));
+                assertEquals(l.adapter().stallDuration(ip("2001:db8:1:2::1", 0)), l.adapter().stallDuration(ip("2001:db8:1:2::2", 9)));
             }
         }
     }
@@ -97,7 +96,7 @@ class ListenerEntryTest {
                     }).withPeekTimeout(Duration.ofMillis(800))).build();
             try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var handled = l.handle(boot[1], JoinHint.inBand(TestAddr.peer("a")));
+                var handled = l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("a")));
                 Admission.Deadline d = deadlines.poll(5, TimeUnit.SECONDS);
                 assertFalse(d.expired());
                 assertTrue(d.remaining().compareTo(Duration.ofMillis(800)) <= 0);
@@ -110,7 +109,7 @@ class ListenerEntryTest {
                 // A decision past the deadline: cancelled, the carrier closed.
                 var slow = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var ended = watchEnd(slow[0]);
-                l.handle(slow[1], JoinHint.inBand(TestAddr.peer("b")));
+                l.adapter().handle(slow[1], JoinHint.inBand(TestAddr.peer("b")));
                 deadlines.poll(5, TimeUnit.SECONDS);
                 var pending = later.get();
                 ended.get(5, TimeUnit.SECONDS);
@@ -134,7 +133,7 @@ class ListenerEntryTest {
             var l = ZmuxListener.of(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
-            l.handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
+            l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
             var f = pending.poll(5, TimeUnit.SECONDS);
             l.close();
             ended.get(5, TimeUnit.SECONDS);
@@ -160,7 +159,7 @@ class ListenerEntryTest {
             var l = ZmuxListener.of(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
-            l.handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
+            l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
             assertTrue(inDecider.await(5, TimeUnit.SECONDS));
             l.close();
             closeDone.countDown();
@@ -180,10 +179,10 @@ class ListenerEntryTest {
                         return d;
                     })).withStall(Duration.ofSeconds(20), Duration.ofSeconds(20))).build();
             try (var l = ZmuxListener.of(lc)) {
-                java.util.function.Function<Admission.Decision, ZmuxListener.Handled> carrier = d -> {
+                java.util.function.Function<Admission.Decision, io.zmux.adapter.Handled> carrier = d -> {
                     next.set(d);
                     var p = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    var h = l.handle(p[1], JoinHint.inBand(TestAddr.peer("s")),
+                    var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")),
                             (io, info) -> { io.reader().close(); io.writer().close(); });
                     try { h.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError(e); }
                     return h;
@@ -247,31 +246,36 @@ class ListenerEntryTest {
             var cfg = config(loops);
             var l = ZmuxListener.of(ListenerConfig.of(cfg));
             var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-            l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
+            l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
             var client = Zmux.open(boot[0], Role.CLIENT, cfg);
             var server = l.accept(Duration.ofSeconds(5));
-            var done = l.shutdownAsync(Duration.ofSeconds(30));
-            assertThrows(ClosedChannelException.class, () -> l.accept(Duration.ofMillis(10)));
+            // An open stream keeps the session running through its shutdown.
+            var open = client.openStream();
+            open.write(new byte[] {1});
+            var held = server.acceptStream(Duration.ofSeconds(5));
+            var done = l.shutdownAsync(0, "");
+            assertThrows(ListenerClosedException.class, () -> l.accept(Duration.ofMillis(10)));
             // A new session is refused.
             var fresh = MemoryPipe.pair(Framing.BYTE_STREAM);
             long refused = l.stats().refused();
-            l.handle(fresh[1], JoinHint.inBand(TestAddr.peer("d")));
+            l.adapter().handle(fresh[1], JoinHint.inBand(TestAddr.peer("d")));
             var connecting = CompletableFuture.supplyAsync(() -> {
                 try { return Zmux.open(fresh[0], Role.CLIENT, cfg); } catch (Exception e) { return null; }
             }, r -> Thread.ofVirtual().start(r));
             await(() -> l.stats().refused() == refused + 1);
             // The live session still joins a pipe.
             var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-            l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
+            l.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
             client.addPipe(pair[0], PipeOptions.builder().noProbation().build());
             await(() -> l.stats().joins() == 1);
             assertFalse(done.isDone(), "open while its session lives");
             assertFalse(l.isClosed());
+            open.close(); held.close();
             client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             done.get(5, TimeUnit.SECONDS);
             assertTrue(l.isClosed());
             var late = MemoryPipe.pair(Framing.BYTE_STREAM);
-            assertFalse(l.handle(late[1], JoinHint.inBand(TestAddr.peer("c"))).taken().toCompletableFuture().get(5, TimeUnit.SECONDS));
+            assertFalse(l.adapter().handle(late[1], JoinHint.inBand(TestAddr.peer("c"))).taken().toCompletableFuture().get(5, TimeUnit.SECONDS));
             var c = connecting.get(10, TimeUnit.SECONDS);
             if (c != null) c.close();
         }

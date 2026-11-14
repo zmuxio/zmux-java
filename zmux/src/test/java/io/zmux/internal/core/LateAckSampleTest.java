@@ -41,7 +41,7 @@ class LateAckSampleTest {
         Poke.set(ps, "so", end);
         Field samples = AckEngine.Send.class.getDeclaredField("samples");
         samples.setAccessible(true);
-        ((ArrayList<Pipe.Sample>) samples.get(ps)).add(new Pipe.Sample(end, sent, 0, sent, sent, 0, false, 0));
+        ((ArrayList<Pipe.Sample>) samples.get(ps)).add(new Pipe.Sample(end, sent, 0, sent, sent, 0, false, 0, false));
         lane.segs.add(start, end, start);
         engine.acked(lane, end);
         engine.advanced(pipe, lane, end, delayMicros, now);

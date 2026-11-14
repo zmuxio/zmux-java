@@ -111,7 +111,7 @@ final class CarrierChoiceSource {
         } catch (IOException | RuntimeException e) {
             session.reportCarrier(List.of(new CandidateResult(c.kind(), CarrierSelection.outcomeOf(e), true, e, c.variant())), null, "");
             record(i, false);
-            throw e instanceof IOException io ? io : new IOException(c.kind() + " join failed", e);
+            throw e instanceof IOException io ? io : new CallbackFailedException(c.kind() + " join failed", e);
         }
         session.reportCarrier(List.of(new CandidateResult(c.kind(), CandidateOutcome.USABLE, true, null, c.variant())), null, "");
         return pipes;
@@ -121,7 +121,7 @@ final class CarrierChoiceSource {
         CarrierCredential cred = s.credential();
         if (c.joiner() != null) {
             List<ZmuxPipe> pipes = c.joiner().join(s, options, cred, policy.timerMin());
-            if (pipes == null || pipes.isEmpty()) throw new IOException(c.kind() + " joined no pipe");
+            if (pipes == null || pipes.isEmpty()) throw new CallbackFailedException(c.kind() + " joined no pipe");
             return List.copyOf(pipes);
         }
         long t0 = System.nanoTime();
@@ -146,11 +146,11 @@ final class CarrierChoiceSource {
             f.thenAccept(CarrierChoiceSource::abort);
             throw new InterruptedIOException("interrupted");
         } catch (ExecutionException e) {
-            throw e.getCause() instanceof IOException io2 ? io2 : new IOException(e.getCause());
+            throw e.getCause() instanceof IOException io2 ? io2 : new CallbackFailedException("join failed", e.getCause());
         }
     }
 
     private static void abort(ZmuxPipe pipe) {
-        try { pipe.abort(); } catch (IOException ignored) { /* Gone. */ }
+        pipe.abort();
     }
 }

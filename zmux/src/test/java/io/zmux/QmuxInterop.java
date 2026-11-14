@@ -63,7 +63,7 @@ class QmuxInterop {
                         var failure = assertThrows(ExecutionException.class, () -> PeerInterop.read(stream));
                         assertEquals(33, assertInstanceOf(StreamResetException.class, failure.getCause()).code());
                     }
-                    var incoming = session.acceptReceiveStreamAsync(Duration.ofSeconds(10));
+                    var incoming = session.acceptReceiveStreamAsync().orTimeout(10, java.util.concurrent.TimeUnit.SECONDS);
                     try (var stream = session.openSendStream(Preamble.EMPTY)) { stream.write(text("uni")); stream.finish(); }
                     try (var stream = PeerInterop.get(incoming)) { assertArrayEquals(text("uni"), PeerInterop.read(stream)); }
                     assertTrue(state.maxDatagramPayload() > 0);

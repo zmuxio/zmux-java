@@ -96,7 +96,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    public boolean closed() {
+    public boolean isClosed() {
         return closed;
     }
 
@@ -124,10 +124,10 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    public boolean hasExporter() { return true; }
+    public boolean exporterPresent() { return true; }
 
     @Override
-    public boolean secure() {
+    public boolean isSecure() {
         // The host's word for the path; the version is judged here.
         if (!declaredSecure || handshaking) return false;
         String v = engine.getSession().getProtocol();
@@ -367,7 +367,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
             endInput(endPending == 1);
             return;
         }
-        if (!closed && !paused && !inEnded && key != null && key.isValid()) key.interestOps(key.interestOps() | SelectionKey.OP_READ);
+        if (key != null && key.isValid()) key.interestOps(key.interestOps() | SelectionKey.OP_READ);
     }
 
     @Override

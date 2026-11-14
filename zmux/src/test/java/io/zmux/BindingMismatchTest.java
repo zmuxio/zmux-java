@@ -30,7 +30,7 @@ class BindingMismatchTest {
     /** Runs a Bound Establish whose exporters differ; returns how long the client waited for the end, in ms. */
     private static long mismatchedEstablish(ZmuxListener l) throws Exception {
         PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-        l.handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+        l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
         PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withSecure(true);
         long t0 = System.nanoTime();
         var f = Seal.establish(near, SealTest.client().mode(RecordMode.BOUND).handshakeTimeout(Duration.ofSeconds(20)).build()).toCompletableFuture();
@@ -86,7 +86,7 @@ class BindingMismatchTest {
                 try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(10))) {
                     assertNotNull(s);
                     PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 2)));
+                    l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 2)));
                     PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withSecure(true);
                     long t0 = System.nanoTime();
                     assertThrows(Exception.class, () -> c.addPipe(near, PipeOptions.builder().recordMode(RecordMode.BOUND).build()));

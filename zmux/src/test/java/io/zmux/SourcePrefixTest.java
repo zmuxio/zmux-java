@@ -41,22 +41,22 @@ class SourcePrefixTest {
         var lc = ListenerConfig.builder().maxPendingPerSource(2).sourcePrefixV4(24).sourcePrefixV6(56).admission(adm).build();
         try (var l = ZmuxListener.of(lc)) {
             // Two IPv4 sources of one /24 hold its two slots; a third, mapped or not, has none.
-            assertNotNull(l.reserve(at("10.0.0.1", 1), null));
-            assertNotNull(l.reserve(at("10.0.0.2", 2), null));
-            assertNull(l.reserve(at("10.0.0.200", 3), null));
-            assertNull(l.reserve(mapped(10, 0, 0, 7), null), "IPv4-mapped IPv6 counts as IPv4");
-            assertNotNull(l.reserve(at("10.0.1.1", 4), null), "another /24 has its own share");
+            assertNotNull(l.adapter().reserve(at("10.0.0.1", 1), null));
+            assertNotNull(l.adapter().reserve(at("10.0.0.2", 2), null));
+            assertNull(l.adapter().reserve(at("10.0.0.200", 3), null));
+            assertNull(l.adapter().reserve(mapped(10, 0, 0, 7), null), "IPv4-mapped IPv6 counts as IPv4");
+            assertNotNull(l.adapter().reserve(at("10.0.1.1", 4), null), "another /24 has its own share");
             // IPv6: /56 is the first seven bytes.
-            assertNotNull(l.reserve(at("2001:db8:0:1::1", 5), null));
-            assertNotNull(l.reserve(at("2001:db8:0:ff::2", 6), null));
-            assertNull(l.reserve(at("2001:db8:0:42::3", 7), null));
-            assertNotNull(l.reserve(at("2001:db8:0:100::1", 8), null), "another /56 has its own share");
+            assertNotNull(l.adapter().reserve(at("2001:db8:0:1::1", 5), null));
+            assertNotNull(l.adapter().reserve(at("2001:db8:0:ff::2", 6), null));
+            assertNull(l.adapter().reserve(at("2001:db8:0:42::3", 7), null));
+            assertNotNull(l.adapter().reserve(at("2001:db8:0:100::1", 8), null), "another /56 has its own share");
 
-            assertEquals(l.stallDuration(at("10.0.0.1", 1)), l.stallDuration(at("10.0.0.99", 2)));
-            assertEquals(l.stallDuration(at("10.0.0.1", 1)), l.stallDuration(mapped(10, 0, 0, 3)));
-            assertNotEquals(l.stallDuration(at("10.0.0.1", 1)), l.stallDuration(at("10.0.1.1", 1)));
-            assertEquals(l.stallDuration(at("2001:db8:0:1::1", 1)), l.stallDuration(at("2001:db8:0:ff::9", 1)));
-            assertNotEquals(l.stallDuration(at("2001:db8:0:1::1", 1)), l.stallDuration(at("2001:db8:0:100::1", 1)));
+            assertEquals(l.adapter().stallDuration(at("10.0.0.1", 1)), l.adapter().stallDuration(at("10.0.0.99", 2)));
+            assertEquals(l.adapter().stallDuration(at("10.0.0.1", 1)), l.adapter().stallDuration(mapped(10, 0, 0, 3)));
+            assertNotEquals(l.adapter().stallDuration(at("10.0.0.1", 1)), l.adapter().stallDuration(at("10.0.1.1", 1)));
+            assertEquals(l.adapter().stallDuration(at("2001:db8:0:1::1", 1)), l.adapter().stallDuration(at("2001:db8:0:ff::9", 1)));
+            assertNotEquals(l.adapter().stallDuration(at("2001:db8:0:1::1", 1)), l.adapter().stallDuration(at("2001:db8:0:100::1", 1)));
         }
     }
 

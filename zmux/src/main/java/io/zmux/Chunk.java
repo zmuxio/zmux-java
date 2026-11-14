@@ -12,14 +12,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@link ZmuxSendStream#writeChunk(Chunk)}. Transfer consumes it on every outcome.
  *
  * <p>A chunk that is neither closed nor transferred keeps its buffer (a session's receive
- * buffer, a carrier's read buffer) until it is: nothing releases it when it becomes
- * unreachable. Setting the system property {@code zmux.leakDetection} to {@code sample}
- * (one chunk in 128) or {@code paranoid} (every chunk, with the stack that created it)
- * reports such chunks when the garbage collector finds them, and releases them then.
+ * buffer, a carrier's read buffer) until it is. As a safety net, one chunk in 128 is watched by
+ * default: when the garbage collector finds one of those dropped, zmux logs a warning and
+ * releases its buffer, so a leak shows in the log at the cost of watching a sample. The system
+ * property {@code zmux.leakDetection} changes the share: {@code paranoid} watches every chunk,
+ * with the stack that created it, and releases every dropped one; {@code off} watches none.
  */
 public final class Chunk implements AutoCloseable {
     private final AtomicReference<StreamRecv.Chunk> value;
-    /** The leak report of a sampled chunk, or null. */
+    /** The leak watch of a sampled chunk, or null. */
     private final Cleaner.Cleanable leak;
 
     Chunk(StreamRecv.Chunk chunk) {
@@ -62,13 +63,13 @@ public final class Chunk implements AutoCloseable {
         if (leak != null) leak.clean();
     }
 
-    /** Sampled detection of chunks that were dropped without close or transfer. */
+    /** Sampled detection and release of chunks that were dropped without close or transfer. */
     private static final class Leaks {
         /** 0: off; 1: every chunk; n: one chunk in n. */
-        private static final int RATE = switch (System.getProperty("zmux.leakDetection", "off")) {
+        private static final int RATE = switch (System.getProperty("zmux.leakDetection", "sample")) {
             case "paranoid" -> 1;
-            case "sample" -> 128;
-            default -> 0;
+            case "off" -> 0;
+            default -> 128;
         };
         private static final Cleaner CLEANER = RATE == 0 ? null : Cleaner.create(Thread.ofVirtual().name("zmux-leak-detector").factory());
         private static final java.util.logging.Logger LOG = java.util.logging.Logger.getLogger(Chunk.class.getName());

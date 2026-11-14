@@ -69,7 +69,7 @@ class QuicAdmissionTest {
                 var connecting = endpoint.connectAsync(server.address(), "localhost", config);
                 byte[] first = got.get(10, TimeUnit.SECONDS);
                 assertTrue(first.length >= 4, "the bytes read are replayed to the fallback");
-                assertNull(listener.accept(Duration.ofMillis(200)));
+                assertThrows(java.net.SocketTimeoutException.class, () -> listener.accept(Duration.ofMillis(200)));
                 server.connections().forEach(c -> c.close());
                 assertThrows(Exception.class, () -> connecting.get(10, TimeUnit.SECONDS));
             }
@@ -85,7 +85,7 @@ class QuicAdmissionTest {
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var connecting = endpoint.connectAsync(server.address(), "localhost", config);
                 assertThrows(Exception.class, () -> connecting.get(10, TimeUnit.SECONDS));
-                assertNull(listener.accept(Duration.ofMillis(100)));
+                assertThrows(java.net.SocketTimeoutException.class, () -> listener.accept(Duration.ofMillis(100)));
             }
         }
     }
@@ -119,7 +119,7 @@ class QuicAdmissionTest {
                 assertNotNull(b);
                 assertEquals("32 ACCEPT", verdicts.poll(1, TimeUnit.SECONDS));
 
-                var joined = client.openPipeAsync(server.address(), "localhost", a, auth).get(5, TimeUnit.SECONDS);
+                var joined = client.dialAsync(server.address(), "localhost", a, auth).get(5, TimeUnit.SECONDS);
                 a.addPipe(joined, PipeOptions.defaults());
                 assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
 
@@ -137,7 +137,7 @@ class QuicAdmissionTest {
                 }
                 assertNull(verdicts.poll(100, TimeUnit.MILLISECONDS), "one admission per connection");
 
-                var bare = client.openPipeAsync(server.address(), "localhost", a).get(5, TimeUnit.SECONDS);
+                var bare = client.dialAsync(server.address(), "localhost", a).get(5, TimeUnit.SECONDS);
                 var refused = CompletableFuture.runAsync(() -> {
                     try { a.addPipe(bare, PipeOptions.defaults()); }
                     catch (java.io.IOException e) { throw new java.io.UncheckedIOException(e); }

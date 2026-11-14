@@ -113,14 +113,12 @@ final class Pacer {
     }
 
     /** The earliest moment a held pipe may send again; dataPending is whether any stream data waits. */
-    long deadline(boolean dataPending, long now) {
+    long deadline(boolean dataPending) {
         if (!dataPending) return Time.NEVER;
         long t = Time.NEVER;
         for (Pipe p : pipes) {
             if (p.out() != null && p.out().pace.lim != null && p.out().pace.lim.held()) {
-                // The limiter release, never sooner than one granularity from now, competes for the earliest wake-up.
-                long release = Math.max(p.out().pace.lim.release(), Time.add(now, Limiter.GRANULARITY));
-                t = Math.min(t, release);
+                t = Math.min(t, p.out().pace.lim.release());
             }
         }
         return t;

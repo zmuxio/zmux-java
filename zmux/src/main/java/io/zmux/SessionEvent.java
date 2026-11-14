@@ -51,13 +51,13 @@ public sealed interface SessionEvent {
                                PipeStats.SettingSource source) implements SessionEvent {}
 
     /** A quality estimate left the configured band; rate is bytes/s. */
-    record PipeQualityChanged(PipeId pipeId, CarrierKind carrier, java.time.Duration smoothedRtt, double rate) implements SessionEvent {}
+    record PipeQualityChanged(PipeId pipeId, CarrierKind carrier, java.time.Duration smoothedRtt, long rate) implements SessionEvent {}
 
     /** The sum of measured usable outbound rate estimates fell below the floor, in bytes/s. */
-    record CapacityBelow(double rate) implements SessionEvent {}
+    record CapacityBelow(long rate) implements SessionEvent {}
 
-    /** The sum of measured usable rate estimates recovered past the configured hysteresis. */
-    record CapacityRestored(double rate) implements SessionEvent {}
+    /** The sum of measured usable rate estimates recovered past the configured hysteresis, in bytes/s. */
+    record CapacityRestored(long rate) implements SessionEvent {}
 
     /**
      * A candidate of {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} was tried; an unread one is replaced by the next try of the same kind.
@@ -85,10 +85,10 @@ public sealed interface SessionEvent {
 
     /**
      * Follows {@link SessionSuspended} when the session can rejoin but nothing in the library
-     * will dial for it: it has no {@link ZmuxConfig.Builder#redial redial hook} and no running
+     * will dial for it: it has no {@link ZmuxConfig.Builder#redial(Redial) redial hook} and no running
      * pool ({@link ZmuxSession#maintainPipes}). It ends at the grace period unless the
      * application adds a pipe; one that resumes by its own {@link ZmuxSession#addPipe} calls
-     * can ignore this event. Also logged as a warning ({@link ZmuxConfig.Builder#logger}).
+     * can ignore this event. Also logged as a warning ({@link ZmuxConfig.Builder#logger(System.Logger)}).
      */
     record ResumeUnattended() implements SessionEvent {}
 

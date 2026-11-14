@@ -64,7 +64,7 @@ class AppDataTest {
                 // The anchor sees the data before its own verification: none of it is authenticated yet.
                 same(List.of(new AppData(1, new byte[] {1}, false, false), new AppData(3, new byte[] {3}, true, false)), judged.getFirst().peerAppData());
                 assertEquals(2, client.size());
-                assertTrue(client.get(0).peer().profile().hasPsk());
+                assertTrue(client.get(0).peer().profile().isPskBased());
                 assertNull(client.get(0).peer().input());
                 assertArrayEquals(SealTest.NODE.publicKey(), client.get(1).peer().input().peerStatic());
                 same(List.of(new AppData(2, "two".getBytes(), true, false)), client.get(1).peer().input().peerAppData());

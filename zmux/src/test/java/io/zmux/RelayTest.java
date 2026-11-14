@@ -21,7 +21,7 @@ class RelayTest {
 
     static PipePool through(TcpRelay relay, PipeOptions options) {
         return PipePool.of(attempt -> attempt.join(relay.address())).withOptions(options)
-                .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new PipePool.Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
+                .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
     }
 
     static <T extends SessionEvent> T event(ZmuxSession s, Class<T> kind, java.util.function.Predicate<T> match, long ms) throws Exception {

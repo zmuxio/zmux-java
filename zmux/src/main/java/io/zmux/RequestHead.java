@@ -10,7 +10,7 @@ import java.util.TreeMap;
 /**
  * The HTTP request of a carrier, as the application's HTTP server received it: its header
  * fields and whether the carrier is decided on this head.
- * An HTTP adapter gives it to {@link ZmuxListener#handle} with the carrier ({@link JoinHint#request()});
+ * An HTTP adapter gives it to {@link io.zmux.adapter.ListenerAdapter#handle} with the carrier ({@link JoinHint#request()});
  * the admission sees it through {@link Admission.CarrierInfo}.
  *
  * @param headers the request's header fields, names compared without regard to case; fields

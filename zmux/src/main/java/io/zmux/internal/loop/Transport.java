@@ -76,7 +76,7 @@ public interface Transport {
     void close(Throwable cause);
 
     /** Whether the transport is closed (or moved away). */
-    boolean closed();
+    boolean isClosed();
 
     /**
      * Leaves this loop without closing the connection: the returned transport, not yet
@@ -89,10 +89,10 @@ public interface Transport {
     default byte[] export(String label, byte[] context, int length) { return null; }
 
     /** Whether this carrier declares the Bound contract; an exporter alone is no such declaration. */
-    default boolean secure() { return false; }
+    default boolean isSecure() { return false; }
 
     /** Whether a Bound Join can run here: a split carrier cannot at present. */
-    default boolean bindable() { return secure() && info().carrier().kind() != io.zmux.CarrierKind.SPLIT; }
+    default boolean bindable() { return isSecure() && info().carrier().kind() != io.zmux.CarrierKind.SPLIT; }
 
     /** The record mode of an Establish that ran on this carrier, which is then a secure first pipe; null (or UNMANAGED) otherwise. */
     default io.zmux.RecordMode firstPipeMode() { return null; }
@@ -104,7 +104,7 @@ public interface Transport {
     default long handshakePadding() { return 0; }
 
     /** Whether this carrier has an exporter, whether or not its value exists yet. */
-    default boolean hasExporter() { return false; }
+    default boolean exporterPresent() { return false; }
 
     /** The TLS session of the handshake this process ran for the carrier; null without one. */
     default javax.net.ssl.SSLSession tlsSession() { return null; }

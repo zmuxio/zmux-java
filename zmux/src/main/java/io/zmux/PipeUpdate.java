@@ -20,23 +20,30 @@ import java.util.Objects;
  *   <li>{@code probation}: set to a duration or off ({@link Builder#noProbation()}); cleared, the
  *       session's.
  *   <li>{@code liveness}: set, the pipe's {@link PipeLiveness} as a whole; cleared, the session's.
+ *   <li>{@code qualityBand}: set, the pipe's own quality event band ({@link QualityBand}, outbound
+ *       pipes only); cleared, the session's ({@link ZmuxSession#setQualityBand}).
  * </ul>
  *
  * One update applies all its settings together (one that changes both receive settings sends one
  * PIPE_STATUS); an invalid value is rejected when it is set and changes nothing. The settings
- * fixed when the pipe is added ({@link PipeOptions}: direction, record mode, key group, label,
- * fate group, returnOnReply) are not here. Immutable.
+ * fixed when the pipe is added ({@link PipeOptions}: direction, record mode, key group, fate
+ * group, returnOnReply) are not here; {@link PipeOptions.Builder} takes these same settings, where
+ * keeping and clearing both mean the default. Immutable.
  */
 public final class PipeUpdate {
     /** A setting's change. */
     enum Change { KEEP, CLEAR, SET }
 
-    final Change sendPriority, receivePriority, sendStandby, receiveStandby, weight, probation, liveness;
+    /** The update that changes nothing. */
+    static final PipeUpdate KEEP_ALL = builder().build();
+
+    final Change sendPriority, receivePriority, sendStandby, receiveStandby, weight, probation, liveness, qualityBand;
     final long sendPriorityValue, receivePriorityValue, weightValue;
     final boolean sendStandbyValue, receiveStandbyValue;
     /** Set probation; null with {@link Change#SET}: off. */
     final Duration probationValue;
     final PipeLiveness livenessValue;
+    final QualityBand qualityBandValue;
 
     private PipeUpdate(Builder b) {
         sendPriority = b.sendPriority; receivePriority = b.receivePriority; sendStandby = b.sendStandby;
@@ -44,6 +51,25 @@ public final class PipeUpdate {
         sendPriorityValue = b.sendPriorityValue; receivePriorityValue = b.receivePriorityValue; weightValue = b.weightValue;
         sendStandbyValue = b.sendStandbyValue; receiveStandbyValue = b.receiveStandbyValue;
         probationValue = b.probationValue; livenessValue = b.livenessValue;
+        qualityBand = b.qualityBand; qualityBandValue = b.qualityBandValue;
+    }
+
+    /** Whether no setting but the quality band changes. */
+    boolean onlyBand() {
+        return sendPriority == Change.KEEP && sendStandby == Change.KEEP && receivePriority == Change.KEEP
+                && receiveStandby == Change.KEEP && weight == Change.KEEP && probation == Change.KEEP && liveness == Change.KEEP;
+    }
+
+    /** A builder holding this update. */
+    Builder toBuilder() {
+        Builder b = new Builder();
+        b.sendPriority = sendPriority; b.receivePriority = receivePriority; b.sendStandby = sendStandby;
+        b.receiveStandby = receiveStandby; b.weight = weight; b.probation = probation; b.liveness = liveness;
+        b.sendPriorityValue = sendPriorityValue; b.receivePriorityValue = receivePriorityValue; b.weightValue = weightValue;
+        b.sendStandbyValue = sendStandbyValue; b.receiveStandbyValue = receiveStandbyValue;
+        b.probationValue = probationValue; b.livenessValue = livenessValue;
+        b.qualityBand = qualityBand; b.qualityBandValue = qualityBandValue;
+        return b;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -51,11 +77,13 @@ public final class PipeUpdate {
     /** Builds a {@link PipeUpdate}; the last call for a setting wins. */
     public static final class Builder {
         private Change sendPriority = Change.KEEP, receivePriority = Change.KEEP, sendStandby = Change.KEEP,
-                receiveStandby = Change.KEEP, weight = Change.KEEP, probation = Change.KEEP, liveness = Change.KEEP;
+                receiveStandby = Change.KEEP, weight = Change.KEEP, probation = Change.KEEP, liveness = Change.KEEP,
+                qualityBand = Change.KEEP;
         private long sendPriorityValue, receivePriorityValue, weightValue = 1;
         private boolean sendStandbyValue, receiveStandbyValue;
         private Duration probationValue;
         private PipeLiveness livenessValue;
+        private QualityBand qualityBandValue;
 
         private Builder() {}
 
@@ -109,6 +137,12 @@ public final class PipeUpdate {
 
         /** The pipe's liveness settings follow the session's again. */
         public Builder clearLiveness() { liveness = Change.CLEAR; return this; }
+
+        /** The pipe's own quality event band; the pipe must have an outbound direction. */
+        public Builder qualityBand(QualityBand b) { qualityBandValue = Objects.requireNonNull(b, "qualityBand"); qualityBand = Change.SET; return this; }
+
+        /** The pipe's quality event band follows the session's again. */
+        public Builder clearQualityBand() { qualityBand = Change.CLEAR; return this; }
 
         public PipeUpdate build() { return new PipeUpdate(this); }
 

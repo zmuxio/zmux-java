@@ -15,11 +15,10 @@ import java.util.concurrent.locks.LockSupport;
  * dial waits for the longer of the two. It ends with the session.
  */
 final class Redialer {
-    private static final double JITTER = 0.2;
-
     private final ZmuxSession session;
     private final ZmuxConfig.Redial hook;
     private final long min, max;
+    private final double jitter;
     private final AtomicBoolean changed = new AtomicBoolean(true);
     private final Cancellation cancellation = new Cancellation();
     private volatile Thread worker;
@@ -31,17 +30,17 @@ final class Redialer {
         }
     };
 
-    private Redialer(ZmuxSession session, ZmuxConfig.Redial hook, long min, long max) {
-        this.session = session; this.hook = hook; this.min = min; this.max = max;
+    private Redialer(ZmuxSession session, ZmuxConfig.Redial hook, long min, long max, double jitter) {
+        this.session = session; this.hook = hook; this.min = min; this.max = max; this.jitter = jitter;
     }
 
-    static void start(ZmuxSession session, ZmuxConfig.Redial hook, long min, long max) {
-        var r = new Redialer(session, hook, min, max);
+    static void start(ZmuxSession session, ZmuxConfig.Redial hook, long min, long max, double jitter) {
+        var r = new Redialer(session, hook, min, max, jitter);
         Thread.ofVirtual().name("zmux-redial").start(r::run);
     }
 
-    private static long jittered(long d) {
-        return Math.max(1, (long) (d * (1 - ThreadLocalRandom.current().nextDouble() * JITTER)));
+    private long jittered(long d) {
+        return Math.max(1, (long) (d * (1 - ThreadLocalRandom.current().nextDouble() * jitter)));
     }
 
     /** The direction the session lacks, or null while it has both. */

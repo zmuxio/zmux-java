@@ -61,7 +61,7 @@ public final class QuicClient implements AutoCloseable {
         } catch (InterruptedException | RuntimeException error) {
             host.close(); group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS); workers.shutdownNow();
             if (error instanceof InterruptedException) Thread.currentThread().interrupt();
-            throw new IOException("could not bind QUIC endpoint", error);
+            throw new io.zmux.CarrierFailedException("could not bind QUIC endpoint", error);
         }
     }
 
@@ -104,7 +104,7 @@ public final class QuicClient implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 throw new java.io.InterruptedIOException();
             } catch (java.util.concurrent.ExecutionException e) {
-                throw new IOException(e.getCause());
+                throw e.getCause() instanceof io.zmux.ZmuxException z ? z : new io.zmux.CarrierFailedException("QUIC session setup failed", e.getCause());
             }
         }));
     }
@@ -142,15 +142,15 @@ public final class QuicClient implements AutoCloseable {
     }
 
     /** Opens a pipe on a fresh connection for an existing session's addPipe call, without a credential. */
-    public ZmuxFuture<PipeIo> openPipeAsync(InetSocketAddress address, String serverName, ZmuxSession owner) {
-        return openPipeAsync(address, serverName, owner, null);
+    public ZmuxFuture<PipeIo> dialAsync(InetSocketAddress address, String serverName, ZmuxSession owner) {
+        return dialAsync(address, serverName, owner, null);
     }
 
     /**
      * Opens a pipe on a fresh connection for an existing session's addPipe call; the pipe, the
      * connection's first stream, starts with credential's prefix (null: none).
      */
-    public ZmuxFuture<PipeIo> openPipeAsync(InetSocketAddress address, String serverName, ZmuxSession owner,
+    public ZmuxFuture<PipeIo> dialAsync(InetSocketAddress address, String serverName, ZmuxSession owner,
                                             io.zmux.CarrierCredential credential) {
         CompletableFuture<PipeIo> result = track(new CompletableFuture<>());
         CompletableFuture<PipeIo> notified = ConnectionCarrier.offLoop(result, completions, pipe -> {
@@ -177,7 +177,7 @@ public final class QuicClient implements AutoCloseable {
     private <T> CompletableFuture<T> track(CompletableFuture<T> result) {
         pending.add(result);
         result.whenComplete((value, error) -> pending.remove(result));
-        if (closed.get()) result.completeExceptionally(new IOException("QUIC endpoint closed"));
+        if (closed.get()) result.completeExceptionally(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
         return result;
     }
 
@@ -241,19 +241,19 @@ public final class QuicClient implements AutoCloseable {
     }
 
     private CompletableFuture<Channel> datagram(SocketProtocolFamily family) {
-        if (closed.get()) return CompletableFuture.failedFuture(new IOException("QUIC endpoint closed"));
+        if (closed.get()) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
         var existing = datagrams.get(family);
         if (existing != null) return existing;
         var created = new CompletableFuture<Channel>();
         existing = datagrams.putIfAbsent(family, created);
         if (existing != null) return existing;
-        if (closed.get()) { bindFailed(family,created,new IOException("QUIC endpoint closed")); return created; }
+        if (closed.get()) { bindFailed(family,created,new io.zmux.CarrierFailedException("QUIC endpoint closed")); return created; }
         // Binding is outside the map publication; callbacks and close never wait under a lock.
         try { bindDatagram(family).addListener(done -> {
             if (!done.isSuccess()) bindFailed(family,created,done.cause());
             else {
                 Channel channel = ((ChannelFuture)done).channel();
-                if (closed.get()) { channel.close(); bindFailed(family,created,new IOException("QUIC endpoint closed")); }
+                if (closed.get()) { channel.close(); bindFailed(family,created,new io.zmux.CarrierFailedException("QUIC endpoint closed")); }
                 else if (!created.complete(channel)) channel.close();
             }
         }); } catch (RuntimeException error) { bindFailed(family,created,error); }
@@ -280,7 +280,7 @@ public final class QuicClient implements AutoCloseable {
     /** Closes owned connections and cancels pending handshakes. Native callbacks never wait on their own loop. */
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        for (CompletableFuture<?> operation : pending) operation.completeExceptionally(new IOException("QUIC endpoint closed"));
+        for (CompletableFuture<?> operation : pending) operation.completeExceptionally(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
         workers.shutdownNow();
         for (QuicChannel connection : connections) ConnectionCarrier.close(connection);
         for (var endpoint : datagrams.values()) endpoint.whenComplete((channel,error) -> { if (channel != null) channel.close(); });
@@ -304,9 +304,9 @@ public final class QuicClient implements AutoCloseable {
             throw new java.io.InterruptedIOException("interrupted");
         } catch (java.util.concurrent.ExecutionException e) {
             Throwable c = e.getCause();
-            if (c instanceof IOException io) throw io;
+            if (c instanceof io.zmux.ZmuxException z) throw z;
             if (c instanceof RuntimeException r) throw r;
-            throw new IOException(c);
+            throw new io.zmux.CarrierFailedException("QUIC operation failed", c);
         }
     }
 
@@ -326,13 +326,13 @@ public final class QuicClient implements AutoCloseable {
         return await(connectAsync(address, serverName, config, layer));
     }
 
-    /** {@link #openPipeAsync(InetSocketAddress, String, ZmuxSession)}, waiting for the pipe input. */
-    public PipeIo openPipe(InetSocketAddress address, String serverName, ZmuxSession owner) throws IOException {
-        return await(openPipeAsync(address, serverName, owner));
+    /** {@link #dialAsync(InetSocketAddress, String, ZmuxSession)}, waiting for the pipe input. */
+    public PipeIo dial(InetSocketAddress address, String serverName, ZmuxSession owner) throws IOException {
+        return await(dialAsync(address, serverName, owner));
     }
 
-    /** {@link #openPipeAsync(InetSocketAddress, String, ZmuxSession, io.zmux.CarrierCredential)}, waiting for the pipe input. */
-    public PipeIo openPipe(InetSocketAddress address, String serverName, ZmuxSession owner, io.zmux.CarrierCredential credential) throws IOException {
-        return await(openPipeAsync(address, serverName, owner, credential));
+    /** {@link #dialAsync(InetSocketAddress, String, ZmuxSession, io.zmux.CarrierCredential)}, waiting for the pipe input. */
+    public PipeIo dial(InetSocketAddress address, String serverName, ZmuxSession owner, io.zmux.CarrierCredential credential) throws IOException {
+        return await(dialAsync(address, serverName, owner, credential));
     }
 }

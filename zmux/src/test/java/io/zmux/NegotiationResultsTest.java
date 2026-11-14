@@ -52,7 +52,7 @@ class NegotiationResultsTest {
             ZmuxStream open = p.client().openStream();
             open.write(ByteBuffer.wrap(new byte[] {1}));
             ZmuxStream accepted = p.server().acceptStream();
-            var shut = ex.submit(() -> { p.server().shutdown(Duration.ofSeconds(10)); return null; });
+            var shut = ex.submit(() -> { p.server().shutdown(0, "", Duration.ofSeconds(10)); return null; });
             SessionEvent e;
             do e = p.client().nextEvent(Duration.ofSeconds(10)); while (!(e instanceof SessionEvent.GoAwayReceived));
             var g = (SessionEvent.GoAwayReceived) e;

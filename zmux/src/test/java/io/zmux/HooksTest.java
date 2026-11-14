@@ -125,7 +125,7 @@ class HooksTest {
                 var c = Zmux.connect(listener.localAddress(), cfg); ref.set(c); var s = accepted.get();
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 var pipe = c.pipes().getFirst();
-                for (int i=0; i<20; i++) pipe.setSendPriority(i);
+                for (int i=0; i<20; i++) pipe.update(PipeUpdate.builder().sendPriority(i).build());
                 assertTrue(c.ping().toNanos() > 0);
                 release.countDown();
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();

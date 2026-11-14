@@ -31,11 +31,11 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     private ZmuxSession session;
     private boolean handshake;
     /** A server connection's source slot, taken when it is accepted, before its handshake; used by its first stream. */
-    private ZmuxListener.Slot slot;
+    private io.zmux.adapter.Slot slot;
     /** An accepted (server) connection. */
     private final boolean server;
     /** The handover of the admitted first stream, through which the connection's further streams go. */
-    private ZmuxListener.Handled first;
+    private io.zmux.adapter.Handled first;
     /** A client's credential, presented on the connection's first bidirectional stream; null: none. */
     private final io.zmux.CarrierCredential credential;
     /** A client's server name, as it sent it; "" when none. */
@@ -106,13 +106,13 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         if (server && listener != null) {
             // A server connection: its source's slot comes first, before the handshake.
             var peer = (java.net.InetSocketAddress) channel.remoteSocketAddress();
-            slot = listener.reserve(peer, null);
+            slot = listener.adapter().reserve(peer, null);
             if (slot == null) { channel.close(); return; }
         }
         if (established) { handshake = true; routePending(); }
     }
     @Override public void userEventTriggered(ChannelHandlerContext context, Object event) {
-        if (event instanceof QuicDatagramExtensionEvent datagrams && options.datagrams()) maxDatagram = Math.max(0, datagrams.maxLength());
+        if (event instanceof QuicDatagramExtensionEvent datagrams && options.isDatagrams()) maxDatagram = Math.max(0, datagrams.maxLength());
         if (event instanceof SslHandshakeCompletionEvent completed) {
             if (completed.isSuccess()) { handshake = true; routePending(); }
             else { handshakeFailed(); context.close(); }
@@ -130,7 +130,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     /** The handshake of a server connection failed, timed out, or the connection ended before it completed. */
     private void handshakeFailed() {
-        ZmuxListener.Slot s = slot;
+        io.zmux.adapter.Slot s = slot;
         slot = null;
         if (s != null) s.handshakeFailed();
     }
@@ -291,11 +291,11 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         admission = ADMITTING;
         QuicChannel connection = channel;
         QuicServer.Fallback target = fallback;
-        ZmuxListener.Slot s = slot;
+        io.zmux.adapter.Slot s = slot;
         slot = null;
         io.zmux.Admission.Fallback fb = target == null ? null : (stream, info) -> target.serve(connection, stream);
         var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()), fb)
-                : listener.handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
+                : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
         this.first = admitted;
         admitted.verdict().whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
             if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {

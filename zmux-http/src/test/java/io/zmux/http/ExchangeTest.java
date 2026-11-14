@@ -31,7 +31,7 @@ class ExchangeTest {
     static final byte[] PSK = new byte[32];
     static { Arrays.fill(PSK, (byte) 9); }
 
-    static ExchangeConfig.Builder cfg() { return ExchangeConfig.builder().psk(PSK); }
+    static ExchangeConfig.Builder cfg() { return ExchangeConfig.builder(PSK); }
 
     record Resp(int status, byte[] body) {
         int flags() { return body[Exchange.MAC] & 0xff; }
@@ -103,7 +103,7 @@ class ExchangeTest {
         };
         for (String[] v : vecs) {
             byte[] psk = HEX.parseHex(v[0]);
-            var c = psk.length == 0 ? ExchangeConfig.builder().psk(new byte[32]) : ExchangeConfig.builder().psk(psk);
+            var c = psk.length == 0 ? ExchangeConfig.builder(new byte[32]) : ExchangeConfig.builder(psk);
             try (var f = Fixture.plain(b -> b.exchange(c.build()))) {
                 f.endpoint.exchange.seconds = () -> 1767225600L;
                 Resp r = post(f.base, HEX.parseHex(v[1]));
@@ -271,7 +271,7 @@ class ExchangeTest {
     /** The server's answers that the end-to-end runs do not reach. */
     @Test void serverRules() throws Exception {
         byte[] k = "k".getBytes(StandardCharsets.US_ASCII);
-        var c = ExchangeConfig.builder().psk(k).downWindow(4).holdTime(Duration.ofMillis(50)).build();
+        var c = ExchangeConfig.builder(k).downWindow(4).holdTime(Duration.ofMillis(50)).build();
         try (var f = new Fixture(b -> b, b -> b.firstRecordTimeout(Duration.ofSeconds(10)), b -> b.exchange(c), false, null)) {
             var x = new Raw(f.base, k);
             assertEquals(404, x.send(Exchange.KIND_DOWN, 0, 0, 0, NONE, true).status, "a bad MAC goes to the host");
@@ -391,7 +391,7 @@ class ExchangeTest {
 
     /** A carrier the listener rejects ends its downlink; the final CLOSE completes it. */
     @Test void completionAndClose() throws Exception {
-        var c = ExchangeConfig.builder().psk(new byte[32]).holdTime(Duration.ofSeconds(1)).build();
+        var c = ExchangeConfig.builder(new byte[32]).holdTime(Duration.ofSeconds(1)).build();
         try (var f = Fixture.plain(b -> b.exchange(c))) {
             var x = new Raw(f.base, NONE);
             assertEquals(0, x.flags(Exchange.KIND_UP, Exchange.FLAG_FIN, 0, 0, new byte[] {(byte) 0xff}));
@@ -475,7 +475,7 @@ class ExchangeTest {
 
     /** Lost, repeated, delayed and replayed requests and responses through a proxy. */
     @Test void faults() throws Exception {
-        var c = cfg().holdTime(Duration.ofMillis(500)).backoff(new io.zmux.PipePool.Backoff(Duration.ofMillis(5), Duration.ofMillis(100), 0.5))
+        var c = cfg().holdTime(Duration.ofMillis(500)).backoff(new io.zmux.Backoff(Duration.ofMillis(5), Duration.ofMillis(100), 0.5))
                 .requestTimeout(Duration.ofSeconds(3)).upPieceSize(64 << 10).downPieceSize(64 << 10).build();
         try (var f = Fixture.plain(b -> b.exchange(c));
              var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0), new TestProxy.Faults(0.05, 0.05, 0.1, 0.2, 30, 0.05, null), 7);
@@ -488,8 +488,8 @@ class ExchangeTest {
 
     /** BUSY makes the client repeat; GONE fails the carrier. */
     @Test void busyAndGone() throws Exception {
-        var c = ExchangeConfig.builder().psk(new byte[32]).holdTime(Duration.ofMillis(500))
-                .backoff(new io.zmux.PipePool.Backoff(Duration.ofMillis(5), Duration.ofMillis(50), 0.5)).build();
+        var c = ExchangeConfig.builder(new byte[32]).holdTime(Duration.ofMillis(500))
+                .backoff(new io.zmux.Backoff(Duration.ofMillis(5), Duration.ofMillis(50), 0.5)).build();
         AtomicInteger busy = new AtomicInteger();
         try (var f = Fixture.plain(b -> b.exchange(c));
              var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0),
@@ -539,9 +539,9 @@ class ExchangeTest {
 
     /** An UP over the server's limit is not authenticated, and the carrier fails at its deadline; a DOWN over the client's fails it at once. */
     @Test void bodyLimits() throws Exception {
-        var srv = ExchangeConfig.builder().psk(new byte[32]).upPieceSize(16 << 10).holdTime(Duration.ofMillis(100)).build();
+        var srv = ExchangeConfig.builder(new byte[32]).upPieceSize(16 << 10).holdTime(Duration.ofMillis(100)).build();
         try (var f = Fixture.plain(b -> b.exchange(srv)); var hc = f.client(b -> b)) {
-            var cl = ExchangeConfig.builder().psk(new byte[32]).upPieceSize(2 << 20).coalesce(Duration.ZERO)
+            var cl = ExchangeConfig.builder(new byte[32]).upPieceSize(2 << 20).coalesce(Duration.ZERO)
                     .deadline(Duration.ofSeconds(1)).build();
             PipeIo p = hc.exchangePipe(f.base.toString(), cl);
             CompletableFuture<Throwable> wrote = new CompletableFuture<>();
@@ -554,18 +554,18 @@ class ExchangeTest {
         try (var f = Fixture.plain(b -> b.exchange(srv));
              var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0), new TestProxy.Faults(0, 0, 0, 0, 0, 0, body -> new byte[2 << 20]), 1);
              var hc = f.client(b -> b)) {
-            var cl = ExchangeConfig.builder().psk(new byte[32]).downPieceSize(16 << 10).build();
+            var cl = ExchangeConfig.builder(new byte[32]).downPieceSize(16 << 10).build();
             assertEquals(ExchangeClient.PROTOCOL, readFailure(hc.exchangePipe(px.base.toString(), cl)).getMessage());
         }
     }
 
     /** UP and DOWN requests to different fronts and paths reach one server. */
     @Test void splitTargets() throws Exception {
-        var c0 = ExchangeConfig.builder().psk(new byte[32]).holdTime(Duration.ofSeconds(1)).build();
+        var c0 = ExchangeConfig.builder(new byte[32]).holdTime(Duration.ofSeconds(1)).build();
         try (var f = Fixture.plain(b -> b.exchange(c0));
              var up = new TestProxy(f.base, TestProxy.Profile.PASS); var down = new TestProxy(f.base, TestProxy.Profile.PASS);
              var hc = f.client(b -> b)) {
-            var c = ExchangeConfig.builder().psk(new byte[32]).downUrl(down.base + "/down/{instance}/{nonce}").build();
+            var c = ExchangeConfig.builder(new byte[32]).downUrl(down.base + "/down/{instance}/{nonce}").build();
             try (var s = Zmux.open(hc.exchangePipe(up.base + "/up/{instance}", c), Role.CLIENT, f.config)) {
                 echo(f, s, 1 << 20);
             }
@@ -595,7 +595,7 @@ class ExchangeTest {
     }
 
     @Test void configNeedsAPsk() {
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().build());
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[0]));
         try (var hc = HttpCarrierClient.builder().build()) {
             assertThrows(IllegalArgumentException.class, () -> hc.exchangePipe("ftp://x/{nonce}", cfg().build()));
         } catch (IOException e) {

@@ -44,9 +44,9 @@ class ListenerStatsTest {
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                 String token = SplitBootstrapTest.token(1);
-                l.handle(PipeIo.of(up[1].reader(), null), JoinHint.pair(token, true, TestAddr.peer("a"))).closed();
+                l.adapter().handle(PipeIo.of(up[1].reader(), null), JoinHint.pair(token, true, TestAddr.peer("a"))).closed();
                 // Its halves arrive together: each holds a slot of its source until it waits for the other.
-                l.handle(PipeIo.of(null, down[1].writer()), JoinHint.pair(token, false, TestAddr.peer("a2"))).closed();
+                l.adapter().handle(PipeIo.of(null, down[1].writer()), JoinHint.pair(token, false, TestAddr.peer("a2"))).closed();
                 inputs++;
                 var connecting = ex.submit(() -> Zmux.open(PipeIo.split(PipeIo.of(null, up[0].writer()), PipeIo.of(down[0].reader(), null)),
                         Role.CLIENT, cfg));
@@ -54,27 +54,27 @@ class ListenerStatsTest {
                     assertNotNull(server);
                     PipePoolTest.await(() -> l.stats().sessions() == 1);
                     // The token again: a replayed half, rejected.
-                    l.handle(PipeIo.of(null, MemoryPipe.pair(Framing.BYTE_STREAM)[1].writer()), JoinHint.pair(token, false, TestAddr.peer("b"))).closed();
+                    l.adapter().handle(PipeIo.of(null, MemoryPipe.pair(Framing.BYTE_STREAM)[1].writer()), JoinHint.pair(token, false, TestAddr.peer("b"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().rejected() == 1);
                     // An uplink half without a first record: ended by the handshake timeout, on its own.
-                    l.handle(PipeIo.of(MemoryPipe.pair(Framing.BYTE_STREAM)[1].reader(), null), JoinHint.pair(SplitBootstrapTest.token(2), true, TestAddr.peer("c"))).closed();
+                    l.adapter().handle(PipeIo.of(MemoryPipe.pair(Framing.BYTE_STREAM)[1].reader(), null), JoinHint.pair(SplitBootstrapTest.token(2), true, TestAddr.peer("c"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().timedOut() == 1);
                     // Not zmux at all: rejected.
-                    l.handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes()), JoinHint.inBand(TestAddr.peer("d"))).closed();
+                    l.adapter().handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes()), JoinHint.inBand(TestAddr.peer("d"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().rejected() == 2);
                     // A pending carrier holds its source's only slot; the next one of that source is refused.
                     var idle = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    assertNotNull(l.reserve(TestAddr.peer("e"), null).handle(idle[1], JoinHint.inBand(TestAddr.peer("e")), null));
+                    assertNotNull(l.adapter().reserve(TestAddr.peer("e"), null).handle(idle[1], JoinHint.inBand(TestAddr.peer("e")), null));
                     inputs++;
-                    assertNull(l.reserve(TestAddr.peer("e"), null));
+                    assertNull(l.adapter().reserve(TestAddr.peer("e"), null));
                     inputs++;
                     assertEquals(1, l.stats().refused());
                     PipePoolTest.await(() -> l.stats().timedOut() == 2);
                     // An adapter's connection that never became an input.
-                    l.countSetupFailure();
+                    l.adapter().countSetupFailure();
                     ListenerStats s = l.stats();
                     assertEquals(new ListenerStats(1, 0, 1, 2, 1, 2, new AdmissionStats(0, 0, 0, 0, 0, 0, 0)), s);
                     assertEquals(inputs, sum(s), "every input once");
@@ -93,7 +93,7 @@ class ListenerStatsTest {
                             .withStall(Duration.ofMillis(300), Duration.ofMillis(300))).build();
             try (var l = ZmuxListener.of(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.handle(p[1], JoinHint.inBand(TestAddr.peer("s")), null);
+                var admitted = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")), null);
                 assertEquals(AdmissionVerdict.STALL, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
                 assertEquals(0, sum(l.stats()), "an admission's decision is no pipe input");
@@ -116,7 +116,7 @@ class ListenerStatsTest {
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofSeconds(10)).build();
             try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
+                l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     byte[] tag = {(byte) 0x9a, 0x24, (byte) 0xde, 0x36};

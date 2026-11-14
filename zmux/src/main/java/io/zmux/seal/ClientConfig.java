@@ -71,7 +71,7 @@ public final class ClientConfig {
     public byte[] psk() { return psk == null ? null : psk.clone(); }
 
     /** Whether a pre-shared key is set. */
-    boolean hasPsk() { return psk != null && psk.length > 0; }
+    boolean isPskBased() { return psk != null && psk.length > 0; }
 
     /** Whether a Handle is set. */
     boolean hasHandle() { return handle != null; }

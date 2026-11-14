@@ -69,7 +69,7 @@ class HybridTest {
         assertEquals(Profile.XXHFS_PSK0_AES, Profiles.client(both.build()));
         var none = ClientConfig.builder().psk(HANDLE, PSK).allowedProfiles(Profile.XXHFS_CHACHA).build();
         assertEquals(SecureCarrierException.Code.INVALID_CONFIG, assertThrows(SecureCarrierException.class, () -> Profiles.client(none)).code());
-        assertTrue(Profiles.client(ClientConfig.builder().psk(HANDLE, PSK).build()).hasPsk());
-        assertFalse(Profiles.client(ClientConfig.builder().build()).hasPsk());
+        assertTrue(Profiles.client(ClientConfig.builder().psk(HANDLE, PSK).build()).isPskBased());
+        assertFalse(Profiles.client(ClientConfig.builder().build()).isPskBased());
     }
 }

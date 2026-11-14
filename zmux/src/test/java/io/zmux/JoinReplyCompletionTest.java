@@ -49,7 +49,7 @@ class JoinReplyCompletionTest {
                 };
                 PipeIo server = new PipeIo(p[1].reader(), late, framing, "memory", null);
                 boolean bound = mode == RecordMode.BOUND;
-                l.handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withSecure(true) : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withSecure(true) : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).withSecure(true) : p[0], PipeOptions.builder().recordMode(mode).build());
                 int streams = 30, size = 8000;
                 var received = readers.submit(() -> {

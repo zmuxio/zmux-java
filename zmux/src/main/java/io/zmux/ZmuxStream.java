@@ -28,12 +28,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * A stream handle. Concurrent reads (and concurrent writes) are serialised; reads and writes
  * proceed independently. A handle that becomes unreachable without {@link #close()} releases
- * the stream (reset and stop with code 0).
+ * the stream as close does.
  *
- * <p><b>{@link #close()} is not a clean end.</b> As for every zmux binding it resets the
- * sending part and stops the receiving part (code 0), unlike {@link java.net.Socket#close()},
- * which flushes and sends FIN. After the last write call {@link #finish()}, and only
- * then close:
+ * <p><b>{@link #close()} is not a clean end.</b> As for every zmux binding it resets a sending
+ * part not finished with ZMUX_CANCELLED (0x5a4d0001), so the peer sees an abandoned stream rather
+ * than a clean end, and stops a receiving part not read to its end with code 0; unlike
+ * {@link java.net.Socket#close()}, it never flushes and sends FIN. After the last write call
+ * {@link #finish()}, and only then close:
  * <pre>{@code
  * try (ZmuxStream s = session.openStream()) {
  *     s.write(request);
@@ -116,7 +117,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         Objects.requireNonNull(src);
         session.driver.checkBlocking();
         try {
-            out.write(src, null, null, ZmuxSession.deadline(writeTimeout));
+            out.write(src, null, null, ZmuxSession.until(writeTimeout));
         } catch (CoreException e) {
             throw Errors.io(e);
         }
@@ -128,7 +129,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         try {
             checkApplicationIo();
             session.driver.checkBlocking();
-            out.write(null, owned.data(), owned.buf(), ZmuxSession.deadline(writeTimeout));
+            out.write(null, owned.data(), owned.buf(), ZmuxSession.until(writeTimeout));
         } catch (CoreException e) {
             throw Errors.io(e);
         } finally {
@@ -155,7 +156,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     public void finish() throws IOException {
         checkApplicationIo();
         session.driver.checkBlocking();
-        long deadline = ZmuxSession.deadline(writeTimeout);
+        long deadline = ZmuxSession.until(writeTimeout);
         try {
             Errors.check(out.finish(deadline).await(deadline));
         } catch (CoreException e) {
@@ -196,18 +197,22 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     @Override
     public long awaitSendCapacity(long min) throws IOException {
-        return awaitSendCapacity(min, null);
+        return awaitSendCapacity(min, Long.MAX_VALUE);
     }
 
     @Override
     public long awaitSendCapacity(long min, Duration timeout) throws IOException {
+        return awaitSendCapacity(min, ZmuxSession.deadline(timeout));
+    }
+
+    private long awaitSendCapacity(long min, long deadline) throws IOException {
         if (min < 1) throw new IllegalArgumentException("min must be at least 1");
         session.driver.checkBlocking();
         return (Long) session.call(op -> {
             session.driver.lanes.flushSending(st);
             if (core.sending().waitSendCapacity(st, min, op)) return core.sending().sendCapacity(st);
             return Operation.PENDING;
-        }, op -> core.sending().cancelCapacityWait(st, op), ZmuxSession.deadline(timeout));
+        }, op -> core.sending().cancelCapacityWait(st, op), deadline);
     }
 
     @Override
@@ -277,7 +282,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         if (!dst.hasRemaining()) return 0;
         session.driver.checkBlocking();
         try {
-            return in.read(dst, ZmuxSession.deadline(readTimeout));
+            return in.read(dst, ZmuxSession.until(readTimeout));
         } catch (CoreException e) {
             throw Errors.io(e);
         }
@@ -289,7 +294,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         if (max < 1) throw new IllegalArgumentException("max must be positive");
         session.driver.checkBlocking();
         try {
-            StreamRecv.Chunk c = in.readChunk(max, ZmuxSession.deadline(readTimeout));
+            StreamRecv.Chunk c = in.readChunk(max, ZmuxSession.until(readTimeout));
             return c == null ? null : new Chunk(c);
         } catch (CoreException e) {
             throw Errors.io(e);
@@ -305,7 +310,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
                 ByteBuffer b = c.buffer();
                 if (out.size() + (long) b.remaining() > maxBytes) {
                     stop(0);
-                    throw new IOException("stream longer than " + maxBytes + " bytes");
+                    throw new LimitExceededException(st.id(), maxBytes);
                 }
                 byte[] a = new byte[b.remaining()];
                 b.get(a);
@@ -402,7 +407,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
             session.driver.lanes.flushSending(st);
             if (target[0] < 0) target[0] = core.streams().flush(st);
             return core.sending().flushDone(st, target[0], op) ? Boolean.TRUE : Operation.PENDING;
-        }, op -> core.sending().cancelWriteWait(st, op), ZmuxSession.deadline(writeTimeout));
+        }, op -> core.sending().cancelWriteWait(st, op), ZmuxSession.until(writeTimeout));
     }
 
     @Override
@@ -434,18 +439,22 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     /** Waits for the next datagram of this stream's flow. */
     public StreamDatagram receiveDatagram() throws IOException {
-        return receiveDatagram(null);
+        return receiveDatagram(Long.MAX_VALUE);
     }
 
-    /** Waits at most timeout (null: no limit) for the next datagram of this stream's flow; {@link SocketTimeoutException} after it. */
+    /** Waits at most timeout for the next datagram of this stream's flow; {@link SocketTimeoutException} after it. */
     public StreamDatagram receiveDatagram(Duration timeout) throws IOException {
+        return receiveDatagram(ZmuxSession.deadline(timeout));
+    }
+
+    private StreamDatagram receiveDatagram(long deadline) throws IOException {
         Object r = session.call(op -> {
             Datagrams.StreamDatagram d = core.datagrams().receive(st);
             if (d != null) return new StreamDatagram(d.context(), d.payload());
             if (core.error() != null) throw CoreException.session(core.error());
             core.datagrams().waitReceive(st, op);
             return Operation.PENDING;
-        }, op -> core.datagrams().cancelReceiveWait(st, op), ZmuxSession.deadline(timeout));
+        }, op -> core.datagrams().cancelReceiveWait(st, op), deadline);
         return (StreamDatagram) r;
     }
 
@@ -453,9 +462,9 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
      * Releases the stream. A sending part that was {@link #finish() finished} and a receiving
      * part read to its end are left as they are, so the block {@code write}, {@code finish},
      * read the reply, {@code close} (the end of a try-with-resources) ends the stream cleanly.
-     * Only a part left open is ended abruptly, with code 0: an unfinished sending part is reset
-     * (RESET_STREAM, <b>its unsent data discarded</b>) and an unread receiving part stopped
-     * (STOP_SENDING). Close never finishes the stream: call {@link #finish()} after the last write.
+     * Only a part left open is ended abruptly: an unfinished sending part is reset with
+     * ZMUX_CANCELLED (RESET_STREAM, <b>its unsent data discarded</b>) and an unread receiving part
+     * stopped with code 0 (STOP_SENDING). Close never finishes the stream: call {@link #finish()} after the last write.
      */
     @Override
     public void close() {
@@ -471,7 +480,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     @Override public ZmuxFuture<Integer> readAsync(ByteBuffer dst) {
         checkApplicationIo(); checkReadDestination(dst);
         if (!dst.hasRemaining()) return ZmuxFuture.completed(0);
-        return ZmuxSession.future(in.readAsync(dst, 0, ZmuxSession.deadline(readTimeout)), r -> {
+        return ZmuxSession.future(in.readAsync(dst, 0, ZmuxSession.until(readTimeout)), r -> {
             if (r instanceof Throwable) throw Errors.outcome(r, 0);
             return (Integer) r;
         });
@@ -479,7 +488,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     @Override public ZmuxFuture<Chunk> readChunkAsync(int max) {
         checkApplicationIo(); if (max < 1) throw new IllegalArgumentException("max must be positive");
-        return ZmuxSession.future(in.readAsync(null, max, ZmuxSession.deadline(readTimeout)), r -> {
+        return ZmuxSession.future(in.readAsync(null, max, ZmuxSession.until(readTimeout)), r -> {
             if (r instanceof Throwable) throw Errors.outcome(r, 0);
             return r == StreamRecv.FIN ? null : new Chunk((StreamRecv.Chunk) r);
         });
@@ -488,7 +497,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     /** Borrows src until completion; a failed or cancelled write can have sent a prefix. */
     @Override public ZmuxFuture<Void> writeAsync(ByteBuffer src) {
         checkApplicationIo(); Objects.requireNonNull(src);
-        var op = out.writeAsync(src, null, null, ZmuxSession.deadline(writeTimeout));
+        var op = out.writeAsync(src, null, null, ZmuxSession.until(writeTimeout));
         return ZmuxSession.future(op, r -> {
             if (r instanceof Throwable) throw Errors.outcome(r, SendLane.written(op));
             return null;
@@ -499,7 +508,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         StreamRecv.Chunk owned = Objects.requireNonNull(chunk).take();
         try { checkApplicationIo(); }
         catch (RuntimeException error) { owned.buf().unref(); throw error; }
-        var op = out.writeAsync(null, owned.data(), owned.buf(), ZmuxSession.deadline(writeTimeout));
+        var op = out.writeAsync(null, owned.data(), owned.buf(), ZmuxSession.until(writeTimeout));
         return ZmuxSession.future(op, r -> {
             if (r instanceof Throwable) throw Errors.outcome(r, SendLane.written(op));
             return null;
@@ -508,7 +517,7 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     @Override public ZmuxFuture<Void> finishAsync() {
         checkApplicationIo();
-        return ZmuxSession.future(out.finishAsync(ZmuxSession.deadline(writeTimeout)), r -> {
+        return ZmuxSession.future(out.finishAsync(ZmuxSession.until(writeTimeout)), r -> {
             if (r instanceof Throwable) throw Errors.outcome(r, 0);
             return null;
         });

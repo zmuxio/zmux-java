@@ -5,13 +5,13 @@ import java.util.List;
 
 /**
  * What an Establish learned of the other end. On a client it is {@link Seal#peerOf}; on a server it goes to
- * {@link Gate#commit} in an {@link Admission} and, with the commit's value, is the session's host value
+ * {@link Gate#commit} in an {@link CommitRequest} and, with the commit's value, is the session's host value
  * ({@link io.zmux.ZmuxSession#admitted()}).
  *
  * @param staticKey the peer's static key, copied in and out
  * @param credential the credential the peer's message carried; null when it carried none
  * @param verdict the anchor's verdict, its principal and value; null when no anchor judged the peer
- * @param value {@link Gate#commit}'s result, server only; null otherwise, and in the {@link Admission} itself
+ * @param value {@link Gate#commit}'s result, server only; null otherwise, and in the {@link CommitRequest} itself
  * @param profile the handshake's Profile
  * @param mode the handshake's record mode
  * @param appData the application data the peer sent, in message order (from a client messages 1 and 3,

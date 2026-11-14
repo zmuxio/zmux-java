@@ -23,6 +23,8 @@ public final class TransportError {
     public static final long PIPE_RESOURCE_LIMIT = 0x0b4fa113L;
     public static final long PIPE_AUTH_FAILED = 0x09613938L;
     public static final long IDLE_TIMEOUT = 0x2736d55cL;
+    /** ZMUX_CANCELLED, an application code: the endpoint abandoned the stream or operation. */
+    public static final long CANCELLED = 0x5a4d0001L;
     /** ZMUX_REJECTED, an application code. */
     public static final long REJECTED = 0x5a4d0002L;
 

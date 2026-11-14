@@ -31,7 +31,7 @@ class SealPeerInterop {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
             InetSocketAddress at = PeerInterop.address(child.expect("LISTEN "));
             var b = SealTest.client().allowedProfiles(profile);
-            if (!profile.hasPsk()) b.psk(null, null);
+            if (!profile.isPskBased()) b.psk(null, null);
             var p = SealTest.establish(SealTest.tcp(at), b.build());
             assertEquals(profile, Seal.peerOf(p).orElseThrow().profile());
             try (var session = Zmux.open(p, Role.CLIENT, cfg)) {

@@ -202,7 +202,7 @@ class AdmissionTest {
                     .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(2))
                             .withStall(stallFor, stallFor)).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
-                assertEquals(stallFor, l.stallDuration(new java.net.InetSocketAddress("127.0.0.1", 0)));
+                assertEquals(stallFor, l.adapter().stallDuration(new java.net.InetSocketAddress("127.0.0.1", 0)));
                 try (var c = Zmux.connect(l.localAddress(), dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id().value() > 0, "a session's own TCP pipe presents the credential");
@@ -222,7 +222,7 @@ class AdmissionTest {
                     assertEquals(-1, n, "a stalled carrier sends nothing");
                     assertTrue(ms >= 200, "closed after " + ms + " ms");
                 }
-                assertNull(l.accept(Duration.ofMillis(100)));
+                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(100)));
             }
         }
     }
@@ -349,7 +349,7 @@ class AdmissionTest {
                     assertEquals("xy", readAll(ch));
                 }
                 assertEquals("127.0.0.1", sources.poll(1, TimeUnit.SECONDS));
-                assertNull(l.accept(Duration.ofMillis(50)));
+                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(50)));
             }
         }
     }
@@ -426,19 +426,19 @@ class AdmissionTest {
                 other[0] ^= 1;
                 byte[] head = helloHead(known, 1);
                 int total = head.length;
-                assertEquals(new ZmuxListener.JoinLookup(true, 0), b.knownJoin(ByteBuffer.wrap(head)));
-                assertEquals(new ZmuxListener.JoinLookup(true, 0), b.knownJoin(ByteBuffer.wrap(Arrays.copyOf(head, total + 5)).limit(total + 5)), "bytes after the head");
-                assertEquals(new ZmuxListener.JoinLookup(false, 0), a.knownJoin(ByteBuffer.wrap(head)), "another listener's session");
-                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(helloHead(other, 1))));
-                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(helloHead(known, 99))), "unknown suite");
-                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.allocate(0)));
-                assertEquals(new ZmuxListener.JoinLookup(false, 0), b.knownJoin(ByteBuffer.wrap(new byte[] {(byte) 0x80, 1, 2})), "not a join");
+                assertEquals(new io.zmux.adapter.JoinLookup(true, 0), b.adapter().knownJoin(ByteBuffer.wrap(head)));
+                assertEquals(new io.zmux.adapter.JoinLookup(true, 0), b.adapter().knownJoin(ByteBuffer.wrap(Arrays.copyOf(head, total + 5)).limit(total + 5)), "bytes after the head");
+                assertEquals(new io.zmux.adapter.JoinLookup(false, 0), a.adapter().knownJoin(ByteBuffer.wrap(head)), "another listener's session");
+                assertEquals(new io.zmux.adapter.JoinLookup(false, 0), b.adapter().knownJoin(ByteBuffer.wrap(helloHead(other, 1))));
+                assertEquals(new io.zmux.adapter.JoinLookup(false, 0), b.adapter().knownJoin(ByteBuffer.wrap(helloHead(known, 99))), "unknown suite");
+                assertEquals(new io.zmux.adapter.JoinLookup(false, 0), b.adapter().knownJoin(ByteBuffer.allocate(0)));
+                assertEquals(new io.zmux.adapter.JoinLookup(false, 0), b.adapter().knownJoin(ByteBuffer.wrap(new byte[] {(byte) 0x80, 1, 2})), "not a join");
                 // A short prefix names the length that can make progress, and that prefix then answers.
-                var cut = b.knownJoin(ByteBuffer.wrap(head, 0, 3));
+                var cut = b.adapter().knownJoin(ByteBuffer.wrap(head, 0, 3));
                 assertFalse(cut.known());
                 assertTrue(cut.need() > 3 && cut.need() <= total);
-                var more = b.knownJoin(ByteBuffer.wrap(head, 0, total - 1));
-                assertEquals(new ZmuxListener.JoinLookup(false, total), more);
+                var more = b.adapter().knownJoin(ByteBuffer.wrap(head, 0, total - 1));
+                assertEquals(new io.zmux.adapter.JoinLookup(false, total), more);
             }
         }
     }
@@ -484,7 +484,7 @@ class AdmissionTest {
             try (var l = ZmuxListener.of(lc)) {
                 SocketChannel ch = SocketChannel.open(server.getLocalAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {7, 7, 7, 7}));
-                var admitted = l.handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
+                var admitted = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
                 try (var c = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
@@ -492,7 +492,7 @@ class AdmissionTest {
                 try (SocketChannel raw = SocketChannel.open(server.getLocalAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {8, 'a', 'b', 'c', 'd'}));
                     raw.shutdownOutput();
-                    var fb = l.handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
+                    var fb = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
                     assertEquals(AdmissionVerdict.FALLBACK, fb.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                     assertEquals(new String(new byte[] {8, 'a', 'b', 'c', 'd'}, java.nio.charset.StandardCharsets.US_ASCII), readAll(raw));
                     assertEquals("peer", sources.poll(1, TimeUnit.SECONDS));
@@ -500,7 +500,7 @@ class AdmissionTest {
                 }
                 try (SocketChannel raw = SocketChannel.open(server.getLocalAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {8, 0, 0, 0}));
-                    var none = l.handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), null);
+                    var none = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), null);
                     assertEquals(AdmissionVerdict.STALL, none.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS),
                             "a fallback without a target stalls");
                 }
@@ -713,7 +713,7 @@ class AdmissionTest {
                 var request = RequestHead.of(java.util.Map.of(header.name(), java.util.List.of(header.value()),
                         "X-App", java.util.List.of("1")), true);
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.handle(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), null);
+                var admitted = l.adapter().handle(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), null);
                 // Decided before the client writes anything: a prefix read would wait out the peek timeout.
                 assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals("peer example.com true 0 [1]", seen.poll(1, TimeUnit.SECONDS));
@@ -722,10 +722,10 @@ class AdmissionTest {
                 }
                 // The same token again, and none at all: both stall at once.
                 var again = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.handle(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handle(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), null)
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 var none = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.handle(none[1], JoinHint.of(RequestHead.of(java.util.Map.of(), true), false, TestAddr.peer("peer")), null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handle(none[1], JoinHint.of(RequestHead.of(java.util.Map.of(), true), false, TestAddr.peer("peer")), null)
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 for (var p : new PipeIo[] {again[0], none[0]}) { p.reader().close(); p.writer().abort(new IOException("done")); }
             }
@@ -778,13 +778,13 @@ class AdmissionTest {
                 var plain = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
                 try (var l = ZmuxListener.of(lc)) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
+                    l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                     try (var c = Zmux.open(prefixed(boot[0], auth.prefix(plain)), Role.CLIENT, cfg);
                          var s = l.accept(Duration.ofSeconds(5))) {
                         assertNotNull(s);
                         for (int i = 0; i < 6; i++) {
                             var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
-                            l.handle(pipe[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
+                            l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                             assertTrue(c.addPipe(prefixed(pipe[0], auth.prefix(plain)), PipeOptions.defaults()).id().value() > 0);
                         }
                         try (var st = c.openStream()) {
@@ -811,7 +811,7 @@ class AdmissionTest {
             @Override public void completed() {}
             @Override public void failed(Throwable cause) {}
         });
-        l.handle(pipe[1], JoinHint.inBand(TestAddr.literal(source)));
+        l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.literal(source)));
         return ended;
     }
 

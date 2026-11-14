@@ -81,14 +81,14 @@ final class Connections {
      */
     CompletableFuture<Channel> open(URI u, boolean pooled, boolean http1) {
         synchronized (this) {
-            if (closed) return CompletableFuture.failedFuture(new java.io.IOException("client closed"));
+            if (closed) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("HTTP carrier client closed"));
         }
         String o = origin(u);
         boolean wantH2 = !http1 && (version == Version.HTTP_2 || version == Version.AUTO && secure(u));
         if (wantH2) {
             CompletableFuture<Channel> conn;
             synchronized (this) {
-                if (closed) return CompletableFuture.failedFuture(new java.io.IOException("client closed"));
+                if (closed) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("HTTP carrier client closed"));
                 conn = h2.get(o);
                 if (conn == null || conn.isCompletedExceptionally() || conn.isDone() && !conn.join().isActive()) {
                     conn = connect(u, false);

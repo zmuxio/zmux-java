@@ -4,6 +4,7 @@ import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
 
 import io.zmux.InboundTransform;
 import io.zmux.RecordPolicyInput;
+import io.zmux.ZmuxFuture;
 import io.zmux.RecordMode;
 import io.zmux.CarrierRejectedException;
 import io.zmux.carrier.Framing;
@@ -47,11 +48,13 @@ public final class Seal {
      * new carrier. The stage fails with a {@link SecureCarrierException} of the protocol's class, a {@link
      * CredentialsFailedException} when the {@link Anchor} passes no credential of the server, a {@link
      * NoReplyException} when the carrier ends or the timeout passes before the server's reply, a
-     * {@link java.util.concurrent.TimeoutException} when it passes later, or with the carrier's own failure.
+     * {@link java.net.SocketTimeoutException} when it passes later, or with the carrier's own failure.
+     * Cancelling the future, or completing it from outside ({@link ZmuxFuture#orTimeout}), stops the
+     * handshake and closes the carrier.
      * A server that stalls a refused carrier leaves the client waiting until this timeout, so without a
      * handshake timeout the client waits until the server ends the stall.
      */
-    public static CompletionStage<PipeIo> establish(PipeIo carrier, ClientConfig cfg) {
+    public static ZmuxFuture<PipeIo> establish(PipeIo carrier, ClientConfig cfg) {
         Objects.requireNonNull(carrier, "carrier");
         Objects.requireNonNull(cfg, "cfg");
         CompletableFuture<PipeIo> f = new CompletableFuture<>();
@@ -66,18 +69,16 @@ public final class Seal {
                 f.completeExceptionally(e);
             }
         });
-        Duration limit = cfg.handshakeTimeout().orElse(null);
-        if (limit != null) {
+        cfg.handshakeTimeout().ifPresent(limit ->
             CompletableFuture.delayedExecutor(limit.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS).execute(() -> {
-                var timeout = new java.util.concurrent.TimeoutException("handshake timeout " + limit);
+                var timeout = new java.net.SocketTimeoutException("handshake timeout " + limit);
                 f.completeExceptionally(replied.get() ? timeout : new NoReplyException(timeout));
-            });
-        }
+            }));
         f.whenComplete((r, e) -> {
             if (e != null) t.interrupt(); // The handshake wakes and closes the carrier.
         });
         t.start();
-        return f;
+        return io.zmux.internal.spi.Spi.future(f, () -> f.completeExceptionally(new java.util.concurrent.CancellationException("establish cancelled")));
     }
 
     /**
@@ -168,13 +169,13 @@ public final class Seal {
     /** What a framed unit of n Noise bytes takes on the carrier. */
     private static int unit(PipeIo p, int n) { return io.zmux.internal.join.Frames.unitLength(framing(p), n); }
 
-    private static PipeIo client(PipeIo p, ClientConfig c, java.util.concurrent.atomic.AtomicBoolean replied) throws SecureCarrierException, IOException {
+    private static PipeIo client(PipeIo p, ClientConfig c, java.util.concurrent.atomic.AtomicBoolean replied) throws IOException {
         if (p.reader() == null || p.writer() == null) throw new SecureCarrierException(INVALID_CONFIG, "an Establish needs both halves");
         if (c.anchor() == null && !c.isAllowPskOnly()) throw new SecureCarrierException(INVALID_CONFIG, "no Anchor");
         if (c.isRequirePqAuth() && c.anchor() == null) throw new SecureCarrierException(INVALID_CONFIG, "requirePqAuth without an Anchor");
         PinAnchor.checkPqAuth(c.anchor(), c.isRequirePqAuth());
         Profile profile = Profiles.client(c);
-        if (c.isAllowPskOnly() && !profile.hasPsk()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
+        if (c.isAllowPskOnly() && !profile.isPskBased()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
         StaticKey key = c.key() != null ? c.key() : ProcessKey.KEY;
         Mode mode = Mode.of(c.mode());
         byte[] binding = null;
@@ -183,7 +184,7 @@ public final class Seal {
         }
         var hs = EstablishClient.create(profile, mode, framing(p), c.handle(), c.psk(), binding, key).maxAppData(ClientConfig.appDataLimit(c.maxAppData()));
         // Message 1 carries application data only under a pre-shared key.
-        EstablishPayload first = new EstablishPayload(null, profile.hasPsk() ? appData(c.appData(), 1, new AppDataSource.Known(profile, null, null)) : null, null, 0);
+        EstablishPayload first = new EstablishPayload(null, profile.isPskBased() ? appData(c.appData(), 1, new AppDataSource.Known(profile, null, null)) : null, null, 0);
         int noise = Handshake.minLength(profile, 0) + first.length();
         long[] padded = new long[1];
         int pad = shape(c.shaper(), c.shapingLimits(), p, "hello", EstablishHello.headerLength(profile, c.handle()) + unit(p, noise), noise, padded);
@@ -239,9 +240,9 @@ public final class Seal {
             Thread.currentThread().interrupt();
             throw new InterruptedIOException("application data of message " + msg);
         } catch (java.util.concurrent.ExecutionException e) {
-            throw new IOException("application data of message " + msg, e.getCause());
+            throw new io.zmux.CallbackFailedException("application data of message " + msg, e.getCause());
         } catch (RuntimeException e) {
-            throw new IOException("application data of message " + msg, e);
+            throw new io.zmux.CallbackFailedException("application data of message " + msg, e);
         }
     }
 
@@ -250,7 +251,7 @@ public final class Seal {
     }
 
     /** Reads until reader takes a whole unit, and returns its result with the unit consumed. */
-    private static <T> T readUnit(HandshakeIo io, UnitReader<T> reader) throws SecureCarrierException, IOException {
+    private static <T> T readUnit(HandshakeIo io, UnitReader<T> reader) throws IOException {
         if (io.buf.length == 0 || io.messages()) io.fill();
         while (true) {
             try {
@@ -335,7 +336,7 @@ public final class Seal {
         int wireProfile = (int) h.profile().value();
         RecordMode mode = Mode.record(h.mode());
         Refuser refuse = (why, cause) -> new CarrierRejectedException(wireProfile, mode, why, cause);
-        boolean withPsk = h.profile().hasPsk();
+        boolean withPsk = h.profile().isPskBased();
         if (!c.acceptedProfiles().contains(h.profile())) throw refuse.of("profile_disabled", null);
         if (mode != RecordMode.SEALED && c.allowRecordMode() == null) throw refuse.of("record_mode", null);
         byte[] psk = null;
@@ -408,11 +409,11 @@ public final class Seal {
         Peer early = new Peer(finish.peerStatic(), finish.credential(), verdict, null, h.profile(), mode, clientData, h.profile().pqConfidential(), pqAuth);
         if (c.allowRecordMode() != null) {
             boolean exporter = p.capabilities().exporter() != null;
-            if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isSecure(), p.label(), true), mode, early)) throw refuse.of("record_mode", null);
+            if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isSecure(), java.util.Optional.ofNullable(p.label()), true), mode, early)) throw refuse.of("record_mode", null);
         }
         Object value;
         try {
-            value = c.gate().commit(new Admission(h.handle(), early), src);
+            value = c.gate().commit(new CommitRequest(h.handle(), early), src);
         } catch (Exception failed) {
             throw refuse.of("gate_error", failed);
         }

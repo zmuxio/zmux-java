@@ -78,6 +78,8 @@ final class Limiter {
     boolean held() { return held; }
     private long release = Time.NEVER;
     long release() { return release; }
+    /** When the current hold began. */
+    private long heldAt;
     final Windowed heldMin = new Windowed(false);
 
     Limiter(long now) {
@@ -222,14 +224,20 @@ final class Limiter {
     /** Decides whether the pipe is held and until when. */
     void refresh(long now, long inFlightNow, double rate, long srtt, Params p) {
         advance(now, inFlightNow, rate, srtt, p);
+        boolean was = held;
         held = room(now, inFlightNow, rate, srtt, p) == 0;
         release = Time.NEVER;
+        if (!held) return;
+        if (!was) heldAt = now;
         double t = bucket(now, rate, srtt, p);
-        if (held && t < 1) {
+        if (t < 1) {
+            // An absolute time, no earlier than G after the hold began and kept until the next refresh: a deadline
+            // taken as G from the current time whenever it is read moves on with every event that reads it, and a
+            // pipe whose events come faster than G is then released only by acknowledgements.
             long d = GRANULARITY;
             double pr = paceRate(now, rate, srtt, p);
             if (pr > 0) d = (long) Math.min((1 - t) / pr * 1e9, Long.MAX_VALUE / 2.0) + Time.MICROSECOND;
-            release = Time.add(now, d);
+            release = Math.max(Time.add(now, d), Time.add(heldAt, GRANULARITY));
         }
     }
 

@@ -34,8 +34,8 @@ class CloseFormsTest {
     }
 
     @Test void anAbortDuringACloseEndsTheFlushAndTheCloseDecides() throws Exception {
-        long saved = ZmuxSession.closeHandOffLimit;
-        ZmuxSession.closeHandOffLimit = TimeUnit.SECONDS.toNanos(60); // The flush through the slow carrier could take minutes.
+        long saved = io.zmux.internal.core.Session.closeLimit;
+        io.zmux.internal.core.Session.closeLimit = TimeUnit.SECONDS.toNanos(60); // The flush through the slow carrier could take minutes.
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var p = slowPair(loops);
             var client = p[0]; var server = p[1];
@@ -59,7 +59,7 @@ class CloseFormsTest {
             assertEquals(new SessionError.ApplicationClosed(0x2a, "first", false), client.closed().get(5, TimeUnit.SECONDS));
             in.get(5, TimeUnit.SECONDS);
         } finally {
-            ZmuxSession.closeHandOffLimit = saved;
+            io.zmux.internal.core.Session.closeLimit = saved;
         }
     }
 
@@ -69,7 +69,7 @@ class CloseFormsTest {
             long t0 = System.nanoTime();
             p.client().close(0x2a, "close");
             p.client().close();
-            assertTrue(System.nanoTime() - t0 < TimeUnit.NANOSECONDS.toNanos(ZmuxSession.closeHandOffLimit), "a close after an abort waited for its bound");
+            assertTrue(System.nanoTime() - t0 < TimeUnit.NANOSECONDS.toNanos(io.zmux.internal.core.Session.closeLimit), "a close after an abort waited for its bound");
             assertEquals(new SessionError.ApplicationClosed(7, "abort", true), p.server().closed().get(5, TimeUnit.SECONDS));
             assertEquals(new SessionError.ApplicationClosed(7, "abort", false), p.client().closed().get(5, TimeUnit.SECONDS));
         }
@@ -86,8 +86,8 @@ class CloseFormsTest {
             p.client().close(0x2a, "bye");
             long took = System.nanoTime() - t0;
             // It waits for credit until a tenth before its bound, never past the bound (a loose guard).
-            assertTrue(took >= ZmuxSession.closeHandOffLimit * 9 / 10, "close returned before its flush bound: " + took / 1_000_000 + " ms");
-            assertTrue(took < ZmuxSession.closeHandOffLimit + TimeUnit.SECONDS.toNanos(5), "close is bounded");
+            assertTrue(took >= io.zmux.internal.core.Session.closeLimit * 9 / 10, "close returned before its flush bound: " + took / 1_000_000 + " ms");
+            assertTrue(took < io.zmux.internal.core.Session.closeLimit + TimeUnit.SECONDS.toNanos(5), "close is bounded");
             assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", true), p.server().closed().get(5, TimeUnit.SECONDS));
             assertTrue(p.server().stats().bytesReceived() < 4 << 20, "the data behind the window was given up");
         }

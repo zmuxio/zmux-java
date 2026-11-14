@@ -100,7 +100,7 @@ final class Router extends ChannelInboundHandlerAdapter {
         if (Requests.earlyData(r)) {
             // A request forwarded from early data takes no carrier: the intermediary repeats it. The upgrade
             // failed: a setup failure of the listener.
-            ep.listener.countSetupFailure();
+            ep.listener.adapter().countSetupFailure();
             refuse(r, HttpResponseStatus.valueOf(425));
             return;
         }
@@ -187,7 +187,7 @@ final class Router extends ChannelInboundHandlerAdapter {
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
-        ZmuxListener.Handled a = l.handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> fallback(c, r, given)));
+        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> fallback(c, r, given)));
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
                 .whenComplete((no, e) -> refused.complete(Boolean.TRUE.equals(no)));
         a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {

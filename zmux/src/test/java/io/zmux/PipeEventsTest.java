@@ -52,12 +52,12 @@ class PipeEventsTest {
                 assertTrue(c.pipeStats().stream().filter(x -> x.pipeId().value() == 0).findFirst().orElseThrow().peerAttached());
 
                 // A receive priority set on the joined pipe reaches the server as a request: source PEER there.
-                added.setReceivePriority(5);
+                added.update(PipeUpdate.builder().receivePriority(5).build());
                 List<SessionEvent> serverSeen = new ArrayList<>();
                 var peer = await(s, SessionEvent.PipePriorityChanged.class, e -> e.pipeId().value() == id && e.priority() == 5, serverSeen);
                 assertEquals(PipeStats.SettingSource.PEER, peer.source());
 
-                added.setSendPriority(9);
+                added.update(PipeUpdate.builder().sendPriority(9).build());
                 var local = await(c, SessionEvent.PipePriorityChanged.class, e -> e.pipeId().value() == id && e.priority() == 9, seen);
                 assertEquals(PipeStats.SettingSource.LOCAL, local.source());
 

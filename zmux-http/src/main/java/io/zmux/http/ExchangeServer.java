@@ -95,7 +95,7 @@ final class ExchangeServer {
      */
     Collect collect(Router router, HttpRequest req) {
         var ch = router.context().channel();
-        var slot = ep.listener.reserve(Requests.peer(ch), Requests.source(ch, req, ep.trusted));
+        var slot = ep.listener.adapter().reserve(Requests.peer(ch), Requests.source(ch, req, ep.trusted));
         if (slot == null && !ep.listener.isClosed()) {
             router.refuse(req, HttpResponseStatus.SERVICE_UNAVAILABLE);
             return null;
@@ -123,7 +123,7 @@ final class ExchangeServer {
          * The listener's slots of the request: given back once its header is authenticated, unless it creates a carrier;
          * null for a request that arrived at a closed listener.
          */
-        private ZmuxListener.Slot slot;
+        private io.zmux.adapter.Slot slot;
         /** The body read so far, encoded. */
         private final ByteBuf body;
         private ScheduledFuture<?> timer;
@@ -136,14 +136,14 @@ final class ExchangeServer {
         private Gone g;
         private boolean done;
 
-        Collect(Router router, HttpRequest req, int length, ZmuxListener.Slot slot) {
+        Collect(Router router, HttpRequest req, int length, io.zmux.adapter.Slot slot) {
             this.router = router;
             this.req = req;
             this.length = length;
             this.slot = slot;
             body = router.context().alloc().buffer(headerLength(), length);
             timer = router.context().executor().schedule(this::firstRecordTimedOut,
-                    ep.listener.firstRecordTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                    ep.listener.adapter().firstRecordTimeout().toNanos(), TimeUnit.NANOSECONDS);
         }
 
         /** Takes body bytes (not consumed); last: the body ended. */

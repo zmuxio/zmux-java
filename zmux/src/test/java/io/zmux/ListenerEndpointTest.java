@@ -44,7 +44,7 @@ class ListenerEndpointTest {
                 var fromResponder = server.addPipe(a.localAddress(),PipeOptions.defaults());
                 var fromInitiator = client.addPipe(b.localAddress(),PipeOptions.defaults());
                 assertEquals(PipeState.Outbound.ACTIVE, fromResponder.state().orElseThrow().outbound()); assertEquals(PipeState.Outbound.ACTIVE, fromInitiator.state().orElseThrow().outbound());
-                assertNull(a.accept(Duration.ofMillis(20)),"a join must not create a second application session");
+                assertThrows(java.net.SocketTimeoutException.class, () -> a.accept(Duration.ofMillis(20)),"a join must not create a second application session");
                 exchange(client,server); exchange(server,client); closed(client,server);
             }
             assertEquals(0,loops.outstandingBuffers());
@@ -54,11 +54,11 @@ class ListenerEndpointTest {
         try (EventLoops loops = EventLoops.create(4)) {
             var cfg = config(loops);
             try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
-                var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
+                var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
                     for (Framing framing : Framing.values()) {
                         var pair = MemoryPipe.pair(framing);
-                        var lifetime = a.handle(pair[1],JoinHint.inBand(TestAddr.peer("joined"))).closed();
+                        var lifetime = a.adapter().handle(pair[1],JoinHint.inBand(TestAddr.peer("joined"))).closed();
                         var joined = server.addPipe(pair[0], PipeOptions.defaults());
                         assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound());
                         exchange(client,server);
@@ -115,17 +115,17 @@ class ListenerEndpointTest {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops);
             try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
-                var pair = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(pair[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
+                var pair = MemoryPipe.pair(Framing.BYTE_STREAM); b.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed();
                 try (var client = a.open(pair[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
                     assertTrue((Integer)client.run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(client.core)) > 0);
                     a.close(); exchange(client,server); empty(a);
                     assertEquals(0,(Integer)client.run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(client.core)));
                     var refused = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    a.handle(refused[1],JoinHint.inBand(TestAddr.peer("late"))).closed().toCompletableFuture().get(3,TimeUnit.SECONDS);
+                    a.adapter().handle(refused[1],JoinHint.inBand(TestAddr.peer("late"))).closed().toCompletableFuture().get(3,TimeUnit.SECONDS);
                     refused[0].reader().close(); refused[0].writer().close();
-                    assertThrows(java.nio.channels.ClosedChannelException.class,() -> a.connect(NetworkTest.any()));
+                    assertThrows(ListenerClosedException.class,() -> a.connect(NetworkTest.any()));
                     var unused = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    assertThrows(java.nio.channels.ClosedChannelException.class,() -> a.open(unused[0], Role.CLIENT));
+                    assertThrows(ListenerClosedException.class,() -> a.open(unused[0], Role.CLIENT));
                     unused[1].reader().close(); unused[1].writer().close();
                     closed(client,server);
                 }
@@ -141,9 +141,9 @@ class ListenerEndpointTest {
             Thread.sleep(20); listener.close();
             for (var waiter : java.util.List.of(blocked, timed)) {
                 var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> waiter.get(1, TimeUnit.SECONDS));
-                assertInstanceOf(java.nio.channels.ClosedChannelException.class, failure.getCause());
+                assertInstanceOf(ListenerClosedException.class, failure.getCause());
             }
-            assertThrows(java.nio.channels.ClosedChannelException.class, () -> listener.accept(Duration.ZERO));
+            assertThrows(ListenerClosedException.class, () -> listener.accept(Duration.ZERO));
         }
     }
     @Test void failedExternalStartupRollsBackAllRoutingAndResources() throws Exception {
@@ -160,7 +160,7 @@ class ListenerEndpointTest {
             };
             assertThrows(java.io.IOException.class,() -> endpoint.open(PipeIo.of(reader,writer), Role.CLIENT));
             empty(endpoint);
-            assertEquals(1,readerClosed.get()); assertEquals(1,writerClosed.get()); assertEquals(0,endpoint.memoryUsed());
+            assertEquals(1,readerClosed.get()); assertEquals(1,writerClosed.get()); assertEquals(0,endpoint.adapter().memoryUsed());
         }
     }
     @Test void repeatedEndpointSessionsUnregisterWithoutRetainingClosedDrivers() throws Exception {
@@ -168,7 +168,7 @@ class ListenerEndpointTest {
             var cfg = config(loops);
             try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 for (int i=0;i<20;i++) {
-                    var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("repeat"))).closed();
+                    var bootstrap = MemoryPipe.pair(Framing.BYTE_STREAM); b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("repeat"))).closed();
                     try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(3))) {
                         assertEquals(1,registered(a,"sessions")); assertEquals(1,registered(b,"sessions"));
                         closed(client,server);
@@ -217,8 +217,8 @@ class ListenerEndpointTest {
                 }, r -> Thread.ofVirtual().start(r));
                 try (var first = a.open(bootstrap[0], Role.AUTO); var second = remote.get(3,TimeUnit.SECONDS)) {
                     first.designateDialer(true); second.designateDialer(false);
-                    assertNull(a.accept(Duration.ofMillis(10))); assertNull(b.accept(Duration.ofMillis(10)));
-                    var extra = MemoryPipe.pair(Framing.BYTE_STREAM); a.handle(extra[1], JoinHint.inBand(TestAddr.peer("joined"))).closed();
+                    assertThrows(java.net.SocketTimeoutException.class, () -> a.accept(Duration.ofMillis(10))); assertThrows(java.net.SocketTimeoutException.class, () -> b.accept(Duration.ofMillis(10)));
+                    var extra = MemoryPipe.pair(Framing.BYTE_STREAM); a.adapter().handle(extra[1], JoinHint.inBand(TestAddr.peer("joined"))).closed();
                     var joined = second.addPipe(extra[0],PipeOptions.defaults());
                     assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound()); exchange(first,second); closed(first,second);
                 }
@@ -242,7 +242,7 @@ class ListenerEndpointTest {
                     @Override public void close() { writes.incrementAndGet(); }
                 };
                 PipeIo carrier = PipeIo.of(reader,writer).withProtocol(stopped ? "qmux-02" : "another-protocol");
-                var rejected = endpoint.handle(carrier, JoinHint.inBand(TestAddr.peer("rejected"))).closed().toCompletableFuture();
+                var rejected = endpoint.adapter().handle(carrier, JoinHint.inBand(TestAddr.peer("rejected"))).closed().toCompletableFuture();
                 if (stopped) assertThrows(ExecutionException.class,() -> rejected.get(2,TimeUnit.SECONDS));
                 else rejected.get(2,TimeUnit.SECONDS);
                 assertEquals(1,reads.get()); assertEquals(1,writes.get()); empty(endpoint);

@@ -23,7 +23,7 @@ public final class PinAnchor implements Anchor {
     }
 
     /** Whether the pin names a proof key; a pin without one can never give PQ authentication. */
-    public boolean hasProofKey() { return proofKeyId != null; }
+    public boolean isProofKeyPinned() { return proofKeyId != null; }
 
     @Override
     public VerifyVerdict verify(VerifyInput in) throws CredentialsFailedException {
@@ -38,7 +38,7 @@ public final class PinAnchor implements Anchor {
 
     /** The rule of requirePqAuth: an end that requires it accepts no pin of an X25519 key alone. */
     static void checkPqAuth(Anchor a, boolean requirePqAuth) throws io.zmux.seal.SecureCarrierException {
-        if (requirePqAuth && a instanceof PinAnchor p && !p.hasProofKey()) {
+        if (requirePqAuth && a instanceof PinAnchor p && !p.isProofKeyPinned()) {
             throw new io.zmux.seal.SecureCarrierException(io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG, "requirePqAuth with a pin without a proof key");
         }
     }

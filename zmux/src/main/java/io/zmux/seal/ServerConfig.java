@@ -147,7 +147,7 @@ public final class ServerConfig {
 
         /**
          * The check of a Hello's mode, with the Establish's {@link Peer} as its peer; null: only Sealed. Joins have
-         * their own check, {@link io.zmux.ZmuxConfig.Builder#allowRecordMode}.
+         * their own check, {@link io.zmux.ZmuxConfig.Builder#allowRecordMode(AllowRecordMode)}.
          */
         public Builder allowRecordMode(AllowRecordMode a) { allowRecordMode = a; return this; }
 

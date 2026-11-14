@@ -61,7 +61,7 @@ final class ExternalTransport extends AbstractTransport {
     @Override public void taken() { inbox.taken.decide(true); }
 
     @Override public TransportInfo info() { return info; }
-    @Override public boolean closed() { return closed; }
+    @Override public boolean isClosed() { return closed; }
     @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() {
         var opener = pio.capabilities().laneOpener();
         return opener == null ? null : opener.open();
@@ -214,9 +214,9 @@ final class ExternalTransport extends AbstractTransport {
 
     private final ByteBuffer header = ByteBuffer.allocate(8);
 
-    @Override public boolean hasExporter() { return pio.capabilities().exporter() != null; }
+    @Override public boolean exporterPresent() { return pio.capabilities().exporter() != null; }
 
-    @Override public boolean secure() { return pio.isSecure(); }
+    @Override public boolean isSecure() { return pio.isSecure(); }
 
     @Override public io.zmux.RecordMode firstPipeMode() { return PipeIoAccess.get().recordMode(pio); }
 

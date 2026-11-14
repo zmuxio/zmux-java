@@ -73,6 +73,11 @@ final class ControlQueue {
                 || head != null;
     }
 
+    /** Whether a credit update (MAX_DATA, MAX_STREAM_DATA) is pending. */
+    boolean creditPending() {
+        return maxData || anyStream(MAX_STREAM_DATA);
+    }
+
     /** Whether a frame that is written after stream data (blocked reports, stream frames) is pending. */
     boolean pendingAfterData() {
         return dataBlocked || streamsBlocked[0] || streamsBlocked[1] || head != null;

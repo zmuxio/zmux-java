@@ -23,11 +23,11 @@ class SessionMachineTest {
         e = new io.zmux.shaping.Effects();
         m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, io.zmux.PipeId.BOOTSTRAP, 0, 1_000_000, 0, false, 0), e);
         assertEquals(1, m.state(0));
-        assertFalse(e.hasWake());
+        assertFalse(e.isWakeSet());
         e = new io.zmux.shaping.Effects();
         m.onEvent(new io.zmux.shaping.Event(io.zmux.shaping.EventKind.WAKE, io.zmux.PipeId.BOOTSTRAP, 0, 1_000_000, 0, false, 0), e);
         assertEquals(2, m.state(0));
-        assertTrue(e.hasWake() && e.isWakeNone());
+        assertTrue(e.isWakeSet() && e.isWakeNone());
     }
 
     @Test void aDefinitionShapesTheRecordsOfASession() throws Exception {

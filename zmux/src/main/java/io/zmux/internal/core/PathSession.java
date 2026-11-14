@@ -232,7 +232,11 @@ final class PathSession implements PathLayer {
         switch (f.kind) {
             case PIPE_PING -> {
                 // Answered on its own pipe pair; the record decides whether the primary pipe answers too.
-                if (pairAnswers(p)) p.mp().link.ackPair = true;
+                if (pairAnswers(p)) {
+                    Link l = p.mp().link;
+                    if (!l.ackPair) l.ackPairAt = port.now();
+                    l.ackPair = true;
+                }
                 pipes.wakeWriters();
             }
             case PIPE_ABANDON -> {
@@ -269,10 +273,34 @@ final class PathSession implements PathLayer {
         return quiet() && pairAnswers(p);
     }
 
-    /** R_p = max(1 s, T_suspect_p): the idle time after which an acknowledgement on p carries a PIPE_PING. */
+    /**
+     * Whether p is unproven (MULTIPATH.md Section 6.4), so that an acknowledgement on it carries a PIPE_PING: for
+     * R_p = max(1 s, T_suspect_p) no ack-eliciting byte was sent on it, its acknowledged position did not advance and
+     * it was not made live. An advance proves the direction as a sent byte does, so an answer that acknowledges p's
+     * own PIPE_PING carries none, and PIPE_PING frames never answer each other however long an exchange takes.
+     */
     private boolean idleForReturnPing(Pipe p, long now) {
         Attach a = p.mp();
-        return !a.health.needPing() && now >= Time.add(Math.max(a.link.lastElicit, a.link.liveAt), Math.max(Time.SECOND, health.tSuspect(p)));
+        long since = Math.max(Math.max(a.link.lastElicit, a.link.liveAt), a.link.lastAdvance);
+        return !a.health.needPing() && now >= Time.add(since, Math.max(Time.SECOND, health.tSuspect(p)));
+    }
+
+    /**
+     * When a shaping delay of p's next record ends because the record carries a pending PIPE_ACK: zmux_max_ack_delay
+     * after the first ack-eliciting byte it reports (MULTIPATH.md Section 6.3). The first record's snapshot and the
+     * primary acknowledgement report the session's pending bytes; the answer to a PIPE_PING on p's pipe pair reports
+     * that PIPE_PING too, which a quiet session does not count toward the primary acknowledgement.
+     * {@link Time#NEVER} when p carries none.
+     */
+    long ackRelease(Pipe p) {
+        Attach a = p.mp();
+        long t = ack.release();
+        if (a == null) return t;
+        if (t != Time.NEVER && !a.link.firstRecord && !a.link.ackPair) {
+            Pipe prim = primary();
+            if (p != prim && prim != null) t = Time.NEVER;
+        }
+        return a.link.ackPair ? Math.min(t, Time.add(a.link.ackPairAt, ack.delay())) : t;
     }
 
     void emitPipeState(Pipe p) {
@@ -396,7 +424,7 @@ final class PathSession implements PathLayer {
         if (ack != null) {
             long now = port.now();
             boolean onPrim = p == prim || prim == null;
-            if (onPrim && (ack.due(now) || unreported() && creditPending())) {
+            if (onPrim && (ack.due(now) || ack.unreported() && ctl.creditPending())) {
                 // The primary acknowledgement; in a busy session with return-pipe liveness.
                 if ((!quiet() || a.link.ackPair) && idleForReturnPing(p, now)) health.requestPing(p, now);
                 snapped = ack.snapshot(w, now);
@@ -413,14 +441,15 @@ final class PathSession implements PathLayer {
                 ackChanged = false;
                 retention.writeCreditCopies(w);
             }
+            // A snapshot the record refused (a planned delay holds it, or it did not fit) stays owed: the answer to a
+            // PIPE_PING on the pipe pair goes with the record that takes it.
+            if (!snapped) return;
             a.link.ackPair = false;
         }
-        if (first && !snapped) return;
         a.link.firstRecord = false;
         if (a.health.needPing() && a.health.out() != Attach.OUT_FAILED && health.pingAllowed(port.now()) && health.oldestPingWaiter(p)) {
             if (w.frame(VarInt.length(FrameType.PIPE_PING), true, FrameEncoder::pipePing)) {
-                health.pingWritten(p, port.now());
-                w.pingWritten();
+                w.pingWritten(health.pingWritten(p, port.now()));
                 if (a.prob.revalPing()) w.revalPingWritten();
             }
         }
@@ -465,7 +494,7 @@ final class PathSession implements PathLayer {
             if ((p == prim || prim == null) && tx.controlPending()) return true;
         }
         if (ol.lane == 0 && !a.ret.copyQ().isEmpty() && metrics.open(p)) return true;
-        if (ol == p.mp().ret.copyLane() && !a.ret.selfCopyQ().isEmpty() && !ol.tx.writing() && !ol.tx.notWritable() && !Pacer.held(p)) return true;
+        if (ol == p.mp().ret.copyLane() && !a.ret.selfCopyQ().isEmpty() && metrics.laneOpen(p, ol)) return true;
         return tx.dataPendingOn(p, ol) && scheduler.anyStreamOn(p, ol) && (pipes.shaping() == null || !Shaping.held(p, port.now()));
     }
 
@@ -494,24 +523,10 @@ final class PathSession implements PathLayer {
         return q != p || prim == p || prim == null;
     }
 
-    boolean creditPending() {
-        if (ctl.maxData()) return true;
-        if (ctl.anyStream(ControlQueue.MAX_STREAM_DATA)) return true;
-        return false;
-    }
-
     boolean hasEntries() {
         for (Pipe p : pipes.all()) {
             if (p.in() == null || p.mp() != null && p.mp().health.retired()) continue;
             for (Pipe.InLane il : p.in().lanes) if (il.rx.pos() > 0) return true;
-        }
-        return false;
-    }
-
-    boolean unreported() {
-        for (Pipe p : pipes.all()) {
-            if (p.in() == null) continue;
-            for (Pipe.InLane il : p.in().lanes) if (il.rx.pos() > il.ack.reported()) return true;
         }
         return false;
     }
@@ -730,7 +745,14 @@ final class PathSession implements PathLayer {
         @Override public boolean takes(Tiers.Gate g, Pipe p) { return tiers.takes(g, p); }
         @Override public void unsettle(Pipe p) { retention.unsettle(p); }
         @Override public boolean untaken(long id) { return joins.untaken(id); }
-        @Override public boolean wantsWrite(Pipe p, Pipe.OutLane ol) { return PathSession.this.wantsWrite(p, ol); }
+        @Override public boolean waitsFor(Pipe p, Pipe.OutLane ol) {
+            metrics.openAs(p);
+            try {
+                return PathSession.this.wantsWrite(p, ol);
+            } finally {
+                metrics.openAs(null);
+            }
+        }
     }
 
     /** The sender view and record liveness of one attachment. */
@@ -745,6 +767,8 @@ final class PathSession implements PathLayer {
         private long lastRecord;
         private long maxGap;
         private boolean ackPair;
+        /** When the PIPE_PING that set ackPair arrived. */
+        private long ackPairAt;
         private boolean firstRecord;
         /** The outbound state last reported as an application event; whether the inbound end was. */
         private PipeInfo.Out reportedOut = PipeInfo.Out.NONE;

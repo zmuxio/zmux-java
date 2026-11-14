@@ -74,7 +74,7 @@ class SplitSilenceTest {
             var joins = new AtomicInteger();
             var pool = PipePool.join(a -> { joins.incrementAndGet(); return java.util.List.of(c.splitJoin(a.session(), px.base, Map.of(), null, a.options())); })
                     .withOptions(PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(1)).build()).build())
-                    .withBackoff(new PipePool.Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
+                    .withBackoff(new io.zmux.Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
             var run = s.maintainPipes(pool);
             // The silence reaches the responses streaming now only, so the member's downlink must be
             // open before it. Its uplink must also hold an RTT sample: without one PTO is the initial

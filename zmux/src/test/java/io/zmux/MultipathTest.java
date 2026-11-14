@@ -163,7 +163,7 @@ class MultipathTest {
     void configValidation() {
         assertThrows(IllegalArgumentException.class, () -> PipeAuth.psk(new byte[8]).withEndToEnd());
         assertThrows(IllegalArgumentException.class, () -> new PipeAuth(new byte[16], false, true, false));
-        org.junit.jupiter.api.Assertions.assertFalse(PipeAuth.none().hasSource(), "no source is a value; a session that needs one fails to start");
+        org.junit.jupiter.api.Assertions.assertFalse(PipeAuth.none().isConfigured(), "no source is a value; a session that needs one fails to start");
         assertThrows(IllegalArgumentException.class, () -> Liveness.builder().suspectFloor(Duration.ofMillis(10)));
         assertThrows(IllegalArgumentException.class, () -> Liveness.builder().deadTimeout(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(0));

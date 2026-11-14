@@ -76,7 +76,7 @@ class QuicTest {
                 ZmuxSession client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                 ZmuxSession accepted = listener.accept(Duration.ofSeconds(10)); assertNotNull(accepted);
                 assertEquals("qmux-02", client.info().applicationProtocol());
-                assertTrue(listener.memoryUsed() >= options.connectionWindow());
+                assertTrue(listener.adapter().memoryUsed() >= options.connectionWindow());
                 transfer(workers, client, accepted, 16, 256 << 10);
                 assertTrue(client.pipeStats().getFirst().lanesOut() > 1, "outbound lanes were not opened");
                 var laneStats = client.pipeStats().getFirst();
@@ -161,7 +161,7 @@ class QuicTest {
                 var client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
                 var accepted = listener.accept(Duration.ofSeconds(10)); assertNotNull(accepted);
                 var original = endpoint.connections().getFirst();
-                var pipe = endpoint.openPipeAsync(server.address(), "localhost", client).thenApply(value -> {
+                var pipe = endpoint.dialAsync(server.address(), "localhost", client).thenApply(value -> {
                     assertFalse(original.eventLoop().inEventLoop(), "application callback ran on the native event loop");
                     return value;
                 }).toCompletableFuture().get(10, TimeUnit.SECONDS);

@@ -6,7 +6,7 @@ import java.util.Optional;
 
 /**
  * The settings that judge whether a session and its pipes are alive, the one place of the
- * session's keep-alive and probe settings ({@link ZmuxConfig.Builder#liveness}); a pipe's own are
+ * session's keep-alive and probe settings ({@link ZmuxConfig.Builder#liveness(Liveness)}); a pipe's own are
  * a {@link PipeLiveness}. {@link #defaults()} or {@link #builder()}: not calling a builder method
  * keeps the default; a setting that is off has a {@code noX()} method of its own. Replaced while
  * the session runs with {@link ZmuxSession#setLiveness}, which takes the whole object: a setting

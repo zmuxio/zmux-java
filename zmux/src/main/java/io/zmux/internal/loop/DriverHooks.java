@@ -11,7 +11,7 @@ public record DriverHooks(Consumer<Event> tracer, LongConsumer dropped, int trac
                           Limiter datagramSend, Limiter datagramReceive, PickerBridge.Picker picker, JoinPolicy joinPolicy,
                           io.zmux.carrier.HandshakeShaper handshakeShaper, System.Logger logger, Redial redial) {
     /** The session's redial hook and its backoff bounds (nanoseconds), for the public layer. */
-    public record Redial(Object hook, long minBackoff, long maxBackoff) {}
+    public record Redial(Object hook, long minBackoff, long maxBackoff, double jitter) {}
 
     /** The acceptor's checks of a verified Hello; unset, only Sealed passes. */
     public interface JoinPolicy {

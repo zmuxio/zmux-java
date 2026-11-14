@@ -77,7 +77,7 @@ class QuicHostTest {
                 var client = Zmux.connect(listener.localAddress(), config);
                 var accepted = listener.accept(Duration.ofSeconds(10));
                 assertNotNull(accepted);
-                var pipe = endpoint.openPipeAsync(server.address(), "localhost", client).get(10, TimeUnit.SECONDS);
+                var pipe = endpoint.dialAsync(server.address(), "localhost", client).get(10, TimeUnit.SECONDS);
                 ZmuxPipe joined = client.addPipe(pipe, PipeOptions.defaults());
                 assertTrue(joined.id().value() > 0);
                 QuicTest.transfer(workers, client, accepted, 8, 256 << 10);

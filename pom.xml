@@ -5,7 +5,7 @@
 
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux-parent</artifactId>
-    <version>1.1.4</version>
+    <version>1.1.5</version>
     <packaging>pom</packaging>
 
     <name>zmux parent</name>
@@ -81,6 +81,7 @@
                     <release>${maven.compiler.release}</release>
                     <compilerArgs>
                         <arg>-Xlint:all,-serial,-processing</arg>
+                        <arg>-Xdoclint:reference/private</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>

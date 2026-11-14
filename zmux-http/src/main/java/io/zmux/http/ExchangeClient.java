@@ -52,11 +52,6 @@ import java.util.concurrent.TimeUnit;
  * is one HTTP exchange on a connection of the {@link HttpCarrierClient}.
  */
 final class ExchangeClient {
-    /** Failures zmux sees on a failed carrier. */
-    static final class ExchangeException extends IOException {
-        ExchangeException(String m) { super(m); }
-    }
-
     static final String GONE = "exchange carrier gone", DEADLINE = "exchange carrier deadline exceeded",
             PROTOCOL = "exchange carrier protocol violation";
 
@@ -243,7 +238,7 @@ final class ExchangeClient {
 
     private long check(State s, long now, long deadline) {
         if (s.since == 0) return Long.MAX_VALUE;
-        if (now - s.since > deadline) fail(new ExchangeException(DEADLINE));
+        if (now - s.since > deadline) fail(new io.zmux.CarrierFailedException(DEADLINE));
         return s.since + deadline + 1_000_000;
     }
 
@@ -260,7 +255,7 @@ final class ExchangeClient {
             State s = downs.get(n);
             if (s == null) {
                 s = new State();
-                s.backoff = cfg.backoff().minimum().toNanos();
+                s.backoff = cfg.backoff().min().toNanos();
                 downs.put(n, s);
             }
             if (s.inflight) continue;
@@ -290,7 +285,7 @@ final class ExchangeClient {
         Up u = new Up(upSeq++, len > 0 ? open : null, wclosed);
         if (len == 0 && open != null) open.release();
         open = null;
-        u.backoff = cfg.backoff().minimum().toNanos();
+        u.backoff = cfg.backoff().min().toNanos();
         finSeal = wclosed;
         ups.add(u);
     }
@@ -621,8 +616,8 @@ final class ExchangeClient {
         long now = System.nanoTime();
         if (r.error != null) { fail(r.error); return; }
         if (!r.ok) { retry(st, now); return; }
-        if (r.bad) { fail(new ExchangeException(PROTOCOL)); return; }
-        if (r.flags == Exchange.FLAG_GONE) { gone = true; fail(new ExchangeException(GONE)); return; }
+        if (r.bad) { fail(new io.zmux.CarrierFailedException(PROTOCOL)); return; }
+        if (r.flags == Exchange.FLAG_GONE) { gone = true; fail(new io.zmux.CarrierFailedException(GONE)); return; }
         st.since = 0;
         if (r.flags == Exchange.FLAG_BUSY) {
             retry(st, now);
@@ -630,7 +625,7 @@ final class ExchangeClient {
             else downLimit = Math.max(1, downLimit - 1);
             return;
         }
-        st.backoff = cfg.backoff().minimum().toNanos();
+        st.backoff = cfg.backoff().min().toNanos();
         if (a.kind == Exchange.KIND_UP) {
             upLimit = Math.min(cfg.upRequests(), upLimit + 1);
             for (Iterator<Up> it = ups.iterator(); it.hasNext(); ) {
@@ -651,7 +646,7 @@ final class ExchangeClient {
     private void retry(State st, long now) {
         long spread = (long) (st.backoff * cfg.backoff().jitter());
         st.retryAt = now + st.backoff - spread + ThreadLocalRandom.current().nextLong(spread + 1);
-        st.backoff = Math.min(2 * st.backoff, cfg.backoff().maximum().toNanos());
+        st.backoff = Math.min(2 * st.backoff, cfg.backoff().max().toNanos());
     }
 
     /** Takes downlink piece n. */

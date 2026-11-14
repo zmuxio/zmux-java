@@ -34,8 +34,10 @@ try (var endpoint = new QuicClient(tls, QuicOptions.defaults());
 
 The client uses the supplied trust configuration and enforces HTTPS server
 name verification. The negotiated ALPN must match the session configuration.
-`connect` and `openPipe` wait for the session or the carrier; `connectAsync` and
-`openPipeAsync` return a cancellable `ZmuxFuture` instead. Closing the endpoint fails pending
+`connect` establishes a session over a new connection; `dial(address,
+serverName, session)` only dials a connection and returns its first stream as a
+carrier (a `PipeIo` for `addPipe`). Both wait; `connectAsync` and `dialAsync`
+return a cancellable `ZmuxFuture` instead. Closing the endpoint fails pending
 operations and closes its native connections. Close sessions before their
 endpoint: an endpoint hosts the sessions of its connections on its native event
 loop, so closing it ends them. Blocking zmux calls are refused on that loop, as
@@ -115,7 +117,7 @@ several pipes of the same joiner on one connection, supply their shared non-zero
 `PipeOptions.Builder.fateGroup`. For automatic placement and fate-group assignment,
 use `QuicPool` below.
 
-A listener-backed client's `openPipe(address, serverName, session)` also keeps
+A listener-backed client's `dial(address, serverName, session)` also keeps
 that same incoming routing on the new connection. This enables the ordinary
 `Zmux.resolveDuplicate` rejoin callback to join a fresh carrier to an initiated
 session. Use the attempt's cancellation when waiting for carrier creation; if
@@ -143,7 +145,7 @@ first; the connection's other streams wait and then reach the listener
 without a new admission. A client presents a `CarrierCredential` on stream 0 of
 every connection it opens, in 1-RTT data: `connect` takes the session
 configuration's (`ZmuxConfig.carrierCredential()`, the bound listener's for a
-listener-backed client), `openPipe` and `QuicPool` take one per call. A token
+listener-backed client), `dial` and `QuicPool` take one per call. A token
 bound to the connection's TLS exporter (`PrefixAuth` with `bindTls`) works here:
 see [Joins and the exporter](#joins-and-the-exporter). A source is the
 remote IP address, not the QUIC connection ID. Native stream credit bounds
@@ -165,7 +167,7 @@ refuses early data in its TLS configuration.
 ## Multiple connections and lanes
 
 Enable multipath and configure the same PSK on both peers. Then use
-`endpoint.openPipe(address, serverName, session)` and
+`endpoint.dial(address, serverName, session)` and
 `session.addPipe(pipeIo, PipeOptions.defaults())` to join another QUIC
 connection. A failed connection can be replaced while the zmux session and
 its logical streams survive. Connection identity is checked before admitting

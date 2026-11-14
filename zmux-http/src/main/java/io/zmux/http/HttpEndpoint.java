@@ -42,7 +42,7 @@ import java.util.function.Supplier;
  * ({@link ZmuxListener#admission()}); nothing is written before it is accepted. An exchange
  * carrier is authenticated per request by its {@link ExchangeConfig} PSK instead (the session's
  * credential is not presented on it): its authentication header within the listener's
- * {@link ZmuxListener#firstRecordTimeout()}, before the rest of its body is read. A request that
+ * {@link io.zmux.adapter.ListenerAdapter#firstRecordTimeout()}, before the rest of its body is read. A request that
  * is not authenticated goes to the host's handler with the bytes read replayed; one that finds no
  * slot of the listener for it is answered 503 without a body. A request that an intermediary forwarded from TLS early data
  * ({@code Early-Data: 1}) is answered 425 before any admission. A response that carries a
@@ -204,7 +204,7 @@ public final class HttpEndpoint implements AutoCloseable {
         /**
          * The request field that pairs the uplink POST and the downlink GET of a split bootstrap (empty:
          * {@link io.zmux.JoinHint#PAIR_HEADER}), another name only where an intermediary strips unknown
-         * fields; the client uses the same ({@link HttpCarrierClient.Builder#pairField}). It is the one
+         * fields; the client uses the same ({@link HttpCarrierClient.Builder#pairField(String)}). It is the one
          * field of the whole endpoint: classification and pairing of every adapter, the exchange carrier's
          * included, use it.
          */

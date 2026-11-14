@@ -143,7 +143,7 @@ class EpochTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
-                assertThrows(IllegalStateException.class, () -> c.replacePipes(WAIT));
+                assertThrows(IllegalStateException.class, () -> c.replacePipes());
             }
             var single = ZmuxConfig.builder().eventLoops(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(single)); var c = Zmux.connect(l.localAddress(), single); var s = l.accept(WAIT)) {
@@ -160,18 +160,18 @@ class EpochTest {
             var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
                 dials.incrementAndGet();
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("redial")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("redial")));
                 return io[0];
             }).build();
             try (listener) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
                     var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
+                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
                     c.addPipe(joined[0], PipeOptions.defaults());
                     ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    c.replacePipes(WAIT).get(WAIT.toMillis() * 2, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    c.replacePipes().get(WAIT.toMillis() * 2, java.util.concurrent.TimeUnit.MILLISECONDS);
                     assertEquals(1, c.epoch());
                     assertEquals(2, dials.get());
                 }
@@ -188,16 +188,16 @@ class EpochTest {
             }).build();
             try (listener) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
                     var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
+                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
                     c.addPipe(joined[0], PipeOptions.defaults());
                     ListenerEntryTest.await(() -> s.pipes().size() == 2);
                     long t0 = System.nanoTime();
                     var e = assertThrows(java.util.concurrent.ExecutionException.class,
-                            () -> c.replacePipes(Duration.ofMillis(500)).get(10, java.util.concurrent.TimeUnit.SECONDS));
-                    org.junit.jupiter.api.Assertions.assertInstanceOf(java.net.SocketTimeoutException.class, e.getCause());
+                            () -> c.replacePipes().orTimeout(500, java.util.concurrent.TimeUnit.MILLISECONDS).get(10, java.util.concurrent.TimeUnit.SECONDS));
+                    org.junit.jupiter.api.Assertions.assertInstanceOf(java.util.concurrent.TimeoutException.class, e.getCause());
                     long ms = (System.nanoTime() - t0) / 1_000_000;
                     org.junit.jupiter.api.Assertions.assertTrue(ms < 3_000, "took " + ms + " ms");
                 }
@@ -223,13 +223,13 @@ class EpochTest {
             }).build();
             try (listener) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
                     var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
+                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
                     c.addPipe(joined[0], PipeOptions.defaults());
                     ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    var f = c.replacePipes(WAIT);
+                    var f = c.replacePipes();
                     org.junit.jupiter.api.Assertions.assertTrue(dialing.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
                     f.cancel(true);
                     org.junit.jupiter.api.Assertions.assertTrue(signalled.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));

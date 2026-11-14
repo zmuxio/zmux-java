@@ -66,11 +66,11 @@ class CloseHandOffTest {
     }
 
     @Test void aCarrierThatTakesNothingEndsTheCloseAtTheBound() throws Exception {
-        long saved = ZmuxSession.closeHandOffLimit;
-        ZmuxSession.closeHandOffLimit = TimeUnit.MILLISECONDS.toNanos(300);
+        long saved = io.zmux.internal.core.Session.closeLimit;
+        io.zmux.internal.core.Session.closeLimit = TimeUnit.MILLISECONDS.toNanos(300);
         try (EventLoops loops = EventLoops.create(2); var listener = ZmuxListener.of(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-            listener.handle(io[1], JoinHint.inBand(TestAddr.peer("stall"))).closed();
+            listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("stall"))).closed();
             var writer = new Stalling(io[0].writer());
             var client = Zmux.open(PipeIo.of(io[0].reader(), writer), Role.CLIENT, PipePoolTest.config(loops, 2));
             var server = listener.accept(Duration.ofSeconds(3));
@@ -89,13 +89,54 @@ class CloseHandOffTest {
             assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(50), "an ended session's close returns at once");
             server.close(); server.awaitClosed();
         } finally {
-            ZmuxSession.closeHandOffLimit = saved;
+            io.zmux.internal.core.Session.closeLimit = saved;
+        }
+    }
+
+    /** Two sessions over a memory pipe whose write sides stall on demand. */
+    private static ZmuxSession[] stalledPair(ZmuxConfig cfg, Stalling[] writers) throws Exception {
+        var io = MemoryPipe.pair(Framing.BYTE_STREAM);
+        writers[0] = new Stalling(io[0].writer());
+        writers[1] = new Stalling(io[1].writer());
+        var server = CompletableFuture.supplyAsync(() -> {
+            try { return Zmux.open(PipeIo.of(io[1].reader(), writers[1]), Role.SERVER, cfg); }
+            catch (Exception e) { throw new CompletionException(e); }
+        }, r -> Thread.ofVirtual().start(r));
+        var client = Zmux.open(PipeIo.of(io[0].reader(), writers[0]), Role.CLIENT, cfg);
+        client.awaitEstablished(System.nanoTime() + TimeUnit.SECONDS.toNanos(3));
+        return new ZmuxSession[] {client, server.get(3, TimeUnit.SECONDS)};
+    }
+
+    /** An abort whose CONNECTION_CLOSE a stuck carrier never takes still ends the session. */
+    @Test void anAbortOnAStuckCarrierEndsTheSession() throws Exception {
+        try (EventLoops loops = EventLoops.create(1)) {
+            var w = new Stalling[2];
+            var s = stalledPair(ZmuxConfig.builder().eventLoops(loops).build(), w);
+            w[0].held.set(true);
+            s[0].abort(3, "stuck");
+            assertInstanceOf(SessionError.ApplicationClosed.class, s[0].closed().get(5, TimeUnit.SECONDS));
+            s[1].abort(0, "");
+            s[1].closed().get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** An idle timeout whose CONNECTION_CLOSE a stuck carrier never takes still ends the session within the close bound. */
+    @Test void anIdleTimeoutOnAStuckCarrierEndsTheSession() throws Exception {
+        try (EventLoops loops = EventLoops.create(1)) {
+            var w = new Stalling[2];
+            var s = stalledPair(ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofMillis(300)).build(), w);
+            w[0].held.set(true);
+            w[1].held.set(true);
+            long t0 = System.nanoTime();
+            for (var x : s) assertInstanceOf(SessionError.IdleTimeout.class, x.closed().get(5, TimeUnit.SECONDS));
+            long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertTrue(took < 3_000, "the sessions ended after " + took + " ms");
         }
     }
 
     @Test void closeOnAStalledLoopStillReturnsAtTheBound() throws Exception {
-        long saved = ZmuxSession.closeHandOffLimit;
-        ZmuxSession.closeHandOffLimit = TimeUnit.MILLISECONDS.toNanos(300);
+        long saved = io.zmux.internal.core.Session.closeLimit;
+        io.zmux.internal.core.Session.closeLimit = TimeUnit.MILLISECONDS.toNanos(300);
         CountDownLatch release = new CountDownLatch(1), entered = new CountDownLatch(1);
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 2))) {
             try {
@@ -114,7 +155,7 @@ class CloseHandOffTest {
             }
             f.client.closed().get(3, TimeUnit.SECONDS);
         } finally {
-            ZmuxSession.closeHandOffLimit = saved;
+            io.zmux.internal.core.Session.closeLimit = saved;
         }
     }
 
@@ -242,8 +283,8 @@ class CloseHandOffTest {
 
     /** A stuck event loop holds neither a failed join's abort nor a splice's cleanup longer than a close's bound. */
     @Test void loopWaitsOfAbortsAndSpliceCleanupAreBounded() throws Exception {
-        long saved = ZmuxSession.closeHandOffLimit;
-        ZmuxSession.closeHandOffLimit = TimeUnit.MILLISECONDS.toNanos(200);
+        long saved = io.zmux.internal.core.Session.closeLimit;
+        io.zmux.internal.core.Session.closeLimit = TimeUnit.MILLISECONDS.toNanos(200);
         try (EventLoops loops = EventLoops.create(1); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 2))) {
             var stream = f.client.openStream();
             var entered = new CountDownLatch(1);
@@ -264,7 +305,7 @@ class CloseHandOffTest {
             }
             assertTrue(f.client.cancelJoinedPipe(99), "a running loop answers");
         } finally {
-            ZmuxSession.closeHandOffLimit = saved;
+            io.zmux.internal.core.Session.closeLimit = saved;
         }
     }
 
@@ -272,7 +313,7 @@ class CloseHandOffTest {
     @Test void closeReturnsAfterTheWriteSideIsShut() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var listener = ZmuxListener.of(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-            listener.handle(io[1], JoinHint.inBand(TestAddr.peer("slow-shut"))).closed();
+            listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("slow-shut"))).closed();
             var shut = new java.util.concurrent.atomic.AtomicLong();
             PipeWriter w = io[0].writer();
             PipeWriter slowShut = new PipeWriter() {

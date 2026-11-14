@@ -19,7 +19,7 @@ import org.opentest4j.AssertionFailedError;
  */
 class TraceTest {
     /** The number of public traces: none is left out. */
-    static final int TRACE_COUNT = 372;
+    static final int TRACE_COUNT = 376;
 
     @TestFactory
     Stream<DynamicTest> traces() throws Exception {

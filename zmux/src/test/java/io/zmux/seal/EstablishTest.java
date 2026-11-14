@@ -23,8 +23,8 @@ class EstablishTest {
     private record Pair(EstablishClient client, EstablishServer server) {}
 
     private static Pair hello(Profile p, Mode m, Framing f, StaticKey cKey, StaticKey sKey) throws Exception {
-        byte[] handle = p.hasPsk() ? HANDLE : null;
-        byte[] psk = p.hasPsk() ? PSK : null;
+        byte[] handle = p.isPskBased() ? HANDLE : null;
+        byte[] psk = p.isPskBased() ? PSK : null;
         byte[] binding = m == Mode.BOUND ? new byte[32] : null;
         EstablishClient c = EstablishClient.create(p, m, f, handle, psk, binding, cKey);
         byte[] w = c.writeHello(EstablishPayload.padding(3, false));
@@ -43,7 +43,7 @@ class EstablishTest {
             for (Mode m : Mode.values()) {
                 for (Framing f : Framing.values()) {
                     Pair x = hello(p, m, f, cKey, sKey);
-                    byte[] first = p.hasPsk() ? new byte[] {9} : null;
+                    byte[] first = p.isPskBased() ? new byte[] {9} : null;
                     byte[] reply = x.server().writeReply(new EstablishPayload(null, null, first, 0), null);
                     EstablishClient.Reply r = x.client().readReply(reply, 0, reply.length);
                     assertEquals(reply.length, r.consumed());
@@ -97,7 +97,7 @@ class EstablishTest {
             assertEquals(io.zmux.Role.SERVER, c.seen.role());
             assertEquals(p, c.seen.profile());
             assertArrayEquals(sKey.publicKey(), c.seen.peerStatic());
-            assertArrayEquals(p.hasPsk() ? HANDLE : null, c.seen.pskIdentity());
+            assertArrayEquals(p.isPskBased() ? HANDLE : null, c.seen.pskIdentity());
             assertEquals(7, c.seen.credential().type());
             assertArrayEquals(new byte[] {1, 2}, c.seen.credential().data());
             assertEquals("client context", c.seen.localContext());
@@ -275,7 +275,7 @@ class EstablishTest {
         Gate gate = new Gate() {
             @Override public byte[] resolve(byte[] h, java.net.SocketAddress src) { return null; }
             @Override public Credential credential(byte[] h, Profile p, java.net.SocketAddress src) { return null; }
-            @Override public Object commit(io.zmux.seal.Admission a, java.net.SocketAddress src) { return null; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, java.net.SocketAddress src) { return null; }
         };
         var cfg = ServerConfig.builder(gate, StaticKey.generate()).build();
         assertThrows(IllegalArgumentException.class, () -> cfg.toBuilder().anchor(pin).requirePqAuth(true).build());
@@ -303,14 +303,14 @@ class EstablishTest {
         Gate gate = new Gate() {
             @Override public byte[] resolve(byte[] h, java.net.SocketAddress src) { return null; }
             @Override public Credential credential(byte[] h, Profile p, java.net.SocketAddress src) { return null; }
-            @Override public Object commit(io.zmux.seal.Admission a, java.net.SocketAddress src) { return null; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, java.net.SocketAddress src) { return null; }
         };
         StaticKey key = StaticKey.generate();
         assertThrows(IllegalArgumentException.class, () -> ServerConfig.builder(null, key).build());
         assertThrows(IllegalArgumentException.class, () -> ServerConfig.builder(gate, null).build());
         ServerConfig ok = ServerConfig.builder(gate, key).build();
         assertEquals(ServerConfig.DEFAULT_PROFILES, ok.acceptedProfiles());
-        assertTrue(ok.acceptedProfiles().stream().allMatch(Profile::hasPsk));
+        assertTrue(ok.acceptedProfiles().stream().allMatch(Profile::isPskBased));
         assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES, Profile.of(6)).build());
         assertEquals(List.of(Profile.XXHFS_AES), ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES).build().acceptedProfiles());
         assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().anchor(null).requirePqAuth(true).build());

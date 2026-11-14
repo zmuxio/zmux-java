@@ -115,9 +115,9 @@ final class Handshake {
         if (p == null) throw new SecureCarrierException(SecureCarrierException.Code.UNKNOWN_PROFILE);
         if (m == null) throw new SecureCarrierException(INVALID_CONFIG, "mode");
         int hl = handle == null ? 0 : handle.length;
-        if (p.hasPsk() ? hl != HANDLE_LEN : hl != 0) throw new SecureCarrierException(INVALID_CONFIG, "handle");
+        if (p.isPskBased() ? hl != HANDLE_LEN : hl != 0) throw new SecureCarrierException(INVALID_CONFIG, "handle");
         int pl = psk == null ? 0 : psk.length;
-        if (p.hasPsk() ? pl != PSK_LEN : pl != 0) throw new SecureCarrierException(INVALID_CONFIG, "pre-shared key");
+        if (p.isPskBased() ? pl != PSK_LEN : pl != 0) throw new SecureCarrierException(INVALID_CONFIG, "pre-shared key");
         int bl = binding == null ? 0 : binding.length;
         // Only a sender judges its Binding here: a responder fails as AUTH when it reads.
         if (initiator && (m == Mode.BOUND ? bl != Kdf.BINDING_LEN : bl != 0)) {
@@ -138,7 +138,7 @@ final class Handshake {
     }
 
     private static Token[][] pattern(Profile p) {
-        return p.hasPsk() ? XXHFS_PSK0 : XXHFS;
+        return p.isPskBased() ? XXHFS_PSK0 : XXHFS;
     }
 
     static byte[] prologue(Profile p, Mode m, byte[] handle, byte[] binding) {
@@ -159,8 +159,8 @@ final class Handshake {
 
     private int known(int message) {
         return switch (message) {
-            case 0 -> profile.hasPsk() ? KNOWN_MSG1_PSK : 0;
-            case 1 -> profile.hasPsk() ? KNOWN_MSG2_PSK : KNOWN_MSG2;
+            case 0 -> profile.isPskBased() ? KNOWN_MSG1_PSK : 0;
+            case 1 -> profile.isPskBased() ? KNOWN_MSG2_PSK : KNOWN_MSG2;
             default -> KNOWN_MSG3;
         };
     }
@@ -238,7 +238,7 @@ final class Handshake {
                         byte[] pub = e.publicRaw();
                         out.writeBytes(pub);
                         ss.mixHash(pub);
-                        if (profile.hasPsk()) ss.mixKey(pub);
+                        if (profile.isPskBased()) ss.mixKey(pub);
                     }
                     case S -> out.writeBytes(ss.encryptAndHash(s.publicRaw()));
                     case PSK -> ss.mixKeyAndHash(psk);
@@ -278,7 +278,7 @@ final class Handshake {
         try {
             // Application data in a message 1 without a key is refused, not skipped.
             int message = idx;
-            boolean refuseAppData = message == 0 && !profile.hasPsk();
+            boolean refuseAppData = message == 0 && !profile.isPskBased();
             EstablishPayload p = EstablishPayload.parse(readRaw(msg), known, maxAppData, refuseAppData);
             // A proof read carries the M it signs.
             return p.proof() == null ? p : p.withProof(p.proof().withMessage(Proof.message(message, hp)));
@@ -299,7 +299,7 @@ final class Handshake {
                     re = Arrays.copyOfRange(msg, at, at + StaticKey.KEY_LEN);
                     at += StaticKey.KEY_LEN;
                     ss.mixHash(re);
-                    if (profile.hasPsk()) ss.mixKey(re);
+                    if (profile.isPskBased()) ss.mixKey(re);
                 }
                 case S -> {
                     int n = StaticKey.KEY_LEN + (ss.cs.hasKey() ? tag : 0);
@@ -353,7 +353,7 @@ final class Handshake {
                 switch (t) {
                     case E -> {
                         n += StaticKey.KEY_LEN;
-                        keyed |= p.hasPsk();
+                        keyed |= p.isPskBased();
                     }
                     case S -> n += StaticKey.KEY_LEN + (keyed ? tag : 0);
                     case E1 -> n += MlKem768.ENCAPSULATION_KEY_LEN + (keyed ? tag : 0);

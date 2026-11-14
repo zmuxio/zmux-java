@@ -17,12 +17,12 @@ final class Profiles {
 
     /** The Profile a client uses: the first allowed one that fits its pre-shared key. */
     static Profile client(ClientConfig c) throws SecureCarrierException {
-        boolean withPsk = c.hasPsk();
+        boolean withPsk = c.isPskBased();
         if (c.hasHandle() && !withPsk) throw new SecureCarrierException(INVALID_CONFIG, "Handle set without a pre-shared key");
         List<Profile> list = c.allowedProfiles();
         if (list == null) list = Suite.aesHardware() ? CLIENT_AES : CLIENT;
         for (Profile p : list) {
-            if (p.hasPsk() == withPsk) return p;
+            if (p.isPskBased() == withPsk) return p;
         }
         throw new SecureCarrierException(INVALID_CONFIG, "no allowed profile fits the pre-shared key");
     }

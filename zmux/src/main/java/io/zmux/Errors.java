@@ -58,7 +58,7 @@ final class Errors {
             case Error error -> throw error;
             // A configuration error is the caller's to see as it is (a host callback's failure is a failed operation).
             case IllegalArgumentException invalid -> throw invalid;
-            default -> new IOException(c);
+            default -> new CallbackFailedException("operation failed", c);
         };
     }
 
@@ -75,7 +75,7 @@ final class Errors {
 
     /** Turns an operation's outcome into its exception; bytes is what a partial transfer moved. */
     static IOException outcome(Object r, long bytes) {
-        IOException x = switch (r) {
+        return switch (r) {
             case CoreException ce -> io(ce);
             case InterruptedIOException ie -> {
                 InterruptedIOException c = ie instanceof java.net.SocketTimeoutException
@@ -85,10 +85,9 @@ final class Errors {
             }
             case IOException io -> io;
             case RuntimeException re -> throw re;
-            case Throwable t -> new IOException(t);
+            case Throwable t -> new CallbackFailedException("operation failed", t);
             default -> throw new IllegalStateException("not an outcome: " + r);
         };
-        return x;
     }
 
     /** Throws when r is an outcome (a Throwable); returns r otherwise. */

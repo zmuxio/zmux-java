@@ -19,8 +19,8 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     void stop(long code);
 
     /**
-     * Reads to the end of the stream; fails with {@link java.io.IOException} once more than
-     * maxBytes arrived.
+     * Reads to the end of the stream; once more than maxBytes arrived it stops the receiving part
+     * with code 0 and throws {@link LimitExceededException}.
      */
     byte[] readAll(long maxBytes) throws IOException;
 

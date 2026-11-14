@@ -66,7 +66,7 @@ class InboundTransformTest {
             var lc = ListenerConfig.builder().session(serverCfg).admission(valued("tenant-7")).inboundTransform(t).build();
             try (var l = ZmuxListener.of(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")).withRequest(RequestHead.NONE));
+                l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")).withRequest(RequestHead.NONE));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     var ctx = seen.poll(5, TimeUnit.SECONDS);
                     assertEquals(Optional.of("tenant-7"), ctx.admitted());
@@ -82,7 +82,7 @@ class InboundTransformTest {
                     assertEquals(29, p.writeOverhead(), "the transform's overhead reaches the shaper factory");
                     // A join carries its own value; zmux does not compare it with the session's.
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
+                    l.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
                     c.addPipe(pair[0], PipeOptions.builder().noProbation().build());
                     ListenerEntryTest.await(() -> l.stats().joins() == 1);
                     assertEquals(Optional.of("tenant-7"), seen.poll(5, TimeUnit.SECONDS).admitted());
@@ -101,7 +101,7 @@ class InboundTransformTest {
             try (var l = ZmuxListener.of(ListenerConfig.builder().session(config(loops)).inboundTransform(t).build())) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var ended = ListenerEntryTest.watchEnd(boot[0]);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
+                l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 ended.get(5, TimeUnit.SECONDS);
                 ListenerEntryTest.await(() -> l.stats().setupFailures() == 1);
                 assertEquals(0, l.stats().sessions());
@@ -124,7 +124,7 @@ class InboundTransformTest {
                 for (int i = 0; i < 2; i++) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var ended = ListenerEntryTest.watchEnd(boot[0]);
-                    l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
+                    l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                     ended.get(5, TimeUnit.SECONDS);
                 }
                 cancelled.get(5, TimeUnit.SECONDS);
@@ -148,8 +148,8 @@ class InboundTransformTest {
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                 String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
                 // The downlink first: the session's value is still the uplink's.
-                l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null), JoinHint.pair(token, false, downPeer));
-                l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null), JoinHint.pair(token, true, upPeer));
+                l.adapter().handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null), JoinHint.pair(token, false, downPeer));
+                l.adapter().handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null), JoinHint.pair(token, true, upPeer));
                 var client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null),
                         new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null));
                 try (var c = Zmux.open(client, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
@@ -168,10 +168,10 @@ class InboundTransformTest {
             var cfg = config(loops);
             try (var home = ZmuxListener.of(ListenerConfig.of(cfg)); var other = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                home.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
+                home.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5))) {
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    other.handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
+                    other.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
                     assertThrows(Exception.class, () -> c.addPipe(pair[0], PipeOptions.builder().noProbation().build()));
                     ListenerEntryTest.await(() -> other.stats().rejected() == 1);
                     assertNotNull(c.info(), "the session lives on");
@@ -185,7 +185,7 @@ class InboundTransformTest {
             var cfg = config(loops);
             try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
+                l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 var writes = java.util.Collections.synchronizedList(new ArrayList<Integer>());
                 try (var c = Zmux.open(counted(boot[0], writes, 1234), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     var st = c.openStream();

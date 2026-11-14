@@ -99,7 +99,7 @@ func (g *matrixGate) Resolve(_ context.Context, h []byte, _ netip.AddrPort) ([]b
 func (g *matrixGate) Credential(context.Context, seal.CredentialRequest) (*proto.Credential, error) {
 	return nil, nil
 }
-func (g *matrixGate) Commit(_ context.Context, a seal.Admission) (any, error) { return a.Peer, nil }
+func (g *matrixGate) Commit(_ context.Context, a seal.CommitRequest) (any, error) { return a.Peer, nil }
 
 func printAppData(d []seal.AppData) {
 	for _, e := range d {
@@ -366,7 +366,7 @@ func matrixClient(sc string, args []string) {
 			failf("tls dial: %v", err)
 		}
 		bound := zmux.RecordBound
-		if _, err := conn.AddPipe(ctx, zmux.SecureTLS(tc), zmux.PipeOptions{RecordMode: &bound}); err != nil {
+		if _, err := conn.AddPipe(ctx, zmux.SecureTLS(tc), zmux.PipeOptions{RecordMode: zmux.Set(bound)}); err != nil {
 			failf("bound join: %v", err)
 		}
 		fmt.Printf("PIPES %d\n", len(conn.PipeStats()))

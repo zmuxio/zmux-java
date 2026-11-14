@@ -33,6 +33,13 @@ final class Shaping {
         long earnBytes();
         /** Stream data waits to be scheduled. */
         boolean dataWaiting();
+        /**
+         * When a shaping delay of p's next record ends because the record carries a pending PIPE_ACK: the
+         * acknowledgement's deadline, zmux_max_ack_delay after the first ack-eliciting byte it reports
+         * (MULTIPATH.md Section 6.3). The peer's PTO and so its T_suspect count on that bound; held longer, the
+         * peer's working pipe turns suspect at every exchange. {@link Time#NEVER} when p carries none.
+         */
+        long ackRelease(Pipe p);
     }
 
     /** Drivers arm no gate timer earlier than this. */
@@ -302,8 +309,10 @@ final class Shaping {
             if (ps == null || ps.sh == null) continue;
             t = Math.min(t, ps.wakeAt);
             if (ps.injLen > 0 && !ps.injDue) t = Math.min(t, ps.injAt);
-            if (ps.wake && (waiting || ps.delaying(now))) {
-                long r = ps.hold;
+            boolean delaying = ps.wake && ps.delaying(now);
+            if (ps.wake && (waiting || delaying)) {
+                // A delayed record that carries a PIPE_ACK goes at the acknowledgement's deadline.
+                long r = delaying ? Math.min(ps.hold, port.ackRelease(p)) : ps.hold;
                 TokenBucket b = ps.bucket;
                 if (b.rate() > 0 && b.held()) {
                     long at = b.release();
@@ -466,14 +475,14 @@ final class Shaping {
         /** Executes effects. */
         void apply(Effects e) {
             long now = port.now();
-            if (e.hasInject()) {
+            if (e.isInjectSet()) {
                 injLen = 0; injAt = Time.NEVER; injDue = injDeferred = false;
                 if (!e.isInjectNone()) {
                     injLen = Math.max(e.injectLength(), 1);
                     injAt = e.injectAtNanos();
                 }
             }
-            if (e.hasGate()) {
+            if (e.isGateSet()) {
                 holdUntil(e.gatePauseUntilNanos(), now);
                 // Both are unsigned: what lies above a bound takes the bound.
                 long r = unsignedMin(e.gateRate(), WireAccount.MAX_RATE);
@@ -488,8 +497,8 @@ final class Shaping {
                 }
                 wake = true;
             }
-            if (e.hasWake()) wakeAt = e.isWakeNone() ? Time.NEVER : e.wakeAtNanos();
-            if (e.hasWeight() && e.weight() >= 0) weight = e.weight();
+            if (e.isWakeSet()) wakeAt = e.isWakeNone() ? Time.NEVER : e.wakeAtNanos();
+            if (e.isWeightSet() && e.weight() >= 0) weight = e.weight();
             if (e.isStopRequested()) stop(true);
             pipes.wakeWriters(p.id);
         }
@@ -520,9 +529,9 @@ final class Shaping {
             pauseAsked = until;
         }
 
-        /** The planned record waits for its delay. */
+        /** The planned record waits for its delay: it has not passed, and the record carries no PIPE_ACK whose deadline has. */
         boolean delaying(long now) {
-            return planned && rp.delayNanos() > 0 && now < hold;
+            return planned && rp.delayNanos() > 0 && now < hold && now < port.ackRelease(p);
         }
 
         boolean held(long now) {

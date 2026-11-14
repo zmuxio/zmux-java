@@ -54,7 +54,15 @@ class ProbeTest {
                 assertTrue(f >= 5 && f <= 8, "1 s interval: " + f + " probes in 6.5 s");
                 // Each wait is drawn from [0.2 s, 2 s]: at least 3, at most 32 probes in 6.5 s.
                 assertTrue(j >= 3 && j <= 33, "jittered 2 s interval: " + j + " probes in 6.5 s");
-                assertTrue(bootstrap.stats().orElseThrow().pingsSent() - b0 <= 1, "the session's 15 s interval");
+                // The bootstrap pipe keeps the session's 15 s. Its PIPE_PING count may still grow: in this busy
+                // session the pipe ordered first or second for control carries the acknowledgements, and one of them
+                // carries a return-pipe PIPE_PING when the pipe is unproven, with no ack-eliciting byte sent and no
+                // advance of its acknowledged position for R_p = max(1 s, T_suspect) (MULTIPATH.md Section 6.4).
+                // That is at most one per R_p >= 1 s, 7 in 6.5 s. Measured 0 or 1 alone and up to 3 under a full
+                // build's load (1 to 6 when an advance did not count); a tighter bound would test the host's load.
+                assertEquals(Duration.ofSeconds(15), client.liveness().probeInterval().orElseThrow(), "the session's 15 s interval");
+                long b = bootstrap.stats().orElseThrow().pingsSent() - b0;
+                assertTrue(b <= 7, "return-pipe liveness: at most one per second, " + b + " PIPE_PING in 6.5 s");
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
             assertEquals(0, loops.outstandingBuffers());
@@ -101,7 +109,7 @@ class ProbeTest {
                     dials.add(System.nanoTime()); options.set(attempt.options());
                     if (dials.size() <= 2) throw new java.io.IOException("refused");
                     return attempt.join(listener.localAddress());
-                }).withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new PipePool.Backoff(Duration.ofSeconds(10), Duration.ofSeconds(20), 0))
+                }).withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofSeconds(10), Duration.ofSeconds(20), 0))
                         .withPolicy(policy);
                 try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
@@ -110,8 +118,8 @@ class ProbeTest {
                         long gap = TimeUnit.NANOSECONDS.toMillis(dials.get(i) - dials.get(i - 1));
                         assertTrue(gap >= 90 && gap < 2000, "dial spacing " + gap + " ms, not the 10 s backoff");
                     }
-                    assertEquals(java.util.Optional.of(Duration.ofSeconds(3)), options.get().liveness.probeInterval());
-                    assertEquals(java.util.OptionalDouble.of(0.25), options.get().liveness.probeJitter());
+                    assertEquals(java.util.Optional.of(Duration.ofSeconds(3)), options.get().liveness().probeInterval());
+                    assertEquals(java.util.OptionalDouble.of(0.25), options.get().liveness().probeJitter());
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
@@ -127,7 +135,7 @@ class ProbeTest {
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 var dials = new AtomicInteger();
                 PipePool pool = PipePool.of(attempt -> { dials.incrementAndGet(); return attempt.join(listener.localAddress()); })
-                        .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new PipePool.Backoff(Duration.ofMillis(200), Duration.ofSeconds(1), 0));
+                        .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofMillis(200), Duration.ofSeconds(1), 0));
                 try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     Thread.sleep(300); // older than the backoff: the redial goes at once

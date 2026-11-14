@@ -25,26 +25,26 @@ public final class Zmux {
     /**
      * The largest stream count credit the encoding allows, 2<sup>60</sup> (RFC 9000 Section 4.6):
      * the value that grants the peer as many streams as the protocol can count, in effect no
-     * limit, for {@link ZmuxConfig.Builder#incomingStreams}, {@link ZmuxConfig.Builder#incomingUniStreams}
+     * limit, for {@link ZmuxConfig.Builder#incomingStreams(long)}, {@link ZmuxConfig.Builder#incomingUniStreams}
      * and {@link ZmuxSession#raiseIncomingStreams}. It is a value of their range, not an unlimited
      * setting; their none setting stays 0.
      */
     public static final long MAX_STREAM_CREDIT = 1L << 60;
 
     /**
-     * Transfers both streams to a bounded, bidirectional relay. Cancelling the returned stage
-     * ({@code toCompletableFuture().cancel(...)}) cancels the splice: both streams are reset and stopped with code 0
+     * Transfers both streams to a bounded, bidirectional relay. Cancelling the returned future, or
+     * completing it from outside ({@link ZmuxFuture#orTimeout}), cancels the splice: both streams are reset and stopped with code 0
      * and there is no result. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
      * finished, with how each direction ended, or exceptionally when a limiter failed, for stream data or for datagrams (the limiter's exception is the
      * cause of the {@link java.io.IOException} the stage completes with). The ownership cleanup waits
      * for each stream's event loop at most one second; a loop that does not answer by then completes the stage
      * exceptionally with an {@link java.io.IOException} saying so (the cleanup still runs if the loop resumes).
      */
-    public static java.util.concurrent.CompletionStage<SpliceResult> splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+    public static ZmuxFuture<SpliceResult> splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
         return Splice.start(a, b, options);
     }
 
-    public static java.util.concurrent.CompletionStage<SpliceResult> splice(ZmuxStream a, ZmuxStream b) {
+    public static ZmuxFuture<SpliceResult> splice(ZmuxStream a, ZmuxStream b) {
         return splice(a, b, SpliceOptions.defaults());
     }
 
@@ -170,9 +170,9 @@ public final class Zmux {
      * included, and the caller never does.
      *
      * <p>A {@link Role#SERVER} or {@link Role#AUTO} session opened here has no listener, so it
-     * cannot accept joins: {@link ZmuxConfig.Builder#maxPipes} above 1 or a
-     * {@link ZmuxConfig.Builder#resumeTimeout} on it is rejected with
-     * {@link IllegalArgumentException} (use {@link ZmuxListener#handle} instead).
+     * cannot accept joins: {@link ZmuxConfig.Builder#maxPipes(int)} above 1 or a
+     * {@link ZmuxConfig.Builder#resumeTimeout(Duration)} on it is rejected with
+     * {@link IllegalArgumentException} (use {@link io.zmux.adapter.ListenerAdapter#handle} instead).
      *
      * @throws IllegalArgumentException for a configuration that cannot work on this pipe input,
      *     before any byte is written; io is closed
@@ -200,7 +200,7 @@ public final class Zmux {
     /**
      * Dials a client session over the carrier the choice selects; each
      * carrier presents cfg's {@link ZmuxConfig#carrierCredential()}. policy is the policy of
-     * {@link CarrierChoice#auto} (null: the defaults).
+     * {@link CarrierChoice#auto(Candidate...)} (null: the defaults).
      *
      * <p>An explicit choice dials its one candidate as its own dialer does. An auto choice does not
      * use early data, so that nothing the application sends goes out before a carrier is chosen,

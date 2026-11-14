@@ -231,7 +231,7 @@ class SessionTest {
         assertThrows(java.net.SocketTimeoutException.class, () -> b.read(new byte[8], 0, 8));
         a.close();
         b.close();
-        p.client().shutdown(Duration.ofSeconds(5));
+        p.client().shutdown(0, "", Duration.ofSeconds(5));
         assertTrue(p.client().isClosed());
         p.server().awaitClosed();
         p.close();
@@ -250,7 +250,7 @@ class SessionTest {
         b.finish();
         assertEquals("r", new String(a.inputStream().readAllBytes(), StandardCharsets.UTF_8));
         long start = System.nanoTime();
-        p.client().shutdown(Duration.ofSeconds(10));
+        p.client().shutdown(0, "", Duration.ofSeconds(10));
         assertTrue(p.client().isClosed());
         assertTrue(System.nanoTime() - start < Duration.ofSeconds(5).toNanos(), "the shutdown waited for the open handles");
         // The session ended gracefully, not by the timeout's close.

@@ -90,7 +90,7 @@ public final class MatrixPeer {
         Gate gate = new Gate() {
             @Override public byte[] resolve(byte[] handle, SocketAddress src) { return Arrays.equals(handle, HP.handle()) ? HP.psk() : null; }
             @Override public io.zmux.seal.Credential credential(byte[] handle, Profile profile, SocketAddress src) { return null; }
-            @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "matrix"; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "matrix"; }
         };
         var sc0 = ServerConfig.builder(gate, SERVER_KEY).acceptedProfiles(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES, Profile.XXHFS_CHACHA, Profile.XXHFS_AES).allowRecordMode(s.multipath ? ANY_MODE : null).build();
         if (s == Scenario.APPDATA) {
@@ -119,7 +119,7 @@ public final class MatrixPeer {
                     try {
                         SocketChannel ch = tcp.accept();
                         var peer = (InetSocketAddress) ch.getRemoteAddress();
-                        l.handle(PipeChannel.pipe(ch, ch, Framing.BYTE_STREAM, 1 << 16), JoinHint.inBand(peer));
+                        l.adapter().handle(PipeChannel.pipe(ch, ch, Framing.BYTE_STREAM, 1 << 16), JoinHint.inBand(peer));
                     } catch (IOException closed) {
                         return;
                     }
@@ -178,7 +178,7 @@ public final class MatrixPeer {
         var cc = ClientConfig.builder();
         byte[] node = KeyId.of(KeyAlg.X25519, SERVER_KEY.publicKey());
         cc.anchor(new PinAnchor(node)).allowedProfiles(s.profile);
-        if (s.profile.hasPsk()) cc.psk(HP.handle(), HP.psk());
+        if (s.profile.isPskBased()) cc.psk(HP.handle(), HP.psk());
         if (s == Scenario.APPDATA) cc.key(CLIENT_KEY).appData(only(3, "cli-msg3"));
         if (s == Scenario.PROOF) cc.anchor(new PinAnchor(node, HexFormat.of().parseHex(rest[1]))).requirePqAuth(true);
         PipeIo p = Seal.establish(tcp(at), cc.build())
@@ -224,7 +224,7 @@ public final class MatrixPeer {
             }
             if (s == Scenario.CLOSE_IDLE) return reportClose(session);
             if (s == Scenario.EPOCH) System.out.println("EPOCH " + session.epoch());
-            session.shutdown(Duration.ofSeconds(10)); // Code 0, after the echo of B is delivered.
+            session.shutdown(0, "", Duration.ofSeconds(10)); // Code 0, after the echo of B is delivered.
             System.out.println("OK");
             return 0;
         }

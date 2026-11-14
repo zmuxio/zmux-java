@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * How {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} chooses the carrier, or a pool's members ({@link PipePool#choice}): one kind only ({@link #explicit}) or among
- * candidates ({@link #auto}), each of its own kind.
+ * candidates ({@link #auto(Candidate...)}), each of its own kind.
  */
 public final class CarrierChoice {
     private final boolean auto;

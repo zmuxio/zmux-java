@@ -23,14 +23,8 @@ final class Splice {
     private final AtomicReference<IOException> teardown = new AtomicReference<>();
     /** The stream whose side was lost in the failure behind {@link #teardown}; guarded by teardown, null when the cause names no side. */
     private ZmuxStream teardownLost;
-    /** The caller's stage: cancelling it cancels the splice. */
-    private final CompletableFuture<SpliceResult> result = new CompletableFuture<>() {
-        @Override public boolean cancel(boolean mayInterruptIfRunning) {
-            boolean done = super.cancel(mayInterruptIfRunning);
-            if (done) Splice.this.cancel();
-            return done;
-        }
-    };
+    /** The caller's future: cancelling it, or completing it from outside, cancels the splice. */
+    private final ZmuxFuture<SpliceResult> result = new ZmuxFuture<>(() -> { cancel(); return true; });
     private final Direction forward, reverse;
 
     private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
@@ -38,7 +32,7 @@ final class Splice {
         forward = new Direction(a, b, options.aToB()); reverse = new Direction(b, a, options.bToA());
     }
 
-    static CompletionStage<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+    static ZmuxFuture<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
         Objects.requireNonNull(a); Objects.requireNonNull(b); Objects.requireNonNull(options);
         if (a.session.driver == b.session.driver && a.st == b.st) throw new IllegalArgumentException("cannot splice a stream into itself");
         a.claimIo();
@@ -65,11 +59,11 @@ final class Splice {
         CompletableFuture<?> wait = stream.session.driver.executeCarrier(() -> {
             try { action.run(); done.complete(null); } catch (Throwable error) { done.completeExceptionally(error); }
         }) ? done : stream.session.driver.closedFuture();
-        return ZmuxSession.awaitBounded(wait, ZmuxSession.closeHandOffLimit);
+        return ZmuxSession.awaitBounded(wait, io.zmux.internal.core.Session.closeLimit);
     }
 
     private void run() {
-        try { runOwned(); } catch (Throwable error) { result.completeExceptionally(error); }
+        try { runOwned(); } catch (Throwable error) { result.publishFailure(error); }
     }
 
     private void runOwned() {
@@ -87,12 +81,12 @@ final class Splice {
             finally { cleaned &= ownerCleanup(b, () -> { b.session.driver.lanes.watchRecvEnd(b.st, null); b.session.driver.lanes.watchSendEnd(b.st, null); b.session.driver.lanes.releaseStream(b.st); }); }
         }
         if (!cleaned) {
-            result.completeExceptionally(new IOException("splice cleanup timed out: a stream's event loop did not answer within 1 s"));
+            result.publishFailure(new java.net.SocketTimeoutException("splice cleanup timed out: a stream's event loop did not answer within 1 s"));
             return;
         }
         IOException failed = forward.callbackFailure != null ? forward.callbackFailure : reverse.callbackFailure;
-        if (failed != null) result.completeExceptionally(failed);
-        else result.complete(new SpliceResult(forward.result(), reverse.result()));
+        if (failed != null) result.publishFailure(failed);
+        else result.publish(new SpliceResult(forward.result(), reverse.result()));
     }
 
     /**
@@ -185,13 +179,13 @@ final class Splice {
                         try {
                             if (resetPoke.compareAndSet(true, false)) throw new InterruptedException(); // A reset beat the flag above.
                             int allowed = ready.get();
-                            if (allowed < 1 || allowed > n) throw new CallbackFailed(new IOException("invalid limiter allowance"));
+                            if (allowed < 1 || allowed > n) throw new CallbackFailed(new CallbackFailedException("invalid limiter allowance"));
                             n = allowed;
                         } catch (InterruptedException error) {
                             ready.cancel(true); check();
                             continue; // A source reset: read again, up to its end.
                         } catch (ExecutionException error) {
-                            throw new CallbackFailed(new IOException("limiter failed", error.getCause()));
+                            throw new CallbackFailed(new CallbackFailedException("limiter failed", error.getCause()));
                         } finally {
                             limiting = false;
                         }
@@ -239,7 +233,7 @@ final class Splice {
             } catch (RuntimeException error) {
                 settling = true;
                 Errors.clearInternalWake();
-                callbackFailed(new IOException("relay callback failed", error));
+                callbackFailed(new CallbackFailedException("relay callback failed", error));
             } finally {
                 settling = true; worker = null; closeRead.run(); closeWrite.run();
             }
@@ -330,7 +324,7 @@ final class Splice {
                 // Stream workers own terminal propagation; datagrams never add a waiting queue.
             } catch (RuntimeException error) {
                 // A limiter callback (or the relay itself) failed: the splice reports it as a stream worker's would.
-                if (!cancelled.get()) callbackFailed(new IOException("relay callback failed", error));
+                if (!cancelled.get()) callbackFailed(new CallbackFailedException("relay callback failed", error));
             } finally { datagramWorker = null; }
         }
 

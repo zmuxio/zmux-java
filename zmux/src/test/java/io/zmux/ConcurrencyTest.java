@@ -165,7 +165,7 @@ class ConcurrencyTest {
                     }
                 }
                 assertTrue(e != null, "no reset after the handle became unreachable");
-                assertEquals(0, e.code());
+                assertEquals(0x5a4d0001L, e.code());
             }
         }
     }

@@ -96,7 +96,7 @@ class PeerInterop {
                         var reset = assertInstanceOf(StreamResetException.class, failure.getCause()); assertEquals(33, reset.code());
                     }
                     var back = jobs.submit(() -> {
-                        try (var stream = get(session.acceptStreamAsync(Duration.ofSeconds(10)))) {
+                        try (var stream = get(session.acceptStreamAsync().orTimeout(10, java.util.concurrent.TimeUnit.SECONDS))) {
                             assertEquals("back", new String(stream.preamble().openInfo(), StandardCharsets.UTF_8));
                             byte[] bytes = read(stream); stream.write(("back:" + new String(bytes, StandardCharsets.UTF_8)).getBytes(StandardCharsets.UTF_8)); stream.finish();
                         }
@@ -104,10 +104,10 @@ class PeerInterop {
                     });
                     try { assertEquals("opened=back:hello", command(session, "open-bidi:hello", new byte[0])); get(back); }
                     finally { if (!back.isDone()) back.cancel(true); }
-                    var uni = session.acceptReceiveStreamAsync(Duration.ofSeconds(10));
+                    var uni = session.acceptReceiveStreamAsync().orTimeout(10, java.util.concurrent.TimeUnit.SECONDS);
                     assertEquals("sent", command(session, "open-uni:uni", new byte[0]));
                     try (var stream = get(uni)) { assertArrayEquals("uni".getBytes(StandardCharsets.UTF_8), read(stream)); }
-                    var returned = session.acceptReceiveStreamAsync(Duration.ofSeconds(10));
+                    var returned = session.acceptReceiveStreamAsync().orTimeout(10, java.util.concurrent.TimeUnit.SECONDS);
                     try (var stream = get(session.openSendStreamAsync(Preamble.EMPTY))) { get(stream.writeAsync(ByteBuffer.wrap(new byte[] {4, 5}))); get(stream.finishAsync()); }
                     try (var stream = get(returned)) { assertArrayEquals(new byte[] {4, 5}, read(stream)); }
                     session.datagrams().send(ByteBuffer.wrap(new byte[] {3})); assertArrayEquals(new byte[] {3}, session.datagrams().receive());

@@ -48,18 +48,18 @@ public final class Effects {
     public Effects stop() { set |= STOP; return this; }
 
     public boolean isEmpty() { return set == 0; }
-    public boolean hasInject() { return (set & INJECT) != 0; }
+    public boolean isInjectSet() { return (set & INJECT) != 0; }
     public boolean isInjectNone() { return injectNone; }
     public long injectAtNanos() { return injectAt; }
     public int injectLength() { return injectLength; }
-    public boolean hasWake() { return (set & WAKE) != 0; }
+    public boolean isWakeSet() { return (set & WAKE) != 0; }
     public boolean isWakeNone() { return wakeNone; }
     public long wakeAtNanos() { return wakeAt; }
-    public boolean hasGate() { return (set & GATE) != 0; }
+    public boolean isGateSet() { return (set & GATE) != 0; }
     public long gatePauseUntilNanos() { return gateUntil; }
     public long gateRate() { return gateRate; }
     public long gateBurst() { return gateBurst; }
-    public boolean hasWeight() { return (set & WEIGHT) != 0; }
+    public boolean isWeightSet() { return (set & WEIGHT) != 0; }
     public long weight() { return weight; }
     public boolean isStopRequested() { return (set & STOP) != 0; }
 

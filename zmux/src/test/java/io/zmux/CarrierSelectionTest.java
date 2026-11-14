@@ -17,7 +17,7 @@ class CarrierSelectionTest {
         return Candidate.of(kind, (cred, timeout) -> {
             dials.incrementAndGet();
             var m = MemoryPipe.pair(Framing.BYTE_STREAM);
-            l.handle(m[1], JoinHint.inBand(TestAddr.peer("client"))).closed();
+            l.adapter().handle(m[1], JoinHint.inBand(TestAddr.peer("client"))).closed();
             return m[0];
         });
     }

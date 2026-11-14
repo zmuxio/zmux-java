@@ -23,9 +23,9 @@ final class Events {
             case TIER_SATURATION -> new SessionEvent.TierSaturation(e.code(), e.flag());
             case PIPE_PRIORITY -> new SessionEvent.PipePriorityChanged(PipeId.of(e.pipe()), e.carrier(), e.code(), e.flag(), e.count(),
                     e.initiator() ? PipeStats.SettingSource.PEER : PipeStats.SettingSource.LOCAL);
-            case PIPE_QUALITY -> new SessionEvent.PipeQualityChanged(PipeId.of(e.pipe()), e.carrier(), Duration.ofNanos(e.rtt()), e.rate());
-            case CAPACITY_BELOW -> new SessionEvent.CapacityBelow(e.rate());
-            case CAPACITY_RESTORED -> new SessionEvent.CapacityRestored(e.rate());
+            case PIPE_QUALITY -> new SessionEvent.PipeQualityChanged(PipeId.of(e.pipe()), e.carrier(), Duration.ofNanos(e.rtt()), (long) e.rate());
+            case CAPACITY_BELOW -> new SessionEvent.CapacityBelow((long) e.rate());
+            case CAPACITY_RESTORED -> new SessionEvent.CapacityRestored((long) e.rate());
             case EPOCH_COMMITTED -> new SessionEvent.EpochCommitted(e.code());
             case EPOCH_DELETED -> new SessionEvent.EpochDeleted(e.code());
             default -> null;

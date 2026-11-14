@@ -74,7 +74,7 @@ class QuicSecureCarrierTest {
             other[0] = 1;
             var refused = new PrefixAuth(other, Duration.ofSeconds(30), true, 1, 0);
             var denied = client.connectAsync(server.address(), "localhost", ZmuxConfig.builder().carrierCredential(refused).build());
-            assertNull(l.accept(Duration.ofMillis(500)), "another key's token is not admitted");
+            assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(500)), "another key's token is not admitted");
             denied.cancel(true);
         }
     }
@@ -86,16 +86,16 @@ class QuicSecureCarrierTest {
              QuicClient client = new QuicClient(TestTls.client, QuicOptions.defaults())) {
             ZmuxSession c = client.connectAsync(server.address(), "localhost", cfg).get(10, TimeUnit.SECONDS);
             ZmuxSession s = l.accept(WAIT);
-            assertTrue(c.joinReady(), "the exporter of the key log is the session's secret");
+            assertTrue(c.adapter().isJoinReady(), "the exporter of the key log is the session's secret");
             echo(c, s);
-            PipeIo p1 = client.openPipeAsync(server.address(), "localhost", c).get(10, TimeUnit.SECONDS);
+            PipeIo p1 = client.dialAsync(server.address(), "localhost", c).get(10, TimeUnit.SECONDS);
             assertTrue(p1.isSecure());
             assertNotNull(p1.capabilities().exporter().export("EXPORTER-x", null, 32));
             ZmuxPipe sealed = c.addPipe(p1, PipeOptions.defaults());
             PipeStats st = sealed.stats().orElseThrow();
             assertEquals(RecordMode.SEALED, st.recordMode());
             echo(c, s);
-            ZmuxPipe bound = c.addPipe(client.openPipeAsync(server.address(), "localhost", c).get(10, TimeUnit.SECONDS),
+            ZmuxPipe bound = c.addPipe(client.dialAsync(server.address(), "localhost", c).get(10, TimeUnit.SECONDS),
                     PipeOptions.builder().recordMode(RecordMode.BOUND).build());
             assertEquals(RecordMode.BOUND, bound.stats().orElseThrow().recordMode());
             echo(c, s);
@@ -114,10 +114,10 @@ class QuicSecureCarrierTest {
         var gate = new io.zmux.seal.Gate() {
             @Override public byte[] resolve(byte[] h, java.net.SocketAddress src) { return hp.psk(); }
             @Override public io.zmux.seal.Credential credential(byte[] h, io.zmux.seal.Profile p, java.net.SocketAddress src) { return null; }
-            @Override public Object commit(io.zmux.seal.Admission a, java.net.SocketAddress src) { return "q"; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, java.net.SocketAddress src) { return "q"; }
         };
         ZmuxConfig cfg = ZmuxConfig.builder().maxPipes(4).noProbation().allowRecordMode((c, m, p) -> true).build();
-        var lc = ListenerConfig.builder().session(cfg).inboundTransform(io.zmux.seal.Seal.server(io.zmux.seal.ServerConfig.builder(gate, node).allowRecordMode((c, m, p) -> c.secure()).build())).build();
+        var lc = ListenerConfig.builder().session(cfg).inboundTransform(io.zmux.seal.Seal.server(io.zmux.seal.ServerConfig.builder(gate, node).allowRecordMode((c, m, p) -> c.isSecure()).build())).build();
         for (RecordMode mode : java.util.List.of(RecordMode.SEALED, RecordMode.BOUND)) {
             try (ZmuxListener l = ZmuxListener.of(lc);
                  QuicServer server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), l);

@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(120)
 class QuicPeerInterop {
     private static final byte[] PSK = "zmux interop pre-shared key 0123".getBytes(StandardCharsets.US_ASCII);
-    private static final QuicOptions OPTIONS = new QuicOptions(2 << 20, 4, 16, Duration.ofSeconds(30));
+    private static final QuicOptions OPTIONS = QuicOptions.builder().streamWindow(2 << 20).lanes(16).build();
 
     private static String binary() {
         String p = System.getenv("ZMUX_INTEROP_PEER");

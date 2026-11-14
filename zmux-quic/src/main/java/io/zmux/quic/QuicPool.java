@@ -174,7 +174,7 @@ public final class QuicPool implements AutoCloseable {
         Request request = new Request(); boolean rejected;
         synchronized (this) { rejected = closed; if (!rejected) requests.add(request); }
         var notification = ConnectionCarrier.offLoop(request.result, client.completions(), QuicPool::discard);
-        if (rejected) request.result.completeExceptionally(new IOException("QUIC pool closed")); else acquire(request, true);
+        if (rejected) request.result.completeExceptionally(new io.zmux.CarrierFailedException("QUIC pool closed")); else acquire(request, true);
         return QuicClient.future(notification);
     }
 
@@ -219,7 +219,7 @@ public final class QuicPool implements AutoCloseable {
             }
         }
         idle.forEach(QuicPool::dispose);
-        if (reject) { request.result.completeExceptionally(new IOException("QUIC pool closed")); return; }
+        if (reject) { request.result.completeExceptionally(new io.zmux.CarrierFailedException("QUIC pool closed")); return; }
         if (lease != null) { open(request,lease); return; }
         var shared = waiting; boolean fallback = diverted;
         shared.ready.whenComplete((entry,error) -> {
@@ -256,7 +256,7 @@ public final class QuicPool implements AutoCloseable {
             long fate = NEXT_FATE.getAndIncrement();
             if (fate <= 0 || fate > ((1L << 62)-1)) {
                 carrier.dispose(); synchronized (this) { if (opening == shared) opening = null; }
-                shared.ready.completeExceptionally(new IOException("fate group namespace exhausted")); return;
+                shared.ready.completeExceptionally(new io.zmux.CarrierFailedException("fate group namespace exhausted")); return;
             }
             Entry entry = new Entry(carrier,fate); boolean adopted;
             synchronized (this) {
@@ -385,7 +385,7 @@ public final class QuicPool implements AutoCloseable {
                 if (entry.active == 0) { idle.add(entry); entries.remove(i); } else i++;
             }
         }
-        for (Request request : pending) request.result.completeExceptionally(new IOException("QUIC pool closed"));
+        for (Request request : pending) request.result.completeExceptionally(new io.zmux.CarrierFailedException("QUIC pool closed"));
         if (cancel != null) cancel.cancel(false);
         idle.forEach(QuicPool::dispose);
     }

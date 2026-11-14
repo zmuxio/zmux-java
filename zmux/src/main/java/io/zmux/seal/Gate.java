@@ -19,9 +19,9 @@ public interface Gate {
 
     /**
      * Accepts a client after message 3 verified, and after the {@link ServerConfig#anchor()} judged it when there is
-     * one; {@code a} holds the Handle and the client's whole {@link Peer}. Any server state that should exist only
+     * one; {@code request} holds the Handle and the client's whole {@link Peer}. Any server state that should exist only
      * after a successful handshake is committed here; a one-time token is consumed idempotently for one client key.
      * The result is the session's host value ({@link Peer#value()}); an exception closes the carrier.
      */
-    Object commit(Admission a, SocketAddress src) throws Exception;
+    Object commit(CommitRequest request, SocketAddress src) throws Exception;
 }

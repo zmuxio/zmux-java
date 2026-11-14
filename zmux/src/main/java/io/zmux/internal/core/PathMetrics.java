@@ -11,6 +11,7 @@ final class PathMetrics {
     private final PipeTable pipes;
     private final AckEngine ack;
     private final Features feat;
+    private Pipe openAs;
 
     PathMetrics(PipeTable pipes, AckEngine ack, Features feat) {
         this.pipes = pipes;
@@ -77,11 +78,25 @@ final class PathMetrics {
         return q;
     }
 
-    /** Whether a pipe's carrier takes bytes now. */
+    /** Whether a pipe's carrier takes bytes now (its lane 0). */
     boolean open(Pipe p) {
         if (p.out() == null || p.out().failed()) return false;
-        Pipe.OutLane ol = p.out().lanes.getFirst();
-        return !ol.tx.notWritable() && !ol.tx.writing() && !Pacer.held(p);
+        return laneOpen(p, p.out().lanes.getFirst());
+    }
+
+    /**
+     * Whether lane ol of p takes bytes now: its carrier accepts them and the limiter does not hold p. While the write
+     * stall check evaluates p (openAs), its carrier counts as accepting them.
+     */
+    boolean laneOpen(Pipe p, Pipe.OutLane ol) {
+        if (Pacer.held(p)) return false;
+        if (openAs == p) return true;
+        return !ol.tx.notWritable() && !ol.tx.writing();
+    }
+
+    /** The pipe evaluated as if its carrier took bytes, or null; set by the write stall check only. */
+    void openAs(Pipe p) {
+        openAs = p;
     }
 
     /** A stream direction's data ready within its own credit and not yet committed (the preamble counts). */

@@ -37,8 +37,8 @@ class EstablishLengthVectorsTest {
             Profile profile = u.containsKey("profile") ? Profile.of(num(u, "profile")) : Profile.XXHFS_PSK0_CHACHA;
             assertEquals(num(u, "noise"), Handshake.minLength(profile, seq), c.toString());
             if (seq == 0) {
-                assertEquals(u.get("has_handle"), profile.hasPsk(), c.toString());
-                w += EstablishHello.headerLength(profile, new byte[profile.hasPsk() ? Handshake.HANDLE_LEN : 0]);
+                assertEquals(u.get("has_handle"), profile.isPskBased(), c.toString());
+                w += EstablishHello.headerLength(profile, new byte[profile.isPskBased() ? Handshake.HANDLE_LEN : 0]);
             }
             assertEquals(num(c, "wire"), w, c.toString());
             seen++;

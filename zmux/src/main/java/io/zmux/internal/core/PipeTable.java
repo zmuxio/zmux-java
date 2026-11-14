@@ -42,12 +42,23 @@ public final class PipeTable {
     void remove(Pipe p) {
         list.remove(p);
         if (byId.get(p.id) == p) byId.remove(p.id);
+        if (!goneW.isEmpty()) goneW.wakeEvery(outbox);
     }
 
     void clear() {
         list.clear();
         byId.clear();
+        if (!goneW.isEmpty()) goneW.wakeEvery(outbox);
     }
+
+    /** The waiters for a pipe's removal. */
+    private final WaitList goneW = new WaitList();
+
+    /** Registers w until the next removal of a pipe. */
+    void waitRemoved(Waiter w) { goneW.add(w); }
+
+    /** Withdraws a registration of {@link #waitRemoved}. */
+    void cancelRemovedWait(Waiter w) { goneW.remove(w); }
 
     /** Attaches pipe 0 in both directions; the driver then polls it for the first record. */
     public void attachBootstrap(CarrierInfo in, CarrierInfo out, Waiter writerWaiter) {

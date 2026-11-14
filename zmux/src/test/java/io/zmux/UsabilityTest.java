@@ -115,7 +115,7 @@ class UsabilityTest {
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(4).replayWindow(11).build(), "below 4 + 8");
         assertEquals(12, ZmuxConfig.builder().maxPipes(4).replayWindow(12).build().replayWindow().orElseThrow());
         assertThrows(IllegalArgumentException.class,
-                () -> new PipePool.Backoff(Duration.ofSeconds(2), Duration.ofSeconds(1), 0));
+                () -> new Backoff(Duration.ofSeconds(2), Duration.ofSeconds(1), 0));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().sendBufferMax(1 << 20).build(), "below the send buffer");
         assertEquals(OptionalLong.empty(), ZmuxConfig.defaults().incomingUniStreams(), "unset: staged credit");
         assertEquals(OptionalLong.of(0), ZmuxConfig.builder().incomingUniStreams(0).build().incomingUniStreams(), "none");
@@ -189,7 +189,7 @@ class UsabilityTest {
             var sl = ZmuxListener.of(ListenerConfig.of(server));
             var cl = ZmuxListener.of(ListenerConfig.of(client));
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-            sl.handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
+            sl.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
             var c = cl.open(io[0], Role.CLIENT);
             return new Rejoinable(sl, cl, c, sl.accept(Duration.ofSeconds(5)));
         }
@@ -239,12 +239,12 @@ class UsabilityTest {
             var client = resuming(loops, logger).redial((need, cancellation) -> {
                 dials.incrementAndGet();
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("redial")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("redial")));
                 return io[0];
             }).build();
             try (listener) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
+                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(Duration.ofSeconds(5))) {
                     c.pipes().getFirst().abort();
                     RelayTest.event(c, SessionEvent.SessionResumed.class, e -> true, 10_000);

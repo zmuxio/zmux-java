@@ -164,11 +164,13 @@ class QuicChannelTest {
      * packets are lost and whose later ones (retransmissions among them) are held at the relay,
      * then 10 datagrams. With channel datagrams they are waited for before the relay lets the
      * stream go on; otherwise the server's count is taken once it has processed every packet
-     * that carried them.
+     * that carried them. lanes is the endpoints' maximum lane count (0: the default).
      */
-    static Run lossLatencies(Duration d, QuicOptions clientOptions) throws Exception {
+    static Run lossLatencies(Duration d, QuicOptions clientOptions, long lanes) throws Exception {
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = config(loops);
+            var b = ZmuxConfig.builder().eventLoops(loops).datagrams(true);
+            if (lanes > 0) b.maxLanes(lanes);
+            var config = b.build();
             try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                  var relay = new LossyRelay(server.address(), d);
@@ -191,7 +193,7 @@ class QuicChannelTest {
                     for (int i = 0; i < 10; i++) c.datagrams().send(ByteBuffer.wrap(new byte[100]));
                     relay.barrier().get(10, TimeUnit.SECONDS);
                     int whileHeld = 0;
-                    if (clientOptions.datagrams()) {
+                    if (clientOptions.isDatagrams()) {
                         for (; whileHeld < 10; whileHeld++) {
                             try { s.datagrams().receive(Duration.ofSeconds(2)); }
                             catch (java.net.SocketTimeoutException e) { break; }
@@ -200,9 +202,9 @@ class QuicChannelTest {
                         whileHeld = (int) (s.stats().datagramsReceived() - 5);
                     }
                     relay.release();
-                    int received = clientOptions.datagrams() ? whileHeld : 0;
+                    int received = clientOptions.isDatagrams() ? whileHeld : 0;
                     for (; received < 10; received++) {
-                        try { s.datagrams().receive(Duration.ofSeconds(clientOptions.datagrams() ? 1 : 10)); }
+                        try { s.datagrams().receive(Duration.ofSeconds(clientOptions.isDatagrams() ? 1 : 10)); }
                         catch (java.net.SocketTimeoutException e) { break; }
                     }
                     st.finish();
@@ -219,16 +221,18 @@ class QuicChannelTest {
 
     @Test void channelDatagramsAvoidHeadOfLineBlocking() throws Exception {
         Duration d = Duration.ofMillis(40);
-        Run channel = lossLatencies(d, QuicOptions.defaults());
+        Run channel = lossLatencies(d, QuicOptions.defaults(), 0);
         assertEquals(2, channel.dropped);
         assertTrue(channel.client.datagramsSentChannel() >= 15, "not on the channel: " + channel.client);
         // They arrive while the stream's lost data is still missing.
         assertTrue(channel.whileHeld >= 5, channel.whileHeld + " datagrams arrived while the stream was held");
 
-        Run records = lossLatencies(d, QuicOptions.defaults().withDatagrams(false));
+        // Without lanes the stream data and the records share one QUIC stream; with them the data goes on a lane of
+        // its own once the peer has acknowledged that lane, and the records on lane 0 are not held.
+        Run records = lossLatencies(d, QuicOptions.builder().datagrams(false).build(), 1);
         assertEquals(2, records.dropped);
         assertEquals(0, records.client.datagramsSentChannel());
-        // In records they wait behind the stream's lost data, however long it is missing.
+        // In records on the same QUIC stream they wait behind the stream's lost data, however long it is missing.
         assertEquals(0, records.whileHeld, "a datagram in records was not held");
         assertEquals(10, records.received);
     }
@@ -237,7 +241,7 @@ class QuicChannelTest {
     @Test void fallbackToRecords() throws Exception {
         try (var loops = EventLoops.create(2)) {
             var config = config(loops);
-            for (QuicOptions clientOptions : List.of(QuicOptions.defaults(), QuicOptions.defaults().withDatagrams(false))) {
+            for (QuicOptions clientOptions : List.of(QuicOptions.defaults(), QuicOptions.builder().datagrams(false).build())) {
                 try (var listener = ZmuxListener.of(ListenerConfig.of(config));
                      var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
                      var endpoint = new QuicClient(TestTls.client, clientOptions)) {
@@ -253,9 +257,9 @@ class QuicChannelTest {
                         assertArrayEquals(small, c.datagrams().receive(Duration.ofSeconds(5)));
                         var cs = c.stats();
                         assertEquals(2, cs.datagramsSent());
-                        assertEquals(clientOptions.datagrams() ? 1 : 0, cs.datagramsSentChannel(), cs.toString());
-                        assertEquals(clientOptions.datagrams() ? 1 : 0, cs.datagramsReceivedChannel(), cs.toString());
-                        assertEquals(clientOptions.datagrams() ? 1 : 0, s.stats().datagramsReceivedChannel());
+                        assertEquals(clientOptions.isDatagrams() ? 1 : 0, cs.datagramsSentChannel(), cs.toString());
+                        assertEquals(clientOptions.isDatagrams() ? 1 : 0, cs.datagramsReceivedChannel(), cs.toString());
+                        assertEquals(clientOptions.isDatagrams() ? 1 : 0, s.stats().datagramsReceivedChannel());
                     } finally {
                         QuicEndpointTest.closed(c, s);
                     }

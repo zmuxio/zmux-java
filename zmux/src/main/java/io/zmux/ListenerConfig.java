@@ -15,9 +15,9 @@ public final class ListenerConfig {
     public static final int MAX_INSTANCE_ID = 8;
 
     private static final ListenerConfig DEFAULTS = builder().build();
-    /** {@link #memoryBudget} unlimited. */
+    /** {@link #memoryBudget()} unlimited. */
     private static final long NO_BUDGET = -1;
-    /** {@link #maxPending} unlimited. */
+    /** {@link #maxPending()} unlimited. */
     private static final int NO_MAX_PENDING = -1;
 
     private final ZmuxConfig session;
@@ -122,7 +122,7 @@ public final class ListenerConfig {
     public BiConsumer<Long, Long> memoryPressureListener() { return memoryPressureListener; }
     /**
      * The admission of every new carrier: the listener's socket and TLS carriers and those
-     * given to {@link ZmuxListener#handle}; null: none.
+     * given to {@link io.zmux.adapter.ListenerAdapter#handle}; null: none.
      */
     public Admission admission() { return admission; }
     /** The fallback target of the listener's socket and TLS carriers; null: none (a fallback stalls). */
@@ -191,9 +191,9 @@ public final class ListenerConfig {
         public Builder sessionConfigs(SessionConfigs c) { sessionConfigs = c; return this; }
 
         /**
-         * The logger of the listener's own warnings, failures of its host callbacks ({@link #onReject},
-         * {@link #sessionConfigs}) among them. It is called outside every lock and must not block. Null
-         * (the default): the logger of {@link #session}. Sessions log to their own configuration's.
+         * The logger of the listener's own warnings, failures of its host callbacks ({@link #onReject()},
+         * {@link #sessionConfigs()}) among them. It is called outside every lock and must not block. Null
+         * (the default): the logger of {@link #session()}. Sessions log to their own configuration's.
          */
         public Builder logger(System.Logger l) { logger = l; return this; }
 
@@ -202,7 +202,7 @@ public final class ListenerConfig {
 
         /**
          * Answers a refused unauthenticated carrier, nothing written either way. A stalled Join
-         * ends one join timeout of {@link #session} after the refusal, whatever the session its
+         * ends one join timeout of {@link #session()} after the refusal, whatever the session its
          * Locator names configures; a known Locator declined under memory pressure is refused as
          * {@code memory_pressure} and answered the same way. A stalled Establish at the handshake timeout, and never later than
          * the maximum stall duration (the admission's, or one drawn when there is none). A source

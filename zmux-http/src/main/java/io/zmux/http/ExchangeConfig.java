@@ -8,7 +8,7 @@ import java.util.Objects;
 /**
  * Configures both ends of an HTTP exchange carrier: one bidirectional
  * carrier made of a sequence of bounded HTTP POST exchanges, for paths where a long-lived request
- * does not work. A PSK is required; every other field
+ * does not work. The PSK is the parameter of {@link #builder(byte[])}; every other field
  * has a default. The PSK and base64 must be the same on both ends; the other
  * fields are local to one end. The server's hold time must stay below the response timeout of
  * every intermediary on the path, and the client's request timeout above the hold time.
@@ -22,12 +22,11 @@ public final class ExchangeConfig {
     private final Map<String, List<String>> headers;
     private final String downUrl, instance, nonceParam;
     private final int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
-    private final io.zmux.PipePool.Backoff backoff;
+    private final io.zmux.Backoff backoff;
     private final Duration requestTimeout, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
     private ExchangeConfig(Builder b) {
-        if (b.psk.length == 0) throw new IllegalArgumentException("an exchange carrier needs a PSK");
-        psk = b.psk.clone();
+        psk = b.psk;
         base64 = b.base64;
         cacheBust = b.cacheBust;
         headers = Map.copyOf(b.headers);
@@ -82,7 +81,13 @@ public final class ExchangeConfig {
         return base64 ? Exchange.BODY_MAX / 4 * 3 - Exchange.REQ_OVERHEAD : Exchange.BODY_MAX - Exchange.REQ_OVERHEAD;
     }
 
-    public static Builder builder() { return new Builder(); }
+    /**
+     * A builder for a carrier authenticated with psk, the pre-shared key both ends hold: the MACs
+     * authenticate both ends with it.
+     *
+     * @throws IllegalArgumentException when psk is empty
+     */
+    public static Builder builder(byte[] psk) { return new Builder(psk); }
 
     public byte[] psk() { return psk.clone(); }
     byte[] pskRef() { return psk; }
@@ -107,7 +112,7 @@ public final class ExchangeConfig {
     public int nonceCacheSize() { return nonceCacheSize; }
     public Duration requestTimeout() { return requestTimeout; }
     /** The randomized, doubling delay before a request without a result is repeated (client). */
-    public io.zmux.PipePool.Backoff backoff() { return backoff; }
+    public io.zmux.Backoff backoff() { return backoff; }
     public Duration deadline() { return deadline; }
     public Duration holdTime() { return holdTime; }
     public Duration coalesce() { return coalesce; }
@@ -124,21 +129,22 @@ public final class ExchangeConfig {
     /**
      * Builds an {@link ExchangeConfig}; a value not set keeps its default. A value outside a
      * setting's range is rejected: counts are at least 1, the timeouts, the deadline and the clock
-     * skew positive; zero is a value for {@link #holdTime}, {@link #coalesce} and {@link #goneMemory}.
+     * skew positive; zero is a value for {@link #holdTime()}, {@link #coalesce()} and {@link #goneMemory()}.
      */
     public static final class Builder {
-        private byte[] psk = new byte[0];
+        private final byte[] psk;
         private boolean base64, cacheBust = true;
         private Map<String, List<String>> headers = Map.of();
-        private io.zmux.PipePool.Backoff backoff = new io.zmux.PipePool.Backoff(Duration.ofMillis(20), Duration.ofSeconds(2), 0.5);
+        private io.zmux.Backoff backoff = new io.zmux.Backoff(Duration.ofMillis(20), Duration.ofSeconds(2), 0.5);
         private String downUrl = "", instance = "", nonceParam = "";
         private int downRequests, upRequests, upPieceSize, downPieceSize, downWindow, upStoreLimit, nonceCacheSize;
         private Duration requestTimeout, deadline, holdTime, coalesce, idleTimeout, goneMemory, maxClockSkew;
 
-        private Builder() {}
+        private Builder(byte[] key) {
+            if (Objects.requireNonNull(key, "psk").length == 0) throw new IllegalArgumentException("an exchange carrier needs a PSK");
+            psk = key.clone();
+        }
 
-        /** The pre-shared key: the MACs authenticate both ends with it. */
-        public Builder psk(byte[] key) { psk = Objects.requireNonNull(key).clone(); return this; }
         /** Sends every body base64-encoded (standard alphabet, padded). */
         public Builder base64(boolean on) { base64 = on; return this; }
         /**
@@ -175,7 +181,7 @@ public final class ExchangeConfig {
          * The randomized, doubling delay before a request without a result is repeated: its
          * minimum and maximum (20 ms, 2 s) and its jitter j (0.5): each wait is drawn from [d(1 - j), d], d doubling from the minimum to the maximum.
          */
-        public Builder backoff(io.zmux.PipePool.Backoff b) { backoff = Objects.requireNonNull(b, "backoff"); return this; }
+        public Builder backoff(io.zmux.Backoff b) { backoff = Objects.requireNonNull(b, "backoff"); return this; }
         /** Fails the carrier when a request has had no result for this long (30 s). */
         public Builder deadline(Duration d) { deadline = positive(d, "deadline"); return this; }
         /** How long the server holds a DOWN request without data (20 s); zero: it answers at once. */

@@ -288,6 +288,15 @@ public final class ListenerHub {
         }
     }
 
+    /** The sessions registered now (the ones the listener started or dialed that have not ended). */
+    public java.util.List<SessionRuntime> registered() {
+        synchronized (this) {
+            java.util.List<SessionRuntime> l = new java.util.ArrayList<>(registrations.size());
+            for (Registration r : registrations) l.add(r.driver);
+            return l;
+        }
+    }
+
     /**
      * Takes no new session from now on (a new session's first record and a split bootstrap are
      * refused); the registered sessions take their joins and resumptions until they end.
@@ -532,7 +541,7 @@ public final class ListenerHub {
             PairHalf up = uplink ? this : down;
             String alpn = combined.info().applicationProtocol();
             Admission.CarrierInfo paired = new Admission.CarrierInfo(up.info.source(), up.info.peer(), alpn, up.info.serverName(),
-                    combined.hasExporter() ? combined::export : null, up.info.request(), info.terminatedTls() && down.info.terminatedTls());
+                    combined.exporterPresent() ? combined::export : null, up.info.request(), info.terminatedTls() && down.info.terminatedTls());
             Next session = (c, value) -> gate(c, source, alpn, value, paired,
                     driver -> { adopted.set(true); driver.closedFuture().whenComplete((v, error) -> forget.run()); }) != null;
             if (transform == null) session.start(combined, up.admitted);
@@ -647,16 +656,16 @@ public final class ListenerHub {
      * that is not a Join, or is malformed, gives (false, 0); one that ends before the head
      * of the Hello (through R) gives (false, total length needed).
      */
-    public io.zmux.ZmuxListener.JoinLookup knownJoin(ByteBuffer prefix) {
+    public io.zmux.adapter.JoinLookup knownJoin(ByteBuffer prefix) {
         int n = prefix.remaining();
-        if (n == 0 || (prefix.get(prefix.position()) & 0xff) != io.zmux.internal.join.Hello.PROFILE_JOIN) return new io.zmux.ZmuxListener.JoinLookup(false, 0);
+        if (n == 0 || (prefix.get(prefix.position()) & 0xff) != io.zmux.internal.join.Hello.PROFILE_JOIN) return new io.zmux.adapter.JoinLookup(false, 0);
         byte[] b = new byte[n];
         prefix.get(prefix.position(), b);
         try {
             var h = io.zmux.internal.join.Hello.parseHead(b, 0, n, io.zmux.internal.join.Framing.STREAM);
-            return new io.zmux.ZmuxListener.JoinLookup(sessions.containsKey(HexFormat.of().formatHex(h.locator())), 0);
+            return new io.zmux.adapter.JoinLookup(sessions.containsKey(HexFormat.of().formatHex(h.locator())), 0);
         } catch (io.zmux.seal.SecureCarrierException e) {
-            return new io.zmux.ZmuxListener.JoinLookup(false, e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE ? e.need() : 0);
+            return new io.zmux.adapter.JoinLookup(false, e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE ? e.need() : 0);
         }
     }
 
@@ -1023,7 +1032,7 @@ public final class ListenerHub {
             }
             Transport c = carrier;
             if (!next.start(c, value)) return;
-            if (!c.closed() && c.inbound() != this && !parked(c)) resume();
+            if (!c.isClosed() && c.inbound() != this && !parked(c)) resume();
         }
 
         /** After the skipped bytes of a live delivery: next; the count consumed of [pos, lim), or GONE. */
@@ -1031,7 +1040,7 @@ public final class ListenerHub {
             Transport c = carrier;
             if (deferred) return later();
             if (!next.start(c, value)) return Inbound.GONE;
-            if (c.inbound() == this || c.closed() || pos == lim) return 0;
+            if (c.inbound() == this || c.isClosed() || pos == lim) return 0;
             return c.inbound().bytes(c, buf, data, pos, lim);
         }
 
@@ -1045,8 +1054,8 @@ public final class ListenerHub {
             c.rebind(HOLD);
             c.pauseInput();
             if (!c.loop().tryExecute(() -> {
-                if (c.inbound() != HOLD || c.closed()) return;
-                if (next.start(c, value) && !c.closed() && c.inbound() != HOLD && !parked(c)) c.resumeInput();
+                if (c.inbound() != HOLD || c.isClosed()) return;
+                if (next.start(c, value) && !c.isClosed() && c.inbound() != HOLD && !parked(c)) c.resumeInput();
             })) {
                 c.close(null);
                 return Inbound.GONE;
@@ -1068,7 +1077,7 @@ public final class ListenerHub {
                 return;
             }
             if (!next.start(c, value)) return;
-            if (c.inbound() == this || c.closed()) {
+            if (c.inbound() == this || c.isClosed()) {
                 c.close(null);
                 return;
             }
@@ -1612,7 +1621,7 @@ public final class ListenerHub {
             view = new Forwarded(c, replay, ended, graceful, messages);
             var caps = io.zmux.carrier.PipeIo.Capabilities.builder().exporter(info.exporter()).receiveMemory(Forwarded.AHEAD)
                     .applicationProtocol(info.applicationProtocol()).serverName(info.serverName()).fateGroup(ci.fateGroup())
-                    .writeOverhead(ci.carrier().writeOverhead()).terminatedTls(info.terminatedTls()).secure(c.secure())
+                    .writeOverhead(ci.carrier().writeOverhead()).terminatedTls(info.terminatedTls()).secure(c.isSecure())
                     .handshakePadding(c.handshakePadding()).build();
             given = PipeIoAccess.get().withCarrierPeer(view.pipe(info.applicationProtocol()).withCapabilities(caps).withLabel(ci.carrier().label())
                     .withCarrierConn(ci.connection()).withCarrier(ci.carrier().kind()).withVariant(v.variant()), c.carrierPeer());
@@ -1689,7 +1698,7 @@ public final class ListenerHub {
             if (same(r) && view.untouched()) {
                 // The carrier itself: it goes on as it is, its input where the admission left it.
                 view.release();
-                if (next.start(c, value) && !c.closed() && !parked(c)) c.resumeInput();
+                if (next.start(c, value) && !c.isClosed() && !parked(c)) c.resumeInput();
                 return;
             }
             var ci = c.info();

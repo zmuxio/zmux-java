@@ -3,7 +3,7 @@ package io.zmux;
 /**
  * A local join of a session that has no join keys yet. A session whose first pipe is not on the
  * secure carrier gets them only once the host declared pipe 0 end to end ({@link
- * ZmuxSession#declareEndToEnd()} or {@link PipeAuth#withEndToEnd()}) and once a {@link
+ * io.zmux.adapter.SessionAdapter#declareEndToEnd()} or {@link PipeAuth#withEndToEnd()}) and once a {@link
  * PipeAuth#deferred() deferred PSK} was supplied ({@link ZmuxSession#setJoinSecret}); the message
  * names what is still missing. Until then the peer's joins are held.
  */

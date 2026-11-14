@@ -7,7 +7,7 @@ public enum AdmissionVerdict {
     /**
      * The carrier goes, with every byte read replayed, to the fallback target of the entry
      * that took it ({@link ListenerConfig#fallback()} for the listener's sockets, the target
-     * given to {@link ZmuxListener#handle}: an HTTP endpoint's host handler, a QUIC
+     * given to {@link io.zmux.adapter.ListenerAdapter#handle}: an HTTP endpoint's host handler, a QUIC
      * server's fallback); without one it is {@link #STALL}.
      */
     FALLBACK,

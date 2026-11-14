@@ -78,11 +78,11 @@ class HandshakeWireTest {
             var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, p) -> true).shaper(shaper).build());
             try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(seal).build())) {
                 Side[] first = carrier(f, overhead);
-                l.handle(first[1].io(), JoinHint.inBand(SRC));
+                l.adapter().handle(first[1].io(), JoinHint.inBand(SRC));
                 PipeIo p = Seal.establish(first[0].io(), SealTest.client().shaper(shaper).build()).toCompletableFuture().get(10, java.util.concurrent.TimeUnit.SECONDS);
                 try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     Side[] second = carrier(f, overhead);
-                    l.handle(second[1].io(), JoinHint.inBand(SRC));
+                    l.adapter().handle(second[1].io(), JoinHint.inBand(SRC));
                     var options = PipeOptions.builder().recordMode(mode).build();
                     c.addPipe(second[0].io(), options);
                     SealTest.echo(c, s);

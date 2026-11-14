@@ -93,7 +93,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
         byte[] b = null;
         if (bindTls) {
             b = info == null ? null : binding(info);
-            if (b == null) throw new java.io.IOException("PrefixAuth.bindTls on a carrier without a TLS exporter");
+            if (b == null) throw new NoExporterException();
         }
         return token(b);
     }

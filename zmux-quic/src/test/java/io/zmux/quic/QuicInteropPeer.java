@@ -28,7 +28,7 @@ import java.util.function.Consumer;
  */
 public final class QuicInteropPeer {
     private static final byte[] PSK = "zmux interop pre-shared key 0123".getBytes(StandardCharsets.US_ASCII);
-    private static final QuicOptions OPTIONS = new QuicOptions(2 << 20, 4, 16, Duration.ofSeconds(30));
+    private static final QuicOptions OPTIONS = QuicOptions.builder().streamWindow(2 << 20).lanes(16).build();
 
     private QuicInteropPeer() {}
 

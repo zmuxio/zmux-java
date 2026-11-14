@@ -169,7 +169,7 @@ class SealVectorsTest {
                 }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> want = (Map<String, Object>) v.get(idx == 1 ? "verify_server" : idx == 2 ? "verify_client" : "none");
-                judged(want, rd, p, p.hasPsk() ? handle : null, got, idx == 1, name);
+                judged(want, rd, p, p.isPskBased() ? handle : null, got, idx == 1, name);
                 for (Framing f : Framing.values()) {
                     byte[] wire = idx == 0 ? EstablishHello.encode(p, m, handle == null ? new byte[0] : handle, noise, f) : Frames.frame(f, noise);
                     assertArrayEquals(hex(msg, f == Framing.STREAM ? "wire_stream" : "wire_message"), wire, name);

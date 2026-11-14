@@ -5,7 +5,8 @@ import java.io.IOException;
 /**
  * Every zmux failure an operation reports, by scope: the session ended
  * ({@link SessionClosedException}), one stream failed ({@link StreamException}), one pipe
- * failed ({@link PipeException}), or a feature or state was missing. Timeouts are
+ * failed ({@link PipeException}), the listener was closed ({@link ListenerClosedException}),
+ * or a feature or state was missing. Timeouts are
  * {@link java.net.SocketTimeoutException} (with the bytes transferred) and interruptions
  * {@link java.io.InterruptedIOException}; calling a blocking method on an event loop or a
  * completion context throws {@link IllegalStateException}.
@@ -13,8 +14,8 @@ import java.io.IOException;
 public abstract sealed class ZmuxException extends IOException
         permits SessionClosedException, StreamException, PipeException, NotNegotiatedException,
         DatagramTooLargeException, NotEstablishedException, DuplicateResolutionException,
-        JoinPendingException, JoinSecretSetException, NoExporterException,
-        CarrierChoiceException, CarrierRejectedException, HttpRedirectException, HttpStatusException,
+        JoinPendingException, JoinSecretSetException, NoExporterException, ListenerClosedException,
+        CarrierChoiceException, CarrierRejectedException, CarrierFailedException, CallbackFailedException, HttpRedirectException, HttpStatusException,
         io.zmux.seal.NoReplyException, io.zmux.seal.CredentialsFailedException, io.zmux.seal.VerifierUnavailableException,
         io.zmux.seal.SecureCarrierException {
 

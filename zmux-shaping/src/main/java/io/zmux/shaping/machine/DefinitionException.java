@@ -2,8 +2,11 @@ package io.zmux.shaping.machine;
 
 import java.io.Serial;
 
-/** A definition or a configuration bundle that does not load; {@link #category()} names the kind of error. */
-public final class DefinitionException extends Exception {
+/**
+ * A definition or a configuration bundle that does not load, an argument error;
+ * {@link #category()} names the kind of error.
+ */
+public final class DefinitionException extends IllegalArgumentException {
     @Serial
     private static final long serialVersionUID = 1L;
 

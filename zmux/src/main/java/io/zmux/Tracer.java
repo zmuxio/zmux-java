@@ -1,7 +1,7 @@
 package io.zmux;
 
 /**
- * The event hook of a session ({@link ZmuxConfig.Builder#tracer}): ordered asynchronous
+ * The event hook of a session ({@link ZmuxConfig.Builder#tracer(Tracer,int)}): ordered asynchronous
  * notifications of the session's events. A slow tracer loses events (reported by
  * {@link #dropped}), never a terminal one or the end of the session.
  */

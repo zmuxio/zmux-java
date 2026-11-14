@@ -4,8 +4,11 @@ import io.zmux.internal.core.CoreException;
 import io.zmux.internal.core.Tiers;
 import io.zmux.internal.core.Session;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * One attachment of a multipath session. Thread-safe. Once the attachment is retired (or the
@@ -54,8 +57,7 @@ public final class ZmuxPipe {
     public Optional<Object> admitted() throws IOException {
         if (id == 0) return session.admitted();
         return Optional.ofNullable(session.run(op -> {
-            Object v = session.core.pipes().admitted(id);
-            return v;
+            return session.core.pipes().admitted(id);
         }));
     }
 
@@ -123,58 +125,72 @@ public final class ZmuxPipe {
             case CLEAR -> b.probation(-1L);
             case KEEP -> { }
         }
-        Tiers.PipeSettings settings = u.sendPriority == PipeUpdate.Change.KEEP && u.sendStandby == PipeUpdate.Change.KEEP
-                && u.receivePriority == PipeUpdate.Change.KEEP && u.receiveStandby == PipeUpdate.Change.KEEP
-                && u.weight == PipeUpdate.Change.KEEP && u.probation == PipeUpdate.Change.KEEP ? null : b.build();
+        Tiers.PipeSettings settings = u.onlyBand() ? null : b.build();
         PipeLiveness l = switch (u.liveness) {
             case SET -> u.livenessValue;
             case CLEAR -> PipeLiveness.inherit();
             case KEEP -> null;
         };
         Session core = session.core;
+        PipeUpdate.Change band = u.qualityBand;
+        QualityBand bandValue = u.qualityBandValue;
+        boolean[] noOut = new boolean[1];
         gone(() -> {
+            // The band first: the only setting refused for the pipe's kind (no outbound direction), before anything changed.
+            if (band == PipeUpdate.Change.SET) noOut[0] = !core.setQualityBand(id, ZmuxConfig.nanos(bandValue.rtt()), bandValue.rateRatio(),
+                    ZmuxConfig.nanos(bandValue.minInterval()));
+            else if (band == PipeUpdate.Change.CLEAR) noOut[0] = !core.clearQualityBand(id);
+            if (noOut[0]) return;
             if (settings != null) core.setPipe(id, settings);
             if (l != null) core.setPipeLiveness(id, l.suspectFloorNanos(), l.deadTimeoutNanos(), l.probeIntervalNanos(), l.probeJitterRaw());
         });
+        if (noOut[0]) throw new IllegalStateException("pipe " + id + " has no outbound direction for a quality band");
     }
 
-    /** Sets the tier of the local outbound direction: {@link #update} with that one setting. */
-    public void setSendPriority(long tier) throws IOException { update(PipeUpdate.builder().sendPriority(tier).build()); }
-
-    /** Sets the tier requested for the peer's outbound direction: {@link #update} with that one setting. */
-    public void setReceivePriority(long tier) throws IOException { update(PipeUpdate.builder().receivePriority(tier).build()); }
-
-    /** Sets the local outbound standby: {@link #update} with that one setting. */
-    public void setSendStandby(boolean on) throws IOException { update(PipeUpdate.builder().sendStandby(on).build()); }
-
-    /** Sets the standby requested for the peer's outbound direction: {@link #update} with that one setting. */
-    public void setReceiveStandby(boolean on) throws IOException { update(PipeUpdate.builder().receiveStandby(on).build()); }
-
-    /** Overrides the session's quality event band for this outbound pipe. */
-    public void setQualityBand(QualityBand band) throws IOException {
-        java.util.Objects.requireNonNull(band);
-        gone(() -> session.core.setQualityBand(id, ZmuxConfig.nanos(band.rtt()), band.rateRatio(),
-                ZmuxConfig.nanos(band.minInterval())));
+    /**
+     * Installs shaper on this pipe's outbound direction until the session's next
+     * {@link ZmuxSession#setShaper}; null: the pipe is not shaped. <b>Advanced:</b> most hosts set
+     * one factory with {@link ZmuxSession#setShaper}.
+     *
+     * @throws IllegalStateException when the pipe has no outbound direction
+     * @throws PipeGoneException once the pipe is retired
+     */
+    public void setShaper(io.zmux.shaping.Shaper shaper) throws IOException {
+        Session core = session.core;
+        boolean[] set = new boolean[1];
+        gone(() -> {
+            if (core.pipeState(id) == null) throw CoreException.of(CoreException.Reason.INVALID);
+            set[0] = core.setPipeShaper(id, shaper);
+        });
+        if (!set[0]) throw new IllegalStateException("pipe " + id + " has no outbound direction");
     }
 
     /**
      * Waits until the peer is known to hold this pipe: a pipe this side joined
      * counts once a PIPE_ACK on any lane covered more than zero bytes or, receive-only, once a
      * record arrived; pipe 0 and pipes the peer joined are held from the start. Joining waits for
-     * this unless {@link PipeOptions.Builder#returnOnReply} is set, when it returns once the Reply
+     * this unless {@link PipeOptions.Builder#returnOnReply(boolean)} is set, when it returns once the Reply
      * verified, before the acceptor read the Confirm: removing the session's other pipes earlier
-     * may leave the peer without a live pipe. null timeout: no limit;
-     * {@link java.net.SocketTimeoutException} after it, {@link PipeGoneException} once the pipe is
+     * may leave the peer without a live pipe. {@link PipeGoneException} once the pipe is
      * retired, {@link SessionClosedException} once the session ended.
      */
+    public void awaitPeerAttached() throws IOException {
+        awaitPeerAttached(Long.MAX_VALUE);
+    }
+
+    /** {@link #awaitPeerAttached()} bounded by timeout: {@link java.net.SocketTimeoutException} after it. */
     public void awaitPeerAttached(Duration timeout) throws IOException {
-        Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, ZmuxSession.deadline(timeout));
+        awaitPeerAttached(ZmuxSession.deadline(Objects.requireNonNull(timeout, "timeout")));
+    }
+
+    private void awaitPeerAttached(long deadline) throws IOException {
+        Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, deadline);
         if (r == MISSING) throw new PipeGoneException(pipeId);
     }
 
-    /** Like {@link #awaitPeerAttached} without blocking; cancelling the future withdraws the wait. */
-    public ZmuxFuture<Void> peerAttachedAsync(Duration timeout) {
-        return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, ZmuxSession.deadline(timeout), r -> {
+    /** Like {@link #awaitPeerAttached()} without blocking; cancelling the future withdraws the wait. */
+    public ZmuxFuture<Void> peerAttachedAsync() {
+        return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, Long.MAX_VALUE, r -> {
             if (r == MISSING) throw new PipeGoneException(pipeId);
             return null;
         });
@@ -199,16 +215,93 @@ public final class ZmuxPipe {
         gone(() -> core.revalidatePipes(id, false));
     }
 
-    /** Retires the pipe gracefully: its data moves to the other pipes first. */
-    public void close() throws IOException {
-        Session core = session.core;
-        gone(() -> { strandWarning(core); core.removePipe(id, true); });
+    /**
+     * Retires the pipe gracefully: its data moves to the other pipes first. Returns once the
+     * removal started; {@link #closed()} completes when it finished. Idempotent: on a pipe already
+     * removed, or of an ended session, it does nothing.
+     */
+    public void close() {
+        remove(true);
     }
 
-    /** Fails the pipe and closes its carrier at once; protocol bookkeeping may await retirement. */
-    public void abort() throws IOException {
+    /**
+     * Fails the pipe and closes its carrier at once, its unacknowledged data reinjected on the
+     * other pipes; protocol bookkeeping may await retirement ({@link #closed()}). Idempotent as
+     * {@link #close()} is.
+     */
+    public void abort() {
+        remove(false);
+    }
+
+    private void remove(boolean graceful) {
         Session core = session.core;
-        gone(() -> { strandWarning(core); core.removePipe(id, false); });
+        if (!session.driver.mayBlock()) {
+            removeQueued(graceful);
+            return;
+        }
+        try {
+            gone(() -> { strandWarning(core); core.removePipe(id, graceful); });
+        } catch (PipeGoneException | SessionClosedException e) {
+            // Already removed, or released by the session's end: nothing left to do.
+        } catch (InterruptedIOException e) {
+            // The interrupt withdrew the waiting operation before it ran: a removal is not
+            // shortened by it, so it is queued instead (the flag stays set).
+            Thread.currentThread().interrupt();
+            removeQueued(graceful);
+        } catch (IOException e) {
+            // Other failures of a removal leave the pipe to the session's own end.
+        }
+    }
+
+    /**
+     * Completes when the pipe was removed, its retirement and the session's bookkeeping for it
+     * done, or, when the session ends first, at the session's whole end ({@link ZmuxSession#closed()}).
+     * Cancelling the future withdraws only this wait.
+     */
+    public ZmuxFuture<Void> closed() {
+        Session core = session.core;
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        var op = new io.zmux.internal.loop.Operation<>(session.driver, o -> {
+            return core.waitPipeRemoved(id, o) ? Boolean.TRUE : io.zmux.internal.loop.Operation.PENDING;
+        }, core::cancelPipeRemovedWait);
+        Runnable removed = () -> { if (Boolean.TRUE.equals(op.outcome())) done.complete(null); };
+        if (op.onDone(removed)) op.submit(); else removed.run();
+        session.driver.closedFuture().whenComplete((v, e) -> done.complete(null));
+        done.whenComplete((v, e) -> op.cancel());
+        return ZmuxFuture.of(done, op::cancel);
+    }
+
+    /** Waits for {@link #closed()}. */
+    public void awaitClosed() throws IOException {
+        session.driver.checkBlocking();
+        var f = closed();
+        try {
+            f.get();
+        } catch (InterruptedException e) {
+            f.cancel(false);
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("interrupted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw Errors.failure(e.getCause());
+        }
+    }
+
+    /** {@link #awaitClosed()} bounded by timeout: {@link java.net.SocketTimeoutException} after it. */
+    public void awaitClosed(Duration timeout) throws IOException {
+        session.driver.checkBlocking();
+        var f = closed();
+        try {
+            f.get(Math.max(1, Objects.requireNonNull(timeout, "timeout").toNanos()), java.util.concurrent.TimeUnit.NANOSECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            f.cancel(false);
+            throw new java.net.SocketTimeoutException("pipe " + id + " not removed within " + timeout);
+        } catch (InterruptedException e) {
+            f.cancel(false);
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("interrupted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw Errors.failure(e.getCause());
+        }
     }
 
     /** Logs the removal of the last pipe of a direction while streams are open; on the loop. */
@@ -224,9 +317,14 @@ public final class ZmuxPipe {
      * every later session command. For reclaiming a pipe its creator rejected.
      */
     void abortQueued() {
+        removeQueued(false);
+    }
+
+    /** Queues the removal on the loop without waiting; a pipe already retired is left as it is. */
+    private void removeQueued(boolean graceful) {
         Session core = session.core;
         session.driver.post(() -> {
-            try { core.removePipe(id, false); } catch (CoreException e) { /* Already retired. */ }
+            try { strandWarning(core); core.removePipe(id, graceful); } catch (CoreException e) { /* Already retired. */ }
         });
     }
 

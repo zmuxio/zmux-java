@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * The metadata of a carrier given to {@link ZmuxListener#handle}, supplied by an
+ * The metadata of a carrier given to {@link io.zmux.adapter.ListenerAdapter#handle}, supplied by an
  * HTTP or other adapter, or by a host: its pairing header, its addresses, and the
  * HTTP request it arrived with.
  *

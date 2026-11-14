@@ -35,8 +35,8 @@ final class WebSocketClient {
     /** A carrier and the URL redirects led it to. */
     record Opened(PipeIo io, URI url) {}
 
-    /** The upgrade was answered with a redirect: the attempt's internal outcome. */
-    private static final class Redirected extends IOException {
+    /** The upgrade was answered with a redirect: the attempt's internal outcome, never surfaced (unchecked, so the carrier wait passes it on). */
+    private static final class Redirected extends RuntimeException {
         final int status;
         final String location;
 
@@ -137,7 +137,7 @@ final class WebSocketClient {
                         int s = resp == null ? 0 : resp.status().code();
                         if (resp != null && Redirects.isRedirect(s)) done.completeExceptionally(new Redirected(s, resp.headers().get("Location")));
                         else if (resp != null && s != 101) done.completeExceptionally(new HttpStatusException(s, resp.status().reasonPhrase()));
-                        else done.completeExceptionally(new IOException(e.getMessage(), e));
+                        else done.completeExceptionally(new io.zmux.CarrierFailedException(e.getMessage(), e));
                         ctx.close();
                     }
                 }
@@ -147,7 +147,7 @@ final class WebSocketClient {
         }
 
         @Override public void channelInactive(ChannelHandlerContext ctx) {
-            done.completeExceptionally(new ClosedChannelException());
+            done.completeExceptionally(new io.zmux.CarrierFailedException("WebSocket connection closed during the upgrade"));
             frames.carrier.lost(new ClosedChannelException());
             frames.closed();
         }

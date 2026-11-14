@@ -139,23 +139,23 @@ class ExchangeWireTest {
     }
 
     @Test void configNeedsAPsk() {
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().build());
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[32]).upPieceSize(100).upStoreLimit(1000).build(),
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[0]));
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[32]).upPieceSize(100).upStoreLimit(1000).build(),
                 "store below twice the largest UP piece");
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().psk(new byte[32]).upPieceSize(3 << 20).upStoreLimit((6 << 20) - 1).build());
-        assertEquals(2 << 20, ExchangeConfig.builder().psk(new byte[32]).upStoreLimit(2 << 20).build().upStoreLimit());
-        assertEquals(8 << 20, ExchangeConfig.builder().psk(new byte[32]).upPieceSize(4 << 20).build().upStoreLimit(), "default raised");
-        var zero = ExchangeConfig.builder().psk(new byte[32])
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[32]).upPieceSize(3 << 20).upStoreLimit((6 << 20) - 1).build());
+        assertEquals(2 << 20, ExchangeConfig.builder(new byte[32]).upStoreLimit(2 << 20).build().upStoreLimit());
+        assertEquals(8 << 20, ExchangeConfig.builder(new byte[32]).upPieceSize(4 << 20).build().upStoreLimit(), "default raised");
+        var zero = ExchangeConfig.builder(new byte[32])
                 .holdTime(java.time.Duration.ZERO).goneMemory(java.time.Duration.ZERO).build();
         assertEquals(java.time.Duration.ZERO, zero.holdTime());
         assertEquals(java.time.Duration.ZERO, zero.goneMemory());
-        assertEquals(java.time.Duration.ofSeconds(20), ExchangeConfig.builder().psk(new byte[32]).build().holdTime());
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().downRequests(0), "0 is no default");
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().requestTimeout(java.time.Duration.ZERO));
-        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder().requestTimeout(java.time.Duration.ofNanos(-1)));
-        assertEquals(java.time.Duration.ofMillis(2), ExchangeConfig.builder().psk(new byte[32]).build().coalesce());
-        assertEquals(java.time.Duration.ZERO, ExchangeConfig.builder().psk(new byte[32]).coalesce(java.time.Duration.ZERO).build().coalesce(), "0: no wait");
+        assertEquals(java.time.Duration.ofSeconds(20), ExchangeConfig.builder(new byte[32]).build().holdTime());
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[32]).downRequests(0), "0 is no default");
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[32]).requestTimeout(java.time.Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> ExchangeConfig.builder(new byte[32]).requestTimeout(java.time.Duration.ofNanos(-1)));
+        assertEquals(java.time.Duration.ofMillis(2), ExchangeConfig.builder(new byte[32]).build().coalesce());
+        assertEquals(java.time.Duration.ZERO, ExchangeConfig.builder(new byte[32]).coalesce(java.time.Duration.ZERO).build().coalesce(), "0: no wait");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-                () -> ExchangeConfig.builder().coalesce(java.time.Duration.ofMillis(-1)));
+                () -> ExchangeConfig.builder(new byte[32]).coalesce(java.time.Duration.ofMillis(-1)));
     }
 }

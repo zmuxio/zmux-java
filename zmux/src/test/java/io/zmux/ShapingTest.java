@@ -310,8 +310,7 @@ class ShapingTest {
                 await(() -> events.contains(EventKind.REPLACED) && second.contains(EventKind.START));
                 assertTrue(events.contains(EventKind.REPLACED));
                 assertTrue(second.contains(EventKind.START));
-                assertTrue(p.shaped().setPipeShaper(PipeId.of(0), null));
-                assertFalse(p.shaped().setPipeShaper(PipeId.of(99), null));
+                p.shaped().pipes().getFirst().setShaper(null);
                 transfer(p.shaped(), p.other(), 100);
             }
         }

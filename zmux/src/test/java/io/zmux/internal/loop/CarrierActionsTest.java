@@ -18,7 +18,7 @@ class CarrierActionsTest {
         @Override public TransportInfo info() { return info; }
         @Override public int directions() { return direction; }
         @Override public boolean writable() { return false; }
-        @Override public boolean closed() { return closed; }
+        @Override public boolean isClosed() { return closed; }
         @Override protected void begin() {}
         @Override protected boolean accepting() { return false; }
         @Override protected void inputFailed(java.io.IOException cause) {}

@@ -42,7 +42,7 @@ public enum Profile {
     }
 
     /** Whether the Profile takes a pre-shared key and a Handle. */
-    public boolean hasPsk() {
+    public boolean isPskBased() {
         return psk;
     }
 

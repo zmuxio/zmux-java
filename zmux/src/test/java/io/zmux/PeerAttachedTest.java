@@ -17,7 +17,7 @@ class PeerAttachedTest {
 
     static ZmuxPipe lateJoin(PipePoolTest.Fixture f, long delayMillis, PipeOptions options) throws Exception {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-        f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("late-confirm"))).closed();
+        f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("late-confirm"))).closed();
         return f.client.addPipe(PipeIo.of(pair[0].reader(), new PipePoolTest.LateConfirm(pair[0].writer(), delayMillis)), options);
     }
 
@@ -30,7 +30,7 @@ class PeerAttachedTest {
             for (ZmuxPipe q : f.client.pipes()) if (q.id().value() == 0) q.awaitPeerAttached(WAIT);
             for (ZmuxPipe q : f.server.pipes()) q.awaitPeerAttached(WAIT);
             ZmuxPipe p = lateJoin(f, 300, NO_WAIT);
-            var attached = p.peerAttachedAsync(WAIT);
+            var attached = p.peerAttachedAsync().orTimeout(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
             assertFalse(held(f.server, p), "the Confirm is still held");
             assertFalse(attached.isDone(), "attached before the acceptor read the Confirm");
             attached.get(3, TimeUnit.SECONDS);
@@ -39,6 +39,29 @@ class PeerAttachedTest {
             // The acceptor's view of a pipe the peer joined: attached from the start.
             for (ZmuxPipe q : f.server.pipes()) if (q.id().value() == p.id().value()) q.awaitPeerAttached(Duration.ofMillis(100));
         }
+    }
+
+    @Test void closeAndAbortRemoveThePipeEvenWithTheInterruptFlagSet() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 5))) {
+            for (boolean graceful : new boolean[] {true, false}) {
+                ZmuxPipe p = lateJoin(f, 0, PipeOptions.defaults());
+                p.awaitPeerAttached(WAIT);
+                Thread.currentThread().interrupt();
+                try {
+                    if (graceful) p.close(); else p.abort();
+                    assertTrue(Thread.currentThread().isInterrupted(), "the flag is kept");
+                } finally {
+                    Thread.interrupted();
+                }
+                p.awaitClosed(WAIT);
+                assertFalse(f.client.pipes().stream().anyMatch(q -> q.id().value() == p.id().value()), "the pipe is still on the session");
+            }
+        }
+    }
+
+    @Test void aReceiveOnlyPipeRefusesAQualityBand() {
+        assertThrows(IllegalArgumentException.class, () -> PipeOptions.builder()
+                .direction(PipeOptions.Direction.RECEIVE_ONLY).qualityBand(QualityBand.disabled()).build());
     }
 
     @Test void aReceiveOnlyJoinIsAttachedByARecord() throws Exception {
@@ -53,18 +76,18 @@ class PeerAttachedTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
             ZmuxPipe slow = lateJoin(f, 1_000, NO_WAIT);
             assertThrows(SocketTimeoutException.class, () -> slow.awaitPeerAttached(Duration.ofMillis(50)));
-            var cancelled = slow.peerAttachedAsync(null);
+            var cancelled = slow.peerAttachedAsync();
             cancelled.cancel(false);
             assertTrue(cancelled.isCancelled());
 
-            var gone = slow.peerAttachedAsync(null);
+            var gone = slow.peerAttachedAsync();
             slow.abort();
             var e = assertThrows(ExecutionException.class, () -> gone.get(3, TimeUnit.SECONDS));
             assertInstanceOf(PipeGoneException.class, e.getCause());
             assertThrows(PipeGoneException.class, () -> slow.awaitPeerAttached(WAIT));
 
             ZmuxPipe other = lateJoin(f, 1_000, NO_WAIT);
-            var ended = other.peerAttachedAsync(null);
+            var ended = other.peerAttachedAsync();
             f.client.close();
             var c = assertThrows(ExecutionException.class, () -> ended.get(3, TimeUnit.SECONDS));
             assertInstanceOf(java.io.IOException.class, c.getCause());

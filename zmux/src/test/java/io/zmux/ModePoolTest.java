@@ -68,7 +68,7 @@ class ModePoolTest {
                 var base = new AtomicInteger(); var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache(Duration.ofHours(1), Duration.ofMillis(100), Duration.ofSeconds(10));
                 var pool = PipePool.choice(CarrierChoice.auto(refused(CarrierKind.WEBSOCKET, ws), reaching(CarrierKind.EXCHANGE, l, ex)),
-                        CarrierChoicePolicy.of(cache, "k")).withBackoff(new PipePool.Backoff(Duration.ofMillis(20), Duration.ofMillis(50), 0));
+                        CarrierChoicePolicy.of(cache, "k")).withBackoff(new Backoff(Duration.ofMillis(20), Duration.ofMillis(50), 0));
                 try (var s = Zmux.dial(CarrierChoice.explicit(reaching(CarrierKind.STREAMING, l, base)), cfg, null);
                      var m = s.maintainPipes(pool)) {
                     await(() -> m.pipes().size() == 1, "first member");

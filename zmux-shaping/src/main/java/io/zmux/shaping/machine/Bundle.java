@@ -233,7 +233,7 @@ public final class Bundle {
     }
 
     /**
-     * The budget of a kind, for {@link io.zmux.ZmuxConfig.Builder#shapingBudget} or {@link io.zmux.ZmuxSession#setShaper}: it
+     * The budget of a kind, for {@link io.zmux.ZmuxConfig.Builder#shapingBudget(java.util.function.Supplier)} or {@link io.zmux.ZmuxSession#setShaper}: it
      * draws the values of scope session at each call; null without a budget.
      */
     public Supplier<ShapingBudget> budget(CarrierKind kind) {

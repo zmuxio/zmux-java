@@ -31,10 +31,10 @@ class ModeHttpTest {
     static final byte[] PSK = ExchangeTest.PSK;
 
     /** The server's exchange carrier: its hold time below the buffering CDN's 3 s response timeout. */
-    static ExchangeConfig serverExchange() { return ExchangeConfig.builder().psk(PSK).holdTime(Duration.ofSeconds(1)).build(); }
+    static ExchangeConfig serverExchange() { return ExchangeConfig.builder(PSK).holdTime(Duration.ofSeconds(1)).build(); }
 
     /** The client's exchange carrier: a short deadline, so that a refused path fails within the test. */
-    static ExchangeConfig clientExchange() { return ExchangeConfig.builder().psk(PSK).deadline(Duration.ofSeconds(3)).build(); }
+    static ExchangeConfig clientExchange() { return ExchangeConfig.builder(PSK).deadline(Duration.ofSeconds(3)).build(); }
 
     /** A unified endpoint with every adapter; multipath: joins allowed. */
     static Fixture fixture(boolean multipath) throws Exception {
@@ -141,7 +141,7 @@ class ModeHttpTest {
                 while (s.pipes().stream().anyMatch(p -> p.id().value() == 0) && System.nanoTime() < until) Thread.sleep(10);
                 assertTrue(s.pipes().stream().noneMatch(p -> p.id().value() == 0), "the exchange pipe retired: " + s.pipes());
                 f.echo(s);
-                assertNull(f.listener.accept(Duration.ofMillis(200)), "a second session");
+                assertThrows(java.net.SocketTimeoutException.class, () -> f.listener.accept(Duration.ofMillis(200)), "a second session");
             }
             ExchangeTest.waitFor(() -> f.endpoint.exchange.live() == 0, "the retired exchange carrier ends");
         }

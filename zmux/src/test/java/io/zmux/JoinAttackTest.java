@@ -284,7 +284,7 @@ class JoinAttackTest {
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT); var relay = new UnitRelay(l.localAddress())) {
                 // The direct pipe is the backup tier, so the data goes over the relayed pipe whatever the schedulers measure.
-                c.pipes().getFirst().setSendPriority(1);
+                c.pipes().getFirst().update(PipeUpdate.builder().sendPriority(1).build());
                 ZmuxPipe p = c.addPipe(relay.address(), mode(RecordMode.SEALED));
                 long id = p.id().value();
                 until("the acceptor's pipe", () -> s.pipes().size() >= 2);
@@ -360,7 +360,7 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 long before = l.stats().rejected();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((x, y, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1].withExporter((x, y, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeIo near = pair[0].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
                 assertThrows(Exception.class, () -> c.addPipe(near, mode(RecordMode.BOUND)));
                 until("the rejection", () -> l.stats().rejected() > before);
@@ -414,7 +414,7 @@ class JoinAttackTest {
                 byte[] hello = helloFor(c, 40, Mode.BOUND, new byte[32], null);
                 long auth = s.stats().joinAuthFailures(), replays = s.stats().joinReplays();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).withSecure(true),
+                l.adapter().handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).withSecure(true),
                         JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeChannel near = PipeChannel.of(pair[0]);
                 near.write(ByteBuffer.wrap(hello));
@@ -560,7 +560,7 @@ class JoinAttackTest {
                 try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                      var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                     PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                    l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                     GatedWriter w = new GatedWriter(pair[0].writer(), 2, false); // the Hello, then the Confirm
                     PipeIo carrier = new PipeIo(pair[0].reader(), w, Framing.BYTE_STREAM, "gated", null);
                     var added = new java.util.concurrent.CompletableFuture<ZmuxPipe>();
@@ -589,7 +589,7 @@ class JoinAttackTest {
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 GatedWriter w = new GatedWriter(pair[0].writer(), -1, true);
                 try {
                     ZmuxPipe p = c.addPipe(new PipeIo(pair[0].reader(), w, Framing.BYTE_STREAM, "gated", null), PipeOptions.defaults());
@@ -799,7 +799,7 @@ class JoinAttackTest {
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build())) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                 PipeIo.Exporter same = (x, y, n) -> new byte[n];
-                l.handle(pair[1].withExporter(same), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1].withExporter(same), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeIo near = tampered(pair[0].withExporter(same), f -> f & ~TransportParams.SECRET_PSK);
                 ZmuxSession c = null;
                 try {
@@ -826,7 +826,7 @@ class JoinAttackTest {
             ZmuxConfig cfg = config(loops).handshakeTimeout(Duration.ofSeconds(2)).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build())) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 ZmuxSession c = Zmux.open(tampered(pair[0], f -> 0), Role.CLIENT, cfg);
                 try {
                     ZmuxSession s = l.accept(WAIT);
@@ -1026,7 +1026,7 @@ class JoinAttackTest {
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
                  var c = Zmux.connect(l.localAddress(), client); var s = l.accept(WAIT)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeWriter w = pair[0].writer();
                 var writes = new java.util.concurrent.atomic.AtomicInteger();
                 PipeWriter late = new PipeWriter() {

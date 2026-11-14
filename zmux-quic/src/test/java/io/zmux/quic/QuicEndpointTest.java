@@ -47,7 +47,7 @@ class QuicEndpointTest {
                 a.pipes().stream().filter(p -> p.id().value()==0).findFirst().orElseThrow().abort();
                 QuicTest.transfer(workers,a,b,4,128<<10); QuicTest.transfer(workers,b,a,4,64<<10);
                 assertTrue(shared.isActive(),"aborting pipe 0 must not close its shared QUIC connection");
-                assertNull(local.accept(Duration.ofMillis(20)),"join created an application session");
+                assertThrows(java.net.SocketTimeoutException.class, () -> local.accept(Duration.ofMillis(20)),"join created an application session");
                 closed(a,b);
             }
             assertEquals(0,io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops));
@@ -62,7 +62,7 @@ class QuicEndpointTest {
                 var a = client.connectAsync(server.address(),"localhost").get(10,TimeUnit.SECONDS);
                 var b = remote.accept(Duration.ofSeconds(5)); assertNotNull(b);
                 var original = client.connections().getFirst(); var originalRemote = server.connections().getFirst();
-                var joined = client.openPipeAsync(server.address(),"localhost",a).get(5,TimeUnit.SECONDS);
+                var joined = client.dialAsync(server.address(),"localhost",a).get(5,TimeUnit.SECONDS);
                 a.addPipe(joined,PipeOptions.defaults());
                 var fresh = server.connections().stream().filter(c -> c != originalRemote).findFirst().orElseThrow();
                 b.addPipe(server.openPipeAsync(fresh).get(5,TimeUnit.SECONDS),PipeOptions.defaults());
@@ -118,7 +118,7 @@ class QuicEndpointTest {
                         var ar = Zmux.resolveDuplicate(a1,a2,DuplicateOptions.defaults().withIdentities(new byte[] {1},new byte[] {2}));
                         assertSame(a1,ar.survivor());
                         var br = Zmux.resolveDuplicate(b1,b2,DuplicateOptions.defaults().withIdentities(new byte[] {2},new byte[] {1})
-                                .withRejoin(PipePool.of(attempt -> attempt.join(awaitPipe(rightClient.openPipeAsync(leftServer.address(),"localhost",b1))))));
+                                .withRejoin(PipePool.of(attempt -> attempt.join(awaitPipe(rightClient.dialAsync(leftServer.address(),"localhost",b1))))));
                         var result = br.rejoin().completion().toCompletableFuture().get(6,TimeUnit.SECONDS);
                         assertNull(result.cause()); assertEquals(1,result.joined());
                         old.finish(); assertArrayEquals(new byte[] {7},QuicTest.read(receiving));
@@ -143,7 +143,7 @@ class QuicEndpointTest {
                 assertThrows(ExecutionException.class,() -> plain.connectAsync(server.address(),"localhost").get(3,TimeUnit.SECONDS));
                 assertInstanceOf(javax.net.ssl.SSLHandshakeException.class,assertThrows(ExecutionException.class,() -> wrong.connectAsync(server.address(),"localhost")
                         .toCompletableFuture().get(5,TimeUnit.SECONDS)).getCause());
-                assertNull(listener.accept(Duration.ofMillis(100)),"mismatched ALPN must not start a zmux session");
+                assertThrows(java.net.SocketTimeoutException.class, () -> listener.accept(Duration.ofMillis(100)),"mismatched ALPN must not start a zmux session");
             }
         }
     }

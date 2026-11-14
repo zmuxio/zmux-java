@@ -85,7 +85,7 @@ final class EstablishHello {
         Mode mode = (flags & ~FLAGS_MODE) != 0 ? null : Mode.ofWire(flags);
         if (mode == null) throw new SecureCarrierException(BAD_FLAGS);
         byte[] handle = new byte[0];
-        if (p.hasPsk()) {
+        if (p.isPskBased()) {
             if (len < n + Handshake.HANDLE_LEN) throw Frames.shortInput(f, n + Handshake.HANDLE_LEN);
             handle = Arrays.copyOfRange(b, off + n, off + n + Handshake.HANDLE_LEN);
             n += Handshake.HANDLE_LEN;
@@ -111,7 +111,7 @@ final class EstablishHello {
     /** The bytes before the framed first message. */
     static int headerLength(Profile p, byte[] handle) {
         int n = (p.value() >= Profile.ESCAPE ? 1 + VarInt.length(p.value()) : 1) + 1;
-        return p.hasPsk() ? n + Handshake.HANDLE_LEN : n;
+        return p.isPskBased() ? n + Handshake.HANDLE_LEN : n;
     }
 
     static byte[] encode(Profile p, Mode m, byte[] handle, byte[] msg1, Framing f) throws SecureCarrierException {
@@ -123,7 +123,7 @@ final class EstablishHello {
             head.write((int) p.value());
         }
         head.write(m.wire());
-        if (p.hasPsk()) head.writeBytes(handle);
+        if (p.isPskBased()) head.writeBytes(handle);
         return Kdf.concat(head.toByteArray(), Frames.frame(f, msg1));
     }
 }

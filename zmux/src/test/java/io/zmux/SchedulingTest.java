@@ -45,7 +45,7 @@ class SchedulingTest {
                 var peer = s.pipes().stream().filter(p -> p.id().value() == added.id().value()).findFirst().orElseThrow().stats().orElseThrow();
                 assertEquals(12, peer.sendPriority()); assertTrue(peer.standby());
                 assertEquals(PipeStats.SettingSource.PEER, peer.sendPrioritySource()); assertEquals(PipeStats.SettingSource.PEER, peer.standbySource());
-                added.setSendPriority(9);
+                added.update(PipeUpdate.builder().sendPriority(9).build());
                 added.update(PipeUpdate.builder().weight(7).build());
                 assertEquals(9, added.stats().orElseThrow().sendPriority());
                 assertEquals(PipeStats.SettingSource.LOCAL, added.stats().orElseThrow().sendPrioritySource());
@@ -77,7 +77,7 @@ class SchedulingTest {
                 PipePoolTest.await(() -> c.stats().schedulerFallbacks() > fallbacks);
                 c.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
                 c.setQualityBand(new QualityBand(Duration.ofMillis(1), 1.5));
-                c.setCapacityFloor(new CapacityFloor(Double.MAX_VALUE, 1.25));
+                c.setCapacityFloor(new CapacityFloor(Long.MAX_VALUE, 1.25));
                 boolean below = false;
                 while (!below) below = c.nextEvent() instanceof SessionEvent.CapacityBelow;
                 added.update(PipeUpdate.builder().clearSendPriority().build());
@@ -89,7 +89,7 @@ class SchedulingTest {
     }
 
     @Test void invalidQualitySettingsAreRejectedAtTheBoundary() {
-        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(Double.NaN, 0));
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(-1, 0));
         assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, 0.5));
         assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 1, Duration.ZERO));
         assertThrows(IllegalArgumentException.class, () -> new Scheduler.Answer(0, -1, false));

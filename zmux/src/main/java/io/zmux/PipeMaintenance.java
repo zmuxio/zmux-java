@@ -104,7 +104,11 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     /** Last published membership, including replacements still in probation. */
     public List<ZmuxPipe> pipes() { return visible; }
-    public CompletionStage<Result> completion() { return completion.minimalCompletionStage(); }
+    /**
+     * Completes with the run's result once it ended; cancelling the future, or completing it from
+     * outside, changes only that future ({@link #close()} stops the run).
+     */
+    public ZmuxFuture<Result> completion() { return ZmuxFuture.of(completion, null); }
     @Override public void close() {
         stopped.set(true); Thread t = worker; if (t != null) t.interrupt();
     }
@@ -113,7 +117,7 @@ public final class PipeMaintenance implements AutoCloseable {
         SessionError error = terminal.get(); if (error != null) throw new SessionClosedException(error);
         if (Thread.interrupted()) throw new InterruptedIOException("pipe maintenance interrupted");
     }
-    private long minimumBackoff() { return PipePool.nanos(policy.backoff().minimum(), false); }
+    private long minimumBackoff() { return PipePool.nanos(policy.backoff().min(), false); }
     private static long jitter(long limit, double fraction) {
         return Math.max(1, (long)(limit * (1 - ThreadLocalRandom.current().nextDouble() * fraction)));
     }
@@ -148,7 +152,7 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private void failed() {
         failures++; retryDelay = jitter(backoff, policy.backoff().jitter());
-        long maximum = policy.backoff().maximum().toNanos();
+        long maximum = policy.backoff().max().toNanos();
         backoff = backoff > maximum / 2 ? maximum : Math.min(maximum, backoff * 2);
     }
     private PipeStats stats(ZmuxPipe pipe) throws IOException {
@@ -191,7 +195,7 @@ public final class PipeMaintenance implements AutoCloseable {
     }
     private static void abort(List<ZmuxPipe> pipes) {
         for (ZmuxPipe p : pipes) {
-            try { p.abort(); } catch (IOException ignored) { /* Gone or its session ended. */ }
+            p.abort();
         }
     }
     private void publish() {
@@ -304,7 +308,7 @@ public final class PipeMaintenance implements AutoCloseable {
         }
         target = d.count().orElse(policy.count());
         decidedAt = now; recheck = d.recheckDelay().map(ZmuxConfig::nanos).orElse(0L);
-        dialAfter = d.dialAfter().isEmpty() ? -1 : Math.min(PipePool.nanos(d.dialAfter().get(), true), policy.backoff().maximum().toNanos());
+        dialAfter = d.dialAfter().isEmpty() ? -1 : Math.min(PipePool.nanos(d.dialAfter().get(), true), policy.backoff().max().toNanos());
         dialOptions = policy.options().withLiveness(d.liveness());
         for (Member m : members) if (d.retirePipes().contains(m.pipeId())) m.retire = true;
         boolean changed = false;
@@ -324,7 +328,7 @@ public final class PipeMaintenance implements AutoCloseable {
 
     private static void closeQuietly(List<ZmuxPipe> pipes) {
         for (ZmuxPipe p : pipes) {
-            try { p.close(); } catch (IOException ignored) { /* Gone or its session ended. */ }
+            p.close();
         }
     }
 
@@ -369,7 +373,7 @@ public final class PipeMaintenance implements AutoCloseable {
                 var scope = new PipePool.Attempt(session, dialOptions.toBuilder().returnOnReply(true).build(), cancellation, kind);
                 creation.set(scope);
                 p = Objects.requireNonNull(policy.join().open(scope), "join returned null");
-                if (!scope.adopt(p)) { failure = new IOException("a dial must return the pipes created by its Attempt"); p = null; }
+                if (!scope.adopt(p)) { failure = new CallbackFailedException("a dial must return the pipes created by its Attempt"); p = null; }
             } catch (Throwable error) { failure = error; }
             // Returned before the owner sees the outcome: a rejected creation is then reclaimed
             // by the owner's verdict itself, before the run reports completion.
@@ -385,7 +389,7 @@ public final class PipeMaintenance implements AutoCloseable {
             throw error;
         }
         Throwable late = settleAttempt(cancellation, attempt, verdict, true);
-        if (late != null) throw new IOException("dial cancellation callback failed", late);
+        if (late != null) throw new CallbackFailedException("dial cancellation callback failed", late);
         joined++;
         return pipe;
     }
@@ -407,10 +411,10 @@ public final class PipeMaintenance implements AutoCloseable {
             boolean in = policy.options().direction != PipeOptions.Direction.SEND_ONLY;
             boolean hasOut = false, hasIn = false;
             for (ZmuxPipe one : pipe) { PipeStats s = one.stats().orElseThrow(() -> new PipeGoneException(one.id())); hasOut |= s.outbound() != null; hasIn |= s.inbound() != null; }
-            if (hasOut != out || hasIn != in) throw new IOException("dial returned incompatible directions");
+            if (hasOut != out || hasIn != in) throw new CallbackFailedException("dial returned incompatible directions");
             return pipe;
         } catch (InterruptedException error) { check(); throw new InterruptedIOException("pipe dial interrupted"); }
-        catch (ExecutionException error) { throw new IOException("pipe dial failed", error.getCause()); }
+        catch (ExecutionException error) { throw new CallbackFailedException("pipe dial failed", error.getCause()); }
     }
 
     /**
@@ -502,7 +506,7 @@ public final class PipeMaintenance implements AutoCloseable {
             SessionError ended = terminal.get();
             cause = ended != null && !stopped.get() && error instanceof InterruptedIOException ? new SessionClosedException(ended) : error;
         }
-        catch (RuntimeException error) { cause = new IOException("pipe maintenance failed", error); }
+        catch (RuntimeException error) { cause = new CallbackFailedException("pipe maintenance failed", error); }
         finally {
             // A session that failed soon after its members' kinds were chosen counts against them.
             if (mode != null && terminal.get() != null && !(terminal.get() instanceof SessionError.ApplicationClosed)) {

@@ -57,7 +57,7 @@ final class BodyCarrier {
     // Outbound.
     private final boolean outHalf;
     private boolean outClosed, started, starting, aborted, finished;
-    /** A graceful end before anything was written leaves the head unwritten (see {@link #holdEmptyEnd}). */
+    /** A graceful end before anything was written leaves the head unwritten (see {@link #holdEmptyEnd()}). */
     private boolean holdEmptyEnd;
     /** zmux closed the outbound half gracefully before anything was written. */
     private boolean endedUnstarted;

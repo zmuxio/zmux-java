@@ -70,8 +70,12 @@ final class PathHealth {
         /** See {@link Retention}. */
         void unsettle(Pipe p);
 
-        /** See {@link PathSession}. */
-        boolean wantsWrite(Pipe p, Pipe.OutLane ol);
+        /**
+         * Whether records or stream data wait for lane ol of p: wantsWrite with p's carrier taken to accept bytes.
+         * Data held back by the peer's credit, the limiter or a shaping delay does not wait for the carrier, nor does
+         * data the scheduler would place on another pipe.
+         */
+        boolean waitsFor(Pipe p, Pipe.OutLane ol);
     }
 
     static final long NO_STALL = Long.MIN_VALUE;
@@ -233,13 +237,17 @@ final class PathHealth {
         return Math.max(tSuspect(p), dt);
     }
 
-    /** The start of the oldest write stall on p (a lane whose carrier takes no bytes while records wait), or NO_STALL. */
+    /**
+     * The start of the oldest write stall on p, or NO_STALL: a lane whose carrier takes no bytes while records or
+     * stream data wait for it (waitsFor). A lane refused only because nothing could be written, for lack of data or
+     * of the peer's credit or under the limiter, has no stall.
+     */
     long writeStall(Pipe p) {
         if (p.out() == null) return NO_STALL;
         long t = NO_STALL;
         for (Pipe.OutLane ol : p.out().lanes) {
             if (!(ol.tx.writing() || ol.tx.notWritable()) || ol.st.shut()) continue;
-            if (!ol.tx.writing() && !port.wantsWrite(p, ol)) continue;
+            if (!ol.tx.writing() && !port.waitsFor(p, ol)) continue;
             if (t == NO_STALL || ol.tx.stallAt() < t) t = ol.tx.stallAt();
         }
         if (t != NO_STALL && p.mp() != null && p.mp().link.liveAt() > t) t = p.mp().link.liveAt();
@@ -471,6 +479,7 @@ final class PathHealth {
         port.checkTakeover();
         port.reinjectPipe(p);
         a.health.needPing = true;
+        a.health.suspPing = true;
         a.health.pingSince = port.now();
         port.emitPipeState(p);
         port.suspectedRedundantAck();
@@ -671,14 +680,17 @@ final class PathHealth {
         }
     }
 
-    /** The owed PIPE_PING went out on the pipe. */
-    void pingWritten(Pipe p, long now) {
+    /** The owed PIPE_PING went out on the pipe; returns whether it is that of a suspicion. */
+    boolean pingWritten(Pipe p, long now) {
         Slot h = p.mp().health;
+        boolean susp = h.suspPing;
         h.needPing = false;
+        h.suspPing = false;
         h.pingsSent++;
         h.probeDraw = Double.NaN; // the next wait is drawn anew
         h.probeHold = -1;
         pingSent(now);
+        return susp;
     }
 
     /** The queued PIPE_ABANDON about q was written; returns whether it is the first one sent. */
@@ -737,6 +749,8 @@ final class PathHealth {
         private long suspects;
         private long failures;
         private boolean needPing;
+        /** The pending PIPE_PING is that of a suspicion. */
+        private boolean suspPing;
         private long pingSince;
         private long pingsSent;
         private long pingsAnswered;

@@ -36,8 +36,8 @@ class ConfigBoundsTest {
         assertEquals(Liveness.DEFAULT_PROBE_JITTER, ZmuxConfig.defaults().liveness().probeJitter());
         assertEquals(Duration.ofSeconds(10), ZmuxConfig.DEFAULT_JOIN_TIMEOUT);
         assertEquals(ZmuxConfig.DEFAULT_JOIN_TIMEOUT, ZmuxConfig.defaults().joinTimeout());
-        assertEquals(Duration.ofSeconds(1), PipePool.Backoff.defaults().minimum());
-        assertEquals(Duration.ofSeconds(60), PipePool.Backoff.defaults().maximum());
-        assertEquals(PipePool.Backoff.defaults(), ZmuxConfig.defaults().redialBackoff());
+        assertEquals(Duration.ofSeconds(1), Backoff.defaults().min());
+        assertEquals(Duration.ofSeconds(60), Backoff.defaults().max());
+        assertEquals(Backoff.defaults(), ZmuxConfig.defaults().redialBackoff());
     }
 }

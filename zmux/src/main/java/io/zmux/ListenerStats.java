@@ -12,7 +12,7 @@ package io.zmux;
  * @param joins joins accepted into existing sessions, and lanes accepted into their pipes
  * @param setupFailures connections never made a pipe input: a failed TLS handshake or its timeout (with an admission:
  *     {@link AdmissionStats#handshakeFailed()} instead), a failed HTTP or WebSocket upgrade (adapters with their own
- *     accept loops report them through {@link ZmuxListener#countSetupFailure()})
+ *     accept loops report them through {@link io.zmux.adapter.ListenerAdapter#countSetupFailure()})
  * @param rejected inputs closed without a distinguishable reason: unknown, unauthenticated or replayed joins, lanes
  *     that name no pipe, inputs that are not zmux, and new carriers closed at once because every slot of {@link
  *     ListenerConfig#maxPending()} was taken and none was stalled (a stalled carrier closed to make room is not

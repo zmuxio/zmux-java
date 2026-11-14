@@ -30,17 +30,17 @@ class PipePoolTest {
     }
     static PipePool fast(PipePool.Dial dial) {
         return PipePool.of(dial).withInspectionInterval(Duration.ofMillis(5))
-                .withBackoff(new PipePool.Backoff(Duration.ofMillis(10), Duration.ofMillis(40), 0));
+                .withBackoff(new Backoff(Duration.ofMillis(10), Duration.ofMillis(40), 0));
     }
     static final class Fixture implements AutoCloseable {
         final ZmuxListener listener; final ZmuxSession client, server;
         Fixture(ZmuxConfig cfg) throws Exception {
             listener = ZmuxListener.of(ListenerConfig.of(cfg)); var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-            listener.handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed(); client = Zmux.open(io[0], Role.CLIENT, cfg);
+            listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap"))).closed(); client = Zmux.open(io[0], Role.CLIENT, cfg);
             server = listener.accept(Duration.ofSeconds(3));
         }
         PipePool.Dial dial() { return attempt -> {
-            var io = MemoryPipe.pair(Framing.BYTE_STREAM); listener.handle(io[1], JoinHint.inBand(TestAddr.peer("pool"))).closed();
+            var io = MemoryPipe.pair(Framing.BYTE_STREAM); listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("pool"))).closed();
             return attempt.join(io[0]);
         }; }
         @Override public void close() throws Exception { client.close(); server.close(); client.awaitClosed(); server.awaitClosed(); listener.close(); }
@@ -77,7 +77,7 @@ class PipePoolTest {
     @Test void fullMaintenanceTargetPreventsDialingAndCancellationStillWakesTheWorker() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new Fixture(config(loops, 2))) {
             for (int i = 0; i < 1; i++) {
-                var occupied = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.handle(occupied[1], JoinHint.inBand(TestAddr.peer("occupied"))).closed();
+                var occupied = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.adapter().handle(occupied[1], JoinHint.inBand(TestAddr.peer("occupied"))).closed();
                 f.client.addPipe(occupied[0], PipeOptions.defaults());
             }
             assertFalse(f.client.joinReady()); var calls = new AtomicInteger(); var cancel = new Cancellation();
@@ -143,7 +143,7 @@ class PipePoolTest {
                 if (n == 1) return f.dial().open(attempt);
                 if (n > 2) throw new IOException("pause further rotation");
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("late-confirm"))).closed();
+                f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("late-confirm"))).closed();
                 return attempt.join(PipeIo.of(pair[0].reader(), new LateConfirm(pair[0].writer(), 200)));
             }).withRotation(new PipePool.Rotation(0, Duration.ofMillis(50), 0)));
             try {
@@ -182,7 +182,7 @@ class PipePoolTest {
                     entered.countDown();
                     try { new CountDownLatch(1).await(); throw new AssertionError("unexpected wake"); }
                     finally { exited.incrementAndGet(); }
-                }).withAttemptTimeout(Duration.ofMillis(40)).withBackoff(new PipePool.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0));
+                }).withAttemptTimeout(Duration.ofMillis(40)).withBackoff(new Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0));
                 var maintenance = f.client.maintainPipes(pool, cancel);
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
                 if (deadline) await(() -> exited.get() == 1); cancel.cancel();
@@ -197,7 +197,7 @@ class PipePoolTest {
         try (EventLoops loops = EventLoops.create(2); var f = new Fixture(config(loops, 3))) {
             var pool = fast(attempt -> {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("pool"))).closed();
+                f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("pool"))).closed();
                 return attempt.session().addPipe(pair[0], attempt.options());
             }).withOptions(PipeOptions.builder().direction(PipeOptions.Direction.RECEIVE_ONLY).receivePriority(123456).build());
             var maintenance = f.client.maintainPipes(pool);
@@ -213,7 +213,7 @@ class PipePoolTest {
             var pairs = new CopyOnWriteArrayList<PipeIo[]>();
             var pool = fast(attempt -> {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM); pairs.add(pair);
-                f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("replacement"))).closed(); return attempt.join(pair[0]);
+                f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("replacement"))).closed(); return attempt.join(pair[0]);
             }).withOptions(PipeOptions.builder().probation(Duration.ofMillis(200)).build())
                     .withRotation(new PipePool.Rotation(0, Duration.ofMillis(100), 0));
             var run = f.client.maintainPipes(pool);
@@ -231,11 +231,11 @@ class PipePoolTest {
         try (EventLoops loops = EventLoops.create(2); var f = new Fixture(config(loops, 4))) {
             var foreign = new AtomicReference<ZmuxPipe>(); var ours = new AtomicReference<ZmuxPipe>();
             var run = f.client.maintainPipes(fast(attempt -> {
-                var pair = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("application"))).closed();
+                var pair = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("application"))).closed();
                 foreign.set(f.client.addPipe(pair[0], PipeOptions.defaults()));
                 ours.set(f.dial().open(attempt));
                 return foreign.get();
-            }).withBackoff(new PipePool.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
+            }).withBackoff(new Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
             await(() -> ours.get() != null); run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertEquals(PipeState.Outbound.ACTIVE, foreign.get().stats().orElseThrow().outbound());
@@ -249,7 +249,7 @@ class PipePoolTest {
             var run = f.client.maintainPipes(fast(attempt -> {
                 attempt.cancellation().onCancel(() -> { failed.countDown(); throw new IllegalStateException("broken callback"); });
                 var pipe = f.dial().open(attempt); created.set(pipe); return pipe;
-            }).withBackoff(new PipePool.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
+            }).withBackoff(new Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
             assertTrue(failed.await(3, TimeUnit.SECONDS)); run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertNotNull(created.get()); inactive(created.get());
@@ -264,7 +264,7 @@ class PipePoolTest {
                 var pipe = f.dial().open(attempt); created.set(pipe); entered.countDown();
                 while (true) { try { release.await(); break; } catch (InterruptedException ignored) { /* Deliberately unresponsive. */ } }
                 return pipe;
-            }).withAttemptTimeout(Duration.ofMillis(50)).withBackoff(new PipePool.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
+            }).withAttemptTimeout(Duration.ofMillis(50)).withBackoff(new Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
             assertTrue(entered.await(3, TimeUnit.SECONDS)); run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertTrue(result.pipes().isEmpty()); assertEquals(0, result.joined());
@@ -281,7 +281,7 @@ class PipePoolTest {
                 try { new CountDownLatch(1).await(); } catch (InterruptedException expected) { /* Completion raced the deadline. */ }
                 finally { exited.countDown(); }
                 return pipe;
-            }).withAttemptTimeout(Duration.ofMillis(200)).withBackoff(new PipePool.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
+            }).withAttemptTimeout(Duration.ofMillis(200)).withBackoff(new Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5), 0)));
             assertTrue(exited.await(3, TimeUnit.SECONDS)); run.close();
             var result = run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             // The abandoned attempt returns after counting down: its creation is reclaimed then.
@@ -376,11 +376,11 @@ class PipePoolTest {
                 // Simulate concurrent application joins taking all physical attachment headroom.
                 int cap = f.client.core.config().maxPipes() + f.client.core.config().headroom();
                 for (int i = 1; i < cap; i++) {
-                    var other = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.handle(other[1], JoinHint.inBand(TestAddr.peer("application"))).closed();
+                    var other = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.adapter().handle(other[1], JoinHint.inBand(TestAddr.peer("application"))).closed();
                     f.client.addPipe(other[0], PipeOptions.defaults());
                 }
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                lifetime.set(f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("held"))).closed()); held.countDown();
+                lifetime.set(f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("held"))).closed()); held.countDown();
                 return attempt.join(pair[0]);
             }).withAttemptTimeout(Duration.ofSeconds(10)));
             assertTrue(held.await(3, TimeUnit.SECONDS));
@@ -393,7 +393,7 @@ class PipePoolTest {
 
     @Test void interruptedIdPublicationWaitsForCreationAndAbandonAcknowledgement() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new Fixture(config(loops, 3))) {
-            var pair = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("pending-publication"))).closed();
+            var pair = MemoryPipe.pair(Framing.BYTE_STREAM); f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("pending-publication"))).closed();
             var created = f.client.addPipe(pair[0], PipeOptions.defaults());
             var publication = new CompletableFuture<Long>(); var finished = new CompletableFuture<IOException>();
             var interrupted = new AtomicBoolean();
@@ -421,7 +421,7 @@ class PipePoolTest {
                 return f.dial().open(attempt);
             }).withCount(2).withOptions(PipeOptions.builder().probation(Duration.ofMillis(150)).build())
                     .withRotation(new PipePool.Rotation(0, Duration.ofMillis(80), 0))
-                    .withBackoff(new PipePool.Backoff(Duration.ofMillis(20), Duration.ofSeconds(5), 0)));
+                    .withBackoff(new Backoff(Duration.ofMillis(20), Duration.ofSeconds(5), 0)));
             try {
                 await(() -> run.pipes().size() == 2); var healthy = run.pipes().getFirst(); var lost = run.pipes().get(1);
                 await(() -> run.pipes().size() == 3); lost.abort();
@@ -441,7 +441,7 @@ class PipePoolTest {
                 if (calls.incrementAndGet() == 1) return f.dial().open(attempt);
                 if (calls.get() > 2) throw new IOException("pause further rotation");
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM); var gate = new SpliceTest.GateWriter(pair[0].writer());
-                f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("replacement"))).closed();
+                f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("replacement"))).closed();
                 var pipe = attempt.join(PipeIo.of(pair[0].reader(), gate));
                 gate.paused = true; pipe.revalidate(); return pipe;
             }).withOptions(PipeOptions.builder().probation(Duration.ofMillis(20)).build())
@@ -463,7 +463,7 @@ class PipePoolTest {
                 if (calls.incrementAndGet() == 1) return f.dial().open(attempt);
                 if (calls.get() > 2) throw new IOException("pause further rotation");
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM); var gate = new SpliceTest.GateWriter(pair[0].writer());
-                f.listener.handle(pair[1], JoinHint.inBand(TestAddr.peer("revalidation"))).closed();
+                f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("revalidation"))).closed();
                 var pipe = attempt.join(PipeIo.of(pair[0].reader(), gate));
                 gate.paused = true; held.set(gate); pipe.revalidate(); return pipe;
             }).withOptions(PipeOptions.builder().probation(Duration.ofMillis(100)).build())

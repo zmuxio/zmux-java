@@ -34,7 +34,7 @@ func (g *gate) Resolve(_ context.Context, h []byte, _ netip.AddrPort) ([]byte, e
 func (g *gate) Credential(context.Context, seal.CredentialRequest) (*proto.Credential, error) {
 	return nil, nil
 }
-func (g *gate) Commit(context.Context, seal.Admission) (any, error) { return "ok", nil }
+func (g *gate) Commit(context.Context, seal.CommitRequest) (any, error) { return "ok", nil }
 
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "sealpeer:", err)

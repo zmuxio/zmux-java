@@ -27,7 +27,7 @@ class ListenerResourcesTest {
                 c.pipes().getFirst().abort();
                 assertInstanceOf(SessionError.ResumeTimeout.class, s.awaitClosed());
                 c.close(); c.awaitClosed();
-                until(() -> listener.memoryUsed() == 0);
+                until(() -> listener.adapter().memoryUsed() == 0);
             }
             assertEquals(0, loops.outstandingBuffers());
         }
@@ -47,7 +47,7 @@ class ListenerResourcesTest {
                 var c1 = Zmux.connect(listener.localAddress(), cfg); var s1 = first.get();
                 var a = c1.openStream(); a.write(new byte[96 << 10]);
                 var held1 = s1.acceptStream();
-                until(() -> listener.memoryUsed() >= 96 << 10);
+                until(() -> listener.adapter().memoryUsed() >= 96 << 10);
                 var second = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c2 = Zmux.connect(listener.localAddress(), cfg); var s2 = second.get();
                 var b = c2.openStream(); b.write(new byte[96 << 10]);

@@ -38,15 +38,6 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         }
         public static Rotation none() { return new Rotation(0, Duration.ZERO, 0); }
     }
-    public record Backoff(Duration minimum, Duration maximum, double jitter) {
-        public Backoff {
-            if (nanos(minimum, false) > nanos(maximum, false) || jitter < 0 || jitter > 1 || !Double.isFinite(jitter))
-                throw new IllegalArgumentException("backoff");
-        }
-        /** The default maximum: the longest wait between failed dials. */
-        public static final Duration DEFAULT_MAXIMUM = Duration.ofSeconds(60);
-        public static Backoff defaults() { return new Backoff(Duration.ofSeconds(1), DEFAULT_MAXIMUM, .2); }
-    }
     public PipePool {
         Objects.requireNonNull(join); Objects.requireNonNull(options); Objects.requireNonNull(rotation); Objects.requireNonNull(backoff);
         if (count < 1) throw new IllegalArgumentException("count must be positive");
@@ -83,7 +74,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         Attempt(ZmuxSession session, PipeOptions options, Cancellation cancellation, int kind) {
             this.session = session; this.options = options; this.cancellation = cancellation; this.kind = kind; owner = Thread.currentThread();
         }
-        /** The options to join with: the pool's, with {@link PipeOptions.Builder#returnOnReply} set. */
+        /** The options to join with: the pool's, with {@link PipeOptions.Builder#returnOnReply(boolean)} set. */
         public PipeOptions options() { return options; }
         /** The session a {@link Join} adds its pipes to. */
         public ZmuxSession session() { return session; }

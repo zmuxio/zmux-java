@@ -50,7 +50,7 @@ class HandshakePlanTest {
             try (EventLoops loops = EventLoops.create(2)) {
                 ZmuxConfig cfg = SealTest.sessions(loops).allowRecordMode((c, m, peer) -> true).build();
                 int[] calls = new int[1];
-                var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, peer) -> c.secure()).build());
+                var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, peer) -> c.isSecure()).build());
                 InboundTransform once = (carrier, ctx) -> { calls[0]++; return seal.transform(carrier, ctx); };
                 try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(once).build())) {
                     var up = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -58,8 +58,8 @@ class HandshakePlanTest {
                     PipeIo.Exporter eu = (x, y, n) -> new byte[n], ed = (x, y, n) -> { byte[] b = new byte[n]; b[0] = 1; return b; };
                     String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
                     var src = new InetSocketAddress("127.0.0.1", 9);
-                    l.handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true), JoinHint.pair(token, true, src));
-                    l.handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true), JoinHint.pair(token, false, src));
+                    l.adapter().handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true), JoinHint.pair(token, true, src));
+                    l.adapter().handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true), JoinHint.pair(token, false, src));
                     PipeIo client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true),
                             new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true));
                     PipeIo p = Seal.establish(client, SealTest.client().mode(mode).build()).toCompletableFuture().get(10, TimeUnit.SECONDS);

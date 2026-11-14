@@ -652,6 +652,9 @@ public final class Session {
         if (!handOffW.isEmpty() && closeHandedOff()) handOffW.wakeAll(outbox);
     }
 
+    /** The longest a close (flush and hand-off of CONNECTION_CLOSE) waits for the carriers before they are closed: the one authority, read by the session facade too; tests shorten it. */
+    public static volatile long closeLimit = java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+
     /** CONNECTION_CLOSE was queued on every carrier, and the linger waits for its writes to complete. */
     private boolean lingerOnHandOff;
 
@@ -717,7 +720,11 @@ public final class Session {
             return;
         }
         boolean holdForLanes = !feat.multipath() && !e.remote() && (fr.app() || fr.code() == TransportError.NO_ERROR) && !lanes.covered();
-        life.closeQueued(fr, holdForLanes ? Time.add(now, lingerTimeout()) : Time.NEVER);
+        long laneWait = holdForLanes ? Time.add(now, lingerTimeout()) : Time.NEVER;
+        life.closeQueued(fr, laneWait);
+        // Every close is bounded: a carrier whose write side is stuck (a peer that does not read)
+        // never takes CONNECTION_CLOSE, and without this bound nothing would end the session.
+        life.handOffBy(Time.add(laneWait == Time.NEVER ? now : laneWait, closeLimit));
         pipes.wakeWriters();
     }
 
@@ -904,7 +911,7 @@ public final class Session {
                           boolean activity) {
         // A PIPE_PING alone in a quiet session is answered on its pipe pair only.
         boolean pairOnly = pingOnly && p.mp() != null && mp().pingAnsweredOnPair(p);
-        if (ack != null && ack.onRecord(il, posBytes, elicit && !pairOnly, pipePing && !pairOnly, now)) pipes.wakeWriters();
+        if (ack != null && ack.onRecord(p, il, posBytes, elicit && !pairOnly, pipePing && !pairOnly, now)) pipes.wakeWriters();
         if (traffic) p.traffic(now);
         if (p.mp() != null) mp().recorded(p, il, traffic);
         if (!feat.acked() || activity) ka.activity(now);
@@ -1216,6 +1223,16 @@ public final class Session {
 
     public void cancelPeerAttachedWait(Waiter sig) { path.cancelPeerAttachedWait(sig); }
 
+    /** One attempt of a wait for pipe id to be removed: true once it is, false after registering sig. */
+    public boolean waitPipeRemoved(long id, Waiter sig) {
+        Pipe p = pipes.get(id);
+        if (p == null || (p.mp() != null && p.mp().health.retired())) return true;
+        pipes.waitRemoved(sig);
+        return false;
+    }
+
+    public void cancelPipeRemovedWait(Waiter sig) { pipes.cancelRemovedWait(sig); }
+
     private static io.zmux.PipeStats.SettingSource settingSource(Attach a, boolean local, boolean peerRequest) {
         if (a == null) return io.zmux.PipeStats.SettingSource.DEFAULT;
         return local ? io.zmux.PipeStats.SettingSource.LOCAL
@@ -1356,7 +1373,7 @@ public final class Session {
         t = Math.min(t, ka.deadline(peerSeen && state != SessionState.SUSPENDED));
         if (ack != null) {
             t = Math.min(t, ack.deadline());
-            t = Math.min(t, pacer.deadline(!sched.isEmpty(), now));
+            t = Math.min(t, pacer.deadline(!sched.isEmpty()));
             if (quality != null) t = Math.min(t, quality.timers(now, false));
         }
         t = Math.min(t, path.deadline(now));
@@ -1881,6 +1898,10 @@ public final class Session {
                 @Override public boolean peerZmux() { TransportParams p = peerParams(); return p != null && p.isZmux(); }
                 @Override public long earnBytes() { return tx.earnBytes(); }
                 @Override public boolean dataWaiting() { return !sched.isEmpty(); }
+                @Override public long ackRelease(Pipe p) {
+                    if (ack == null) return Time.NEVER;
+                    return path instanceof PathSession m ? m.ackRelease(p) : ack.release();
+                }
             }, pipes, shapingLimitsInForce(), ka.outstandingSentAt(), start));
         }
         return pipes.shaping();
@@ -1919,16 +1940,32 @@ public final class Session {
     /** The counters of a Join's handshake, which exist with or without a shaper. */
     private long handshakeFaults, handshakeUnplanned;
 
-    /** Sets the quality band of one pipe, or (pipe negative) the default of the session's pipes. */
-    public void setQualityBand(long pipe, long rtt, double rateRatio, long minInterval) throws CoreException {
-        QualityMonitor.Band b = new QualityMonitor.Band(rtt, rateRatio, minInterval); // minInterval 0: no floor
-        if (quality == null) quality = new QualityMonitor(this);
+    /**
+     * Sets the quality band of one pipe, or (pipe negative) the default of the session's pipes;
+     * false when the pipe has no outbound direction.
+     */
+    public boolean setQualityBand(long pipe, long rtt, double rateRatio, long minInterval) throws CoreException {
+        return band(pipe, new QualityMonitor.Band(rtt, rateRatio, minInterval)); // minInterval 0: no floor
+    }
+
+    /** Makes pipe follow the session's quality band again; false when it has no outbound direction. */
+    public boolean clearQualityBand(long pipe) throws CoreException {
+        return band(pipe, null);
+    }
+
+    private boolean band(long pipe, QualityMonitor.Band b) throws CoreException {
         Pipe p = null;
         if (pipe >= 0) {
             p = pipes.get(pipe);
-            if (p == null || p.out() == null) throw CoreException.of(CoreException.Reason.INVALID);
+            if (p == null) throw CoreException.of(CoreException.Reason.INVALID);
+            if (p.out() == null) return false;
+        }
+        if (quality == null) {
+            if (b == null) return true;
+            quality = new QualityMonitor(this);
         }
         quality.band(p, b);
+        return true;
     }
 
     /** Sets the capacity floor; it reports at once when the capacity is below it. */

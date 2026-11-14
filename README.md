@@ -77,14 +77,18 @@ timeouts. `finish()` sends FIN (the clean end); `reset(code)` resets the sender,
 and `stop(code)` stops receiving. A stream is `AutoCloseable`: `close()` leaves a
 finished sending part and a receiving part read to its end as they are, so
 `write`, `finish`, read the reply, `close` (the end of try-with-resources) ends
-the stream cleanly. **Closing a part left open resets/stops it with code 0**:
-unlike `Socket.close()`, `close()` does not flush or send FIN, so call
-`finish()` after the last write. A write returns once its bytes are in the
+the stream cleanly. **Closing a part left open ends it abruptly**: a sending
+part not finished is reset with ZMUX_CANCELLED (0x5a4d0001), so the peer sees
+an abandoned stream and never a clean end, and a receiving part not read to its
+end is stopped with code 0. Unlike `Socket.close()`, `close()` does not flush or
+send FIN, so call `finish()` after the last write; a handle the garbage
+collector finds unclosed is released the same way. A write returns once its bytes are in the
 stream's send buffer; a STOP_SENDING, reset or session end racing it can drop
 them, and the next write or `finish()` reports that error (as TCP reports an
 RST). `finish()` waits for the session to take the FIN, so it is the point where
 every earlier write's fate is known. `tryWrite` returns 0 while another write
-owns the stream. `readAll(maxBytes)` reads to FIN. A preamble that would exceed
+owns the stream. `readAll(maxBytes)` reads to FIN; past `maxBytes` it stops
+the stream and throws `LimitExceededException`. A preamble that would exceed
 the peer's maximum preamble size is refused when it is set
 (`PreambleTooLargeException`). Setters that cannot fail
 (`setPriority`, `setSendBuffer`, `setReceiveWindow`, ...) validate their
@@ -113,14 +117,23 @@ completes before the linger timeout, the peer has read the close. To wait for
 "delivered or given up after d", bound the wait itself: `closed().get(d, unit)`
 or `orTimeout`; the timeout changes nothing in the session. After the peer's
 close, the data that arrived before it stays readable on the streams the
-application opened or accepted, until it is read or the linger timeout passes. `awaitClosed()` waits for the same
-end. `shutdown(Duration)` waits for a graceful close (GOAWAY,
-then CONNECTION_CLOSE once no stream remains) and closes at its deadline.
-Blocking
-calls (`openStream`, `acceptStream`, `receiveDatagram`, `ping`, `nextEvent`,
-`awaitSendCapacity`) have `Duration` overloads that throw
-`SocketTimeoutException`; the TCP dial of a session is bounded by the handshake
-timeout, that of an added pipe by the join timeout.
+application opened or accepted, until it is read or the linger timeout passes. `awaitClosed()` (and
+`awaitClosed(Duration)`) waits for the same end. `shutdown(code, reason)` closes
+gracefully (GOAWAY, then CONNECTION_CLOSE with code and reason once no stream
+remains); `shutdown(code, reason, Duration)` closes at once when its bound
+passes, and `shutdownAsync(code, reason)` returns a `ZmuxFuture<Void>` whose
+`orTimeout` is that bound.
+
+Every blocking wait (`openStream`, `openSendStream`, `acceptStream`,
+`acceptReceiveStream`, `receiveDatagram`, `datagrams().receive`,
+`datagrams().sendWait`, `ping`, `nextEvent`, `awaitSendCapacity`,
+`awaitPeerAttached`, `awaitClosed`, `listener.accept`) has a form without a bound
+and a `Duration` overload that throws `SocketTimeoutException` when the bound
+passes; no wait takes `null` for "no bound", and none returns `null` on a
+timeout. The TCP dial of a session is bounded by the handshake timeout, that of
+an added pipe by the join timeout. A session's end is never a timeout: an idle,
+handshake or resume timeout ends the session, and every later call throws
+`SessionClosedException`.
 
 Streams expose receive-window/send-buffer controls, send-capacity waiting,
 preambles and RFC 9218 priorities (`setPriority(Priority)` and `setPeerPriority`).
@@ -136,11 +149,11 @@ takes ownership of the buffer's remaining bytes; do not mutate them afterwards.
 A chunk held by the application remains valid after the source session closes.
 `Chunk.of(buffer, release)` supports pooled buffers; release is resource cleanup
 and must not block, as the last reference may be dropped on an event loop.
-A chunk that is neither closed nor transferred keeps its buffer: nothing
-releases it when it becomes unreachable. Run with
-`-Dzmux.leakDetection=sample` (one chunk in 128) or `=paranoid` (every chunk,
-with the stack that created it) to have such chunks reported, and released,
-when the garbage collector finds them.
+A chunk that is neither closed nor transferred keeps its buffer until it is.
+As a safety net one chunk in 128 is watched: when the garbage collector finds a
+watched chunk dropped, zmux logs a warning and releases it.
+`-Dzmux.leakDetection=paranoid` watches every chunk, with the stack that created
+it; `=off` watches none.
 
 `session.openStreamAsPipe(info, tlvs)` (OPEN_INFO and application TLVs, both optional) opens a bidirectional stream marked as
 PIPE_CARRIER (when the preamble extension is in use) and returns it as a
@@ -178,7 +191,7 @@ key or the exporter on a secure first pipe (`PipeAuth.none().withEndToEnd()` is
 accepted there without effect, so that one configuration serves both kinds of
 first pipe). A session has no join keys until the host states that its first
 pipe is end to end: `PipeAuth.withEndToEnd()` when known before it starts, else
-`session.declareEndToEnd()` once proven; until then local joins fail with
+`session.adapter().declareEndToEnd()` once proven; until then local joins fail with
 `JoinPendingException`, whose message names what is missing (the declaration,
 the deferred PSK or both), and the peer's are held. A server session needs a
 listener for either feature: `Zmux.open(io, Role.SERVER, config)` with
@@ -197,7 +210,7 @@ ClientConfig client = ClientConfig.builder()
         .psk(handle, psk)
         .handshakeTimeout(Duration.ofSeconds(5))   // 10 s unless set; noHandshakeTimeout() for none
         .build();
-PipeIo io = Seal.establish(carrier, client).toCompletableFuture().get();
+PipeIo io = Seal.establish(carrier, client).get();     // a ZmuxFuture
 ZmuxSession session = Zmux.open(io, Role.CLIENT, config);
 Peer peer = Seal.peerOf(io).orElseThrow();
 ```
@@ -218,11 +231,14 @@ with `JoinRefusedException` and starts the join refusal backoff. A `ZmuxPipe`
 is identified by a `PipeId`. `ZmuxPipe.update(PipeUpdate)` changes its
 settings together: send priority and standby (the local outbound direction),
 receive priority and standby (the request for the peer's outbound direction),
-weight, probation and `PipeLiveness`; a setting is kept when its methods are not
-called, set with `x(value)` or cleared with `clearX()`. `setSendPriority`,
-`setReceivePriority`, `setSendStandby` and `setReceiveStandby` are shorthands
-for one setting. A pipe can also revalidate, retire gracefully (`close()`) or
-`abort()`. Lower priority numbers are preferred. The local outbound override takes precedence over the
+weight, probation, `PipeLiveness` and the pipe's own `QualityBand`; a setting is
+kept when its methods are not called, set with `x(value)` or cleared with
+`clearX()`. `update` is the only way to change them; `PipeOptions.Builder` takes
+the same settings with the same methods when the pipe is added, where keeping
+and clearing both mean the default. `pipe.setShaper(shaper)` replaces the
+pipe's own shaper. A pipe can also revalidate, retire gracefully (`close()`) or
+`abort()`; `closed()` (a `ZmuxFuture`) and `awaitClosed()` wait until its
+removal finished. Lower priority numbers are preferred. The local outbound override takes precedence over the
 peer's request; clearing it follows the peer again. Standby means failover,
 not ordinary overflow. The priority field spans the full wire varint62 range.
 
@@ -232,8 +248,9 @@ epoch every hour or every 65536 joins (`ZmuxConfig.Builder.epochPeriod`,
 `session.advanceEpoch()` asks; a session whose secret comes from a pre-shared
 key or an exporter also advances once when its first Sealed or Bound pipe exists
 (`epochAfterFirstPipe(boolean)`, on by default). `EpochCommitted` and
-`EpochDeleted` report it, and `session.replacePipes(Duration)` also replaces
-every carrier through the redial hook, make before break, within the timeout.
+`EpochDeleted` report it, and `session.replacePipes()` also replaces every
+carrier through the redial hook, make before break; `orTimeout` on its future
+bounds it.
 
 ### Resume after a lost connection
 
@@ -257,7 +274,7 @@ try (ZmuxSession session = Zmux.connect(serverAddress, config)) {
 ```
 
 The hook is called as soon as the session suspends or lacks a direction, and
-again after a failure with an exponential backoff (`redialBackoff(PipePool.Backoff)`,
+again after a failure with an exponential backoff (`redialBackoff(Backoff)`,
 by default from 1 s to 60 s with jitter 0.2), measured from the start of the
 previous attempt; a join refused by the peer also waits for the refusal
 backoff, so a dial waits for the longer of the two. The server needs a
@@ -345,7 +362,7 @@ concurrent reads and writes (or use split requests), forward cancellation and
 failure, and keep response/request bodies alive for the pipe lifetime.
 
 External HTTP handlers pass `JoinHint.inBand(source)` to
-`listener.handle(pipeIo, hint)` and keep their request/response bodies
+`listener.adapter().handle(pipeIo, hint)` and keep their request/response bodies
 alive until the returned stage completes. `source` is a stable client identity
 for admission, usually the remote IP. Malformed, unauthenticated and replayed
 joins are closed through the same protocol admission path.
@@ -387,7 +404,9 @@ size), `bytesRetransmitted` (the carrier's own retransmissions, where its
 (smoothed, after the first samples a second apart); each is empty where it
 cannot be known. Durations use `Duration`, rates bytes/s. Estimates
 are observations, not guaranteed bandwidth. Quality bands and capacity floors
-are opt-in through `session.setQualityBand` and `setCapacityFloor`; reports appear in
+are opt-in through `session.setQualityBand` (a pipe's own band through
+`PipeUpdate.qualityBand`) and `setCapacityFloor` (an integer rate in bytes/s,
+as every rate zmux reports); reports appear in
 `nextEvent()`. Tier saturation and effective-setting changes are events too.
 Configuration also exposes spread size, overflow delay, redundancy and the
 receive auto-tuner's latency budget.
@@ -509,7 +528,7 @@ never withdrawn.
 
 The `Admission` of `ListenerConfig` decides on every new carrier of that
 listener before anything is written on it: its TCP and TLS carriers, those
-given to `listener.handle(...)` (the HTTP, WebSocket and exchange carriers of
+given to `listener.adapter().handle(...)` (the HTTP, WebSocket and exchange carriers of
 an `HttpEndpoint`, a host's own pipes), and QUIC connections by their first
 bidirectional stream (the connection's other streams wait for it and then
 reach the listener without a new decision), joins and resumptions included.
@@ -537,8 +556,8 @@ var config = ListenerConfig.builder()
 ```
 
 A fallback target receives the carrier as a byte-stream `PipeIo` with every
-byte read replayed in front. `listener.handle(io, hint, fallback)` takes its
-own target and returns a `Handled` with the verdict and whether a session
+byte read replayed in front. `listener.adapter().handle(io, hint, fallback)`
+takes its own target and returns an `io.zmux.adapter.Handled` with the verdict and whether a session
 took the carrier (`taken()`: false when the listener refused it, having
 written nothing), and `QuicServer` takes one for QUIC connections. Without a
 target a fallback stalls: nothing is sent, input is discarded, and the carrier
@@ -580,7 +599,13 @@ differ.
 ### Carriers from an HTTP server
 
 An application that runs its own HTTP server gives each request carrier to
-`listener.handle(io, hint, fallback)`. The `JoinHint` carries the request:
+`listener.adapter().handle(io, hint, fallback)`. What only such an adapter or
+an own accept loop needs (`reserve` and the `Slot` it returns, `handle`,
+`knownJoin`, `stallDuration`, `countSetupFailure`, `firstRecordTimeout`,
+`memoryUsed`) is in `io.zmux.adapter.ListenerAdapter`, reached through
+`listener.adapter()`; a session's counterpart (`isJoinReady`,
+`declareEndToEnd`, `releaseFirstFlight`) is
+`session.adapter()`. The `JoinHint` carries the request:
 `JoinHint.of(RequestHead.of(headers, head), uplink, peer)` takes the
 `Zmux-Pipe-Pair` field from the headers (`JoinHint.of(head, pairField, uplink, peer)` another field), and `head` is
 true for a carrier decided on its request head: an HTTP upgrade (WebSocket,
@@ -591,9 +616,14 @@ host resolved itself (the peer otherwise); with `HttpEndpoint`, a host sets
 capabilities supply the TLS metadata of the connection that carries the
 request: `withExporter`, `withProtocol` and `withServerName`.
 
-`listener.shutdown(timeout)` (or `shutdownAsync`) stops new sessions but lets the listener's
-sessions join and resume until they end (or the timeout passes), then closes
-the listener; `close()` stops everything at once.
+`listener.shutdown(code, reason)` refuses new sessions at once
+(`accept()` throws `ListenerClosedException`), shuts every session of the
+listener down with code and reason, and lets them join and resume until they
+have all ended; then the listener closes. `shutdown(code, reason, Duration)`
+closes the sessions still running when its bound passes, and
+`shutdownAsync(code, reason)` returns a `ZmuxFuture<Void>` whose `orTimeout` is
+that bound. `close()` stops the listener at once and leaves started sessions
+running, without new pipes from it.
 
 On a carrier decided on its head, `PrefixAuth`'s verifier takes the token
 from the request field `Zmux-Prefix-Auth` (`PrefixAuth.withHeaderField` agrees
@@ -620,7 +650,7 @@ and `listener.connectTls` (with the listener's session configuration), and
 and TLS pipes a session dials itself (`addPipe(address, ...)`,
 `addTlsPipe(...)`). The prefix goes after the TLS handshake and before
 the first zmux record. Pipe dialers take one
-per call: `QuicClient.openPipe(address, serverName, session, credential)` (and `openPipeAsync`) and
+per call: `QuicClient.dial(address, serverName, session, credential)` (and `dialAsync`) and
 `new QuicPool(client, address, serverName, limits, credential)`, which present
 it on the first stream of each connection they open. A pipe the application
 dials itself (`Zmux.open`, `listener.open`, `addPipe(io, ...)`) presents
@@ -659,7 +689,43 @@ and `carrierCandidates()`.
 
 ## HTTP carriers
 
-The optional `zmux-http` module serves and dials HTTP carriers on Netty 4.2.
+The optional `zmux-http` module serves and dials HTTP carriers on Netty 4.2
+([zmux-http/README.md](zmux-http/README.md)). A runnable minimum, a cleartext
+server and a client in one process:
+
+```java
+var group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+try (ZmuxListener listener = ZmuxListener.of(ListenerConfig.defaults());
+     HttpEndpoint endpoint = HttpEndpoint.builder(listener).streaming().build()) {
+    var server = new ServerBootstrap().group(group).channel(NioServerSocketChannel.class)
+            .childHandler(endpoint.initializer(null, null))      // cleartext HTTP/1.1 and h2c
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
+    int port = ((InetSocketAddress) server.localAddress()).getPort();
+
+    Thread.ofVirtual().start(() -> {                              // the server: echo one stream
+        try (ZmuxSession session = listener.accept(); var stream = session.acceptStream()) {
+            stream.write(stream.readAll(1 << 20));
+            stream.finish();
+            session.awaitClosed();
+        } catch (Exception e) {
+            // The client ended first.
+        }
+    });
+
+    try (HttpCarrierClient client = HttpCarrierClient.builder().group(group).build();
+         ZmuxSession session = Zmux.open(client.pipe(URI.create("http://127.0.0.1:" + port + "/zmux"), Map.of(),
+                 PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, listener.config());
+         var stream = session.openStream()) {
+        stream.write("hello".getBytes(StandardCharsets.UTF_8));
+        stream.finish();
+        System.out.println(new String(stream.readAll(1 << 20), StandardCharsets.UTF_8));
+    }
+    server.close().sync();
+} finally {
+    group.shutdownGracefully();
+}
+```
+
 `HttpEndpoint.builder(listener)` enables each adapter on its own:
 `streaming()` (bidirectional requests, split carriers' uplinks and downlinks), `exchange(ExchangeConfig)` (the exchange carrier) and
 `webSocket(protocols...)`. Every request is classified on its head
@@ -711,12 +777,12 @@ Internet reaches with an admission, such as `PrefixAuth`.
 
 - **Exchange carrier**: one carrier made of bounded
   POST exchanges, for paths that buffer whole bodies. Both ends share a PSK
-  (`ExchangeConfig.builder().psk(key)`) and the body
+  (`ExchangeConfig.builder(key)`) and the body
   encoding (`base64(boolean)`); the default piece size keeps every body at most
   1,000,000 bytes after the encoding. The URL template may hold `{instance}`
   and `{nonce}`; `downUrl` sends DOWN requests elsewhere; `headers` adds fields to every
   request, `cacheBust(false)` stops the nonce query parameter being added to a URL
-  without `{nonce}`, and `backoff(PipePool.Backoff)` sets the wait before a request
+  without `{nonce}`, and `backoff(Backoff)` sets the wait before a request
   without a result is repeated. Every request
   starts with a fixed 66-byte authentication header (88 characters in
   `base64`), which the server reads and verifies (MAC, time, nonce, declared
@@ -764,7 +830,7 @@ its pipe's stream ID, so that a lost packet loses that datagram instead of
 delaying every later one; larger datagrams, shaped pipes and peers without
 the channel use records. Several sessions may share a connection's
 datagrams. `QuicOptions` negotiates QUIC datagrams by default
-(`withDatagrams(false)` turns them off), and `SessionStats` counts the
+(`QuicOptions.builder().datagrams(false)` turns them off), and `SessionStats` counts the
 datagrams that went on channels (`datagramsSentChannel`,
 `datagramsReceivedChannel`, included in the totals). Only a session on the
 connection's own loop uses the channel.
@@ -786,7 +852,7 @@ endpoint cancellation.
 ## Stream relays
 
 `Zmux.splice(inbound, outbound)` transfers both streams to a bidirectional relay
-and returns a `CompletionStage<SpliceResult>`. Prepare the outbound preamble
+and returns a `ZmuxFuture<SpliceResult>`. Prepare the outbound preamble
 first, copying or adjusting application TLVs and PIPE_CARRIER as appropriate.
 After transfer, let the relay own stream I/O and release both streams.
 
@@ -798,13 +864,13 @@ receives RESET_STREAM after the forwarded tail has reached the carrier.
 Session failure interrupts capacity and limiter waits.
 
 `SpliceOptions` supplies the chunk size and the two direction limiters.
-Cancelling the returned stage (`toCompletableFuture().cancel(true)`) cancels
-the relay: both streams are reset and stopped with code 0, and there is no
-result. Otherwise the stage completes after all relay workers, limiter waits,
+Cancelling the returned future, or completing it from outside (`orTimeout`),
+cancels the relay: both streams are reset and stopped with code 0, and there is
+no result. Otherwise the future completes after all relay workers, limiter waits,
 chunks and owner-loop registrations have been cleaned up, with each direction's
 byte counts and how it ended, a sealed `SpliceResult.End`: `Finished`,
 `Reset(code)`, `Stopped(code)`, `UpstreamLost` or `DownstreamLost`. A failing
-limiter completes the stage exceptionally.
+limiter completes the future exceptionally with a `CallbackFailedException`.
 
 Stream datagrams preserve context IDs and use the sessions' existing bounded
 queues. They remain eligible after a reliable half-close until the association
@@ -828,7 +894,7 @@ PipePool route = PipePool.of(attempt -> attempt.join(remoteAddress))
 PipeMaintenance maintenance = session.maintainPipes(route);
 // Later: stop creation and rotation, then wait for all attempt cleanup.
 maintenance.close();
-PipeMaintenance.Result result = maintenance.completion().toCompletableFuture().join();
+PipeMaintenance.Result result = maintenance.completion().join();
 ```
 
 Multipath must be negotiated. `count` includes only this pool's members, not the
@@ -964,13 +1030,18 @@ survivor after the one-shot worker ends.
 
 Every blocking call has an asynchronous twin returning `ZmuxFuture`:
 `ZmuxSession` provides `openStreamAsync`, `openSendStreamAsync`,
-`acceptStreamAsync`, `acceptReceiveStreamAsync` (also with a `Duration`
-deadline), `pingAsync`, `nextEventAsync`, `shutdownAsync` and `replacePipes`;
+`acceptStreamAsync`, `acceptReceiveStreamAsync`, `pingAsync`,
+`nextEventAsync`, `shutdownAsync` and `replacePipes`;
 `Zmux`, `ZmuxListener` and `ZmuxPipe` provide `connectAsync`, `connectTlsAsync`,
 `dialTlsPipeAsync`, `acceptAsync`, `shutdownAsync` and `peerAttachedAsync`; streams provide
 `readAsync(ByteBuffer)`, `readChunkAsync(max)`, `writeAsync(ByteBuffer)`,
 `writeChunkAsync(Chunk)`, `finishAsync` and `idAsync`. A blocking call is the
-same operation plus a bounded wait. Submission never waits for network I/O and
+same operation plus a bounded wait. An asynchronous form takes no timeout:
+`orTimeout` (or `completeOnTimeout`) on its future bounds it and withdraws the
+wait. Splice, the secure carrier's `Seal.establish`, pool maintenance's
+`completion()` and the adapter's `Handled` return `ZmuxFuture` too; only code the
+application supplies (an admission `Decider`, a `LaneOpener`) returns a
+`CompletionStage`. Submission never waits for network I/O and
 is safe on an event-loop thread; pending operations do not hold a thread. An
 operation that can complete at once returns a completed future, and its
 dependents run on the calling thread; later completions run outside the event
@@ -985,7 +1056,7 @@ independent. Read/write timeouts set on the stream are captured at submission
 and include time waiting for the turn.
 
 ```java
-var incoming = session.acceptStreamAsync(Duration.ofSeconds(5));
+var incoming = session.acceptStreamAsync().orTimeout(5, TimeUnit.SECONDS);
 var opened = session.openStreamAsync();
 var sent = opened.thenCompose(stream -> {
     var writing = stream.writeAsync(payload);

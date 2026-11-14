@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * The local policy of {@link CarrierChoice#auto}. Start from {@link #defaults()}
+ * The local policy of {@link CarrierChoice#auto(Candidate...)}. Start from {@link #defaults()}
  * or {@link #of}; an item not set with a {@code with} method keeps its default. Values are taken
  * as they are, zero included; a negative, NaN or infinite one is rejected, as is a timerMax
  * below timerMin.

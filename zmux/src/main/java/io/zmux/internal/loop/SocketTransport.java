@@ -40,7 +40,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
     }
 
     @Override
-    public boolean closed() {
+    public boolean isClosed() {
         return closed;
     }
 

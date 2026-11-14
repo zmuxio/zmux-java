@@ -20,6 +20,13 @@ import java.util.OptionalLong;
  * multipath without a secret source) when the configuration is built or, for what depends on the
  * first pipe, when the session starts, before any byte is written. No value is ever raised,
  * lowered or dropped instead. A duration beyond the clock's range never fires.
+ *
+ * <p>An accessor that returns an empty {@link Optional}, {@link OptionalInt} or
+ * {@link OptionalLong} means the option's one setting that is not a value, as its documentation
+ * names it: off or none ({@link #handshakeTimeout()}, {@link #resumeTimeout()}), unlimited
+ * ({@link #memoryBudget()}), automatic ({@link #maxStreamReceiveWindow()},
+ * {@link #maxConnectionReceiveWindow()}, {@link #sendBufferMax()}, {@link #replayWindow()},
+ * {@link #probation()}) or staged ({@link #incomingUniStreams()}). No option has two such settings.
  */
 public final class ZmuxConfig {
     /** The default ALPN identifier, as of QMux draft-02. */
@@ -79,7 +86,7 @@ public final class ZmuxConfig {
     final long epochJoins; // negative: off
     final boolean epochAfterFirstPipe, epochAfterResume;
     final Redial redial;
-    final PipePool.Backoff redialBackoff;
+    final Backoff redialBackoff;
     final Scheduler scheduler;
     final Duration probation; // null: derived; zero: off
     final int spreadChunk;
@@ -117,7 +124,7 @@ public final class ZmuxConfig {
             else { SessionEvent event = Events.publicEvent(e); if (event != null) tracer.event(event); }
         }, tracer == null ? null : tracer::dropped, b.tracerQueue, b.allowWindowGrowth,
                 b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), joinPolicy(b), b.handshakeShaper, b.logger,
-                b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.minimum()), nanos(b.redialBackoff.maximum())));
+                b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.min()), nanos(b.redialBackoff.max()), b.redialBackoff.jitter()));
         joinEarlyHello = b.joinEarlyHello;
     }
 
@@ -127,7 +134,7 @@ public final class ZmuxConfig {
         java.util.function.BiPredicate<ZmuxSession, PipeId> authorize = b.authorizeJoin;
         return new io.zmux.internal.loop.DriverHooks.JoinPolicy() {
             private RecordPolicyInput carrier(io.zmux.internal.loop.Transport c) {
-                return new RecordPolicyInput(c.hasExporter(), c.bindable(), c.info().carrier().label(), false);
+                return new RecordPolicyInput(c.exporterPresent(), c.bindable(), Optional.ofNullable(c.info().carrier().label()), false);
             }
 
             @Override public boolean allow(io.zmux.internal.loop.Transport c, io.zmux.internal.join.Mode mode, Object peer) {
@@ -214,7 +221,7 @@ public final class ZmuxConfig {
         }
     }
     /** Whether datagrams and datagram flows are on. */
-    public boolean hasDatagrams() { return datagrams; }
+    public boolean isDatagrams() { return datagrams; }
     public EarlyData earlyData() { return earlyData; }
     /** Whether a client holds its first carrier write ({@link Builder#holdFirstFlight}). */
     public boolean isHoldFirstFlight() { return holdFirstFlight; }
@@ -237,7 +244,7 @@ public final class ZmuxConfig {
     public int maxPipes() { return maxPipes; }
     /** The attachments the peer may hold beyond {@link #maxPipes()}. */
     public int pipeHeadroom() { return pipeHeadroom; }
-    /** The replay window of joins; empty: the default, max(64, 2 x (maxPipes + headroom)). */
+    /** The replay window of joins; empty: automatic, max(64, 2 x (maxPipes + headroom)). */
     public OptionalInt replayWindow() { return replayWindow == 0 ? OptionalInt.empty() : OptionalInt.of(replayWindow); }
     /** The secret sources of joins; empty: none (a secure first pipe is its own source). */
     public Optional<PipeAuth> pipeAuth() { return Optional.ofNullable(pipeAuth); }
@@ -258,9 +265,9 @@ public final class ZmuxConfig {
     /** The redial hook; empty: none. */
     public Optional<Redial> redial() { return Optional.ofNullable(redial); }
     /** The backoff of the redial hook's attempts. */
-    public PipePool.Backoff redialBackoff() { return redialBackoff; }
+    public Backoff redialBackoff() { return redialBackoff; }
     public Scheduler scheduler() { return scheduler; }
-    /** The base of a new pipe's probation ({@link Duration#ZERO}: off); empty: derived. */
+    /** The base of a new pipe's probation, {@link Duration#ZERO} turning it off; empty: derived from the path (automatic). */
     public Optional<Duration> probation() { return Optional.ofNullable(probation); }
     public int spreadChunk() { return spreadChunk; }
     public Duration overflowDelay() { return overflowDelay; }
@@ -518,7 +525,7 @@ public final class ZmuxConfig {
         private long epochJoins = CoreConfig.Epochs.DEFAULT.joins();
         private boolean epochAfterFirstPipe = true, epochAfterResume = true;
         private Redial redial;
-        private PipePool.Backoff redialBackoff = PipePool.Backoff.defaults();
+        private Backoff redialBackoff = Backoff.defaults();
         private Scheduler scheduler = Scheduler.AFFINITY;
         private Duration probation;
         private int spreadChunk = CoreConfig.DEFAULT_SPREAD_CHUNK;
@@ -657,7 +664,7 @@ public final class ZmuxConfig {
         /**
          * Queued incoming bytes of session datagrams and of datagrams for peer streams not opened
          * yet, default 1 MiB, at least 1. Stream datagram queues have their own bound
-         * ({@link #datagramStreamBytes}) and do not count against it.
+         * ({@link #datagramStreamBytes()}) and do not count against it.
          */
         public Builder datagramReceiveBytes(long n) {
             if (n < 1) throw new IllegalArgumentException("datagramReceiveBytes below 1");
@@ -666,7 +673,7 @@ public final class ZmuxConfig {
 
         /**
          * Queued incoming payload bytes per stream flow, default 512 KiB, at least 1. A datagram
-         * that would exceed this bound or {@link #datagramStreamQueue} drops the oldest datagrams of
+         * that would exceed this bound or {@link #datagramStreamQueue()} drops the oldest datagrams of
          * that stream's queue until both hold, each counted as dropped; a single datagram larger
          * than the bound is kept alone.
          */
@@ -675,12 +682,12 @@ public final class ZmuxConfig {
             datagramStreamBytes = n; return this;
         }
 
-        /** No byte bound on a stream's datagram queue: {@link #datagramStreamQueue} alone bounds it. */
+        /** No byte bound on a stream's datagram queue: {@link #datagramStreamQueue()} alone bounds it. */
         public Builder noDatagramStreamBytes() { datagramStreamBytes = -1; return this; }
 
         /**
          * The initial written-but-unreleased budget, default 4 MiB, at least 1; multipath grows it up
-         * to {@link #sendBufferMax}. Each direction has a 64 KiB floor, subject to its explicit stream limit.
+         * to {@link #sendBufferMax()}. Each direction has a 64 KiB floor, subject to its explicit stream limit.
          */
         public Builder sendBuffer(long n) {
             if (n < 1) throw new IllegalArgumentException("sendBuffer below 1");
@@ -688,7 +695,7 @@ public final class ZmuxConfig {
         }
 
         /**
-         * A fixed maximum of multipath send-buffer growth, at least {@link #sendBuffer} (checked by
+         * A fixed maximum of multipath send-buffer growth, at least {@link #sendBuffer()} (checked by
          * {@link #build()}); not calling it: automatic, at least 64 MiB and beyond that within the memory budget.
          */
         public Builder sendBufferMax(long n) {
@@ -699,7 +706,7 @@ public final class ZmuxConfig {
         /**
          * The attachments a session aims for with its own joins, at least 1 (default 1, multipath
          * off; 8 is the recommended value with multipath). Above 1 the session offers multipath,
-         * which needs a secret source ({@link #pipeAuth}, or a first pipe on the secure carrier)
+         * which needs a secret source ({@link #pipeAuth()}, or a first pipe on the secure carrier)
          * and, for a server, a listener.
          */
         public Builder maxPipes(int n) {
@@ -733,7 +740,7 @@ public final class ZmuxConfig {
         /**
          * Enables resume with this grace period, at least 1 ms (sent in milliseconds, a fraction
          * rounded up); not calling it leaves resume off. Resume needs a secret source and, for a
-         * server, a listener; a client should have a redial source ({@link #redial} or a pool).
+         * server, a listener; a client should have a redial source ({@link #redial()} or a pool).
          */
         public Builder resumeTimeout(Duration d) {
             resumeTimeout = atLeast(d, Duration.ofMillis(1), "resumeTimeout"); return this;
@@ -792,9 +799,9 @@ public final class ZmuxConfig {
 
         /**
          * The backoff of the redial hook's attempts, each wait measured from the start of the
-         * previous attempt (default {@link PipePool.Backoff#defaults()}).
+         * previous attempt (default {@link Backoff#defaults()}).
          */
-        public Builder redialBackoff(PipePool.Backoff b) { redialBackoff = Objects.requireNonNull(b, "redialBackoff"); return this; }
+        public Builder redialBackoff(Backoff b) { redialBackoff = Objects.requireNonNull(b, "redialBackoff"); return this; }
 
         /** The scheduling policy (default {@link Scheduler#AFFINITY}). */
         public Builder scheduler(Scheduler s) { scheduler = Objects.requireNonNull(s); return this; }
@@ -836,7 +843,7 @@ public final class ZmuxConfig {
         public Builder earlyData(EarlyData mode) { earlyData = Objects.requireNonNull(mode); return this; }
 
         /**
-         * Keeps the bootstrap pipe's first carrier write until {@link ZmuxSession#releaseFirstFlight},
+         * Keeps the bootstrap pipe's first carrier write until {@link io.zmux.adapter.SessionAdapter#releaseFirstFlight},
          * or until the handshake timeout has passed since the start ({@link SessionStats#firstFlightTimeouts});
          * the handshake timeout runs from the release. Streams written before the release leave in
          * the same write as the transport parameters. A client with {@link EarlyData#ZMUX_PEER} only.
@@ -888,7 +895,7 @@ public final class ZmuxConfig {
         /**
          * The configuration. Rejects the combinations that cannot work: a held first flight
          * without early data, a replay window below maxPipes + pipeHeadroom, a redial minimum
-         * above its maximum, and multipath or resume without {@link #pipeAuth} carrying a source
+         * above its maximum, and multipath or resume without {@link #pipeAuth()} carrying a source
          * is left to the session's start, where a secure first pipe can supply it.
          */
         public ZmuxConfig build() {

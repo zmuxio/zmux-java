@@ -61,7 +61,7 @@ record CapacityProbeConfig(UdpBottleneck.Config link, int repetitions, int bytes
     }
 
     QuicOptions nativeOptions() {
-        return new QuicOptions(plan(1).nativeWindow(), 16, 16, Duration.ofSeconds(30));
+        return QuicOptions.builder().streamWindow(plan(1).nativeWindow()).bidirectionalStreams(16).lanes(16).build();
     }
 
     ZmuxConfig sessionConfig(EventLoops loops, int independentLinks) {

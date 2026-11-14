@@ -373,7 +373,7 @@ public final class Transmitter {
         AckEngine ack = port.ack();
         PathLayer path = port.path();
         long now = port.now();
-        if (ack != null && path.acksInControl()) ack.write(w, now);
+        if (ack != null && path.acksInControl()) ack.write(w, now, ctl.creditPending());
         ka.writeResponse(w);
         if (ctl.maxData()) {
             tuner.connUpdate();

@@ -79,13 +79,13 @@ class QuicCapacityProbe {
                             var paths = sender.pipes().stream().filter(p -> p.id().value() != 0).toList();
                             try {
                                 for (var selected : paths) {
-                                    selected.setSendStandby(false);
-                                    for (var other : paths) if (other.id().value() != selected.id().value()) other.setSendStandby(true);
+                                    selected.update(io.zmux.PipeUpdate.builder().sendStandby(false).build());
+                                    for (var other : paths) if (other.id().value() != selected.id().value()) other.update(io.zmux.PipeUpdate.builder().sendStandby(true).build());
                                     long before = selected.stats().orElseThrow().bytesSent();
                                     QuicTest.transfer(workers, sender, receiver, 1, 512 << 10);
                                     assertTrue(selected.stats().orElseThrow().bytesSent() - before >= (512 << 10), "selected pipe did not carry training payload");
                                 }
-                            } finally { for (var path : paths) path.setSendStandby(false); }
+                            } finally { for (var path : paths) path.update(io.zmux.PipeUpdate.builder().sendStandby(false).build()); }
                             results.add(String.format(Locale.ROOT, "TRAINING_ESTIMATE,%d,%s,%s,%.3f", round, name,
                                     direction == 0 ? "forward" : "reverse", sender.pipeStats().stream()
                                             .filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));

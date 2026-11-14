@@ -74,14 +74,14 @@ final class WebSocketServer {
         if (!HttpClass.hasToken(r.headers().getAll(HttpHeaderNames.CONNECTION), "upgrade")
                 || !"13".equals(r.headers().get(HttpHeaderNames.SEC_WEBSOCKET_VERSION))
                 || r.headers().get(HttpHeaderNames.SEC_WEBSOCKET_KEY, "").isBlank()) {
-            l.countSetupFailure();
+            l.adapter().countSetupFailure();
             return null;
         }
         Channel ch = ctx.channel();
         WebSocketServerHandshaker hs = new WebSocketServerHandshakerFactory("ws://" + r.headers().get(HttpHeaderNames.HOST, "") + r.uri(),
                 protocol.isEmpty() ? null : protocol, WebSocketDecoderConfig.newBuilder().maxFramePayloadLength(WebSocketFrames.READ_LIMIT).allowExtensions(false).build())
                 .newHandshaker(r);
-        if (hs == null) { l.countSetupFailure(); return null; }
+        if (hs == null) { l.adapter().countSetupFailure(); return null; }
         var full = new DefaultFullHttpRequest(r.protocolVersion(), r.method(), r.uri(), Unpooled.EMPTY_BUFFER, r.headers(),
                 io.netty.handler.codec.http.EmptyHttpHeaders.INSTANCE);
         AdmissionVerdict[] verdict = new AdmissionVerdict[1];
@@ -105,7 +105,7 @@ final class WebSocketServer {
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
                 .withProtocol(protocol).withCarrier(CarrierKind.WEBSOCKET);
-        ZmuxListener.Handled a = l.handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> {
+        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> {
             c.detach();
             Router.closeQuietly(given);
             router.toHost(r, List.of(), true);

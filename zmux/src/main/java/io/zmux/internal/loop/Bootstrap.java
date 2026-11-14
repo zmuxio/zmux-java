@@ -155,7 +155,7 @@ public final class Bootstrap {
                     + " (static or deferred) or the exporter, or use the secure carrier for the first pipe; withEndToEnd() alone is no source");
         }
         if ((l.secretFlags & TransportParams.SECRET_EXPORTER) == 0) return cfg;
-        if (!c.hasExporter()) {
+        if (!c.exporterPresent()) {
             c.close(null);
             throw new IllegalArgumentException("PipeAuth.exporter() on a carrier without an exporter");
         }

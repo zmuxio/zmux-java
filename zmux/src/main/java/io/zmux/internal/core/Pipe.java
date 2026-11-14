@@ -104,6 +104,7 @@ final class Pipe {
         /** Lanes other than 0 by number; null until the peer opens one. */
         private LongMap<InLane> byLane;
         private boolean ended;
+        final AckEngine.InPipeAck ack = new AckEngine.InPipeAck();
 
         /** An inbound direction with lane 0. */
         InDir(InLane first) {
@@ -267,5 +268,5 @@ final class Pipe {
     }
 
     record Sample(long end, long sent, long delivered, long deliveredAt, long firstSentAt, long epoch,
-                  boolean bubble, long queue) {}
+                  boolean bubble, long queue, boolean probe) {}
 }

@@ -78,7 +78,7 @@ public final class HttpCarrierClient implements AutoCloseable {
             both = alpn(tls, ApplicationProtocolNames.HTTP_2, ApplicationProtocolNames.HTTP_1_1);
             h1 = alpn(tls, ApplicationProtocolNames.HTTP_1_1);
         } catch (java.security.GeneralSecurityException e) {
-            throw new IOException(e);
+            throw new IllegalStateException("the default TLS trust store is unusable", e);
         }
         timeout = b.timeout;
         conns = new Connections(group, both, h1, b.version, b.timeout);
@@ -258,7 +258,8 @@ public final class HttpCarrierClient implements AutoCloseable {
             f.thenAccept(x -> { if (x instanceof Channel c) c.close(); });
             throw new SocketTimeoutException(what + " timed out");
         } catch (ExecutionException e) {
-            throw e.getCause() instanceof IOException io ? io : new IOException(e.getCause());
+            if (e.getCause() instanceof RuntimeException r) throw r;
+            throw e.getCause() instanceof io.zmux.ZmuxException z ? z : new io.zmux.CarrierFailedException(what + " failed", e.getCause());
         }
     }
 
@@ -350,7 +351,7 @@ public final class HttpCarrierClient implements AutoCloseable {
         /**
          * The request field that pairs the two requests of a split bootstrap (empty: {@link JoinHint#PAIR_HEADER}),
          * another name only where an intermediary strips unknown fields; the server's
-         * {@link HttpEndpoint.Builder#pairField} must be the same.
+         * {@link HttpEndpoint.Builder#pairField(String)} must be the same.
          */
         public Builder pairField(String field) { pairField = Objects.requireNonNull(field); return this; }
 

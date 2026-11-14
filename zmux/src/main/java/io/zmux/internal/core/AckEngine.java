@@ -39,6 +39,10 @@ final class AckEngine {
     private final long delay;
     private final long peerDelay;
     private boolean immediate;
+    // An ack-eliciting record arrived on an inbound pipe without a PIPE_ACK during the preceding
+    // zmux_max_ack_delay: acknowledged at once, so that a sparse record is not held back by the delay
+    // and the peer's RTT samples stay free of it.
+    private boolean prompt;
     private boolean woken;
     private final ArrayList<long[]> entries = new ArrayList<>(2);
 
@@ -56,6 +60,11 @@ final class AckEngine {
         return peer.has(TransportParams.ACK_DELAY) ? Time.millis(peer.maxAckDelayMillis) : 25 * Time.MILLISECOND;
     }
 
+    /** zmux_max_ack_delay of this endpoint. */
+    long delay() {
+        return delay;
+    }
+
     long peerDelay() {
         return peerDelay;
     }
@@ -71,10 +80,12 @@ final class AckEngine {
      * answered there). A quiet session's PIPE_PING alone does neither: its answer goes on the probed pipe pair
      * only.
      */
-    boolean onRecord(Pipe.InLane il, long n, boolean elicit, boolean atOnce, long now) {
+    boolean onRecord(Pipe p, Pipe.InLane il, long n, boolean elicit, boolean atOnce, long now) {
         if (elicit) {
             if (il.ack.elicit == 0) il.ack.elicitAt = now;
             il.ack.elicit += n;
+            InPipeAck a = p.in().ack;
+            if (!a.acked || Time.sub(now, a.ackedAt) >= delay) prompt = true;
         }
         if (atOnce) immediate = true;
         return due(now);
@@ -82,7 +93,7 @@ final class AckEngine {
 
     /** Whether a PIPE_ACK must be sent now. */
     boolean due(long now) {
-        if (immediate) return true;
+        if (immediate || prompt) return true;
         for (Pipe p : pipes) {
             if (p.in() == null) continue;
             long sum = 0, first = Time.NEVER;
@@ -109,6 +120,25 @@ final class AckEngine {
         return t;
     }
 
+    /**
+     * The latest time the pending acknowledgement may be sent: zmux_max_ack_delay after the first ack-eliciting byte it
+     * covers (MULTIPATH.md Section 6.3), the one bound a shaping delay of the record carrying it never passes;
+     * {@link Time#NEVER} when none is pending.
+     */
+    long release() {
+        long t = Time.NEVER;
+        for (int i = 0, n = pipes.size(); i < n; i++) {
+            Pipe p = pipes.get(i);
+            if (p.in() == null) continue;
+            ArrayList<Pipe.InLane> lanes = p.in().lanes;
+            for (int j = 0, m = lanes.size(); j < m; j++) {
+                Pipe.InLane il = lanes.get(j);
+                if (il.ack.elicit > 0) t = Math.min(t, Time.add(il.ack.elicitAt, delay));
+            }
+        }
+        return t;
+    }
+
     /** Runs the delay timer; true when writers must wake to send a due PIPE_ACK. */
     boolean onTimeout(long now) {
         if (!due(now)) return false;
@@ -116,9 +146,21 @@ final class AckEngine {
         return true;
     }
 
-    /** Writes a PIPE_ACK snapshot when one is due. */
-    void write(RecordWriter w, long now) {
-        if (due(now)) snapshot(w, now, true);
+    /**
+     * Writes a PIPE_ACK snapshot when one is due, or when unreported positions can ride along with the credit frames
+     * of the same write (credit: MAX_DATA or MAX_STREAM_DATA is pending).
+     */
+    void write(RecordWriter w, long now, boolean credit) {
+        if (due(now) || credit && unreported()) snapshot(w, now, true);
+    }
+
+    /** Whether an inbound lane holds a position not yet reported. */
+    boolean unreported() {
+        for (Pipe p : pipes) {
+            if (p.in() == null) continue;
+            for (Pipe.InLane il : p.in().lanes) if (il.rx.pos() > il.ack.reported) return true;
+        }
+        return false;
     }
 
     /** Writes a snapshot that answers what is due on the primary pipe. */
@@ -144,7 +186,10 @@ final class AckEngine {
             }
         }
         if (es.isEmpty()) {
-            if (settles) immediate = false;
+            if (settles) {
+                immediate = false;
+                prompt = false;
+            }
             return true;
         }
         es.sort((a, b) -> a[0] != b[0] ? Long.compare(a[0], b[0]) : Long.compare(a[1], b[1]));
@@ -175,8 +220,14 @@ final class AckEngine {
             i += k;
         }
         es.clear();
+        for (Pipe p : pipes) {
+            if (p.in() == null) continue;
+            p.in().ack.ackedAt = now;
+            p.in().ack.acked = true;
+        }
         if (!settles) return true;
         immediate = false;
+        prompt = false;
         woken = false;
         for (Pipe p : pipes) {
             if (p.in() == null) continue;
@@ -210,7 +261,7 @@ final class AckEngine {
             }
             ps.elicitEnd = Math.max(ps.elicitEnd, end);
             boolean bubble = ps.re.bubbleInFlight(ps.cum);
-            ps.samples.add(new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt, ps.re.blockEpoch(), bubble, queue));
+            ps.samples.add(new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt, ps.re.blockEpoch(), bubble, queue, w.suspPing()));
         }
     }
 
@@ -287,7 +338,7 @@ final class AckEngine {
             boolean proven = minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
             boolean sampleOk = p.mp() == null || p.mp().sampleOk(last.sent());
             boolean rateOk = sampleOk || proven && p.mp().health.out() != Attach.OUT_FAILED;
-            if (!late && sampleOk) {
+            if (!late && (sampleOk || (last.probe() && ps.paced(i, last, now)))) {
                 sampleRtt = r.update(rtt, Math.min(ad, peerDelay), peerDelay, now, p.mp() != null && port.quiet());
                 sampleSentAt = last.sent();
                 ps.rttAt = now;
@@ -298,6 +349,9 @@ final class AckEngine {
                 sampleRate = ps.re.sample((ps.delivered - last.delivered()) * 1e9 / iv, last.bubble(), last.epoch(), proven, now);
             }
             ps.firstSentAt = last.sent();
+            ps.prevSent = last.sent();
+            ps.prevAckAt = now;
+            ps.prevOk = true;
         }
         ps.samples.subList(0, i).clear();
         ps.deliveredAt = now;
@@ -344,6 +398,18 @@ final class AckEngine {
         }
     }
 
+    /**
+     * The last PIPE_ACK sent while an inbound pipe existed (acked: one was), for the immediate acknowledgement of an
+     * ack-eliciting record after zmux_max_ack_delay without one.
+     */
+    static final class InPipeAck {
+        private long ackedAt;
+        private boolean acked;
+
+        InPipeAck() {
+        }
+    }
+
     /** The sender's view of an outbound pipe, counted in send order across its lanes. */
     static final class Send {
         private long so;
@@ -356,6 +422,21 @@ final class AckEngine {
         private final RateEstimator re = new RateEstimator();
         private long rttAt;
         private long elicitEnd;
+        /** The send time of the last batch an earlier advance acknowledged, and when that advance arrived (paced). */
+        private long prevSent, prevAckAt;
+        private boolean prevOk;
+
+        /**
+         * Whether the acknowledgement arriving now of last, the i-th and last sample it covers and a suspicion's
+         * PIPE_PING, came apart from that of the bytes acknowledged before it by at least half the time between their
+         * sending: the path delivered them at their own pace, as on a path whose round trip exceeds T_suspect, and the
+         * sample measures that path. Released together after an outage (in one advance, or a gap that shrank to
+         * nothing), the sample would measure the outage, which no sample does.
+         */
+        boolean paced(int i, Pipe.Sample last, long now) {
+            if (i >= 2 || !prevOk) return false; // acknowledged together with earlier bytes, or nothing to compare
+            return Time.sub(now, prevAckAt) >= Time.sub(last.sent(), prevSent) / 2;
+        }
 
         Send() {
         }

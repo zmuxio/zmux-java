@@ -52,7 +52,7 @@ class StreamingTest {
     }
 
     @Test void splitBootstrapWithAnotherPairField() throws Exception {
-        var exchange = ExchangeConfig.builder().psk(new byte[32]).build();
+        var exchange = ExchangeConfig.builder(new byte[32]).build();
         try (var f = Fixture.plain(b -> b.streaming().pairField("X-Pair-Id").exchange(exchange))) {
             for (boolean h1 : new boolean[] {true, false}) {
                 try (var c = f.client(b -> (h1 ? b.http1() : b.http2()).pairField("X-Pair-Id"))) {
@@ -65,7 +65,7 @@ class StreamingTest {
     }
 
     @Test void endpointRefusesBadPairFields() throws Exception {
-        var plain = ExchangeConfig.builder().psk(new byte[32]).build();
+        var plain = ExchangeConfig.builder(new byte[32]).build();
         try (var l = ZmuxListener.of(io.zmux.ListenerConfig.of(io.zmux.ZmuxConfig.builder().build()))) {
             assertThrows(IllegalArgumentException.class, () -> HttpEndpoint.builder(l).pairField("Host").build());
             assertThrows(IllegalArgumentException.class, () -> HttpCarrierClient.builder().pairField("Upgrade").build());

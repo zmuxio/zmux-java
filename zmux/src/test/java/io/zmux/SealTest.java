@@ -49,7 +49,7 @@ class SealTest {
                 return HP.psk();
             }
             @Override public Credential credential(byte[] handle, io.zmux.seal.Profile profile, SocketAddress src) { return cred; }
-            @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "committed"; }
+            @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "committed"; }
         };
     }
 
@@ -190,7 +190,7 @@ class SealTest {
             var server = ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.values()).build();
             for (Profile profile : Profile.values()) {
                 var b = client().allowedProfiles(profile);
-                if (!profile.hasPsk()) b.psk(null, null);
+                if (!profile.isPskBased()) b.psk(null, null);
                 try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(server)).build());
                      var c = Zmux.open(establish(tcp(l.localAddress()), b.build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertEquals(profile, ((Peer) s.admitted().orElseThrow()).profile());
@@ -214,7 +214,7 @@ class SealTest {
                 List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
                 var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(k.server())).build();
                 var b = client().allowedProfiles(k.client()).handshakeTimeout(Duration.ofSeconds(5));
-                if (!k.client().hasPsk()) b.psk(null, null);
+                if (!k.client().isPskBased()) b.psk(null, null);
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                     var f = Seal.establish(tcp(l.localAddress()), b.build()).toCompletableFuture();
                     if (k.refused() != null) {
@@ -239,12 +239,12 @@ class SealTest {
     @Test void theCommitSeesTheWholePeer() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
-            var seen = new java.util.concurrent.atomic.AtomicReference<io.zmux.seal.Admission>();
+            var seen = new java.util.concurrent.atomic.AtomicReference<io.zmux.seal.CommitRequest>();
             Gate base = gate(null);
             Gate recording = new Gate() {
                 @Override public byte[] resolve(byte[] h, SocketAddress src) throws Exception { return base.resolve(h, src); }
                 @Override public Credential credential(byte[] h, io.zmux.seal.Profile p, SocketAddress src) { return null; }
-                @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { seen.set(a); return "value"; }
+                @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { seen.set(a); return "value"; }
             };
             Object mine = new Object();
             var sc = ServerConfig.builder(recording, NODE).anchor(in -> new io.zmux.seal.VerifyVerdict(new Principal(9, new byte[] {9}), null, mine)).build();
@@ -361,7 +361,7 @@ class SealTest {
             Gate gate = new Gate() {
                 @Override public byte[] resolve(byte[] h, SocketAddress src) { return null; }
                 @Override public Credential credential(byte[] h, Profile p, SocketAddress src) { asked.add(p); return null; }
-                @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "ok"; }
+                @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "ok"; }
             };
             var anonymous = ClientConfig.builder().anchor(new PinAnchor(io.zmux.seal.KeyId.of(io.zmux.seal.KeyAlg.X25519, NODE.publicKey()))).allowedProfiles(Profile.XXHFS_CHACHA)
                     .handshakeTimeout(Duration.ofSeconds(5)).build();
@@ -393,7 +393,7 @@ class SealTest {
             Gate gate = new Gate() {
                 @Override public byte[] resolve(byte[] h, SocketAddress src) throws Exception { throw new Exception("down"); }
                 @Override public Credential credential(byte[] h, Profile p, SocketAddress src) { return null; }
-                @Override public Object commit(io.zmux.seal.Admission a, SocketAddress src) { return "ok"; }
+                @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "ok"; }
             };
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; })
                     .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
@@ -465,7 +465,7 @@ class SealTest {
         TestTls.init();
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = sessions(loops).allowRecordMode((c, m, p) -> true).build();
-            var server = ServerConfig.builder(gate(null), NODE).allowRecordMode((c, m, p) -> c.secure() && c.isFirstPipe()).build();
+            var server = ServerConfig.builder(gate(null), NODE).allowRecordMode((c, m, p) -> c.isSecure() && c.isFirstPipe()).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()).withSecure()).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var tls = TlsOptions.client(TestTls.client(), "localhost");
@@ -500,7 +500,7 @@ class SealTest {
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(pair[1].withExporter((a, b, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                l.adapter().handle(pair[1].withExporter((a, b, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeIo near = pair[0].withExporter((a, b, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
                 var f = Seal.establish(near, client().mode(RecordMode.BOUND).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));

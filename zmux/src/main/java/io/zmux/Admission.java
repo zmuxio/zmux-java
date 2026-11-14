@@ -9,7 +9,7 @@ import java.util.concurrent.CompletionStage;
 /**
  * The decision on every new carrier of a {@link ZmuxListener}, configured once on its
  * {@link ListenerConfig#admission()} and run by every entry of that listener: its socket and
- * TLS carriers, those given to {@link ZmuxListener#handle} (the HTTP, WebSocket and exchange
+ * TLS carriers, those given to {@link io.zmux.adapter.ListenerAdapter#handle} (the HTTP, WebSocket and exchange
  * carriers of an HTTP endpoint, the connections of a QUIC server), joins and resumptions
  * included. A carrier first takes a slot of its source ({@link
  * ListenerConfig#maxPendingPerSource()}) and one of the listener ({@link

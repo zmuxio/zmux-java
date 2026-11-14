@@ -281,7 +281,7 @@ class QuicPoolTest {
             var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipeAsync())).withCount(2)
-                    .withInspectionInterval(Duration.ofMillis(5)).withBackoff(new PipePool.Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
+                    .withInspectionInterval(Duration.ofMillis(5)).withBackoff(new Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
             try {
                 until(() -> maintenance.pipes().size()==2);assertEquals(1,pool.connections().size());
                 var old=maintenance.pipes().getFirst();old.abort();

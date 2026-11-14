@@ -48,7 +48,7 @@ class PoolPolicyTest {
             var dials = new ConcurrentLinkedQueue<Long>();
             PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withDialAfter(Duration.ofMillis(200));
             PipePool.Dial dial = attempt -> { dials.add(System.nanoTime()); return f.dial().open(attempt); };
-            var run = f.client.maintainPipes(PipePoolTest.fast(dial).withBackoff(new PipePool.Backoff(Duration.ofMillis(10), Duration.ofSeconds(1), 0)).withCount(2).withPolicy(policy));
+            var run = f.client.maintainPipes(PipePoolTest.fast(dial).withBackoff(new Backoff(Duration.ofMillis(10), Duration.ofSeconds(1), 0)).withCount(2).withPolicy(policy));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             run.close();
             run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
@@ -93,7 +93,7 @@ class PoolPolicyTest {
             var dials = new ConcurrentLinkedQueue<Long>();
             PipePool.Dial dial = attempt -> { dials.add(System.nanoTime()); return f.dial().open(attempt); };
             var run = f.client.maintainPipes(PipePoolTest.fast(dial).withCount(2)
-                    .withBackoff(new PipePool.Backoff(Duration.ofMillis(300), Duration.ofSeconds(1), 0)));
+                    .withBackoff(new Backoff(Duration.ofMillis(300), Duration.ofSeconds(1), 0)));
             PipePoolTest.await(() -> run.pipes().size() == 2);
             run.close();
             run.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);

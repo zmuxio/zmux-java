@@ -118,12 +118,12 @@ class LivenessTest {
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).allowRecordMode((c, m, p) -> true).shaper(ShapingTest.firstDelay(30_000_000, false)).build();
             try (var l = ZmuxListener.of(ListenerConfig.of(scfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
+                l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                 try (var c = Zmux.open(boot[0], Role.CLIENT, ccfg); var s = l.accept(Duration.ofSeconds(5))) {
                     ShapingTest.transfer(c, s, 100);
                     var m = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var rec = new Recorder(m[1].writer());
-                    l.handle(new PipeIo(m[1].reader(), rec, Framing.BYTE_STREAM, "memory", null), JoinHint.inBand(TestAddr.peer("peer"))).closed();
+                    l.adapter().handle(new PipeIo(m[1].reader(), rec, Framing.BYTE_STREAM, "memory", null), JoinHint.inBand(TestAddr.peer("peer"))).closed();
                     c.addPipe(m[0], PipeOptions.defaults());
                     long until = System.nanoTime() + 5_000_000_000L;
                     byte[] first;

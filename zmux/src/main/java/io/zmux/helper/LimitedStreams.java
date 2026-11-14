@@ -13,13 +13,13 @@ public final class LimitedStreams {
         var pending = limiter.ready(1, max).toCompletableFuture();
         try {
             int n = pending.get();
-            if (n <= 0 || n > max) throw new IOException("invalid limiter allowance");
+            if (n <= 0 || n > max) throw new io.zmux.CallbackFailedException("invalid limiter allowance");
             return n;
         } catch (InterruptedException e) {
             pending.cancel(true);
             Thread.currentThread().interrupt();
             throw new InterruptedIOException("interrupted while waiting for limiter");
-        } catch (ExecutionException e) { throw new IOException("limiter failed", e.getCause()); }
+        } catch (ExecutionException e) { throw new io.zmux.CallbackFailedException("limiter failed", e.getCause()); }
     }
 
     /** Charges bytes returned to the application; readiness is awaited before reading. */

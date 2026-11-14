@@ -26,10 +26,10 @@ public final class Benchmark {
     private static void control(ZmuxSession session) throws Exception {
         int warmup = quick ? 2000 : 20000;
         int count = quick ? 5000 : 50000;
-        for (int i = 0; i < warmup; i++) session.joinReady();
+        for (int i = 0; i < warmup; i++) session.adapter().isJoinReady();
         long[] ns = new long[count];
         for (int i = 0; i < count; i++) {
-            long start = System.nanoTime(); session.joinReady(); ns[i] = System.nanoTime() - start;
+            long start = System.nanoTime(); session.adapter().isJoinReady(); ns[i] = System.nanoTime() - start;
         }
         Arrays.sort(ns);
         samples.put("control_samples", count);

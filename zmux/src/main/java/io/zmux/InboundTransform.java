@@ -6,12 +6,12 @@ import java.util.Optional;
 import java.util.concurrent.CompletionStage;
 
 /**
- * A listener's inbound transform ({@link ListenerConfig.Builder#inboundTransform}): it takes
+ * A listener's inbound transform ({@link ListenerConfig.Builder#inboundTransform(InboundTransform)}): it takes
  * each carrier the listener takes, after the admission and before any session processing, and
  * returns the pipe input the listener continues with, a layer over it or the carrier itself.
  *
  * <p>It is called once for every carrier, whatever entry fed it (the listener's sockets, {@link
- * ZmuxListener#handle}, the HTTP, WebSocket, exchange and QUIC carriers), each one-way half of a
+ * io.zmux.adapter.ListenerAdapter#handle}, the HTTP, WebSocket, exchange and QUIC carriers), each one-way half of a
  * split bootstrap included ({@link JoinHint#pairing()} is set, the carrier has one half only),
  * on the listener's event loop: it must not block, and returns a stage that completes later
  * when the layer takes time (a handshake run on a virtual thread, say). The carrier keeps its
@@ -28,7 +28,7 @@ import java.util.concurrent.CompletionStage;
  * exporter of the layer's own handshake). A transform that throws, a stage that fails, a null
  * result or one of another kind closes the carrier and counts in {@link
  * ListenerStats#setupFailures()}. Once a transform was called the carrier counts as taken
- * ({@link ZmuxListener.Handled#taken()}): an HTTP entry no longer hands a refused carrier to the
+ * ({@link io.zmux.adapter.Handled#taken()}): an HTTP entry no longer hands a refused carrier to the
  * host, as the layer may have read and written on it.
  *
  * <p>A layer must map every write on the pipe input it returns to exactly one write on the

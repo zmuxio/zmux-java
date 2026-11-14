@@ -65,7 +65,7 @@ final class EstablishClient {
 
     /** The Hello carrying p; its padding item, when the field is not zero, is random unless the message has a key. */
     byte[] writeHello(EstablishPayload p) throws SecureCarrierException {
-        byte[] msg = hs.writeMessage(p.withPadding(p.padding(), !profile.hasPsk()));
+        byte[] msg = hs.writeMessage(p.withPadding(p.padding(), !profile.isPskBased()));
         return EstablishHello.encode(profile, mode, handle, msg, framing);
     }
 
@@ -98,13 +98,13 @@ final class EstablishClient {
     /** Accepts any server that knows the pre-shared key: an explicit bootstrap, instead of {@link #verify}. */
     public void trustPskOnly(Object localContext) throws SecureCarrierException {
         if (!replied) throw new IllegalStateException("no Reply yet");
-        if (!profile.hasPsk()) throw new SecureCarrierException(INVALID_CONFIG, "no pre-shared key");
+        if (!profile.isPskBased()) throw new SecureCarrierException(INVALID_CONFIG, "no pre-shared key");
         known = input(localContext);
         judged = true;
     }
 
     private VerifyInput input(Object localContext) {
-        return new VerifyInput(io.zmux.Role.SERVER, profile, hs.peerStatic(), profile.hasPsk() ? handle : null, credential, peerAppData, localContext);
+        return new VerifyInput(io.zmux.Role.SERVER, profile, hs.peerStatic(), profile.isPskBased() ? handle : null, credential, peerAppData, localContext);
     }
 
     /** What is known of the server when message 3 is written: what the anchor judged, and its verdict. */

@@ -77,6 +77,9 @@ final class RecordWriter {
     /** The batch holds a PIPE_PING. */
     private boolean pingSent;
     boolean pingSent() { return pingSent; }
+    /** The batch's PIPE_PING is that of a suspicion (MULTIPATH.md Section 7.2 step 3). */
+    private boolean suspPing;
+    boolean suspPing() { return suspPing; }
     /** The epoch of a SESSION_EPOCH answer in the batch, 0 for none. */
     private long epochAnswer;
     long epochAnswer() { return epochAnswer; }
@@ -119,6 +122,7 @@ final class RecordWriter {
         abandonsSent.clear();
         revalPing = false;
         pingSent = false;
+        suspPing = false;
         epochAnswer = 0;
         pingRequests = 0;
         pendOn = false;
@@ -507,8 +511,9 @@ final class RecordWriter {
     }
 
     /** A PIPE_PING was written. */
-    void pingWritten() {
+    void pingWritten(boolean suspicion) {
         pingSent = true;
+        suspPing |= suspicion;
     }
 
     /** A revalidation PIPE_PING was written. */

@@ -44,7 +44,7 @@ class GlobalBoundTest {
 
     static Fake handle(ZmuxListener l, String source) {
         Fake f = new Fake();
-        l.handle(f.io, from(source));
+        l.adapter().handle(f.io, from(source));
         return f;
     }
 
@@ -72,7 +72,7 @@ class GlobalBoundTest {
             Admission more = Admission.of(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.more(2)))
                     .withMaxPeek(2).withPeekTimeout(Duration.ofSeconds(30));
             // The handshake: a slot reserved by an entry before its outer handshake.
-            holdsTheSlot("handshake", base(loops), l -> assertNotNull(l.reserve(TestAddr.peer("a"), null)));
+            holdsTheSlot("handshake", base(loops), l -> assertNotNull(l.adapter().reserve(TestAddr.peer("a"), null)));
             // The admission's prefix read, then its decision.
             holdsTheSlot("prefix", base(loops).admission(deciding), l -> handle(l, "a"));
             holdsTheSlot("decision", base(loops).admission(deciding), l -> {
@@ -86,7 +86,7 @@ class GlobalBoundTest {
             // A split half waiting for its pair.
             holdsTheSlot("pairing", base(loops), l -> {
                 Fake half = new Fake(true, false);
-                l.handle(half.io, JoinHint.pair("AAAAAAAAAAAAAAAAAAAAAA", true, TestAddr.peer("a")));
+                l.adapter().handle(half.io, JoinHint.pair("AAAAAAAAAAAAAAAAAAAAAA", true, TestAddr.peer("a")));
             });
             // Classification: no first record yet.
             holdsTheSlot("classification", base(loops), l -> handle(l, "a"));

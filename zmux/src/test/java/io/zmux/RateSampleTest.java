@@ -39,7 +39,7 @@ class RateSampleTest {
         PipeIo[] io = MemoryPipe.pair(Framing.BYTE_STREAM);
         var up = new SlowPathTest.Link(io[0].writer(), Duration.ofMillis(20), rate, 16 << 20);
         var down = new SlowPathTest.Link(io[1].writer(), Duration.ofMillis(20), 5e6, 16 << 20);
-        listener.handle(new PipeIo(io[1].reader(), down, Framing.BYTE_STREAM, null, null), JoinHint.inBand(TestAddr.peer("deep")));
+        listener.adapter().handle(new PipeIo(io[1].reader(), down, Framing.BYTE_STREAM, null, null), JoinHint.inBand(TestAddr.peer("deep")));
         var client = Zmux.open(new PipeIo(io[0].reader(), up, Framing.BYTE_STREAM, null, null), Role.CLIENT, cfg);
         var server = listener.accept(Duration.ofSeconds(10));
         Thread.ofVirtual().start(() -> {
