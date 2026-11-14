@@ -134,12 +134,17 @@ final class UdpBottleneck implements AutoCloseable {
         }
     }
 
-    @Override public void close() throws Exception {
+    @Override public void close() throws IOException {
         closed = true;
         front.close(); back.close(); delivery.shutdownNow();
-        upstream.join(5000); downstream.join(5000);
-        if (!delivery.awaitTermination(5, TimeUnit.SECONDS) || upstream.isAlive() || downstream.isAlive())
-            throw new IOException("relay workers did not terminate");
+        try {
+            upstream.join(5000); downstream.join(5000);
+            if (!delivery.awaitTermination(5, TimeUnit.SECONDS) || upstream.isAlive() || downstream.isAlive())
+                throw new IOException("relay workers did not terminate");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.io.InterruptedIOException("interrupted");
+        }
         forward.queue.clear(); reverse.queue.clear();
         check();
     }

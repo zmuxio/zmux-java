@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.io.IOException;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.carrier.Framing;
@@ -194,7 +195,7 @@ class UsabilityTest {
             return new Rejoinable(sl, cl, c, sl.accept(Duration.ofSeconds(5)));
         }
 
-        @Override public void close() throws Exception {
+        @Override public void close() throws IOException {
             client.close();
             server.close();
             clientListener.close();
@@ -224,7 +225,7 @@ class UsabilityTest {
         var clientLog = new CapturingLogger();
         try (EventLoops loops = EventLoops.create(2);
              var r = Rejoinable.open(resuming(loops, new CapturingLogger()).build(), resuming(loops, clientLog).build());
-             var unsent = r.client().openStream()) {
+             var _ = r.client().openStream()) {
             r.client().pipes().getFirst().abort();
             assertTrue(clientLog.has("the last of a direction, while streams are open"));
         }

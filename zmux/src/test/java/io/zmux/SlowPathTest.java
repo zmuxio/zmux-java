@@ -43,7 +43,7 @@ class SlowPathTest {
         }
 
         @Override public void write(OutboundBatch batch, Completion done) {
-            ByteBuffer copy = ByteBuffer.allocate((int) batch.bytes());
+            ByteBuffer copy = ByteBuffer.allocate(batch.bytes());
             for (int i = 0; i < batch.segmentCount(); i++) copy.put(batch.segment(i).duplicate());
             copy.flip();
             boolean now;
@@ -128,6 +128,7 @@ class SlowPathTest {
     record Run(long echoed, SessionStats stats, long slowSent) {}
 
     /** Echoes at ~3 MB/s for 6 s over the slow bootstrap pipe and a fast joined one; window 0: the default. */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     private static Run echoed(long window) throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cb = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd());

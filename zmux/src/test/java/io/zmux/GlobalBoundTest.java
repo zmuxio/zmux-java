@@ -144,7 +144,7 @@ class GlobalBoundTest {
     @Test void socketsTakeTheSameBound() throws Exception {
         try (EventLoops loops = EventLoops.create(1);
              var l = Zmux.listen(new java.net.InetSocketAddress("127.0.0.1", 0), base(loops).maxPending(1).maxPendingPerSource(4).build());
-             var first = java.nio.channels.SocketChannel.open(l.localAddress());
+             var _ = java.nio.channels.SocketChannel.open(l.localAddress());
              var second = java.nio.channels.SocketChannel.open(l.localAddress())) {
             second.socket().setSoTimeout(5000);
             assertEquals(-1, second.socket().getInputStream().read(), "no slot left, closed at once");

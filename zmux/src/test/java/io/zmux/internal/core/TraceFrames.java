@@ -72,12 +72,12 @@ final class TraceFrames {
         return m.get(k) instanceof Boolean b && b;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static Map<String, Object> map(Object o) {
         return (Map<String, Object>) o;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static List<Object> list(Object o) {
         return (List<Object>) o;
     }
@@ -160,6 +160,7 @@ final class TraceFrames {
                 }
                 case "zmux_session_crypto" -> {
                     p.present |= TransportParams.SESSION_CRYPTO;
+                    // Parsed JSON: the vector file's schema fixes the type.
                     @SuppressWarnings("unchecked") var m = (Map<String, Object>) v;
                     try {
                         p.sessionCrypto = io.zmux.internal.join.SessionCrypto.of(list(m.get("suites")).stream().mapToLong(TraceFrames::num).toArray(),

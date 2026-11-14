@@ -75,6 +75,15 @@ public interface Transport {
     /** Closes both halves; abortive when cause is not null. Idempotent. */
     void close(Throwable cause);
 
+    /**
+     * Whether a graceful {@link #close} can leave work running that {@link #abort} ends (a carrier whose halves
+     * close in the host's code); the session then bounds that close by the linger timeout (SPEC 6.5 step 4).
+     */
+    default boolean abortable() { return false; }
+
+    /** Aborts what a graceful close left running; a no-op where it ended. Only for an {@link #abortable} transport; any thread. */
+    default void abort(Throwable cause) { }
+
     /** Whether the transport is closed (or moved away). */
     boolean isClosed();
 

@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
@@ -15,6 +14,7 @@ class ResumeTest {
     static <T extends SessionEvent> void event(ZmuxSession session, Class<T> kind) throws Exception {
         while (true) if (kind.isInstance(session.nextEvent())) return;
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void tcpSessionResumesTheSameLogicalStreamAfterLosingEveryCarrier() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).noProbation().build();

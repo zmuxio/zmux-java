@@ -52,10 +52,10 @@ import org.junit.jupiter.api.Timeout;
 class HttpInteropTest {
     static final String PSK = "000102030405060708090a0b0c0d0e0f";
 
-    /** The command of a peer, or null when it is not set. */
+    /** The command of a peer, or an empty list when it is not set. */
     static List<String> peer(String env) {
         String p = System.getenv(env);
-        if (p == null || p.isEmpty()) return null;
+        if (p == null || p.isEmpty()) return List.of();
         assertTrue(Files.isExecutable(Path.of(p)), env + " is not executable: " + p);
         return env.contains("_GO_") ? List.of(p, "-test.run", "^TestHTTPExchangeInterop$", "-test.count=1", "-test.v") : List.of(p);
     }
@@ -64,9 +64,9 @@ class HttpInteropTest {
 
     @Test void exchangeWithRust() throws Exception { exchangeMatrix("ZMUX_RS_EXCHANGE_PEER"); }
 
-    private void exchangeMatrix(String env) throws Exception {
+    private static void exchangeMatrix(String env) throws Exception {
         List<String> cmd = peer(env);
-        assumeTrue(cmd != null, env + " not set");
+        assumeTrue(!cmd.isEmpty(), env + " not set");
         List<String> failed = new ArrayList<>();
         for (boolean javaServer : new boolean[] {true, false}) {
             for (String psk : new String[] {PSK, ""}) {
@@ -96,13 +96,13 @@ class HttpInteropTest {
 
     @Test void webSocketWithRust() throws Exception { webSocket("ZMUX_RS_WS_PEER"); }
 
-    private void webSocket(String env) throws Exception {
+    private static void webSocket(String env) throws Exception {
         String bin = System.getenv(env);
         assumeTrue(bin != null && !bin.isEmpty(), env + " not set");
         // The peer's clients against a Java server.
         var seen = new LinkedBlockingQueue<String>();
         var verifier = WS_AUTH.verifier();
-        try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier::decide)), e -> e.webSocket(),
+        try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier)), e -> e.webSocket(),
                 false, () -> new Teapot(seen))) {
             Thread echo = echoSessions(f.listener);
             String addr = "127.0.0.1:" + f.base.getPort();
@@ -144,7 +144,7 @@ class HttpInteropTest {
         return new PrefixAuth(key.getBytes(StandardCharsets.US_ASCII), Duration.ofSeconds(30), false, 1, 0);
     }
 
-    private void streaming(String env) throws Exception {
+    private static void streaming(String env) throws Exception {
         String bin = System.getenv(env);
         assumeTrue(bin != null && !bin.isEmpty(), env + " not set");
         for (String kind : new String[] {"stream", "split", "stream2", "split2"}) {
@@ -152,7 +152,7 @@ class HttpInteropTest {
             // The peer's client against a Java server.
             var seen = new LinkedBlockingQueue<String>();
             var verifier = streamAuth("right").verifier();
-            try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier::decide)), e -> e.streaming(),
+            try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier)), e -> e.streaming(),
                     false, () -> new Teapot(seen))) {
                 Thread echo = echoSessions(f.listener);
                 String addr = "127.0.0.1:" + f.base.getPort();
@@ -197,7 +197,7 @@ class HttpInteropTest {
     /** The peers' session configuration: multipath, joins in Bound only on a carrier that declares the contract. */
     static io.zmux.ZmuxConfig.Builder mp(io.zmux.ZmuxConfig.Builder b) {
         return b.pipeAuth(io.zmux.PipeAuth.psk(JOIN_PSK).withEndToEnd()).maxPipes(4)
-                .allowRecordMode((c, m, p) -> m == io.zmux.RecordMode.SEALED || m == io.zmux.RecordMode.BOUND && c.isSecure() && c.isExporterPresent());
+                .allowRecordMode((c, m, p) -> m == io.zmux.RecordMode.SEALED || (m == io.zmux.RecordMode.BOUND && c.isSecure() && c.isExporterPresent()));
     }
 
     @Test void boundOverTls() throws Exception {
@@ -239,7 +239,7 @@ class HttpInteropTest {
     }
 
     /** The peer's client against the peer's server, directly or through the front; both report the join's mode. */
-    private void peerPair(String server, String client, String serverKind, String clientKind, String front, String want) throws Exception {
+    private static void peerPair(String server, String client, String serverKind, String clientKind, String front, String want) throws Exception {
         String addr = "127.0.0.1:" + freePort();
         String what = client + " -> " + server + " " + clientKind + (front != null ? " via front" : "");
         // The Go server serves WebSocket over HTTP/2 only with extended CONNECT turned on.
@@ -259,7 +259,7 @@ class HttpInteropTest {
     }
 
     /** A Java client against the peer's server: the join's mode at both ends, then data on the session. */
-    private void javaClientTls(String server, String kind, String front, String want) throws Exception {
+    private static void javaClientTls(String server, String kind, String front, String want) throws Exception {
         String addr = "127.0.0.1:" + freePort();
         Process p = startReady(List.of(server, "server", kind, addr));
         String[] via = {addr};
@@ -285,7 +285,7 @@ class HttpInteropTest {
     }
 
     /** The peer's client against a Java server over TLS, or in cleartext behind the front. */
-    private void javaServerTls(String client, String kind, String front, String want) throws Exception {
+    private static void javaServerTls(String client, String kind, String front, String want) throws Exception {
         var sessions = new LinkedBlockingQueue<ZmuxSession>();
         try (var f = new Fixture(HttpInteropTest::mp, b -> b, e -> e.streaming(), front == null, null)) {
             Thread echo = echoSessions(f.listener, sessions);
@@ -453,7 +453,7 @@ class HttpInteropTest {
         });
     }
 
-    private void javaServer(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
+    private static void javaServer(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
         try (var f = Fixture.plain(b -> b.exchange(config(psk, b64, "")))) {
             Thread echo = echoSessions(f.listener);
             String origin = "http://127.0.0.1:" + f.base.getPort();
@@ -473,7 +473,7 @@ class HttpInteropTest {
         }
     }
 
-    private void javaClient(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
+    private static void javaClient(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
         int port;
         try (var s = new java.net.ServerSocket(0)) { port = s.getLocalPort(); }
         var env = Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", "127.0.0.1:" + port, "ZMUX_EXCHANGE_FOR", "60s",

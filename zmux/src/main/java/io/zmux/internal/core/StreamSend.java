@@ -506,11 +506,14 @@ public final class StreamSend {
 
     /**
      * Whether st's opening frame and its data up to target were sent, registering sig otherwise.
-     * A reset stream is done; a failed one reports its failure. While the first flight is held
-     * they are queued in it and leave with it: done.
+     * Once they were sent the flush is done, even if the stream failed since (a STOP_SENDING or a
+     * reset after the data left): the next operation reports that. Before, a failed stream reports
+     * its failure and a locally reset one is done. While the first flight is held they are queued
+     * in it and leave with it: done.
      */
     public boolean flushDone(Stream st, long target, Waiter sig) throws CoreException {
         StreamSend.SendPart sp = st.snd;
+        if (st.tab.opened() && sp.sent >= target) return true;
         if (sp.errState != null) throw CoreException.stream(sp.errState);
         if (sp.reset) return true;
         if (port.error() != null) throw CoreException.session(port.error());

@@ -50,6 +50,7 @@ class DuplicateTest {
         assertEquals(reason, assertThrows(DuplicateResolutionException.class, () -> Zmux.resolveDuplicate(a,b,opts)).reason());
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void bothEndpointsKeepTheSameSessionAndDrainExistingStreams() throws Exception {
         try (EventLoops loops = EventLoops.create(4)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
@@ -76,7 +77,7 @@ class DuplicateTest {
         for (boolean mp : new boolean[] {true,false}) try (EventLoops loops = EventLoops.create(3)) {
             var cfg = mp ? PipePoolTest.config(loops,3) : ZmuxConfig.builder().eventLoops(loops).build();
             try (Pair one = mp ? Pair.memory(cfg) : symmetric(cfg); Pair two = mp ? Pair.memory(cfg) : symmetric(cfg);
-                 Held holdOne = Held.open(one); Held holdTwo = Held.open(two)) {
+                 Held _ = Held.open(one); Held _ = Held.open(two)) {
                 if (!mp) {
                     expectReason(DuplicateResolutionException.Reason.UNKNOWN_DIALER,one.client(),two.server(),ids(1,2));
                     one.client().designateDialer(true); one.server().designateDialer(false);
@@ -123,7 +124,7 @@ class DuplicateTest {
                 assertThrows(GoingAwayException.class,loser.client()::openStream);
                 old.finish();
             }
-            try (var survivor = new PipePoolTest.Fixture(cfg); Pair loser = Pair.memory(cfg); Held old = Held.open(loser)) {
+            try (var survivor = new PipePoolTest.Fixture(cfg); Pair loser = Pair.memory(cfg); Held _ = Held.open(loser)) {
                 var calls = new AtomicInteger();
                 var route = PipePool.of(attempt -> { calls.incrementAndGet(); throw new IOException("must not dial"); });
                 var result = Zmux.resolveDuplicate(survivor.client,loser.server(),ids(1,2).withRejoin(route));
@@ -165,6 +166,7 @@ class DuplicateTest {
             }
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void plainPeersDrainExistingStreamsButRefuseNewOnesWithoutGoaway() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
@@ -182,7 +184,7 @@ class DuplicateTest {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build();
             try (Pair one = Pair.memory(cfg); Pair two = Pair.memory(cfg); Held held = Held.open(two);
-                 Held second = Held.open(two); Held third = Held.open(two); Held fourth = Held.open(two)) {
+                 Held _ = Held.open(two); Held _ = Held.open(two); Held _ = Held.open(two)) {
                 var blocked = workers.submit(() -> two.client().openStream());
                 PipePoolTest.await(() -> (Boolean)two.client().run(op -> two.client().core.streams().openersWaiting(true)));
                 Zmux.resolveDuplicate(one.server(),two.client(),ids(2,1));
@@ -202,6 +204,7 @@ class DuplicateTest {
             assertEquals(0,calls.get()); assertEquals(0,skipped.joined()); assertNull(skipped.cause());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void plainDrainIncludesStreamsOpenedBeforeTheirFirstWrite() throws Exception {
         for (boolean finish : new boolean[] {false,true}) try (EventLoops loops = EventLoops.create(3)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();

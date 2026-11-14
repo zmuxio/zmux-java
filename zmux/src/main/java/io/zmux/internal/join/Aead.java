@@ -24,7 +24,9 @@ final class Aead {
     Aead(Suite suite) {
         this.suite = suite;
         try {
-            this.cipher = Cipher.getInstance(suite.transformation);
+            // The transformation is one of the Suite constants (AES/GCM or ChaCha20-Poly1305), chosen by the suite.
+            @SuppressWarnings("InsecureCryptoUsage") Cipher c = Cipher.getInstance(suite.transformation);
+            this.cipher = c;
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("the JDK lacks " + suite.transformation, e);
         }

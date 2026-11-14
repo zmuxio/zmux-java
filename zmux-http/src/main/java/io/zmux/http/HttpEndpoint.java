@@ -234,7 +234,7 @@ public final class HttpEndpoint implements AutoCloseable {
 
         ProxyProtocolHandler(TrustedProxies trusted) { this.trusted = trusted; }
 
-        @Override protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        @Override protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) {
             if (!(ctx.channel().remoteAddress() instanceof InetSocketAddress peer) || !trusted.trusts(peer.getAddress())) {
                 ctx.pipeline().remove(this); // other peers are passed through unread
                 return;

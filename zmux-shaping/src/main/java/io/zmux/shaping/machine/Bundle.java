@@ -87,7 +87,7 @@ public final class Bundle {
 
         /** Draws the shared values in order: handshakes, machines, pool. */
         Kind compile(Sampler compile, MachineOptions o) {
-            @SuppressWarnings("IdentityHashMapUsage") // values are told apart by identity: equal values of different declarations are distinct
+            @SuppressWarnings({"IdentityHashMapUsage", "ValueClassIdentity"}) // keys are told apart by identity: equal values of different declarations are distinct; the Long values are not compared
             Map<Value, Long> kept = new java.util.IdentityHashMap<>();
             List<Long> shared = new ArrayList<>();
             for (Unit u : units.values()) {

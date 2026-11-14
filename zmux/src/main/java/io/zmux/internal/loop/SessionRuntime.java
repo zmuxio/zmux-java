@@ -1128,14 +1128,14 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
      * @param datagramLimit the largest datagram payload the peer accepts now before a flow prefix, 0 when none
      * @param goAway the received GOAWAY watermarks [maxBidi, maxUni, code], null while none was received
      */
-    public record Info(boolean established, boolean initiator, boolean peerIsZmux, boolean preamble,
+    public record SessionInfo(boolean established, boolean initiator, boolean peerIsZmux, boolean preamble,
                        boolean priority, boolean datagramFlows, boolean pipeAck, boolean multipath, boolean resume,
                        boolean lanesToPeer, boolean localDatagrams, boolean peerDatagrams, boolean localResetStreamAt,
                        boolean peerResetStreamAt, int datagramLimit, boolean joinPending, boolean joinSecurityUnavailable,
                        boolean suspended, long[] goAway) {}
 
     private volatile io.zmux.internal.core.SessionStats.Snapshot stats;
-    private volatile Info info;
+    private volatile SessionInfo info;
     // Loop only: what the published snapshots were made from.
     private long statsVersion = -1, statsBudget = -1;
     private boolean infoEstablished, infoSuspended, infoSecretPending;
@@ -1158,7 +1158,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     /** The negotiated features as of the loop's last round; any thread, no hand-off. */
-    public Info info() { return info; }
+    public SessionInfo info() { return info; }
 
     /** Published once requested, then refreshed with the counters: per-pipe information. */
     private volatile java.util.List<io.zmux.PipeStats> pipes;
@@ -1243,7 +1243,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             infoSuspended = suspended;
             var p = core.peerParams();
             var local = core.config().local();
-            info = new Info(est, core.initiator(), p != null && p.isZmux(), f.preamble(), f.priority(), f.flows(),
+            info = new SessionInfo(est, core.initiator(), p != null && p.isZmux(), f.preamble(), f.priority(), f.flows(),
                     f.pipeAck(), f.multipath(), f.resume(), f.lanesOut(), core.config().datagrams(),
                     p != null && p.has(io.zmux.internal.wire.TransportParams.DATAGRAM) && p.maxDatagramFrameSize > 0,
                     local.has(io.zmux.internal.wire.TransportParams.RESET_AT),

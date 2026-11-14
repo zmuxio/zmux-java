@@ -4,9 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -35,6 +33,7 @@ class RelayTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void probesBelowTheIdleLimitKeepPipesThroughAnIdleCuttingRelay() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops, multipath(4));
@@ -54,6 +53,7 @@ class RelayTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aProbeIntervalAboveTheIdleLimitLosesThePipeAndThePoolRedials() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops, multipath(4));
@@ -79,6 +79,7 @@ class RelayTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anIdlePipeIntoABlackHoleFailsWithinTheProbeIntervalAndTFail() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops, multipath(4));
@@ -99,7 +100,7 @@ class RelayTest {
 
     @Test void cuttingTheLastPipeSuspendsAndThePoolResumesWithoutLossOrDuplication() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = config(loops, multipath(2).resumeTimeout(Duration.ofSeconds(120)));
+            var cfg = config(loops, multipath(2).resumeTimeout(Duration.ofMinutes(2)));
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress())) {
                 var accepted = ex.submit((Callable<ZmuxSession>) listener::accept);
                 var client = Zmux.connect(relay.address(), cfg); var server = accepted.get(5, TimeUnit.SECONDS);
@@ -149,6 +150,7 @@ class RelayTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anAgeRuleWithJitterRotatesBeforeTheRelaysConnectionLimitWithoutStalling() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops, multipath(4));

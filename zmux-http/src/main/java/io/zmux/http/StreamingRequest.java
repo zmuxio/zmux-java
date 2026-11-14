@@ -267,12 +267,12 @@ final class StreamingRequest {
     }
 
     /** The read half of a carrier of this request, which has one when the request reads. */
-    private PipeReader readerOf(BodyCarrier c) {
+    private static PipeReader readerOf(BodyCarrier c) {
         return java.util.Objects.requireNonNull(c.reader(), "a reading request's carrier has a read half");
     }
 
     /** The write half of a carrier of this request, which has one when the request writes. */
-    private PipeWriter writerOf(BodyCarrier c) {
+    private static PipeWriter writerOf(BodyCarrier c) {
         return java.util.Objects.requireNonNull(c.writer(), "a writing request's carrier has a write half");
     }
 

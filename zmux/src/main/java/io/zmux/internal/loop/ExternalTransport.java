@@ -369,6 +369,17 @@ final class ExternalTransport extends AbstractTransport {
         inbox.discard();
         if (reader != null) reader.release();
     }
+    @Override public boolean abortable() { return true; }
+
+    /** The halves' close is the host's code and may leave work running: abort ends it (a no-op for a half that ended). */
+    @Override public void abort(Throwable cause) {
+        PipeWriter w = pio.writer();
+        if (w == null) return;
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try { w.abort(cause); } catch (RuntimeException ignored) { /* Already ended. */ }
+        }, Callbacks.EXECUTOR);
+    }
+
     @Override public void close(Throwable cause) {
         if (closed) return;
         closed = true;

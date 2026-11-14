@@ -3,6 +3,7 @@ package io.zmux.internal.core;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 
 /**
  * An open-addressing map from long keys to non-null values, without boxing: linear probing,
@@ -33,7 +34,7 @@ public final class LongMap<V> {
 
     public boolean isEmpty() { return size == 0; }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // vals holds only values of type V
     public V get(long key) {
         for (int i = slot(key, mask);; i = (i + 1) & mask) {
             Object v = vals[i];
@@ -45,9 +46,9 @@ public final class LongMap<V> {
     public boolean containsKey(long key) { return get(key) != null; }
 
     /** Associates value with key; returns the previous value or null. */
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // vals holds only values of type V
     public V put(long key, V value) {
-        if (value == null) throw new NullPointerException("null value");
+        Objects.requireNonNull(value, "null value");
         int i = slot(key, mask);
         for (;; i = (i + 1) & mask) {
             Object v = vals[i];
@@ -60,7 +61,7 @@ public final class LongMap<V> {
     }
 
     /** Removes key; returns its value or null. */
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // vals holds only values of type V
     public V remove(long key) {
         int i = slot(key, mask);
         for (;; i = (i + 1) & mask) {
@@ -103,7 +104,7 @@ public final class LongMap<V> {
             private int next = advance(0);
             private int advance(int from) { while (from < vals.length && vals[from] == null) from++; return from; }
             @Override public boolean hasNext() { return next < vals.length; }
-            @SuppressWarnings("unchecked")
+            @SuppressWarnings("unchecked") // vals holds only values of type V
             @Override public V next() {
                 if (next >= vals.length) throw new NoSuchElementException();
                 V v = (V) vals[next]; next = advance(next + 1); return v;

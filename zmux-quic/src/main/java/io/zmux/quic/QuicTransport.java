@@ -209,6 +209,11 @@ final class QuicTransport extends AbstractTransport {
         carrier.closeInput();
     }
 
+    @Override public boolean abortable() { return true; }
+
+    /** A graceful close whose stream is still open is ended by closing the stream. */
+    @Override public void abort(Throwable cause) { carrier.abortOpen(); }
+
     @Override
     public void close(Throwable cause) {
         if (closed) return;

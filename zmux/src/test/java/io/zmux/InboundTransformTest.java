@@ -6,9 +6,7 @@ import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
-import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -73,10 +71,10 @@ class InboundTransformTest {
                     assertEquals(Optional.of("tenant-7"), s.admitted());
                     assertEquals(Optional.empty(), c.admitted(), "the dialing side has none");
                     var st = c.openStream();
-                    st.write("hello".getBytes());
+                    st.write("hello".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     st.finish();
                     var in = s.acceptStream();
-                    assertArrayEquals("hello".getBytes(), readAll(in));
+                    assertArrayEquals("hello".getBytes(java.nio.charset.StandardCharsets.UTF_8), readAll(in));
                     var p = shaped.poll(5, TimeUnit.SECONDS);
                     assertNotNull(p);
                     assertEquals(29, p.writeOverhead(), "the transform's overhead reaches the shaper factory");
@@ -152,7 +150,7 @@ class InboundTransformTest {
                 l.adapter().handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null), JoinHint.pair(token, true, upPeer));
                 var client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null),
                         new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null));
-                try (var c = Zmux.open(client, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(client, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertEquals(1, hints.size());
                     var hint = hints.peek();
                     assertTrue(hint.uplink(), "the transform sees the uplink's hint");
@@ -169,7 +167,7 @@ class InboundTransformTest {
             try (var home = ZmuxListener.of(ListenerConfig.of(cfg)); var other = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 home.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
-                try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = home.accept(Duration.ofSeconds(5))) {
+                try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var _ = home.accept(Duration.ofSeconds(5))) {
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     other.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("c")));
                     assertThrows(Exception.class, () -> c.addPipe(pair[0], PipeOptions.builder().noProbation().build()));

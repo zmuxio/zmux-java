@@ -20,17 +20,17 @@ public final class VectorFiles {
         return Json.parse(Files.readString(p));
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     public static List<Map<String, Object>> list(String name) throws IOException {
         return (List<Map<String, Object>>) load(name);
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     public static Map<String, Object> object(String name) throws IOException {
         return (Map<String, Object>) load(name);
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     public static List<Map<String, Object>> items(Map<String, Object> m, String key) {
         return (List<Map<String, Object>>) m.get(key);
     }
@@ -59,7 +59,7 @@ public final class VectorFiles {
         return v == null ? "" : (String) v;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     public static long[] longs(Map<String, Object> m, String key) {
         return ((List<Object>) m.get(key)).stream().mapToLong(x -> ((Number) x).longValue()).toArray();
     }

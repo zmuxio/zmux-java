@@ -86,6 +86,8 @@ public final class SealedTransport implements Transport, Inbound {
     @Override public void shutdownOutput() { lower.shutdownOutput(); }
     @Override public void shutdownInput() { lower.shutdownInput(); }
     @Override public void close(Throwable cause) { lower.close(cause); }
+    @Override public boolean abortable() { return lower.abortable(); }
+    @Override public void abort(Throwable cause) { lower.abort(cause); }
     @Override public boolean isClosed() { return lower.isClosed(); }
     @Override public Transport moveTo(SessionHost to) { lower.close(null); return null; }
     @Override public boolean exporterPresent() { return true; }

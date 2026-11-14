@@ -45,7 +45,7 @@ class CarrierCacheSnapshotTest {
         return out;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     @Test void sharedVectors() throws Exception {
         var v = Json.object(Files.readString(Path.of("src", "test", "resources", "carrier-cache", "vectors.json")));
         var exact = (List<String>) v.get("exact");

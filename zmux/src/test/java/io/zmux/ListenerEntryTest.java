@@ -102,7 +102,7 @@ class ListenerEntryTest {
                 assertTrue(d.remaining().compareTo(Duration.ofMillis(800)) <= 0);
                 Thread.sleep(100);
                 later.get().complete(Admission.Decision.accept(0)); // off the loop, later
-                try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     assertEquals(AdmissionVerdict.ACCEPT, handled.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 }
@@ -110,7 +110,7 @@ class ListenerEntryTest {
                 var slow = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var ended = watchEnd(slow[0]);
                 l.adapter().handle(slow[1], JoinHint.inBand(TestAddr.peer("b")));
-                deadlines.poll(5, TimeUnit.SECONDS);
+                assertNotNull(deadlines.poll(5, TimeUnit.SECONDS), "the slow decision was given its deadline");
                 var pending = later.get();
                 ended.get(5, TimeUnit.SECONDS);
                 await(pending::isCancelled); // the cancel and the close both happen, in no promised order
@@ -209,7 +209,7 @@ class ListenerEntryTest {
                 var b = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).maxPendingPerSource(1);
                 if (admission) b.admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0))));
                 try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), b.build());
-                     var silent = new Socket("127.0.0.1", l.localAddress().getPort())) {
+                     var _ = new Socket("127.0.0.1", l.localAddress().getPort())) {
                     Thread.sleep(200);
                     try (var second = new Socket("127.0.0.1", l.localAddress().getPort())) {
                         second.setSoTimeout(3000);

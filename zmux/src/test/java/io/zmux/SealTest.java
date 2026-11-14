@@ -1,14 +1,15 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
-import io.zmux.seal.SecureCarrierException;
 import io.zmux.seal.*;
 import io.zmux.seal.Credential;
+import io.zmux.seal.SecureCarrierException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -33,7 +34,7 @@ class SealTest {
 
     static {
         try {
-            HP = HandlePsk.derive(SECRET, "test".getBytes(), null);
+            HP = HandlePsk.derive(SECRET, "test".getBytes(UTF_8), null);
             byte[] seed = new byte[32];
             Arrays.fill(seed, (byte) 7);
             NODE = StaticKey.fromScalar(seed);
@@ -252,7 +253,7 @@ class SealTest {
                 Credential cred = new Credential(5, new byte[] {1, 2});
                 PipeIo p = establish(tcp(l.localAddress()), client().credential(cred)
                         .appData((m, peer) -> java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.of(new byte[] {(byte) m}))).build());
-                try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(WAIT)) {
+                try (var _ = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     var a = seen.get();
                     assertArrayEquals(HP.handle(), a.handle());
                     Peer peer = a.peer();
@@ -262,7 +263,7 @@ class SealTest {
                     assertSame(mine, peer.verdict().value());
                     assertEquals(List.of(1, 3), peer.appData().stream().map(io.zmux.seal.AppData::message).toList());
                     assertTrue(peer.pqConfidential());
-                    assertEquals(false, peer.pqAuthenticated());
+                    assertFalse(peer.pqAuthenticated());
                     assertNull(peer.value());
                     // The session's host value is the same Peer with the commit's value.
                     Peer admitted = (Peer) s.admitted().orElseThrow();
@@ -331,7 +332,7 @@ class SealTest {
                     var f = Seal.establish(tcp(l.localAddress()), client().credential(mine).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                     PipeIo p = f.get(10, TimeUnit.SECONDS); // the client is done after message 3
                     if (verdict.equals("pass")) {
-                        try (var c = Zmux.open(p, Role.CLIENT, cfg); var srv = l.accept(WAIT)) {
+                        try (var _ = Zmux.open(p, Role.CLIENT, cfg); var srv = l.accept(WAIT)) {
                             assertEquals(Principal.NODE_KEY, ((Peer) srv.admitted().orElseThrow()).verdict().principal().type());
                         }
                     } else {
@@ -623,5 +624,38 @@ class SealTest {
         try {
             while (from.read(b) >= 0) { b.flip(); while (b.hasRemaining()) to.write(b); b.clear(); }
         } catch (java.io.IOException ended) { /* Either side closed. */ }
+    }
+    /** A channel that cannot close one direction: its only close ends both. */
+    private record WholeChannel(SocketChannel ch) implements java.nio.channels.ByteChannel {
+        @Override public int read(ByteBuffer dst) throws java.io.IOException { return ch.read(dst); }
+        @Override public int write(ByteBuffer src) throws java.io.IOException { return ch.write(src); }
+        @Override public boolean isOpen() { return ch.isOpen(); }
+        @Override public void close() throws java.io.IOException { ch.close(); }
+    }
+
+    /**
+     * Over a carrier without a half-close, ending the sending direction keeps the carrier open: the client reads the
+     * server's close, then finishes its own direction, and still sees the server's close code.
+     */
+    @Test @Timeout(120) void aCarrierWithoutHalfCloseKeepsTheCloseCode() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            ZmuxConfig cfg = sessions(loops).build();
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build())) {
+                for (int round = 0; round < 200; round++) {
+                    var whole = new WholeChannel(SocketChannel.open(l.localAddress()));
+                    try (var c = Zmux.open(establish(PipeChannel.pipe(whole, whole, Framing.BYTE_STREAM, 1 << 16), client().build()), Role.CLIENT, cfg);
+                         var s = l.accept(WAIT)) {
+                        ZmuxStream st = c.openStream();
+                        st.write("ping".getBytes(UTF_8));
+                        ZmuxStream in = s.acceptStream();
+                        assertArrayEquals("ping".getBytes(UTF_8), in.inputStream().readNBytes(4));
+                        s.close(7, "done");
+                        try { st.inputStream().readAllBytes(); st.finish(); } catch (java.io.IOException expected) { /* The session ended. */ }
+                        var why = assertInstanceOf(SessionError.ApplicationClosed.class, c.awaitClosed(WAIT), "round " + round);
+                        assertEquals(7, why.code(), "round " + round);
+                    }
+                }
+            }
+        }
     }
 }

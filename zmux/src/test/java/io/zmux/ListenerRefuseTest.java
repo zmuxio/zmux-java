@@ -25,7 +25,7 @@ class ListenerRefuseTest {
 
     @Test void aFullBacklogRefusesANewSession() throws Exception {
         try (var l = Zmux.listen(LOOPBACK, ListenerConfig.builder().backlog(1).build());
-             var first = Zmux.connect(l.localAddress())) {
+             var _ = Zmux.connect(l.localAddress())) {
             // The one backlog slot is taken by a session nobody accepts.
             PipePoolTest.await(() -> l.queued.get() == 1);
             assertRefused(l);

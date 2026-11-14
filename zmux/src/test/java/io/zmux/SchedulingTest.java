@@ -1,7 +1,6 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
-import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;

@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(15)
 class CarrierActionsTest {
-    static final class Carrier extends AbstractTransport {
+    static class Carrier extends AbstractTransport {
         final int direction;
         final TransportInfo info;
         boolean stoppedInput, stoppedOutput, closed;
@@ -40,6 +40,39 @@ class CarrierActionsTest {
                 assertTrue(inbound.closed);
             });
         } finally { loop.close(); }
+    }
+    /** A carrier whose graceful close never completes. */
+    static final class Hanging extends Carrier {
+        volatile Throwable aborted;
+        Hanging(EventLoop loop) { super(loop, Action.DIR_BIDI, null, 0); }
+        @Override public boolean abortable() { return true; }
+        @Override public void abort(Throwable cause) { aborted = cause; }
+    }
+    @Test void aGracefulCloseThatNeverCompletesIsAbortedAfterTheLinger() throws Exception {
+        EventLoop loop = new EventLoop("close-bound", true, BufferPool.DEFAULT_IDLE_BYTES);
+        io.zmux.internal.diag.Diagnostics.lingerForTests(java.time.Duration.ofMillis(300));
+        try {
+            Hanging graceful = new Hanging(loop), abortive = new Hanging(loop);
+            long[] t0 = new long[1];
+            ExternalTransportTest.run(loop, () -> {
+                var driver = new SessionRuntime(loop, new Session(CoreConfig.defaults(), Clock.now()), DriverHooks.NONE);
+                var a = driver.carriers().attach(graceful, 0, 1, null);
+                var b = driver.carriers().attach(abortive, 0, 2, null);
+                t0[0] = System.nanoTime();
+                driver.carriers().remove(a, null);
+                driver.carriers().remove(b, new java.io.IOException("failed"));
+                assertNull(graceful.aborted);
+            });
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            while (graceful.aborted == null && System.nanoTime() < until) Thread.sleep(2);
+            assertNotNull(graceful.aborted, "the graceful close was bounded");
+            long took = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0[0]);
+            assertTrue(took >= 250 && took < 1_500, "aborted after the linger: " + took + " ms");
+            assertNull(abortive.aborted, "an abortive close needs no bound");
+        } finally {
+            io.zmux.internal.diag.Diagnostics.lingerForTests(java.time.Duration.ZERO);
+            loop.close();
+        }
     }
     @Test void closingInputLeavesTheBidirectionalOutputUsable() throws Exception {
         EventLoop loop = new EventLoop("carrier-half-close", true, BufferPool.DEFAULT_IDLE_BYTES);

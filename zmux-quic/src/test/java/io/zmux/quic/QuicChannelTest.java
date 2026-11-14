@@ -1,10 +1,12 @@
 package io.zmux.quic;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.quic.QuicChannel;
 import io.zmux.*;
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -129,11 +131,12 @@ class QuicChannelTest {
             }
         }
 
-        @Override public void close() throws Exception {
+        @Override public void close() throws IOException {
             front.close();
             back.close();
             timer.shutdownNow();
-            for (Thread t : pumps) t.join(5000);
+            try { for (Thread t : pumps) t.join(5000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.io.InterruptedIOException("interrupted"); }
         }
     }
 
@@ -180,7 +183,7 @@ class QuicChannelTest {
                 assertNotNull(s);
                 try {
                     ZmuxStream st = c.openStream();
-                    st.write(ByteBuffer.wrap("warm".getBytes()));
+                    st.write(ByteBuffer.wrap("warm".getBytes(UTF_8)));
                     ZmuxStream in = s.acceptStream();
                     Future<byte[]> read = workers.submit(() -> QuicTest.read(in));
                     for (int i = 0; i < 5; i++) {
@@ -302,16 +305,16 @@ class QuicChannelTest {
                     byte[] first = s1.datagrams().receive(Duration.ofSeconds(5));
                     if (first[0] != 1) { var t = s1; s1 = s2; s2 = t; assertArrayEquals(new byte[] {1}, s1.datagrams().receive(Duration.ofSeconds(5))); }
                     for (int i = 0; i < 20; i++) {
-                        c1.datagrams().send(ByteBuffer.wrap(("one " + i).getBytes()));
-                        c2.datagrams().send(ByteBuffer.wrap(("two " + i).getBytes()));
-                        s1.datagrams().send(ByteBuffer.wrap(("back one " + i).getBytes()));
-                        s2.datagrams().send(ByteBuffer.wrap(("back two " + i).getBytes()));
+                        c1.datagrams().send(ByteBuffer.wrap(("one " + i).getBytes(UTF_8)));
+                        c2.datagrams().send(ByteBuffer.wrap(("two " + i).getBytes(UTF_8)));
+                        s1.datagrams().send(ByteBuffer.wrap(("back one " + i).getBytes(UTF_8)));
+                        s2.datagrams().send(ByteBuffer.wrap(("back two " + i).getBytes(UTF_8)));
                     }
                     for (int i = 0; i < 20; i++) {
-                        assertTrue(new String(s1.datagrams().receive(Duration.ofSeconds(5))).startsWith("one "));
-                        assertTrue(new String(s2.datagrams().receive(Duration.ofSeconds(5))).startsWith("two "));
-                        assertTrue(new String(c1.datagrams().receive(Duration.ofSeconds(5))).startsWith("back one "));
-                        assertTrue(new String(c2.datagrams().receive(Duration.ofSeconds(5))).startsWith("back two "));
+                        assertTrue(new String(s1.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("one "));
+                        assertTrue(new String(s2.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("two "));
+                        assertTrue(new String(c1.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("back one "));
+                        assertTrue(new String(c2.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("back two "));
                     }
                     assertEquals(21, c1.stats().datagramsSentChannel());
                     assertEquals(20, c2.stats().datagramsSentChannel());

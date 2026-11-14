@@ -176,7 +176,7 @@ public final class InteropPeer {
                 }
                 case "schedule" -> { if (!arg.equals("round-robin")) throw new IOException("unknown policy"); session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN); reply(stream, "scheduled"); }
                 case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
-                case "goaway" -> { session.run(op -> { session.core.shutdown(Long.parseLong(arg), null); return Boolean.TRUE; }); read(stream); reply(stream, "draining"); }
+                case "goaway" -> { session.run(op -> { session.core.shutdown(Long.parseLong(arg), null); return true; }); read(stream); reply(stream, "draining"); }
                 case "close" -> {
                     String[] close = arg.split(":", 2); read(stream);
                     if (closeReply) { reply(stream, "closing"); Thread.sleep(50); }

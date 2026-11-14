@@ -339,7 +339,7 @@ final class PathSession implements PathLayer {
         }
     }
 
-    private int controlRank(Attach a) {
+    private static int controlRank(Attach a) {
         return switch (a.health.out()) {
             case Attach.OUT_ACTIVE -> 0;
             case Attach.OUT_JOINING -> 1;

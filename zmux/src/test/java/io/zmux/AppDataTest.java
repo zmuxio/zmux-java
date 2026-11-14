@@ -1,21 +1,22 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.zmux.carrier.PipeIo;
-import io.zmux.seal.SecureCarrierException;
 import io.zmux.seal.AppData;
 import io.zmux.seal.AppDataSource;
 import io.zmux.seal.Peer;
 import io.zmux.seal.Principal;
 import io.zmux.seal.Profile;
 import io.zmux.seal.Seal;
+import io.zmux.seal.SecureCarrierException;
 import io.zmux.seal.ServerConfig;
-import io.zmux.seal.VerifyVerdict;
 import io.zmux.seal.VerifyInput;
+import io.zmux.seal.VerifyVerdict;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -53,21 +54,21 @@ class AppDataTest {
             List<VerifyInput> judged = new CopyOnWriteArrayList<>();
             var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE)
                     .anchor(in -> { judged.add(in); return new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic())); }).localContext("edge")
-                    .appData(answering(server, m -> "two".getBytes())).build();
+                    .appData(answering(server, m -> "two".getBytes(UTF_8))).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc)).build())) {
                 PipeIo p = SealTest.establish(SealTest.tcp(l.localAddress()), SealTest.client().appData(answering(client, m -> new byte[] {(byte) m})).build());
                 List<AppData> fromClient = List.of(new AppData(1, new byte[] {1}, false, false), new AppData(3, new byte[] {3}, true, true));
-                try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
+                try (var _ = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
                     same(fromClient, ((Peer) s.admitted().orElseThrow()).appData());
                 }
-                same(List.of(new AppData(2, "two".getBytes(), true, true)), Seal.peerOf(p).orElseThrow().appData());
+                same(List.of(new AppData(2, "two".getBytes(UTF_8), true, true)), Seal.peerOf(p).orElseThrow().appData());
                 // The anchor sees the data before its own verification: none of it is authenticated yet.
                 same(List.of(new AppData(1, new byte[] {1}, false, false), new AppData(3, new byte[] {3}, true, false)), judged.getFirst().peerAppData());
                 assertEquals(2, client.size());
                 assertTrue(client.get(0).peer().profile().isPskBased());
                 assertNull(client.get(0).peer().input());
                 assertArrayEquals(SealTest.NODE.publicKey(), client.get(1).peer().input().peerStatic());
-                same(List.of(new AppData(2, "two".getBytes(), true, false)), client.get(1).peer().input().peerAppData());
+                same(List.of(new AppData(2, "two".getBytes(UTF_8), true, false)), client.get(1).peer().input().peerAppData());
                 assertTrue(client.get(1).peer().verdict() != null);
                 assertEquals(1, server.size());
                 assertEquals(2, server.getFirst().message());

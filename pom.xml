@@ -64,6 +64,8 @@
         <maven.source.version>3.4.0</maven.source.version>
         <maven.javadoc.version>3.12.0</maven.javadoc.version>
         <surefire.forkCount>1</surefire.forkCount>
+        <!-- Warnings fail the compile; a survey run may pass -Dcompiler.werror=-Xlint:-serial to list them all. -->
+        <compiler.werror>-Werror</compiler.werror>
     </properties>
 
     <build>
@@ -79,9 +81,13 @@
                 <version>3.16.0</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
+                    <!-- Every lint but serial, and warnings fail the build. serial: the exceptions are not meant to be
+                         serialized (they carry live handles and results); declaring serialVersionUIDs would promise a
+                         serialized form the library does not support. -->
                     <compilerArgs>
-                        <arg>-Xlint:all,-serial,-processing</arg>
+                        <arg>-Xlint:all,-serial</arg>
                         <arg>-Xdoclint:reference/private</arg>
+                        <arg>${compiler.werror}</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>
@@ -100,11 +106,65 @@
 
     <profiles>
         <profile>
-            <!-- Error Prone on the main sources, not part of the default build: mvn -Perrorprone clean compile;
-                 the check passes when the output has no "[CheckName]" warning other than the module-info lint ones. -->
+            <!-- Error Prone on the main and test sources, not part of the default build (CI runs it):
+                 mvn -Perrorprone clean test-compile. Every check runs, the experimental ones included
+                 (-XepAllDisabledChecksAsWarnings), and the build's -Werror fails on any finding; the checks turned
+                 off are listed below with their reasons. -->
             <id>errorprone</id>
             <properties>
-                <errorprone.version>2.45.0</errorprone.version>
+                <errorprone.version>2.51.0</errorprone.version>
+                <!--
+                    Checks turned off for all sources.
+                    Deliberate design:
+                    - FutureReturnValueIgnored: the library registers completion handlers (whenComplete, thenAccept)
+                      and fires closes whose outcome is observed elsewhere; the returned stage or channel future
+                      carries nothing more.
+                    - ArrayRecordComponent: records carry byte arrays without a copy on purpose (zero-copy payload
+                      handoff); the arrays' ownership is documented where they change hands.
+                    - AvoidObjectArrays: ByteBuffer[] and PipeIo[] are the gathering-write and pipe-pair shapes of
+                      the carrier SPI, passed without wrapping.
+                    - NonApiType: package-private scratch collections of the core are concrete ArrayLists by design;
+                      no public signature has one.
+                    - UnnecessaryLambda: Runnable constants and fields are single instances that are registered,
+                      withdrawn or compared by identity.
+                    - ReferenceEquality: every reported comparison is an intended identity test (sentinels such as
+                      StreamRecv.FIN, handles, transports, loops, the exception being thrown).
+                    - Interruption: blocked worker and waiting threads are woken by interrupting them, and
+                      Future.cancel(true) stops a blocking dial; that is the cancellation mechanism.
+                    - UnusedException: exceptions are translated to protocol and I/O types (ProtocolException,
+                      InterruptedIOException, wire errors) whose cause would be a parser detail or a control signal.
+                    - PreferJavaTimeOverload: the long-nanosecond overloads exist so waits need no Duration; the
+                      library and the tests call them with constants on purpose.
+                    - ThrowsUncheckedException: unchecked exceptions are listed in throws clauses as documentation.
+                    - PublicApiNamedStreamShouldReturnStream: "stream" is the zmux stream, not java.util.stream.
+                    - Java8ApiChecker: the library targets Java 25; Java 8 API availability does not apply.
+                    - StringConcatToTextBlock: the reported literals are CRLF protocol text; a text block would turn
+                      the line ends into LF (its suggested fix broke two HTTP requests).
+                    Need annotation or Guava dependencies the library does not take:
+                    - CanIgnoreReturnValueSuggester, ImmutableMemberCollection, AddNullMarkedToClass,
+                      AddNullMarkedToPackageInfo, ParameterMissingNullable, ReturnMissingNullable,
+                      FieldMissingNullable.
+                    Code style the project does not follow (formatting and naming preferences, no defects found):
+                    - MissingBraces, UnnecessarilyFullyQualified, Var, Varifier, MultiVariableDeclaration,
+                      UngroupedOverloads, InconsistentOverloads, TraditionalJavadocToMarkdown, WildcardImport,
+                      YodaCondition, DifferentNameButSame, BooleanParameter, NegativeBoolean, TooManyParameters,
+                      ClassNamedLikeTypeParameter (X25519 is the algorithm's name).
+                -->
+                <ep.off>-Xep:FutureReturnValueIgnored:OFF -Xep:ArrayRecordComponent:OFF -Xep:AvoidObjectArrays:OFF -Xep:NonApiType:OFF -Xep:UnnecessaryLambda:OFF -Xep:ReferenceEquality:OFF -Xep:Interruption:OFF -Xep:UnusedException:OFF -Xep:PreferJavaTimeOverload:OFF -Xep:ThrowsUncheckedException:OFF -Xep:PublicApiNamedStreamShouldReturnStream:OFF -Xep:StringConcatToTextBlock:OFF -Xep:Java8ApiChecker:OFF -Xep:CanIgnoreReturnValueSuggester:OFF -Xep:ImmutableMemberCollection:OFF -Xep:AddNullMarkedToClass:OFF -Xep:AddNullMarkedToPackageInfo:OFF -Xep:ParameterMissingNullable:OFF -Xep:ReturnMissingNullable:OFF -Xep:FieldMissingNullable:OFF -Xep:MissingBraces:OFF -Xep:UnnecessarilyFullyQualified:OFF -Xep:Var:OFF -Xep:Varifier:OFF -Xep:MultiVariableDeclaration:OFF -Xep:UngroupedOverloads:OFF -Xep:InconsistentOverloads:OFF -Xep:TraditionalJavadocToMarkdown:OFF -Xep:WildcardImport:OFF -Xep:YodaCondition:OFF -Xep:DifferentNameButSame:OFF -Xep:BooleanParameter:OFF -Xep:NegativeBoolean:OFF -Xep:TooManyParameters:OFF -Xep:ClassNamedLikeTypeParameter:OFF</ep.off>
+                <!--
+                    Checks turned off for the test sources only:
+                    - SystemOut: the interop peers and probes talk to their driver over stdout.
+                    - InterruptedExceptionSwallowed, EmptyCatch: test threads end on any exception, and cleanup
+                      ignores failures of what is being torn down.
+                    - AddressSelection: tests bind and dial the loopback by name and literal on purpose.
+                    - CheckedExceptionNotThrown, ThrowSpecificExceptions, CatchingUnchecked: test helpers declare and
+                      catch broadly; JUnit reports whatever escapes.
+                    - StringSplitter: the tests split fixed, well-formed fixture text.
+                    - EnumOrdinal: tests cycle through enum constants by index to vary their inputs.
+                    - NonFinalStaticField, PrivateConstructorForUtilityClass, IdentifierName, MissingJavadoc: fixture
+                      state, helper holders and test names are not API.
+                -->
+                <ep.test.off>-Xep:SystemOut:OFF -Xep:InterruptedExceptionSwallowed:OFF -Xep:EmptyCatch:OFF -Xep:AddressSelection:OFF -Xep:CheckedExceptionNotThrown:OFF -Xep:ThrowSpecificExceptions:OFF -Xep:CatchingUnchecked:OFF -Xep:StringSplitter:OFF -Xep:EnumOrdinal:OFF -Xep:NonFinalStaticField:OFF -Xep:PrivateConstructorForUtilityClass:OFF -Xep:IdentifierName:OFF -Xep:MissingJavadoc:OFF</ep.test.off>
                 <ep.args></ep.args>
             </properties>
             <build>
@@ -120,19 +180,6 @@
                                 <arg>--should-stop=ifError=FLOW</arg>
                                 <arg>-Xmaxwarns</arg>
                                 <arg>100000</arg>
-                                <!--
-                                    Checks turned off, each by design:
-                                    - FutureReturnValueIgnored: the library registers completion handlers (whenComplete,
-                                      thenAccept) and fires closes whose outcome is observed elsewhere; the returned stage
-                                      or channel future carries nothing more.
-                                    - ArrayRecordComponent: records carry byte arrays without a copy on purpose (zero-copy
-                                      payload handoff); the arrays' ownership is documented where they change hands.
-                                    - NonApiType: package-private scratch collections of the core are concrete ArrayLists
-                                      by design; no public signature has one.
-                                    - UnnecessaryLambda: Runnable constants and fields are single instances that are
-                                      registered, withdrawn or compared by identity.
-                                -->
-                                <arg>-Xplugin:ErrorProne -XepDisableWarningsInGeneratedCode -Xep:FutureReturnValueIgnored:OFF -Xep:ArrayRecordComponent:OFF -Xep:NonApiType:OFF -Xep:UnnecessaryLambda:OFF ${ep.args}</arg>
                                 <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</arg>
                                 <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>
                                 <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</arg>
@@ -154,12 +201,31 @@
                                 </path>
                             </annotationProcessorPaths>
                         </configuration>
+                        <executions>
+                            <execution>
+                                <id>default-compile</id>
+                                <configuration>
+                                    <compilerArgs combine.children="append">
+                                        <arg>-Xplugin:ErrorProne -XepDisableWarningsInGeneratedCode -XepAllDisabledChecksAsWarnings ${ep.off} ${ep.args}</arg>
+                                    </compilerArgs>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>default-testCompile</id>
+                                <configuration>
+                                    <compilerArgs combine.children="append">
+                                        <arg>-Xplugin:ErrorProne -XepDisableWarningsInGeneratedCode -XepAllDisabledChecksAsWarnings ${ep.off} ${ep.test.off} ${ep.args}</arg>
+                                    </compilerArgs>
+                                </configuration>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>
         </profile>
         <profile>
-            <!-- Static analysis, not part of the default build: mvn -Pstatic-checks test-compile spotbugs:check -->
+            <!-- SpotBugs on the main and test classes, not part of the default build (CI runs it):
+                 mvn -Pstatic-checks test-compile spotbugs:check. The exclusions and their reasons are in spotbugs-exclude.xml. -->
             <id>static-checks</id>
             <build>
                 <plugins>
@@ -170,6 +236,23 @@
                         <configuration>
                             <excludeFilterFile>${maven.multiModuleProjectDirectory}/spotbugs-exclude.xml</excludeFilterFile>
                             <failOnError>true</failOnError>
+                            <effort>Max</effort>
+                            <threshold>Low</threshold>
+                            <includeTests>true</includeTests>
+                            <!-- Source paths let the filter tell test sources apart. -->
+                            <addSourceDirs>true</addSourceDirs>
+                            <plugins>
+                                <plugin>
+                                    <groupId>com.h3xstream.findsecbugs</groupId>
+                                    <artifactId>findsecbugs-plugin</artifactId>
+                                    <version>1.14.0</version>
+                                </plugin>
+                                <plugin>
+                                    <groupId>com.mebigfatguy.sb-contrib</groupId>
+                                    <artifactId>sb-contrib</artifactId>
+                                    <version>7.7.4</version>
+                                </plugin>
+                            </plugins>
                         </configuration>
                     </plugin>
                 </plugins>
@@ -199,7 +282,14 @@
                         <configuration>
                             <quiet>true</quiet>
                             <failOnError>true</failOnError>
-                            <doclint>none</doclint>
+                            <failOnWarnings>true</failOnWarnings>
+                            <!-- Every doclint group but missing: the API documents each member in a summary sentence that
+                                 covers its parameters and result, without one @param/@return/@throws tag per item. -->
+                            <doclint>all,-missing</doclint>
+                            <additionalOptions>
+                                <additionalOption>-Xmaxwarns</additionalOption>
+                                <additionalOption>10000</additionalOption>
+                            </additionalOptions>
                         </configuration>
                         <executions>
                             <execution>

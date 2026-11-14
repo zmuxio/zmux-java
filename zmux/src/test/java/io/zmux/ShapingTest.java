@@ -147,7 +147,7 @@ class ShapingTest {
                     @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
                     @Override public void plan(RecordView view, RecordPlan plan) {}
                     @Override public void onEvent(Event event, Effects effects) {
-                        if (event.kind() == EventKind.START || event.kind() == EventKind.INJECTED && sent.incrementAndGet() < 40) {
+                        if (event.kind() == EventKind.START || (event.kind() == EventKind.INJECTED && sent.incrementAndGet() < 40)) {
                             effects.inject(event.nowNanos(), 100);
                         } else if (event.kind() == EventKind.INJECTED) {
                             effects.noInject();

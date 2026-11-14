@@ -72,6 +72,7 @@ class QuicEndpointTest {
             assertEquals(0,io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops));
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void cancellingAReversePipeReturnsOnlyItsStreamAndRejectsForeignConnections() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops); var options = QuicOptions.defaults();

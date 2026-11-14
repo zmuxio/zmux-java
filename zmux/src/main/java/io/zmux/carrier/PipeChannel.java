@@ -147,9 +147,11 @@ public final class PipeChannel implements ByteChannel {
      * Framing#MESSAGES}, so in must keep message boundaries, as a {@link PipeChannel} does);
      * its writer makes one write call on out (null: no sending half) for each write it takes,
      * the batch gathered (one call per message with {@link Framing#MESSAGES}), on a virtual
-     * thread. Closing a half closes its channel; when in and out are one socket channel,
-     * closing a half shuts that direction down (the sending half's close sends FIN, its abort
-     * closes the socket) and the socket closes with the second half.
+     * thread. Closing a half closes its channel. When in and out are one channel, the channel
+     * closes with the second half: a socket channel shuts each direction down as its half closes
+     * (the sending half's close sends FIN); any other channel cannot close one direction, so the
+     * sending half's close leaves it open for the receiving half (a peer's last write and its
+     * close code still arrive). An abort of the sending half closes the channel.
      *
      * <p>A selectable half (a socket channel) is served by a platform thread of its own instead:
      * on Windows, JDK 25 and later lose the wake-up of a virtual thread waiting to write on a
@@ -162,9 +164,11 @@ public final class PipeChannel implements ByteChannel {
     public static PipeIo pipe(ReadableByteChannel in, WritableByteChannel out, Framing framing, int readSize) {
         Objects.requireNonNull(framing, "framing");
         if (readSize < 1) throw new IllegalArgumentException("readSize below 1");
-        Socket shared = in == out && in instanceof SocketChannel sc ? new Socket(sc) : null;
+        Shared shared = in != null && in == out ? new Shared(in) : null;
         PipeReader r = in == null ? null : new PipeReader() {
             private final AtomicBoolean once = new AtomicBoolean();
+            // The read thread ends on any failure, an interrupt included, and reports it to the sink.
+            @SuppressWarnings("InterruptedExceptionSwallowed")
             @Override public void start(Sink sink) {
                 if (!once.compareAndSet(false, true)) throw new IllegalStateException("reader already started");
                 threads(in).name("zmux-pipe-channel-read").start(() -> {
@@ -221,15 +225,20 @@ public final class PipeChannel implements ByteChannel {
         return new PipeIo(r, w, framing, null, null);
     }
 
-    /** The two halves of one socket channel: each close shuts its direction, the second closes the socket. */
-    private record Socket(SocketChannel ch, java.util.concurrent.atomic.AtomicInteger open) {
-        Socket(SocketChannel ch) { this(ch, new java.util.concurrent.atomic.AtomicInteger(2)); }
+    /**
+     * The two halves of one channel: each close shuts its direction where the channel can (a socket channel), the
+     * second closes the channel.
+     */
+    private record Shared(java.nio.channels.Channel ch, java.util.concurrent.atomic.AtomicInteger open) {
+        Shared(java.nio.channels.Channel ch) { this(ch, new java.util.concurrent.atomic.AtomicInteger(2)); }
 
         void closeHalf(boolean output) {
-            try {
-                if (output) ch.shutdownOutput(); else ch.shutdownInput();
-            } catch (IOException ignored) {
-                // The socket is gone already; closing it below is all that is left.
+            if (ch instanceof SocketChannel sc) {
+                try {
+                    if (output) sc.shutdownOutput(); else sc.shutdownInput();
+                } catch (IOException ignored) {
+                    // The socket is gone already; closing it below is all that is left.
+                }
             }
             if (open.decrementAndGet() == 0) closeQuietly(ch);
         }

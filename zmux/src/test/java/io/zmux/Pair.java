@@ -1,5 +1,6 @@
 package io.zmux;
 
+import java.io.IOException;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.PipeIo;
@@ -36,7 +37,7 @@ record Pair(ZmuxSession client, ZmuxSession server, ZmuxListener listener) imple
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() throws IOException {
         client.close();
         server.close();
         client.awaitClosed();

@@ -1,6 +1,7 @@
 package io.zmux.internal.wire;
 
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -64,13 +65,13 @@ class WireTest {
 
     @Test
     void preambleRoundTripAndViolations() throws Exception {
-        Preamble p = new Preamble(0, "dst".getBytes(), 1, true, true,
+        Preamble p = new Preamble(0, "dst".getBytes(UTF_8), 1, true, true,
                 List.of(new Preamble.Tlv(0x1000, new byte[] {7})), new Preamble.Tlv(0x21, new byte[0]));
         ByteBuffer b = ByteBuffer.allocate(64);
         p.encode(b);
         assertEquals(p.encodedSize(), b.position());
         Preamble q = Preamble.parse(b, 0, b.position(), 1024);
-        assertArrayEquals("dst".getBytes(), q.openInfo());
+        assertArrayEquals("dst".getBytes(UTF_8), q.openInfo());
         assertEquals(1, q.urgency());
         assertTrue(q.incremental() && q.pipeCarrier());
         assertEquals(1, q.applicationTlvs().size());
@@ -82,7 +83,7 @@ class WireTest {
     @Test
     void firstRecordCheck() {
         Records.FirstRecordCheck c = new Records.FirstRecordCheck(65535, true);
-        ByteBuffer foreign = ByteBuffer.wrap("GET ".getBytes());
+        ByteBuffer foreign = ByteBuffer.wrap("GET ".getBytes(UTF_8));
         assertEquals(Records.Verdict.REJECT, c.feed(foreign, 0, 4));
         // A foreign first record fails at its third byte, without waiting for more.
         assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(foreign, 0, 3));
@@ -94,7 +95,7 @@ class WireTest {
         assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(other, 0, 5));
         ByteBuffer small = ByteBuffer.wrap(HexFormat.of().parseHex("08ff"));
         assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(small, 0, 1));
-        ByteBuffer http = ByteBuffer.wrap("GET / HTTP/1.1".getBytes());
+        ByteBuffer http = ByteBuffer.wrap("GET / HTTP/1.1".getBytes(UTF_8));
         assertEquals(Records.Verdict.REJECT, new Records.FirstRecordCheck(65535, true).feed(http, 0, 3));
     }
 

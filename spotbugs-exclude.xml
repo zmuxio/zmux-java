@@ -3,8 +3,82 @@
   SpotBugs exclusions for zmux. Every entry is a reviewed, intentional pattern; fix real findings in code
   instead of adding entries. Entries name the bug pattern and the class (and method where it is one place).
   Run: mvn -o -Pstatic-checks test-compile spotbugs:check
+  The analysis runs at effort Max and threshold Low over the main and the test classes, with the find-sec-bugs and
+  sb-contrib plugins. The first block turns off whole patterns of those plugins that conflict with the code's design
+  or report nothing actionable here; the test block turns off patterns that describe deliberate test scaffolding.
 -->
 <FindBugsFilter>
+
+  <!-- Patterns off everywhere.
+       Style preferences of sb-contrib that the code does not follow, no defect among their reports:
+       IMC_* (toString/equals on every class, field order), CC_CYCLOMATIC_COMPLEXITY, CE_CLASS_ENVY,
+       OCP_* (parameter types), UVA_USE_VAR_ARGS, ITC_INHERITANCE_TYPE_CHECKING, CBC_CONTAINS_BASED_CONDITIONAL,
+       LSC_LITERAL_STRING_COMPARISON, CNC_COLLECTION_NAMING_CONFUSION, PME_POOR_MANS_ENUM, BL_BURYING_LOGIC,
+       MOM_MISLEADING_OVERLOAD_MODEL, OPM_OVERLY_PERMISSIVE_METHOD (public API used only by callers outside),
+       DRE_DECLARED_RUNTIME_EXCEPTION and THROWS_* (throws clauses list what a method throws, as documentation),
+       FCCD_FIND_CLASS_CIRCULAR_DEPENDENCY (mutually referring classes of one package), SEC_SIDE_EFFECT_CONSTRUCTOR,
+       FII_* (lambda-to-method-reference rewrites), UAA_USE_ADD_ALL, PDP_POORLY_DEFINED_PARAMETER.
+       Detectors whose reports here are false or describe intended code:
+       SPP_FIELD_COULD_BE_STATIC (fields written from other classes of the package), CLI_CONSTANT_LIST_INDEX
+       (fixed-layout arrays of the wire format), PRMC_POSSIBLY_REDUNDANT_METHOD_CALLS (reads of state that may change
+       between them), SEO_SUBOPTIMAL_EXPRESSION_ORDER, PSC_PRESIZE_COLLECTIONS and LII_LIST_INDEXED_ITERATING
+       (indexed loops avoid the iterator allocation), MUI_CONTAINSKEY_BEFORE_GET (cold-path parsing; the maps of
+       parsed JSON may hold explicit nulls), NAB_NEEDLESS_BOOLEAN_CONSTANT_CONVERSION (Boolean.TRUE/FALSE of a
+       tri-state or generic result, cached instances), PZLA_PREFER_ZERO_LENGTH_ARRAYS and ENMI_NULL_ENUM_VALUE (null
+       is the documented "none"), CFS_CONFUSING_FUNCTION_SEMANTICS and
+       URV_* (scratch objects reused and returned to stay allocation free; tagged Object results of the loop),
+       DLC_DUBIOUS_LIST_COLLECTION, PL_PARALLEL_LISTS (parallel arrays instead of per-entry objects),
+       OI_OPTIONAL_ISSUES_USES_IMMEDIATE_EXECUTION (the fallbacks are constants), STT_STRING_PARSING_A_FIELD (the JSON parsers' input), UWF_FIELD_NOT_INITIALIZED_IN_CONSTRUCTOR
+       (state set by a lifecycle step before the methods that read it can run), NOS_NON_OWNED_SYNCHRONIZATION
+       (classes lock themselves on purpose), MDM_WAIT_WITHOUT_TIMEOUT (blocking calls wait until woken or closed),
+       AFBR_ABNORMAL_FINALLY_BLOCK_RETURN (any call that can throw in a finally block), EXS_* (checked exceptions
+       wrapped at API boundaries), WEM_WEAK_EXCEPTION_MESSAGING (constant messages, no allocation or data in them),
+       LEST_LOST_EXCEPTION_STACK_TRACE (exceptions translated to protocol and I/O types without a cause on
+       purpose), IMPROPER_UNICODE (ASCII protocol tokens compared case-insensitively or with Locale.ROOT).
+       Serialization (the exceptions are not meant to be serialized; javac's serial lint is off for the same
+       reason): NFF_NON_FUNCTIONAL_FIELD, SE_TRANSIENT_FIELD_NOT_RESTORED.
+       Needs nullness annotations the library does not depend on: AI_ANNOTATION_ISSUES_NEEDS_NULLABLE. -->
+  <Match>
+    <Or>
+      <Bug pattern="IMC_IMMATURE_CLASS_NO_TOSTRING, IMC_IMMATURE_CLASS_NO_EQUALS, IMC_IMMATURE_CLASS_WRONG_FIELD_ORDER, IMC_IMMATURE_CLASS_PRINTSTACKTRACE"/>
+      <Bug pattern="CC_CYCLOMATIC_COMPLEXITY, CE_CLASS_ENVY, OCP_OVERLY_CONCRETE_PARAMETER, OCP_OVERLY_CONCRETE_COLLECTION_PARAMETER"/>
+      <Bug pattern="UVA_USE_VAR_ARGS, ITC_INHERITANCE_TYPE_CHECKING, CBC_CONTAINS_BASED_CONDITIONAL, LSC_LITERAL_STRING_COMPARISON"/>
+      <Bug pattern="CNC_COLLECTION_NAMING_CONFUSION, PME_POOR_MANS_ENUM, BL_BURYING_LOGIC, MOM_MISLEADING_OVERLOAD_MODEL, OPM_OVERLY_PERMISSIVE_METHOD"/>
+      <Bug pattern="DRE_DECLARED_RUNTIME_EXCEPTION, THROWS_METHOD_THROWS_CLAUSE_BASIC_EXCEPTION, THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+      <Bug pattern="FCCD_FIND_CLASS_CIRCULAR_DEPENDENCY, SEC_SIDE_EFFECT_CONSTRUCTOR, FII_USE_FUNCTION_IDENTITY, FII_USE_METHOD_REFERENCE, UAA_USE_ADD_ALL, PDP_POORLY_DEFINED_PARAMETER"/>
+      <Bug pattern="SPP_FIELD_COULD_BE_STATIC, CLI_CONSTANT_LIST_INDEX, PRMC_POSSIBLY_REDUNDANT_METHOD_CALLS, SEO_SUBOPTIMAL_EXPRESSION_ORDER"/>
+      <Bug pattern="PSC_PRESIZE_COLLECTIONS, LII_LIST_INDEXED_ITERATING, MUI_CONTAINSKEY_BEFORE_GET, NAB_NEEDLESS_BOOLEAN_CONSTANT_CONVERSION"/>
+      <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS, ENMI_NULL_ENUM_VALUE, CFS_CONFUSING_FUNCTION_SEMANTICS"/>
+      <Bug pattern="URV_UNRELATED_RETURN_VALUES, URV_CHANGE_RETURN_TYPE, DLC_DUBIOUS_LIST_COLLECTION, STT_STRING_PARSING_A_FIELD"/>
+      <Bug pattern="PL_PARALLEL_LISTS, OI_OPTIONAL_ISSUES_USES_IMMEDIATE_EXECUTION"/>
+      <Bug pattern="UWF_FIELD_NOT_INITIALIZED_IN_CONSTRUCTOR, NOS_NON_OWNED_SYNCHRONIZATION, MDM_WAIT_WITHOUT_TIMEOUT, AFBR_ABNORMAL_FINALLY_BLOCK_RETURN"/>
+      <Bug pattern="EXS_EXCEPTION_SOFTENING_NO_CONSTRAINTS, EXS_EXCEPTION_SOFTENING_HAS_CHECKED, EXS_EXCEPTION_SOFTENING_RETURN_FALSE"/>
+      <Bug pattern="WEM_WEAK_EXCEPTION_MESSAGING, LEST_LOST_EXCEPTION_STACK_TRACE, IMPROPER_UNICODE"/>
+      <Bug pattern="NFF_NON_FUNCTIONAL_FIELD, SE_TRANSIENT_FIELD_NOT_RESTORED, AI_ANNOTATION_ISSUES_NEEDS_NULLABLE"/>
+    </Or>
+  </Match>
+
+  <!-- Test scaffolding: the tests and interop peers use plain sockets, trust-all TLS, fixed passwords, seeded or
+       one-off Random instances, child processes, reflection into the classes under test, Thread.yield spins,
+       System.exit in peer mains, platform-independent fixture text, broad catches and ignored cleanup failures,
+       assertThrows lambdas whose result is unused, casts to the type a factory is known to return, tests whose
+       assertion is that nothing throws, AssertionErrors thrown with a cause, fixture fields kept for the test's
+       lifetime, streams owned by a child process or a pipe, and lists shared with carrier threads. -->
+  <Match>
+    <Source name="~.*/src/test/java/.*"/>
+    <Or>
+      <Bug pattern="PREDICTABLE_RANDOM, DMI_RANDOM_USED_ONLY_ONCE, WEAK_TRUST_MANAGER, UNENCRYPTED_SOCKET, UNENCRYPTED_SERVER_SOCKET"/>
+      <Bug pattern="COMMAND_INJECTION, HARD_CODE_PASSWORD, INFORMATION_EXPOSURE_THROUGH_AN_ERROR_MESSAGE, MDM_PROMISCUOUS_SERVERSOCKET, UNSAFE_HASH_EQUALS"/>
+      <Bug pattern="RFI_SET_ACCESSIBLE, MDM_RUNTIME_EXIT_OR_HALT, MDM_THREAD_YIELD, DM_GC, MDM_STRING_BYTES_ENCODING, IOI_USE_OF_FILE_STREAM_CONSTRUCTORS"/>
+      <Bug pattern="REC_CATCH_EXCEPTION, DE_MIGHT_IGNORE, BED_BOGUS_EXCEPTION_DECLARATION, RV_RETURN_VALUE_IGNORED_INFERRED, RV_RETURN_VALUE_IGNORED_BAD_PRACTICE"/>
+      <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE, NP_NULL_PARAM_DEREF_ALL_TARGETS_DANGEROUS, UTAO_JUNIT_ASSERTION_ODDITIES_NO_ASSERT, UTAO_JUNIT_ASSERTION_ODDITIES_INEXACT_DOUBLE"/>
+      <Bug pattern="SACM_STATIC_ARRAY_CREATED_IN_METHOD, PCAIL_POSSIBLE_CONSTANT_ALLOCATION_IN_LOOP, ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD, HES_EXECUTOR_NEVER_SHUTDOWN"/>
+      <Bug pattern="USO_UNSAFE_OBJECT_SYNCHRONIZATION, USO_UNSAFE_STATIC_METHOD_SYNCHRONIZATION, USO_UNSAFE_INHERITABLE_OBJECT_SYNCHRONIZATION, EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
+      <Bug pattern="UTAO_JUNIT_ASSERTION_ODDITIES_ASSERT_USED, UTAO_JUNIT_ASSERTION_ODDITIES_USE_ASSERT_NOT_EQUALS, URF_UNREAD_FIELD, UEC_USE_ENUM_COLLECTIONS"/>
+      <Bug pattern="OS_OPEN_STREAM, OS_OPEN_STREAM_EXCEPTION_PATH, LSYC_LOCAL_SYNCHRONIZED_COLLECTION, RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+      <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE, STT_TOSTRING_STORED_IN_FIELD, VO_VOLATILE_REFERENCE_TO_ARRAY, WOC_WRITE_ONLY_COLLECTION_LOCAL"/>
+    </Or>
+  </Match>
 
   <!-- Zero-copy handoff. The internal.* packages (exported only to the sibling modules) pass byte arrays,
        buffers and live objects between the core, the loop and the carriers without copying: a defensive copy on
@@ -103,12 +177,14 @@
       <Class name="io.zmux.internal.loop.SessionRuntime$JoinerGate"/>
       <Class name="io.zmux.internal.loop.SocketTransport"/>
       <Class name="io.zmux.internal.loop.TlsTransport"/>
+      <And><Class name="io.zmux.ZmuxFuture"/><Method name="discard"/></And>
+      <And><Class name="io.zmux.internal.loop.ListenerHub"/><Method name="closeQuietly"/></And>
     </Or>
   </Match>
 
   <!-- Tri-state results: null is the third answer (unknown scheme; registered and waiting). -->
   <Match>
-    <Bug pattern="NP_BOOLEAN_RETURN_NULL"/>
+    <Bug pattern="NP_BOOLEAN_RETURN_NULL, TBP_TRISTATE_BOOLEAN_PATTERN"/>
     <Or>
       <Class name="io.zmux.http.Redirects"/>
       <Class name="io.zmux.internal.core.Session"/>
@@ -135,6 +211,103 @@
     <Bug pattern="MS_EXPOSE_REP"/>
     <Class name="io.zmux.quic.QuicServer"/>
     <Method name="streamHandler"/>
+  </Match>
+
+  <!-- Fields read and written only through VarHandles (CAS on the lane's waiter and the operation's state). -->
+  <Match>
+    <Bug pattern="UWF_UNWRITTEN_FIELD, UUF_UNUSED_FIELD"/>
+    <Or>
+      <And><Class name="io.zmux.internal.loop.RecvLane"/><Field name="waiter"/></And>
+      <And><Class name="io.zmux.internal.loop.SendLane"/><Field name="waiter"/></And>
+      <And><Class name="io.zmux.internal.loop.Operation"/><Or><Field name="state"/><Field name="listener"/></Or></And>
+    </Or>
+  </Match>
+
+  <!-- Locals javac synthesises for record patterns in a switch, and collections handed to a constructor that the
+       detector does not follow. -->
+  <Match>
+    <Bug pattern="DLS_DEAD_LOCAL_STORE"/>
+    <Class name="io.zmux.CarrierCache$Snapshot"/>
+  </Match>
+  <Match>
+    <Bug pattern="WOC_WRITE_ONLY_COLLECTION_LOCAL"/>
+    <Class name="io.zmux.PipeMaintenance"/>
+    <Method name="consult"/>
+  </Match>
+  <Match>
+    <Bug pattern="WOC_WRITE_ONLY_COLLECTION_FIELD, DMC_DUBIOUS_MAP_COLLECTION"/>
+    <Class name="io.zmux.shaping.machine.Bundle"/>
+  </Match>
+  <Match>
+    <Bug pattern="USBR_UNNECESSARY_STORE_BEFORE_RETURN"/>
+    <Class name="io.zmux.internal.join.Joiner"/>
+    <Method name="writeConfirm"/>
+  </Match>
+
+  <!-- The splice's turn lock is handed between the two directions: a direction may release the lock the other
+       took, checks whether it holds it, and takes it with tryLock when offered a turn. -->
+  <Match>
+    <Bug pattern="CWO_CLOSED_WITHOUT_OPENED, MDM_LOCK_ISLOCKED, MDM_THREAD_FAIRNESS"/>
+    <Class name="io.zmux.Splice$Direction"/>
+  </Match>
+  <!-- The datagram relays are best effort and end with the splice; the executor's close awaits them. -->
+  <Match>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE"/>
+    <Class name="io.zmux.Splice"/>
+    <Method name="runOwned"/>
+  </Match>
+
+  <!-- A bounded packet queue: each added packet wakes one reader and each taken packet one writer, all waiting for
+       the same condition; end() returns early under the lock, which the detector reads as an unmatched unlock. -->
+  <Match>
+    <Bug pattern="MDM_SIGNAL_NOT_SIGNALALL, CWO_CLOSED_WITHOUT_OPENED"/>
+    <Class name="io.zmux.helper.PacketStream"/>
+  </Match>
+
+  <!-- Jitter and sampling, not security: retry, rotation and probe spreading. -->
+  <Match>
+    <Bug pattern="PREDICTABLE_RANDOM"/>
+    <Or>
+      <Class name="io.zmux.http.ExchangeClient"/>
+      <Class name="io.zmux.quic.QuicPool"/>
+      <Class name="~io\.zmux\.Chunk(\$.*)?"/>
+      <Class name="io.zmux.PipeMaintenance"/>
+      <Class name="io.zmux.Redialer"/>
+    </Or>
+  </Match>
+
+  <!-- Loop-confined table of the session runtime, written by the loop that owns it. -->
+  <Match>
+    <Bug pattern="PA_PUBLIC_MUTABLE_OBJECT_ATTRIBUTE"/>
+    <Class name="io.zmux.internal.loop.SessionRuntime"/>
+    <Field name="pickers"/>
+  </Match>
+
+  <!-- One MAC per thread for each verifier's key: the thread-local belongs to the key, not to the class. -->
+  <Match>
+    <Bug pattern="PMB_INSTANCE_BASED_THREAD_LOCAL"/>
+    <Class name="io.zmux.PrefixAuth$Verifier"/>
+  </Match>
+
+  <!-- Passes itself to the shared static end-of-transport routine. -->
+  <Match>
+    <Bug pattern="SPP_PASSING_THIS_AS_PARM"/>
+    <Class name="io.zmux.internal.loop.SealedTransport"/>
+    <Method name="openFailed"/>
+  </Match>
+
+  <!-- Swaps the scheme of an already validated URI string. -->
+  <Match>
+    <Bug pattern="ITU_INAPPROPRIATE_TOSTRING_USE"/>
+    <Class name="io.zmux.http.WebSocketClient"/>
+    <Method name="attempt"/>
+  </Match>
+
+  <!-- An exact tie between two computed arrival estimates falls back to the pipe id. -->
+  <Match>
+    <Bug pattern="FE_FLOATING_POINT_EQUALITY"/>
+    <Class name="io.zmux.internal.core.PathScheduler"/>
+    <Method name="earliestTwo"/>
   </Match>
 
 </FindBugsFilter>

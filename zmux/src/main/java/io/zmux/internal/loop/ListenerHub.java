@@ -515,6 +515,8 @@ public final class ListenerHub {
                 synchronized (ListenerHub.this) { if (done || down.done) return; }
                 down.stopTimers();
                 ExternalTransport moved = (ExternalTransport) down.carrier.moveTo(carrier.loop);
+                // moveTo returns null for a carrier that cannot move (closed, writing, a session on it); the analyzer does not follow that.
+                //noinspection ConstantValue
                 if (moved == null) { fail(Outcome.REJECTED); return; }
                 if (!carrier.loop().tryExecute(() -> finishPair(down, moved))) { moved.close(null); fail(Outcome.REFUSED); }
             })) fail(Outcome.REFUSED);

@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(30)
 class SplitBootstrapTest {
     static String token(int value) { byte[] token = new byte[16]; token[0] = (byte) value; return Base64.getUrlEncoder().withoutPadding().encodeToString(token); }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void halvesPairInEitherOrderAndTokenStaysUsedUntilTheSessionEnds() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
@@ -71,8 +72,9 @@ class SplitBootstrapTest {
             assertEquals(0, loops.outstandingBuffers());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void splitExporterBindsBothHalvesInUplinkDownlinkOrder() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (EventLoops loops = EventLoops.create(2); var _ = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.exporter().withEndToEnd()).noProbation().build();
             try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
                 PipeIo.Exporter upKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 3); return key; };
@@ -130,7 +132,7 @@ class SplitBootstrapTest {
                 try { return Zmux.open(memory[1], Role.SERVER, cfg); } catch (Exception e) { throw new CompletionException(e); }
             }, r -> Thread.ofVirtual().start(r));
             ZmuxSession client = Zmux.open(new PipeIo(tapped, memory[0].writer(), Framing.BYTE_STREAM, "memory", null), Role.CLIENT, cfg);
-            try (ZmuxSession peer = server.get(5, TimeUnit.SECONDS)) {
+            try (ZmuxSession _ = server.get(5, TimeUnit.SECONDS)) {
                 AtomicInteger released = new AtomicInteger();
                 var entered = new CountDownLatch(1); var proceed = new CountDownLatch(1);
                 client.driver.executeCarrier(() -> { entered.countDown(); try { proceed.await(); } catch (InterruptedException ignored) { } });

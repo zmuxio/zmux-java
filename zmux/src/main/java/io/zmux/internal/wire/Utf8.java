@@ -2,6 +2,7 @@ package io.zmux.internal.wire;
 
 import java.nio.charset.StandardCharsets;
 
+/** UTF-8 helpers of the wire layer. */
 public final class Utf8 {
     private Utf8() {}
 

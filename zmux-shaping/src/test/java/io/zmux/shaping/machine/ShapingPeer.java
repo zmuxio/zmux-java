@@ -81,7 +81,7 @@ public final class ShapingPeer {
             for (var t : tasks) t.get(30, TimeUnit.SECONDS);
         }
         session.closed().get(30, TimeUnit.SECONDS);
-        return report(session, factory != null, false);
+        return report(session, factory != null);
     }
 
     /** Sends {@link #STREAMS} payloads, checks their echoes, closes and returns the STATS line. */
@@ -105,13 +105,13 @@ public final class ShapingPeer {
             for (var t : tasks) t.get(30, TimeUnit.SECONDS);
         }
         Thread.sleep(300); // injections run on a timer
-        String line = report(session, factory != null, true);
+        String line = report(session, factory != null);
         session.close();
         session.closed().get(5, TimeUnit.SECONDS);
         return line;
     }
 
-    static String report(ZmuxSession session, boolean shaped, boolean client) throws IOException {
+    static String report(ZmuxSession session, boolean shaped) throws IOException {
         var st = session.shapingStats();
         String line = "STATS wire_spent=" + st.wireSpent() + " injected=" + st.injected() + " dropped=" + st.injectDropped()
                 + " clamped=" + st.clamped() + " faults=" + st.faults();

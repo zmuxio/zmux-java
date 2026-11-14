@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import java.io.IOException;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.*;
 import io.zmux.carrier.PipeIo;
@@ -97,8 +98,9 @@ class QuicPoolTest {
             if (lifetime > 0) l = l.withMaxPipesPerConnectionLifetime(lifetime);
             return age.isZero() ? l : l.withMaxConnectionAge(age);
         }
-        @Override public void close() throws Exception { client.close();server.close();local.close();remote.close();loops.close();assertEquals(0,io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops)); }
+        @Override public void close() throws IOException { client.close();server.close();local.close();remote.close();loops.close();assertEquals(0,io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops)); }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void concurrentRequestsShareDialsAndRespectReservationLimits() throws Exception {
         try (var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO)) {
             var futures=new ArrayList<CompletableFuture<PipeIo>>();
@@ -140,6 +142,7 @@ class QuicPoolTest {
             release(one);until(() -> !original.isActive());release(two);until(() -> pool.connections().isEmpty());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void poolCloseKeepsJoinedTrafficAndReleasesConnectionAfterItsStreamsEnd() throws Exception {
         try(var f=new Fixture();var workers=Executors.newVirtualThreadPerTaskExecutor();var pool=f.pool(2,0,Duration.ZERO)) {
             var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
@@ -173,6 +176,7 @@ class QuicPoolTest {
             until(() -> pool.connections().isEmpty() && !connection.isActive());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void failedConnectionsAreNotReusedAndOneCancelledWaiterDoesNotCancelOtherDialWaiters() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO)) {
             var old=pool.openPipeAsync().get(5,TimeUnit.SECONDS);
@@ -212,9 +216,11 @@ class QuicPoolTest {
             } finally { nativeProceed.countDown();finishFailure.countDown();stopping.get(4,TimeUnit.SECONDS); }
         }
     }
+    @SuppressWarnings("UndefinedEquals") // the wrapped set holds CompletableFutures, whose equality is identity
     @Test void cancelledOldFactoryCannotStartAlongsideItsReplacement() throws Exception {
         try(var f=new Fixture();var pool=f.pool(1,0,Duration.ZERO)) {
             var field=QuicClient.class.getDeclaredField("pending");field.setAccessible(true);
+            // The field's declared type, read by reflection.
             @SuppressWarnings("unchecked") var original=(java.util.Set<CompletableFuture<?>>)field.get(f.client);
             var calls=new java.util.concurrent.atomic.AtomicInteger();var entered=new CountDownLatch(1);var proceed=new CountDownLatch(1);
             java.util.Set<CompletableFuture<?>> gate=new java.util.AbstractSet<>() {
@@ -260,6 +266,7 @@ class QuicPoolTest {
             assertEquals(0,notSeen.get());assertEquals(1,failedEarly.get());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void oneNativeConnectionServesSeveralSessionsAndClosingOneDoesNotCloseTheOthers() throws Exception {
         try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=pool.openPipeAsync().get(5,TimeUnit.SECONDS);

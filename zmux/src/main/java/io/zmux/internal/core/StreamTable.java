@@ -356,7 +356,7 @@ public final class StreamTable {
         }
     }
 
-    private Stream newStream(boolean bidi, boolean local) {
+    private static Stream newStream(boolean bidi, boolean local) {
         return new Stream(bidi, local);
     }
 

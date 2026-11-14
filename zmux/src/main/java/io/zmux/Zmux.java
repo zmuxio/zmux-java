@@ -33,8 +33,9 @@ public final class Zmux {
 
     /**
      * Transfers both streams to a bounded, bidirectional relay. Cancelling the returned future, or
-     * completing it from outside ({@link ZmuxFuture#orTimeout}), cancels the splice: both streams are reset and stopped with code 0
-     * and there is no result. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
+     * completing it from outside ({@link ZmuxFuture#orTimeout}), cancels the splice: both streams are reset with ZMUX_CANCELLED (0x5a4d0001) and stopped with code 0
+     * and there is no result. A {@link SpliceControl} in the options ends the splice with a chosen code instead: both
+     * streams are reset and stopped with it and the result reports {@link SpliceResult.End.Cancelled}. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
      * finished, with how each direction ended, or exceptionally when a limiter failed, for stream data or for datagrams (the limiter's exception is the
      * cause of the {@link java.io.IOException} the stage completes with). The ownership cleanup waits
      * for each stream's event loop at most one second; a loop that does not answer by then completes the stage

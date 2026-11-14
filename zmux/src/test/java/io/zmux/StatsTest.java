@@ -1,5 +1,6 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Timeout;
 /** The session and pipe statistics: each count is checked against what the test made happen. */
 @Timeout(60)
 class StatsTest {
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test
     void streamAndSessionCountsFollowTheirEvents() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -146,12 +148,12 @@ class StatsTest {
                 assertEquals(0, l.stats().joins());
 
                 // A carrier without a first record times out; one that is not zmux is rejected.
-                try (Socket idle = new Socket(l.localAddress().getAddress(), l.localAddress().getPort())) {
+                try (Socket _ = new Socket(l.localAddress().getAddress(), l.localAddress().getPort())) {
                     PipePoolTest.await(() -> l.stats().timedOut() == 1);
                 }
                 try (Socket junk = new Socket(l.localAddress().getAddress(), l.localAddress().getPort())) {
                     OutputStream out = junk.getOutputStream();
-                    out.write("GET / HTTP/1.1\r\n\r\n".getBytes());
+                    out.write("GET / HTTP/1.1\r\n\r\n".getBytes(UTF_8));
                     out.flush();
                     PipePoolTest.await(() -> l.stats().rejected() == 2);
                 }

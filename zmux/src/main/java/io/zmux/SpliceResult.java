@@ -4,7 +4,7 @@ package io.zmux;
  * How a splice ended: per direction the stream bytes and datagram bytes forwarded (together what
  * was charged to the direction's limiter), the datagrams dropped, and the event that ended it. A queued datagram is
  * not an acknowledgement of peer delivery. Cancelling the stage is the cancellation of the splice: it then has no
- * result.
+ * result; a cancellation through {@link SpliceControl#cancel(long)} has one.
  */
 public record SpliceResult(Direction aToB, Direction bToA) {
     /** How one direction ended. */
@@ -23,6 +23,9 @@ public record SpliceResult(Direction aToB, Direction bToA) {
 
         /** The downstream stream's session closed or was lost. */
         record DownstreamLost() implements End {}
+
+        /** The splice was cancelled through its {@link SpliceControl}: both streams were reset and stopped with code. */
+        record Cancelled(long code) implements End {}
     }
 
     /**

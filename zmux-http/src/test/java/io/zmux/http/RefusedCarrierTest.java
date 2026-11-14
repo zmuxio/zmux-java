@@ -1,8 +1,10 @@
 package io.zmux.http;
 
-import io.zmux.AdmissionVerdict;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
+
 import io.zmux.Admission;
+import io.zmux.AdmissionVerdict;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
 import io.zmux.Zmux;
@@ -23,15 +25,15 @@ class RefusedCarrierTest {
     }
 
     static String chunked(byte[] body) {
-        return Integer.toHexString(body.length) + "\r\n" + new String(body) + "\r\n0\r\n\r\n";
+        return Integer.toHexString(body.length) + "\r\n" + new String(body, UTF_8) + "\r\n0\r\n\r\n";
     }
 
-    static final byte[] GARBAGE = "GET / HTTP/1.1 is not a zmux record, and it goes on for a while longer".getBytes();
+    static final byte[] GARBAGE = "GET / HTTP/1.1 is not a zmux record, and it goes on for a while longer".getBytes(UTF_8);
 
     @Test void aRefusedFirstRecordGoesToTheHostWithItsBody() throws Exception {
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
         try (var f = fixture(seen)) {
-            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes());
+            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes(UTF_8));
             assertTrue(got.startsWith("HTTP/1.1 200") && got.endsWith("host"), "[" + got + "]");
             var s = seen.poll(2, TimeUnit.SECONDS);
             assertNotNull(s);
@@ -56,9 +58,9 @@ class RefusedCarrierTest {
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
         try (var f = fixture(seen)) {
             for (String join : new String[] {"not-a-join", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}) {
-                byte[] body = ("uplink bytes for " + join).getBytes();
+                byte[] body = ("uplink bytes for " + join).getBytes(UTF_8);
                 String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nZmux-Pipe-Pair: " + join
-                        + "\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(body).getBytes());
+                        + "\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(body).getBytes(UTF_8));
                 assertTrue(got.endsWith("host"), got);
                 var s = seen.poll(2, TimeUnit.SECONDS);
                 assertNotNull(s, join);
@@ -75,7 +77,7 @@ class RefusedCarrierTest {
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
         try (var f = fixture(seen)) {
             f.listener.close();
-            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes());
+            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes(UTF_8));
             assertTrue(got.endsWith("host"), got);
             assertArrayEquals(GARBAGE, seen.poll(2, TimeUnit.SECONDS).body());
         }
@@ -88,7 +90,7 @@ class RefusedCarrierTest {
             var seen = new LinkedBlockingQueue<HostHandler.Seen>();
             try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> d))), e -> e.streaming(), false,
                     () -> new HostHandler(seen))) {
-                String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes());
+                String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes(UTF_8));
                 assertFalse(got.endsWith("host"), d + ": " + got);
                 assertEquals(d.verdict() == AdmissionVerdict.ACCEPT, got.startsWith("HTTP/1.1 200"), d + ": " + got);
                 assertNull(seen.poll(300, TimeUnit.MILLISECONDS), d + " reached the host");

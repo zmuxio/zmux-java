@@ -188,6 +188,8 @@ final class Router extends ChannelInboundHandlerAdapter {
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
         io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> fallback(c, r, given)));
+        // The verdict and the taken flag come from the listener adapter in another module; the analyzer takes the result for a constant.
+        //noinspection ConstantValue
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
                 .whenComplete((no, e) -> refused.complete(Boolean.TRUE.equals(no)));
         a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {

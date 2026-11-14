@@ -25,6 +25,7 @@ class LivenessTest {
      * A last pipe whose T_dead equals its T_suspect (DeadTimeout below T_suspect) fails in the timer pass that makes
      * it suspect: the session without resume ends with its pipes lost at once, not at its idle timeout.
      */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aDeadTimeoutBelowTheSuspicionFailsTheLastPipeInTheSamePass() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noKeepAlive().probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1)).suspectFloor(Duration.ofSeconds(2)).build())
@@ -48,6 +49,7 @@ class LivenessTest {
      * An end with its idle probes turned off still answers the peer's PIPE_PING on the probed pipe pair, and adds a
      * PIPE_PING of its own once that pipe has been idle for max(1 s, T_suspect): one exchange checks both directions.
      */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anEndWithProbesOffAnswersWithAProbeOfItsOwn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().probeJitter(0).noKeepAlive().build())).build();

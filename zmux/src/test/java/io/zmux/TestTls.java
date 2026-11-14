@@ -1,5 +1,7 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import java.io.FileInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,7 +31,7 @@ final class TestTls {
                     "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
                     "-keypass", "changeit").redirectErrorStream(true).start();
             if (!p.waitFor(60, TimeUnit.SECONDS) || p.exitValue() != 0) {
-                throw new IllegalStateException("keytool failed: " + new String(p.getInputStream().readAllBytes()));
+                throw new IllegalStateException("keytool failed: " + new String(p.getInputStream().readAllBytes(), UTF_8));
             }
         }
         KeyStore store = KeyStore.getInstance("PKCS12");

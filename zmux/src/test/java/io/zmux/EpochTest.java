@@ -1,5 +1,7 @@
 package io.zmux;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -69,10 +71,10 @@ class EpochTest {
         var off = ZmuxConfig.builder().noEpochPeriod().noEpochJoins().epochAfterFirstPipe(false).epochAfterResume(false).build();
         assertEquals(java.util.Optional.empty(), off.epochPeriod());
         assertEquals(java.util.OptionalLong.empty(), off.epochJoins());
-        assertEquals(false, off.isEpochAfterFirstPipe());
-        assertEquals(false, off.isEpochAfterResume());
-        assertEquals(true, ZmuxConfig.builder().build().isEpochAfterFirstPipe());
-        assertEquals(true, ZmuxConfig.builder().build().isEpochAfterResume());
+        assertFalse(off.isEpochAfterFirstPipe());
+        assertFalse(off.isEpochAfterResume());
+        assertTrue(ZmuxConfig.builder().build().isEpochAfterFirstPipe());
+        assertTrue(ZmuxConfig.builder().build().isEpochAfterResume());
     }
 
     /**
@@ -142,11 +144,11 @@ class EpochTest {
     @Test void replacePipesNeedsRedialAndAdvanceNeedsMultipath() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                 assertThrows(IllegalStateException.class, () -> c.replacePipes());
             }
             var single = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(single)); var c = Zmux.connect(l.localAddress(), single); var s = l.accept(WAIT)) {
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(single)); var c = Zmux.connect(l.localAddress(), single); var _ = l.accept(WAIT)) {
                 assertThrows(NotNegotiatedException.class, c::advanceEpoch);
             }
         }

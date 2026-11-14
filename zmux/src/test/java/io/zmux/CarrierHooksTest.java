@@ -291,7 +291,6 @@ class CarrierHooksTest {
                 if (prefix.remaining() == 6) return new Admission.Decision(AdmissionVerdict.ACCEPT, 6, "v", 0, "x");
                 return Admission.Decision.CLOSE;
             })).withMaxPeek(16).withPeekTimeout(WAIT);
-            var transformSeen = new java.util.concurrent.atomic.AtomicReference<String>();
             var lc = ListenerConfig.builder().session(cfg).admission(adm).build();
             try (var l = ZmuxListener.of(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -301,7 +300,7 @@ class CarrierHooksTest {
                 write(p[0], new byte[] {2});
                 Thread.sleep(50);
                 write(p[0], new byte[] {3, 4, 5, 6});
-                try (var c = Zmux.open(p[0], Role.CLIENT, cfg); var s = l.accept(WAIT)) {
+                try (var _ = Zmux.open(p[0], Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertNotNull(s);
                     assertEquals("v", s.admitted().orElse(null));
                     assertEquals(List.of(2, 6), seen);
@@ -403,7 +402,7 @@ class CarrierHooksTest {
                 var p = MemoryPipe.pair(Framing.MESSAGES);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[] {9, 8, 7});
-                try (var c = Zmux.open(p[0], Role.CLIENT, cfg); var s = l.accept(WAIT)) {
+                try (var _ = Zmux.open(p[0], Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertNotNull(s, "the session's records follow the skipped message");
                     assertArrayEquals(new byte[] {9, 8, 7}, prefix.get());
                 }
@@ -446,7 +445,7 @@ class CarrierHooksTest {
             try (var l = ZmuxListener.of(ListenerConfig.builder().session(base).sessionConfigs((info, admitted) -> chosen).build())) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
-                try (var c = Zmux.open(p[0], Role.CLIENT, base); var s = l.accept(WAIT)) {
+                try (var _ = Zmux.open(p[0], Role.CLIENT, base); var s = l.accept(WAIT)) {
                     assertSame(chosenCredential, s.credential());
                 }
             }
@@ -463,7 +462,7 @@ class CarrierHooksTest {
             try (var l = ZmuxListener.of(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
-                try (var client = Zmux.open(p[0], Role.CLIENT, c); var s = l.accept(WAIT)) {
+                try (var _ = Zmux.open(p[0], Role.CLIENT, c); var s = l.accept(WAIT)) {
                     assertNotNull(s);
                     assertEquals(1, infos.get());
                     assertTrue(waitPending(s), "the chosen configuration's deferred PSK");
@@ -492,7 +491,7 @@ class CarrierHooksTest {
             try (var l = ZmuxListener.of(ListenerConfig.of(c))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
-                try (var client = Zmux.open(p[0].withVariant("w"), Role.CLIENT, c); var s = l.accept(WAIT)) {
+                try (var client = Zmux.open(p[0].withVariant("w"), Role.CLIENT, c); var _ = l.accept(WAIT)) {
                     client.setShaper(pipe -> { shaped.add(pipe.variant()); return null; });
                     try (var st = client.openStream()) {
                         st.write(new byte[] {1});

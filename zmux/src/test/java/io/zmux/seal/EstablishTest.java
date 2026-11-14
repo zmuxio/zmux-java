@@ -170,7 +170,7 @@ class EstablishTest {
     void requiredPqAuthenticationFailsWithoutAProof() throws Exception {
         StaticKey sKey = StaticKey.generate();
         var j = replied(sKey, null).client().verify(new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())), null, false);
-        assertEquals(false, j.pqAuthenticated());
+        assertFalse(j.pqAuthenticated());
         assertEquals(Principal.NODE_KEY, j.verdict().principal().type());
         assertArrayEquals(KeyId.of(KeyAlg.X25519, sKey.publicKey()), j.verdict().principal().bytes());
         assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
@@ -222,7 +222,7 @@ class EstablishTest {
             EstablishServer.Finish fin = x.server().readFinish(finish, 0, finish.length);
             assertTrue(x.server().verify(naming(CLIENT_PROOF.keyId()), fin, null, true).pqAuthenticated());
             // A verdict without a proof key does not look at the proof: no PQ authentication.
-            assertEquals(false, x.server().verify(naming(null), fin, null, false).pqAuthenticated());
+            assertFalse(x.server().verify(naming(null), fin, null, false).pqAuthenticated());
             assertNotNull(x.client().finish());
         }
     }

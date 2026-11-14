@@ -43,9 +43,10 @@ class PipePoolTest {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM); listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("pool"))).closed();
             return attempt.join(io[0]);
         }; }
-        @Override public void close() throws Exception { client.close(); server.close(); client.awaitClosed(); server.awaitClosed(); listener.close(); }
+        @Override public void close() throws IOException { client.close(); server.close(); client.awaitClosed(); server.awaitClosed(); listener.close(); }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void maintainsTcpMembersAndReplacesFailureWithoutOwningTrafficScheduling() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops, 4);
@@ -119,7 +120,7 @@ class PipePoolTest {
                 if (n > 2) delivered.thenRun(() -> delegate.write(batch, done)); else delegate.write(batch, done);
                 return;
             }
-            var copy = java.nio.ByteBuffer.allocate((int)batch.bytes());
+            var copy = java.nio.ByteBuffer.allocate(batch.bytes());
             for (int i = 0; i < batch.segmentCount(); i++) copy.put(batch.segment(i).duplicate());
             done.completed();
             CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(() -> delegate.write(io.zmux.carrier.OutboundBatch.of(copy.flip()), new Completion() {
@@ -343,6 +344,7 @@ class PipePoolTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void stalledTlsAttemptCancelsPromptlyAndOwnerShutdownClosesItToo() throws Exception {
         for (boolean shutdown : new boolean[] {false, true}) {
             try (EventLoops loops = EventLoops.create(2); var f = new Fixture(config(loops, 3));

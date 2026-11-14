@@ -120,7 +120,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
     private final Spec spec;
     private final Sampler sampler;
     /** Shared values, by the value's place. */
-    @SuppressWarnings("IdentityHashMapUsage") // values are told apart by identity: equal values of different declarations are distinct
+    @SuppressWarnings({"IdentityHashMapUsage", "ValueClassIdentity"}) // keys are told apart by identity: equal values of different declarations are distinct; the Long values are not compared
     private final Map<Value, Long> shared = new java.util.IdentityHashMap<>();
     /** Per member, by rule: the word of its jitter and its kept threshold. */
     private final HashMap<Long, MemberState> members = new HashMap<>();

@@ -333,6 +333,7 @@ class CloseHandOffTest {
     }
 
     /** Over one socket channel, the sending half's close sends FIN and the receiving half keeps reading. */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aChannelPipesSendingHalfClosesWithFin() throws Exception {
         try (var server = java.nio.channels.ServerSocketChannel.open().bind(NetworkTest.any());
              var ch = java.nio.channels.SocketChannel.open(server.getLocalAddress());

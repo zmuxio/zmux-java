@@ -101,7 +101,7 @@ final class Limiter {
         return inFlight <= bdp + p.slack(rate);
     }
 
-    private long plen(int k, long u, boolean downDone) {
+    private static long plen(int k, long u, boolean downDone) {
         if (k == DOWN_PHASE) return downDone ? 0 : u * DOWN_PHASES;
         return u;
     }

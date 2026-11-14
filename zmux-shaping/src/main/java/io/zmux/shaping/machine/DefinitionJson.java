@@ -263,45 +263,45 @@ final class DefinitionJson {
         if (!(x instanceof Map<?, ?> raw)) throw err(TYPE, "action");
         Op op = named(Op.class, raw.get("op"), "op");
         String id = op.name().toLowerCase(Locale.ROOT);
-        switch (op) {
+        return switch (op) {
             case INJECT -> {
                 Map<String, Object> d = members(x, Set.of("op", "cancel", "after", "len"), id);
                 if (cancel(d)) {
                     if (d.containsKey("after") || d.containsKey("len")) throw err(UNKNOWN_MEMBER, "inject cancel");
-                    return new Action(op, true, -1, null, null, null, null, null);
+                    yield new Action(op, true, -1, null, null, null, null, null);
                 }
-                return new Action(op, false, -1, req(d, "after", Family.TIME, tables, id), req(d, "len", Family.LENGTH, tables, id), null, null, null);
+                yield new Action(op, false, -1, req(d, "after", Family.TIME, tables, id), req(d, "len", Family.LENGTH, tables, id), null, null, null);
             }
             case PAUSE -> {
                 Map<String, Object> d = members(x, Set.of("op", "after"), id);
-                return new Action(op, false, -1, req(d, "after", Family.TIME, tables, id), null, null, null, null);
+                yield new Action(op, false, -1, req(d, "after", Family.TIME, tables, id), null, null, null, null);
             }
             case RATE -> {
                 Map<String, Object> d = members(x, Set.of("op", "rate", "burst"), id);
-                return new Action(op, false, -1, null, null, req(d, "rate", Family.RATE, tables, id), optional(d, "burst", Family.LENGTH, tables), null);
+                yield new Action(op, false, -1, null, null, req(d, "rate", Family.RATE, tables, id), optional(d, "burst", Family.LENGTH, tables), null);
             }
             case TIMER -> {
                 Map<String, Object> d = members(x, Set.of("op", "slot", "cancel", "after"), id);
                 int s = slot(d, nt, id);
                 if (cancel(d)) {
                     if (d.containsKey("after")) throw err(UNKNOWN_MEMBER, "timer cancel");
-                    return new Action(op, true, s, null, null, null, null, null);
+                    yield new Action(op, true, s, null, null, null, null, null);
                 }
-                return new Action(op, false, s, req(d, "after", Family.TIME, tables, id), null, null, null, null);
+                yield new Action(op, false, s, req(d, "after", Family.TIME, tables, id), null, null, null, null);
             }
             case SET, ADD, SUB -> {
                 Map<String, Object> d = members(x, Set.of("op", "slot", "value"), id);
-                return new Action(op, false, slot(d, nc, id), null, null, null, null, req(d, "value", Family.COUNTER, tables, id));
+                yield new Action(op, false, slot(d, nc, id), null, null, null, null, req(d, "value", Family.COUNTER, tables, id));
             }
             case WEIGHT -> {
                 Map<String, Object> d = members(x, Set.of("op", "value"), id);
-                return new Action(op, false, -1, null, null, null, null, req(d, "value", Family.WEIGHT, tables, id));
+                yield new Action(op, false, -1, null, null, null, null, req(d, "value", Family.WEIGHT, tables, id));
             }
             default -> {
                 members(x, Set.of("op"), id);
-                return new Action(op, false, -1, null, null, null, null, null);
+                yield new Action(op, false, -1, null, null, null, null, null);
             }
-        }
+        };
     }
 
     private static Transition transition(Object x, Tables tables, int n, int nc, int nt) throws DefinitionException {
@@ -628,7 +628,7 @@ final class DefinitionJson {
                 while (i < s.length() && digit(s.charAt(i))) i++;
             }
             String t = s.substring(start, i);
-            if (!integral) return Double.parseDouble(t);
+            if (!integral) return Double.valueOf(t);
             // More digits than any value here has: out of range whatever they say, and converting them costs n^2.
             if (t.length() - (t.charAt(0) == '-' ? 1 : 0) > MAX_DIGITS) return t.charAt(0) == '-' ? BEYOND.negate() : BEYOND;
             BigInteger b = new BigInteger(t);

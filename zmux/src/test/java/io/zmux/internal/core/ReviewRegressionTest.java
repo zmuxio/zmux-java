@@ -82,7 +82,7 @@ class ReviewRegressionTest {
             ps.apply(e);
         }
         assertEquals(Duration.ofMillis(10), s.shapingStats().stallSpent());
-        s.setNow(now += Time.MILLISECOND);
+        s.setNow(now + Time.MILLISECOND);
         ps.apply(new Effects().gate(Time.SECOND + Time.SECOND + 5 * Time.MILLISECOND, 0, 0));
         assertEquals(Duration.ofMillis(15), s.shapingStats().stallSpent());
     }

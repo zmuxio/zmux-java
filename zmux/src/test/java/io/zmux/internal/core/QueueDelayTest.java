@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
  * without that batch: the bytes of write calls in progress plus the carrier's unsent count.
  */
 class QueueDelayTest {
-    private static long expected(PathHealth h, PathMetrics m, Pipe p, long ahead) {
+    private static long expected(PathMetrics m, Pipe p, long ahead) {
         long queue = (long) Math.min(Time.SECOND, ahead / m.rateOf(p) * Time.SECOND);
         long floor = CoreConfig.builder().build().suspectFloor();
         return Math.max(floor, Time.mul(Time.add(m.pto(p.mp()), queue), 2));
@@ -39,7 +39,7 @@ class QueueDelayTest {
         double rateAtHandOver = m.rateOf(p);
         assertEquals(PathHealth.queueDelay(200 << 10, rateAtHandOver), p.mp().link.oldestQueue(), "the snapshot is Q_p without the batch over R_p");
         long slow = h.tSuspect(p);
-        assertEquals(expected(h, m, p, 200 << 10), slow);
+        assertEquals(expected(m, p, 200 << 10), slow);
         assertTrue(slow > idle, "T_suspect grows with the carrier's queue: " + slow + " <= " + idle);
         long queue = PathHealth.queueDelay(200 << 10, m.rateOf(p));
         assertEquals(Math.max(2 * Time.SECOND, Time.mul(Time.add(m.pto(p.mp()), queue), 8)), h.tFail(p));
@@ -61,7 +61,7 @@ class QueueDelayTest {
         handOver(t);
         long capped = t.mp().health.tSuspect(q);
         assertEquals(Time.mul(Time.add(t.mp().metrics.pto(q.mp()), Time.SECOND), 2), capped);
-        assertEquals(expected(t.mp().health, t.mp().metrics, q, 64L << 20), capped);
+        assertEquals(expected(t.mp().metrics, q, 64L << 20), capped);
     }
 
     @Test void queueDelayIsCappedAtOneSecond() {

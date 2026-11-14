@@ -8,7 +8,6 @@ import io.zmux.seal.Seal;
 import io.zmux.seal.ServerConfig;
 import java.net.InetSocketAddress;
 import java.time.Duration;
-import java.util.List;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;

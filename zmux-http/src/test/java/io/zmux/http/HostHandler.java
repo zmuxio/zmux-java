@@ -1,5 +1,7 @@
 package io.zmux.http;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -30,7 +32,7 @@ final class HostHandler extends ChannelInboundHandlerAdapter {
             if (msg instanceof HttpContent c) body.writeBytes(ByteBufUtil.getBytes(c.content()));
             if (msg instanceof LastHttpContent && req != null) {
                 seen.add(new Seen(req.method().name(), req.uri(), body.toByteArray()));
-                var resp = new DefaultFullHttpResponse(req.protocolVersion(), HttpResponseStatus.OK, Unpooled.copiedBuffer("host".getBytes()));
+                var resp = new DefaultFullHttpResponse(req.protocolVersion(), HttpResponseStatus.OK, Unpooled.copiedBuffer("host".getBytes(UTF_8)));
                 HttpUtil.setContentLength(resp, 4);
                 ctx.writeAndFlush(resp);
                 req = null;

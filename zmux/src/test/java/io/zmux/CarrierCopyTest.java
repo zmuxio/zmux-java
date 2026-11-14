@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.*;
 import io.zmux.internal.diag.Diagnostics;
 import java.nio.ByteBuffer;
-import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.Random;
 import java.util.concurrent.*;
@@ -47,12 +46,12 @@ class CarrierCopyTest {
             boolean now = end || bytes.length < 4096;
             byte[] all = pending.toByteArray();
             int at = 0;
-            for (; all.length - at >= CHUNK || now && at < all.length; at += Math.min(CHUNK, all.length - at)) {
+            for (; all.length - at >= CHUNK || (now && at < all.length); at += Math.min(CHUNK, all.length - at)) {
                 queue.add(ByteBuffer.wrap(all, at, Math.min(CHUNK, all.length - at)).slice());
             }
             pending.reset();
             pending.write(all, at, all.length - at);
-            if (end) queue.add(Boolean.TRUE);
+            if (end) queue.add(true);
             else if (pending.size() > 0) flush = FLUSH.schedule(() -> push(new byte[0], false), 1, TimeUnit.MILLISECONDS);
             drain();
         }

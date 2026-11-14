@@ -1,4 +1,6 @@
 /** zmux: QMux-compatible multiplexing of streams and datagrams over reliable byte pipes. */
+// The qualified exports name the sibling modules, which are compiled after this one.
+@SuppressWarnings("module")
 module io.zmux {
     requires java.logging;
 

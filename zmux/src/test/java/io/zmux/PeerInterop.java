@@ -48,8 +48,8 @@ class PeerInterop {
             var packets = PacketStream.of(stream, options);
             int large = stream.maxDatagramPayload(5) + 100;
             var small = new HashSet<String>(); var big = new HashSet<String>();
-            for (int i = 0; i < 8; i++) { long context = 5 * (i % 2); String payload = "small-" + i; small.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
-            for (int i = 0; i < 2; i++) { long context = 5 * i; String payload = String.valueOf((char) ('A' + i)).repeat(large + i); big.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
+            for (int i = 0; i < 8; i++) { long context = 5L * (i % 2); String payload = "small-" + i; small.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
+            for (int i = 0; i < 2; i++) { long context = 5L * i; String payload = String.valueOf((char) ('A' + i)).repeat(large + i); big.add(context + "/" + payload); packets.send(context, ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))); }
             assertEquals(8, packets.stats().sentAsDatagrams()); assertEquals(2, packets.stats().sentAsCapsules());
             packets.finishAsync().get(10, TimeUnit.SECONDS);
             int smallBack = 0;
@@ -67,12 +67,12 @@ class PeerInterop {
         try (var stream = session.openStream(Preamble.openInfo("packets:stream".getBytes(StandardCharsets.UTF_8)))) {
             var packets = PacketStream.of(stream, new PacketStream.Options(PacketStream.SendPolicy.STREAM_ONLY, 1 << 20));
             int[] sizes = {0, 1, 100, 1500, 20000, 65535};
-            for (int i = 0; i < sizes.length; i++) { byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i); packets.send(5 * (i % 2), ByteBuffer.wrap(bytes)); }
+            for (int i = 0; i < sizes.length; i++) { byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i); packets.send(5L * (i % 2), ByteBuffer.wrap(bytes)); }
             packets.finishAsync().get(10, TimeUnit.SECONDS);
             for (int i = 0; i < sizes.length; i++) {
                 var packet = packets.receive(Duration.ofSeconds(10)); assertNotNull(packet);
                 byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i);
-                assertEquals(5 * (i % 2), packet.context()); assertArrayEquals(bytes, packet.payload());
+                assertEquals(5L * (i % 2), packet.context()); assertArrayEquals(bytes, packet.payload());
             }
             assertNull(packets.receive(Duration.ofSeconds(10)));
             assertEquals(0, packets.stats().receivedAsDatagrams());
@@ -93,7 +93,7 @@ class PeerInterop {
             packets.close();
         }
     }
-    private void run(boolean initiating, boolean multipath) throws Exception {
+    private static void run(boolean initiating, boolean multipath) throws Exception {
         String binary = InteropProcess.required("ZMUX_INTEROP_PEER");
         try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
             var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16);

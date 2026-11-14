@@ -24,7 +24,7 @@ public final class Json {
         return v;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     public static Map<String, Object> object(String s) {
         return (Map<String, Object>) parse(s);
     }
@@ -40,8 +40,8 @@ public final class Json {
             case '{' -> obj();
             case '[' -> arr();
             case '"' -> str();
-            case 't' -> lit("true", Boolean.TRUE);
-            case 'f' -> lit("false", Boolean.FALSE);
+            case 't' -> lit("true", true);
+            case 'f' -> lit("false", false);
             case 'n' -> lit("null", null);
             default -> num();
         };
@@ -122,7 +122,7 @@ public final class Json {
         int st = i;
         while (i < s.length() && "+-0123456789.eE".indexOf(s.charAt(i)) >= 0) i++;
         String t = s.substring(st, i);
-        if (t.contains(".") || t.contains("e") || t.contains("E")) return Double.parseDouble(t);
+        if (t.contains(".") || t.contains("e") || t.contains("E")) return Double.valueOf(t);
         BigInteger v = new BigInteger(t);
         return v.bitLength() < 64 ? (Object) v.longValue() : v;
     }

@@ -33,7 +33,7 @@ class HeldControlTest {
     }
 
     /** Moves bytes both ways until quiet; returns the frames each side sent ([0] by a, [1] by b). */
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"}) // an array of the two sides' lists: generic arrays are created raw
     static List<Sent>[] pump(Session a, Session b) throws Exception {
         List<Sent>[] out = new List[] {new ArrayList<>(), new ArrayList<>()};
         Batch batch = new Batch();
@@ -249,5 +249,22 @@ class HeldControlTest {
         assertEquals(0, first.off());
         assertEquals(3, first.len(), "the preamble and the data written before go in the opening frame");
         assertTrue(a.sending().flushDone(full, target, none));
+    }
+    /** A STOP_SENDING after the flushed data left does not fail the flush; for data not yet sent it does. */
+    @Test void aStopAfterTheDataWasSentLeavesTheFlushDone() throws Exception {
+        Session a = session(CoreConfig.Role.INITIATOR), b = session(CoreConfig.Role.RESPONDER);
+        pump(a, b);
+        Waiter none = new Waiter() { @Override public void wake() { } };
+        Stream st = a.streams().openStream(true);
+        a.sending().write(st, ByteBuffer.wrap(new byte[] {1, 2}), false);
+        long target = a.streams().flush(st);
+        pump(a, b);
+        assertTrue(a.sending().flushDone(st, target, none), "sent");
+        Stream peer = b.streams().acceptStream(true);
+        assertNotNull(peer);
+        b.receiving().stop(peer, 9);
+        pump(a, b);
+        assertTrue(a.sending().flushDone(st, target, none), "the data left before the STOP_SENDING");
+        assertThrows(CoreException.class, () -> a.sending().flushDone(st, target + 1, none), "data not sent reports the stop");
     }
 }

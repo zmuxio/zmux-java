@@ -36,6 +36,9 @@ final class RecordReceiver {
 
         void failLocal(WireException e);
 
+        /** The peer's CONNECTION_CLOSE was read on an inbound pipe of a session that lingers: its linger may end. */
+        void closeRead();
+
         /** Charges one no-effect frame or record. */
         void charge();
 
@@ -82,7 +85,7 @@ final class RecordReceiver {
         Pipe.InLane il = p.in().lane(lane);
         SessionState state = port.state();
         if (il == null || il.rx.ended || state == SessionState.CLOSED) return all;
-        if (state == SessionState.CLOSING && !life.waitingLanes()) return all;
+        if (state == SessionState.CLOSING && !life.waitingLanes()) return lingerRead(p, il, data, pos, limit);
         int consumed = 0;
         while (pos + consumed < limit && (!closing() || life.waitingLanes())) {
             int at = pos + consumed;
@@ -111,9 +114,13 @@ final class RecordReceiver {
 
     /** Processes one message of a message-framed carrier. */
     void receiveMessage(Pipe p, long lane, ReadBuf buf, ByteBuffer data, int pos, int limit, long now) {
-        if (p == null || p.in() == null || closing()) return;
+        if (p == null || p.in() == null) return;
         Pipe.InLane il = p.in().lane(lane);
         if (il == null || il.rx.ended) return;
+        if (closing()) {
+            if (port.state() == SessionState.CLOSING && lingerWatch(p, il) && holdsClose(data, pos, limit)) markClose(p);
+            return;
+        }
         int len = limit - pos;
         if (len > cfg.local().maxRecordSize) {
             port.failLocal(WireException.frame("message above max_record_size"));
@@ -130,6 +137,55 @@ final class RecordReceiver {
             }
         }
         record(p, il, buf, data, pos, limit, VarInt.length(len) + len, now);
+    }
+
+    /** Whether a lane of a lingering session is still read for the peer's CONNECTION_CLOSE (lane 0 carries it, once). */
+    private static boolean lingerWatch(Pipe p, Pipe.InLane il) {
+        return il.lane == 0 && !il.rx.expectTp && !il.rx.expectLane && !p.in().closeRead();
+    }
+
+    /**
+     * Reads a lingering session's lane: what it holds is discarded without processing, apart from the one thing the
+     * linger waits for, the peer's CONNECTION_CLOSE (nothing follows it on the pipe). Returns the bytes consumed;
+     * a partial record stays with the caller.
+     */
+    private int lingerRead(Pipe p, Pipe.InLane il, ByteBuffer data, int pos, int limit) {
+        int all = limit - pos;
+        if (!lingerWatch(p, il)) return all;
+        int consumed = 0;
+        while (pos + consumed < limit) {
+            int at = pos + consumed;
+            long size = VarInt.get(data, at, limit);
+            if (size < 0) break;
+            int n = VarInt.lengthOf(data.get(at));
+            if (size == 0 || size > cfg.local().maxRecordSize) return all;
+            if (limit - at - n < size) break;
+            consumed += n + (int) size;
+            if (holdsClose(data, at + n, at + n + (int) size)) {
+                markClose(p);
+                return all;
+            }
+        }
+        return consumed;
+    }
+
+    /** Whether the record in data[pos, end) holds a CONNECTION_CLOSE; undecodable bytes hold none. */
+    private boolean holdsClose(ByteBuffer data, int pos, int end) {
+        Frame f = frame;
+        while (pos < end) {
+            try {
+                pos += decoder.decode(data, pos, end, f);
+            } catch (WireException e) {
+                return false;
+            }
+            if (f.kind == FrameKind.CONNECTION_CLOSE) return true;
+        }
+        return false;
+    }
+
+    private void markClose(Pipe p) {
+        p.in().readClose();
+        port.closeRead();
     }
 
     /** Validates the prefix of a bootstrap pipe's first record byte by byte. */
@@ -226,6 +282,7 @@ final class RecordReceiver {
                 case PIPE_PING -> pipePing = true;
                 default -> { }
             }
+            if (f.kind == FrameKind.CONNECTION_CLOSE && il.lane == 0) p.in().readClose();
             if (closing()) {
                 // Waiting for lanes before CONNECTION_CLOSE: only acknowledgements and the peer's close matter.
                 if (f.kind == FrameKind.PIPE_ACK) port.closingAck(f);

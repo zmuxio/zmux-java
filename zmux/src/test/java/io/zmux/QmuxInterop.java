@@ -30,7 +30,7 @@ class QmuxInterop {
         }
         return fail("no STOP_SENDING arrived");
     }
-    private void run(String environment, boolean initiating) throws Exception {
+    private static void run(String environment, boolean initiating) throws Exception {
         String binary = InteropProcess.required(environment);
         try (var loops = EventLoops.create(2)) {
             // Offer zmux extensions: a plain peer must disable them through negotiation.

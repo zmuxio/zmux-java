@@ -109,7 +109,7 @@ final class EstablishHello {
     }
 
     /** The bytes before the framed first message. */
-    static int headerLength(Profile p, byte[] handle) {
+    static int headerLength(Profile p) {
         int n = (p.value() >= Profile.ESCAPE ? 1 + VarInt.length(p.value()) : 1) + 1;
         return p.isPskBased() ? n + Handshake.HANDLE_LEN : n;
     }

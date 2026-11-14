@@ -25,10 +25,11 @@ class RateSampleTest {
             return client.pipeStats().getFirst().deliveryRate().orElse(-1);
         }
 
-        @Override public void close() throws Exception {
+        @Override public void close() throws IOException {
             writer.interrupt();
             client.close(); server.close(); listener.close();
-            writer.join(5_000);
+            try { writer.join(5_000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.io.InterruptedIOException("interrupted"); }
         }
     }
 

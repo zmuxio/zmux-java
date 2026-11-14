@@ -69,7 +69,7 @@ class CloseFormsTest {
             long t0 = System.nanoTime();
             p.client().close(0x2a, "close");
             p.client().close();
-            assertTrue(System.nanoTime() - t0 < TimeUnit.NANOSECONDS.toNanos(io.zmux.internal.core.Session.closeLimit), "a close after an abort waited for its bound");
+            assertTrue(System.nanoTime() - t0 < io.zmux.internal.core.Session.closeLimit, "a close after an abort waited for its bound");
             assertEquals(new SessionError.ApplicationClosed(7, "abort", true), p.server().closed().get(5, TimeUnit.SECONDS));
             assertEquals(new SessionError.ApplicationClosed(7, "abort", false), p.client().closed().get(5, TimeUnit.SECONDS));
         }

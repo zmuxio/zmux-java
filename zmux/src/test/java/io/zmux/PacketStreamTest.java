@@ -34,7 +34,7 @@ class PacketStreamTest {
 
     /** EXTENSIONS.md Section 12 capsule vectors of zmux-spec/fixtures/capsules.json. */
     @Test void capsuleVectorsDecodeAndEncode() throws Exception {
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         var cases = (List<Map<String, Object>>) Json.object(Files.readString(SpecFixtures.root().resolve("fixtures/capsules.json"))).get("cases");
         assertFalse(cases.isEmpty());
         try (EventLoops loops = EventLoops.create(2); var pair = Pair.memory(config(loops, false))) {
@@ -42,6 +42,7 @@ class PacketStreamTest {
                 String id = (String) c.get("id");
                 byte[] wire = SpecFixtures.hex(c.get("hex"));
                 int max = ((Long) c.get("max_payload")).intValue();
+                // Parsed JSON: the vector file's schema fixes the type.
                 @SuppressWarnings("unchecked") var expected = (List<Map<String, Object>>) c.get("packets");
                 Object error = c.get("error");
 

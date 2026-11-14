@@ -1,5 +1,6 @@
 package io.zmux.internal.core;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteBuffer;
@@ -35,7 +36,7 @@ class CloseDrainTest {
 
     /** a closes; b reads the close, then a's FIN arrives and b's write side is shut. */
     private static void peerCloses(Session a, Session b) throws Exception {
-        a.close(0x2a, "bye".getBytes());
+        a.close(0x2a, "bye".getBytes(UTF_8));
         HeldControlTest.pump(a, b);
         b.pipeEnded(0, 0, true, false, null, 0);
         b.outputShut(0, 0, 0);
@@ -90,7 +91,7 @@ class CloseDrainTest {
         setUp(a, b, 100, true);
         b.pipes.get(0).out().fail(); // The outbound side is gone, the inbound one still reads.
         b.setNow(1_000);
-        a.close(0x2a, "bye".getBytes());
+        a.close(0x2a, "bye".getBytes(UTF_8));
         HeldControlTest.pump(a, b);
         assertEquals(SessionState.CLOSING, b.state(), "the close was read; the drain runs");
         assertTrue(b.nextTimeout() <= 1_000 + b.lingerTimeout(), "bounded by a linger from the close");

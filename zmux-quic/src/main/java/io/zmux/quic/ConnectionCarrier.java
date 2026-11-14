@@ -220,8 +220,12 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         int who = closing;
         if (who == POOLED) return;
         if (lastLocal) { close(channel); return; }
-        if (who == DEDICATED) channel.eventLoop().schedule(() -> { if (pipes == 0) close(channel); },
-                PEER_CLOSE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (who == DEDICATED) {
+            // The event loop is the channel's, owned and closed by Netty.
+            //noinspection resource
+            channel.eventLoop().schedule(() -> { if (pipes == 0) close(channel); },
+                    PEER_CLOSE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
     }
 
     /** A session on one of the connection's pipes ended with e. On the loop. */
@@ -297,7 +301,10 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()), fb)
                 : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
         this.first = admitted;
-        admitted.verdict().whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
+        // The handler comes from the listener adapter in another module; the analyzer takes it for null.
+        //noinspection ConstantValue
+        var decision = admitted.verdict();
+        decision.whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
             if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {
                 admission = ACCEPTED;
                 var waiting = new ArrayList<>(held);

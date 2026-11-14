@@ -1,10 +1,12 @@
 package io.zmux.quic;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import io.zmux.*;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -51,7 +53,7 @@ class QuicChannelInteropTest {
         Path dir = Path.of("target", "tls");
         KeyStore store = KeyStore.getInstance("PKCS12");
         try (var in = Files.newInputStream(dir.resolve("localhost.p12"))) { store.load(in, "changeit".toCharArray()); }
-        var mime = Base64.getMimeEncoder(64, "\n".getBytes());
+        var mime = Base64.getMimeEncoder(64, "\n".getBytes(UTF_8));
         Path cert = dir.resolve("localhost.crt"), key = dir.resolve("localhost.key");
         Files.writeString(cert, "-----BEGIN CERTIFICATE-----\n" + mime.encodeToString(store.getCertificate("localhost").getEncoded())
                 + "\n-----END CERTIFICATE-----\n");
@@ -83,9 +85,11 @@ class QuicChannelInteropTest {
             throw new AssertionError("peer: no " + prefix);
         }
 
-        @Override public void close() throws Exception {
-            if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
-            reader.join(5000);
+        @Override public void close() throws IOException {
+            try {
+                if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+                reader.join(5000);
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.io.InterruptedIOException("interrupted"); }
         }
     }
 

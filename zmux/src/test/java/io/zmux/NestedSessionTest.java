@@ -1,6 +1,8 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
+
 import io.zmux.carrier.PipeIo;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -19,6 +21,7 @@ class NestedSessionTest {
             return new Pair(client, listener.accept(Duration.ofSeconds(5)));
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void nestedSessionsUseOwnedBuffersAndPreserveOuterOwnership() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
@@ -74,11 +77,11 @@ class NestedSessionTest {
                     return Zmux.open(stream.asPipe(), Role.SERVER, config);
                 });
                 var tlv = new Preamble.Tlv(0x1001, new byte[] {9, 8});
-                var carrier = outer.client().openStreamAsPipe("dst:7".getBytes(), java.util.List.of(tlv));
-                try (var client = Zmux.open(carrier, Role.CLIENT, config); var server = accepting.get(5, TimeUnit.SECONDS)) {
+                var carrier = outer.client().openStreamAsPipe("dst:7".getBytes(UTF_8), java.util.List.of(tlv));
+                try (var _ = Zmux.open(carrier, Role.CLIENT, config); var _ = accepting.get(5, TimeUnit.SECONDS)) {
                     Preamble p = accepted.get().preamble();
                     assertTrue(p.pipeCarrier());
-                    assertArrayEquals("dst:7".getBytes(), p.openInfo());
+                    assertArrayEquals("dst:7".getBytes(UTF_8), p.openInfo());
                     assertEquals(1, p.tlvs().size());
                     assertEquals(0x1001, p.tlvs().getFirst().type());
                     assertArrayEquals(new byte[] {9, 8}, p.tlvs().getFirst().value());
@@ -86,6 +89,7 @@ class NestedSessionTest {
             }
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void nestedLanesShareAnOuterCreditLeaseAndDoNotWait() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).incomingStreams(8).build();
@@ -126,6 +130,7 @@ class NestedSessionTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void nestedLanesCarryIndependentStreamsOverMultipathOuterSession() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var outerConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();

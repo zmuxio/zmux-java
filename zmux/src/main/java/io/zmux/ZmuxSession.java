@@ -268,6 +268,8 @@ public final class ZmuxSession implements AutoCloseable {
         long until = Long.MAX_VALUE;
         ZmuxConfig.Redial hook = (ZmuxConfig.Redial) redial.hook();
         // Signals the redial hook when the future is cancelled.
+        // Closed by the try-with-resources inside the lambda; the future callback only cancels it.
+        //noinspection resource
         Cancellation cancel = new Cancellation();
         ZmuxFuture<Void> f = ZmuxFuture.onThread("zmux-replace-pipes", () -> {
             List<ZmuxPipe> old = pipes();
@@ -1227,7 +1229,7 @@ public final class ZmuxSession implements AutoCloseable {
      */
     public ZmuxFuture<Void> shutdownAsync(long code, String reason) {
         byte[] r = startShutdown(code, reason);
-        return ZmuxFuture.of(driver.closedFuture().thenApply(e -> (Void) null),
+        return ZmuxFuture.of(driver.closedFuture().thenApply(e -> null),
                 // Not on the thread that completed the future (the JDK's delay thread for orTimeout): close may wait for a flush.
                 () -> Thread.ofVirtual().name("zmux-shutdown").start(() -> closeWith(code, r)));
     }

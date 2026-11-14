@@ -272,6 +272,11 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         });
     }
 
+    /** Closes the stream if a graceful close left it open (a peer that never finishes its side). */
+    void abortOpen() {
+        dispatch(() -> { if (stream.isOpen()) stream.close(); });
+    }
+
     /** Whether a session took the stream (Transport#whenTaken), across the transports that move it. */
     final io.zmux.internal.loop.TakenSignal taken = new io.zmux.internal.loop.TakenSignal();
 

@@ -372,7 +372,7 @@ public final class PathScheduler {
         void visit(Pipe p, double w);
     }
 
-    void rrWeights(Tiers.Gate g, int ti, boolean byRate, WeightVisitor f) {
+    private void rrWeights(Tiers.Gate g, int ti, boolean byRate, WeightVisitor f) {
         boolean allZero = true;
         for (Pipe q : g.tierPipes(ti)) if (metrics.open(q) && q.mp().tier.weight() > 0) allZero = false;
         for (Pipe q : g.tierPipes(ti)) {

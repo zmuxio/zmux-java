@@ -383,7 +383,7 @@ public final class PacketStream implements AutoCloseable {
 
     /** Waits at most timeout for the next packet; {@link SocketTimeoutException} after it, the stream staying usable. */
     public StreamDatagram receive(Duration timeout) throws IOException {
-        return receive(Math.min(Math.max(0, timeout.toNanos()), Long.MAX_VALUE - 1));
+        return receive(Math.clamp(timeout.toNanos(), 0, Long.MAX_VALUE - 1));
     }
 
     /** Waits at most nanos; Long.MAX_VALUE: no bound. */
@@ -475,8 +475,15 @@ public final class PacketStream implements AutoCloseable {
         }
         if (datagrams != null) datagrams.interrupt();
         for (var w : waiting) {
-            if (outcome == END) w.complete(null); else w.completeExceptionally((IOException) outcome);
+            w.completeExceptionally((IOException) outcome); // waiting is only filled for a failure
         }
+    }
+
+    /** Clears the interrupt that stopped the datagram reader; the capsules already decide how the stream ends. */
+    private static void clearInterrupt() {
+        // The call is the clearing; there is no state to read.
+        //noinspection ResultOfMethodCallIgnored
+        Thread.interrupted();
     }
 
     private void readDatagrams() {
@@ -493,17 +500,19 @@ public final class PacketStream implements AutoCloseable {
             // The capsules decide how the packet stream ends.
         }
         try {
-            Thread.interrupted();
+            clearInterrupt();
             if (held != null) offer(held);
             boolean ended;
             lock.lock();
             try { ended = terminal == END && !closed; } finally { lock.unlock(); }
             // The stream ended at a capsule boundary: datagrams that arrived before the end are still packets.
-            while (ended) {
-                StreamDatagram d;
-                try { d = stream.receiveDatagram(Duration.ZERO); } catch (IOException none) { break; }
-                receivedDatagrams.incrementAndGet();
-                offer(d);
+            if (ended) {
+                while (true) {
+                    StreamDatagram d;
+                    try { d = stream.receiveDatagram(Duration.ZERO); } catch (IOException none) { break; }
+                    receivedDatagrams.incrementAndGet();
+                    offer(d);
+                }
             }
         } finally {
             datagramsDone();
@@ -685,14 +694,14 @@ public final class PacketStream implements AutoCloseable {
 
     /** Marks the packet stream closed and ends its readers; false when it already was. */
     private boolean shut() {
-        var waiting = new ArrayDeque<CompletableFuture<StreamDatagram>>();
         Thread capsules, datagrams;
+        ArrayDeque<CompletableFuture<StreamDatagram>> waiting;
         lock.lock();
         try {
             if (closed) return false;
             closed = true;
             queue.clear();
-            waiting.addAll(receivers); receivers.clear();
+            waiting = new ArrayDeque<>(receivers); receivers.clear();
             readable.signalAll(); writable.signalAll();
             capsules = capsuleReader; datagrams = datagramReader;
         } finally {

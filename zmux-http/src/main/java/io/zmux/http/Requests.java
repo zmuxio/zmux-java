@@ -118,8 +118,8 @@ final class Requests {
         return v != null && !v.isEmpty();
     }
 
-    static final CharSequence ACCEL = "X-Accel-Buffering";
-    static final CharSequence NO_STORE = "no-store";
-    static final CharSequence OCTETS = "application/octet-stream";
+    static final String ACCEL = "X-Accel-Buffering";
+    static final String NO_STORE = "no-store";
+    static final String OCTETS = "application/octet-stream";
     static final CharSequence CACHE = HttpHeaderNames.CACHE_CONTROL;
 }

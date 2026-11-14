@@ -1,6 +1,8 @@
 package io.zmux.http;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
+
 import io.zmux.RequestHead;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -148,7 +150,7 @@ class ClassifyTest {
         }
         ByteBuffer v2 = ByteBuffer.allocate(16 + 12 + 3 + 4);
         v2.put(new byte[] {0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a, 0x21, 0x11}).putShort((short) 15);
-        v2.put(new byte[] {(byte) 203, 0, 113, 9, 10, 0, 0, 1}).putShort((short) 51000).putShort((short) 443).put(new byte[] {4, 0, 0}).put("rest".getBytes());
+        v2.put(new byte[] {(byte) 203, 0, 113, 9, 10, 0, 0, 1}).putShort((short) 51000).putShort((short) 443).put(new byte[] {4, 0, 0}).put("rest".getBytes(UTF_8));
         v2.flip();
         var p2 = ProxyHeader.parse(v2);
         assertEquals(31, p2.length());

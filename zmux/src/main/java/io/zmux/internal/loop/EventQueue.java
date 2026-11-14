@@ -45,9 +45,9 @@ final class EventQueue {
             case TIER_SATURATION -> new Key(e.kind(), -1, 0, e.code());
             case CAPACITY_BELOW, CAPACITY_RESTORED -> new Key(Event.Kind.CAPACITY_BELOW, -1, 0, null);
             case SUSPENDED, RESUMED -> new Key(Event.Kind.SUSPENDED, -1, 0, null);
-            // Its own key: it follows SessionSuspended rather than replacing it; a resumption makes it stale.
-            case RESUME_UNATTENDED -> new Key(e.kind(), -1, 0, null);
-            case GOAWAY_RECEIVED, EPOCH_COMMITTED, EPOCH_DELETED -> new Key(e.kind(), -1, 0, null);
+            // RESUME_UNATTENDED has its own key: it follows SessionSuspended rather than replacing it; a resumption
+            // makes it stale.
+            case RESUME_UNATTENDED, GOAWAY_RECEIVED, EPOCH_COMMITTED, EPOCH_DELETED -> new Key(e.kind(), -1, 0, null);
             case JOIN_AUTH_FAILED -> new Key(e.kind(), -1, 0, e.reason());
             default -> null;
         };

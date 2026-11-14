@@ -130,9 +130,24 @@ final class CarrierSet {
         if (a.channelStop != null) a.channelStop.run();
         if (rt.core.state().compareTo(io.zmux.internal.core.SessionState.CLOSING) >= 0) a.t.sessionEnded(rt.core.error());
         a.t.close(cause);
+        if (cause == null && a.t.abortable()) boundClose(a.t);
         release(a);
         track(a.t.whenClosed().toCompletableFuture());
     }
+
+    /**
+     * A graceful close of t that leaves work running is aborted once the linger timeout passes (SPEC 6.5 step 4),
+     * so that no carrier outlives its session unbounded.
+     */
+    private void boundClose(Transport t) {
+        long bound = rt.core.lingerTimeout();
+        rt.loop.schedule(new TimerHeap.Timer() {
+            @Override void fire(long now) { t.abort(CLOSE_BOUND); }
+        }, io.zmux.internal.core.Time.add(Clock.now(), bound));
+    }
+
+    @SuppressWarnings("StaticAssignmentOfThrowable") // a shared marker cause; the stack of its creation says nothing
+    private static final Throwable CLOSE_BOUND = new java.io.IOException("graceful close bounded by the linger timeout");
 
     /** Detaches and closes every transport (the session ended). */
     void closeAll() {

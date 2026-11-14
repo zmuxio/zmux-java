@@ -163,7 +163,7 @@ class QuicAdmissionTest {
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var withCredential = ZmuxConfig.builder().eventLoops(loops).carrierCredential(auth).build();
-                try (var client = endpoint.connectAsync(server.address(), "localhost", withCredential).get(10, TimeUnit.SECONDS);
+                try (var _ = endpoint.connectAsync(server.address(), "localhost", withCredential).get(10, TimeUnit.SECONDS);
                      var accepted = listener.accept(Duration.ofSeconds(5))) {
                     assertNotNull(accepted);
                 }

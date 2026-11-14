@@ -10,7 +10,6 @@ import static io.zmux.internal.join.VectorFiles.num;
 import static io.zmux.internal.join.VectorFiles.str;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,7 +44,7 @@ class SealVectorsTest {
         byte[] kem = hexOrNull(v, initiator ? "initiator_kem_seed" : "responder_encaps_m");
         Handshake hs = new Handshake(p, m, initiator, handle, hexOrNull(v, "psk"), hexOrNull(v, "binding"),
                 StaticKey.fromScalar(hex(v, who + "_static")), () -> eph, kem == null ? null : new FixedRandom(kem));
-        hs.maxAppData(ClientConfig.appDataLimit(configured(v).maxAppData()));
+        hs.maxAppData(ClientConfig.appDataLimit(configured(v).maxAppDataBound()));
         return hs;
     }
 
@@ -148,7 +147,7 @@ class SealVectorsTest {
                 assertArrayEquals(hex(msg, "ck"), w.ss.ck, name);
                 EstablishPayload got = rd.readMessage(noise);
                 assertArrayEquals(hex(msg, "h"), rd.ss.h, name);
-                @SuppressWarnings("unchecked")
+                @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
                 Map<String, Object> cred = (Map<String, Object>) msg.get("credential");
                 if (cred != null) {
                     assertEquals(num(cred, "type"), got.credential().type(), name);
@@ -167,7 +166,7 @@ class SealVectorsTest {
                 } else {
                     assertNull(got.proof(), name);
                 }
-                @SuppressWarnings("unchecked")
+                @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
                 Map<String, Object> want = (Map<String, Object>) v.get(idx == 1 ? "verify_server" : idx == 2 ? "verify_client" : "none");
                 judged(want, rd, p, p.isPskBased() ? handle : null, got, idx == 1, name);
                 for (Framing f : Framing.values()) {
@@ -189,7 +188,7 @@ class SealVectorsTest {
             Result ri = i.finish();
             Result rr = r.finish();
             assertArrayEquals(hex(v, "exporter_secret"), ri.exporterSecret(), name);
-            @SuppressWarnings("unchecked")
+            @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
             Map<String, Object> ex = (Map<String, Object>) v.get("exporter");
             for (Result res : List.of(ri, rr)) {
                 assertArrayEquals(hex(ex, "output"), res.export(str(ex, "label"), hex(ex, "context"), (int) num(ex, "length")), name);
@@ -389,7 +388,7 @@ class SealVectorsTest {
                     hex(v, "offer_body"), hex(v, "answer_body"), ss), name);
             n++;
         }
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         Map<String, Object> es = (Map<String, Object>) d.get("exporter_secret");
         assertArrayEquals(hex(es, "exporter_secret"), Kdf.expandLabel(hex(es, "ck"), "zmux-seal exporter", hex(es, "h"), 32));
         n++;
@@ -443,7 +442,7 @@ class SealVectorsTest {
         return SessionCrypto.session(set(v, "crypto_i"), set(v, "crypto_r"));
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     private static SessionCrypto set(Map<String, Object> v, String key) throws SecureCarrierException {
         Map<String, Object> c = (Map<String, Object>) v.get(key);
         return SessionCrypto.of(longs(c, "suites"), longs(c, "groups"));

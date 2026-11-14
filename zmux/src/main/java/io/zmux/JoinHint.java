@@ -47,7 +47,7 @@ public record JoinHint(String pairing, boolean uplink, InetSocketAddress source,
             if (!token) throw new IllegalArgumentException("pairing field \"" + field + "\" is not a header field name");
         }
         String l = field.toLowerCase(java.util.Locale.ROOT);
-        boolean reserved = RESERVED.contains(l) || l.equals(PrefixAuth.HEADER_FIELD.toLowerCase(java.util.Locale.ROOT));
+        boolean reserved = RESERVED.contains(l) || PrefixAuth.HEADER_FIELD.equalsIgnoreCase(l);
         for (String p : RESERVED_PREFIXES) reserved |= l.startsWith(p);
         if (reserved) throw new IllegalArgumentException("pairing field \"" + field + "\" is reserved");
         return field;

@@ -200,6 +200,7 @@ class QuicTest {
             } finally { endpoint.close(); }
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void cancellingAConnectAndClosingFromACompletionDoNotBlock() throws Exception {
         try (EventLoops loops = EventLoops.create(1); var blackhole = new java.net.DatagramSocket(any())) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();

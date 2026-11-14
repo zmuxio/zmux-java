@@ -31,7 +31,7 @@ record CapacityProbeConfig(UdpBottleneck.Config link, int repetitions, int bytes
             default -> throw new IllegalArgumentException("unknown probe scheduler");
         };
         long budget = number(p, "listenerBudget", 1L << 30);
-        if (repetitions < 1 || bytes < 1 || mode < -1 || mode > 3 || budget < 1 || cross && mode == 0)
+        if (repetitions < 1 || bytes < 1 || mode < -1 || mode > 3 || budget < 1 || (cross && mode == 0))
             throw new IllegalArgumentException("invalid probe workload, mode or memory budget");
         if (windows != Windows.DEFAULT && (link == null || link.oneWayDelay().isZero()))
             throw new IllegalArgumentException("BDP window controls require a positive link rate and delay");

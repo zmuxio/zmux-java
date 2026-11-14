@@ -112,8 +112,11 @@ public final class ClientConfig {
     /** The limits on the shaper's plans. */
     public ShapingLimits shapingLimits() { return shapingLimits; }
 
-    /** The internal form of a bound on received application data: bytes, or {@link Long#MAX_VALUE} for none. */
-    static long appDataLimit(OptionalInt bound) { return bound.isPresent() ? bound.getAsInt() : Long.MAX_VALUE; }
+    /** The stored bound on the application data of a received message: bytes, or {@link #NO_BOUND}. */
+    int maxAppDataBound() { return maxAppData; }
+
+    /** The internal form of a stored bound on received application data: bytes, or {@link Long#MAX_VALUE} for none. */
+    static long appDataLimit(int bound) { return bound == NO_BOUND ? Long.MAX_VALUE : bound; }
 
     static int checkMaxAppData(int bytes) {
         if (bytes < 0) throw new IllegalArgumentException("negative maxAppData; noMaxAppData() sets no bound");

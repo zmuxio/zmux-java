@@ -16,6 +16,8 @@ final class Errors {
      * nothing to restore, and clearing it lets the teardown that follows block normally.
      */
     static void clearInternalWake() {
+        // The call is the clearing; there is no state to read.
+        //noinspection ResultOfMethodCallIgnored
         Thread.interrupted();
     }
 

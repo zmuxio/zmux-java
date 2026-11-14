@@ -58,6 +58,7 @@ class MultipathTest {
         if (during != null) during.call();
         for (Future<?> f : cs) f.get();
         acceptor.get();
+        for (Future<?> f : server) f.get();
     }
 
     private static void closeBoth(ZmuxSession c, ZmuxSession s) throws Exception {

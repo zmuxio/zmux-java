@@ -325,7 +325,7 @@ final class TestProxy implements Closeable {
         try { Thread.sleep(d); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
-    private void respond(OutputStream out, String line, byte[] body) throws IOException {
+    private static void respond(OutputStream out, String line, byte[] body) throws IOException {
         respond(out, line, new Head(line, List.<String[]>of(new String[] {"Content-Type", "application/octet-stream"})), body);
     }
 

@@ -12,7 +12,7 @@ final class Poke {
             f.setAccessible(true);
             f.set(target, value);
         } catch (ReflectiveOperationException e) {
-            throw new AssertionError(e);
+            throw new LinkageError(e.getMessage(), e);
         }
     }
 }

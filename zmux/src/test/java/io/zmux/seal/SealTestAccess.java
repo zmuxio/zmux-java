@@ -7,7 +7,6 @@ import io.zmux.carrier.PipeIo;
 import io.zmux.internal.join.Mode;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.List;
 
 /** The sans-IO client for a test that sends what no public interface sends: a Trusted one with first bytes. */
 public final class SealTestAccess {
@@ -20,7 +19,7 @@ public final class SealTestAccess {
     public static synchronized PipeIo handshakeUpToFinish(SocketChannel ch) throws Exception {
         done = null;
         byte[] secret = new byte[32];
-        HandlePsk hp = HandlePsk.derive(secret, "test".getBytes(), null);
+        HandlePsk hp = HandlePsk.derive(secret, "test".getBytes(java.nio.charset.StandardCharsets.UTF_8), null);
         client = EstablishClient.create(Profile.XXHFS_PSK0_AES, Mode.TRUSTED, io.zmux.internal.join.Framing.STREAM, hp.handle(), hp.psk(), null, StaticKey.generate());
         ch.write(ByteBuffer.wrap(client.writeHello(EstablishPayload.padding(0, false))));
         ByteBuffer b = ByteBuffer.allocate(4096);

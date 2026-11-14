@@ -6,11 +6,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class SendBufferContractTest {
-    private Session highBDP() {
+    private static Session highBDP() {
         return highBDP(CoreConfig.builder());
     }
 
-    private Session highBDP(CoreConfig.Builder b) {
+    private static Session highBDP(CoreConfig.Builder b) {
         Session s = PipeTargetTest.session(b);
         Pipe p = s.pipes.get(0);
         Poke.set(p.mp().rtt, "smoothed", Time.SECOND);

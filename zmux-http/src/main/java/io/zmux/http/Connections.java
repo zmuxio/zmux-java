@@ -124,7 +124,7 @@ final class Connections {
         c.close();
     }
 
-    private CompletableFuture<Channel> stream(Channel conn) {
+    private static CompletableFuture<Channel> stream(Channel conn) {
         CompletableFuture<Channel> f = new CompletableFuture<>();
         new Http2StreamChannelBootstrap(conn).handler(new ChannelInitializer<>() {
             @Override protected void initChannel(Channel ch) { ch.pipeline().addLast(new Http2StreamFrameToHttpObjectCodec(false)); }

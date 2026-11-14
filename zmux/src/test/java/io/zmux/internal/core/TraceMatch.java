@@ -52,23 +52,23 @@ final class TraceMatch {
 
     /** Returns null on a match, else the reason. */
     static String match(String mode, List<Map<String, Object>> pats, List<Map<String, Object>> frames) {
-        switch (mode) {
+        return switch (mode) {
             case "exact", "first" -> {
                 int i = 0;
                 for (int pi = 0; pi < pats.size(); pi++) {
                     Map<String, Object> p = pats.get(pi);
                     if ("STREAM_DATA".equals(p.get("type"))) {
                         int j = streamData(p, frames, i, true);
-                        if (j < 0) return "pattern " + pi + " (STREAM_DATA) does not match";
+                        if (j < 0) yield "pattern " + pi + " (STREAM_DATA) does not match";
                         i = j;
                         continue;
                     }
-                    if (i >= frames.size()) return "pattern " + pi + ": no frame left";
-                    if (!TraceFrames.matchFrame(p, frames.get(i))) return "pattern " + pi + " does not match frame " + i;
+                    if (i >= frames.size()) yield "pattern " + pi + ": no frame left";
+                    if (!TraceFrames.matchFrame(p, frames.get(i))) yield "pattern " + pi + " does not match frame " + i;
                     i++;
                 }
-                if (mode.equals("exact") && i != frames.size()) return (frames.size() - i) + " extra frames";
-                return null;
+                if (mode.equals("exact") && i != frames.size()) yield (frames.size() - i) + " extra frames";
+                yield null;
             }
             case "contains" -> {
                 int i = 0;
@@ -76,21 +76,21 @@ final class TraceMatch {
                     Map<String, Object> p = pats.get(pi);
                     if ("STREAM_DATA".equals(p.get("type"))) {
                         int j = streamData(p, frames, i, false);
-                        if (j < 0) return "pattern " + pi + " (STREAM_DATA) not found";
+                        if (j < 0) yield "pattern " + pi + " (STREAM_DATA) not found";
                         i = j;
                         continue;
                     }
                     while (i < frames.size() && !TraceFrames.matchFrame(p, frames.get(i))) i++;
-                    if (i >= frames.size()) return "pattern " + pi + " not found";
+                    if (i >= frames.size()) yield "pattern " + pi + " not found";
                     i++;
                 }
-                return null;
+                yield null;
             }
             case "unordered" -> {
                 for (int pi = 0; pi < pats.size(); pi++) {
                     Map<String, Object> p = pats.get(pi);
                     if ("STREAM_DATA".equals(p.get("type"))) {
-                        if (streamData(p, frames, 0, false) < 0) return "pattern " + pi + " (STREAM_DATA) not found";
+                        if (streamData(p, frames, 0, false) < 0) yield "pattern " + pi + " (STREAM_DATA) not found";
                         continue;
                     }
                     long c = 0;
@@ -98,20 +98,18 @@ final class TraceMatch {
                     Object cnt = p.get("count");
                     if (cnt instanceof Map<?, ?>) {
                         Map<String, Object> m = map(cnt);
-                        if (m.containsKey("min") && c < num(m.get("min"))) return "pattern " + pi + ": " + c + " matches";
-                        if (m.containsKey("max") && c > num(m.get("max"))) return "pattern " + pi + ": " + c + " matches";
+                        if (m.containsKey("min") && c < num(m.get("min"))) yield "pattern " + pi + ": " + c + " matches";
+                        if (m.containsKey("max") && c > num(m.get("max"))) yield "pattern " + pi + ": " + c + " matches";
                     } else if (cnt != null) {
-                        if (c != num(cnt)) return "pattern " + pi + ": " + c + " matches, want " + cnt;
+                        if (c != num(cnt)) yield "pattern " + pi + ": " + c + " matches, want " + cnt;
                     } else if (c == 0) {
-                        return "pattern " + pi + " not found";
+                        yield "pattern " + pi + " not found";
                     }
                 }
-                return null;
+                yield null;
             }
-            default -> {
-                return "unknown match " + mode;
-            }
-        }
+            default -> "unknown match " + mode;
+        };
     }
 
     /**
@@ -159,7 +157,7 @@ final class TraceMatch {
             boolean complete = true;
             for (boolean h : have) if (!h) complete = false;
             Object pf = p.get("fin");
-            if (complete && (pf == null || pf.equals(finSeen) || !finSeen && (Boolean) pf && i + 1 < frames.size())) {
+            if (complete && (pf == null || pf.equals(finSeen) || (!finSeen && (Boolean) pf && i + 1 < frames.size()))) {
                 if (want != null && !java.util.Arrays.equals(got, want)) return -1;
                 if (pf instanceof Boolean fin && fin != finSeen) {
                     if (fin && i + 1 < frames.size()) {

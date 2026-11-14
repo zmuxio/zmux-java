@@ -357,7 +357,7 @@ public final class RecvLane {
             }
         }
 
-        private Object asRead(Object r) { return r == StreamRecv.FIN ? Integer.valueOf(-1) : r; }
+        private static Object asRead(Object r) { return r == StreamRecv.FIN ? Integer.valueOf(-1) : r; }
     }
 
     /**

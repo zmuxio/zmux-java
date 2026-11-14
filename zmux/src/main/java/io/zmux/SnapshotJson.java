@@ -6,6 +6,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -205,7 +206,7 @@ final class SnapshotJson {
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
                 default -> {
-                    if (c < 0x20) out.append(String.format("\\u%04x", (int) c));
+                    if (c < 0x20) out.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
                     else out.append(c);
                 }
             }
@@ -216,11 +217,11 @@ final class SnapshotJson {
     /** The RFC 3339 UTC form of t: seconds, a fraction without trailing zeros when not zero, Z. */
     static String formatTime(Instant t) {
         LocalDateTime d = LocalDateTime.ofEpochSecond(t.getEpochSecond(), 0, ZoneOffset.UTC);
-        var b = new StringBuilder(String.format("%04d-%02d-%02dT%02d:%02d:%02d",
+        var b = new StringBuilder(String.format(Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d",
                 d.getYear(), d.getMonthValue(), d.getDayOfMonth(), d.getHour(), d.getMinute(), d.getSecond()));
         int nanos = t.getNano();
         if (nanos > 0) {
-            String f = String.format("%09d", nanos);
+            String f = String.format(Locale.ROOT, "%09d", nanos);
             int end = f.length();
             while (f.charAt(end - 1) == '0') end--;
             b.append('.').append(f, 0, end);

@@ -79,7 +79,7 @@ class ShapingBudgetTest {
         Session s = session(initial(1), ShapingBudget.NONE, f);
         assertEquals(List.of(998), write(s, 100));
         assertEquals(1, s.shapingMeters().wireLeft(), "padding takes nothing from the account");
-        long frame = FrameEncoder.streamHeaderLength(4, 0, 100, true) + 100;
+        long frame = FrameEncoder.streamHeaderLength(4, 0, 100, true) + 100L;
         assertEquals(998 - frame, s.shapingStats().wireSpent());
     }
 

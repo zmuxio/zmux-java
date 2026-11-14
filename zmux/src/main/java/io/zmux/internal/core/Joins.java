@@ -139,10 +139,17 @@ public final class Joins {
         var own = l.sessionCrypto;
         var other = peer.sessionCrypto;
         // Without the parameter on both ends no join key exists: inputs() refuses to derive one.
-        boolean both = own != null && other != null;
-        sessionCrypto = both ? io.zmux.internal.join.SessionCrypto.session(initiator ? own : other, initiator ? other : own) : new byte[0];
-        usable = both ? io.zmux.internal.join.SessionCrypto.intersect(own.suites(), other.suites()) : new long[0];
-        usableGroups = both ? io.zmux.internal.join.SessionCrypto.intersect(own.groups(), other.groups()) : new long[0];
+        // Both sessions' crypto parameters are set by the decoder and the local configuration, in other classes; the analyzer sees neither.
+        //noinspection ConstantValue
+        if (own != null && other != null) {
+            sessionCrypto = io.zmux.internal.join.SessionCrypto.session(initiator ? own : other, initiator ? other : own);
+            usable = io.zmux.internal.join.SessionCrypto.intersect(own.suites(), other.suites());
+            usableGroups = io.zmux.internal.join.SessionCrypto.intersect(own.groups(), other.groups());
+        } else {
+            sessionCrypto = new byte[0];
+            usable = new long[0];
+            usableGroups = new long[0];
+        }
         usePsk = (l.secretFlags & TransportParams.SECRET_PSK) != 0;
         nextId = initiator ? 2 : 1;
         heldExporter = (l.secretFlags & TransportParams.SECRET_EXPORTER) != 0 && exporter != null ? exporter : new byte[0];
@@ -521,7 +528,7 @@ public final class Joins {
         if (len > 0 && b[off] != 0x03) {
             if (a.tpSkipped()) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
             if (a.joinFraming() == Framing.MESSAGE) {
-                if (!startsWithParameters(b, off, len, 0)) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+                if (!startsWithParameters(b, off, len)) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
                 a.tpSkipped(true);
                 return new JoinStep(Step.MORE, len, 0);
             }
@@ -587,7 +594,7 @@ public final class Joins {
         return new JoinStep(Step.FAILED, 0, 0);
     }
 
-    private static boolean startsWithParameters(byte[] b, int off, int len, int ignored) {
+    private static boolean startsWithParameters(byte[] b, int off, int len) {
         byte[] prefix = io.zmux.internal.wire.Records.TRANSPORT_PARAMETERS_PREFIX;
         if (len < prefix.length) return false;
         for (int i = 0; i < prefix.length; i++) if (b[off + i] != prefix[i]) return false;

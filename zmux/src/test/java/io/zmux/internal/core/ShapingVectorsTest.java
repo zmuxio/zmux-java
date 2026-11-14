@@ -34,14 +34,14 @@ class ShapingVectorsTest {
         return Json.object(Files.readString(p));
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static List<Map<String, Object>> cases(Map<String, Object> m, String k) { return (List<Map<String, Object>>) m.get(k); }
 
     static int num(Map<String, Object> m, String k) {
         return m.get(k) == null ? 0 : ((Number) m.get(k)).intValue();
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static Map<String, Object> obj(Map<String, Object> m, String k) { return (Map<String, Object>) m.get(k); }
 
     static UnitPlan plan(Map<String, Object> p) {
@@ -163,7 +163,7 @@ class ShapingVectorsTest {
 
     private static long u64(Object x) { return x == null ? 0 : ((Number) x).longValue(); }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     private static WireAccount account(Object x) {
         Map<String, Object> a = (Map<String, Object>) x;
         return new WireAccount(u64(a.get("initial")), u64(a.get("per_mb")), u64(a.get("per_sec")));

@@ -2,6 +2,7 @@ package io.zmux.seal;
 
 import io.zmux.internal.kex.MlKem768;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,7 +29,7 @@ class HybridTest {
         assertEquals(List.of(1L, 3L), ServerConfig.DEFAULT_PROFILES.stream().map(Profile::value).toList());
         assertEquals(List.of(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_CHACHA), Profiles.CLIENT.subList(0, 2));
         assertEquals(List.of(Profile.XXHFS_PSK0_AES, Profile.XXHFS_AES), Profiles.CLIENT_AES.subList(0, 2));
-        for (long unassigned : new long[] {0, 2, 6, 7}) assertEquals(null, Profile.of(unassigned));
+        for (long unassigned : new long[] {0, 2, 6, 7}) assertNull(Profile.of(unassigned));
         assertEquals(List.of(1248, 1216, 1200, 64), List.of(Handshake.minLength(Profile.XXHFS_PSK0_AES, 0), Handshake.minLength(Profile.XXHFS_CHACHA, 0),
                 Handshake.minLength(Profile.XXHFS_CHACHA, 1), Handshake.minLength(Profile.XXHFS_PSK0_CHACHA, 2)));
     }

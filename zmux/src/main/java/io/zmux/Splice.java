@@ -24,6 +24,8 @@ final class Splice {
     /** A packet relay (EXTENSIONS.md Section 12): the stream bytes are capsules, and datagrams may become capsules. */
     private final boolean packets;
     private final AtomicBoolean cancelled = new AtomicBoolean();
+    /** The code of a cancellation through the splice's control; -1 for none (a cancelled stage resets with ZMUX_CANCELLED and stops with 0). */
+    private volatile long cancelCode = -1;
     private volatile boolean dataDone;
     /** Why the first direction to fail tore both streams down; the other direction's local-close faults follow from it. */
     private final AtomicReference<IOException> teardown = new AtomicReference<>();
@@ -47,6 +49,7 @@ final class Splice {
         try { b.claimIo(); } catch (RuntimeException error) { a.unclaimIo(); throw error; }
         try {
             Splice splice = new Splice(a, b, options, packets);
+            if (options.control() != null) options.control().attach(splice);
             Thread.ofVirtual().name("zmux-splice").start(splice::run);
             return splice.result;
         } catch (RuntimeException | Error failure) { a.unclaimIo(); b.unclaimIo(); throw failure; }
@@ -54,6 +57,14 @@ final class Splice {
 
     private void cancel() {
         cancelled.set(true); forward.interrupt(); reverse.interrupt();
+    }
+
+    /** Cancels with code through the control; false when already cancelled or ended. */
+    boolean cancelWith(long code) {
+        if (cancelled.get() || result.isDone()) return false;
+        cancelCode = code;
+        cancel();
+        return true;
     }
 
     /**
@@ -357,7 +368,11 @@ final class Splice {
         }
         private void finish(IOException error) {
             if (cancelled.get() || error instanceof InterruptedIOException) {
-                end = null; abortBoth(source, target, 0); return;
+                long code = cancelCode;
+                end = code >= 0 ? new SpliceResult.End.Cancelled(code) : null;
+                if (code >= 0) abortBoth(source, target, code);
+                else abortBoth(source, target, io.zmux.internal.wire.TransportError.CANCELLED, 0); // 7.4: reset with ZMUX_CANCELLED, stop with 0
+                return;
             }
             if (error instanceof StreamResetException reset) {
                 long code = reset.code();
@@ -483,6 +498,10 @@ final class Splice {
     }
 
     private static void abortBoth(ZmuxStream a, ZmuxStream b, long code) {
-        a.stop(code); a.reset(code); b.stop(code); b.reset(code);
+        abortBoth(a, b, code, code);
+    }
+
+    private static void abortBoth(ZmuxStream a, ZmuxStream b, long resetCode, long stopCode) {
+        a.stop(stopCode); a.reset(resetCode); b.stop(stopCode); b.reset(resetCode);
     }
 }

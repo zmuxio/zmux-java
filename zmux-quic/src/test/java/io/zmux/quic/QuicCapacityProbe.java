@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import java.io.IOException;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.*;
 import java.time.Duration;
@@ -124,7 +125,7 @@ class QuicCapacityProbe {
     }
 
     /** One measurement path for single-session and simultaneous cross-session traffic. */
-    private Observed measureTransfers(ExecutorService workers, List<Traffic> traffic, int bytes) throws Exception {
+    private static Observed measureTransfers(ExecutorService workers, List<Traffic> traffic, int bytes) throws Exception {
         var samples = new ArrayList<Double>();
         var before = new ArrayList<List<PipeStats>>();
         for (var flow : traffic) before.add(flow.sender().pipeStats());
@@ -178,15 +179,17 @@ class QuicCapacityProbe {
                 samples.stream().mapToDouble(Double::doubleValue).max().orElse(0), samples.size(), delta, List.copyOf(pipeTraffic));
     }
 
-    private double rateSum(ZmuxSession session) throws Exception {
+    private static double rateSum(ZmuxSession session) throws Exception {
         return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
     }
 
     private record Pair(ZmuxSession local, ZmuxSession remote) implements AutoCloseable {
-        @Override public void close() throws Exception { QuicEndpointTest.closed(local, remote); }
+        @Override public void close() throws IOException {
+            local.close(); remote.close(); local.awaitClosed(); remote.awaitClosed();
+        }
     }
 
-    private Pair connect(QuicClient client, QuicServer server, ZmuxListener listener) throws Exception {
+    private static Pair connect(QuicClient client, QuicServer server, ZmuxListener listener) throws Exception {
         var a = client.connectAsync(server.address(), "localhost").get(10, TimeUnit.SECONDS);
         try {
             var b = listener.accept(Duration.ofSeconds(5)); assertNotNull(b); return new Pair(a, b);
@@ -265,19 +268,19 @@ class QuicCapacityProbe {
             }
         }
         QuicPool pool(int index) { return pools.get(pools.size() == 1 ? 0 : index); }
-        @Override public void close() throws Exception {
+        @Override public void close() throws IOException {
             for (var pool : pools) pool.close();
-            Exception error = null;
+            IOException error = null;
             for (var relay : relays) {
                 try { relay.close(); }
-                catch (Exception failure) { if (error == null) error = failure; else error.addSuppressed(failure); }
+                catch (IOException failure) { if (error == null) error = failure; else error.addSuppressed(failure); }
             }
             if (error != null) throw error;
         }
     }
 
     /** Cumulative native counters, sampled outside the timed transfer; includes an idle bootstrap if still live. */
-    private String nativeStats(int round, String mode, int direction, String role,
+    private static String nativeStats(int round, String mode, int direction, String role,
                                List<io.netty.handler.codec.quic.QuicChannel> channels) throws Exception {
         long sent = 0, lost = 0, lostBytes = 0, retransmitted = 0;
         int collected = 0, skipped = 0;
@@ -296,7 +299,7 @@ class QuicCapacityProbe {
                 direction == 0 ? "forward" : "reverse", role, collected, skipped, sent, lost, lostBytes, retransmitted);
     }
 
-    private long acknowledged(ZmuxSession session) throws Exception {
+    private static long acknowledged(ZmuxSession session) throws Exception {
         return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
     }
 }

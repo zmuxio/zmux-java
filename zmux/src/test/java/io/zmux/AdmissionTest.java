@@ -1,6 +1,8 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
+
 import io.zmux.carrier.*;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -249,7 +251,7 @@ class AdmissionTest {
                 verdict.set(Admission.Decision.accept(4));
                 SocketChannel ch = SocketChannel.open(l.localAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {7, 7, 7, 7}));
-                try (var c = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "accepted after the skipped prefix");
                 }
                 verdict.set(Admission.Decision.STALL);
@@ -330,21 +332,21 @@ class AdmissionTest {
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 // The whole prefix at once: decided on live input.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("abcdefgh".getBytes()));
+                    ch.write(ByteBuffer.wrap("abcdefgh".getBytes(UTF_8)));
                     ch.shutdownOutput();
                     assertEquals("abcdefgh", readAll(ch));
                 }
                 // Fewer bytes than the peek: decided when the peek timeout passes, on the buffered prefix.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("ab".getBytes()));
+                    ch.write(ByteBuffer.wrap("ab".getBytes(UTF_8)));
                     Thread.sleep(500);
-                    ch.write(ByteBuffer.wrap("cdefgh".getBytes()));
+                    ch.write(ByteBuffer.wrap("cdefgh".getBytes(UTF_8)));
                     ch.shutdownOutput();
                     assertEquals("abcdefgh", readAll(ch));
                 }
                 // The input ends within the peek: decided at its end, the bytes still replayed.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("xy".getBytes()));
+                    ch.write(ByteBuffer.wrap("xy".getBytes(UTF_8)));
                     ch.shutdownOutput();
                     assertEquals("xy", readAll(ch));
                 }
@@ -357,9 +359,9 @@ class AdmissionTest {
     /** Sends part, waits past the 200 ms peek timeout, sends the rest and returns what the echo fallback wrote back. */
     private static String lateBytes(ZmuxListener l, String part, String rest) throws Exception {
         try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-            ch.write(ByteBuffer.wrap(part.getBytes()));
+            ch.write(ByteBuffer.wrap(part.getBytes(UTF_8)));
             Thread.sleep(500);
-            ch.write(ByteBuffer.wrap(rest.getBytes()));
+            ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
             ch.shutdownOutput();
             return readAll(ch);
         }
@@ -386,7 +388,7 @@ class AdmissionTest {
             // A prefix complete in time is decided as usual.
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("abcd".getBytes()));
+                    ch.write(ByteBuffer.wrap("abcd".getBytes(UTF_8)));
                     assertEquals("", readAll(ch));
                 }
                 assertEquals(1, decided.get());
@@ -420,7 +422,7 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ListenerEndpointTest.config(loops);
             try (var a = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var b = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
-                 var client = a.connect(b.localAddress()); var server = b.accept(Duration.ofSeconds(3))) {
+                 var _ = a.connect(b.localAddress()); var server = b.accept(Duration.ofSeconds(3))) {
                 byte[] known = (byte[]) server.run(op -> server.core.locator().clone());
                 byte[] other = known.clone();
                 other[0] ^= 1;
@@ -464,7 +466,7 @@ class AdmissionTest {
                 SocketChannel ch = SocketChannel.open(l.localAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {1, 2, 3, 4}));
                 Thread.sleep(400);
-                try (var c = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "the session starts after the skipped bytes");
                 }
             }
@@ -485,7 +487,7 @@ class AdmissionTest {
                 SocketChannel ch = SocketChannel.open(server.getLocalAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {7, 7, 7, 7}));
                 var admitted = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
-                try (var c = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 }
@@ -559,7 +561,7 @@ class AdmissionTest {
             @Override public void close() { }
         };
         var opening = Thread.ofVirtual().start(() -> {
-            try (var s = Zmux.open(PipeIo.of(r, w), Role.CLIENT, cfg)) { } catch (Exception ignored) { }
+            try (var _ = Zmux.open(PipeIo.of(r, w), Role.CLIENT, cfg)) { } catch (Exception ignored) { }
         });
         byte[] b = first.get(5, TimeUnit.SECONDS);
         opening.interrupt();
@@ -596,7 +598,7 @@ class AdmissionTest {
                 @Override public void onEnd() {
                     got.add(all.toByteArray());
                     carrier.reader().close();
-                    carrier.writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap("fallback".getBytes())), new PipeWriter.Completion() {
+                    carrier.writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap("fallback".getBytes(UTF_8))), new PipeWriter.Completion() {
                         @Override public void completed() { carrier.writer().close(); }
                         @Override public void failed(Throwable cause) { carrier.writer().abort(cause); }
                     });
@@ -616,7 +618,7 @@ class AdmissionTest {
                 var sock = dialTls(l.localAddress());
                 byte[] tok = auth.token(binding(sock));
                 sock.getOutputStream().write(tok);
-                try (var c = Zmux.open(streamPipe(sock), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(streamPipe(sock), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "a valid carrier is accepted");
                 }
                 byte[] valid;
@@ -628,7 +630,7 @@ class AdmissionTest {
                     try (var c = dialTls(l.localAddress())) {
                         c.getOutputStream().write(cases[i]);
                         c.shutdownOutput();
-                        assertEquals("fallback", new String(c.getInputStream().readAllBytes()), names[i]);
+                        assertEquals("fallback", new String(c.getInputStream().readAllBytes(), UTF_8), names[i]);
                     }
                     assertArrayEquals(cases[i], got.poll(5, TimeUnit.SECONDS), names[i]);
                 }
@@ -677,11 +679,11 @@ class AdmissionTest {
                             "a session's own TLS pipe presents the credential too");
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
                 }
-                try (var c = endpoint.connectTls(l.localAddress(), tls); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = endpoint.connectTls(l.localAddress(), tls); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "a listener's dialer presents its sessions' credential");
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
                 }
-                try (var c = endpoint.connect(new InetSocketAddress("127.0.0.1", l.localAddress().getPort()))) {
+                try (var _ = endpoint.connect(new InetSocketAddress("127.0.0.1", l.localAddress().getPort()))) {
                     fail("a bound credential on a carrier without TLS fails the dial");
                 } catch (IOException expected) {
                     assertTrue(expected.getMessage().contains("exporter"), expected.toString());
@@ -717,7 +719,7 @@ class AdmissionTest {
                 // Decided before the client writes anything: a prefix read would wait out the peek timeout.
                 assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals("peer example.com true 0 [1]", seen.poll(1, TimeUnit.SECONDS));
-                try (var c = Zmux.open(pair[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var _ = Zmux.open(pair[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                 }
                 // The same token again, and none at all: both stall at once.

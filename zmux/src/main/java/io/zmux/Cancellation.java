@@ -5,6 +5,7 @@ import java.util.Objects;
 
 /** A reusable cancellation signal with removable registrations. Callbacks run outside its lock. */
 public final class Cancellation implements AutoCloseable {
+    /** A registered callback; closing it withdraws the callback if it has not run. */
     @FunctionalInterface public interface Registration extends AutoCloseable { @Override void close(); }
     /** Keyed by a fresh token per registration, so one callback registered twice is two registrations. */
     private final IdentityHashMap<Object, Runnable> listeners = new IdentityHashMap<>();

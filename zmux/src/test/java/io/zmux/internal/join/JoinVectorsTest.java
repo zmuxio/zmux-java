@@ -10,6 +10,7 @@ import static io.zmux.internal.join.VectorFiles.items;
 import static io.zmux.internal.join.VectorFiles.longs;
 import static io.zmux.internal.join.VectorFiles.num;
 import static io.zmux.internal.join.VectorFiles.str;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -35,7 +36,7 @@ class JoinVectorsTest {
     }
 
     private static byte[] plaintext(Map<String, Object> v) {
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         Map<String, Object> f = (Map<String, Object>) v.get("plaintext_fill");
         return f != null ? fill((int) num(f, "byte"), (int) num(f, "length")) : hex(v, "plaintext");
     }
@@ -212,7 +213,7 @@ class JoinVectorsTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     void join() throws Exception {
         List<Map<String, Object>> all = VectorFiles.list("join.json");
         for (Map<String, Object> v : all) {
@@ -275,8 +276,8 @@ class JoinVectorsTest {
                     byte[] down = ra.sealer().seal(new byte[] {3}, 0, 1);
                     assertArrayEquals(new byte[] {3}, rj.opener().open(down, 0, down.length), name);
                 } else {
-                    assertEquals(null, rj.sealer(), name);
-                    assertEquals(null, ra.opener(), name);
+                    assertNull(rj.sealer(), name);
+                    assertNull(ra.opener(), name);
                 }
             }
         }
@@ -362,7 +363,7 @@ class JoinVectorsTest {
     @Test
     void suiteTable() {
         assertArrayEquals(new long[] {1, 2}, Suite.supported());
-        assertEquals(null, Suite.lookup(3));
+        assertNull(Suite.lookup(3));
         assertEquals(Suite.AES, Suite.preferred(new long[] {1}));
         assertEquals(Suite.AES.id(), Suite.lookup(1).id());
         assertEquals(Suite.aesHardware() ? Suite.AES : Suite.CHACHA, Suite.preferred(new long[] {1, 2}));

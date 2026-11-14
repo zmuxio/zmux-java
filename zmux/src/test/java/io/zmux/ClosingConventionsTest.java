@@ -45,6 +45,7 @@ final class ClosingConventionsTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void timedWaitsThrowAndNeverReturnNull() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();

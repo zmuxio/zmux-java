@@ -1,5 +1,6 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.carrier.Framing;
@@ -34,6 +35,7 @@ class ListenerStatsTest {
         return p[1];
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void everyPipeInputCountsOnceInOneOutcome() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
@@ -62,7 +64,7 @@ class ListenerStatsTest {
                     inputs++;
                     PipePoolTest.await(() -> l.stats().timedOut() == 1);
                     // Not zmux at all: rejected.
-                    l.adapter().handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes()), JoinHint.inBand(TestAddr.peer("d"))).closed();
+                    l.adapter().handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes(UTF_8)), JoinHint.inBand(TestAddr.peer("d"))).closed();
                     inputs++;
                     PipePoolTest.await(() -> l.stats().rejected() == 2);
                     // A pending carrier holds its source's only slot; the next one of that source is refused.

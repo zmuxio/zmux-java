@@ -15,7 +15,7 @@ import org.junit.jupiter.api.TestFactory;
 
 /** The shared cases of draws, bundles and machines, from the test resources, or the directory of {@code ZMUX_SHAPING_VECTORS}. */
 class VectorsTest {
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static Map<String, Object> file(String name) throws Exception {
         String dir = System.getenv().getOrDefault("ZMUX_SHAPING_VECTORS", "../zmux/src/test/resources/spec/shaping");
         Path p = Path.of(dir, name);
@@ -23,10 +23,10 @@ class VectorsTest {
         return (Map<String, Object>) DefinitionJson.parse(Files.readString(p));
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static List<Map<String, Object>> cases(Map<String, Object> m, String k) { return (List<Map<String, Object>>) m.get(k); }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     static Map<String, Object> obj(Object o) { return (Map<String, Object>) o; }
 
     static DefinitionJson.Tables tables(Object x) throws DefinitionException {
@@ -73,7 +73,7 @@ class VectorsTest {
         return Stream.of(
                 each(cases(f, "splitmix64"), "splitmix64", v -> {
                     Source s = new Source(Map.of("seed", v.get("seed")));
-                    for (Object w : (List<?>) v.get("first")) assertEquals(w, String.format("%016x", s.nextLong()));
+                    for (Object w : (List<?>) v.get("first")) assertEquals(w, String.format(Locale.ROOT, "%016x", s.nextLong()));
                 }),
                 each(cases(f, "values"), "values", v -> {
                     Source s = new Source(obj(v.get("source")));

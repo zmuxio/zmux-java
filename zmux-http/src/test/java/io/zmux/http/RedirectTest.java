@@ -1,15 +1,17 @@
 package io.zmux.http;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.CarrierCache;
 import io.zmux.CarrierChoice;
-import io.zmux.HttpRedirectException;
 import io.zmux.CarrierChoiceException;
 import io.zmux.CarrierChoicePolicy;
+import io.zmux.HttpRedirectException;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
 import io.zmux.Zmux;
+import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
@@ -80,7 +82,7 @@ class RedirectTest {
             }
         }
 
-        @Override public void close() throws Exception {
+        @Override public void close() throws IOException {
             server.close();
             for (var s : open) s.close();
         }
@@ -129,8 +131,7 @@ class RedirectTest {
         var body = new java.io.ByteArrayOutputStream();
         Thread.ofVirtual().start(() -> {
             try (var s = up.accept(); var in = new java.io.DataInputStream(s.getInputStream())) {
-                String line;
-                while (!(line = readLine(in)).isEmpty()) { /* the head */ }
+                for (String line = readLine(in); !line.isEmpty(); line = readLine(in)) { /* the head */ }
                 while (true) {
                     int n = Integer.parseInt(readLine(in).trim(), 16);
                     if (n == 0) return;
@@ -160,7 +161,7 @@ class RedirectTest {
                 Thread.sleep(1);
             }
             var during = new java.util.concurrent.CompletableFuture<Void>();
-            pipe.writer().write(io.zmux.carrier.OutboundBatch.of(java.nio.ByteBuffer.wrap("during".getBytes())), completion(during));
+            pipe.writer().write(io.zmux.carrier.OutboundBatch.of(java.nio.ByteBuffer.wrap("during".getBytes(UTF_8))), completion(during));
             hold.countDown();
             during.get(10, java.util.concurrent.TimeUnit.SECONDS);
             String want = "before during";
@@ -193,7 +194,7 @@ class RedirectTest {
 
     private static void write(io.zmux.carrier.PipeIo pipe, String s) throws Exception {
         var f = new java.util.concurrent.CompletableFuture<Void>();
-        pipe.writer().write(io.zmux.carrier.OutboundBatch.of(java.nio.ByteBuffer.wrap(s.getBytes())), completion(f));
+        pipe.writer().write(io.zmux.carrier.OutboundBatch.of(java.nio.ByteBuffer.wrap(s.getBytes(UTF_8))), completion(f));
         f.get(10, java.util.concurrent.TimeUnit.SECONDS);
     }
 

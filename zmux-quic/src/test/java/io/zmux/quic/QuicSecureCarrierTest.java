@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.*;
@@ -62,7 +63,7 @@ class QuicSecureCarrierTest {
         byte[] key = new byte[32];
         PrefixAuth auth = new PrefixAuth(key, Duration.ofSeconds(30), true, 1, 0);
         ZmuxConfig plain = ZmuxConfig.builder().build();
-        try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(plain).admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()::decide)).build());
+        try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(plain).admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier())).build());
              QuicServer server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), l);
              QuicClient client = new QuicClient(TestTls.client, QuicOptions.defaults())) {
             ZmuxSession c = client.connectAsync(server.address(), "localhost", ZmuxConfig.builder().carrierCredential(auth).build()).get(10, TimeUnit.SECONDS);
@@ -110,7 +111,7 @@ class QuicSecureCarrierTest {
     @Test void anEstablishRunsOnAQuicStreamInBothModes() throws Exception {
         io.zmux.seal.StaticKey node = io.zmux.seal.StaticKey.generate();
         byte[] secret = new byte[32];
-        var hp = io.zmux.seal.HandlePsk.derive(secret, "q".getBytes(), null);
+        var hp = io.zmux.seal.HandlePsk.derive(secret, "q".getBytes(UTF_8), null);
         var gate = new io.zmux.seal.Gate() {
             @Override public byte[] resolve(byte[] h, java.net.SocketAddress src) { return hp.psk(); }
             @Override public io.zmux.seal.Credential credential(byte[] h, io.zmux.seal.Profile p, java.net.SocketAddress src) { return null; }

@@ -51,4 +51,31 @@ class PipeChannelTest {
             assertFalse(reader.isAlive(), "the read thread ends with its half");
         }
     }
+    /** One channel without a half-close: closing the sending half leaves it open, so the input still reads. */
+    @Test void aChannelWithoutHalfCloseStaysOpenForTheInput() throws Exception {
+        try (var server = ServerSocketChannel.open().bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
+            SocketChannel ch = SocketChannel.open(server.getLocalAddress());
+            java.nio.channels.ByteChannel whole = new java.nio.channels.ByteChannel() {
+                @Override public int read(ByteBuffer dst) throws java.io.IOException { return ch.read(dst); }
+                @Override public int write(ByteBuffer src) throws java.io.IOException { return ch.write(src); }
+                @Override public boolean isOpen() { return ch.isOpen(); }
+                @Override public void close() throws java.io.IOException { ch.close(); }
+            };
+            PipeIo io = PipeChannel.pipe(whole, whole, Framing.BYTE_STREAM, 1 << 16);
+            SocketChannel peer = server.accept();
+            var got = new java.util.concurrent.LinkedBlockingQueue<Object>();
+            io.reader().start(new PipeReader.Sink() {
+                @Override public void onData(ByteBuffer data, Runnable release) { got.add(data.remaining()); release.run(); }
+                @Override public void onEnd() { got.add("end"); }
+                @Override public void onError(Throwable cause) { got.add(cause); }
+            });
+            io.writer().close();
+            assertTrue(ch.isOpen(), "the sending half's close leaves the channel to the input");
+            peer.write(ByteBuffer.wrap(new byte[5]));
+            assertEquals(5, got.poll(5, TimeUnit.SECONDS), "the peer's last write still arrives");
+            io.reader().close();
+            assertFalse(ch.isOpen(), "the second half closes the channel");
+            peer.close();
+        }
+    }
 }

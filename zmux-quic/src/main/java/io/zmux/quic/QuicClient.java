@@ -189,7 +189,7 @@ public final class QuicClient implements AutoCloseable {
     CompletionStage<ConnectionCarrier> connectCarrier(InetSocketAddress address, String host, io.zmux.CarrierCredential credential, int closing) {
         CompletableFuture<ConnectionCarrier> result = track(new CompletableFuture<>());
         if (result.isDone()) return result;
-        final InetSocketAddress target;
+        InetSocketAddress target;
         try { target = nativeAddress(address); }
         catch (RuntimeException error) { result.completeExceptionally(error); return result; }
         ConnectionCarrier carrier = new ConnectionCarrier(options, listener, null, this.host, completions, credential,

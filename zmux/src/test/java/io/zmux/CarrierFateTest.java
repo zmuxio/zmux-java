@@ -2,7 +2,6 @@ package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.*;
-import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;

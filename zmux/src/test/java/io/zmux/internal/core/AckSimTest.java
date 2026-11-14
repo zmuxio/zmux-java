@@ -1,5 +1,6 @@
 package io.zmux.internal.core;
 
+import java.util.Locale;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.internal.wire.Frame;
@@ -73,7 +74,7 @@ class AckSimTest {
 
     record Result(long srtt, long minRtt, double rate, double goodput, double acksPerSec) {
         @Override public String toString() {
-            return String.format("srtt %.2f ms min_rtt %.2f ms R_p %.1f MB/s goodput %.1f MB/s PIPE_ACK %.0f/s",
+            return String.format(Locale.ROOT, "srtt %.2f ms min_rtt %.2f ms R_p %.1f MB/s goodput %.1f MB/s PIPE_ACK %.0f/s",
                     srtt / 1e6, minRtt / 1e6, rate / 1e6, goodput / 1e6, acksPerSec);
         }
     }
@@ -252,11 +253,11 @@ class AckSimTest {
                             int app = m.equals("app-4k/10ms") ? 4 << 10 : m.equals("app-60k/30ms") ? 60 << 10 : 0;
                             long every = m.equals("app-4k/10ms") ? 10 * MS : m.equals("app-60k/30ms") ? 30 * MS : 0;
                             Cfg c = new Cfg(f, qb, maxRec, rate, rtt * MS, 4 * Time.SECOND, app, every, seed,
-                                    (seed - 1) * 150 * US, (seed - 1) * 7 * MS);
+                                    (seed - 1L) * 150 * US, (seed - 1L) * 7 * MS);
                             Result r = run(c);
                             minG = Math.min(minG, r.goodput());
                             maxG = Math.max(maxG, r.goodput());
-                            line.append(String.format(" | srtt %5.1f min %5.1f R %6.1f G %6.1f ack %4.0f",
+                            line.append(String.format(Locale.ROOT, " | srtt %5.1f min %5.1f R %6.1f G %6.1f ack %4.0f",
                                     r.srtt() / 1e6, r.minRtt() / 1e6, r.rate() / 1e6, r.goodput() / 1e6, r.acksPerSec()));
                         }
                         System.out.printf("qb=%-5s %-12s %3.0fMB/s %2dms G[%6.1f..%6.1f]%s%n", qb, m, rate / 1e6, rtt,

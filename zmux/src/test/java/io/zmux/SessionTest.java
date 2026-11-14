@@ -1,5 +1,6 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -13,8 +14,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.Future;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -47,15 +48,15 @@ class SessionTest {
     @Test
     void echoWithPreamble() throws Exception {
         try (Pair p = Pair.memory(cfg)) {
-            ZmuxStream a = p.client().openStream(Preamble.openInfo("dst:1".getBytes()));
-            a.write("hello".getBytes());
+            ZmuxStream a = p.client().openStream(Preamble.openInfo("dst:1".getBytes(UTF_8)));
+            a.write("hello".getBytes(UTF_8));
             a.finish();
             ZmuxStream b = p.server().acceptStream();
-            assertArrayEquals("dst:1".getBytes(), b.preamble().openInfo());
-            assertArrayEquals("hello".getBytes(), readAll(b));
-            b.write("world".getBytes());
+            assertArrayEquals("dst:1".getBytes(UTF_8), b.preamble().openInfo());
+            assertArrayEquals("hello".getBytes(UTF_8), readAll(b));
+            b.write("world".getBytes(UTF_8));
             b.finish();
-            assertArrayEquals("world".getBytes(), readAll(a));
+            assertArrayEquals("world".getBytes(UTF_8), readAll(a));
             assertTrue(p.client().info().preamble());
         }
     }
@@ -65,10 +66,10 @@ class SessionTest {
         try (Pair p = Pair.memory(cfg)) {
             ZmuxStream plain = p.client().openStream();
             assertTrue(plain.preamblePriority().isEmpty(), "a local stream has none");
-            plain.write("a".getBytes());
+            plain.write("a".getBytes(UTF_8));
             ZmuxStream ranked = p.client().openStream();
             ranked.setPeerPriority(new Priority(1, true));
-            ranked.write("b".getBytes());
+            ranked.write("b".getBytes(UTF_8));
             ranked.finish();
             plain.finish();
             ZmuxStream first = p.server().acceptStream();
@@ -117,14 +118,14 @@ class SessionTest {
     void resetAndStopReachThePeer() throws Exception {
         try (Pair p = Pair.memory(cfg)) {
             ZmuxStream a = p.client().openStream();
-            a.write("x".getBytes());
+            a.write("x".getBytes(UTF_8));
             ZmuxStream b = p.server().acceptStream();
             a.reset(7);
             StreamResetException e = assertThrows(StreamResetException.class, () -> readAll(b));
             assertEquals(7, e.code());
             b.stop(9);
             ZmuxStream c = p.client().openStream();
-            c.write("y".getBytes());
+            c.write("y".getBytes(UTF_8));
             ZmuxStream d = p.server().acceptStream();
             d.stop(5);
             StreamStoppedException s = assertThrows(StreamStoppedException.class, () -> {
@@ -189,16 +190,16 @@ class SessionTest {
     @Test
     void datagramsAndPing() throws Exception {
         try (Pair p = Pair.memory(cfg)) {
-            p.client().datagrams().send(ByteBuffer.wrap("dg".getBytes()));
-            assertArrayEquals("dg".getBytes(), p.server().datagrams().receive());
+            p.client().datagrams().send(ByteBuffer.wrap("dg".getBytes(UTF_8)));
+            assertArrayEquals("dg".getBytes(UTF_8), p.server().datagrams().receive());
             Duration rtt = p.client().ping();
             assertTrue(rtt.compareTo(Duration.ofSeconds(5)) < 0);
             ZmuxStream a = p.client().openStream();
-            a.sendDatagram(3, ByteBuffer.wrap("sd".getBytes()));
+            a.sendDatagram(3, ByteBuffer.wrap("sd".getBytes(UTF_8)));
             ZmuxStream b = p.server().acceptStream();
             StreamDatagram d = b.receiveDatagram();
             assertEquals(3, d.context());
-            assertArrayEquals("sd".getBytes(), d.payload());
+            assertArrayEquals("sd".getBytes(UTF_8), d.payload());
         }
     }
 
@@ -224,7 +225,7 @@ class SessionTest {
     void readTimeoutAndShutdown() throws Exception {
         Pair p = Pair.memory(cfg);
         ZmuxStream a = p.client().openStream();
-        a.write("q".getBytes());
+        a.write("q".getBytes(UTF_8));
         ZmuxStream b = p.server().acceptStream();
         assertEquals(1, b.read(new byte[8], 0, 8));
         b.setReadTimeout(Duration.ofMillis(50));
@@ -242,11 +243,11 @@ class SessionTest {
     void shutdownDoesNotWaitForTheHandlesOfEndedStreams() throws Exception {
         Pair p = Pair.memory(cfg);
         ZmuxStream a = p.client().openStream();
-        a.write("q".getBytes());
+        a.write("q".getBytes(UTF_8));
         a.finish();
         ZmuxStream b = p.server().acceptStream();
         assertEquals("q", new String(b.inputStream().readAllBytes(), StandardCharsets.UTF_8));
-        b.write("r".getBytes());
+        b.write("r".getBytes(UTF_8));
         b.finish();
         assertEquals("r", new String(a.inputStream().readAllBytes(), StandardCharsets.UTF_8));
         long start = System.nanoTime();

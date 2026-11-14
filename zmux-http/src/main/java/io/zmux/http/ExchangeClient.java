@@ -26,7 +26,6 @@ import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
-import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -424,16 +423,35 @@ final class ExchangeClient {
             connect();
         }
 
-        /** Sends the request at uri on a connection; on the loop. */
+        /**
+         * Sends the request at uri on a connection; on the loop. Nothing is held while the connection
+         * is being opened: its completion can be lost (the client's group shutting down), so the
+         * request buffer is taken only once the connection is there, back on the loop.
+         */
         private void connect() {
-            ByteBuf b = body.retainedDuplicate();
-            URI at = uri;
-            http.conns.open(at, true, false).whenComplete((ch, e) -> {
-                if (e != null) { b.release(); finishOnLoop(Result.NONE); return; }
+            http.conns.open(uri, true, false).whenComplete((ch, e) -> {
+                if (e != null) { finishOnLoop(Result.NONE); return; }
                 channel = ch;
-                if (cancelled) { b.release(); ch.close(); return; }
-                ChannelLoops.executor(ch).execute(() -> send(ch, b));
+                if (cancelled) { ch.close(); return; }
+                try {
+                    loop.execute(() -> dispatch(ch));
+                } catch (java.util.concurrent.RejectedExecutionException ended) {
+                    ch.close(); // nobody is left to take the result
+                }
             });
+        }
+
+        /** Hands the request to the connection's loop, unless the attempt ended meanwhile; on the loop. */
+        private void dispatch(Channel ch) {
+            if (finished || body == null) { ch.close(); return; }
+            ByteBuf b = body.retainedDuplicate();
+            try {
+                ChannelLoops.executor(ch).execute(() -> send(ch, b));
+            } catch (java.util.concurrent.RejectedExecutionException ended) {
+                b.release();
+                ch.close();
+                finish(Result.NONE);
+            }
         }
 
         /**
@@ -645,6 +663,12 @@ final class ExchangeClient {
     }
 
     private void retry(State st, long now) {
+        if (wclosed && rclosed) {
+            // zmux closed both halves and waits for nothing more of the carrier: what is left ends at the first
+            // attempt without a result instead of being repeated up to the deadline (or forever without one).
+            fail(new ClosedChannelException());
+            return;
+        }
         long spread = (long) (st.backoff * cfg.backoff().jitter());
         st.retryAt = now + st.backoff - spread + ThreadLocalRandom.current().nextLong(spread + 1);
         st.backoff = Math.min(2 * st.backoff, cfg.backoff().max().toNanos());

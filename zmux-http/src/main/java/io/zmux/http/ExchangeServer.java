@@ -22,7 +22,6 @@ import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.ReplayFilter;
-import io.zmux.ZmuxListener;
 import javax.crypto.Mac;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -93,6 +92,8 @@ final class ExchangeServer {
      * the host as it is. A request to a closed listener holds no slot: it is still
      * authenticated, to be answered GONE.
      */
+    // reserve returns null when the source or the listener has no slot left (another module); the analyzer takes the slot for a constant.
+    //noinspection ConstantValue
     Collect collect(Router router, HttpRequest req) {
         var ch = router.context().channel();
         var slot = ep.listener.adapter().reserve(Requests.peer(ch), Requests.source(ch, req, ep.trusted));
@@ -142,8 +143,14 @@ final class ExchangeServer {
             this.length = length;
             this.slot = slot;
             body = router.context().alloc().buffer(headerLength(), length);
-            timer = router.context().executor().schedule(this::firstRecordTimedOut,
-                    ep.listener.adapter().firstRecordTimeout().toNanos(), TimeUnit.NANOSECONDS);
+            timer = schedule(this::firstRecordTimedOut, ep.listener.adapter().firstRecordTimeout().toNanos());
+        }
+
+        /** Runs task on the channel's event loop after nanos. */
+        private ScheduledFuture<?> schedule(Runnable task, long nanos) {
+            // The executor is the channel's event loop, owned and closed by Netty.
+            //noinspection resource
+            return router.context().executor().schedule(task, nanos, TimeUnit.NANOSECONDS);
         }
 
         /** Takes body bytes (not consumed); last: the body ended. */
@@ -248,7 +255,7 @@ final class ExchangeServer {
             // A request that cannot create a carrier gives its slots back now.
             if (c != null || gn != null || hd.kind() == Exchange.KIND_CLOSE || !hd.valid((int) hd.dataLength())) releaseSlot();
             ep.listener.config().handshakeTimeout().ifPresent(d ->
-                    timer = router.context().executor().schedule(this::handshakeTimedOut, d.toNanos(), TimeUnit.NANOSECONDS));
+                    timer = schedule(this::handshakeTimedOut, d.toNanos()));
             return true;
         }
 
@@ -332,7 +339,7 @@ final class ExchangeServer {
     }
 
     /** Hands a to k on its loop; a carrier whose loop shut down is gone, and a gets GONE here. */
-    private void serveOn(Carrier k, Answer a) {
+    private static void serveOn(Carrier k, Answer a) {
         try {
             k.loop.execute(() -> k.serve(a));
         } catch (java.util.concurrent.RejectedExecutionException e) {
@@ -558,7 +565,7 @@ final class ExchangeServer {
         }
 
         /** Serves an authenticated request. */
-        void serve(Answer a) {
+        private void serve(Answer a) {
             Exchange.Header q = a.q;
             last = System.nanoTime();
             if (ended) { a.send(endedFlags(), null); return; }

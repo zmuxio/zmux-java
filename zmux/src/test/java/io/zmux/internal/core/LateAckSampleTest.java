@@ -33,7 +33,7 @@ class LateAckSampleTest {
         });
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     private void ack(long sent, long now, long delayMicros) throws Exception {
         AckEngine.Send ps = pipe.out().snd;
         long start = end;

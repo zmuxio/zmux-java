@@ -1,14 +1,15 @@
 package io.zmux;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.zmux.CarrierKind;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeWriter;
-import io.zmux.CarrierKind;
 import io.zmux.internal.join.HelloPayload;
 import io.zmux.internal.join.JoinPipe;
 import io.zmux.internal.join.Joiner;
@@ -17,6 +18,7 @@ import io.zmux.internal.join.Mode;
 import io.zmux.internal.join.Suite;
 import io.zmux.internal.wire.TransportParams;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
@@ -78,7 +80,8 @@ class JoinAttackTest {
         }
     }
 
-    private void oneAnswer(RecordMode m, String name, byte[] answer) throws Exception {
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
+    private static void oneAnswer(RecordMode m, String name, byte[] answer) throws Exception {
         String what = m + " " + name;
         try (EventLoops loops = EventLoops.create(1); var party = ServerSocketChannel.open()) {
             party.bind(NetworkTest.any());
@@ -152,7 +155,7 @@ class JoinAttackTest {
 
         byte[] client() { synchronized (fromClient) { return fromClient.toByteArray(); } }
         byte[] backward() { synchronized (fromServer) { return fromServer.toByteArray(); } }
-        @Override public void close() throws Exception { server.close(); }
+        @Override public void close() throws IOException { server.close(); }
     }
 
     private static boolean contains(byte[] hay, byte[] needle) {
@@ -182,7 +185,7 @@ class JoinAttackTest {
                 ZmuxPipe p = c.addPipe(relay.address(), mode(RecordMode.SEALED));
                 attached(s, p);
                 for (ZmuxPipe q : c.pipes()) if (q.id().value() == 0) q.abort();
-                byte[] marker = "THE-PLAINTEXT-MARKER-0123456789".getBytes();
+                byte[] marker = "THE-PLAINTEXT-MARKER-0123456789".getBytes(UTF_8);
                 ZmuxStream st = c.openStream();
                 st.write(marker);
                 st.finish();
@@ -264,7 +267,7 @@ class JoinAttackTest {
         }
 
         InetSocketAddress address() throws Exception { return (InetSocketAddress) server.getLocalAddress(); }
-        @Override public void close() throws Exception { server.close(); }
+        @Override public void close() throws IOException { server.close(); }
     }
 
     private interface Check { boolean ok() throws Exception; }
@@ -428,6 +431,7 @@ class JoinAttackTest {
     }
 
     /** Closing the session or the listener ends an Unconfirmed carrier at once, and rejects nobody. */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void closingEndsAnUnconfirmedCarrier() throws Exception {
         for (String what : List.of("session", "listener")) {
             try (EventLoops loops = EventLoops.create(2)) {
@@ -452,6 +456,7 @@ class JoinAttackTest {
     }
 
     /** The wait for a Reply's plan ended by the session is no authentication failure. */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aSessionEndDuringAReplyPlanRejectsNobody() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var asked = new java.util.concurrent.CountDownLatch(1);
@@ -486,7 +491,7 @@ class JoinAttackTest {
                     .handshakeShaper(v -> v.message().equals("reply") ? new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofMillis(delay)) : null).build();
             ZmuxConfig client = config(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
-                 var c = Zmux.connect(l.localAddress(), client); var s = l.accept(WAIT);
+                 var c = Zmux.connect(l.localAddress(), client); var _ = l.accept(WAIT);
                  SocketChannel near = SocketChannel.open(l.localAddress())) {
                 long timedOut = l.stats().timedOut();
                 near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
@@ -509,7 +514,7 @@ class JoinAttackTest {
             ZmuxConfig server = config(loops).joinTimeout(Duration.ofMillis(500))
                     .handshakeShaper(v -> v.message().equals("reply") ? new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofHours(1)) : null).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
-                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT);
+                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var _ = l.accept(WAIT);
                  SocketChannel near = SocketChannel.open(l.localAddress())) {
                 near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
                 long start = System.nanoTime();
@@ -553,12 +558,13 @@ class JoinAttackTest {
     }
 
     /** The end of the session or of the attachment while the Confirm is written starts nothing and closes the carrier. */
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anEndWhileTheConfirmIsWrittenStartsNoPipe() throws Exception {
         for (String what : List.of("close", "abort")) {
             try (EventLoops loops = EventLoops.create(2)) {
                 ZmuxConfig cfg = config(loops).build();
                 try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
-                     var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
+                     var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                     PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                     GatedWriter w = new GatedWriter(pair[0].writer(), 2, false); // the Hello, then the Confirm
@@ -654,7 +660,7 @@ class JoinAttackTest {
             try (EventLoops loops = EventLoops.create(1)) {
                 ZmuxConfig cfg = config(loops).handshakeShaper(v -> planned ? io.zmux.carrier.HandshakeShaper.UnitPlan.NONE : null).build();
                 try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
-                     var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
+                     var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                     c.addPipe(l.localAddress(), PipeOptions.defaults());
                     ListenerResourcesTest.until(() -> c.stats().pipesAdded() >= 2);
                     var stats = c.driver.shapingStats();
@@ -770,7 +776,7 @@ class JoinAttackTest {
             @Override public void write(OutboundBatch batch, Completion c) {
                 if (done) { w.write(batch, c); return; }
                 done = true;
-                byte[] out = new byte[(int) batch.bytes()];
+                byte[] out = new byte[batch.bytes()];
                 ByteBuffer to = ByteBuffer.wrap(out);
                 for (int i = 0; i < batch.segmentCount(); i++) to.put(batch.segment(i).duplicate());
                 ByteBuffer id = ByteBuffer.allocate(8);
@@ -931,7 +937,7 @@ class JoinAttackTest {
             var lc = ListenerConfig.builder().session(cfg)
                     .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.STALL; }).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
-                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT);
+                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var _ = l.accept(WAIT);
                  SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 byte[] h = helloFor(c, 20, Mode.SEALED, new byte[0], null);
                 h[1] = 3; // an unassigned Suite
@@ -949,7 +955,7 @@ class JoinAttackTest {
             List<RejectInfo> infos = new java.util.concurrent.CopyOnWriteArrayList<>();
             var lc = ListenerConfig.builder().session(config(loops).build()).maxPendingPerSource(1)
                     .onReject(i -> { infos.add(i); return RejectInfo.Action.STALL; }).build();
-            try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel held = SocketChannel.open(l.localAddress())) {
+            try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel _ = SocketChannel.open(l.localAddress())) {
                 Thread.sleep(300); // the held carrier takes the source's one slot
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
                     long ms = silentFor(ch);
@@ -997,7 +1003,7 @@ class JoinAttackTest {
             ZmuxConfig cfg = config(loops).build();
             var lc = ListenerConfig.builder().session(cfg).maxPendingPerSession(2).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
-                 var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
+                 var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                 SocketChannel[] held = new SocketChannel[3];
                 try {
                     for (int i = 0; i < held.length; i++) {

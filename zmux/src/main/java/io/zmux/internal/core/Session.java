@@ -1147,6 +1147,8 @@ public final class Session {
     /** Enters CLOSED once every inbound pipe ended. */
     void checkLingerDone() {
         if (state != SessionState.CLOSING) return;
+        // A pipe whose peer's CONNECTION_CLOSE was read, with this side's complete, lingers no longer.
+        pipes.endLingeringPipes();
         if (life.closePending()) {
             if (!life.waitingLanes()) closeSentOn();
             return;
@@ -2121,5 +2123,6 @@ public final class Session {
         @Override public Pacer pacer() { return pacer; }
         @Override public PathLayer path() { return path; }
         @Override public void closeSent() { closeSentOn(); }
+        @Override public void closeRead() { checkLingerDone(); }
     }
 }

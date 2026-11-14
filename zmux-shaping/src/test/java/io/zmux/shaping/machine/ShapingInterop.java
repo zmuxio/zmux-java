@@ -86,7 +86,7 @@ class ShapingInterop {
         }
     }
 
-    private Process start(String binary, Path def, String... args) throws IOException {
+    private static Process start(String binary, Path def, String... args) throws IOException {
         var command = new java.util.ArrayList<String>(); command.add(binary); command.addAll(List.of(args));
         var builder = new ProcessBuilder(command).redirectErrorStream(true);
         builder.environment().put("SHAPE_DEF", def == null ? "" : def.toString());

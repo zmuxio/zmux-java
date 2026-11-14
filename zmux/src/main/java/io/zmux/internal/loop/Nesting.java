@@ -33,6 +33,7 @@ final class Nesting {
     private static final Runnable NONE = () -> {};
 
     /** Records child's dependency on connection's session; null (nothing recorded) if it would form a cycle. */
+    @SuppressWarnings("ValueClassIdentity") // keyed by session identity; the Integer counts are only summed, never compared
     static Runnable tryAttach(SessionRuntime child, Object connection) {
         if (!(connection instanceof SessionRuntime parent)) return NONE;
         synchronized (LOCK) {

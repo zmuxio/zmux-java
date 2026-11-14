@@ -269,18 +269,16 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         SSLEngineResult r = engine.unwrap(netIn, dst);
         netIn.compact();
         reader.lim = dst.position();
-        switch (r.getStatus()) {
+        return switch (r.getStatus()) {
             case BUFFER_UNDERFLOW -> {
                 if (!netIn.hasRemaining()) netIn = grow(netIn);
                 int n = ch.read(netIn);
                 if (n < 0) throw new IOException("connection closed during the TLS handshake");
-                return n > 0;
+                yield n > 0;
             }
             case CLOSED -> throw new IOException("TLS closed during the handshake");
-            default -> {
-                return true;
-            }
-        }
+            default -> true;
+        };
     }
 
     private static ByteBuffer grow(ByteBuffer b) {

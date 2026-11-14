@@ -212,6 +212,27 @@ public final class PipeTable {
         return true;
     }
 
+    /**
+     * Ends the linger of every pipe whose peer's CONNECTION_CLOSE was read and whose own close is complete (written
+     * and the write side shut, or nothing to write): its inbound direction ends and its carrier closes gracefully.
+     */
+    void endLingeringPipes() {
+        for (Pipe p : list) {
+            if (p.in() == null || p.in().ended() || !p.in().closeRead() || !closeComplete(p)) continue;
+            p.in().end();
+            outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_BIDI));
+        }
+    }
+
+    /** Whether this side's close on p is complete: CONNECTION_CLOSE written and the write side shut, or none to send. */
+    private static boolean closeComplete(Pipe p) {
+        if (p.out() == null || p.out().failed()) return true;
+        Pipe.OutLane l = p.out().lane(0);
+        if (l == null) return true;
+        if (l.tx.closeSent()) return l.tx.closeDone() && l.tx.shutDone();
+        return !canCarryClose(p);
+    }
+
     /** Whether every inbound direction ended. */
     boolean inboundEnded() {
         for (Pipe p : list) if (p.in() != null && !p.in().ended()) return false;

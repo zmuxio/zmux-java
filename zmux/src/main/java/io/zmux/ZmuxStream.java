@@ -398,6 +398,11 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     // ---- both ----
 
+    /**
+     * Waits until the stream's opening frame and everything written before the call were sent. Once they were, the
+     * flush succeeds even if the peer stops or resets the stream afterwards; the next operation reports that. A
+     * stream that failed before its data was sent fails the flush.
+     */
     @Override
     public void flush() throws IOException {
         checkApplicationIo();

@@ -112,8 +112,7 @@ public final class Transmitter {
 
     /** The record cap the lane's carrier sets (a TLS record, the carrier's own bound), 65535 when none. */
     private static int carrierRecordCap(Pipe.OutLane ol) {
-        int m = 65535;
-        if (ol.st.info().tls()) m = Math.min(m, RecordPlan.MAX_RECORD_LENGTH);
+        int m = ol.st.info().tls() ? RecordPlan.MAX_RECORD_LENGTH : 65535;
         int carrier = ol.st.info().maxRecord();
         if (carrier > 0) m = Math.min(m, carrier);
         return m;

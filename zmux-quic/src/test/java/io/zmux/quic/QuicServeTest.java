@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Timeout;
 class QuicServeTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anEstablishedConnectionIsAdmittedOnceAndServedUntilItEnds() throws Exception {
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         try (EventLoops loops = EventLoops.create(2)) {

@@ -104,6 +104,7 @@ final class Pipe {
         /** Lanes other than 0 by number; null until the peer opens one. */
         private LongMap<InLane> byLane;
         private boolean ended;
+        private boolean closeRead;
         final AckEngine.InPipeAck ack = new AckEngine.InPipeAck();
 
         /** An inbound direction with lane 0. */
@@ -125,6 +126,15 @@ final class Pipe {
 
         boolean ended() {
             return ended;
+        }
+
+        /** Whether the peer's CONNECTION_CLOSE was read on this pipe: it sends nothing after it. */
+        boolean closeRead() {
+            return closeRead;
+        }
+
+        void readClose() {
+            closeRead = true;
         }
 
         /** The inbound direction ended: every lane ended, or the attachment failed. */

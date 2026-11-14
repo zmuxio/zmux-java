@@ -141,13 +141,16 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         paused = false;
         if (inEnded || closed || reader == null) return;
         // redeliver runs the reader, which may pause the input or end it again.
-        if (!redeliver(reader) || paused || inEnded) return;
+        if (!redeliver(reader) || paused || inputDone()) return;
         if (endPending != 0) {
             endInput(endPending == 1);
             return;
         }
         if (key != null && key.isValid()) key.interestOps(key.interestOps() | SelectionKey.OP_READ);
     }
+
+    /** Whether the input has ended; read afresh, as redeliver may have ended it. */
+    private boolean inputDone() { return inEnded; }
 
     @Override
     public void redeliver() {

@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import java.io.IOException;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
@@ -12,7 +13,6 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
 import io.zmux.EventLoops;
 import io.zmux.ListenerConfig;
-import io.zmux.Zmux;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxListener;
 import io.zmux.ZmuxSession;
@@ -89,11 +89,11 @@ final class Fixture implements AutoCloseable {
         }
     }
 
-    @Override public void close() throws Exception {
+    @Override public void close() throws IOException {
         endpoint.close();
         listener.close();
-        server.close().sync();
-        group.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        server.close().syncUninterruptibly();
+        group.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
         loops.close();
     }
 
@@ -115,7 +115,8 @@ final class Fixture implements AutoCloseable {
         }
         KeyStore s = KeyStore.getInstance("PKCS12");
         try (FileInputStream in = new FileInputStream(ks.toFile())) { s.load(in, PASS); }
-        return store = s;
+        store = s;
+        return s;
     }
 
     static KeyManagerFactory kmf() throws Exception {

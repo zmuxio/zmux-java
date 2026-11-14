@@ -52,7 +52,7 @@ class ShapedPipeTest {
 
     /** Both sides' factories see each pipe's declared kind, joined pipes included; events and stats carry it. */
     @Test void factoriesSeeTheDeclaredKindOfEveryPipe() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (EventLoops loops = EventLoops.create(2); var _ = Executors.newVirtualThreadPerTaskExecutor()) {
             Seen cs = new Seen(), ss = new Seen();
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(cs).build();
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(ss).build();

@@ -1,7 +1,6 @@
 package io.zmux.quic;
 
 import io.zmux.*;
-import io.netty.handler.codec.quic.QuicSslContext;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,7 +24,7 @@ final class TestTls {
                     "-storetype", "PKCS12", "-keystore", storePath.toString(), "-storepass", "changeit", "-keypass", "changeit")
                     .redirectErrorStream(true).start();
             if (!process.waitFor(30, TimeUnit.SECONDS)) { process.destroyForcibly().waitFor(); throw new IllegalStateException("keytool timed out"); }
-            if (process.exitValue() != 0) throw new IllegalStateException(new String(process.getInputStream().readAllBytes()));
+            if (process.exitValue() != 0) throw new IllegalStateException(new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
         }
         KeyStore store = KeyStore.getInstance("PKCS12");
         try (var input = Files.newInputStream(storePath)) { store.load(input, "changeit".toCharArray()); }

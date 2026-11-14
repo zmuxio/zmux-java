@@ -48,7 +48,7 @@ class ProofTest {
                 ClientConfig cc = SealTest.client().anchor(pinWithProof()).requirePqAuth(true).signer(CLIENT_PROOF).build();
                 PipeIo p = SealTest.establish(SealTest.tcp(l.localAddress()), cc);
                 assertTrue(Seal.peerOf(p).orElseThrow().pqAuthenticated());
-                try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
+                try (var _ = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(SealTest.WAIT)) {
                     Peer client = (Peer) s.admitted().orElseThrow();
                     assertTrue(client.pqAuthenticated());
                     // The Peer carries the principal the verdict gave.

@@ -111,6 +111,9 @@ public final class ServerConfig {
     /** Supplies the application data of message 2; null: none. */
     public AppDataSource appData() { return appData; }
 
+    /** The stored bound on received application data: bytes, or {@link ClientConfig#NO_BOUND}. */
+    int maxAppDataBound() { return maxAppData; }
+
     /** The bound on the application data of a received message, in bytes; empty: no bound beyond the message. */
     public OptionalInt maxAppData() { return maxAppData == ClientConfig.NO_BOUND ? OptionalInt.empty() : OptionalInt.of(maxAppData); }
 

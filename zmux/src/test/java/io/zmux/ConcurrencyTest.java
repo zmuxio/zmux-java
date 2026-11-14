@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Timeout;
 class ConcurrencyTest {
 
     @RepeatedTest(5)
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     void randomOperationsRaceClose() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();

@@ -163,7 +163,7 @@ final class TraceRunner {
         if (th.containsKey("pipe_cap")) pipeCap = (int) num(th.get("pipe_cap"));
         if (th.get("pipe_rtt_ms") instanceof Map<?, ?>) {
             Map<Long, Long> pr = new java.util.HashMap<>();
-            for (var e : map(th.get("pipe_rtt_ms")).entrySet()) pr.put(Long.parseLong(e.getKey()), ms(e.getValue()));
+            for (var e : map(th.get("pipe_rtt_ms")).entrySet()) pr.put(Long.valueOf(e.getKey()), ms(e.getValue()));
             pipeRtt = pr;
         }
         if (th.containsKey("role_nonce")) cfg.local().roleNonce = num(th.get("role_nonce"));
@@ -724,10 +724,10 @@ final class TraceRunner {
         }
     }
 
-    private void peerReadsReply(RCarrier c) {
+    private static void peerReadsReply(RCarrier c) {
         if (c.joiner == null) return;
         try {
-            c.decision = (int) c.joiner.readReply(c.reply, 0, c.reply.length).decision();
+            c.decision = c.joiner.readReply(c.reply, 0, c.reply.length).decision();
         } catch (SecureCarrierException e) {
             throw fail("carrier " + c.name + ": the peer cannot read the Reply: " + e);
         }
@@ -843,7 +843,7 @@ final class TraceRunner {
         checkOutcome(c, st);
     }
 
-    private void checkOutcome(RCarrier c, Map<String, Object> st) {
+    private static void checkOutcome(RCarrier c, Map<String, Object> st) {
         String want = (String) st.get("outcome");
         if (!want.equals(c.outcome)) throw fail("carrier " + c.name + ": outcome '" + c.outcome + "', want '" + want + "' (held " + (c.heldHello != null) + ")");
         switch (want) {
@@ -1354,7 +1354,7 @@ final class TraceRunner {
         if (name.equals("datagram_dropped")) {
             // Dropped datagrams are reported by the statistics, not as an event.
             long n = s.stats.datagramsDroppedRecv();
-            if (want != (n > 0) || st.get("fields") instanceof Map<?, ?> f && f.get("count") instanceof Number c && c.longValue() != n) {
+            if (want != (n > 0) || (st.get("fields") instanceof Map<?, ?> f && f.get("count") instanceof Number c && c.longValue() != n)) {
                 throw fail("datagrams dropped " + n);
             }
             return;
@@ -1377,7 +1377,7 @@ final class TraceRunner {
         String how = (String) st.get("how");
         java.util.Collection<RLane> lanes = st.containsKey("lane") ? List.of(p.lane(num(st.get("lane")))) : p.lanes.values();
         for (RLane l : lanes) {
-            if (l.closed.isEmpty() || !how.equals("any") && !l.closed.equals(how)) throw fail("pipe closed '" + l.closed + "', want " + how);
+            if (l.closed.isEmpty() || (!how.equals("any") && !l.closed.equals(how))) throw fail("pipe closed '" + l.closed + "', want " + how);
         }
     }
 }

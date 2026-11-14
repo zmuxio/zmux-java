@@ -1,6 +1,8 @@
 package io.zmux.http;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
+
 import io.zmux.Admission;
 import io.zmux.PipeOptions;
 import io.zmux.PrefixAuth;
@@ -47,9 +49,9 @@ class AdmissionHttpTest {
                 }
             }
             // Without a token the request goes to the host, its body replayed.
-            byte[] body = "not a token, but more than thirty-two bytes of a body for the host".getBytes();
-            String chunked = Integer.toHexString(body.length) + "\r\n" + new String(body) + "\r\n0\r\n\r\n";
-            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked.getBytes());
+            byte[] body = "not a token, but more than thirty-two bytes of a body for the host".getBytes(UTF_8);
+            String chunked = Integer.toHexString(body.length) + "\r\n" + new String(body, UTF_8) + "\r\n0\r\n\r\n";
+            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked.getBytes(UTF_8));
             assertTrue(got.startsWith("HTTP/1.1 200") && got.endsWith("host"), got);
             var s = seen.poll(2, TimeUnit.SECONDS);
             assertNotNull(s);
@@ -70,10 +72,10 @@ class AdmissionHttpTest {
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
         var sources = new LinkedBlockingQueue<String>();
         try (var f = fixture(seen, sources)) {
-            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nEarly-Data: 1\r\nTransfer-Encoding: chunked\r\n\r\n", "3\r\nabc\r\n0\r\n\r\n".getBytes());
+            String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nEarly-Data: 1\r\nTransfer-Encoding: chunked\r\n\r\n", "3\r\nabc\r\n0\r\n\r\n".getBytes(UTF_8));
             assertTrue(got.startsWith("HTTP/1.1 425"), got);
             // Every field counts, not only the first.
-            got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nEarly-Data: 0\r\nEarly-Data:  1 \r\nTransfer-Encoding: chunked\r\n\r\n", "3\r\nabc\r\n0\r\n\r\n".getBytes());
+            got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nEarly-Data: 0\r\nEarly-Data:  1 \r\nTransfer-Encoding: chunked\r\n\r\n", "3\r\nabc\r\n0\r\n\r\n".getBytes(UTF_8));
             assertTrue(got.startsWith("HTTP/1.1 425"), got);
             assertTrue(sources.isEmpty(), "no admission");
             assertTrue(seen.isEmpty(), "no host");

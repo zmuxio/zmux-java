@@ -1,7 +1,6 @@
 package io.zmux.adapter;
 
 import io.zmux.JoinPendingException;
-import io.zmux.Role;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxSession;
 import io.zmux.internal.spi.AdapterPorts;

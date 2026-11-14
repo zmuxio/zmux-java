@@ -8,7 +8,6 @@ import io.zmux.EventLoops;
 import io.zmux.ListenerConfig;
 import io.zmux.PipeAuth;
 import io.zmux.Preamble;
-import io.zmux.Zmux;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxSession;
 import java.io.ByteArrayOutputStream;

@@ -18,6 +18,7 @@ import java.util.concurrent.locks.LockSupport;
  * therefore delays only its own cleanup, never the run, its completion or {@link #close()}.
  */
 public final class PipeMaintenance implements AutoCloseable {
+    /** The outcome of a run: its counts of joins, rotations and failures, the pipes it retained, and the failure that ended it (null when none did). */
     public record Result(long joined, long rotations, long failures, List<ZmuxPipe> pipes, IOException cause) {
         public Result { pipes = List.copyOf(pipes); }
     }
@@ -155,7 +156,7 @@ public final class PipeMaintenance implements AutoCloseable {
         long maximum = policy.backoff().max().toNanos();
         backoff = backoff > maximum / 2 ? maximum : Math.min(maximum, backoff * 2);
     }
-    private PipeStats stats(ZmuxPipe pipe) throws IOException {
+    private static PipeStats stats(ZmuxPipe pipe) throws IOException {
         return pipe.stats().orElse(null);
     }
     /** Every direction the pipe has is live. */
@@ -165,7 +166,7 @@ public final class PipeMaintenance implements AutoCloseable {
         boolean in = s.inbound() == null || switch (s.inbound()) { case OPEN, JOINING -> true; default -> false; };
         return out && in;
     }
-    private boolean live(List<ZmuxPipe> pipes) throws IOException {
+    private static boolean live(List<ZmuxPipe> pipes) throws IOException {
         for (ZmuxPipe p : pipes) if (!live(stats(p))) return false;
         return true;
     }
@@ -354,6 +355,9 @@ public final class PipeMaintenance implements AutoCloseable {
         }
     }
 
+    // The dial thread ends once it has recorded its outcome; an interrupt is the run cancelling the attempt and
+    // reaches the owner as that outcome.
+    @SuppressWarnings("InterruptedExceptionSwallowed")
     private List<ZmuxPipe> dial(boolean rotating, int kind, Cancellation cancellation) throws IOException {
         var creation = new AtomicReference<PipePool.Attempt>();
         var outcome = new CompletableFuture<List<ZmuxPipe>>();

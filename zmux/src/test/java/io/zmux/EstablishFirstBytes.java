@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.OutboundBatch;
-import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.seal.Seal;
@@ -12,7 +11,6 @@ import io.zmux.seal.ServerConfig;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
-import java.util.List;
 
 /**
  * A client that puts its first zmux write into message 3 as carrier first bytes (no public interface offers
@@ -35,7 +33,7 @@ final class EstablishFirstBytes {
                     @Override public void write(OutboundBatch batch, Completion done) {
                         if (!first) { raw.write(batch, done); return; }
                         first = false;
-                        byte[] out = new byte[(int) batch.bytes()];
+                        byte[] out = new byte[batch.bytes()];
                         ByteBuffer to = ByteBuffer.wrap(out);
                         for (int i = 0; i < batch.segmentCount(); i++) to.put(batch.segment(i).duplicate());
                         try {

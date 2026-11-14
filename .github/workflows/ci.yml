@@ -41,6 +41,29 @@ jobs:
       - name: Verify release profile build
         run: mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
 
+  static-checks:
+    name: Static checks (Error Prone, SpotBugs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 25
+          cache: maven
+
+      # Every Error Prone finding fails the compile (-Werror); the profile lists the checks turned off.
+      - name: Error Prone
+        run: mvn -B -Perrorprone clean test-compile
+
+      # Effort Max, threshold Low, with find-sec-bugs and sb-contrib; spotbugs-exclude.xml lists the exclusions.
+      - name: SpotBugs
+        run: mvn -B -Pstatic-checks clean test-compile spotbugs:check
+
   interop:
     name: Interop (Go and Rust zmux, independent QMux peers)
     runs-on: ubuntu-latest

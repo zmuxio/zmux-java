@@ -3,7 +3,6 @@ package io.zmux;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.*;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -111,6 +110,7 @@ class ListenerEndpointTest {
             assertEquals(0,loops.outstandingBuffers());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void listenerCloseStopsJoiningButKeepsHandedOutSessionsUsable() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = config(loops);
@@ -181,6 +181,7 @@ class ListenerEndpointTest {
             assertEquals(0,loops.outstandingBuffers());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void closedLoopGroupRejectsBeforeDialAndReturnsExternalTransportOwnership() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var target = new java.net.ServerSocket()) {
             var cfg = config(loops);
@@ -229,6 +230,7 @@ class ListenerEndpointTest {
             assertEquals(0,loops.outstandingBuffers());
         }
     }
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void inboundClosedLoopAndAlpnRejectionReturnBothHalvesEvenIfReaderCloseFails() throws Exception {
         for (boolean stopped : new boolean[] {false,true}) try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);

@@ -37,6 +37,7 @@ class ProbeTest {
         return pipe.stats().orElseThrow().pingsSent();
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aPipeProbesAtItsOwnIntervalWithinItsJitter() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             // The session's default without jitter: the bootstrap pipe's first wait is the whole 15 s.
@@ -97,6 +98,7 @@ class ProbeTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void thePolicysDialAfterReplacesTheBackoffAndItsProbeSettingsReachNewPipes() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops, multipath());
@@ -127,6 +129,7 @@ class ProbeTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aPoolRedialsAsSoonAsItsPipeFails() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops, multipath());
@@ -153,6 +156,7 @@ class ProbeTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void probeRecordsAreShapedAndADelayDoesNotMakeThePipeSuspect() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var planned = new AtomicInteger(); var delay = new java.util.concurrent.atomic.AtomicBoolean();

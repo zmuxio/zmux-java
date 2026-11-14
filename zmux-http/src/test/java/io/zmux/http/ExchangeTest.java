@@ -251,7 +251,7 @@ class ExchangeTest {
         var c = cfg().holdTime(Duration.ofSeconds(2)).build();
         var adm = io.zmux.Admission.of(0, io.zmux.Admission.Decider.immediate((info, prefix) -> io.zmux.Admission.Decision.accept(0, "tenant-7")));
         try (var f = new Fixture(b -> b, b -> b.admission(adm), b -> b.exchange(c), false, null); var hc = f.client(b -> b)) {
-            try (var cs = Zmux.open(hc.exchangePipe(f.base.toString(), c), Role.CLIENT, f.config);
+            try (var _ = Zmux.open(hc.exchangePipe(f.base.toString(), c), Role.CLIENT, f.config);
                  ZmuxSession s = f.listener.accept(Duration.ofSeconds(10))) {
                 assertNotNull(s);
                 assertEquals(java.util.Optional.of("tenant-7"), s.admitted());
@@ -600,6 +600,27 @@ class ExchangeTest {
             assertThrows(IllegalArgumentException.class, () -> hc.exchangePipe("ftp://x/{nonce}", cfg().build()));
         } catch (IOException e) {
             fail(e);
+        }
+    }
+
+    /** Both halves closed by zmux against a server that answers nothing usable: the final pieces are not repeated, the carrier ends within a second. */
+    @Test void aClosedCarrierEndsWhileItsServerIsGone() throws Exception {
+        try (var f = Fixture.plain(b -> b.exchange(cfg().build()));
+             var px = new TestProxy(f.base, TestProxy.Profile.bufferingCdn(0), new TestProxy.Faults(0, 0, 0, 0, 0, 0, body -> new byte[3]), 1);
+             var hc = f.client(b -> b)) {
+            var cl = cfg().backoff(new io.zmux.Backoff(Duration.ofMillis(20), Duration.ofMillis(100), 0.5)).build();
+            PipeIo p = hc.exchangePipe(px.base.toString(), cl);
+            p.writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap(new byte[] {'x'})), new io.zmux.carrier.PipeWriter.Completion() {
+                @Override public void completed() { }
+                @Override public void failed(Throwable cause) { }
+            });
+            Thread.sleep(100); // the pieces fail and wait to be repeated
+            assertFalse(hc.exchanges.isEmpty());
+            p.writer().close();
+            p.reader().close();
+            long t0 = System.nanoTime();
+            waitFor(hc.exchanges::isEmpty, "the closed carrier keeps repeating its final pieces");
+            assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(1));
         }
     }
 

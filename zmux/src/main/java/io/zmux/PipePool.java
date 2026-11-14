@@ -31,6 +31,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
     @FunctionalInterface public interface CarrierDial {
         PipeIo open(Cancellation cancellation) throws IOException, InterruptedException;
     }
+    /** When pipes are replaced: after maxBytes or maxAge (each off at zero), spread by jitter (0 to 1). */
     public record Rotation(long maxBytes, Duration maxAge, double jitter) {
         public Rotation {
             if (maxBytes < 0 || jitter < 0 || jitter > 1 || !Double.isFinite(jitter)) throw new IllegalArgumentException("rotation");

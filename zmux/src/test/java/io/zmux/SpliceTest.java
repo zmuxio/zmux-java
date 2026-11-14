@@ -36,7 +36,7 @@ class SpliceTest {
             a = left.server().acceptStream(Duration.ofSeconds(3)); b = right.client().openStream();
         }
         ZmuxStream destination() throws Exception { return right.server().acceptStream(Duration.ofSeconds(3)); }
-        @Override public void close() throws Exception { endpoint.close(); left.close(); right.close(); }
+        @Override public void close() throws IOException { endpoint.close(); left.close(); right.close(); }
     }
     static ZmuxConfig config(EventLoops loops) { return ZmuxConfig.builder().eventLoops(loops).build(); }
 
@@ -67,6 +67,31 @@ class SpliceTest {
         }
     }
 
+    /** Both peers see the code a control cancels with, both ways; the result reports it. */
+    @Test void aControlEndsBothStreamsWithItsCode() throws Exception {
+        try (EventLoops loops = EventLoops.create(4); var relay = new Relay(config(loops))) {
+            var control = new SpliceControl();
+            var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.defaults().withControl(control)).toCompletableFuture();
+            try (var peer = relay.destination()) {
+                assertEquals(7, peer.inputStream().read(), "the relay carries the first byte");
+                assertTrue(control.cancel(0x77));
+                assertFalse(control.cancel(1), "one cancellation");
+                var result = splice.get(5, TimeUnit.SECONDS);
+                assertEquals(new SpliceResult.End.Cancelled(0x77), result.aToB().end());
+                assertEquals(new SpliceResult.End.Cancelled(0x77), result.bToA().end());
+                for (ZmuxStream end : new ZmuxStream[] {relay.endpoint, peer}) {
+                    var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(end));
+                    assertEquals(0x77, reset.code());
+                    var stopped = assertThrows(StreamStoppedException.class, () -> {
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (System.nanoTime() < until) { end.write(new byte[1024]); end.flush(); }
+                    });
+                    assertEquals(0x77, stopped.code());
+                }
+            }
+        }
+    }
+
     @Test void cancellationUnregistersDataAndLimiterWaitsBeforeCompletion() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var ready = new CompletableFuture<Integer>();
@@ -78,14 +103,20 @@ class SpliceTest {
             };
             var splice = Zmux.splice(relay.a, relay.b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
             assertTrue(entered.await(3, TimeUnit.SECONDS));
-            // Cancelling the stage cancels the splice: no result, both streams reset with code 0.
+            // Cancelling the stage cancels the splice: no result, both streams reset with ZMUX_CANCELLED and stopped with 0.
             assertTrue(splice.cancel(true));
             assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS));
             long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
             while (!ready.isCancelled() && System.nanoTime() < until) Thread.sleep(2);
             assertTrue(ready.isCancelled());
             var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));
-            assertEquals(0, reset.code());
+            assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, reset.code());
+            // The stopped receiving part: the endpoint's own sending side is stopped with code 0, not ZMUX_CANCELLED.
+            var stopped = assertThrows(StreamStoppedException.class, () -> {
+                long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (System.nanoTime() < limit) { relay.endpoint.write(new byte[1024]); Thread.sleep(2); }
+            });
+            assertEquals(0, stopped.code());
         }
     }
 
@@ -265,6 +296,7 @@ class SpliceTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void ownerLoopShutdownDoesNotLeaveObserversParked() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var blocked = new CompletableFuture<Integer>(); var entered = new CountDownLatch(1);

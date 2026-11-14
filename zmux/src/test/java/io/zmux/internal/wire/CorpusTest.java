@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 class CorpusTest {
 
     static Gates gates(Map<String, Object> e) {
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         List<String> names = (List<String>) e.getOrDefault("gates", List.of());
         long dg = 0;
         boolean rsa = false, ga = false, pr = false, mp = false, pa = false, lanes = false;
@@ -33,7 +33,7 @@ class CorpusTest {
                 default -> fail("unknown gate " + n);
             }
         }
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         Map<String, Object> limits = (Map<String, Object>) e.get("limits");
         if (limits != null && limits.get("max_datagram_frame_size") instanceof Long v) dg = v;
         return new Gates(dg, rsa, ga, pr, mp, pa, lanes && (mp || pa));
@@ -79,7 +79,7 @@ class CorpusTest {
                 }
             }
             case "messages" -> {
-                @SuppressWarnings("unchecked")
+                @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
                 List<String> msgs = (List<String>) e.get("messages");
                 for (String m : msgs) {
                     ByteBuffer b = ByteBuffer.wrap(SpecFixtures.hex(m));

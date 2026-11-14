@@ -21,6 +21,7 @@ class QuicStartupProbe {
         }
         assertNotNull(selected,"host did not exhibit the wildcard/specific-address ephemeral-port collision");
         var field = QuicClient.class.getDeclaredField("datagrams"); field.setAccessible(true);
+        // The field's declared type, read by reflection.
         @SuppressWarnings("unchecked") var endpoints = (java.util.concurrent.ConcurrentHashMap<io.netty.channel.socket.SocketProtocolFamily,CompletableFuture<io.netty.channel.Channel>>)field.get(f.client);
         var original = endpoints.get(io.netty.channel.socket.SocketProtocolFamily.INET).get();
         var context = TestTls.client.earlyData(false).endpointIdentificationAlgorithm("HTTPS").build();
@@ -35,6 +36,7 @@ class QuicStartupProbe {
             System.out.println("FORCED_COLLISION,client="+replacement.localAddress()+",server="+f.server.address());
         } catch (Exception error) { if (replacement != null) replacement.close(); else selected.close(); throw error; }
     }
+    @SuppressWarnings("JUnitMethodInvoked") // the probe replays chosen pool tests as its scenarios
     @Test void freshEndpointFirstPooledStream() throws Exception {
         TestTls.init();
         int count = Integer.getInteger("zmux.startup.count",300);

@@ -53,9 +53,11 @@ final class TokenBucket {
         }
     }
 
-    // Not Math.clamp: burst is 0 after a reset, below MIN_MAX_LENGTH, and clamp would throw there.
-    //noinspection MathClampMigration
-    long quantum() { return Math.max(RecordPlan.MIN_MAX_LENGTH, Math.min(burst, rate * 1000 / MILLION)); }
+    /** One release's worth of tokens; at least the smallest record. Not Math.clamp: burst is 0 after a reset, below the floor, and clamp would throw there. */
+    long quantum() {
+        long upper = Math.min(burst, rate * 1000 / MILLION);
+        return Math.max(RecordPlan.MIN_MAX_LENGTH, upper);
+    }
 
     boolean held() { return tokens < quantum(); }
 

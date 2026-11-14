@@ -1,7 +1,6 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
-import io.zmux.internal.loop.EventLoop;
 import io.zmux.internal.loop.Operation;
 import java.io.ByteArrayOutputStream;
 import java.net.SocketTimeoutException;
@@ -213,6 +212,7 @@ class AsyncApiTest {
         }
     }
 
+    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void submissionAfterLoopClosureReturnsOwnedChunksWithoutRegisteringWaiters() throws Exception {
         try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             var sender = pair.client().openStream(); var released = new AtomicInteger();

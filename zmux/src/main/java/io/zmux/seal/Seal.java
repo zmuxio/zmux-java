@@ -23,13 +23,11 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
-import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 
 /** Runs Establish on carriers: the client's as a stage, the server's as a listener's inbound transform. */
 public final class Seal {
@@ -182,12 +180,12 @@ public final class Seal {
         if (mode == Mode.BOUND && (binding = binding(p)) == null) {
             throw new SecureCarrierException(INVALID_CONFIG, "Bound on a carrier without a Secure declaration or an exporter");
         }
-        var hs = EstablishClient.create(profile, mode, framing(p), c.handle(), c.psk(), binding, key).maxAppData(ClientConfig.appDataLimit(c.maxAppData()));
+        var hs = EstablishClient.create(profile, mode, framing(p), c.handle(), c.psk(), binding, key).maxAppData(ClientConfig.appDataLimit(c.maxAppDataBound()));
         // Message 1 carries application data only under a pre-shared key.
         EstablishPayload first = new EstablishPayload(null, profile.isPskBased() ? appData(c.appData(), 1, new AppDataSource.Known(profile, null, null)) : null, null, 0);
         int noise = Handshake.minLength(profile, 0) + first.length();
         long[] padded = new long[1];
-        int pad = shape(c.shaper(), c.shapingLimits(), p, "hello", EstablishHello.headerLength(profile, c.handle()) + unit(p, noise), noise, padded);
+        int pad = shape(c.shaper(), c.shapingLimits(), p, "hello", EstablishHello.headerLength(profile) + unit(p, noise), noise, padded);
         byte[] hello = hs.writeHello(first.withPadding(pad, false));
         HandshakeIo io = new HandshakeIo(p);
         io.write(hello);
@@ -354,7 +352,7 @@ public final class Seal {
         io.consume(io.buf.length);
         EstablishServer hs;
         try {
-            hs = EstablishServer.create(h, f, psk, binding, c.key()).maxAppData(ClientConfig.appDataLimit(c.maxAppData()));
+            hs = EstablishServer.create(h, f, psk, binding, c.key()).maxAppData(ClientConfig.appDataLimit(c.maxAppDataBound()));
             hs.readHello();
         } catch (SecureCarrierException e) {
             throw refuse.of(reason(e), e);

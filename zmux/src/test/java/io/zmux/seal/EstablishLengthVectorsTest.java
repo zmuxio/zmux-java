@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test;
 class EstablishLengthVectorsTest {
     private static int num(Map<String, Object> m, String k) { return ((Number) m.get(k)).intValue(); }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
     @Test void establishUnits() throws Exception {
         String external = System.getenv("ZMUX_SHAPING_VECTORS");
         Path p = Path.of(external != null ? external : "src/test/resources/spec/shaping", "pad.json");
@@ -38,7 +38,7 @@ class EstablishLengthVectorsTest {
             assertEquals(num(u, "noise"), Handshake.minLength(profile, seq), c.toString());
             if (seq == 0) {
                 assertEquals(u.get("has_handle"), profile.isPskBased(), c.toString());
-                w += EstablishHello.headerLength(profile, new byte[profile.isPskBased() ? Handshake.HANDLE_LEN : 0]);
+                w += EstablishHello.headerLength(profile);
             }
             assertEquals(num(c, "wire"), w, c.toString());
             seen++;
