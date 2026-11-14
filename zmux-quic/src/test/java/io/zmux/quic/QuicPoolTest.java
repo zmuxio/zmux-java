@@ -277,7 +277,8 @@ class QuicPoolTest {
         }
     }
     @Test void maintenanceRefillsFromThePoolWithoutLosingPipeOwnership() throws Exception {
-        try(var f=new Fixture();var pool=f.pool(2,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
+        // Room for three: the aborted pipe holds its slot until its stream closes, which may follow the refill.
+        try(var f=new Fixture();var pool=f.pool(3,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipeAsync())).withCount(2)

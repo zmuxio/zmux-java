@@ -160,6 +160,8 @@ class ListenerEndpointTest {
             };
             assertThrows(java.io.IOException.class,() -> endpoint.open(PipeIo.of(reader,writer), Role.CLIENT));
             empty(endpoint);
+            // The halves are the host's code: they close off the loop, after open has thrown.
+            PipePoolTest.await(() -> readerClosed.get() == 1 && writerClosed.get() == 1);
             assertEquals(1,readerClosed.get()); assertEquals(1,writerClosed.get()); assertEquals(0,endpoint.adapter().memoryUsed());
         }
     }
