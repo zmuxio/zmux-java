@@ -140,7 +140,7 @@ public final class Lanes {
         if (lo.refused) return -1;
         if (lo.next == 0) lo.next = 1;
         // Lanes are streams of the pipe's carrier connection: the pipe's record limit holds on each.
-        int cap = CarrierInfo.minRecord(info.maxRecord(), p.out().lanes.get(0).st.info().maxRecord());
+        int cap = CarrierInfo.minRecord(info.maxRecord(), p.out().lanes.getFirst().st.info().maxRecord());
         Pipe.OutLane l = new Pipe.OutLane(lo.next++, cap == info.maxRecord() ? info : info.withMaxRecord(cap), false);
         l.st.laneFirst = true;
         l.st.openedAt = port.now();

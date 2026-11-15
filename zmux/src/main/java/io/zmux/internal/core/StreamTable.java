@@ -388,7 +388,10 @@ public final class StreamTable {
         ctl.allocated(st);
     }
 
-    /** The local bound of a preamble, whatever the peer allows. */
+    /**
+     * The local bound of a preamble, whatever the peer allows. It stays within the record floor bound
+     * ({@link TransportParams#MAX_PREAMBLE_SIZE}), so a preamble within it fits every pipe, now or later.
+     */
     static final int MAX_PREAMBLE = 4096;
     /** The preamble bound before the peer's parameters. */
     static final int FLOOR_PREAMBLE = 1024;
@@ -419,16 +422,9 @@ public final class StreamTable {
         long peerMax = port.established() || port.earlyActive() ? port.peer().maxPreambleSize : FLOOR_PREAMBLE;
         if (peerMax <= 0) peerMax = FLOOR_PREAMBLE;
         // The offset-0 STREAM frame carries the whole preamble: within the record floor it fits every pipe, now or later.
-        return (int) Math.min(Math.min(peerMax, MAX_PREAMBLE), FLOOR_BOUND);
+        return (int) Math.min(peerMax, MAX_PREAMBLE);
     }
 
-    /**
-     * The record floor less 32 bytes for the STREAM frame and record headers around it, the same in every language:
-     * the most a peer may advertise ({@link TransportParams#MAX_PREAMBLE_SIZE}). The bound that applies is
-     * the least of the peer's value, the local {@link #MAX_PREAMBLE} and this one, so it is the effective limit
-     * only for a local bound above it.
-     */
-    static final int FLOOR_BOUND = TransportParams.MAX_PREAMBLE_SIZE;
 
     /** Whether st's preamble, with the GREASE TLV it may carry, fits the bound now. */
     private boolean preambleFits(Stream st) {

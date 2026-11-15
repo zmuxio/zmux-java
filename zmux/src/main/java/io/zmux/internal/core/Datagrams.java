@@ -251,7 +251,10 @@ public final class Datagrams {
      * take: a datagram beyond it fits no pipe now and is dropped, never queued to wait for one.
      */
     private int largestData(int recordLimit) {
-        return maxData(Math.min(Math.min(peerMax, peerMaxRecord), Math.max(largestRecordCap.getAsInt(), recordLimit)));
+        // The peer bounds every datagram frame and every record; locally the frame must fit some pipe's records.
+        long peerBound = Math.min(peerMax, peerMaxRecord);
+        int largestPipe = Math.max(largestRecordCap.getAsInt(), recordLimit);
+        return maxData(Math.min(peerBound, largestPipe));
     }
 
     /**

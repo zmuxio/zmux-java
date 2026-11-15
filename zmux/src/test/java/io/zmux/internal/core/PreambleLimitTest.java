@@ -8,6 +8,12 @@ import org.junit.jupiter.api.Timeout;
 /** The preamble bound: checked when set, and again when the stream takes its identifier. */
 @Timeout(30)
 class PreambleLimitTest {
+    @Test
+    void localBoundWithinRecordFloorBound() {
+        // preambleLimit relies on it: a preamble within the local bound fits every pipe's records.
+        assertTrue(StreamTable.MAX_PREAMBLE <= io.zmux.internal.wire.TransportParams.MAX_PREAMBLE_SIZE);
+    }
+
     static Session session(CoreConfig.Role role, int maxPreamble) {
         CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role);
         c.local().maxPreambleSize = maxPreamble;
