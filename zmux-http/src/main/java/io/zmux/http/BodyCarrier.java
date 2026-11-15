@@ -144,11 +144,16 @@ final class BodyCarrier {
         drain();
     }
 
-    /** The inbound half failed. */
+    /**
+     * The inbound half failed: what is still queued is never delivered (a reader that never
+     * starts or closes would otherwise keep it), so the carrier releases it here, and the sink,
+     * once there is one, gets the error.
+     */
     void inFail(Throwable cause) {
         if (inClosed || inEnded) return;
         inEnded = true;
         inError = cause;
+        for (ByteBuf b; (b = queue.pollFirst()) != null; ) b.release();
         drain();
     }
 
