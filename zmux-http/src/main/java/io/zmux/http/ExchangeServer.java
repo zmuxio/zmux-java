@@ -92,8 +92,8 @@ final class ExchangeServer {
      * the host as it is. A request to a closed listener holds no slot: it is still
      * authenticated, to be answered GONE.
      */
-    // reserve returns null when the source or the listener has no slot left (another module); the analyzer takes the slot for a constant.
-    //noinspection ConstantValue
+    // reserve returns null when the source or the listener has no slot left; it lives in another module, where the analyzer takes its result for a constant.
+    @SuppressWarnings("ConstantValue")
     Collect collect(Router router, HttpRequest req) {
         var ch = router.context().channel();
         var slot = ep.listener.adapter().reserve(Requests.peer(ch), Requests.source(ch, req, ep.trusted));

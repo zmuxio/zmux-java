@@ -291,6 +291,8 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
      * stream ends); a fallback target takes it with that stream, and its other streams are
      * closed.
      */
+    // The handler comes from the listener adapter in another module, where the analyzer takes its result for null.
+    @SuppressWarnings("ConstantValue")
     private void admit(StreamCarrier first) {
         admission = ADMITTING;
         QuicChannel connection = channel;
@@ -301,8 +303,6 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()), fb)
                 : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
         this.first = admitted;
-        // The handler comes from the listener adapter in another module; the analyzer takes it for null.
-        //noinspection ConstantValue
         var decision = admitted.verdict();
         decision.whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
             if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {
