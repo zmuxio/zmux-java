@@ -10,7 +10,7 @@ import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
 
 /**
- * Fails a test class when Netty's leak detector reported a leaked buffer while it ran. Registered for every
+ * Fails a test class when Netty's leak detector reported a leaked buffer, or an exception reached the tail of a pipeline, while it ran. Registered for every
  * test of the module by JUnit's extension autodetection (the module's resources name it), and installed
  * before the first buffer class loads so that every detector reports here. Leaks are only noticed after
  * the garbage collector found the buffer, so the end of each class collects and allocates until the
@@ -19,8 +19,22 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 @SuppressWarnings("exports") // test-only; JUnit loads it by service name, so it is public
 public final class LeakCheck implements AfterAllCallback {
     private static final List<String> LEAKS = new CopyOnWriteArrayList<>();
+    private static final List<String> UNHANDLED = new CopyOnWriteArrayList<>();
+    private static final java.util.logging.Logger TAIL = java.util.logging.Logger.getLogger("io.netty.channel.DefaultChannelPipeline");
 
     static {
+        // An exception that reached the tail of a pipeline is one no handler took: Netty warns, and so would a production server.
+        TAIL.addHandler(new java.util.logging.Handler() {
+            @Override public void publish(java.util.logging.LogRecord r) {
+                if (r.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue() && r.getMessage() != null && r.getMessage().contains("reached at the tail")) {
+                    UNHANDLED.add(String.valueOf(r.getThrown()));
+                }
+            }
+
+            @Override public void flush() {}
+
+            @Override public void close() {}
+        });
         ResourceLeakDetectorFactory.setResourceLeakDetectorFactory(new ResourceLeakDetectorFactory() {
             @Override
             @SuppressWarnings("deprecation") // the factory's only abstract method
@@ -50,6 +64,11 @@ public final class LeakCheck implements AfterAllCallback {
             Thread.sleep(50);
             ByteBuf b = ByteBufAllocator.DEFAULT.buffer(16);
             b.release();
+        }
+        if (!UNHANDLED.isEmpty()) {
+            String all = String.join("\n", UNHANDLED);
+            UNHANDLED.clear();
+            throw new AssertionError("An exception reached the tail of a pipeline during " + context.getDisplayName() + ":\n" + all);
         }
         if (LEAKS.isEmpty()) return;
         String all = String.join("\n---\n", LEAKS);

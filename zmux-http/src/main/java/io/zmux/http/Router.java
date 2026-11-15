@@ -297,6 +297,10 @@ final class Router extends ChannelInboundHandlerAdapter {
             ctx.close();
             return;
         }
+        if (cause instanceof java.io.IOException) { // a reset or a broken connection: nothing for the host to act on beyond channelInactive
+            ctx.close();
+            return;
+        }
         ctx.fireExceptionCaught(cause);
     }
 }

@@ -121,7 +121,9 @@ final class BodyCarrier {
 
     private void run(Runnable r) {
         if (loop.inEventLoop()) r.run();
-        else loop.execute(r);
+        else {
+            try { loop.execute(r); } catch (java.util.concurrent.RejectedExecutionException ended) { /* Its loop is gone; no channel is left to resume. */ }
+        }
     }
 
     // ---- inbound (event loop) ----
