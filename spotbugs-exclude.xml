@@ -150,7 +150,8 @@
       <Class name="~io\.zmux\.internal\.loop\.ListenerHub(\$.*)?"/>
       <!-- StreamPipe: the write cursor is touched only by tasks posted to the outer session's carrier loop. -->
       <Class name="io.zmux.StreamPipe"/>
-      <Class name="~io\.zmux\.http\.ExchangeClient\$Attempt"/>
+      <!-- ExchangeClient: its loop's; after the loop terminated, only the one refused call's release touches it. Collector: its channel's loop's. -->
+      <Class name="~io\.zmux\.http\.ExchangeClient(\$(Attempt|Collector))?"/>
       <Class name="~io\.zmux\.http\.ExchangeServer\$(Carrier|Collect)"/>
       <Class name="~io\.zmux\.quic\.(ConnectionCarrier|NettyHost|StreamCarrier)"/>
     </Or>

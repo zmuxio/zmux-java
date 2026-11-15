@@ -75,6 +75,8 @@ final class ExchangeClient {
     private ScheduledFuture<?> timer;
     private long timerAt;
     private final Set<Attempt> inflight = new HashSet<>();
+    /** Set by the first outside call the loop refused: that call alone releases what is left, after the loop terminated. */
+    private final java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
 
     // Uplink.
     private ByteBuf open;
@@ -128,7 +130,39 @@ final class ExchangeClient {
 
     /** The client closes: the carrier fails without a CLOSE request (the connections are going). */
     void shutdown() {
-        loop.execute(() -> { gone = true; fail(new ClosedChannelException()); });
+        submit(() -> { gone = true; fail(new ClosedChannelException()); });
+    }
+
+    /**
+     * Runs an outside call's task on the loop. Every buffer of the carrier is the loop's; a loop
+     * that refuses the task is shut down and runs nothing more, so what the carrier still holds is
+     * released once the loop has terminated, when nothing else can touch it.
+     */
+    private boolean submit(Runnable task) {
+        try {
+            loop.execute(task);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException ended) {
+            if (released.compareAndSet(false, true)) loop.terminationFuture().addListener(f -> releaseAll());
+            return false;
+        }
+    }
+
+    /** Releases everything the carrier holds, once its loop terminated. */
+    private void releaseAll() {
+        ended = true;
+        for (Attempt a : List.copyOf(inflight)) a.cancel();
+        inflight.clear();
+        for (Up u : ups) if (u.data != null) u.data.release();
+        ups.clear();
+        if (open != null) { open.release(); open = null; }
+        dropHeld();
+        finishWrite(new ClosedChannelException());
+    }
+
+    /** For tests: the downlink pieces held for the reader, read on the loop. */
+    java.util.concurrent.Future<List<ByteBuf>> heldPieces() {
+        return loop.submit(() -> held.values().stream().map(Piece::data).filter(java.util.Objects::nonNull).toList());
     }
 
     PipeIo pipe() {
@@ -192,9 +226,12 @@ final class ExchangeClient {
         loop.execute(this::step);
     }
 
+    /** Fails the carrier: no piece is delivered after the failure, so the held ones go now. */
     private void fail(Throwable e) {
         if (err == null) err = e;
-        poke();
+        dropHeld();
+        if (ended) deliver(); // the scheduler is done: the reader learns of the failure here
+        else poke();
     }
 
     private boolean complete() { return finSeal && ups.isEmpty() && fin >= 0 && ack > fin; }
@@ -338,13 +375,13 @@ final class ExchangeClient {
         ended = true;
         http.exchanges.remove(this);
         if (err == null && !complete) err = new ClosedChannelException();
+        if (err != null) dropHeld();
         if (timer != null) timer.cancel(false);
         for (Attempt a : List.copyOf(inflight)) a.cancel();
         inflight.clear();
         for (Up u : ups) if (u.data != null) u.data.release();
         ups.clear();
         if (open != null) { open.release(); open = null; }
-        if (!complete) dropHeld();
         finishWrite(err != null ? err : new ClosedChannelException());
         if (sentAny && !gone) launch(Exchange.KIND_CLOSE, 0, new State(), null, false, System.nanoTime());
         deliver();
@@ -532,25 +569,35 @@ final class ExchangeClient {
             poke();
         }
 
-        /** Verifies a complete response body (encoded); its data stays in body. */
+        /** Verifies a complete response body (encoded). Takes raw: it is released here, or its data slice goes into the result, whatever is thrown. */
         Result result(ByteBuf raw) {
             ByteBuf b = raw;
             if (cfg.isBase64()) {
-                ByteBuffer dec = Exchange.decodeBase64(raw.nioBuffer());
-                raw.release();
+                ByteBuffer dec;
+                try {
+                    dec = Exchange.decodeBase64(raw.nioBuffer());
+                } finally {
+                    raw.release();
+                }
                 if (dec == null) return Result.NONE;
                 b = Unpooled.wrappedBuffer(dec);
             }
-            if (b.readableBytes() < Exchange.RESP_HDR) { b.release(); return Result.NONE; }
-            byte[] mac = new byte[Exchange.MAC];
-            b.getBytes(b.readerIndex(), mac);
-            int fl = b.getUnsignedByte(b.readerIndex() + Exchange.MAC);
-            ByteBuf data = b.slice(b.readerIndex() + Exchange.RESP_HDR, b.readableBytes() - Exchange.RESP_HDR);
-            byte[] want = key.responseMac(cid, kind, seq, nonce, fl, data.nioBuffer());
-            if (!MessageDigest.isEqual(want, mac)) { b.release(); return Result.NONE; }
-            if (!Exchange.responseValid(kind, fl, data.readableBytes())) { b.release(); return Result.BAD; }
-            if (!data.isReadable()) { b.release(); return new Result(true, false, fl, null); }
-            return new Result(true, false, fl, data);
+            boolean handed = false;
+            try {
+                if (b.readableBytes() < Exchange.RESP_HDR) return Result.NONE;
+                byte[] mac = new byte[Exchange.MAC];
+                b.getBytes(b.readerIndex(), mac);
+                int fl = b.getUnsignedByte(b.readerIndex() + Exchange.MAC);
+                ByteBuf data = b.slice(b.readerIndex() + Exchange.RESP_HDR, b.readableBytes() - Exchange.RESP_HDR);
+                byte[] want = key.responseMac(cid, kind, seq, nonce, fl, data.nioBuffer());
+                if (!MessageDigest.isEqual(want, mac)) return Result.NONE;
+                if (!Exchange.responseValid(kind, fl, data.readableBytes())) return Result.BAD;
+                if (!data.isReadable()) return new Result(true, false, fl, null);
+                handed = true;
+                return new Result(true, false, fl, data);
+            } finally {
+                if (!handed) b.release();
+            }
         }
     }
 
@@ -608,11 +655,14 @@ final class ExchangeClient {
         /** Hands r to the carrier; reusable: the connection may serve another request. */
         private void result(Result r, boolean reusable) {
             done = true;
-            if (body != null) { body.release(); body = null; }
-            ch.pipeline().remove(this);
-            if (reusable && !a.cancelled) http.conns.release(a.uri, ch, true);
-            else ch.close();
-            a.finishOnLoop(r);
+            try {
+                if (body != null) { body.release(); body = null; }
+                ch.pipeline().remove(this);
+                if (reusable && !a.cancelled) http.conns.release(a.uri, ch, true);
+                else ch.close();
+            } finally {
+                a.finishOnLoop(r); // r's data goes to the carrier whatever the connection's handling threw
+            }
         }
 
         @Override public void channelInactive(ChannelHandlerContext ctx) {
@@ -630,24 +680,34 @@ final class ExchangeClient {
         }
     }
 
-    /** Applies an attempt's result. */
+    /** Applies an attempt's result; its data is taken by the downlink or released here. */
     private void apply(Attempt a, Result r) {
+        boolean taken = false;
+        try {
+            taken = applyResult(a, r);
+        } finally {
+            if (!taken && r.data != null) r.data.release();
+        }
+    }
+
+    /** Applies r; true: its data went to the downlink. */
+    private boolean applyResult(Attempt a, Result r) {
         State st = a.st;
         st.inflight = false;
         st.attempt = null;
         if (a.kind == Exchange.KIND_UP) upFlight--;
-        if (ended) { if (r.data != null) r.data.release(); return; }
+        if (ended) return false;
         long now = System.nanoTime();
-        if (r.error != null) { fail(r.error); return; }
-        if (!r.ok) { retry(st, now); return; }
-        if (r.bad) { fail(new io.zmux.CarrierFailedException(PROTOCOL)); return; }
-        if (r.flags == Exchange.FLAG_GONE) { gone = true; fail(new io.zmux.CarrierFailedException(GONE)); return; }
+        if (r.error != null) { fail(r.error); return false; }
+        if (!r.ok) { retry(st, now); return false; }
+        if (r.bad) { fail(new io.zmux.CarrierFailedException(PROTOCOL)); return false; }
+        if (r.flags == Exchange.FLAG_GONE) { gone = true; fail(new io.zmux.CarrierFailedException(GONE)); return false; }
         st.since = 0;
         if (r.flags == Exchange.FLAG_BUSY) {
             retry(st, now);
             if (a.kind == Exchange.KIND_UP) upLimit = Math.max(1, upLimit - 1);
             else downLimit = Math.max(1, downLimit - 1);
-            return;
+            return false;
         }
         st.backoff = cfg.backoff().min().toNanos();
         if (a.kind == Exchange.KIND_UP) {
@@ -661,10 +721,11 @@ final class ExchangeClient {
                 }
             }
             take();
-            return;
+            return false;
         }
         downLimit = Math.min(cfg.downRequests(), downLimit + 1);
         receive(a.seq, r.data, (r.flags & Exchange.FLAG_FIN) != 0);
+        return true;
     }
 
     private void retry(State st, long now) {
@@ -682,7 +743,7 @@ final class ExchangeClient {
     /** Takes downlink piece n. */
     private void receive(long n, ByteBuf data, boolean isFin) {
         downs.remove(n);
-        if (held.containsKey(n) || n < ack || (fin >= 0 && n > fin) || rclosed) {
+        if (err != null || held.containsKey(n) || n < ack || (fin >= 0 && n > fin) || rclosed) {
             if (data != null) data.release();
             return;
         }
@@ -723,7 +784,7 @@ final class ExchangeClient {
             if (n == 0) continue;
             outstanding += n;
             ByteBuf b = p.data;
-            sink.onChunk(Chunk.of(b.nioBuffer(), b::release), () -> loop.execute(() -> { outstanding -= n; deliver(); }));
+            sink.onChunk(Chunk.of(b.nioBuffer(), b::release), () -> submit(() -> { outstanding -= n; deliver(); }));
         }
     }
 
@@ -731,7 +792,7 @@ final class ExchangeClient {
 
     private final class Reader implements PipeReader {
         @Override public void start(Sink s) {
-            loop.execute(() -> {
+            submit(() -> {
                 if (rclosed) return;
                 sink = s;
                 deliver();
@@ -740,7 +801,7 @@ final class ExchangeClient {
 
         /** Stops the downlink; the carrier ends once the uplink is done. */
         @Override public void close() {
-            loop.execute(() -> {
+            submit(() -> {
                 if (rclosed) return;
                 rclosed = true;
                 sink = null;
@@ -756,7 +817,7 @@ final class ExchangeClient {
 
     private final class Writer implements PipeWriter {
         @Override public void write(OutboundBatch batch, Completion done) {
-            loop.execute(() -> {
+            boolean queued = submit(() -> {
                 if (err != null || wclosed || ended) { done.failed(err != null ? err : new ClosedChannelException()); return; }
                 wBatch = batch;
                 wDone = done;
@@ -764,16 +825,17 @@ final class ExchangeClient {
                 wOff = 0;
                 take();
             });
+            if (!queued) done.failed(new ClosedChannelException());
         }
 
         /** Ends the uplink gracefully: the pieces written are sent, the last one with FIN. */
         @Override public void close() {
-            loop.execute(() -> { wclosed = true; poke(); });
+            submit(() -> { wclosed = true; poke(); });
         }
 
         /** Fails the carrier; the server is told with a CLOSE request. */
         @Override public void abort(Throwable cause) {
-            loop.execute(() -> fail(cause == null ? new ClosedChannelException() : cause));
+            submit(() -> fail(cause == null ? new ClosedChannelException() : cause));
         }
     }
 }
