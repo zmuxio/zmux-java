@@ -62,11 +62,19 @@ public final class HttpCarrierClient implements AutoCloseable {
     /** The exchange carriers not yet ended. */
     final java.util.Set<ExchangeClient> exchanges = java.util.concurrent.ConcurrentHashMap.newKeySet();
     volatile boolean closed;
+    /**
+     * The partial response bodies held in channel pipelines, by their release. A group that
+     * terminates can skip a pipeline's teardown; its termination releases what is left here.
+     */
+    final java.util.Map<Runnable, io.netty.buffer.ByteBuf> partials = new java.util.concurrent.ConcurrentHashMap<>();
+    private final io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<Object>> onTerminated =
+            f -> { for (Runnable r : List.copyOf(partials.keySet())) r.run(); };
 
     private HttpCarrierClient(Builder b) throws IOException {
         pairField = JoinHint.pairField(b.pairField);
         ownGroup = b.group == null;
         group = ownGroup ? new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory()) : b.group;
+        group.terminationFuture().addListener(onTerminated);
         SslContextBuilder tls = b.tls;
         SslContext both, h1;
         try {
@@ -327,6 +335,7 @@ public final class HttpCarrierClient implements AutoCloseable {
         for (ExchangeClient x : exchanges) x.shutdown();
         conns.close();
         if (ownGroup) group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
+        else group.terminationFuture().removeListener(onTerminated); // the connections close on the caller's live group
     }
 
     /** Configures an {@link HttpCarrierClient}. */

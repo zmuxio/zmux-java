@@ -71,4 +71,45 @@ class ExchangeClientLeakTest {
             }
         }
     }
+
+    /**
+     * A response cut halfway leaves its partial body in the connection's pipeline; when the
+     * client's group terminates meanwhile, the termination releases it.
+     */
+    @Test void partialBodyWhenTheGroupTerminates() throws Exception {
+        List<java.net.Socket> conns = new CopyOnWriteArrayList<>();
+        try (var server = new java.net.ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress())) {
+            Thread t = new Thread(() -> {
+                try {
+                    while (true) {
+                        java.net.Socket s = server.accept();
+                        conns.add(s);
+                        // Half of the declared body, then nothing: the request itself is never read.
+                        s.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        s.getOutputStream().write(new byte[100]);
+                        s.getOutputStream().flush();
+                    }
+                } catch (java.io.IOException closed) {
+                    // The server socket closed.
+                }
+            }, "half-response");
+            t.setDaemon(true);
+            t.start();
+            var c = ExchangeTest.cfg().build();
+            HttpCarrierClient hc = HttpCarrierClient.builder().timeout(Duration.ofSeconds(5)).build();
+            PipeIo p = hc.exchangePipe("http://127.0.0.1:" + server.getLocalPort() + "/x", c);
+            p.reader().start(new PipeReader.Sink() {
+                @Override public void onData(ByteBuffer data, Runnable release) { release.run(); }
+                @Override public void onEnd() {}
+                @Override public void onError(Throwable cause) {}
+            });
+            ExchangeTest.waitFor(() -> !hc.partials.isEmpty(), "a partial body is held");
+            List<ByteBuf> partial = List.copyOf(hc.partials.values());
+            hc.close();
+            assertTrue(hc.group().terminationFuture().await(5, TimeUnit.SECONDS));
+            ExchangeTest.waitFor(() -> partial.stream().allMatch(b -> b.refCnt() == 0) && hc.partials.isEmpty(), "the partial bodies are released");
+        } finally {
+            for (java.net.Socket s : conns) s.close();
+        }
+    }
 }

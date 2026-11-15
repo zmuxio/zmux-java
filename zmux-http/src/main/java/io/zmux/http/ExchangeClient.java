@@ -605,7 +605,9 @@ final class ExchangeClient {
     private final class Collector extends ChannelInboundHandlerAdapter {
         private final Attempt a;
         private final Channel ch;
+        /** The partial body; while set, registered with the client so that a terminated loop's teardown cannot lose it. */
         private ByteBuf body;
+        private final Runnable orphaned = this::dropBody;
         private long length = -1;
         private boolean keepAlive, done;
 
@@ -635,7 +637,9 @@ final class ExchangeClient {
                     if (r.status().code() != 200 || length < 0) { result(Result.NONE, false); return; }
                     // Over the local limit: a configuration mismatch, never repeated.
                     if (length > limit()) { result(Result.BAD, false); return; }
+                    dropBody();
                     body = ctx.alloc().buffer((int) length, (int) length);
+                    http.partials.put(orphaned, body);
                 }
                 if (msg instanceof HttpContent c && body != null) {
                     if (c.content().readableBytes() > body.writableBytes()) { result(Result.NONE, false); return; }
@@ -644,6 +648,7 @@ final class ExchangeClient {
                         if (body.readableBytes() != length) { result(Result.NONE, false); return; }
                         ByteBuf b = body;
                         body = null;
+                        http.partials.remove(orphaned);
                         result(a.result(b), keepAlive);
                     }
                 }
@@ -656,7 +661,7 @@ final class ExchangeClient {
         private void result(Result r, boolean reusable) {
             done = true;
             try {
-                if (body != null) { body.release(); body = null; }
+                dropBody();
                 ch.pipeline().remove(this);
                 if (reusable && !a.cancelled) http.conns.release(a.uri, ch, true);
                 else ch.close();
@@ -674,9 +679,21 @@ final class ExchangeClient {
             if (!done) result(Result.NONE, false);
         }
 
+        /**
+         * Releases the partial body: on the channel's loop, or once the client's group terminated
+         * (when the pipeline's teardown may never have run and nothing else touches the handler).
+         */
+        private void dropBody() {
+            ByteBuf b = body;
+            if (b == null) return;
+            body = null;
+            http.partials.remove(orphaned);
+            b.release();
+        }
+
         /** The partial body is this handler's: whichever way it leaves the pipeline, the body goes with it. */
         @Override public void handlerRemoved(ChannelHandlerContext ctx) {
-            if (body != null) { body.release(); body = null; }
+            dropBody();
         }
     }
 
