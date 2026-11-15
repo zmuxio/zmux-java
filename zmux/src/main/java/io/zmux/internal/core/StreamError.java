@@ -1,6 +1,10 @@
 package io.zmux.internal.core;
 
-/** A stream-level outcome. */
+/**
+ * A stream-level outcome.
+ *
+ * @param code the error code; for PREAMBLE_TOO_LARGE the largest preamble accepted
+ */
 public record StreamError(Kind kind, long streamId, long code, long reliableSize, boolean remote) {
 
     /** Outcome kinds. */

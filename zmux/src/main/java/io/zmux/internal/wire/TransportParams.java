@@ -38,6 +38,9 @@ public final class TransportParams {
     /** zmux_carrier_datagrams. */
     public static final long ID_CARRIER_DATAGRAMS = 0x3d274c5fL;
 
+    /** The largest zmux_preamble value a peer may advertise: the 8192-byte record floor less 32 bytes of STREAM frame and record headers. */
+    public static final int MAX_PREAMBLE_SIZE = 8160;
+
     /** The record size limit when max_record_size is absent. */
     public static final int DEFAULT_MAX_RECORD_SIZE = io.zmux.shaping.RecordPlan.MAX_RECORD_LENGTH;
 
@@ -258,7 +261,7 @@ public final class TransportParams {
         if (has(RESUME) && !has(MULTIPATH)) throw WireException.param("zmux_resume without zmux_multipath");
         if (has(PREAMBLE)) {
             if (!has(RESET_AT)) throw WireException.param("zmux_preamble without reset_stream_at");
-            if (maxPreambleSize < 1 || maxPreambleSize > maxRecordSize - 32
+            if (maxPreambleSize < 1 || maxPreambleSize > MAX_PREAMBLE_SIZE || maxPreambleSize > maxRecordSize - 32
                     || maxPreambleSize > maxStreamDataBidiRemote || maxPreambleSize > maxStreamDataUni) {
                 throw WireException.param("zmux_preamble out of range");
             }

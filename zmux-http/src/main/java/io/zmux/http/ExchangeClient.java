@@ -623,6 +623,11 @@ final class ExchangeClient {
         @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             if (!done) result(Result.NONE, false);
         }
+
+        /** The partial body is this handler's: whichever way it leaves the pipeline, the body goes with it. */
+        @Override public void handlerRemoved(ChannelHandlerContext ctx) {
+            if (body != null) { body.release(); body = null; }
+        }
     }
 
     /** Applies an attempt's result. */

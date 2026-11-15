@@ -215,17 +215,49 @@ public final class SendLane {
                 if (data != null) fillChunk(data, buf); else fill(src);
                 if (!from.hasRemaining()) return;
                 if (self == null) self = new Blocked();
-                if (!awaitLease(self)) continue;
-                while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
-                        if (WAITER.compareAndSet(this, self, null)) throw interrupted(from.position() - start);
-                        break; // Resumed meanwhile: take the lease.
-                    }
-                    self.park(deadline);
-                }
+                parkForLease(self, deadline, from.position() - start);
             }
         } finally {
             turn.leave();
+        }
+    }
+
+    /**
+     * Waits until a write takes bytes now, or the part ended, and returns the lease a
+     * {@link #tryWrite} takes from: tryWrite's own condition. It holds the turn while it
+     * waits, as a write that waits for lease does (a write in progress finishes first), and
+     * consumes nothing: every other write and finish of the stream queues behind the wait. The lease is not
+     * reserved after the turn is released: {@link #reclaimIdle} may hand an untouched one back to the stream's
+     * share, and then the {@code tryWrite} takes 0 and the caller waits again.
+     */
+    public long awaitWritable(long deadline) throws CoreException, InterruptedIOException {
+        CoreException e = ended();
+        if (e != null) throw e;
+        if (!turn.tryEnter()) waitTurn(deadline, 0);
+        try {
+            Blocked self = null;
+            while (true) {
+                e = ended();
+                if (e != null) throw e;
+                long l = lease.get();
+                if (l > 0) return l;
+                if (self == null) self = new Blocked();
+                parkForLease(self, deadline, 0);
+            }
+        } finally {
+            turn.leave();
+        }
+    }
+
+    /** Parks the turn holder until the loop resumes it with lease or an end; bytes is what it wrote so far. */
+    private void parkForLease(Blocked self, long deadline, int bytes) throws InterruptedIOException {
+        if (!awaitLease(self)) return;
+        while (waiter == self) {
+            if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
+                if (WAITER.compareAndSet(this, self, null)) throw interrupted(bytes);
+                return; // Resumed meanwhile: take the lease.
+            }
+            self.park(deadline);
         }
     }
 

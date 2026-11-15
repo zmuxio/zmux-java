@@ -410,6 +410,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             if (inputEnded && dir != 0) in.ended(t, endedGracefully, false);
             core.pipes().wakeWriters(id);
             markDirty();
+            publishInfo(); // The pipe's record cap is in the next info() of the caller.
             completions.execute(() -> future.complete(id));
         }
 
@@ -487,7 +488,16 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         }
         Runnable edge = Nesting.tryAttach(this, c.info().connection());
         var base = o.variant.isEmpty() || !c.info().carrier().variant().isEmpty() ? c.info().carrier() : c.info().carrier().withVariant(o.variant);
-        var carrier = pj.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base;
+        io.zmux.internal.core.CarrierInfo carrier;
+        try {
+            carrier = pj.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base;
+        } catch (IllegalArgumentException belowFloor) {
+            if (edge != null) edge.run();
+            o.slot.settled();
+            o.reject.accept(c, "record limit");
+            hooks.log(System.Logger.Level.WARNING, "a Sealed join's carrier takes records below the floor; refused", belowFloor);
+            return;
+        }
         Joins.JoinCarrier jc = new Joins.JoinCarrier((c.directions() & Action.DIR_IN) != 0, (c.directions() & Action.DIR_OUT) != 0, carrier, carrier, null, edge == null);
         // Waits for its plan off the session; the slot and the edge are held, and the claim checks the session again.
         PlanningHello planning = new PlanningHello(o, edge);
@@ -754,8 +764,15 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             o = o.toBuilder().mode(chosen).build();
         }
         Joins.JoinOptions.Builder ob = o.toBuilder();
-        ob.in(o.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base);
-        ob.out(o.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base);
+        io.zmux.internal.core.CarrierInfo joined;
+        try {
+            joined = o.mode() == io.zmux.internal.join.Mode.SEALED ? SealedTransport.sealedInfo(base) : base;
+        } catch (IllegalArgumentException belowFloor) {
+            c.close(null);
+            throw belowFloor;
+        }
+        ob.in(joined);
+        ob.out(joined);
         if (o.fateGroup() == 0) ob.fateGroup(c.info().fateGroup());
         if (o.mode() == io.zmux.internal.join.Mode.BOUND) {
             byte[] binding = c.bindable() ? c.export(Kdf.EXPORTER_JOIN, null, Kdf.BINDING_LEN) : null;
@@ -813,7 +830,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** Joins a pipe input to the session (in band). */
     public CompletableFuture<Long> addPipe(io.zmux.carrier.PipeIo io, Joins.JoinOptions o) {
-        Transport t = Transport.of(loop, io);
+        Transport t;
+        try {
+            t = Transport.of(loop, io);
+        } catch (IllegalArgumentException belowFloor) {
+            // A Sealed carrier whose records fall below the floor: closed by Transport.of, reported like Bootstrap does.
+            return CompletableFuture.failedFuture(belowFloor);
+        }
         return t == null ? CompletableFuture.failedFuture(new java.io.IOException("carrier closed")) : submitPipe(t, o);
     }
 
@@ -931,7 +954,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                     if (io != null) discard(io);
                     core.lanes().openFailed(parent.pipe); markDirty(); return;
                 }
-                Transport lane = Transport.of(loop, io);
+                Transport lane;
+                try {
+                    lane = Transport.of(loop, io);
+                } catch (IllegalArgumentException belowFloor) { // Closed by Transport.of: the lane never opened.
+                    hooks.log(System.Logger.Level.DEBUG, "a lane's carrier takes records below the floor; refused", belowFloor);
+                    core.lanes().openFailed(parent.pipe); markDirty(); return;
+                }
                 if (lane == null) { core.lanes().openFailed(parent.pipe); markDirty(); return; }
                 if (parent.t.info().connection() == null || parent.t.info().connection() != lane.info().connection()) {
                     lane.close(ABORTED); core.lanes().openFailed(parent.pipe); markDirty(); return;
@@ -1139,6 +1168,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     // Loop only: what the published snapshots were made from.
     private long statsVersion = -1, statsBudget = -1;
     private boolean infoEstablished, infoSuspended, infoSecretPending;
+    private int infoMaxDatagram;
     private long[] infoGoAway;
 
     /** Set by the first read: the loop then also republishes when only a gauge changed. */
@@ -1235,12 +1265,15 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         var f = core.features();
         boolean est = core.established(), pending = core.joinPending(), suspended = core.state() == SessionState.SUSPENDED;
         long[] away = core.peerGoAway();
-        if (info == null || est != infoEstablished || !java.util.Arrays.equals(away, infoGoAway) || pending != infoSecretPending
+        // The pipes' record caps move it as pipes join and leave.
+        int maxDatagram = core.datagrams().maxPayload(0);
+        if (info == null || est != infoEstablished || maxDatagram != infoMaxDatagram || !java.util.Arrays.equals(away, infoGoAway) || pending != infoSecretPending
                 || suspended != infoSuspended) {
             infoSecretPending = pending;
             infoEstablished = est;
             infoGoAway = away;
             infoSuspended = suspended;
+            infoMaxDatagram = maxDatagram;
             var p = core.peerParams();
             var local = core.config().local();
             info = new SessionInfo(est, core.initiator(), p != null && p.isZmux(), f.preamble(), f.priority(), f.flows(),
@@ -1248,7 +1281,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                     p != null && p.has(io.zmux.internal.wire.TransportParams.DATAGRAM) && p.maxDatagramFrameSize > 0,
                     local.has(io.zmux.internal.wire.TransportParams.RESET_AT),
                     p != null && p.has(io.zmux.internal.wire.TransportParams.RESET_AT),
-                    core.datagrams().maxPayload(0), pending, f.joinSecurityUnavailable(), suspended, away);
+                    maxDatagram, pending, f.joinSecurityUnavailable(), suspended, away);
         }
     }
 

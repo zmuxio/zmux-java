@@ -118,14 +118,38 @@ public final class Transmitter {
         return m;
     }
 
-    /** The smallest carrier record cap of the outbound lanes, any of which may carry a datagram; 65535 when none. */
-    int carrierRecordCap() {
-        int m = 65535;
+    /** The smallest carrier record cap of the usable outbound lanes, any of which may carry a datagram; 65535 when none. */
+    int smallestRecordCap() {
+        int lo = 65535;
         for (Pipe p : pipes.all()) {
-            if (p.out() == null) continue;
-            for (Pipe.OutLane ol : p.out().lanes) m = Math.min(m, carrierRecordCap(ol));
+            if (p.out() == null || p.out().failed()) continue;
+            for (Pipe.OutLane ol : p.out().lanes) if (usable(p, ol)) lo = Math.min(lo, carrierRecordCap(ol));
         }
-        return m;
+        return lo;
+    }
+
+    /** The largest carrier record cap of the usable outbound lanes: a datagram beyond it fits on no pipe now; 0 when none. */
+    int largestRecordCap() {
+        int hi = 0;
+        for (Pipe p : pipes.all()) {
+            if (p.out() == null || p.out().failed()) continue;
+            for (Pipe.OutLane ol : p.out().lanes) if (usable(p, ol)) hi = Math.max(hi, carrierRecordCap(ol));
+        }
+        return hi;
+    }
+
+    /**
+     * Whether the outbound lane can carry new records: confirmed and not shut, on a pipe that is not retired,
+     * handshaking, closing, draining or failed. Computed on each call from the live state (there are few lanes),
+     * so no state change can leave a stale answer behind.
+     */
+    private static boolean usable(Pipe p, Pipe.OutLane ol) {
+        if (p.out() == null || p.out().failed() || ol.st.shut() || !ol.st.confirmed()) return false;
+        Attach a = p.mp();
+        if (a == null) return true;
+        int out = a.health.out();
+        return !a.health.retired() && !a.health.draining() && !a.handshaking()
+                && out != Attach.OUT_FAILED && out != Attach.OUT_CLOSED && out != Attach.OUT_DRAINING;
     }
 
     // ---- interest ----
@@ -158,7 +182,7 @@ public final class Transmitter {
 
     /** The single pipe's interest in writing on ol. */
     boolean wantsWriteSingle(Pipe p, Pipe.OutLane ol) {
-        if (ol.lane == 0 && controlPending()) return true;
+        if (ol.lane == 0 && (controlPending() || datagramsPending(p, ol))) return true;
         return dataPendingOn(p, ol) && !Pacer.held(p) && (pipes.shaping() == null || !Shaping.held(p, port.now()));
     }
 
@@ -180,7 +204,17 @@ public final class Transmitter {
         if (ka.wants()) return true;
         AckEngine ack = port.ack();
         if (ack != null && port.path().acksInControl() && ack.due(port.now())) return true;
-        return dg.sendable();
+        return false;
+    }
+
+    /** Whether a queued datagram goes in, or is dropped by, the next record of lane 0 of p. */
+    boolean datagramsPending(Pipe p, Pipe.OutLane ol) {
+        return ol.lane == 0 && dg.sendable(p, recMax(ol));
+    }
+
+    /** Writes the queued datagrams that p's records hold. */
+    void writeDatagrams(RecordWriter w, Pipe p) {
+        dg.write(w, p);
     }
 
     /** Whether the stream could put a frame out now; the same plan as sendChunk, so interest never spins (W8). */
@@ -436,7 +470,7 @@ public final class Transmitter {
             ctl.goAwayDone();
         }
         ka.write(w, now, port.srtt());
-        dg.write(w, p);
+        writeDatagrams(w, p);
     }
 
     /** Writes the pending control frames of one stream; false when the batch is full. */

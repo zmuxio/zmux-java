@@ -206,6 +206,8 @@ final class RecordWriter {
 
     /** Appends a frame of n bytes written by f; false when it does not fit. */
     boolean frame(int n, boolean elicits, Consumer<ByteBuffer> f) {
+        // The record floor keeps every unsplittable frame within a record: one beyond it would wait forever.
+        if (n > recMax) throw new IllegalStateException("a " + n + "-byte frame exceeds the " + recMax + "-byte record limit");
         if (!fits(n)) {
             if (!open || !newRecordFits(n)) return false;
             end();

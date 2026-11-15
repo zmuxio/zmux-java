@@ -153,6 +153,26 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     }
 
     @Override
+    public long awaitWritable() throws IOException {
+        return awaitWritable(ZmuxSession.until(writeTimeout));
+    }
+
+    @Override
+    public long awaitWritable(Duration timeout) throws IOException {
+        return awaitWritable(ZmuxSession.deadline(timeout));
+    }
+
+    private long awaitWritable(long deadline) throws IOException {
+        checkApplicationIo();
+        session.driver.checkBlocking();
+        try {
+            return out.awaitWritable(deadline);
+        } catch (CoreException e) {
+            throw Errors.io(e);
+        }
+    }
+
+    @Override
     public void finish() throws IOException {
         checkApplicationIo();
         session.driver.checkBlocking();

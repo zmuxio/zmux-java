@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -38,5 +39,46 @@ class DatagramsTest {
         session.close(0, null);
         assertNull(session.datagrams().receive(stream));
         assertEquals(0, session.datagrams().receivedBytes());
+    }
+
+    /** A datagram queued while every pipe took it, then too large for the pipe that polls: no interest, no wait loop. */
+    @Test void aDatagramThatOnlyALargerPipeHoldsIsNoInterestOfTheSmallOne() throws Exception {
+        int[] caps = {65535, 65535}; // the smallest and the largest record cap of the usable pipes
+        SessionStats stats = new SessionStats();
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox());
+        dg.recordCaps(() -> caps[0], () -> caps[1]);
+        dg.peer(65535, 65535, false);
+        dg.send(null, 0, new byte[3000], false);
+        caps[0] = 1000; caps[1] = 5000; // a small pipe joined
+        assertFalse(dg.sendable(null, 1000), "the small pipe has nothing to write: it must not ask to be polled");
+        assertTrue(dg.sendable(null, 5000));
+        RecordWriter small = new RecordWriter();
+        small.init(new Batch(), Framing.BYTES, 1000, Session.DEFAULT_BATCH);
+        dg.write(small, null);
+        assertTrue(dg.queued(), "kept for the larger pipe");
+        assertEquals(0, stats.datagramsDroppedSend());
+        RecordWriter big = new RecordWriter();
+        big.init(new Batch(), Framing.BYTES, 5000, Session.DEFAULT_BATCH);
+        dg.write(big, null);
+        assertFalse(dg.queued());
+        assertEquals(0, stats.datagramsDroppedSend());
+    }
+
+    /** No usable pipe's records hold it any more: dropped and counted at once, never queued to wait. */
+    @Test void aDatagramNoUsablePipeHoldsIsDroppedPromptly() throws Exception {
+        int[] caps = {65535, 65535};
+        SessionStats stats = new SessionStats();
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox());
+        dg.recordCaps(() -> caps[0], () -> caps[1]);
+        dg.peer(65535, 65535, false);
+        dg.send(null, 0, new byte[3000], false);
+        caps[0] = 1000; caps[1] = 2000; // the larger pipe left
+        assertTrue(dg.sendable(null, 1000), "dropping it is work for the next record of any pipe");
+        RecordWriter w = new RecordWriter();
+        w.init(new Batch(), Framing.BYTES, 1000, Session.DEFAULT_BATCH);
+        dg.write(w, null);
+        assertFalse(dg.queued());
+        assertEquals(1, stats.datagramsDroppedSend());
+        assertFalse(dg.sendable(null, 1000));
     }
 }

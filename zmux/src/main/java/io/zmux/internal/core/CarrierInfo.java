@@ -14,11 +14,20 @@ package io.zmux.internal.core;
  * @param label the label the application gave the carrier, or null
  * @param writeOverhead the fixed bytes each carrier write adds below the pipe, for the shaper factory
  * @param variant the host's label of the transform the carrier runs, "" when none
+ * @param maxRecord the largest record Size the carrier takes, applied beside the peer's and TLS's; 0 when none
  */
 public record CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean lanes, boolean queueBound,
                           DatagramChannel channel, io.zmux.CarrierKind kind, String label, int writeOverhead, String variant, int maxRecord) {
+    /** The carrier record floor: every carrier takes records of this Size; a record limit is never below it. */
+    public static final int RECORD_FLOOR = 8192;
+
     public CarrierInfo {
         if (variant == null) variant = "";
+    }
+
+    /** The smaller of two record limits, 0 being none. */
+    public static int minRecord(int a, int b) {
+        return a == 0 ? b : b == 0 ? a : Math.min(a, b);
     }
 
     /** A carrier without a write overhead. */
@@ -55,5 +64,10 @@ public record CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean 
     /** This carrier with variant v. */
     public CarrierInfo withVariant(String v) {
         return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, v, maxRecord);
+    }
+
+    /** This carrier with record cap n (0: none). */
+    public CarrierInfo withMaxRecord(int n) {
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, variant, n);
     }
 }

@@ -378,4 +378,38 @@ class EstablishTest {
         assertInstanceOf(io.zmux.ZmuxException.class, more);
         assertTrue(new SecureCarrierException(SecureCarrierException.Code.AUTH).getStackTrace().length > 0);
     }
+
+    /** Message 2 with an ML-DSA-44 proof leaves at least 3252 bytes for a credential within the 8192-byte floor; one byte more is too_large before writing. */
+    @Test
+    void aReplyWithAProofKeepsItsCredentialWithinTheFloor() throws Exception {
+        for (Profile p : Profile.values()) {
+            int lo = 0, hi = 8192;
+            while (lo < hi) { // the largest credential that fits
+                int mid = (lo + hi + 1) >>> 1;
+                if (replyWith(p, mid) != null) lo = mid; else hi = mid - 1;
+            }
+            byte[] reply = replyWith(p, lo);
+            assertNotNull(reply);
+            assertTrue(reply.length <= io.zmux.internal.join.Sealer.MESSAGE_FLOOR, p + ": " + reply.length);
+            // The credential item's own type and length take a few of the 3252 bytes.
+            assertTrue(lo >= 3252 - 6, p + ": room for a credential of only " + lo + " bytes");
+            int over = lo + 1;
+            Pair x = hello(p, Mode.SEALED, Framing.STREAM, StaticKey.generate(), StaticKey.generate());
+            EstablishPayload pl = new EstablishPayload(new Credential(7, new byte[over]), null, null, 0);
+            var e = assertThrows(SecureCarrierException.class, () -> x.server().writeReply(pl.withProof(Proof.placeholder(SERVER_PROOF)), SERVER_PROOF));
+            assertEquals(SecureCarrierException.Code.TOO_LARGE, e.code());
+        }
+    }
+
+    /** Message 2 with a credential of n bytes and a proof, or null when it is too large. */
+    private static byte[] replyWith(Profile p, int n) throws Exception {
+        Pair x = hello(p, Mode.SEALED, Framing.STREAM, StaticKey.generate(), StaticKey.generate());
+        EstablishPayload pl = new EstablishPayload(new Credential(7, new byte[n]), null, null, 0);
+        try {
+            return x.server().writeReply(pl.withProof(Proof.placeholder(SERVER_PROOF)), SERVER_PROOF);
+        } catch (SecureCarrierException e) {
+            assertEquals(SecureCarrierException.Code.TOO_LARGE, e.code());
+            return null;
+        }
+    }
 }

@@ -412,6 +412,21 @@ public final class ZmuxSession implements AutoCloseable {
         return open(true, preamble, false, Long.MAX_VALUE);
     }
 
+    /** {@link #tryOpenStream(Preamble)} without opening information. */
+    public ZmuxStream tryOpenStream() throws IOException {
+        return tryOpenStream(Preamble.EMPTY);
+    }
+
+    /** Opens a unidirectional (send-only) stream without waiting; fails with {@link StreamLimitException} without credit. */
+    public ZmuxSendStream tryOpenSendStream(Preamble preamble) throws IOException {
+        return open(false, preamble, false, Long.MAX_VALUE);
+    }
+
+    /** {@link #tryOpenSendStream(Preamble)} without opening information. */
+    public ZmuxSendStream tryOpenSendStream() throws IOException {
+        return tryOpenSendStream(Preamble.EMPTY);
+    }
+
     /** Opens a unidirectional (send-only) stream, waiting for stream credit. */
     public ZmuxSendStream openSendStream() throws IOException {
         return open(false, Preamble.EMPTY, true, Long.MAX_VALUE);
@@ -1007,7 +1022,7 @@ public final class ZmuxSession implements AutoCloseable {
     private volatile boolean aborted;
 
     /** The largest reason a close or an abort sends, in bytes of UTF-8 (SPEC.md Section 4.3, CONNECTION_CLOSE). */
-    static final int MAX_REASON_BYTES = 1024;
+    static final int MAX_REASON_BYTES = io.zmux.internal.wire.Utf8.MAX_REASON;
 
     /**
      * Closes gracefully without error: {@link #close(long, String)} with code 0 and an empty

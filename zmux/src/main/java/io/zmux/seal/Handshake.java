@@ -195,6 +195,15 @@ final class Handshake {
      * after the message's last token, and must have the KeyAlg's length.
      */
     byte[] writeMessage(EstablishPayload p, ProofSigner signer) throws SecureCarrierException {
+        return writeMessage(p, signer, 0);
+    }
+
+    /**
+     * {@link #writeMessage(EstablishPayload, ProofSigner)} for a message that goes out with wire more bytes around it
+     * (framing, and the Hello's header): the size check of the application data counts them, so it refuses exactly what
+     * {@link #checkWritten} refuses once the message is written, and before this handshake's state moved on.
+     */
+    byte[] writeMessage(EstablishPayload p, ProofSigner signer, int wire) throws SecureCarrierException {
         ready(true);
         // Without a signer a proof goes as it is: only vectors and tests write one so.
         if (signer != null && p.proof() == null) throw new IllegalArgumentException("a signer without its proof's placeholder");
@@ -202,7 +211,7 @@ final class Handshake {
         try {
             plain = p.encode(known(idx));
             // What is sent is bounded only by the message.
-            if (p.appData() != null && p.appData().length > 0 && minMessage() + plain.length > Sealer.MAX_MESSAGE) {
+            if (p.appData() != null && p.appData().length > 0 && wire + minMessage() + plain.length > Sealer.MESSAGE_FLOOR) {
                 throw new SecureCarrierException(TOO_LARGE, "application data of " + p.appData().length + " bytes does not fit the message");
             }
         } catch (SecureCarrierException x) {
@@ -267,6 +276,12 @@ final class Handshake {
         if (out.size() > Sealer.MAX_MESSAGE) throw fail(new SecureCarrierException(TOO_LARGE));
         idx++;
         return out.toByteArray();
+    }
+
+    /** A message as written, framing included, beyond the handshake message floor: too_large, before it is written. */
+    byte[] checkWritten(byte[] written) throws SecureCarrierException {
+        if (written.length > Sealer.MESSAGE_FLOOR) throw fail(new SecureCarrierException(TOO_LARGE, "a handshake message of " + written.length + " bytes"));
+        return written;
     }
 
     /** Takes the next Noise message, without framing, and returns its validated payload. */

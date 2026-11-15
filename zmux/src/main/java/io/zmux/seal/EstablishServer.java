@@ -66,8 +66,8 @@ final class EstablishServer {
      * signature over the transcript is made here.
      */
     byte[] writeReply(EstablishPayload p, Signer signer) throws SecureCarrierException {
-        byte[] msg = hs.writeMessage(p, signer == null ? null : Handshake.ProofSigner.of(signer));
-        return Frames.frame(framing, msg);
+        byte[] msg = hs.writeMessage(p, signer == null ? null : Handshake.ProofSigner.of(signer), io.zmux.internal.join.Frames.unitLength(framing, 0));
+        return hs.checkWritten(Frames.frame(framing, msg));
     }
 
     /** Takes the bytes that begin with message 3. INCOMPLETE leaves the state as it was. */

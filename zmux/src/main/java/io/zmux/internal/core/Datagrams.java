@@ -139,8 +139,10 @@ public final class Datagrams {
     private long peerMax;
     private long peerMaxRecord;
     private boolean flows;
-    /** The smallest record cap the pipes' carriers set. */
-    private java.util.function.IntSupplier carrierRecordCap = () -> Integer.MAX_VALUE;
+    /** The smallest record cap of the usable pipes' carriers: the advertised maximum fits every one. */
+    private java.util.function.IntSupplier smallestRecordCap = () -> Integer.MAX_VALUE;
+    /** The largest record cap of the usable pipes' carriers: a datagram beyond it fits on no pipe now. */
+    private java.util.function.IntSupplier largestRecordCap = () -> Integer.MAX_VALUE;
 
     Datagrams(CoreConfig cfg, SessionStats stats, Outbox outbox) {
         this.cfg = cfg;
@@ -161,8 +163,9 @@ public final class Datagrams {
         flows = flowsNegotiated;
     }
 
-    void carrierRecordCap(java.util.function.IntSupplier cap) {
-        carrierRecordCap = cap;
+    void recordCaps(java.util.function.IntSupplier smallest, java.util.function.IntSupplier largest) {
+        smallestRecordCap = smallest;
+        largestRecordCap = largest;
     }
 
     /**
@@ -180,7 +183,8 @@ public final class Datagrams {
     /** The largest datagram payload the peer accepts now with a flow prefix of flowLen bytes, 0 when none. */
     public int maxPayload(int flowLen) {
         if (!peerKnown || peerMax == 0) return 0;
-        int d = maxData(Math.min(Math.min(peerMax, peerMaxRecord), carrierRecordCap.getAsInt()));
+        // What fits a record of every pipe; a pipe added later with smaller records carries only those that fit it.
+        int d = maxData(Math.min(Math.min(peerMax, peerMaxRecord), smallestRecordCap.getAsInt()));
         if (flows) d -= flowLen;
         return Math.max(0, d);
     }
@@ -234,33 +238,68 @@ public final class Datagrams {
         return !send.isEmpty();
     }
 
+    /** What becomes of a queued datagram at a pipe: it goes in this pipe's records, waits, or is dropped. */
+    private enum Fate { SEND, HOLD, DROP }
+
+    /** The channel use that applies to pipe p: only the datagram pipe has a channel. */
+    private ChannelUse useOf(Pipe p) {
+        return p == channels.datagramPipe() ? channels.of(p) : ChannelUse.NONE;
+    }
+
     /**
-     * Whether a queued datagram goes in a record (or is dropped) now; those for the datagram
-     * pipe's channel go by {@link #pollChannel}.
+     * The largest datagram data any usable pipe's records take, at least what this pipe's records (recordLimit)
+     * take: a datagram beyond it fits no pipe now and is dropped, never queued to wait for one.
      */
-    boolean sendable() {
+    private int largestData(int recordLimit) {
+        return maxData(Math.min(Math.min(peerMax, peerMaxRecord), Math.max(largestRecordCap.getAsInt(), recordLimit)));
+    }
+
+    /**
+     * Decides o at a pipe with channel use ch and records of recordLimit bytes; datagramChannel is the datagram
+     * pipe's channel as it is now, which takes what it takes whatever the records could hold.
+     */
+    private Fate fate(Out o, ChannelUse ch, ChannelUse datagramChannel, int recordLimit, int largest) {
+        int n = o.data().length;
+        if (o.dead()) return Fate.DROP;
+        if (n > largest && !datagramChannel.takes(n)) return Fate.DROP;
+        // Behind an unopened stream, for the channel, or too large for these records only: it keeps its place.
+        if (!o.ready() || ch.takes(n) || n > maxData(Math.min(peerMax, recordLimit))) return Fate.HOLD;
+        return Fate.SEND;
+    }
+
+    /**
+     * Whether {@link #write} on p, whose records hold recordLimit bytes, does anything now: sends a datagram or
+     * drops one. A datagram that only a larger pipe's records hold, or the channel takes, is not interest.
+     */
+    boolean sendable(Pipe p, int recordLimit) {
         if (!peerKnown || send.isEmpty()) return false;
-        ChannelUse ch = channels.of(channels.datagramPipe());
-        for (Out o : send) if (o.dead() || (o.ready() && !ch.takes(o.data().length))) return true;
+        ChannelUse ch = useOf(p);
+        ChannelUse dch = channels.of(channels.datagramPipe());
+        int largest = largestData(recordLimit);
+        for (Out o : send) if (fate(o, ch, dch, recordLimit, largest) != Fate.HOLD) return true;
         return false;
     }
 
     /**
-     * Writes queued datagrams into w, records of p; those behind an unopened stream and those
-     * for p's datagram channel keep their place.
+     * Writes queued datagrams into w, records of p, and drops those no usable pipe's records hold; those behind an
+     * unopened stream, for p's datagram channel or for a larger pipe's records keep their place.
      */
     void write(RecordWriter w, Pipe p) {
-        ChannelUse ch = p == channels.datagramPipe() ? channels.of(p) : ChannelUse.NONE;
+        if (!peerKnown) return;
+        ChannelUse ch = useOf(p);
+        ChannelUse dch = channels.of(channels.datagramPipe());
+        int limit = w.recordLimit();
+        int largest = largestData(limit);
         ArrayDeque<Out> kept = null;
         while (!send.isEmpty()) {
             Out o = send.peek();
-            // Too large for these records: dropped, never left to hold the datagrams behind it.
-            if (o.dead() || o.data().length > maxData(Math.min(peerMax, w.recordLimit()))) {
+            Fate f = fate(o, ch, dch, limit, largest);
+            if (f == Fate.DROP) {
                 send.poll();
                 stats.datagramDroppedSend();
                 continue;
             }
-            if (!o.ready() || ch.takes(o.data().length)) {
+            if (f == Fate.HOLD) {
                 if (kept == null) kept = new ArrayDeque<>(2);
                 kept.add(send.remove());
                 continue;

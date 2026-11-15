@@ -422,6 +422,7 @@ final class PathHealth {
             p.out().lost();
             stats.pipeFailed();
             p.out().fail();
+            pipes.changed();
             Shaping.pipeDown(p);
             port.probationFailed(p);
             port.unsettle(p);
@@ -649,7 +650,7 @@ final class PathHealth {
         h.abandonAcked = true;
         h.resLimited = true;
         p.mp().endHandshake();
-        if (p.out() != null) { h.out = Attach.OUT_FAILED; p.out().fail(); }
+        if (p.out() != null) { h.out = Attach.OUT_FAILED; p.out().fail(); pipes.changed(); }
         if (p.in() != null) { h.in = Attach.IN_ENDED; p.in().end(); }
         retire(p);
         outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));

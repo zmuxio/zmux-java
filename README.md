@@ -87,7 +87,11 @@ stream's send buffer; a STOP_SENDING, reset or session end racing it can drop
 them, and the next write or `finish()` reports that error (as TCP reports an
 RST). `finish()` waits for the session to take the FIN, so it is the point where
 every earlier write's fate is known. `tryWrite` returns 0 while another write
-owns the stream. `readAll(maxBytes)` reads to FIN; past `maxBytes` it stops
+owns the stream; `awaitWritable` waits, consuming nothing, until `tryWrite`
+takes bytes (send-buffer room, not credit: `sendCapacity` is a different
+quantity), bounded by the write timeout or a `Duration`. The wait holds the
+stream's write turn: other writes and `finish()` of that stream queue behind it,
+and `tryWrite` usually, not always, takes the returned bytes (0: wait again). `readAll(maxBytes)` reads to FIN; past `maxBytes` it stops
 the stream and throws `LimitExceededException`. A preamble that would exceed
 the peer's maximum preamble size is refused when it is set
 (`PreambleTooLargeException`). Setters that cannot fail

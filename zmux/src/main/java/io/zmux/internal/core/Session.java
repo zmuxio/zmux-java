@@ -113,7 +113,7 @@ public final class Session {
         lanes = new Lanes(cfg, pipes, outbox, life, io);
         rx = new RecordReceiver(cfg, stats, life, io);
         tx = new Transmitter(cfg, stats, pipes, lanes, streams, send, recv, sched, ctl, conn, tuner, ka, life, early, dg, io);
-        dg.carrierRecordCap(tx::carrierRecordCap);
+        dg.recordCaps(tx::smallestRecordCap, tx::largestRecordCap);
         if (early.active()) assume(early.assumed(), early.floor());
         dg.channels(new ChannelsPort());
         if (cfg.shaper() != null) setShaper(cfg.shaper());
@@ -742,8 +742,8 @@ public final class Session {
 
     /** Closes the session with an application error. */
     public void close(long code, byte[] reason) {
-        closeWith(SessionError.application(code, reason == null ? "" : new String(reason, java.nio.charset.StandardCharsets.UTF_8), false),
-                CloseFrame.of(true, code, 0, reason));
+        CloseFrame f = CloseFrame.of(true, code, 0, reason);
+        closeWith(SessionError.application(code, new String(f.reason(), java.nio.charset.StandardCharsets.UTF_8), false), f);
     }
 
     /** Closes after a failure inside the endpoint: INTERNAL_ERROR. */
@@ -758,7 +758,7 @@ public final class Session {
 
     void closeTransport(SessionError e) {
         String rs = e.details().isEmpty() ? e.reason() : e.reason() + "\n" + e.details();
-        closeWith(e, CloseFrame.of(false, e.code(), e.frameType(), io.zmux.internal.wire.Utf8.truncate(rs, 1024)));
+        closeWith(e, CloseFrame.of(false, e.code(), e.frameType(), rs.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     /** Closes without CONNECTION_CLOSE; graceful shuts down the write sides and lingers. */
@@ -1044,7 +1044,7 @@ public final class Session {
         if (isClosing()) {
             if (state == SessionState.CLOSING) {
                 Pipe p = pipes.get(pipeId);
-                if (p != null && p.out() != null) p.out().fail();
+                if (p != null && p.out() != null) { p.out().fail(); pipes.changed(); }
                 checkLingerDone();
                 wakeHandOff();
             }

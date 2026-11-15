@@ -1357,7 +1357,13 @@ public final class ListenerHub {
 
     /** An inbound lane of a known session, bounded by its carrier's stream credit. */
     static void laneInput(SessionRuntime driver, io.zmux.carrier.PipeIo io) {
-        Transport carrier = Transport.of(driver.loop(), io);
+        Transport carrier;
+        try {
+            carrier = Transport.of(driver.loop(), io);
+        } catch (IllegalArgumentException belowFloor) { // Closed by Transport.of: the lane is refused, the listener goes on.
+            driver.hooks().log(System.Logger.Level.DEBUG, "a lane's carrier takes records below the floor; refused", belowFloor);
+            return;
+        }
         if (carrier == null) return;
         if (!driver.loop().tryExecute(() -> {
             if (driver.finished()) { carrier.close(null); return; }
@@ -1712,7 +1718,19 @@ public final class ListenerHub {
             var ci = c.info();
             io.zmux.carrier.PipeIo io = r.withCarrier(ci.carrier().kind()).withLabel(ci.carrier().label())
                     .withFateGroup(ci.fateGroup());
-            next.start(Transport.of(c.loop(), io), value);
+            Transport t;
+            try {
+                t = Transport.of(c.loop(), io);
+            } catch (IllegalArgumentException belowFloor) { // The transform's carrier is closed: refused, the listener goes on.
+                owner.log(System.Logger.Level.DEBUG, "the transformed carrier takes records below the floor; refused", belowFloor);
+                // What fail() does once end() ran: the result carrier is closed by Transport.of, the original aborts.
+                if (pending != null) pending.cancel(false);
+                release(hint.source());
+                view.abort(belowFloor);
+                counts.setupFailed();
+                return;
+            }
+            next.start(t, value);
         }
     }
 }

@@ -141,16 +141,7 @@ public final class HttpEndpoint implements AutoCloseable {
                 ch.pipeline().addLast(host.get());
             }
         }));
-        p.addLast(new ConnectionErrors());
-    }
-
-    /** Ends the HTTP/2 connection whose transport failed (a reset, a broken pipe); other failures go on. */
-    @ChannelHandler.Sharable
-    static final class ConnectionErrors extends ChannelInboundHandlerAdapter {
-        @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            if (cause instanceof java.io.IOException) ctx.close();
-            else ctx.fireExceptionCaught(cause);
-        }
+        p.addLast(TransportErrors.INSTANCE);
     }
 
     /** Chooses HTTP/2 by its connection preface, HTTP/1.1 otherwise. */

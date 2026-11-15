@@ -48,7 +48,7 @@ final class Errors {
             case JOIN_PENDING -> new JoinPendingException((e.max() & CoreException.MISSING_END_TO_END) != 0, (e.max() & CoreException.MISSING_PSK) != 0);
             case JOIN_SECRET_SET -> new JoinSecretSetException();
             case JOIN_REFUSED -> new JoinRefusedException(PipeId.of(e.pipe()));
-            case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException();
+            case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException(e.max());
         };
     }
 
@@ -71,7 +71,7 @@ final class Errors {
             case CLOSED_LOCALLY -> new StreamClosedException(e.streamId(), "stream closed locally");
             case REJECTED -> new StreamRejectedException(e.streamId());
             case GOING_AWAY -> new GoingAwayException(e.streamId());
-            case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException();
+            case PREAMBLE_TOO_LARGE -> throw new PreambleTooLargeException((int) e.code());
         };
     }
 

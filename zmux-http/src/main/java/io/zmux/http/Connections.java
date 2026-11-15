@@ -151,7 +151,7 @@ final class Connections {
                             ch.pipeline().addLast(new ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
                                 @Override protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
                                     if (!http1 && ApplicationProtocolNames.HTTP_2.equals(protocol)) h2(ctx.channel());
-                                    else ctx.pipeline().addLast(new HttpClientCodec());
+                                    else ctx.pipeline().addLast(new HttpClientCodec(), TransportErrors.INSTANCE);
                                     f.complete(ctx.channel());
                                 }
 
@@ -163,7 +163,7 @@ final class Connections {
                         } else if (priorKnowledge) {
                             h2(ch);
                         } else {
-                            ch.pipeline().addLast(new HttpClientCodec());
+                            ch.pipeline().addLast(new HttpClientCodec(), TransportErrors.INSTANCE);
                         }
                     }
                 });
@@ -177,7 +177,7 @@ final class Connections {
 
     private static void h2(Channel ch) {
         ch.pipeline().addLast(Http2FrameCodecBuilder.forClient().build());
-        ch.pipeline().addLast(new Http2MultiplexHandler(new ChannelInboundHandlerAdapter()));
+        ch.pipeline().addLast(new Http2MultiplexHandler(new ChannelInboundHandlerAdapter()), TransportErrors.INSTANCE);
     }
 
     /** Closes the pooled and shared connections. */

@@ -76,6 +76,7 @@
       <Bug pattern="USO_UNSAFE_OBJECT_SYNCHRONIZATION, USO_UNSAFE_STATIC_METHOD_SYNCHRONIZATION, USO_UNSAFE_INHERITABLE_OBJECT_SYNCHRONIZATION, EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
       <Bug pattern="UTAO_JUNIT_ASSERTION_ODDITIES_ASSERT_USED, UTAO_JUNIT_ASSERTION_ODDITIES_USE_ASSERT_NOT_EQUALS, URF_UNREAD_FIELD, UEC_USE_ENUM_COLLECTIONS"/>
       <Bug pattern="OS_OPEN_STREAM, OS_OPEN_STREAM_EXCEPTION_PATH, LSYC_LOCAL_SYNCHRONIZED_COLLECTION, RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+      <Bug pattern="IM_MULTIPLYING_RESULT_OF_IREM"/>
       <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE, STT_TOSTRING_STORED_IN_FIELD, VO_VOLATILE_REFERENCE_TO_ARRAY, WOC_WRITE_ONLY_COLLECTION_LOCAL"/>
     </Or>
   </Match>
@@ -141,10 +142,16 @@
   <Match>
     <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE, AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
     <Or>
-      <Class name="~io\.zmux\.internal\.core\.(Batch|Session|SendBlock)"/>
-      <Class name="~io\.zmux\.internal\.loop\.(ExternalTransport|Forwarded|Operation|RecvLane|SendLane|SessionHost|SessionRuntime)"/>
-      <Class name="~io\.zmux\.internal\.loop\.ListenerHub(\$Admitting)?"/>
+      <Class name="~io\.zmux\.internal\.core\.(Batch|Session|SendBlock)(\$.*)?"/>
+      <Class name="~io\.zmux\.internal\.loop\.(ExternalTransport|Forwarded|Operation|RecvLane|SessionHost)(\$.*)?"/>
+      <!-- Nested classes named one by one: the gates and the hello planner are timers and inbounds driven by the session's loop only. -->
+      <Class name="~io\.zmux\.internal\.loop\.(SendLane|SessionRuntime)"/>
+      <Class name="~io\.zmux\.internal\.loop\.SessionRuntime\$(JoinerGate|AcceptorGate|PlanningHello)"/>
+      <Class name="~io\.zmux\.internal\.loop\.ListenerHub(\$.*)?"/>
+      <!-- StreamPipe: the write cursor is touched only by tasks posted to the outer session's carrier loop. -->
+      <Class name="io.zmux.StreamPipe"/>
       <Class name="~io\.zmux\.http\.ExchangeClient\$Attempt"/>
+      <Class name="~io\.zmux\.http\.ExchangeServer\$(Carrier|Collect)"/>
       <Class name="~io\.zmux\.quic\.(ConnectionCarrier|NettyHost|StreamCarrier)"/>
     </Or>
   </Match>

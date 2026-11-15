@@ -400,6 +400,7 @@ final class PathSession implements PathLayer {
             pipeFrames(w, p);
             Pipe prim = primary();
             if (prim == p || prim == null) tx.writeControl(w, p);
+            else tx.writeDatagrams(w, p);
         }
         PathScheduler.Decision d = scheduler.decision();
         if (ol.lane == 0) scheduler.refreshBindings(tiers.buildGate());
@@ -492,6 +493,7 @@ final class PathSession implements PathLayer {
             }
             if (joins.owesAbandons() || joins.epochWanted(p)) return true;
             if ((p == prim || prim == null) && tx.controlPending()) return true;
+            if (tx.datagramsPending(p, ol)) return true;
         }
         if (ol.lane == 0 && !a.ret.copyQ().isEmpty() && metrics.open(p)) return true;
         if (ol == p.mp().ret.copyLane() && !a.ret.selfCopyQ().isEmpty() && metrics.laneOpen(p, ol)) return true;

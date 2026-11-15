@@ -159,7 +159,7 @@ public final class Seal {
                 throw new InterruptedIOException();
             }
         }
-        int item = HandshakePlans.item(plan, wire + p.capabilities().writeOverhead(), io.zmux.internal.join.Sealer.MAX_MESSAGE - noise);
+        int item = HandshakePlans.item(plan, wire + p.capabilities().writeOverhead(), Math.min(io.zmux.internal.join.Sealer.MAX_MESSAGE - noise, io.zmux.internal.join.Sealer.MESSAGE_FLOOR - wire));
         if (item != HandshakePlans.NO_ITEM) padded[0] += HandshakePlans.itemSize(item);
         return Tlv.paddingField(item);
     }

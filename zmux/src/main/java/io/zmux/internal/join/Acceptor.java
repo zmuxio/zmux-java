@@ -128,7 +128,7 @@ public final class Acceptor {
         byte[] r = c.nonceR(e, new byte[] {(byte) Frames.REPLY_TYPE}, plain);
         c.afterHello(helloCt, r);
         byte[] ct = c.seal1(c.k1, plain);
-        if (ct.length > Sealer.MAX_MESSAGE) throw fail(new SecureCarrierException(TOO_LARGE));
+        if (replyLength(r.length, c.framing, ct.length) > Sealer.MESSAGE_FLOOR) throw fail(new SecureCarrierException(TOO_LARGE));
         c.afterReply(ct, exchanged.secrets());
         result = c.result(false);
         state = State.UNCONFIRMED;

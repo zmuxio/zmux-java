@@ -139,12 +139,15 @@ public final class Lanes {
         lo.requested = false;
         if (lo.refused) return -1;
         if (lo.next == 0) lo.next = 1;
-        Pipe.OutLane l = new Pipe.OutLane(lo.next++, info, false);
+        // Lanes are streams of the pipe's carrier connection: the pipe's record limit holds on each.
+        int cap = CarrierInfo.minRecord(info.maxRecord(), p.out().lanes.get(0).st.info().maxRecord());
+        Pipe.OutLane l = new Pipe.OutLane(lo.next++, cap == info.maxRecord() ? info : info.withMaxRecord(cap), false);
         l.st.laneFirst = true;
         l.st.openedAt = port.now();
         l.st.sig = sig;
         lo.pending = l;
         p.out().add(l);
+        pipes.changed();
         pipes.wake(p);
         return l.lane;
     }

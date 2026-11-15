@@ -9,6 +9,11 @@ import java.nio.ByteBuffer;
 public final class Sealer {
     /** The largest message: what a length prefix allows. */
     public static final int MAX_MESSAGE = 65535;
+    /**
+     * The handshake message floor: the largest handshake message a sender writes (as written, framing included), and
+     * the least every receiver accepts. The carrier record floor, so every carrier carries every handshake message.
+     */
+    public static final int MESSAGE_FLOOR = 8192;
 
     private final CipherState cs;
     private SecureCarrierException failed;

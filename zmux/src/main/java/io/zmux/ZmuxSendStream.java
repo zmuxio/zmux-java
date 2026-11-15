@@ -33,6 +33,27 @@ public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream 
     int tryWrite(ByteBuffer src) throws IOException;
 
     /**
+     * Waits until the send buffer has room for a write and returns the bytes
+     * {@link #tryWrite} takes now (above 0); throws the error that ended the part. Room, not
+     * credit, admits a write: it may be there while {@link #sendCapacity()} is 0, and the
+     * other way round. It consumes nothing, and the write timeout bounds the wait.
+     * <p>
+     * The wait holds the stream's write turn, as a {@link #write write} that waits for room
+     * does: a write in progress finishes first, and every other write, {@link #tryWrite} and
+     * {@link #finish()} of this stream queues behind the wait until it returns or fails
+     * (a {@code tryWrite} meanwhile returns 0). Do not wait here for room another thread of
+     * the same stream is to make by writing. The turn is released when the call returns,
+     * so the room is a promise of readiness, not a reservation: {@code tryWrite} usually
+     * takes the returned bytes, but returns 0 when another write of the stream took the
+     * turn meanwhile or the session took the room back for a stream that needed it more;
+     * wait again then.
+     */
+    long awaitWritable() throws IOException;
+
+    /** Like {@link #awaitWritable()}, waiting at most timeout; {@link java.net.SocketTimeoutException} after it. */
+    long awaitWritable(Duration timeout) throws IOException;
+
+    /**
      * Finishes the sending part cleanly: FIN after the written data, so the peer reads every
      * byte and then end of stream. This is the only way to end a stream successfully. It
      * queues behind writes in progress, waiting at most the write timeout for them.
@@ -52,7 +73,10 @@ public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream 
     /** Bytes the part could transmit now within the peer's credit, minus what it holds unsent. */
     long sendCapacity() throws IOException;
 
-    /** Waits until the capacity is at least min, or above 0 while nothing is held unsent; returns it. */
+    /**
+     * Waits until the capacity is at least min, or above 0 while nothing is held unsent;
+     * returns it. It waits for credit, not for what a write takes: see {@link #awaitWritable()}.
+     */
     long awaitSendCapacity(long min) throws IOException;
 
     /** Like {@link #awaitSendCapacity(long)}, waiting at most timeout; {@link java.net.SocketTimeoutException} after it. */

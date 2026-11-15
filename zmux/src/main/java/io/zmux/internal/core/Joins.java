@@ -444,7 +444,7 @@ public final class Joins {
      */
     static ReplyRoom replyRoom(Mode mode, long received, int base, int wantFrames) {
         if (mode == Mode.TRUSTED) return new ReplyRoom(wantFrames, -1);
-        long room = Math.min(3 * received - base, Sealer.MAX_MESSAGE);
+        long room = Math.min(3 * received - base, Sealer.MESSAGE_FLOOR - base);
         int fit = HandshakePlans.fit((int) Math.max(room, -1));
         int frames = fit == HandshakePlans.NO_ITEM ? 0 : Math.min(fit, wantFrames);
         int used = frames > 0 ? HandshakePlans.itemSize(frames) : 0;
@@ -489,10 +489,11 @@ public final class Joins {
         HelloPayload empty = new HelloPayload(pipe, null, 0);
         int limit = a.joining.early ? firstBatchLimit(earlyLimit, plan.padTo(), j.helloLength(empty) + overhead) : 0;
         // The frames item stays within what the Hello's ciphertext holds.
-        if (limit > 0) limit = Math.clamp(HandshakePlans.fit(Sealer.MAX_MESSAGE - j.helloCiphertext(empty)), 0, limit);
+        // and within the handshake message floor, which every acceptor takes.
+        if (limit > 0) limit = Math.clamp(HandshakePlans.fit(Sealer.MESSAGE_FLOOR - j.helloLength(empty)), 0, limit);
         byte[] batch = limit > 0 ? port.firstBatch(limit) : null;
         HelloPayload bare = new HelloPayload(pipe, batch, 0);
-        int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, Sealer.MAX_MESSAGE - j.helloCiphertext(bare));
+        int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, Sealer.MESSAGE_FLOOR - j.helloLength(bare));
         byte[] hello = j.writeHello(new HelloPayload(pipe, batch, Tlv.paddingField(item)));
         if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
         a.joiner(j, framing);
@@ -708,7 +709,7 @@ public final class Joins {
         try {
             ReplyPayload bare = new ReplyPayload(refuse ? 1 : 0, null, 0);
             int wire = pj.acceptor.replyLength(bare) + overhead;
-            int room = Sealer.MAX_MESSAGE - pj.acceptor.replyCiphertext(bare);
+            int room = Sealer.MESSAGE_FLOOR - pj.acceptor.replyLength(bare);
             int limited = replyRoom(pj.mode, received, wire, 0).paddingRoom();
             int item = HandshakePlans.item(plan, wire, limited < 0 ? room : Math.min(room, limited));
             byte[] reply = pj.acceptor.writeReply(new ReplyPayload(bare.decision(), null, Tlv.paddingField(item)));

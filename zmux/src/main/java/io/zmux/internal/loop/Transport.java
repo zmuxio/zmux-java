@@ -172,7 +172,13 @@ public interface Transport {
         if (t == null) t = new ExternalTransport(host, io);
         else if (t.loop() != host) t = t.moveTo(host);
         var records = PipeIoAccess.get().records(io);
-        return t == null || records == null ? t : new SealedTransport(t, records, io.capabilities().exporter());
+        if (t == null || records == null) return t;
+        try {
+            return new SealedTransport(t, records, io.capabilities().exporter());
+        } catch (IllegalArgumentException belowFloor) {
+            t.close(belowFloor);
+            throw belowFloor;
+        }
     }
 
     /** The input's own transport (on its own host, not started), or null. */

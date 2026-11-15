@@ -136,7 +136,7 @@ public final class Joiner {
         byte[] clear = head.toByteArray();
         c.begin(clear, binding);
         byte[] ct = c.seal1(c.k0, plain);
-        if (ct.length > Sealer.MAX_MESSAGE) throw fail(new SecureCarrierException(TOO_LARGE));
+        if (clear.length + Frames.unitLength(c.framing, ct.length) > Sealer.MESSAGE_FLOOR) throw fail(new SecureCarrierException(TOO_LARGE));
         helloCt = ct;
         state = State.HELLO_SENT;
         return Kdf.concat(clear, Frames.frame(c.framing, ct));

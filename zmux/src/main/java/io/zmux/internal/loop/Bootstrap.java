@@ -201,7 +201,12 @@ public final class Bootstrap {
         Transport carrier = Transport.claim(io);
         if (carrier == null) carrier = new ExternalTransport(loop.get(), io);
         var records = PipeIoAccess.get().records(io);
-        if (records != null) carrier = new SealedTransport(carrier, records, io.capabilities().exporter());
+        try {
+            if (records != null) carrier = new SealedTransport(carrier, records, io.capabilities().exporter());
+        } catch (IllegalArgumentException belowFloor) {
+            carrier.close(belowFloor); // The carrier owns io now: the caller must not close io again.
+            return CompletableFuture.failedFuture(belowFloor);
+        }
         try {
             cfg = withExporter(cfg, carrier);
         } catch (IllegalArgumentException invalid) {

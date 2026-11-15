@@ -34,18 +34,30 @@ public final class PipeTable {
         return list;
     }
 
+    /** Moves on every change to the pipes, their outbound lanes or a pipe's outbound failure: what a scan over them depends on. */
+    private int version;
+
+    /** The pipe set's change count; equal across two reads exactly when no pipe, outbound lane or outbound direction came, went or failed. */
+    int version() { return version; }
+
+    /** An outbound lane joined a pipe, or a pipe's outbound direction failed. */
+    void changed() { version++; }
+
     void add(Pipe p) {
+        version++;
         list.add(p);
         byId.put(p.id, p);
     }
 
     void remove(Pipe p) {
+        version++;
         list.remove(p);
         if (byId.get(p.id) == p) byId.remove(p.id);
         if (!goneW.isEmpty()) goneW.wakeEvery(outbox);
     }
 
     void clear() {
+        version++;
         list.clear();
         byId.clear();
         if (!goneW.isEmpty()) goneW.wakeEvery(outbox);

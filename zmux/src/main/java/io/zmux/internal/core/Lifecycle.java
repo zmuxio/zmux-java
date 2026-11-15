@@ -12,7 +12,8 @@ final class Lifecycle {
     /** A CONNECTION_CLOSE to send. */
     record CloseFrame(boolean app, long code, long frameType, byte[] reason) {
         static CloseFrame of(boolean app, long code, long frameType, byte[] reason) {
-            return new CloseFrame(app, code, frameType, reason == null ? new byte[0] : reason);
+            // Every Reason Phrase, the application's included, within the wire's bound.
+            return new CloseFrame(app, code, frameType, reason == null ? new byte[0] : io.zmux.internal.wire.Utf8.truncate(reason, io.zmux.internal.wire.Utf8.MAX_REASON));
         }
     }
 

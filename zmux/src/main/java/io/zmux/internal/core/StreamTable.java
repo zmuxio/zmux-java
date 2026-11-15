@@ -418,8 +418,17 @@ public final class StreamTable {
     int preambleLimit() {
         long peerMax = port.established() || port.earlyActive() ? port.peer().maxPreambleSize : FLOOR_PREAMBLE;
         if (peerMax <= 0) peerMax = FLOOR_PREAMBLE;
-        return (int) Math.min(peerMax, MAX_PREAMBLE);
+        // The offset-0 STREAM frame carries the whole preamble: within the record floor it fits every pipe, now or later.
+        return (int) Math.min(Math.min(peerMax, MAX_PREAMBLE), FLOOR_BOUND);
     }
+
+    /**
+     * The record floor less 32 bytes for the STREAM frame and record headers around it, the same in every language:
+     * the most a peer may advertise ({@link TransportParams#MAX_PREAMBLE_SIZE}). The bound that applies is
+     * the least of the peer's value, the local {@link #MAX_PREAMBLE} and this one, so it is the effective limit
+     * only for a local bound above it.
+     */
+    static final int FLOOR_BOUND = TransportParams.MAX_PREAMBLE_SIZE;
 
     /** Whether st's preamble, with the GREASE TLV it may carry, fits the bound now. */
     private boolean preambleFits(Stream st) {
@@ -432,7 +441,7 @@ public final class StreamTable {
     private void checkPreamble(Stream st, Runnable undo) throws CoreException {
         if (preambleFits(st)) return;
         undo.run();
-        throw CoreException.of(CoreException.Reason.PREAMBLE_TOO_LARGE);
+        throw CoreException.preambleTooLarge(preambleLimit());
     }
 
     /**
@@ -442,7 +451,7 @@ public final class StreamTable {
      */
     boolean preambleAllowed(Stream st, StreamSend send) {
         if (!port.features().preamble() || preambleFits(st)) return true;
-        StreamError e = StreamError.of(StreamError.Kind.PREAMBLE_TOO_LARGE, -1);
+        StreamError e = new StreamError(StreamError.Kind.PREAMBLE_TOO_LARGE, -1, preambleLimit(), 0, false);
         StreamSend.error(st, e, false);
         send.cancelUnopened(st);
         if (st.hasRecv) StreamRecv.failUnopened(st, e);
@@ -454,7 +463,7 @@ public final class StreamTable {
         if (st.tab.idSet) return st.tab.id;
         if (st.snd.cancelled()) throw CoreException.stream(st.snd.errState());
         if (!port.established()) throw CoreException.of(CoreException.Reason.NOT_ESTABLISHED);
-        if (port.features().preamble() && !preambleFits(st)) throw CoreException.of(CoreException.Reason.PREAMBLE_TOO_LARGE);
+        if (port.features().preamble() && !preambleFits(st)) throw CoreException.preambleTooLarge(preambleLimit());
         allocId(st);
         st.tab.pinned = true;
         sched.ensure(st);

@@ -59,9 +59,14 @@ public final class SealedTransport implements Transport, Inbound {
 
     /** What the core sees of a carrier once it is sealed. */
     public static CarrierInfo sealedInfo(CarrierInfo c) {
-        int overhead = c.writeOverhead() + Suite.TAG_LEN + (c.framing() != Framing.RECORDS ? LEN : 0);
+        if (c.maxRecord() > 0 && c.maxRecord() - Suite.TAG_LEN - (c.framing() != Framing.RECORDS ? LEN : 0) < CarrierInfo.RECORD_FLOOR)
+            throw new IllegalArgumentException("the carrier's record limit " + c.maxRecord() + " leaves less than "
+                    + CarrierInfo.RECORD_FLOOR + " bytes once sealed");
+        int seal = Suite.TAG_LEN + (c.framing() != Framing.RECORDS ? LEN : 0), overhead = c.writeOverhead() + seal;
+        // The carrier's own record limit holds for the sealed record it carries.
         return new CarrierInfo(Framing.RECORDS, false, c.minRtt(), false, c.queueBound(), null, c.kind(), c.label(),
-                Math.min(overhead, io.zmux.carrier.PipeIo.MAX_WRITE_OVERHEAD), c.variant(), MAX_RECORD);
+                Math.min(overhead, io.zmux.carrier.PipeIo.MAX_WRITE_OVERHEAD), c.variant(),
+                c.maxRecord() > 0 ? Math.min(c.maxRecord() - seal, MAX_RECORD) : MAX_RECORD);
     }
 
     @Override public TransportInfo info() { return info; }

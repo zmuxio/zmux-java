@@ -65,8 +65,9 @@ final class EstablishClient {
 
     /** The Hello carrying p; its padding item, when the field is not zero, is random unless the message has a key. */
     byte[] writeHello(EstablishPayload p) throws SecureCarrierException {
-        byte[] msg = hs.writeMessage(p.withPadding(p.padding(), !profile.isPskBased()));
-        return EstablishHello.encode(profile, mode, handle, msg, framing);
+        byte[] msg = hs.writeMessage(p.withPadding(p.padding(), !profile.isPskBased()), null,
+                EstablishHello.headerLength(profile) + io.zmux.internal.join.Frames.unitLength(framing, 0));
+        return hs.checkWritten(EstablishHello.encode(profile, mode, handle, msg, framing));
     }
 
     /** Takes the bytes that begin with the Reply. INCOMPLETE leaves the state as it was. */
@@ -129,8 +130,8 @@ final class EstablishClient {
      */
     byte[] writeFinish(EstablishPayload p, Signer signer) throws SecureCarrierException {
         if (!judged) throw new IllegalStateException("the server has not been judged");
-        byte[] msg = hs.writeMessage(p, signer == null ? null : Handshake.ProofSigner.of(signer));
-        return Frames.frame(framing, msg);
+        byte[] msg = hs.writeMessage(p, signer == null ? null : Handshake.ProofSigner.of(signer), io.zmux.internal.join.Frames.unitLength(framing, 0));
+        return hs.checkWritten(Frames.frame(framing, msg));
     }
 
     /** The result, after {@link #writeFinish}. */

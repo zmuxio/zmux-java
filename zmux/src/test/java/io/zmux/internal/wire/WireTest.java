@@ -64,6 +64,23 @@ class WireTest {
     }
 
     @Test
+    void preambleValueAbove8160IsAParameterError() throws Exception {
+        for (int v : new int[] {TransportParams.MAX_PREAMBLE_SIZE, TransportParams.MAX_PREAMBLE_SIZE + 1}) {
+            TransportParams p = new TransportParams();
+            p.present = TransportParams.RESET_AT | TransportParams.PREAMBLE | TransportParams.BIDI_REMOTE | TransportParams.UNI;
+            p.maxStreamDataBidiRemote = p.maxStreamDataUni = 1 << 20;
+            p.maxPreambleSize = v;
+            byte[] enc = p.toBytes();
+            if (v == TransportParams.MAX_PREAMBLE_SIZE) {
+                assertEquals(v, TransportParams.decode(ByteBuffer.wrap(enc), 0, enc.length).maxPreambleSize);
+            } else {
+                WireException x = assertThrows(WireException.class, () -> TransportParams.decode(ByteBuffer.wrap(enc), 0, enc.length));
+                assertEquals(TransportError.TRANSPORT_PARAMETER_ERROR, x.code());
+            }
+        }
+    }
+
+    @Test
     void preambleRoundTripAndViolations() throws Exception {
         Preamble p = new Preamble(0, "dst".getBytes(UTF_8), 1, true, true,
                 List.of(new Preamble.Tlv(0x1000, new byte[] {7})), new Preamble.Tlv(0x21, new byte[0]));

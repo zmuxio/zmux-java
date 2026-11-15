@@ -43,6 +43,11 @@ public final class CoreException extends Exception {
         return new CoreException(Reason.STREAM, e, null, 0, -1);
     }
 
+    /** A preamble beyond max, the largest one accepted now. */
+    public static CoreException preambleTooLarge(int max) {
+        return new CoreException(Reason.PREAMBLE_TOO_LARGE, null, null, max, -1);
+    }
+
     public static CoreException session(SessionError e) {
         return new CoreException(Reason.SESSION, null, e, 0, -1);
     }

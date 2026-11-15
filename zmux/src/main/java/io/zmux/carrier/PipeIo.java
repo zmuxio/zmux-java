@@ -25,6 +25,9 @@ public final class PipeIo {
     /** Application error used when a carrier fails without a graceful end. */
     public static final int CARRIER_FAILED = 0x5a4d0003;
 
+    /** The smallest nonzero {@link Capabilities#maxRecord()}: the carrier record floor, so every unsplittable frame fits one record. */
+    public static final int MIN_RECORD = 8192;
+
     /** The largest {@link Capabilities#writeOverhead()}. */
     public static final int MAX_WRITE_OVERHEAD = 65535;
 
@@ -173,6 +176,17 @@ public final class PipeIo {
     public PipeIo withWriteOverhead(int bytes) { return withCapabilities(capabilities.toBuilder().writeOverhead(bytes).build()); }
 
     /**
+     * The largest record the carrier takes, at least {@link #MIN_RECORD} bytes of Size (0: the carrier's default): zmux
+     * builds this pipe's records, on each of its lanes, and sizes datagrams within it, beside the peer's
+     * {@code max_record_size}, a TLS carrier's record limit and zmux's own (the smallest applies). Under a transform
+     * with record overhead (Sealed) the limit less the overhead must still reach {@link #MIN_RECORD}, or adding the
+     * pipe fails. For a carrier with a small datagram or message size, say.
+     *
+     * @throws IllegalArgumentException neither 0 nor at least {@link #MIN_RECORD}
+     */
+    public PipeIo withMaxRecord(int bytes) { return withCapabilities(capabilities.toBuilder().maxRecord(bytes).build()); }
+
+    /**
      * Whether this process terminates the carrier's TLS or QUIC handshake and it has completed (a carrier whose
      * handshake has not completed counts as without TLS). It is no proof of an end-to-end handshake: an intermediary
      * may have opened this one. The exporter is {@link Capabilities#exporter()} alone.
@@ -236,7 +250,7 @@ public final class PipeIo {
         boolean same = uplink.carrierConn == downlink.carrierConn;
         long memory = same ? Math.max(uc.receiveMemory(), dc.receiveMemory()) : Math.addExact(uc.receiveMemory(), dc.receiveMemory());
         Capabilities caps = Capabilities.builder().exporter(exporter).receiveMemory(memory).applicationProtocol(uc.applicationProtocol())
-                .serverName(uc.serverName()).fateGroup(uc.fateGroup()).writeOverhead((upWrites ? uc : dc).writeOverhead())
+                .serverName(uc.serverName()).fateGroup(uc.fateGroup()).writeOverhead((upWrites ? uc : dc).writeOverhead()).maxRecord((upWrites ? uc : dc).maxRecord())
                 .terminatedTls(uc.isTerminatedTls() && dc.isTerminatedTls())
                 .secure(uc.isSecure() && dc.isSecure() && up != null && down != null).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
@@ -275,6 +289,7 @@ public final class PipeIo {
         private final String serverName;
         private final long fateGroup;
         private final int writeOverhead;
+        private final int maxRecord;
         private final boolean terminatedTls;
         private final boolean secure;
         private final long handshakePadding;
@@ -287,6 +302,7 @@ public final class PipeIo {
             serverName = b.serverName;
             fateGroup = b.fateGroup;
             writeOverhead = b.writeOverhead;
+            maxRecord = b.maxRecord;
             terminatedTls = b.terminatedTls;
             secure = b.secure;
             handshakePadding = b.handshakePadding;
@@ -304,6 +320,7 @@ public final class PipeIo {
             b.serverName = serverName;
             b.fateGroup = fateGroup;
             b.writeOverhead = writeOverhead;
+            b.maxRecord = maxRecord;
             b.terminatedTls = terminatedTls;
             b.secure = secure;
             b.handshakePadding = handshakePadding;
@@ -334,6 +351,9 @@ public final class PipeIo {
          */
         public int writeOverhead() { return writeOverhead; }
 
+        /** The largest record Size the carrier takes, 0 or at least {@link #MIN_RECORD}; 0: the carrier's default. */
+        public int maxRecord() { return maxRecord; }
+
         /** See {@link PipeIo#withTerminatedTls}. */
         public boolean isTerminatedTls() { return terminatedTls; }
 
@@ -352,6 +372,7 @@ public final class PipeIo {
             private String serverName = "";
             private long fateGroup;
             private int writeOverhead;
+            private int maxRecord;
             private boolean terminatedTls;
             private boolean secure;
             private long handshakePadding;
@@ -397,6 +418,18 @@ public final class PipeIo {
                 if (bytes < 0 || bytes > MAX_WRITE_OVERHEAD)
                     throw new IllegalArgumentException("writeOverhead " + bytes + " outside [0, " + MAX_WRITE_OVERHEAD + "]");
                 writeOverhead = bytes;
+                return this;
+            }
+
+            /**
+             * The largest record Size the carrier takes; 0: the carrier's default.
+             *
+             * @throws IllegalArgumentException neither 0 nor at least {@link #MIN_RECORD}
+             */
+            public Builder maxRecord(int bytes) {
+                if (bytes != 0 && bytes < MIN_RECORD)
+                    throw new IllegalArgumentException("maxRecord " + bytes + " is neither 0 nor at least " + MIN_RECORD);
+                maxRecord = bytes;
                 return this;
             }
 
