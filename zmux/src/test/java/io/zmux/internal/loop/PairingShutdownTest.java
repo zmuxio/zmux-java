@@ -28,7 +28,7 @@ class PairingShutdownTest {
             }, null, new byte[0], 8, 0, 0, 0, 0, 0);
             try {
                 PipeReader reader = new PipeReader() {
-                    @Override public void start(Sink sink) { sink.onData(ByteBuffer.wrap(preface), () -> {}); }
+                    @Override public void start(Sink sink) { sink.onLent(ByteBuffer.wrap(preface), () -> {}); }
                     @Override public void close() { readsClosed.incrementAndGet(); }
                 };
                 PipeWriter writer = new PipeWriter() {

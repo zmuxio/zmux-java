@@ -13,6 +13,24 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class WireTest {
+    /** Many unknown parameters decode in near-linear time; a duplicate among them, at any distance, is still found. */
+    @Test
+    void manyUnknownParametersAreCheckedForDuplicatesWithoutAQuadraticScan() throws WireException {
+        // Large enough that a quadratic scan (8e10 comparisons) takes minutes: the generous bound below never
+        // separates a loaded machine's linear decode from it by a narrow margin.
+        int n = 400_000;
+        ByteBuffer b = ByteBuffer.allocate(n * 9 + 9);
+        for (int k = 0; k < n; k++) { VarInt.put(b, 0x4000_0000L + (n - k) * 2L); VarInt.put(b, 0); }
+        int len = b.position();
+        long t0 = System.nanoTime();
+        TransportParams.decode(b, 0, len);
+        assertTrue(System.nanoTime() - t0 < 10_000_000_000L, "decode of many parameters took too long");
+        VarInt.put(b, 0x4000_0000L + 2L * n); VarInt.put(b, 0); // the first identifier again, at the end
+        int dup = b.position();
+        WireException x = assertThrows(WireException.class, () -> TransportParams.decode(b, 0, dup));
+        assertTrue(x.getMessage().endsWith("duplicate parameter"), x.getMessage());
+    }
+
     @Test
     void varintBoundaries() {
         long[] vs = {0, 63, 64, 16383, 16384, (1L << 30) - 1, 1L << 30, VarInt.MAX};

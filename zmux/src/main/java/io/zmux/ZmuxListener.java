@@ -61,6 +61,8 @@ public final class ZmuxListener implements AutoCloseable {
     private volatile boolean closed;
     /** Closed: the listener takes no carrier at all. */
     private final AtomicBoolean stopped = new AtomicBoolean();
+    /** The running shutdown's bound, run at most once whichever caller's future triggers it; null: none started. */
+    private final java.util.concurrent.atomic.AtomicReference<Runnable> shutdownBound = new java.util.concurrent.atomic.AtomicReference<>();
     private final CompletableFuture<Void> terminated = new CompletableFuture<>();
     private final io.zmux.internal.loop.SerialCallbacks pressureCallbacks = new io.zmux.internal.loop.SerialCallbacks();
     private final BiConsumer<Long, Long> pressureListener;
@@ -451,7 +453,7 @@ public final class ZmuxListener implements AutoCloseable {
 
     /**
      * Shuts the listener down gracefully: {@link #accept()} fails from now on, the sessions not
-     * yet accepted are closed, and no new session is taken (a new session's first record or
+     * yet accepted are aborted, and no new session is taken (a new session's first record or
      * split bootstrap is refused); every session the listener started or dialed is shut down
      * ({@link ZmuxSession#shutdown(long, String)}) with code and reason, and until they have all
      * ended the listener still takes their joins and resumptions, which pass the source slot, the
@@ -479,21 +481,29 @@ public final class ZmuxListener implements AutoCloseable {
      * Completing the future from outside (cancel, {@link ZmuxFuture#orTimeout},
      * {@link ZmuxFuture#completeOnTimeout}) is the shutdown's bound: the sessions still running
      * are closed at once with code and reason, and the listener closes.
+     * A call while a shutdown runs joins it: the first call's code and reason apply, and the bound of
+     * any caller's future (or timeout) closes the listener.
      */
     public ZmuxFuture<Void> shutdownAsync(long code, String reason) {
         if (code < 0 || code > (1L << 62) - 1) throw new IllegalArgumentException("application error code outside 0 to 2^62 - 1");
         byte[] r = io.zmux.internal.wire.Utf8.truncate(Objects.requireNonNull(reason, "reason"), ZmuxSession.MAX_REASON_BYTES);
         if (stopped.get()) return ZmuxFuture.of(terminated, null);
+        AtomicBoolean once = new AtomicBoolean();
+        // Not on the thread that completed the future (the JDK's delay thread for orTimeout): close() blocks.
+        Runnable bound = () -> {
+            if (once.compareAndSet(false, true)) Thread.ofVirtual().name("zmux-shutdown").start(() -> {
+                // The bound: the sessions close at once, the listener with them.
+                for (SessionRuntime d : hub.registered()) d.post(() -> d.core().closeBounded(code, r, io.zmux.internal.core.Session.closeLimit,
+                        io.zmux.internal.loop.Clock.now()));
+                close();
+            });
+        };
+        Runnable running = shutdownBound.compareAndExchange(null, bound);
+        if (running != null) return ZmuxFuture.of(terminated, running); // a later call: the running shutdown, bounded by it too
         closeAccept();
         for (SessionRuntime d : hub.registered()) d.post(() -> d.core().shutdown(code, r));
         hub.drain(this::close);
-        // Not on the thread that completed the future (the JDK's delay thread for orTimeout): close() blocks.
-        return ZmuxFuture.of(terminated, () -> Thread.ofVirtual().name("zmux-shutdown").start(() -> {
-            // The bound: the sessions close at once, the listener with them.
-            for (SessionRuntime d : hub.registered()) d.post(() -> d.core().closeBounded(code, r, io.zmux.internal.core.Session.closeLimit,
-                    io.zmux.internal.loop.Clock.now()));
-            close();
-        }));
+        return ZmuxFuture.of(terminated, bound);
     }
 
     private void await(ZmuxFuture<Void> f, Duration timeout) throws IOException {
@@ -524,16 +534,19 @@ public final class ZmuxListener implements AutoCloseable {
         }
     }
 
-    /** Ends {@link #accept()} and closes the sessions not yet accepted. */
+    /**
+     * Ends {@link #accept()} and aborts the sessions not yet accepted: nobody took them, so
+     * nothing of theirs waits to be drained, and the caller never waits for their peers.
+     */
     private void closeAccept() {
         closed = true;
-        for (ZmuxSession s; (s = ready.poll()) != null; ) { queued.decrementAndGet(); s.close(); }
+        for (ZmuxSession s; (s = ready.poll()) != null; ) { queued.decrementAndGet(); s.abort(0, "listener closed"); }
         available.release(); // Wakes one waiting acceptor; each passes the wake-up on.
     }
 
     /**
      * Closes the listener at once: it takes no carrier any more (joins and resumptions
-     * included), cancels the admission decisions under way, and closes the sessions not yet
+     * included), cancels the admission decisions under way, and aborts the sessions not yet
      * accepted; accepted sessions stay, but their pipes can no longer join.
      */
     @Override

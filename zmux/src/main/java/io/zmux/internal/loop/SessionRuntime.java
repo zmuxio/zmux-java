@@ -48,10 +48,17 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     private final SerialCallbacks completions = new SerialCallbacks();
 
     SerialCallbacks completions() { return completions; }
+
+    /** Whether the calling thread runs this session's completions now. */
+    boolean onCompletionContext() { return SerialCallbacks.onContext(completions); }
     private final java.util.concurrent.atomic.AtomicInteger tracePending = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicLong traceDropped = new java.util.concurrent.atomic.AtomicLong();
     private boolean receiveHookBusy;
     private boolean traceClosed;
+    private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
+    /** The session's identity in this process. */
+    private final io.zmux.SessionId id = new io.zmux.SessionId(IDS.incrementAndGet());
+    public io.zmux.SessionId id() { return id; }
 
     /** Listener snapshots are published on the owner loop, never by reading a foreign core. */
     public record Resources(SessionState state, long bytes, long suspendedAt) {}
@@ -85,10 +92,10 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             try {
                 long dropped = traceDropped.getAndSet(0);
                 if (dropped != 0) {
-                    try { hooks.dropped().accept(dropped); }
+                    try { hooks.dropped().accept(id, dropped); }
                     catch (RuntimeException | AssertionError ignored) { /* Still deliver the actual event. */ }
                 }
-                hooks.tracer().accept(event);
+                hooks.tracer().accept(id, event);
             } finally { tracePending.decrementAndGet(); }
         });
     }
@@ -118,17 +125,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             if (data != null) {
                 receiveHookBusy = true;
                 callbacks.execute(() -> {
-                    boolean allow = false;
-                    if (data.active()) {
-                        try {
-                            allow = hooks.datagramReceive().tryReady(data.bytes()) >= data.bytes();
-                        } catch (RuntimeException | AssertionError ignored) { /* a failing hook refuses */ }
-                    }
-                    boolean accepted = allow;
+                    // tryAcquire(n, n) for the whole payload; a failing limiter counts as nothing taken.
+                    boolean accepted = data.active() && io.zmux.helper.Permit.police(hooks.datagramReceive(), data.bytes());
                     post(() -> {
                         receiveHookBusy = false;
-                        if (core.deliverDatagram(data, !accepted)) {
-                            callbacks.execute(() -> hooks.datagramReceive().charge(data.bytes()));
+                        // The grant was taken; it is refunded when the queue refuses the datagram.
+                        if (!core.deliverDatagram(data, !accepted) && accepted) {
+                            callbacks.execute(() -> io.zmux.helper.Permit.refund(hooks.datagramReceive(), data.bytes()));
                         }
                     });
                 });

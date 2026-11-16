@@ -213,4 +213,28 @@ final class Exchange {
             return null;
         }
     }
+
+    /**
+     * Makes room for n more bytes in buf (in write mode): the same buffer when they fit, else a
+     * larger copy (twice the capacity, at least what is needed, at most max). The exchange
+     * carriers keep their pieces and bodies in such heap buffers; they hold nothing to release.
+     */
+    static ByteBuffer room(ByteBuffer buf, int n, int max) {
+        if (buf.remaining() >= n) return buf;
+        int need = buf.position() + n;
+        ByteBuffer grown = ByteBuffer.allocate((int) Math.min(max, Math.max(need, 2L * buf.capacity())));
+        return grown.put(buf.flip());
+    }
+
+    /** Appends src's remaining bytes to buf, grown as {@link #room} does; returns the buffer holding them. */
+    static ByteBuffer append(ByteBuffer buf, ByteBuffer src, int max) {
+        return room(buf, src.remaining(), max).put(src);
+    }
+
+    /** Appends n bytes of src from index (src's indices unchanged) to buf, grown as {@link #room} does. */
+    static ByteBuffer append(ByteBuffer buf, io.netty.buffer.ByteBuf src, int index, int n, int max) {
+        ByteBuffer b = room(buf, n, max);
+        src.getBytes(index, b.array(), b.arrayOffset() + b.position(), n);
+        return b.position(b.position() + n);
+    }
 }

@@ -207,7 +207,7 @@ public final class Joins {
         if (cfg.test().rtt() > 0) d = cfg.test().rtt();
         Long v = cfg.test().pipeRtt().get(pipe);
         if (v != null) d = v;
-        a.rtt.initial(d);
+        a.rtt().initial(d);
     }
 
     boolean ownParity(long id) {

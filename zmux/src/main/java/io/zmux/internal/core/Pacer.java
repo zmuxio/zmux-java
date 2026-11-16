@@ -61,8 +61,9 @@ final class Pacer {
     }
 
     private static long srttOf(Pipe p) {
-        if (p.mp() != null) return p.mp().rtt.smoothed();
-        return p.out().snd.rtt().has() ? p.out().snd.rtt().smoothed() : 333 * Time.MILLISECOND;
+        // An attached pipe's estimator starts at its initial estimate; a bootstrap pipe's has none before a sample.
+        long s = p.out().snd.rtt().smoothed();
+        return s > 0 ? s : 333 * Time.MILLISECOND;
     }
 
     private static Limiter limiterOf(Pipe p, long now) {

@@ -16,12 +16,14 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.util.ReferenceCountUtil;
 import io.zmux.Candidate;
+import io.zmux.CarrierClientClosedException;
 import io.zmux.CarrierKind;
 import io.zmux.CarrierCredential;
 import io.zmux.HttpStatusException;
 import io.zmux.HttpTarget;
 import io.zmux.JoinHint;
 import io.zmux.PipeOptions;
+import io.zmux.ZmuxFuture;
 import io.zmux.ZmuxPipe;
 import io.zmux.ZmuxSession;
 import io.zmux.carrier.PipeIo;
@@ -50,7 +52,8 @@ import javax.net.ssl.TrustManagerFactory;
  * HTTPS uses HTTP/2 when the server's ALPN offers it and HTTP/1.1 otherwise; cleartext HTTP uses
  * HTTP/1.1, or HTTP/2 by prior knowledge ({@link Builder#http2()}). Streaming carriers over
  * HTTP/1.1 get a connection of their own, which closes with them; over HTTP/2 they are streams
- * of one connection per server. Safe for concurrent use; close it to close its connections.
+ * of one connection per server. Safe for concurrent use; {@link #close} closes every connection
+ * it opened.
  */
 public final class HttpCarrierClient implements AutoCloseable {
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -62,19 +65,13 @@ public final class HttpCarrierClient implements AutoCloseable {
     /** The exchange carriers not yet ended. */
     final java.util.Set<ExchangeClient> exchanges = java.util.concurrent.ConcurrentHashMap.newKeySet();
     volatile boolean closed;
-    /**
-     * The partial response bodies held in channel pipelines, by their release. A group that
-     * terminates can skip a pipeline's teardown; its termination releases what is left here.
-     */
-    final java.util.Map<Runnable, io.netty.buffer.ByteBuf> partials = new java.util.concurrent.ConcurrentHashMap<>();
-    private final io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<Object>> onTerminated =
-            f -> { for (Runnable r : List.copyOf(partials.keySet())) r.run(); };
+    /** The close once started ({@link #closeAsync}); null: open. */
+    private final java.util.concurrent.atomic.AtomicReference<CompletableFuture<Void>> closing = new java.util.concurrent.atomic.AtomicReference<>();
 
     private HttpCarrierClient(Builder b) throws IOException {
         pairField = JoinHint.pairField(b.pairField);
         ownGroup = b.group == null;
         group = ownGroup ? new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory()) : b.group;
-        group.terminationFuture().addListener(onTerminated);
         SslContextBuilder tls = b.tls;
         SslContext both, h1;
         try {
@@ -234,9 +231,10 @@ public final class HttpCarrierClient implements AutoCloseable {
      *
      * @throws IllegalArgumentException when url (or the config's DOWN URL) is not an http or
      *     https URL once its placeholders are replaced
+     * @throws CarrierClientClosedException when the client is closed, as every dial of a closed client fails
      */
-    public PipeIo exchangePipe(String url, ExchangeConfig config) {
-        if (closed) throw new IllegalStateException("closed");
+    public PipeIo exchangePipe(String url, ExchangeConfig config) throws CarrierClientClosedException {
+        if (closed) throw closedFailure();
         return new ExchangeClient(this, Objects.requireNonNull(url), Objects.requireNonNull(config)).pipe();
     }
 
@@ -329,13 +327,72 @@ public final class HttpCarrierClient implements AutoCloseable {
 
     EventLoopGroup group() { return group; }
 
-    /** Fails the exchange carriers still running and closes the connections. */
-    @Override public void close() {
+    /**
+     * Counts x as running, for {@link #close} to fail; false once the client is closed. The
+     * set is updated before closed is read, and close sets closed before it reads the set, so
+     * one of the two always sees the other.
+     */
+    boolean register(ExchangeClient x) {
+        exchanges.add(x);
+        if (!closed) return true;
+        exchanges.remove(x);
+        return false;
+    }
+
+    /**
+     * Closes the client without waiting: fails the exchange carriers still running (their readers
+     * and writers see the client's close as the cause), then closes every connection of the client
+     * (those of carriers in use and those still connecting too), then shuts down the client's own
+     * group. The future completes once that is done; the carriers' failing step is bounded by the
+     * client's timeout. Calls after the first return the same future. Cancelling the future
+     * changes nothing of the close.
+     *
+     * <p>With a group of the caller's ({@link Builder#group}), close the client first, then shut
+     * the group down. A group shut down first leaves the client usable only for close: zmux's
+     * calls on its carriers then fail at once, and the group's shutdown closes the connections.
+     */
+    public ZmuxFuture<Void> closeAsync() {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        CompletableFuture<Void> running = closing.compareAndExchange(null, done);
+        if (running != null) return io.zmux.internal.spi.Spi.future(running, null);
         closed = true;
-        for (ExchangeClient x : exchanges) x.shutdown();
-        conns.close();
-        if (ownGroup) group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
-        else group.terminationFuture().removeListener(onTerminated); // the connections close on the caller's live group
+        Throwable cause = new io.zmux.CarrierFailedException("HTTP carrier client closed"); // the running carriers' failure
+        List<CompletableFuture<Void>> failing = new java.util.ArrayList<>();
+        for (ExchangeClient x : exchanges) failing.add(x.shutdown(cause));
+        // Bounded: what has not failed by then fails on its loop.
+        CompletableFuture.allOf(failing.toArray(CompletableFuture[]::new)).orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS)
+                .whenComplete((v, e) -> conns.close().addListener(f -> {
+                    if (!ownGroup) done.complete(null);
+                    else group.shutdownGracefully(0, 1, TimeUnit.SECONDS).addListener(t -> done.complete(null));
+                }));
+        return io.zmux.internal.spi.Spi.future(done, null);
+    }
+
+    /**
+     * {@link #closeAsync()}, then waits for it, bounded by the client's timeout. Called on one of
+     * the group's event loops it does not wait: the close then completes after it returns.
+     */
+    @Override public void close() {
+        var f = closeAsync();
+        if (onGroup()) return;
+        try {
+            f.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException e) {
+            // Bounded: the rest completes on the group.
+        }
+    }
+
+    /** The failure of every dial once the client is closed. */
+    static CarrierClientClosedException closedFailure() {
+        return new CarrierClientClosedException("HTTP carrier client closed");
+    }
+
+    /** Whether the calling thread is one of the group's event loops, which must not wait for the group. */
+    private boolean onGroup() {
+        for (io.netty.util.concurrent.EventExecutor e : group) if (e.inEventLoop()) return true;
+        return false;
     }
 
     /** Configures an {@link HttpCarrierClient}. */

@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -207,9 +208,7 @@ final class StreamingRequest {
                 fail(err);
                 return;
             }
-            // The channel's event loop is borrowed; its group owns and shuts it down.
-            //noinspection resource
-            ch.eventLoop().execute(() -> {
+            Loops.run(ch.eventLoop(), () -> {
                 BodyCarrier nc;
                 List<PipeWriter.Completion> done;
                 PipeReader.Sink s;
@@ -261,7 +260,7 @@ final class StreamingRequest {
                 }
                 if (writes && closeWriter) writerOf(nc).close();
                 for (PipeWriter.Completion d : done) d.completed();
-            });
+            }, () -> { ch.close(); fail(new java.nio.channels.ClosedChannelException()); });
         });
         return true;
     }
@@ -349,9 +348,8 @@ final class StreamingRequest {
                 @Override public void failed(Throwable cause) {
                     // The response may still be on its way (a front that answers and closes): it
                     // decides, read before the connection's end is.
-                    // The channel's event loop is borrowed; its group owns and shuts it down.
-                    //noinspection resource
-                    c.ch.closeFuture().addListener(x -> c.ch.eventLoop().execute(() -> report(cause)));
+                    // report is safe on any thread: a loop that refuses it has it here.
+                    c.ch.closeFuture().addListener(x -> Loops.run(c.ch.eventLoop(), () -> report(cause), () -> report(cause)));
                 }
 
                 private void report(Throwable cause) {

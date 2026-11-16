@@ -56,6 +56,7 @@ class BridgeStructureTest {
             Map.entry("RecvLane.endReported", "loop"),
             Map.entry("RecvLane.appDone", "loop"),
             Map.entry("RecvLane.hostReader", "loop"),
+            Map.entry("RecvLane$AsyncRead.readable", "turn holder; written before the outcome that publishes it, read after observing it"),
             Map.entry("RecvLane$Piece.off", "turn holder (ring consumer); published with the piece's next link"));
 
     @Test

@@ -18,8 +18,12 @@ import java.util.function.BooleanSupplier;
  * session's completion context: one thread at a time, in the order the session decided the
  * outcomes, never an event loop. A dependent stage that blocks there delays the session's
  * later completions; do not wait there for another future of the same session, and use the
- * {@code *Async} stage variants with your own executor for work that blocks. A future that
- * could complete at once is returned completed, and its dependents run on the calling thread.
+ * {@code *Async} stage variants with your own executor for work that blocks. Blocking zmux calls are allowed
+ * there, except that a call that would wait for its stream direction's turn behind an asynchronous operation of that
+ * direction still in progress throws {@link CompletionThreadBlockedException} (an {@link IllegalStateException}), as that operation needs this thread to go
+ * on: a blocking read, {@code readChunk}, {@code awaitReadable}, write or {@code finish}, and a transfer of the
+ * stream ({@code asPipe}, {@link Zmux#splice}), which waits for both directions.
+ * A future that could complete at once is returned completed, and its dependents run on the calling thread.
  *
  * <p>Dependent stages are plain {@link CompletableFuture}s.
  */

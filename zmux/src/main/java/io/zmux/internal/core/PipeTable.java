@@ -263,15 +263,15 @@ public final class PipeTable {
     /** pipe_min_rtt of an attachment, or -1. */
     long minRtt(Pipe p) {
         if (p == null || p.mp() == null) return -1;
-        if (p.out() != null && p.mp().rtt.has()) return p.mp().rtt.min();
+        if (p.out() != null && p.mp().rtt().has()) return p.mp().rtt().min();
         long best = -1;
         for (Pipe q : list) {
-            if (q == p || q.mp() == null || q.out() == null || !q.mp().rtt.has()) continue;
+            if (q == p || q.mp() == null || q.out() == null || !q.mp().rtt().has()) continue;
             if (p.mp().fate != 0 && (q.mp().fate != p.mp().fate || q.mp().joinerLocal != p.mp().joinerLocal)) continue;
-            best = Math.max(best, q.mp().rtt.min());
+            best = Math.max(best, q.mp().rtt().min());
         }
         if (best < 0 && p.mp().fate != 0) {
-            for (Pipe q : list) if (q != p && q.mp() != null && q.out() != null && q.mp().rtt.has()) best = Math.max(best, q.mp().rtt.min());
+            for (Pipe q : list) if (q != p && q.mp() != null && q.out() != null && q.mp().rtt().has()) best = Math.max(best, q.mp().rtt().min());
         }
         return best;
     }

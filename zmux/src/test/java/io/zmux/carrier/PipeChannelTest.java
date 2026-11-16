@@ -26,7 +26,7 @@ class PipeChannelTest {
             PipeIo io = PipeChannel.pipe(ch, ch, Framing.BYTE_STREAM, 1 << 16);
             var readOn = new CompletableFuture<Thread>();
             io.reader().start(new PipeReader.Sink() {
-                @Override public void onData(ByteBuffer data, Runnable release) { readOn.complete(Thread.currentThread()); release.run(); }
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; readOn.complete(Thread.currentThread()); release.run(); }
                 @Override public void onEnd() { }
                 @Override public void onError(Throwable cause) { readOn.completeExceptionally(cause); }
             });
@@ -65,7 +65,7 @@ class PipeChannelTest {
             SocketChannel peer = server.accept();
             var got = new java.util.concurrent.LinkedBlockingQueue<Object>();
             io.reader().start(new PipeReader.Sink() {
-                @Override public void onData(ByteBuffer data, Runnable release) { got.add(data.remaining()); release.run(); }
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(data.remaining()); release.run(); }
                 @Override public void onEnd() { got.add("end"); }
                 @Override public void onError(Throwable cause) { got.add(cause); }
             });

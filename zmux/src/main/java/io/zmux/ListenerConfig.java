@@ -147,7 +147,9 @@ public final class ListenerConfig {
      * Chooses each new session's configuration, for example {@link PipeAuth#exporter()} where the
      * process terminates TLS and {@link PipeAuth#deferred()} where an intermediary does, or
      * per-session shaping limits. Called once per carrier that starts a session, never for a
-     * join, outside every lock, on the listener's event loop: it must not block. What belongs to
+     * join, outside every lock, on the listener's event loop: it must not block, and it must
+     * return well before the carrier's handshake deadline, which keeps running while it does
+     * (a carrier whose deadline passes is closed). What belongs to
      * the listener stays its own (its memory budget, its loops, the carrier-level bounds before a
      * session is known): the returned configuration's values for those are not used.
      */
@@ -209,6 +211,8 @@ public final class ListenerConfig {
          * already holding its maximum of stalled carriers has the carrier closed at once
          * ({@link AdmissionStats#stallOverflow}). Null (the default): an Establish refused before
          * authentication stalls, a Join and every other refusal closes. A failing function closes.
+         * It is synchronous: it must not block, and must return well before the carrier's handshake
+         * deadline, which keeps running while it does.
          */
         public Builder onReject(java.util.function.Function<RejectInfo, RejectInfo.Action> f) { onReject = f; return this; }
 

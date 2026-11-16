@@ -82,12 +82,12 @@ class StreamLimitsTest {
         // The receive hook takes one datagram at a time; holding its answer keeps the rest awaiting it.
         var answer = new java.util.concurrent.CountDownLatch(1);
         io.zmux.helper.Limiter never = new io.zmux.helper.Limiter() {
-            @Override public java.util.concurrent.CompletionStage<Integer> ready(int min, int max) { return new java.util.concurrent.CompletableFuture<>(); }
-            @Override public int tryReady(int max) {
+            @Override public java.util.concurrent.CompletionStage<Long> acquire(long min, long max) { return new java.util.concurrent.CompletableFuture<>(); }
+            @Override public long tryAcquire(long min, long max) {
                 try { answer.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 return 0;
             }
-            @Override public void charge(int bytes) { }
+            @Override public void refund(long bytes) { }
         };
         try (EventLoops loops = EventLoops.create(2);
              var p = pair(loops, b -> b.datagramStreamQueue(32).datagramStreamBytes(16 << 10).datagramLimiters(null, never))) {

@@ -8,6 +8,9 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.group.ChannelGroup;
+import io.netty.channel.group.ChannelGroupFuture;
+import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
@@ -19,6 +22,7 @@ import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.util.concurrent.GlobalEventExecutor;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
@@ -44,8 +48,10 @@ final class Connections {
     private final Map<String, CompletableFuture<Channel>> h2 = new HashMap<>();
     /** Idle HTTP/1.1 connections by origin. */
     private final Map<String, ArrayDeque<Channel>> idle = new HashMap<>();
-    /** Under this: no connection opens or goes back to the pool any more. */
-    private boolean closed;
+    /** Every connection opened and not yet closed, those still connecting too: {@link #close} closes them all. */
+    private final ChannelGroup channels = new DefaultChannelGroup("zmux-http-client", GlobalEventExecutor.INSTANCE);
+    /** No connection opens or goes back to the pool any more; set under this. */
+    private volatile boolean closed;
 
     /** ssl offers h2 and http/1.1, ssl1 http/1.1 only. */
     Connections(EventLoopGroup group, SslContext ssl, SslContext ssl1, Version version, Duration connectTimeout) {
@@ -81,14 +87,14 @@ final class Connections {
      */
     CompletableFuture<Channel> open(URI u, boolean pooled, boolean http1) {
         synchronized (this) {
-            if (closed) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("HTTP carrier client closed"));
+            if (closed) return CompletableFuture.failedFuture(HttpCarrierClient.closedFailure());
         }
         String o = origin(u);
         boolean wantH2 = !http1 && (version == Version.HTTP_2 || (version == Version.AUTO && secure(u)));
         if (wantH2) {
             CompletableFuture<Channel> conn;
             synchronized (this) {
-                if (closed) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("HTTP carrier client closed"));
+                if (closed) return CompletableFuture.failedFuture(HttpCarrierClient.closedFailure());
                 conn = h2.get(o);
                 if (conn == null || conn.isCompletedExceptionally() || (conn.isDone() && !conn.join().isActive())) {
                     conn = connect(u, false);
@@ -168,6 +174,10 @@ final class Connections {
                     }
                 });
         ChannelFuture cf = b.connect(new InetSocketAddress(u.getHost(), port(u)));
+        // Tracked before closed is read, and close sets closed before it closes the group: a
+        // connection that races close is closed by one of the two.
+        channels.add(cf.channel());
+        if (closed) cf.channel().close();
         cf.addListener(r -> {
             if (!r.isSuccess()) f.completeExceptionally(r.cause());
             else if (!tls) f.complete(cf.channel());
@@ -180,12 +190,19 @@ final class Connections {
         ch.pipeline().addLast(new Http2MultiplexHandler(new ChannelInboundHandlerAdapter()), TransportErrors.INSTANCE);
     }
 
-    /** Closes the pooled and shared connections. */
-    synchronized void close() {
-        closed = true;
-        for (var q : idle.values()) for (Channel c : q) c.close();
-        idle.clear();
-        for (var f : h2.values()) f.thenAccept(Channel::close);
-        h2.clear();
+    /**
+     * Closes every connection: pooled, shared, in use (a carrier's, an attempt's) and still
+     * connecting. Complete once they are closed.
+     */
+    ChannelGroupFuture close() {
+        synchronized (this) {
+            closed = true;
+            idle.clear();
+            h2.clear();
+        }
+        return channels.close();
     }
+
+    /** The connections open or connecting, for tests. */
+    int open() { return channels.size(); }
 }

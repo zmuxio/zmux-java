@@ -13,7 +13,7 @@ class SendBufferContractTest {
     private static Session highBDP(CoreConfig.Builder b) {
         Session s = PipeTargetTest.session(b);
         Pipe p = s.pipes.get(0);
-        Poke.set(p.mp().rtt, "smoothed", Time.SECOND);
+        Poke.set(p.mp().rtt(), "smoothed", Time.SECOND);
         Poke.set(p.out().snd.re(), "blockedNow", true);
         p.out().snd.re().sample(512L << 20, false, 0, false, 0);
         Poke.set(p.out().snd.re(), "blockedNow", false);

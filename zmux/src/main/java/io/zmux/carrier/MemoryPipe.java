@@ -41,7 +41,7 @@ public final class MemoryPipe {
         }
 
         private void deliver(Object item) {
-            if (item instanceof Data(ByteBuffer bytes, Runnable release)) sink.onData(bytes, release);
+            if (item instanceof Data(ByteBuffer bytes, Runnable release)) sink.onChunk(io.zmux.Chunk.of(bytes), release); // bytes is a fresh copy: no second one
             else if (item instanceof Throwable t) sink.onError(t);
             else sink.onEnd();
         }

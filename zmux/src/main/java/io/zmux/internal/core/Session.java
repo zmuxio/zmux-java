@@ -1249,7 +1249,7 @@ public final class Session {
     /** The RTT estimate of pipe p's outbound direction: {smoothed, min, variation, latest}, null without a sample; src[0] its source. */
     private long[] rttOf(Pipe p, io.zmux.PipeStats.RttSource[] src) {
         if (p.out() == null) return null;
-        RttEstimator r = p.mp() == null ? p.out().snd.rtt() : p.mp().rtt;
+        RttEstimator r = p.out().snd.rtt();
         long[] v = r.has() ? new long[] {r.smoothed(), r.min(), r.rttvar(), r.latest()} : null;
         src[0] = v != null ? io.zmux.PipeStats.RttSource.ACK : null;
         if (p.mp() == null && tuner.carrierMinRtt() > 0) {
@@ -1646,7 +1646,7 @@ public final class Session {
                 StreamSend.error(st, e, false);
                 StreamRecv.error(st, e, false);
                 send.cancelUnopened(st);
-                wake(st.snd.wsig());
+                StreamSend.wakeAll(outbox, st);
                 wake(st.rcv.rsig());
                 continue;
             }
@@ -1654,7 +1654,7 @@ public final class Session {
                 StreamError e = StreamError.of(StreamError.Kind.REJECTED, st.tab.id());
                 if (st.hasSend) StreamSend.error(st, e, true);
                 if (st.hasRecv) StreamRecv.error(st, e, true);
-                wake(st.snd.wsig());
+                StreamSend.wakeAll(outbox, st);
                 wake(st.rcv.rsig());
             }
         }

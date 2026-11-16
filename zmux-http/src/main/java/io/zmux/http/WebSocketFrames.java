@@ -9,6 +9,7 @@ import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCountUtil;
+import io.zmux.internal.spi.Loops;
 import java.net.ProtocolException;
 
 /**
@@ -54,17 +55,25 @@ final class WebSocketFrames {
         }
     }
 
-    /** The admission's bound of the first message, -1 once it passed or without one. */
-    private volatile int firstLimit = -1;
+    /** The admission's bound of the first message, -1 without one; the loop's. */
+    private int firstLimit = -1;
+    /** The first message is complete, and its length; the loop's. */
+    private boolean firstDone;
+    private int firstLength;
 
-    void limitFirstMessage(int limit) { firstLimit = limit; }
+    /** zmux bounds the first message (before its reader starts): applied on the loop, to a first message already read too. */
+    void limitFirstMessage(int limit) {
+        Loops.dispatch(ch.eventLoop(), ch.eventLoop().inEventLoop(), () -> {
+            if (!firstDone) firstLimit = limit;
+            else if (firstLength > limit) fail("a first message above " + limit + " bytes");
+        }, () -> {}); // refused: the channel goes with its loop
+    }
 
     private void data(WebSocketFrame f, boolean continuation) {
-        int limit = firstLimit;
-        if (limit >= 0) {
-            int have = partial == null ? 0 : partial.readableBytes();
-            if (have + f.content().readableBytes() > limit) { fail("a first message above " + limit + " bytes"); return; }
-            if (f.isFinalFragment()) firstLimit = -1;
+        if (!firstDone) {
+            int have = (partial == null ? 0 : partial.readableBytes()) + f.content().readableBytes();
+            if (firstLimit >= 0 && have > firstLimit) { fail("a first message above " + firstLimit + " bytes"); return; }
+            if (f.isFinalFragment()) { firstDone = true; firstLength = have; }
         }
         if (continuation == (partial == null)) { fail("an unexpected continuation frame"); return; }
         if (!continuation && f.isFinalFragment()) {

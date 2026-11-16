@@ -43,6 +43,14 @@ import javax.net.ssl.SSLEngine;
  */
 public final class ZmuxSession implements AutoCloseable {
     final SessionRuntime driver;
+    /**
+     * One dial of a further pipe at a time, whoever dials it (the redial hook, a pipe pool): a
+     * dial takes it before it decides what is missing and gives it back once its attempt returned
+     * or was abandoned at its deadline (the join deadline, or a pool's attempt timeout), so two never
+     * restore the same direction and a hung dial blocks the other side no longer than that deadline.
+     * What an abandoned attempt still creates is released, never kept.
+     */
+    final java.util.concurrent.Semaphore dialPermit = new java.util.concurrent.Semaphore(1);
     final Session core;
     private final String applicationProtocol;
     /** Presented by the TCP and TLS pipes this session dials ({@link ZmuxConfig#carrierCredential()}); null: none. */
@@ -328,7 +336,7 @@ public final class ZmuxSession implements AutoCloseable {
     /** Runs step on the loop and waits at most until deadline for its outcome. */
     Object call(Operation.Step step, Operation.Withdraw withdraw, long deadline) throws IOException {
         driver.checkBlocking();
-        return Errors.check(new Operation<>(driver, step, withdraw).submit().await(deadline));
+        return Errors.check(new Operation<>(driver, step, withdraw, null, deadline).submit().await(deadline));
     }
 
     Object run(Operation.Step step) throws IOException {
@@ -587,21 +595,44 @@ public final class ZmuxSession implements AutoCloseable {
         driver.checkBlocking();
         int n = payload.remaining();
         var limiter = driver.datagramSendLimiter();
-        if (limiter != null && limiter.tryReady(n) < n) {
+        if (limiter != null && !io.zmux.helper.Permit.police(limiter, n)) {
             run(op -> { core.datagrams().limitedSend(); return true; });
             return false;
         }
-        byte[] b = new byte[n];
-        payload.get(b);
-        call(op -> {
-            if (wait && core.datagrams().sendQueueFull()) {
-                if (core.error() != null) throw CoreException.session(core.error());
-                core.datagrams().waitSend(op); return Operation.PENDING;
-            }
-            core.sendDatagram(stream, context, b); return true;
-        }, op -> core.datagrams().cancelSendWait(op), deadline);
-        if (limiter != null) limiter.charge(n);
+        // tryAcquire(n, n) before queueing; the grant is refunded unless the datagram is queued.
+        boolean queued = false;
+        try {
+            byte[] b = new byte[n];
+            payload.get(b);
+            call(op -> {
+                if (wait && core.datagrams().sendQueueFull()) {
+                    if (core.error() != null) throw CoreException.session(core.error());
+                    core.datagrams().waitSend(op); return Operation.PENDING;
+                }
+                core.sendDatagram(stream, context, b); return true;
+            }, op -> core.datagrams().cancelSendWait(op), deadline);
+            queued = true;
+        } finally {
+            if (!queued) io.zmux.helper.Permit.refund(limiter, n);
+        }
         return true;
+    }
+
+    /**
+     * {@link #sendDatagram(Stream, long, ByteBuffer)} without blocking, for loop-driven relays: takes payload over
+     * (no copy) and completes, on the completion context, with true once queued or false when the datagram limiter
+     * dropped it; a refusal fails it as the blocking send throws.
+     */
+    ZmuxFuture<Boolean> sendDatagramAsync(Stream stream, long context, byte[] payload) {
+        int n = payload.length;
+        var limiter = driver.datagramSendLimiter();
+        if (limiter != null && !io.zmux.helper.Permit.police(limiter, n)) {
+            return async(op -> { core.datagrams().limitedSend(); return false; }, null, null, Long.MAX_VALUE, r -> (Boolean) r);
+        }
+        ZmuxFuture<Boolean> f = async(op -> { core.sendDatagram(stream, context, payload); return true; }, null, null, Long.MAX_VALUE, r -> (Boolean) r);
+        // tryAcquire(n, n) before queueing; the grant is refunded unless the datagram is queued.
+        if (limiter != null) f.whenComplete((queued, error) -> { if (error != null) io.zmux.helper.Permit.refund(limiter, n); });
+        return f;
     }
 
     /** Waits until deadline (System.nanoTime; Long.MAX_VALUE: none) for the next session datagram. */
@@ -712,7 +743,7 @@ public final class ZmuxSession implements AutoCloseable {
             }
         }
         if (o.returnOnReply) return p;
-        Object r = new Operation<>(driver, p.attachedStep(), core::cancelPeerAttachedWait).submit().await(deadline);
+        Object r = new Operation<>(driver, p.attachedStep(), core::cancelPeerAttachedWait, null, deadline).submit().await(deadline);
         // The core fails a join still unattached at the join deadline, which runs from JOINING,
         // after this call's deadline: past it, the pipe is gone because the wait timed out.
         if (r == ZmuxPipe.MISSING && deadline != Long.MAX_VALUE && System.nanoTime() - deadline >= 0) r = new SocketTimeoutException();
@@ -775,7 +806,7 @@ public final class ZmuxSession implements AutoCloseable {
                 driver.waitPipe(op);
                 yield Operation.PENDING;
             }
-        }, driver::cancelPipeWait).submit().await(deadline);
+        }, driver::cancelPipeWait, null, deadline).submit().await(deadline);
         if (r instanceof Throwable) {
             cancelJoinedPipe(id);
             Errors.check(r);
@@ -908,7 +939,10 @@ public final class ZmuxSession implements AutoCloseable {
                 ZmuxConfig.nanos(band.minInterval())); return true; });
     }
 
-    /** The outbound capacity floor, with hysteresis. */
+    /**
+     * The outbound capacity floor, with hysteresis. The floor's values were checked when it was built;
+     * the IOException is the session's: it failed or closed.
+     */
     public void setCapacityFloor(CapacityFloor floor) throws IOException {
         Objects.requireNonNull(floor);
         run(op -> { core.setCapacityFloor((double) floor.rate(), floor.recoveryRatio()); return true; });
@@ -1309,6 +1343,9 @@ public final class ZmuxSession implements AutoCloseable {
     int datagramLimit() {
         return driver.info().datagramLimit();
     }
+
+    /** The session's identity in this process, the one {@link Tracer} callbacks carry. */
+    public SessionId id() { return driver.id(); }
 
     /** The negotiation results as of the session loop's last round: a snapshot, no I/O. */
     public ConnectionInfo info() {

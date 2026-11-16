@@ -8,7 +8,6 @@ import io.zmux.carrier.PipeReader;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -37,7 +36,7 @@ class ListenerEntryTest {
     static CompletableFuture<Void> watchEnd(PipeIo io) {
         var ended = new CompletableFuture<Void>();
         io.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); }
             @Override public void onEnd() { ended.complete(null); }
             @Override public void onError(Throwable cause) { ended.complete(null); }
         });

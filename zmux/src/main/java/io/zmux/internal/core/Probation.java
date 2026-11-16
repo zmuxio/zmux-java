@@ -54,14 +54,14 @@ final class Probation {
         long opt = a.tier.probOpt() < 0 ? cfg.probation() : a.tier.probOpt();
         if (opt == 0) return -1;
         if (opt > 0) return opt;
-        long srtt4 = Time.mul(a.rtt.smoothed(), 4);
+        long srtt4 = Time.mul(a.rtt().smoothed(), 4);
         return hist(p).trouble() ? Math.max(PROBATION_FLOOR, srtt4) : srtt4;
     }
 
     long backoffBase(Pipe p) {
         Attach a = p.mp();
         long opt = a.tier.probOpt() < 0 ? cfg.probation() : a.tier.probOpt();
-        return opt > 0 ? opt : Math.max(PROBATION_FLOOR, Time.mul(a.rtt.smoothed(), 4));
+        return opt > 0 ? opt : Math.max(PROBATION_FLOOR, Time.mul(a.rtt().smoothed(), 4));
     }
 
     /** start + min(base x 2^k, max(base, 2 x U_max)), or Long.MIN_VALUE when not in probation. */
@@ -146,7 +146,7 @@ final class Probation {
                     }
                 } else {
                     next = Math.min(next, end);
-                    long every = Math.max(a.rtt.smoothed(), PROBATION_PROBE);
+                    long every = Math.max(a.rtt().smoothed(), PROBATION_PROBE);
                     long due = Time.add(a.prob.probPing, every);
                     if (!a.prob.probPinged || now >= due) {
                         if (!apply) {

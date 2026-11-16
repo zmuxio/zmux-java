@@ -1,8 +1,9 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.LentInput;
+import io.zmux.internal.spi.Loops;
 import io.zmux.ReplayVerdict;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.EventLoop;
@@ -12,7 +13,7 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpUtil;
-import io.netty.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledFuture;
 import io.zmux.CarrierKind;
 import io.zmux.Chunk;
 import io.zmux.JoinHint;
@@ -26,11 +27,9 @@ import javax.crypto.Mac;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,6 +45,8 @@ import java.util.concurrent.TimeUnit;
 final class ExchangeServer {
     /** What an out-of-order UP piece counts against the uplink store limit besides its bytes; bounds how many are held. */
     static final int PIECE_COST = 64;
+    /** What a refused call fails besides its own completion or sink: nothing; a carrier goes with its loop. */
+    private static final Runnable NOTHING = () -> {};
     private final HttpEndpoint ep;
     final ExchangeConfig cfg;
     private final ReplayFilter nonces;
@@ -125,8 +126,8 @@ final class ExchangeServer {
          * null for a request that arrived at a closed listener.
          */
         private io.zmux.adapter.Slot slot;
-        /** The body read so far, encoded. */
-        private final ByteBuf body;
+        /** The body read so far, encoded, in write mode; a heap buffer that grows with what arrives. */
+        private ByteBuffer body;
         private ScheduledFuture<?> timer;
         /** Set once the header is authenticated. */
         private Exchange.Header h;
@@ -142,7 +143,7 @@ final class ExchangeServer {
             this.req = req;
             this.length = length;
             this.slot = slot;
-            body = router.context().alloc().buffer(headerLength(), length);
+            body = ByteBuffer.allocate(headerLength());
             timer = schedule(this::firstRecordTimedOut, ep.listener.adapter().firstRecordTimeout().toNanos());
         }
 
@@ -150,25 +151,25 @@ final class ExchangeServer {
         private ScheduledFuture<?> schedule(Runnable task, long nanos) {
             // The executor is the channel's event loop, owned and closed by Netty.
             //noinspection resource
-            return router.context().executor().schedule(task, nanos, TimeUnit.NANOSECONDS);
+            return Loops.schedule(router.context().executor(), task, nanos, TimeUnit.NANOSECONDS, NOTHING); // refused: the channel goes with its loop
         }
 
         /** Takes body bytes (not consumed); last: the body ended. */
         void add(ByteBuf b, boolean last) {
             if (done) return;
             int n = b.readableBytes();
-            if (n > length - body.readableBytes()) {
+            if (n > length - body.position()) {
                 // Longer than its Content-Length: the host's before the authentication, else refused.
                 if (h == null) {
                     end();
                     releaseSlot();
-                    router.toHost(req, List.of(body, b.retainedSlice()), last);
+                    router.toHost(req, List.of(Unpooled.wrappedBuffer(body.flip()), b.retainedSlice()), last);
                 } else answerError(HttpResponseStatus.BAD_REQUEST, true);
                 return;
             }
-            body.writeBytes(b, b.readerIndex(), n);
-            if (h == null && body.readableBytes() >= headerLength() && !authenticate()) { fallback(last); return; }
-            if (body.readableBytes() == length) { complete(); return; }
+            body = Exchange.append(body, b, b.readerIndex(), n, length);
+            if (h == null && body.position() >= headerLength() && !authenticate()) { fallback(last); return; }
+            if (body.position() == length) { complete(); return; }
             if (last) {
                 // The body ended early.
                 if (h == null) fallback(true); else answerError(HttpResponseStatus.BAD_REQUEST, false);
@@ -200,20 +201,18 @@ final class ExchangeServer {
             done = true;
             if (timer != null) { timer.cancel(false); timer = null; }
             releaseSlot();
-            body.release();
         }
 
         /** Not authenticated: the host's, with every byte read replayed; ended: the body ended. */
         private void fallback(boolean ended) {
             end();
             releaseSlot();
-            router.toHost(req, List.of(body), ended);
+            router.toHost(req, List.of(Unpooled.wrappedBuffer(body.flip())), ended);
         }
 
         /** Authenticated, the rest failed: nothing changes; close: the body was not read to its end. */
         private void answerError(HttpResponseStatus status, boolean close) {
             end();
-            body.release();
             refuse(status, close);
         }
 
@@ -233,11 +232,11 @@ final class ExchangeServer {
             // A copy: the header outlives the body buffer, which moves as it grows.
             ByteBuffer raw;
             if (cfg.isBase64()) {
-                raw = Exchange.decodeBase64(body.nioBuffer(body.readerIndex(), headerLength()));
+                raw = Exchange.decodeBase64(body.slice(0, headerLength()));
                 if (raw == null) return false;
             } else {
                 byte[] copy = new byte[Exchange.HDR];
-                body.getBytes(body.readerIndex(), copy);
+                body.get(0, copy);
                 raw = ByteBuffer.wrap(copy);
             }
             Exchange.Header hd = Exchange.parseHeader(raw);
@@ -250,7 +249,7 @@ final class ExchangeServer {
             if (!fresh(hd)) return false;
             if (hd.dataLength() > hd.dataLimit(cfg.upLimit()) || encoded(hd.dataLength()) != length) return false;
             h = hd; key = k; mac = m; car = c; g = gn;
-            timer.cancel(false);
+            Loops.cancel(timer);
             timer = null;
             // A request that cannot create a carrier gives its slots back now.
             if (c != null || gn != null || hd.kind() == Exchange.KIND_CLOSE || !hd.valid((int) hd.dataLength())) releaseSlot();
@@ -263,19 +262,18 @@ final class ExchangeServer {
         private void complete() {
             end();
             int dl = (int) h.dataLength();
-            ByteBuf data;
+            ByteBuffer data;
             ByteBuffer dataMac;
             if (cfg.isBase64()) {
-                ByteBuffer rest = Exchange.decodeBase64(body.nioBuffer(body.readerIndex() + headerLength(), length - headerLength()));
-                body.release();
+                ByteBuffer rest = Exchange.decodeBase64(body.slice(headerLength(), length - headerLength()));
                 if (rest == null || rest.remaining() != dl + Exchange.MAC) { failData(); return; }
-                data = Unpooled.wrappedBuffer(rest.slice(0, dl));
+                data = rest.slice(0, dl);
                 dataMac = rest.slice(dl, Exchange.MAC);
             } else {
-                data = body.slice(body.readerIndex() + Exchange.HDR, dl);
-                dataMac = body.nioBuffer(body.readerIndex() + Exchange.HDR + dl, Exchange.MAC);
+                data = body.slice(Exchange.HDR, dl);
+                dataMac = body.slice(Exchange.HDR + dl, Exchange.MAC);
             }
-            if (!Exchange.verifyData(mac, h, data.nioBuffer(), dataMac)) { data.release(); failData(); return; }
+            if (!Exchange.verifyData(mac, h, data.duplicate(), dataMac)) { failData(); return; }
             serve(this, data);
         }
 
@@ -283,8 +281,8 @@ final class ExchangeServer {
         private void failData() { refuse(HttpResponseStatus.BAD_REQUEST, false); }
     }
 
-    /** Serves a request whose Data MAC verified; data is its Data, taken. */
-    private void serve(Collect c, ByteBuf data) {
+    /** Serves a request whose Data MAC verified; data is its Data. */
+    private void serve(Collect c, ByteBuffer data) {
         Exchange.Header q = c.h;
         ByteBuffer cid = ByteBuffer.wrap(q.cid());
         ChannelHandlerContext ctx = c.router.context();
@@ -292,11 +290,10 @@ final class ExchangeServer {
         Carrier car = c.car;
         // The carrier may have ended or been created since the header was authenticated.
         if (car == null && c.g == null) car = carriers.get(cid);
-        if (!q.valid(data.readableBytes())) {
+        if (!q.valid(data.remaining())) {
             Carrier bad = car;
             if (bad != null) {
-                try { bad.loop.execute(() -> bad.end(new IOException("exchange carrier protocol violation"))); }
-                catch (java.util.concurrent.RejectedExecutionException e) { /* Its loop is gone, and the carrier with it. */ }
+                Loops.run(bad.loop, () -> bad.end(new IOException("exchange carrier protocol violation")), NOTHING); // refused: gone with its loop
             }
             c.releaseSlot();
             a.send(Exchange.FLAG_GONE, null);
@@ -313,7 +310,7 @@ final class ExchangeServer {
         // Arrived at a closed listener (or the server is closed): GONE. The listener closed since the request arrived: BUSY.
         if (closed || c.slot == null) { c.releaseSlot(); a.send(Exchange.FLAG_GONE, null); return; }
         if (ep.listener.isClosed()) { c.releaseSlot(); a.send(Exchange.FLAG_BUSY, null); return; }
-        Carrier nc = new Carrier(ctx.channel().eventLoop(), ctx.alloc(), q.cid(), c.key);
+        Carrier nc = new Carrier(ctx.channel().eventLoop(), q.cid(), c.key);
         Carrier old = carriers.putIfAbsent(cid, nc);
         if (old != null) { c.releaseSlot(); serveOn(old, a); return; } // created concurrently
         if (closed || gone(cid) != null) {
@@ -323,6 +320,7 @@ final class ExchangeServer {
             a.send(Exchange.FLAG_GONE, null);
             return;
         }
+        nc.watchLoop();
         // The request's slots go with the carrier, until it enters a session.
         var slot = c.slot;
         c.slot = null;
@@ -331,7 +329,7 @@ final class ExchangeServer {
         // Ended before a session took it while the listener closed: the listener closed before the carrier was established.
         slot.handle(io, JoinHint.inBand(slot.peer()), null).taken().thenAccept(t -> {
             if (!t && ep.listener.isClosed()) {
-                try { nc.loop.execute(nc::refused); } catch (java.util.concurrent.RejectedExecutionException ignored) { /* Its loop is gone. */ }
+                Loops.run(nc.loop, nc::refused, NOTHING); // refused: gone with its loop
             }
         });
         nc.idle();
@@ -340,11 +338,7 @@ final class ExchangeServer {
 
     /** Hands a to k on its loop; a carrier whose loop shut down is gone, and a gets GONE here. */
     private static void serveOn(Carrier k, Answer a) {
-        try {
-            k.loop.execute(() -> k.serve(a));
-        } catch (java.util.concurrent.RejectedExecutionException e) {
-            a.send(Exchange.FLAG_GONE, null);
-        }
+        Loops.run(k.loop, () -> k.serve(a), () -> a.send(Exchange.FLAG_GONE, null));
     }
 
     /** Section 7.1 steps 4 and 5: Time within the window, and the (Carrier ID, Nonce) pair recorded once. */
@@ -372,11 +366,14 @@ final class ExchangeServer {
     /** The carriers with state, for tests. */
     int live() { return carriers.size(); }
 
+    /** The carriers remembered as gone, for tests. */
+    int remembered() { return gone.size(); }
+
     void close() {
         closed = true;
         for (Carrier c : carriers.values()) {
-            try { c.loop.execute(() -> c.end(new ClosedChannelException())); }
-            catch (java.util.concurrent.RejectedExecutionException e) { carriers.remove(ByteBuffer.wrap(c.cid), c); } // Its loop is gone, and the carrier with it.
+            // A loop that refuses it is shutting down: the carrier goes with it, and its requests' channels with their loops.
+            Loops.run(c.loop, () -> c.end(new ClosedChannelException()), () -> carriers.remove(ByteBuffer.wrap(c.cid), c));
         }
     }
 
@@ -392,13 +389,13 @@ final class ExchangeServer {
         final Exchange.Header q;
         /** The request's Data length. */
         final int dataLength;
-        /** The request's Data, until taken or answered. */
-        private ByteBuf hold;
+        /** The request's Data, until taken. */
+        private ByteBuffer hold;
         private final boolean h1;
 
-        Answer(ChannelHandlerContext ctx, HttpRequest req, Exchange.Key key, Exchange.Header q, ByteBuf data) {
+        Answer(ChannelHandlerContext ctx, HttpRequest req, Exchange.Key key, Exchange.Header q, ByteBuffer data) {
             this.ctx = ctx; this.req = req; this.key = key; this.q = q; this.hold = data;
-            dataLength = data.readableBytes();
+            dataLength = data.remaining();
             h1 = !(ctx.channel() instanceof io.netty.handler.codec.http2.Http2StreamChannel);
             if (h1) {
                 ctx.channel().config().setAutoRead(false);
@@ -409,29 +406,27 @@ final class ExchangeServer {
         }
 
         /** Takes the request's Data (the UP piece's bytes) out of the answer. */
-        ByteBuf takeData() {
-            ByteBuf b = hold;
+        ByteBuffer takeData() {
+            ByteBuffer b = hold;
             hold = null;
             return b;
         }
 
-        /** Writes the response with flags and data (a piece, not consumed). */
-        void send(int flags, ByteBuf data) {
-            // The context's executor is borrowed; its group owns and shuts it down.
-            //noinspection resource
-            if (ctx.executor().isShuttingDown()) { // The connection's group ended first: no reader is left.
-                if (hold != null) { hold.release(); hold = null; }
-                return;
-            }
-            ByteBuffer d = data == null ? ByteBuffer.allocate(0) : data.nioBuffer();
+        /**
+         * Writes the response with flags and data (a piece, which may be sent again), on any
+         * thread. A connection whose loop has shut down fails the write, which drops the response.
+         */
+        void send(int flags, ByteBuffer data) {
+            hold = null;
+            ByteBuffer d = data == null ? ByteBuffer.allocate(0) : data.duplicate();
             ByteBuffer hdr = ByteBuffer.allocate(Exchange.RESP_HDR);
-            hdr.put(key.responseMac(q.cid(), q.kind(), q.seq(), q.nonce(), flags, d)).put((byte) flags).flip();
-            ByteBuf body = data == null ? Unpooled.wrappedBuffer(hdr) : Unpooled.wrappedBuffer(Unpooled.wrappedBuffer(hdr), data.retainedDuplicate());
+            hdr.put(key.responseMac(q.cid(), q.kind(), q.seq(), q.nonce(), flags, d.duplicate())).put((byte) flags).flip();
+            ByteBuf body;
             if (cfg.isBase64()) {
-                ByteBuffer bin = ByteBuffer.allocate(body.readableBytes());
-                body.getBytes(body.readerIndex(), bin);
-                body.release();
-                body = Unpooled.wrappedBuffer(Base64.getEncoder().encode(bin.flip()));
+                ByteBuffer bin = ByteBuffer.allocate(hdr.remaining() + d.remaining()).put(hdr).put(d).flip();
+                body = Unpooled.wrappedBuffer(Base64.getEncoder().encode(bin));
+            } else {
+                body = d.hasRemaining() ? Unpooled.wrappedBuffer(hdr, d) : Unpooled.wrappedBuffer(hdr);
             }
             FullHttpResponse resp = new DefaultFullHttpResponse(req.protocolVersion(), HttpResponseStatus.OK, body);
             resp.headers().set(HttpHeaderNames.CONTENT_TYPE, Requests.OCTETS).set(Requests.CACHE, Requests.NO_STORE);
@@ -447,12 +442,11 @@ final class ExchangeServer {
                 });
                 else f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
             }
-            if (hold != null) { hold.release(); hold = null; }
         }
     }
 
     /** An assigned downlink piece. */
-    private record Piece(ByteBuf data, boolean fin) {}
+    private record Piece(ByteBuffer data, boolean fin) {}
 
     /** A held DOWN request. */
     private static final class Held {
@@ -464,10 +458,9 @@ final class ExchangeServer {
         Held(Answer a, long n) { this.a = a; this.n = n; }
     }
 
-    /** One exchange carrier on the server; every field is its loop's. */
+    /** One exchange carrier on the server; every field is its loop's, and its pieces are heap buffers. */
     final class Carrier {
         final EventLoop loop;
-        private final ByteBufAllocator alloc;
         final byte[] cid;
         final Exchange.Key key;
         private boolean ended;
@@ -479,19 +472,23 @@ final class ExchangeServer {
 
         // Uplink.
         private long upNext, upMax, upFin = -1;
-        private final Map<Long, ByteBuf> upOoo = new HashMap<>();
-        private final ArrayDeque<ByteBuf> upQ = new ArrayDeque<>();
-        /** Bytes stored (upOoo, upQ), and handed to zmux and not yet consumed. */
-        private long upLen, delivered;
+        private final Map<Long, ByteBuffer> upOoo = new HashMap<>();
+        /** The contiguous uplink, lent to zmux's reader within the uplink store limit. */
+        private final LentInput up;
+        /** The bytes of upOoo. */
+        private long oooLen;
         /** What the out-of-order entries of upOoo count besides their bytes: PIECE_COST each. */
         private long upOooCost;
         private boolean rclosed;
-        private PipeReader.Sink sink;
+        /** Fails the carrier when its loop terminates: no call of zmux or timer of the loop ends it any more. */
+        private final io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<Object>> onTerminated =
+                f -> end(new ClosedChannelException());
 
         // Downlink.
         private long ack, asgEnd, fill, finLow = -1;
         private final Map<Long, Piece> pieces = new HashMap<>();
-        private ByteBuf cur;
+        /** The open downlink piece, in write mode; null: none. */
+        private ByteBuffer cur;
         private long curAt;
         private boolean wclosed;
         private final List<Held> held = new ArrayList<>();
@@ -500,12 +497,21 @@ final class ExchangeServer {
         private OutboundBatch blockedBatch;
         private int blockedAt;
 
-        Carrier(EventLoop loop, ByteBufAllocator alloc, byte[] cid, Exchange.Key key) {
-            this.loop = loop; this.alloc = alloc; this.cid = cid; this.key = key;
+        Carrier(EventLoop loop, byte[] cid, Exchange.Key key) {
+            this.loop = loop; this.cid = cid; this.key = key;
+            up = new LentInput(cfg.upStoreLimit(), loop, loop::inEventLoop, more -> {}); // the client repeats what is refused BUSY
+        }
+
+        /**
+         * Registered once the carrier won its creation: one that lost it is dropped unregistered, as the loop
+         * would otherwise keep it until termination and then end, and remember, a carrier that never existed.
+         */
+        void watchLoop() {
+            loop.terminationFuture().addListener(onTerminated);
         }
 
         void idle() {
-            loop.execute(() -> idleTimer = loop.schedule(this::onIdle, cfg.idleTimeout().toNanos(), TimeUnit.NANOSECONDS));
+            Loops.run(loop, () -> idleTimer = Loops.schedule(loop, this::onIdle, cfg.idleTimeout().toNanos(), TimeUnit.NANOSECONDS, NOTHING), NOTHING);
         }
 
         private void onIdle() {
@@ -517,7 +523,7 @@ final class ExchangeServer {
                 end(complete ? null : new IOException("exchange carrier idle"));
                 return;
             }
-            idleTimer = loop.schedule(this::onIdle, Math.max(rest, 1_000_000), TimeUnit.NANOSECONDS);
+            idleTimer = Loops.schedule(loop, this::onIdle, Math.max(rest, 1_000_000), TimeUnit.NANOSECONDS, NOTHING);
         }
 
         /** The listener closed before a session took the carrier: it ends as if never created. */
@@ -530,32 +536,28 @@ final class ExchangeServer {
         /** The answer to a request reaching the carrier once it has ended. */
         private int endedFlags() { return refused ? Exchange.FLAG_BUSY : Exchange.FLAG_GONE; }
 
-        /** Ends the carrier (null: completed) and releases what it holds but uplink bytes zmux may still read. */
+        /** Ends the carrier (null: completed) and drops what it holds but uplink bytes zmux may still read. */
         void end(Throwable e) {
             if (ended) return;
             ended = true;
             err = e;
             if (idleTimer != null) idleTimer.cancel(false);
             if (coalesceTimer != null) coalesceTimer.cancel(false);
-            for (Piece p : pieces.values()) if (p.data != null) p.data.release();
             pieces.clear();
-            if (cur != null) { cur.release(); cur = null; }
+            cur = null;
             for (Held h : held) { if (h.timer != null) h.timer.cancel(false); h.a.send(endedFlags(), null); }
             held.clear();
-            if (e != null) dropUplink();
+            loop.terminationFuture().removeListener(onTerminated);
+            if (e != null) { dropUplink(); up.fail(e); }
             ByteBuffer id = ByteBuffer.wrap(cid);
             carriers.remove(id, this);
             if (!refused) remember(id, key);
             if (blocked != null) { blocked.failed(new ClosedChannelException()); blocked = null; blockedBatch = null; }
-            deliver();
         }
 
         private void dropUplink() {
-            for (ByteBuf b : upQ) b.release();
-            upQ.clear();
-            for (ByteBuf b : upOoo.values()) if (b != null) b.release();
             upOoo.clear();
-            upLen = 0;
+            oooLen = 0;
             upOooCost = 0;
         }
 
@@ -575,10 +577,8 @@ final class ExchangeServer {
                     a.send(Exchange.FLAG_GONE, null);
                     return;
                 }
-                for (Iterator<Map.Entry<Long, Piece>> it = pieces.entrySet().iterator(); it.hasNext(); ) {
-                    var e = it.next();
-                    if (e.getKey() < q.ack()) { if (e.getValue().data != null) e.getValue().data.release(); it.remove(); }
-                }
+                long acked = q.ack();
+                pieces.keySet().removeIf(k -> k < acked);
                 ack = q.ack();
                 unblock();
             }
@@ -612,7 +612,7 @@ final class ExchangeServer {
                 return Exchange.FLAG_GONE;
             }
             if (n < upNext || upOoo.containsKey(n)) return 0;
-            ByteBuf piece = null;
+            ByteBuffer piece = null;
             int len = a.dataLength;
             boolean ooo = n != upNext;
             int stored = rclosed ? 0 : len;
@@ -620,47 +620,31 @@ final class ExchangeServer {
                 // Out of order: leave room for the piece zmux waits for, and count each held piece
                 // with a fixed overhead so that empty pieces cannot be held without bound.
                 long room = (long) cfg.upStoreLimit() - cfg.upLimit();
-                if (upLen + delivered + upOooCost + stored + PIECE_COST > room) return Exchange.FLAG_BUSY;
-            } else if (stored > 0 && upLen + delivered + upOooCost + stored > cfg.upStoreLimit()) {
+                if (up.bytes() + oooLen + upOooCost + stored + PIECE_COST > room) return Exchange.FLAG_BUSY;
+            } else if (stored > 0 && up.bytes() + oooLen + upOooCost + stored > cfg.upStoreLimit()) {
                 return Exchange.FLAG_BUSY;
             }
             if (stored > 0) {
                 // The request's Data, zero copy.
                 piece = a.takeData();
-                upLen += len;
             }
             if (fin) upFin = n;
             upMax = Math.max(upMax, n + 1);
-            if (ooo) { upOoo.put(n, piece); upOooCost += PIECE_COST; return 0; }
-            if (piece != null) upQ.add(piece);
+            if (ooo) {
+                upOoo.put(n, piece);
+                upOooCost += PIECE_COST;
+                if (piece != null) oooLen += len;
+                return 0;
+            }
+            if (piece != null) up.offer(Chunk.of(piece), len);
             upNext++;
-            for (ByteBuf x; upOoo.containsKey(upNext); upNext++) {
+            for (ByteBuffer x; upOoo.containsKey(upNext); upNext++) {
                 x = upOoo.remove(upNext);
                 upOooCost -= PIECE_COST;
-                if (x != null) upQ.add(x);
+                if (x != null) { oooLen -= x.remaining(); up.offer(Chunk.of(x), x.remaining()); }
             }
-            deliver();
+            if (upFin >= 0 && upNext > upFin) up.end();
             return 0;
-        }
-
-        /** Hands the contiguous uplink to zmux, within its receive memory. */
-        private void deliver() {
-            if (sink == null) return;
-            while (!upQ.isEmpty() && (delivered == 0 || delivered + upQ.getFirst().readableBytes() <= cfg.upStoreLimit())) {
-                ByteBuf b = upQ.removeFirst();
-                int n = b.readableBytes();
-                upLen -= n;
-                delivered += n;
-                sink.onChunk(Chunk.of(b.nioBuffer(), b::release), () -> loop.execute(() -> {
-                    delivered -= n;
-                    deliver();
-                }));
-                if (sink == null) return;
-            }
-            if (!upQ.isEmpty()) return;
-            PipeReader.Sink s = sink;
-            if (ended && err != null) { sink = null; s.onError(err); }
-            else if (upFin >= 0 && upNext > upFin) { sink = null; s.onEnd(); }
         }
 
         /** Answers a DOWN request, now or once its piece is assigned. */
@@ -668,8 +652,8 @@ final class ExchangeServer {
             Held h = new Held(a, a.q.seq());
             if (answer(h)) return;
             held.add(h);
-            h.timer = loop.schedule(() -> { h.expired = true; if (held.remove(h) && !answer(h)) held.add(h); },
-                    cfg.holdTime().toNanos(), TimeUnit.NANOSECONDS);
+            h.timer = Loops.schedule(loop, () -> { h.expired = true; if (held.remove(h) && !answer(h)) held.add(h); },
+                    cfg.holdTime().toNanos(), TimeUnit.NANOSECONDS, NOTHING);
             coalesce();
             answerHeld();
         }
@@ -682,10 +666,10 @@ final class ExchangeServer {
             if (ended) flags = Exchange.FLAG_GONE;
             else if (n < ack) flags = Exchange.FLAG_BUSY;
             else if (p == null && n >= ack + cfg.downWindow()) flags = Exchange.FLAG_BUSY;
-            else if (p == null && wclosed && (cur == null || !cur.isReadable())) p = assign(n, null, true);
+            else if (p == null && wclosed && (cur == null || cur.position() == 0)) p = assign(n, null, true);
             else if (p == null && h.expired) {
                 // The hold time ran out: the open piece, or an empty one.
-                p = n == fill && cur != null && cur.isReadable() ? assignCur() : assign(n, null, false);
+                p = n == fill && cur != null && cur.position() > 0 ? assignCur() : assign(n, null, false);
             }
             if (flags < 0 && p == null) return false;
             if (h.timer != null) h.timer.cancel(false);
@@ -699,7 +683,7 @@ final class ExchangeServer {
             held.removeIf(this::answer);
         }
 
-        private Piece assign(long n, ByteBuf data, boolean fin) {
+        private Piece assign(long n, ByteBuffer data, boolean fin) {
             Piece p = new Piece(data, fin);
             pieces.put(n, p);
             asgEnd = Math.max(asgEnd, n + 1);
@@ -709,20 +693,20 @@ final class ExchangeServer {
         }
 
         private Piece assignCur() {
-            ByteBuf b = cur;
+            ByteBuffer b = cur.flip();
             cur = null;
             return assign(fill, b, wclosed);
         }
 
         /** Assigns piece fill when full, or when a request can take it and its coalescing delay ran out; else arms the timer. */
         private void coalesce() {
-            if (cur == null || !cur.isReadable() || ended) return;
-            if (cur.readableBytes() >= cfg.downPieceSize() || wclosed) { assignCur(); answerHeld(); return; }
+            if (cur == null || cur.position() == 0 || ended) return;
+            if (cur.position() >= cfg.downPieceSize() || wclosed) { assignCur(); answerHeld(); return; }
             if (held.isEmpty()) return;
             long due = curAt + cfg.coalesce().toNanos() - System.nanoTime();
             if (due <= 0) { assignCur(); answerHeld(); return; }
             if (coalesceTimer == null || coalesceTimer.isDone()) {
-                coalesceTimer = loop.schedule(this::coalesce, due, TimeUnit.NANOSECONDS);
+                coalesceTimer = Loops.schedule(loop, this::coalesce, due, TimeUnit.NANOSECONDS, NOTHING);
             }
         }
 
@@ -735,11 +719,11 @@ final class ExchangeServer {
                 int rem = seg.remaining() - segOffset;
                 if (rem <= 0) { blockedAt++; segOffset = 0; continue; }
                 if (fill >= ack + cfg.downWindow()) return; // the window is full: the write waits
-                if (cur == null) { cur = alloc.buffer(Math.min(cfg.downPieceSize(), 64 << 10)); curAt = System.nanoTime(); }
-                int n = Math.min(rem, cfg.downPieceSize() - cur.readableBytes());
-                cur.writeBytes(seg.slice(seg.position() + segOffset, n));
+                if (cur == null) { cur = ByteBuffer.allocate(Math.min(cfg.downPieceSize(), 64 << 10)); curAt = System.nanoTime(); }
+                int n = Math.min(rem, cfg.downPieceSize() - cur.position());
+                cur = Exchange.append(cur, seg.slice(seg.position() + segOffset, n), cfg.downPieceSize());
                 segOffset += n;
-                if (cur.readableBytes() >= cfg.downPieceSize()) { assignCur(); answerHeld(); }
+                if (cur.position() >= cfg.downPieceSize()) { assignCur(); answerHeld(); }
             }
             PipeWriter.Completion c = blocked;
             blocked = null;
@@ -753,41 +737,43 @@ final class ExchangeServer {
         private void unblock() { if (blocked != null) take(); }
 
         final class Reader implements PipeReader {
-            @Override public void start(Sink s) { loop.execute(() -> { if (!rclosed) { sink = s; deliver(); } }); }
+            @Override public void start(Sink s) {
+                Loops.run(loop, () -> { if (!rclosed) up.start(s); }, () -> s.onError(new ClosedChannelException()));
+            }
 
             @Override public void close() {
-                loop.execute(() -> {
+                Loops.run(loop, () -> {
                     rclosed = true;
-                    sink = null;
+                    up.close();
                     dropUplink();
-                });
+                }, NOTHING);
             }
         }
 
         final class Writer implements PipeWriter {
             @Override public void write(OutboundBatch batch, Completion done) {
-                loop.execute(() -> {
+                Loops.run(loop, () -> {
                     if (ended || wclosed) { done.failed(new ClosedChannelException()); return; }
                     blocked = done;
                     blockedBatch = batch;
                     blockedAt = 0;
                     segOffset = 0;
                     take();
-                });
+                }, () -> done.failed(new ClosedChannelException()));
             }
 
             @Override public void close() {
-                loop.execute(() -> {
+                Loops.run(loop, () -> {
                     if (wclosed || ended) return;
                     wclosed = true;
-                    if (cur != null && cur.isReadable()) assignCur();
+                    if (cur != null && cur.position() > 0) assignCur();
                     answerHeld(); // held requests take an empty FIN piece
                     complete();
-                });
+                }, NOTHING);
             }
 
             @Override public void abort(Throwable cause) {
-                loop.execute(() -> end(cause == null ? new ClosedChannelException() : cause));
+                Loops.run(loop, () -> end(cause == null ? new ClosedChannelException() : cause), NOTHING);
             }
         }
     }

@@ -75,7 +75,7 @@ class ExternalTransportTest {
             ByteBuffer input = ByteBuffer.allocate(size);
             while (input.hasRemaining()) input.put((byte) (input.position() % 251));
             input.flip();
-            sink.get().onData(input, releases::incrementAndGet);
+            sink.get().onLent(input, releases::incrementAndGet);
             sink.get().onEnd();
             received.get(5, TimeUnit.SECONDS);
             run(source, () -> {}); run(target, () -> {});
@@ -105,7 +105,7 @@ class ExternalTransportTest {
                     ListenerHub.laneInput(driver, PipeIo.of(reader, null));
                 } else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null); }
                 run(loop, () -> {});
-                sink.get().onData(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
+                sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
                 loop.close();
                 // A half's close runs off the loop.

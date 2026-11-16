@@ -107,13 +107,13 @@ class SplitBootstrapTest {
             var info = new io.zmux.internal.core.CarrierInfo(io.zmux.internal.core.Framing.BYTES, false, false, false, false);
             peer.pipes().attachBootstrap(info, info, null); var batch = new io.zmux.internal.core.Batch();
             assertTrue(peer.pollTransmit(0, 0, batch, 65536, 0));
-            input.onData(ByteBuffer.wrap(io.zmux.internal.core.BatchFixture.flat(batch)), released::incrementAndGet); batch.discard();
+            input.onLent(ByteBuffer.wrap(io.zmux.internal.core.BatchFixture.flat(batch)), released::incrementAndGet); batch.discard();
             CompletableFuture<Void> parsed = new CompletableFuture<>();
             loops.group().next().execute(() -> parsed.complete(null)); parsed.get(5, TimeUnit.SECONDS);
             assertEquals(0, released.get(), "complete first record must keep its delivery paused");
-            for (int i=0; i<10; i++) input.onData(ByteBuffer.allocate(32 << 10), released::incrementAndGet);
+            for (int i=0; i<10; i++) input.onLent(ByteBuffer.allocate(32 << 10), released::incrementAndGet);
             lifetime.toCompletableFuture().get(5, TimeUnit.SECONDS);
-            input.onData(ByteBuffer.allocate(1), released::incrementAndGet);
+            input.onLent(ByteBuffer.allocate(1), released::incrementAndGet);
             assertEquals(12, released.get()); assertEquals(1, closed.get());
             assertEquals(0, loops.outstandingBuffers());
         }
@@ -139,7 +139,7 @@ class SplitBootstrapTest {
                 try {
                     assertTrue(entered.await(5, TimeUnit.SECONDS));
                     // No receive memory declared: one unreleased batch may queue, the next one overflows.
-                    for (int i = 0; i < 2; i++) sink.get().onData(ByteBuffer.allocate(96 << 10), released::incrementAndGet);
+                    for (int i = 0; i < 2; i++) sink.get().onLent(ByteBuffer.allocate(96 << 10), released::incrementAndGet);
                     assertEquals(1, released.get(), "the overflowing batch is released at once");
                 } finally { proceed.countDown(); }
                 assertNotNull(client.awaitClosed());

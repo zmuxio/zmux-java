@@ -67,9 +67,14 @@ public final class SendLane {
     private final SessionRuntime driver;
     private final Session core;
     private final Stream st;
-    final Turn turn = new Turn();
+    final Turn turn = new Turn("write (writeAsync, writeChunkAsync or finishAsync)");
     private final AtomicLong lease = new AtomicLong();
-    /** The core outcome every later write reports; set on the loop. */
+    /**
+     * The core outcome every later write reports: a published copy, never a state of the lane's
+     * own. Only {@link #terminate} writes it, on the loop, with an outcome the core produced (its
+     * push through LaneTable, or an exception a core call threw); application threads read it
+     * without a loop round trip on the write fast path, which is why the copy exists.
+     */
     private volatile CoreException terminal;
     /** The application is done with this part: it finished or reset it; on the loop. */
     boolean appDone;
@@ -94,8 +99,6 @@ public final class SendLane {
     private final Waiter hostWaiter = new Waiter() {
         @Override public void wake() { drain(); }
     };
-    /** Operations waiting until the core transmitted everything written; loop only. */
-    private final java.util.ArrayList<Operation<?>> sentWaiters = new java.util.ArrayList<>(0);
     /** Told the lane's outcome once it ends; loop only. */
     private java.util.function.Consumer<CoreException> endWatcher;
     SendLane nextLeased;
@@ -292,9 +295,15 @@ public final class SendLane {
     }
 
     /** Waits for the turn behind earlier operations; on timeout nothing was written. */
-    static void waitTurn(Turn turn, long deadline, int bytes) throws InterruptedIOException {
+    static void waitTurn(SessionRuntime driver, Turn turn, long deadline, int bytes) throws InterruptedIOException {
         Blocked w = new Blocked();
         turn.enqueue(w);
+        // Checked once queued: nothing gets ahead of w afterwards.
+        if (!w.granted() && driver.onCompletionContext() && turn.asyncAhead(w) && w.cancel()) {
+            turn.remove(w);
+            throw new io.zmux.CompletionThreadBlockedException("a blocking stream call on the session's completion thread would wait"
+                    + " behind this stream's pending asynchronous " + turn.asyncOperations + ", which needs that thread to complete");
+        }
         while (!w.granted()) {
             if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
                 if (w.cancel()) { turn.remove(w); throw interrupted(bytes); }
@@ -305,7 +314,7 @@ public final class SendLane {
     }
 
     private void waitTurn(long deadline, int bytes) throws InterruptedIOException {
-        waitTurn(turn, deadline, bytes);
+        waitTurn(driver, turn, deadline, bytes);
     }
 
     /**
@@ -336,7 +345,7 @@ public final class SendLane {
             }
         }
         Fin op = new Fin();
-        if (turn.tryEnter()) {
+        if (turn.tryEnterAsync()) {
             try {
                 if (op.grant()) queueFin(op);
             } finally {
@@ -429,7 +438,7 @@ public final class SendLane {
         CoreException e = ended();
         if (e != null) { op.settle(e); return op; }
         op.armDeadline();
-        if (turn.tryEnter()) {
+        if (turn.tryEnterAsync()) {
             if (op.grant()) op.step();
             else turn.leave();
         } else {
@@ -496,7 +505,6 @@ public final class SendLane {
         Resumable w = waiter;
         if (w != null && (lease.get() > 0 || terminal != null) && WAITER.compareAndSet(this, w, null)) w.resume();
         else if (open && w != null) driver.lanes.leaseShort(this);
-        if (!sentWaiters.isEmpty() && sentOutcome() != null) wakeSent();
         if (open) {
             if (waiter != null) {
                 core.sending().waitWrite(st, hostWaiter);
@@ -543,34 +551,32 @@ public final class SendLane {
         core.sending().cancelWriteWait(st, hostWaiter);
         Resumable w = (Resumable) WAITER.getAndSet(this, null);
         if (w != null) w.resume();
-        wakeSent();
         if (notify && endWatcher != null) endWatcher.accept(outcome);
     }
 
     /**
      * Completes with TRUE once the core transmitted everything written before, or with the
-     * part's error. Written bytes reach the core ahead of it: their drain is queued first.
+     * stream's error: a flush of the part (the core's one rule of what was sent, and its one
+     * list of waiters), and the one wait for it, of {@code flush()} and of a splice. Written
+     * bytes reach the core first: the lane drains at the attempt. With open, a stream that has
+     * not opened yet opens now and the wait includes its opening frame; without, a stream with
+     * nothing written and no identifier stays unopened and completes at once.
      */
-    public Operation<Void> awaitSent() {
+    public Operation<Void> awaitSent(boolean open, long deadline) {
+        long[] target = {-1};
         return new Operation<Void>(driver, self -> {
-            Object r = sentOutcome();
-            if (r != null) return r;
-            sentWaiters.add(self);
-            return Operation.PENDING;
-        }, sentWaiters::remove).submit();
-    }
-
-    private Object sentOutcome() {
-        CoreException t = terminal != null ? terminal : core.sending().writeError(st);
-        if (t != null) return t;
-        return core.sending().holdsUnsent(st) ? null : Boolean.TRUE;
-    }
-
-    private void wakeSent() {
-        if (sentWaiters.isEmpty()) return;
-        Operation<?>[] w = sentWaiters.toArray(new Operation<?>[0]);
-        sentWaiters.clear();
-        for (Operation<?> op : w) op.wake();
+            drain();
+            // No early return on the lane's terminal: the core is the authority on the outcome. Every
+            // terminal but one mirrors a core error flushDone throws as well (the part's errState, set
+            // by a local reset or abort, a STOP_SENDING, a rejection or a failed write; the session's
+            // error). The one that does not, the CLOSED_LOCALLY endSending gives a part that finished
+            // cleanly, must not fail a flush whose bytes all left, which an early return would.
+            if (target[0] < 0) {
+                if (!open && core.streams().untouched(st)) return true;
+                target[0] = core.streams().flush(st);
+            }
+            return core.sending().flushDone(st, target[0], self) ? (Object) true : Operation.PENDING;
+        }, op -> core.sending().cancelFlushWait(st, op), null, deadline).submit();
     }
 
     /** Calls watcher (on the loop) with the lane's outcome when it ends; null removes it. */

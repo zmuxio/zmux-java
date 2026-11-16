@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -39,8 +40,8 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     private final AtomicInteger use = new AtomicInteger(FRESH);
     /** The transport reading the stream (native use), or null. */
     private QuicTransport transport;
-    /** The sink of the halves (lent use), or null. */
-    private PipeReader.Sink sink;
+    /** The input lent to the halves' reader (lent use), or null; one read at a time, as the reader consumes it. */
+    private io.zmux.internal.spi.LentInput lent;
     /** Input no owner has taken yet: what arrives before an owner starts and what a moving transport left. */
     private final ArrayDeque<ByteBuf> early = new ArrayDeque<>();
     private boolean end;
@@ -60,6 +61,9 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         stream.config().setAutoRead(false).setReadFrames(true)
                 .setRecvByteBufAllocator(new io.netty.channel.AdaptiveRecvByteBufAllocator(4 << 10, 64 << 10, 256 << 10));
         if (stream.type() == io.netty.handler.codec.quic.QuicStreamType.BIDIRECTIONAL) stream.config().setAllowHalfClosure(true);
+        // Netty completes the close future on the loop as the stream closes, before any later
+        // task; channelInactive is such a task, which a terminating loop may never run.
+        stream.closeFuture().addListener(f -> gone());
     }
 
     boolean unidirectional() { return stream.type() == io.netty.handler.codec.quic.QuicStreamType.UNIDIRECTIONAL; }
@@ -172,11 +176,13 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     private void startHalves(PipeReader.Sink target) {
         if (!halvesStarted.compareAndSet(false, true)) throw new IllegalStateException("carrier reader already started");
         dispatch(() -> {
-            sink = target;
+            lent = new io.zmux.internal.spi.LentInput(1, stream.eventLoop(), stream.eventLoop()::inEventLoop,
+                    more -> { if (more && !inputClosed && !end) stream.read(); });
+            lent.start(target);
             for (ByteBuf b; (b = early.poll()) != null; ) lend(b);
-            if (end) { if (inputFailure == null) sink.onEnd(); else sink.onError(inputFailure); }
-            else stream.read();
-        }, () -> target.onError(new IOException("QUIC event loop closed")));
+            // The input's demand reads on: once at its start, and after each delivery while within budget.
+            if (end) { if (inputFailure == null) lent.end(); else lent.fail(inputFailure); }
+        }, () -> target.onError(new java.nio.channels.ClosedChannelException()));
     }
 
     private void closeHalvesInput() {
@@ -185,29 +191,22 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
 
     private void writeHalves(OutboundBatch batch, PipeWriter.Completion done) {
         dispatch(() -> write(batch, cause -> { if (cause == null) done.completed(); else done.failed(cause); }),
-                () -> done.failed(new IOException("QUIC event loop closed")));
+                () -> done.failed(new java.nio.channels.ClosedChannelException()));
     }
 
-    /** Lends one read to the sink, part by part: nioBuffer() of a composite would merge it into a copy. */
+    /**
+     * Lends one read to the halves' reader as chunks, part by part (nioBuffer() of a composite
+     * would merge it into a copy): each part holds a reference of its own.
+     */
     private void lend(ByteBuf data) {
-        if (!data.isReadable()) { data.release(); return; }
-        AtomicBoolean released = new AtomicBoolean();
-        Runnable release = () -> {
-            if (!released.compareAndSet(false, true)) return;
-            data.release();
-            dispatch(() -> { if (!inputClosed && !end) stream.read(); });
-        };
-        int parts = data.nioBufferCount();
-        try {
-            if (parts <= 1) sink.onData(data.nioBuffer(), release);
-            else {
-                AtomicInteger left = new AtomicInteger(parts);
-                for (ByteBuffer part : data.nioBuffers()) {
-                    AtomicBoolean partDone = new AtomicBoolean();
-                    sink.onData(part, () -> { if (partDone.compareAndSet(false, true) && left.decrementAndGet() == 0) release.run(); });
-                }
-            }
-        } catch (RuntimeException | Error error) { release.run(); throw error; }
+        int n = data.readableBytes();
+        if (n == 0) { data.release(); return; }
+        if (data.nioBufferCount() == 1) { lent.offer(io.zmux.Chunk.of(data.nioBuffer(), data::release), n); return; }
+        for (ByteBuffer part : data.nioBuffers()) {
+            data.retain();
+            lent.offer(io.zmux.Chunk.of(part, data::release), part.remaining());
+        }
+        data.release();
     }
 
     // ---- native use: the transport ----
@@ -222,7 +221,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     /** A transport that moved on leaves its unread input for the next owner, oldest first. */
     void leave(QuicTransport t, ByteBuf unread) {
         if (transport == t) transport = null;
-        if (unread != null && unread.isReadable()) early.add(unread);
+        if (unread != null && unread.isReadable() && !gone) early.add(unread);
         else if (unread != null) unread.release();
     }
 
@@ -234,11 +233,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     void read() {
         if (readQueued || inputClosed || end) return;
         readQueued = true;
-        try {
-            ChannelLoops.afterIteration(stream, readTask);
-        } catch (java.util.concurrent.RejectedExecutionException e) {
-            readQueued = false;
-        }
+        Loops.run(NettyHost.afterIteration(stream.eventLoop()), readTask, () -> readQueued = false);
     }
 
     private boolean readQueued;
@@ -260,6 +255,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         if (inputClosed) return;
         inputClosed = true;
         for (ByteBuf b; (b = early.poll()) != null; ) b.release();
+        if (lent != null) lent.close();
         stream.shutdownInput(PipeIo.CARRIER_FAILED).addListener(done -> { inputDone = true; closeIfReleased(); });
     }
 
@@ -293,8 +289,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
 
     private void dispatch(Runnable action) { dispatch(action, () -> {}); }
     private void dispatch(Runnable action, Runnable rejected) {
-        try { if (ChannelLoops.inLoop(stream)) action.run(); else ChannelLoops.executor(stream).execute(action); }
-        catch (java.util.concurrent.RejectedExecutionException error) { rejected.run(); }
+        Loops.dispatch(stream.eventLoop(), stream.eventLoop().inEventLoop(), action, rejected);
     }
 
     // ---- the channel ----
@@ -307,7 +302,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         else { io.netty.util.ReferenceCountUtil.release(message); return; }
         if (inputClosed || end) data.release();
         else if (transport != null) transport.received(data);
-        else if (sink != null) lend(data);
+        else if (lent != null) lend(data);
         else if (data.isReadable()) early.add(data);
         else data.release();
         if (fin) ended(null);
@@ -326,7 +321,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         end = true;
         inputFailure = failure;
         if (transport != null) transport.ended(failure == null);
-        else if (sink != null) { if (failure == null) sink.onEnd(); else sink.onError(failure); }
+        else if (lent != null) { if (failure == null) lent.end(); else lent.fail(failure); }
     }
 
     @Override public void userEventTriggered(ChannelHandlerContext context, Object event) {
@@ -340,9 +335,20 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     }
 
     @Override public void channelInactive(ChannelHandlerContext context) {
+        gone();
+        context.fireChannelInactive();
+    }
+
+    private boolean gone;
+
+    /** The stream closed: its input ends, and what no owner took is released. Once, on the loop. */
+    private void gone() {
+        if (gone) return;
+        gone = true;
+        // A loop that is shutting down runs no more of zmux's calls: what the reader has not taken goes.
+        if (lent != null && stream.eventLoop().isShuttingDown()) lent.fail(new java.nio.channels.ClosedChannelException());
         if (receive && !inputClosed) ended(new IOException("QUIC stream ended without FIN"));
         for (ByteBuf b; (b = early.poll()) != null; ) b.release();
         if (transport != null) transport.inactive();
-        context.fireChannelInactive();
     }
 }

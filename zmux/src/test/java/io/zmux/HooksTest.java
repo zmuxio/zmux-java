@@ -13,10 +13,11 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(30)
 class HooksTest {
     static class Budget implements Limiter {
-        final AtomicInteger charged = new AtomicInteger();
-        @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(Math.min(max, 2)); }
-        @Override public int tryReady(int max) { assertFalse(io.zmux.internal.loop.SessionHost.onHostThread()); return max <= 4 ? max : 0; }
-        @Override public void charge(int bytes) { assertFalse(io.zmux.internal.loop.SessionHost.onHostThread()); charged.addAndGet(bytes); }
+        final AtomicLong charged = new AtomicLong();
+        /** Net bytes taken: allowances handed out minus what came back. */
+        @Override public CompletionStage<Long> acquire(long min, long max) { long n = Math.min(max, 2); charged.addAndGet(n); return CompletableFuture.completedFuture(n); }
+        @Override public long tryAcquire(long min, long max) { assertFalse(io.zmux.internal.loop.SessionHost.onHostThread()); long n = max <= 4 ? max : 0; charged.addAndGet(n); return n; }
+        @Override public void refund(long bytes) { assertFalse(io.zmux.internal.loop.SessionHost.onHostThread()); charged.addAndGet(-bytes); }
     }
 
     @Test void streamWrappersChargeOnlyForwardedBytesAndDoNotBypassLimits() throws Exception {
@@ -31,19 +32,124 @@ class HooksTest {
         assertEquals(3, input.transferTo(forwarded));
         assertArrayEquals(new byte[] {3,4,5}, forwarded.toByteArray());
         assertEquals(10, budget.charged.get());
-        AtomicReference<CompletableFuture<Integer>> waiting = new AtomicReference<>();
+        AtomicReference<CompletableFuture<Long>> waiting = new AtomicReference<>();
         Limiter paused = new Limiter() {
-            @Override public CompletionStage<Integer> ready(int min, int max) {
-                var f = new CompletableFuture<Integer>(); waiting.set(f); return f;
+            @Override public CompletionStage<Long> acquire(long min, long max) {
+                var f = new CompletableFuture<Long>(); waiting.set(f); return f;
             }
-            @Override public int tryReady(int max) { return 0; }
-            @Override public void charge(int n) { fail("cancelled readiness cannot charge"); }
+            @Override public long tryAcquire(long min, long max) { return 0; }
+            @Override public void refund(long n) { fail("a cancelled wait took nothing"); }
         };
         Thread thread = Thread.ofVirtual().start(() -> assertThrows(InterruptedIOException.class,
                 () -> LimitedStreams.input(new ByteArrayInputStream(new byte[] {1}), paused).read()));
         ListenerResourcesTest.until(() -> waiting.get() != null);
         thread.interrupt(); thread.join(5000);
         assertFalse(thread.isAlive()); assertTrue(waiting.get().isCancelled());
+    }
+
+    @Test void permitsRefundUnusedBytesAndAreCancelSafe() throws Exception {
+        var budget = new SpliceTest.FixedBudget(10);
+        try (var p = io.zmux.helper.Permit.tryAcquire(budget, 1, 2)) {
+            assertEquals(2, p.size()); assertEquals(8, budget.left());
+            p.consume(1);
+        }
+        assertEquals(9, budget.left());
+        try (var p = io.zmux.helper.Permit.acquire(budget, 1, 4).toCompletableFuture().get()) { assertEquals(4, p.size()); }
+        assertEquals(9, budget.left());
+        assertFalse(io.zmux.helper.Permit.police(budget, 10)); assertEquals(9, budget.left());
+        assertTrue(io.zmux.helper.Permit.police(budget, 9)); assertEquals(0, budget.left());
+        var waiting = io.zmux.helper.Permit.acquire(budget, 5, 5).toCompletableFuture();
+        assertTrue(waiting.cancel(true));
+        budget.refund(9); // the cancelled wait takes nothing
+        assertEquals(9, budget.left());
+    }
+
+    /** Records the arguments the limiter sees; grants what grant says. */
+    static final class Recording implements Limiter {
+        final java.util.List<long[]> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final AtomicLong refunded = new AtomicLong();
+        volatile java.util.function.LongUnaryOperator grant = max -> max;
+        volatile RuntimeException fail;
+        @Override public CompletionStage<Long> acquire(long min, long max) {
+            calls.add(new long[] {min, max});
+            if (fail != null) throw fail;
+            return CompletableFuture.completedFuture(grant.applyAsLong(max));
+        }
+        @Override public long tryAcquire(long min, long max) {
+            calls.add(new long[] {min, max});
+            if (fail != null) throw fail;
+            return grant.applyAsLong(max);
+        }
+        @Override public void refund(long n) {
+            refunded.addAndGet(n);
+            if (fail != null) throw fail;
+        }
+    }
+
+    @Test void permitClampsArgumentsAndAppliesTheFailureRules() throws Exception {
+        var l = new Recording();
+        // max <= 0 takes nothing without a call; min < 1 is 1; min > max is max.
+        assertTrue(io.zmux.helper.Permit.acquire(l, 5, 0).toCompletableFuture().get().isEmpty());
+        assertTrue(io.zmux.helper.Permit.tryAcquire(l, 1, -3).isEmpty());
+        assertTrue(l.calls.isEmpty());
+        assertEquals(5, io.zmux.helper.Permit.acquire(l, 0, 5).toCompletableFuture().get().size());
+        assertArrayEquals(new long[] {1, 5}, l.calls.get(0));
+        assertEquals(4, io.zmux.helper.Permit.tryAcquire(l, 9, 4).size());
+        assertArrayEquals(new long[] {4, 4}, l.calls.get(1));
+        assertEquals(Long.MAX_VALUE, io.zmux.helper.Permit.tryAcquire(l, -1, Long.MAX_VALUE).size());
+        assertArrayEquals(new long[] {1, Long.MAX_VALUE}, l.calls.get(2));
+        // A unit granted (n, n) below n (a burst) passes whole and stays taken.
+        l.grant = max -> 2;
+        assertTrue(io.zmux.helper.Permit.police(l, 10));
+        assertTrue(io.zmux.helper.Permit.police(l, 0), "an empty unit passes");
+        assertEquals(4, l.calls.size(), "without a call");
+        // An invalid grant: acquire fails the operation, tryAcquire takes nothing; a positive one is refunded.
+        l.grant = max -> max + 1;
+        var invalid = assertThrows(ExecutionException.class, () -> io.zmux.helper.Permit.acquire(l, 1, 3).toCompletableFuture().get());
+        assertInstanceOf(CallbackFailedException.class, invalid.getCause());
+        assertEquals(4, l.refunded.get());
+        assertTrue(io.zmux.helper.Permit.tryAcquire(l, 3, 3).isEmpty());
+        assertEquals(8, l.refunded.get());
+        l.grant = max -> 0;
+        assertInstanceOf(CallbackFailedException.class, assertThrows(ExecutionException.class,
+                () -> io.zmux.helper.Permit.acquire(l, 1, 3).toCompletableFuture().get()).getCause());
+        assertFalse(io.zmux.helper.Permit.police(l, 3));
+        // A throwing limiter: acquire fails, tryAcquire counts as nothing taken, refund failures are ignored.
+        l.grant = max -> max;
+        l.fail = new IllegalStateException("broken");
+        var thrown = assertThrows(ExecutionException.class, () -> io.zmux.helper.Permit.acquire(l, 1, 3).toCompletableFuture().get());
+        assertSame(l.fail, thrown.getCause().getCause());
+        assertTrue(io.zmux.helper.Permit.tryAcquire(l, 1, 3).isEmpty());
+        assertFalse(io.zmux.helper.Permit.police(l, 3));
+        io.zmux.helper.Permit.refund(l, 5);
+        io.zmux.helper.Permit.refund(l, 0);
+        assertEquals(13, l.refunded.get(), "refunds of 0 are not passed on");
+    }
+
+    @Test void permitsSharingALimiterNeverOverGrant() throws Exception {
+        var budget = new SpliceTest.FixedBudget(10000);
+        AtomicLong used = new AtomicLong();
+        try (var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
+            var all = new java.util.ArrayList<Future<?>>();
+            for (int t = 0; t < 8; t++) {
+                int id = t;
+                all.add(tasks.submit(() -> {
+                    for (int i = 0; i < 2000; i++) {
+                        try (var p = id % 2 == 0 ? io.zmux.helper.Permit.tryAcquire(budget, 1, 7)
+                                : io.zmux.helper.Permit.acquire(budget, 3, 3).toCompletableFuture().get(5, TimeUnit.SECONDS)) {
+                            assertTrue(budget.left() >= 0);
+                            // Waiters only borrow; pollers keep one byte each until 9000 are used, so waiters are always served.
+                            long take = id % 2 == 0 && used.get() < 9000 ? Math.min(p.size(), 1) : 0;
+                            p.consume(take); used.addAndGet(take);
+                        }
+                    }
+                    return null;
+                }));
+            }
+            for (var f : all) f.get(20, TimeUnit.SECONDS);
+        }
+        assertTrue(budget.lowest >= 0);
+        assertEquals(10000, budget.left() + used.get(), "grants minus refunds equal what was used");
     }
 
     @Test void interruptedOutputReportsAllCompletedChunks() throws Exception {
@@ -62,8 +168,8 @@ class HooksTest {
         assertEquals(3, error.bytesTransferred); assertEquals(3, budget.charged.get());
         AtomicInteger asks = new AtomicInteger();
         Budget cancelled = new Budget() {
-            @Override public CompletionStage<Integer> ready(int min, int max) {
-                if (asks.incrementAndGet() == 1) return CompletableFuture.completedFuture(2);
+            @Override public CompletionStage<Long> acquire(long min, long max) {
+                if (asks.incrementAndGet() == 1) { charged.addAndGet(2); return CompletableFuture.completedFuture(2L); }
                 Thread.currentThread().interrupt(); return new CompletableFuture<>();
             }
         };
@@ -106,15 +212,16 @@ class HooksTest {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), closed = new CountDownLatch(1);
             AtomicLong dropped = new AtomicLong(); AtomicBoolean blocked = new AtomicBoolean();
-            AtomicReference<ZmuxSession> ref = new AtomicReference<>();
+            AtomicReference<ZmuxSession> ref = new AtomicReference<>(); AtomicReference<SessionId> seen = new AtomicReference<>();
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
-                        @Override public void established() {
+                        @Override public void established(SessionId session) {
+                            seen.set(session);
                             entered.countDown();
                             try { assertTrue(release.await(5, TimeUnit.SECONDS)); } catch (InterruptedException e) { throw new AssertionError(e); }
                             assertThrows(IllegalStateException.class, () -> ref.get().ping()); blocked.set(true);
                         }
-                        @Override public void dropped(long n) { dropped.addAndGet(n); throw new IllegalArgumentException("failed loss notification"); }
-                        @Override public void closed(SessionError error) { closed.countDown(); }
+                        @Override public void dropped(SessionId session, long n) { if (!session.equals(seen.get())) return; dropped.addAndGet(n); throw new IllegalArgumentException("failed loss notification"); }
+                        @Override public void closed(SessionId session, SessionError error) { if (session.equals(seen.get())) closed.countDown(); }
                     }, 1).build();
             // Trace only the client, so both contexts cannot wait on the same gate.
             var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
@@ -129,6 +236,7 @@ class HooksTest {
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
                 assertTrue(closed.await(5, TimeUnit.SECONDS));
                 assertTrue(blocked.get()); assertTrue(dropped.get() > 0);
+                assertEquals(c.id(), seen.get(), "the tracer names its session"); assertNotEquals(c.id(), s.id());
             } finally { release.countDown(); }
         }
     }

@@ -13,6 +13,10 @@ public record SpliceOptions(int chunkSize, Limiter aToB, Limiter bToA, SpliceCon
     /** The chunk size and the limiters, without a control. */
     public SpliceOptions(int chunkSize, Limiter aToB, Limiter bToA) { this(chunkSize, aToB, bToA, null); }
     public static SpliceOptions defaults() { return new SpliceOptions(65536, null, null, null); }
-    /** These options with control, which then serves the one splice started with them. */
+    /**
+     * These options with control, which then serves the one splice started with them. A control
+     * serves one splice only: a second splice started with it fails at its start
+     * ({@link Zmux#splice}) with {@link IllegalStateException}, not here.
+     */
     public SpliceOptions withControl(SpliceControl control) { return new SpliceOptions(chunkSize, aToB, bToA, control); }
 }

@@ -1,5 +1,7 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.LentInput;
+import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -13,15 +15,14 @@ import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 
 /**
  * The halves of one HTTP carrier over a Netty channel (an HTTP/1.1 connection or an HTTP/2
- * stream): body bytes (or WebSocket messages) arriving on the channel go to zmux as owned chunks,
- * without copying, and zmux's batches go out as wrapped buffers, without copying. Every field is
+ * stream): body bytes (or WebSocket messages) arriving on the channel become owned core chunks
+ * as they arrive, without copying, and wait for zmux's reader as such, and zmux's batches go out as wrapped buffers, without copying. Every field is
  * owned by the channel's event loop; zmux's calls hop there.
  */
 final class BodyCarrier {
@@ -47,12 +48,11 @@ final class BodyCarrier {
     private final Function<Throwable, Void> kill;
 
     // Inbound.
-    private PipeReader.Sink sink;
-    private final ArrayDeque<ByteBuf> queue = new ArrayDeque<>();
-    private long outstanding;
+    /** What arrived and zmux has not taken: chunks from their arrival, so the carrier keeps no bare buffer. */
+    private final LentInput input;
     private final boolean inHalf;
-    private boolean inEnded, inClosed;
-    private Throwable inError;
+    /** zmux closed the inbound half (or it has none, or it went to the host). */
+    private boolean inClosed;
 
     // Outbound.
     private final boolean outHalf;
@@ -63,7 +63,11 @@ final class BodyCarrier {
     private boolean endedUnstarted;
     /** The carrier went to the host's handler: zmux's calls no longer touch the channel. */
     private boolean detached;
-    /** Duplicates of every inbound buffer while a verdict that may replay them is pending; null: none kept. */
+    /**
+     * Duplicates of every inbound buffer while a verdict that may replay them is pending; null:
+     * none kept. The carrier's only buffers outside chunks: {@link #keepNoMore} releases them
+     * (the verdict, or {@link #lost}), and {@link #detach} hands them to the host.
+     */
     private ArrayList<ByteBuf> log;
     private final List<Runnable> pending = new ArrayList<>(0);
     /** The latest write on the channel. */
@@ -86,6 +90,15 @@ final class BodyCarrier {
         inClosed = !reader;
         outHalf = writer;
         outClosed = !writer;
+        input = new LentInput(RECEIVE_MEMORY, loop, loop::inEventLoop, more -> ch.config().setAutoRead(more));
+        // The channel's close, which its loop's shutdown does too, notifies this on the loop as
+        // it happens; the handlers' channelInactive is a later task, which a terminating loop may
+        // never run. So the carrier is lost here, whatever its handlers see afterwards; a loop
+        // that is shutting down runs no more of zmux's calls, so its input fails outright.
+        ch.closeFuture().addListener(f -> {
+            if (loop.isShuttingDown()) input.fail(new ClosedChannelException());
+            lost(new ClosedChannelException());
+        });
     }
 
     PipeReader reader() { return inHalf ? new Reader() : null; }
@@ -105,13 +118,14 @@ final class BodyCarrier {
     /**
      * Gives the carrier up for the host's handler: every inbound buffer kept (in order) is
      * returned, the carrier's own references are dropped, and zmux's later calls are ignored.
+     * The channel reads again on its own (autoRead), as zmux's backpressure no longer applies:
+     * the host's handler reads the rest of the request.
      */
     List<ByteBuf> detach() {
         detached = true;
         finished = true;
         inClosed = outClosed = true;
-        for (ByteBuf b; (b = queue.pollFirst()) != null; ) b.release();
-        sink = null;
+        input.close();
         List<ByteBuf> r = log == null ? List.of() : log;
         log = null;
         return r;
@@ -119,77 +133,43 @@ final class BodyCarrier {
 
     boolean detached() { return detached; }
 
-    private void run(Runnable r) {
-        if (loop.inEventLoop()) r.run();
-        else {
-            try { loop.execute(r); } catch (java.util.concurrent.RejectedExecutionException ended) { /* Its loop is gone; no channel is left to resume. */ }
-        }
+    /**
+     * Runs a zmux call's task on the loop. A loop that refuses it is shutting down and closes the
+     * channel, whose {@link #lost} releases what the carrier holds; onRejected fails only what
+     * the call brought (its completion, its sink).
+     */
+    private void run(Runnable task, Runnable onRejected) {
+        Loops.dispatch(loop, loop.inEventLoop(), task, onRejected);
     }
+
+    private static final Runnable NOTHING = () -> {};
 
     // ---- inbound (event loop) ----
 
     /** A body piece or message arrived; the carrier owns data's reference. */
     void in(ByteBuf data) {
         if (log != null) log.add(data.retainedDuplicate());
-        if (inClosed || inEnded) { data.release(); return; }
-        if (!data.isReadable() && framing != Framing.MESSAGES) { data.release(); return; }
-        queue.add(data);
-        drain();
+        if (inClosed || (!data.isReadable() && framing != Framing.MESSAGES)) { data.release(); return; }
+        int n = data.readableBytes();
+        if (data.nioBufferCount() == 1) {
+            input.offer(Chunk.of(data.nioBuffer(), data::release), n);
+            return;
+        }
+        // A buffer of several components as one: the copy only a composite needs; it goes at once.
+        ByteBuffer c = ByteBuffer.allocate(n);
+        data.getBytes(data.readerIndex(), c);
+        data.release();
+        input.offer(Chunk.of(c.flip()), n);
     }
 
     /** The inbound body (or message stream) ended gracefully. */
-    void inEnd() {
-        if (inClosed || inEnded) return;
-        inEnded = true;
-        drain();
-    }
+    void inEnd() { input.end(); }
 
     /**
-     * The inbound half failed: what is still queued is never delivered (a reader that never
-     * starts or closes would otherwise keep it), so the carrier releases it here, and the sink,
-     * once there is one, gets the error.
+     * The inbound half failed: what is still queued is never delivered, and the sink, once there
+     * is one, gets the error; an input that ended gracefully keeps its end for a reader taking it.
      */
-    void inFail(Throwable cause) {
-        if (inClosed || inEnded) return;
-        inEnded = true;
-        inError = cause;
-        for (ByteBuf b; (b = queue.pollFirst()) != null; ) b.release();
-        drain();
-    }
-
-    private void drain() {
-        if (sink == null) {
-            if (!queue.isEmpty()) ch.config().setAutoRead(false);
-            return;
-        }
-        while (!queue.isEmpty() && (outstanding == 0 || outstanding + queue.getFirst().readableBytes() <= RECEIVE_MEMORY)) {
-            ByteBuf b = queue.removeFirst();
-            int n = b.readableBytes();
-            outstanding += n;
-            ByteBuffer view = b.nioBufferCount() == 1 ? b.nioBuffer() : copy(b);
-            sink.onChunk(Chunk.of(view, b::release), () -> run(() -> consumed(n)));
-            if (inClosed) return;
-        }
-        ch.config().setAutoRead(queue.isEmpty() && outstanding < RECEIVE_MEMORY / 2);
-        if (queue.isEmpty() && inEnded) {
-            PipeReader.Sink s = sink;
-            sink = null;
-            if (inError == null) s.onEnd();
-            else s.onError(inError);
-        }
-    }
-
-    /** A buffer of several components as one: the copy only a composite needs. */
-    private static ByteBuffer copy(ByteBuf b) {
-        ByteBuffer c = ByteBuffer.allocate(b.readableBytes());
-        b.getBytes(b.readerIndex(), c);
-        return c.flip();
-    }
-
-    private void consumed(int n) {
-        outstanding -= n;
-        if (!inClosed) drain();
-    }
+    void inFail(Throwable cause) { input.lost(cause); }
 
     /** Bounds a first message, for a carrier of messages (its frames set it). */
     java.util.function.IntConsumer firstLimit = n -> {};
@@ -200,20 +180,17 @@ final class BodyCarrier {
         @Override public void start(Sink s) {
             run(() -> {
                 if (inClosed || detached) return;
-                sink = s;
-                drain();
-            });
+                input.start(s);
+            }, () -> s.onError(new ClosedChannelException()));
         }
 
         @Override public void close() {
             run(() -> {
                 if (inClosed) return;
                 inClosed = true;
-                sink = null;
-                for (ByteBuf b; (b = queue.pollFirst()) != null; ) b.release();
-                ch.config().setAutoRead(true); // discard what follows
+                input.close(); // reading goes on, and what follows is discarded
                 check();
-            });
+            }, NOTHING);
         }
     }
 
@@ -290,7 +267,7 @@ final class BodyCarrier {
                     else c.failed(r.cause());
                 });
                 });
-            });
+            }, () -> c.failed(new ClosedChannelException()));
         }
 
         @Override public void close() {
@@ -310,7 +287,7 @@ final class BodyCarrier {
                     else ReferenceCountUtil.release(end);
                     check();
                 });
-            });
+            }, NOTHING);
         }
 
         @Override public void abort(Throwable cause) {
@@ -319,7 +296,7 @@ final class BodyCarrier {
                 outClosed = true;
                 fail(cause == null ? new ClosedChannelException() : cause);
                 check();
-            });
+            }, NOTHING);
         }
     }
 

@@ -118,10 +118,10 @@ public final class ZmuxConfig {
         spreadChunk = b.spreadChunk; overflowDelay = b.overflowDelay;
         redundancy = b.redundancy; logger = b.logger;
         Tracer tracer = b.tracer;
-        hooks = new io.zmux.internal.loop.DriverHooks(tracer == null ? null : e -> {
-            if (e.kind() == io.zmux.internal.core.Event.Kind.ESTABLISHED) tracer.established();
-            else if (e.kind() == io.zmux.internal.core.Event.Kind.CLOSED) tracer.closed(Errors.session(e.error()));
-            else { SessionEvent event = Events.publicEvent(e); if (event != null) tracer.event(event); }
+        hooks = new io.zmux.internal.loop.DriverHooks(tracer == null ? null : (id, e) -> {
+            if (e.kind() == io.zmux.internal.core.Event.Kind.ESTABLISHED) tracer.established(id);
+            else if (e.kind() == io.zmux.internal.core.Event.Kind.CLOSED) tracer.closed(id, Errors.session(e.error()));
+            else { SessionEvent event = Events.publicEvent(e); if (event != null) tracer.event(id, event); }
         }, tracer == null ? null : tracer::dropped, b.tracerQueue, b.allowWindowGrowth,
                 b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), joinPolicy(b), b.handshakeShaper, b.logger,
                 b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.min()), nanos(b.redialBackoff.max()), b.redialBackoff.jitter()));
@@ -479,7 +479,10 @@ public final class ZmuxConfig {
         /**
          * Opens a carrier for the direction the session lacks; the returned pipe input belongs to
          * zmux. It must cooperate with cancellation and interruption. A failure, or an exception,
-         * is a failed attempt: the next one waits the backoff.
+         * is a failed attempt: the next one waits the backoff, except a
+         * {@link CarrierClientClosedException}, which ends the redialling. It runs on a thread of its own; an
+         * attempt still running at the session's join deadline is cancelled, interrupted and
+         * abandoned as failed, and a pipe input it returns afterwards is closed.
          */
         io.zmux.carrier.PipeIo dial(PipeOptions.Direction need, Cancellation cancellation) throws IOException, InterruptedException;
     }
@@ -876,7 +879,7 @@ public final class ZmuxConfig {
          */
         public Builder shaper(io.zmux.shaping.ShaperFactory factory) { shaper = factory; return this; }
 
-        /** The event hook: ordered asynchronous notifications; capacity bounds queued events (default 256). */
+        /** The event hook: ordered asynchronous notifications naming the session; capacity bounds each session's queued events (default 256). */
         public Builder tracer(Tracer t, int capacity) {
             if (capacity < 1) throw new IllegalArgumentException("tracer queue below 1");
             tracer = t; tracerQueue = capacity; return this;
@@ -887,7 +890,7 @@ public final class ZmuxConfig {
             allowWindowGrowth = predicate; return this;
         }
 
-        /** Nonblocking whole-payload datagram admission in each direction; null disables a limiter. */
+        /** Datagram limiters per direction, each asked {@code tryAcquire(n, n)} per datagram (dropped and counted on 0); null: none. */
         public Builder datagramLimiters(io.zmux.helper.Limiter send, io.zmux.helper.Limiter receive) {
             datagramSend = send; datagramReceive = receive; return this;
         }

@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Timeout;
 class QuicAdmissionTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
 
-    static ListenerConfig admitting(ZmuxConfig config, java.util.function.BiFunction<Admission.CarrierInfo, java.nio.ByteBuffer, Admission.Decision> decider) {
+    static ListenerConfig admitting(ZmuxConfig config, java.util.function.BiFunction<Admission.CarrierInfo, ByteBuffer, Admission.Decision> decider) {
         return ListenerConfig.builder().session(config)
                 .admission(Admission.of(4, Admission.Decider.immediate(decider)).withPeekTimeout(Duration.ofSeconds(2))).build();
     }
@@ -52,7 +52,7 @@ class QuicAdmissionTest {
                 assertNotNull(connection);
                 var all = new java.io.ByteArrayOutputStream();
                 stream.reader().start(new PipeReader.Sink() {
-                    @Override public void onData(ByteBuffer data, Runnable release) {
+                    @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
                         byte[] b = new byte[data.remaining()];
                         data.get(b);
                         all.writeBytes(b);

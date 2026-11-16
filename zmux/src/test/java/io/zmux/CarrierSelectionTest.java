@@ -131,7 +131,7 @@ class CarrierSelectionTest {
                     var got = new java.io.ByteArrayOutputStream();
                     var end = new java.util.concurrent.CompletableFuture<Void>();
                     keep.getFirst().reader().start(new PipeReader.Sink() {
-                        @Override public void onData(ByteBuffer data, Runnable release) {
+                        @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
                             byte[] a = new byte[data.remaining()]; data.get(a); synchronized (got) { got.writeBytes(a); } release.run();
                         }
                         @Override public void onEnd() { end.complete(null); }

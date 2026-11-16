@@ -326,7 +326,7 @@ final class AckEngine {
             long rtt = Time.sub(now, last.sent());
             long ad = Time.mul(delayMicros, Time.MICROSECOND);
             boolean late = ad > peerDelay && ps.rttAt != 0 && Time.sub(now, ps.rttAt) < Time.SECOND;
-            RttEstimator r = p.mp() != null ? p.mp().rtt : ps.rtt;
+            RttEstimator r = ps.rtt;
             // Queue-proven: the range's adjusted RTT exceeded min_rtt by at least 4 x min_rtt, so the
             // path held it back and was busy throughout (a deep carrier or path buffer that never
             // refuses bytes). Its rate sample is a bottleneck sample, also for bytes sent before
@@ -415,7 +415,7 @@ final class AckEngine {
         private long delivered;
         private long deliveredAt;
         private long firstSentAt;
-        private final RttEstimator rtt = new RttEstimator();
+        private RttEstimator rtt = new RttEstimator();
         private final RateEstimator re = new RateEstimator();
         private long rttAt;
         private long elicitEnd;
@@ -464,6 +464,11 @@ final class AckEngine {
 
         RttEstimator rtt() {
             return rtt;
+        }
+
+        /** Takes r as the direction's estimator (the pipe's attachment's): one estimator per pipe. */
+        void useRtt(RttEstimator r) {
+            rtt = r;
         }
 
         RateEstimator re() {

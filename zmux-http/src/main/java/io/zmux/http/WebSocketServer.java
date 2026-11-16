@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.Loops;
 import io.zmux.AdmissionVerdict;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -106,16 +107,17 @@ final class WebSocketServer {
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
                 .withProtocol(protocol).withCarrier(CarrierKind.WEBSOCKET);
-        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> {
+        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> Loops.run(ch.eventLoop(), () -> {
             c.detach();
             Router.closeQuietly(given);
             router.toHost(r, List.of(), true);
-        }));
-        a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {
+        }, () -> Router.closeQuietly(given)));
+        // A loop that refuses the verdict is shutting down and closes the channel, which ends the carrier.
+        a.verdict().whenComplete((v, e) -> Loops.run(ch.eventLoop(), () -> {
             if (c.detached() || v == AdmissionVerdict.FALLBACK) return;
             verdict[0] = v == null ? AdmissionVerdict.CLOSE : v;
             if (v == AdmissionVerdict.ACCEPT) c.start(); // the 101 goes out now, and frames may follow
-        }));
+        }, () -> {}));
         return new WebSocketFrames(c);
     }
 }

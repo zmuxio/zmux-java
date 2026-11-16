@@ -35,7 +35,7 @@ class GlobalBoundTest {
 
         Fake() { this(true, true); }
 
-        void send(byte... b) throws Exception { sink.get(5, TimeUnit.SECONDS).onData(ByteBuffer.wrap(b), () -> {}); }
+        void send(byte... b) throws Exception { sink.get(5, TimeUnit.SECONDS).onLent(ByteBuffer.wrap(b), () -> {}); }
         boolean isClosed() { return closed.getCount() == 0; }
         void awaitClosed() throws InterruptedException { assertTrue(closed.await(5, TimeUnit.SECONDS), "closed"); }
     }

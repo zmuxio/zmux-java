@@ -525,7 +525,7 @@ class ExchangeTest {
     static Throwable readFailure(PipeIo p) throws Exception {
         CompletableFuture<Throwable> err = new CompletableFuture<>();
         p.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); }
             @Override public void onEnd() { err.complete(null); }
             @Override public void onError(Throwable cause) { err.complete(cause); }
         });

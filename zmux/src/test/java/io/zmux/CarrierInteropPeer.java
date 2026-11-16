@@ -185,7 +185,7 @@ final class CarrierInteropPeer {
                         byte[] bytes = new byte[16384];
                         for (int n; !closed && (n = in.read(bytes)) >= 0;) {
                             var done = new CountDownLatch(1);
-                            sink.onData(ByteBuffer.wrap(bytes.clone(), 0, n), done::countDown);
+                            sink.onLent(ByteBuffer.wrap(bytes.clone(), 0, n), done::countDown);
                             done.await();
                         }
                         if (!closed) sink.onEnd();

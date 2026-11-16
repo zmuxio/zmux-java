@@ -224,6 +224,11 @@ Both configurations bound the application data a peer sends in the handshake
 protocol are `SecureCarrierException`, a `ZmuxException` carrying the error
 class.
 
+`StaticKey` is `AutoCloseable`: `close()` zeroes the private scalar it holds
+(the JDK's own key object keeps a copy until garbage collection), after which
+the key can no longer take part in a handshake; close it once no configuration
+or session using it remains. Its `toString()` shows only the public key.
+
 `session.addPipe(address, options)` joins another TCP carrier and waits
 until the peer has attached it (`PipeOptions.Builder.returnOnReply(true)`
 returns at the verified Reply; `ZmuxPipe.awaitPeerAttached` waits later),
@@ -353,9 +358,11 @@ which widens the suspicion and failure timeouts by min(1 s, queue / delivery
 rate). The bundled TCP and TLS carriers report none: a write completes only once
 the socket took every byte, and the JDK offers no query for the kernel's unsent
 bytes.
-On the receiving side `PipeReader.Sink.onData(buffer, release)` lends a batch:
-zmux runs `release` once it has copied or parsed it, and a reader delivers more
-before earlier batches are released only within the `receiveMemory` it declares
+On the receiving side `PipeReader.Sink.onLent(buffer, consumed)` lends a batch:
+zmux copies it before the call returns (the reader may reuse the buffer at once)
+and runs `consumed` once it parsed the copy, as for `onChunk`: that is the
+carrier's backpressure. A reader delivers more before earlier batches are
+consumed only within the `receiveMemory` it declares
 in `PipeIo.Capabilities` (`Capabilities.builder().receiveMemory(bytes)`, or
 `PipeIo.withReceiveMemory`; charged to the memory budget); a reader that queues
 beyond that fails its carrier. `onChunk` transfers owned buffers: zmux parses
@@ -451,8 +458,11 @@ is `ZmuxConfig.Builder.noMemoryBudget()` or `ListenerConfig.Builder.noMemoryBudg
 ## Application hooks and budgets
 
 `ZmuxConfig.Builder.tracer(tracer, queueCapacity)` installs an ordered,
-asynchronous `Tracer`. A slow tracer drops events and reports the loss
-count; its terminal notification is retained. Window growth can be approved
+asynchronous `Tracer`. Every callback names its session (`SessionId`, also
+`session.id()`), so one tracer can serve many sessions. The capacity bounds
+each session's own trace backlog: a slow tracer loses that session's events
+and reports the count with `dropped(session, count)`; its terminal
+notification is retained. Window growth can be approved
 by `allowConnectionWindowIncrease`; the predicate runs off-loop and stale or
 now-unaffordable answers cannot increase credit.
 
@@ -480,12 +490,28 @@ accumulates until read, so the event queue stays bounded however many pipes a
 session goes through; compare `session.pipes()` with the handles you hold to find
 every retired ID.
 
-`io.zmux.helper.Limiter` supplies asynchronous `ready`, immediate `tryReady`
-and `charge`. Readiness reserves nothing. `LimitedStreams.input/output`
-wrap application streams, wait outside the event loop, and charge bytes
-actually forwarded, including partial interrupted writes. Datagram limiters
-are installed with `datagramLimiters(send, receive)`: they admit a whole
-payload or drop it. Received datagrams waiting for a hook remain within the
+`io.zmux.helper.Limiter` is the reserve-then-refund interface shared by every
+zmux implementation: `CompletionStage<Long> acquire(long min, long max)` waits
+for a grant, `long tryAcquire(long min, long max)` grants without waiting or
+returns 0, and `void refund(long n)` gives back granted bytes that were not
+used. Units are bytes. Arguments are clamped: `max <= 0` takes nothing,
+`min < 1` is 1, `min > max` is `max`; `(n, n)` asks for a whole unit and
+`(1, max)` for as much as is available. A grant lies between `min` (or the
+limiter's burst, if smaller) and `max`, and a whole unit granted `(n, n)` may
+be sent even when fewer bytes were returned. Grants are taken when handed out,
+so streams, splices and sessions sharing one limiter never exceed it together.
+A limiter that fails fails the operation in `acquire` (an exception, a failed
+stage, or a grant outside `1..max`), counts as nothing taken in `tryAcquire`,
+and is ignored in `refund`. `Permit` does the bookkeeping:
+`Permit.acquire`/`tryAcquire` take a grant, `consume` marks bytes used, and
+`close` refunds the rest (`Permit.abandon` drops a pending acquire either
+way). `LimitedStreams.input/output` wrap application streams, wait outside the
+event loop, and keep only bytes actually forwarded, including partial
+interrupted writes. Datagram limiters are installed with
+`datagramLimiters(send, receive)`: each datagram costs one
+`tryAcquire(n, n)` for its whole payload, on send before it is queued and on
+receive before it reaches the application's queue; one that is refused is
+dropped and counted, and a granted one that is then not queued is refunded. Received datagrams waiting for a hook remain within the
 same bounded receive queue and cannot return after eviction.
 
 A stream's datagram queue is bounded per stream and direction by a count
@@ -619,6 +645,11 @@ session), `binding_unavailable`, `memory_pressure` or `auth`) with `RejectInfo.A
 refusal before authentication gets this one answer, so the response and the way the
 carrier ends are the same whatever the reason; the time spent before the refusal may
 differ.
+
+`onReject` and `ListenerConfig.Builder.sessionConfigs` are synchronous hooks: they
+must not block and must return well before the carrier's handshake deadline, which
+keeps running while they do. Slow decisions belong in the asynchronous
+`Admission.decide`, which is given its deadline.
 
 ### Carriers from an HTTP server
 
@@ -880,8 +911,13 @@ and returns a `ZmuxFuture<SpliceResult>`. Prepare the outbound preamble
 first, copying or adjusting application TLVs and PIPE_CARRIER as appropriate.
 After transfer, let the relay own stream I/O and release both streams.
 
-Each direction waits for downstream capacity and its optional limiter before
-taking a chunk. It holds at most one chunk (64 KiB by default), forwards its
+Each direction waits for downstream capacity, and with a limiter waits until
+its source is readable without consuming anything, then acquires `(1, k)` with
+k the bytes readable (at most the chunk size), reads at most the grant without
+blocking, forwards it and refunds the unused rest; an idle source holds no
+grant. `Zmux.splicePackets` acquires `(n, n)` for each whole capsule (holding
+only its few header bytes while it waits) and polices each datagram it
+forwards with `tryAcquire(n, n)`, dropping and counting it on 0. It holds at most one chunk (64 KiB by default), forwards its
 buffer ownership, and preserves independent FIN, RESET and STOP behavior.
 Reliable reset tails keep their error code and boundary; a plain QMux peer
 receives RESET_STREAM after the forwarded tail has reached the carrier.
@@ -898,7 +934,7 @@ limiter completes the future exceptionally with a `CallbackFailedException`.
 
 Stream datagrams preserve context IDs and use the sessions' existing bounded
 queues. They remain eligible after a reliable half-close until the association
-ends. A direction limiter's whole-payload rejection is counted as a drop;
+ends. A direction limiter's whole-payload rejection (`tryAcquire(n, n)` returning 0) is counted as a drop;
 accepted datagram bytes count local queue admission, not peer delivery. Shared
 limiters must safely support concurrent byte and datagram calls. Helper work uses
 virtual threads outside the owner loops, while the existing core remains the

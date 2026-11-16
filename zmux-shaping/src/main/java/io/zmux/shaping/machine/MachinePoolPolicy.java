@@ -31,7 +31,6 @@ import java.util.Set;
  * invalid, and the pool keeps its own behaviour. A decision does not block.
  */
 public final class MachinePoolPolicy implements PoolPolicy {
-    private static final long SECOND_MICROS = 1_000_000;
 
     /** A member as the metrics see it; times in microseconds, sizes unsigned. */
     record Metrics(long id, long age, long idle, long pipes, long bytesSent, long bytesReceived) {}
@@ -63,6 +62,14 @@ public final class MachinePoolPolicy implements PoolPolicy {
 
     /** The members of a {@code pool} object, checked; every value is one place a number is used. */
     record Spec(Value count, List<Value> dialAfter, long dialJitter, List<Rule> rules, Value probeInterval, Long probeJitter) {
+        /** Numbers the shared values in drawing order, as a {@link Definition} does: their place in the policy's array. */
+        Spec {
+            dialAfter = List.copyOf(dialAfter);
+            rules = List.copyOf(rules);
+            int n = 0;
+            for (Value v : sites(count, dialAfter, rules, probeInterval)) if (v.scope == Scope.SHARED) v.slot = n++;
+        }
+
         private static final Set<String> FIELDS = Set.of("count", "dial_after", "dial_jitter", "retire", "probe_interval", "probe_jitter");
 
         static Spec read(Object raw, DefinitionJson.Tables tables) throws DefinitionException {
@@ -107,7 +114,9 @@ public final class MachinePoolPolicy implements PoolPolicy {
         }
 
         /** The shared values in the order they are drawn. */
-        List<Value> sites() {
+        List<Value> sites() { return sites(count, dialAfter, rules, probeInterval); }
+
+        private static List<Value> sites(Value count, List<Value> dialAfter, List<Rule> rules, Value probeInterval) {
             List<Value> out = new ArrayList<>();
             if (count != null) out.add(count);
             out.addAll(dialAfter);
@@ -115,13 +124,18 @@ public final class MachinePoolPolicy implements PoolPolicy {
             if (probeInterval != null) out.add(probeInterval);
             return out;
         }
+
+        int sharedSlots() {
+            int n = 0;
+            for (Value v : sites()) if (v.scope == Scope.SHARED) n++;
+            return n;
+        }
     }
 
     private final Spec spec;
     private final Sampler sampler;
-    /** Shared values, by the value's place. */
-    @SuppressWarnings({"IdentityHashMapUsage", "ValueClassIdentity"}) // keys are told apart by identity: equal values of different declarations are distinct; the Long values are not compared
-    private final Map<Value, Long> shared = new java.util.IdentityHashMap<>();
+    /** Shared values, by their slot (as {@link Machines} keeps a definition's). */
+    private final long[] shared;
     /** Per member, by rule: the word of its jitter and its kept threshold. */
     private final HashMap<Long, MemberState> members = new HashMap<>();
     private boolean waiting;
@@ -144,13 +158,14 @@ public final class MachinePoolPolicy implements PoolPolicy {
     MachinePoolPolicy(Spec spec, Sampler compile, Sampler sampler) {
         this.spec = spec;
         this.sampler = sampler;
-        for (Value v : spec.sites()) if (v.scope == Scope.SHARED) shared.put(v, compile.draw(v.segments));
+        shared = new long[spec.sharedSlots()];
+        for (Value v : spec.sites()) if (v.scope == Scope.SHARED) shared[v.slot] = compile.draw(v.segments);
     }
 
     /** The shared values in the order they were drawn. */
     List<Long> sharedInOrder() {
         List<Long> out = new ArrayList<>();
-        for (Value v : spec.sites()) if (v.scope == Scope.SHARED) out.add(shared.get(v));
+        for (Value v : spec.sites()) if (v.scope == Scope.SHARED) out.add(shared[v.slot]);
         return out;
     }
 
@@ -168,7 +183,7 @@ public final class MachinePoolPolicy implements PoolPolicy {
     }
 
     private long val(Value v) {
-        if (v.scope == Scope.SHARED) return shared.get(v);
+        if (v.scope == Scope.SHARED) return shared[v.slot];
         return sampler.draw(v.segments);
     }
 
@@ -182,9 +197,6 @@ public final class MachinePoolPolicy implements PoolPolicy {
             ms.add(new Metrics(id, micros(m.age()), micros(m.idle()), m.pipes(), m.bytesSent(), m.bytesReceived()));
         }
         Result r = decide(view.failures(), view.sinceLastDial() == null ? null : micros(view.sinceLastDial()), ms);
-        if (r.probeInterval() != null && r.probeInterval() != 0 && r.probeInterval() < SECOND_MICROS) {
-            throw new IllegalArgumentException("pool probe_interval " + r.probeInterval() + " us outside 0 and [1 s, 10^15 us]");
-        }
         Decision d = connections ? Decision.KEEP.withRetireConnections(new LinkedHashSet<>(r.retire()))
                 : Decision.KEEP.withRetirePipes(r.retire().stream().map(PipeId::of).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
         if (r.count() != null) d = d.withCount((int) Math.min(r.count(), Integer.MAX_VALUE));
@@ -193,6 +205,10 @@ public final class MachinePoolPolicy implements PoolPolicy {
         if (r.probeInterval() != null || r.probeJitter() != null) {
             PipeLiveness.Builder l = PipeLiveness.builder();
             if (r.probeInterval() != null) {
+                // Not checked when the definition compiles: the shaping spec has the
+                // executor yield the drawn value as it is and the pool reject an interval in (0, 1 s) as an invalid
+                // decision, kept as KEEP and reported (shared vector pool_policy "probe-below-one-second-is-output").
+                // PipeLiveness's check is that one rejection: it throws, and the pool keeps.
                 if (r.probeInterval() == 0) l.noProbeInterval(); else l.probeInterval(Duration.ofNanos(r.probeInterval() * 1000));
             }
             if (r.probeJitter() != null) l.probeJitter(r.probeJitter() / 1e6);

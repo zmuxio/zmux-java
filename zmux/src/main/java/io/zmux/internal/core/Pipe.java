@@ -47,6 +47,17 @@ final class Pipe {
         this.in = in;
         this.out = out;
         this.mp = mp;
+        shareRtt();
+    }
+
+    /**
+     * One RTT estimator per pipe: an attachment and the outbound direction share it. A pipe
+     * attached once it had samples keeps them; otherwise the attachment's initial estimate stands.
+     */
+    private void shareRtt() {
+        if (mp == null || out == null) return;
+        if (out.snd.rtt().has()) mp.useRtt(out.snd.rtt());
+        else out.snd.useRtt(mp.rtt());
     }
 
     InDir in() {
@@ -96,6 +107,7 @@ final class Pipe {
     void attach(Attach a) {
         if (mp != null) throw new IllegalStateException("pipe " + id + " already attached");
         mp = a;
+        shareRtt();
     }
 
     static final class InDir {

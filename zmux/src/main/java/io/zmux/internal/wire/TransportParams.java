@@ -145,9 +145,6 @@ public final class TransportParams {
             int bit = bitOf(id);
             if (bit == 0) {
                 if (unknown == null) unknown = new long[8];
-                for (int k = 0; k < unknownCount; k++) {
-                    if (unknown[k] == id) throw WireException.param("duplicate parameter");
-                }
                 if (unknownCount == unknown.length) unknown = Arrays.copyOf(unknown, unknownCount * 2);
                 unknown[unknownCount++] = id;
                 continue;
@@ -155,6 +152,13 @@ public final class TransportParams {
             if ((p.present & bit) != 0) throw WireException.param("duplicate parameter");
             p.present |= bit;
             p.decodeOne(id, b, vp, (int) vl);
+        }
+        // Unknown identifiers come in any order: one sort, then neighbours (O(n log n), no quadratic scan).
+        if (unknownCount > 1) {
+            Arrays.sort(unknown, 0, unknownCount);
+            for (int k = 1; k < unknownCount; k++) {
+                if (unknown[k] == unknown[k - 1]) throw WireException.param("duplicate parameter");
+            }
         }
         p.validate();
         return p;

@@ -15,7 +15,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class BodyCarrierLeakTest {
-    private static BodyCarrier carrier(EmbeddedChannel ch) {
+    private static BodyCarrier carrier(io.netty.channel.Channel ch) {
         return new BodyCarrier(ch, Framing.BYTE_STREAM, true, true, new BodyCarrier.Out() {
             @Override public Object content(ByteBuf data) { return data; }
             @Override public Object end() { return null; }
@@ -38,7 +38,6 @@ class BodyCarrierLeakTest {
         // A late start sees the error only.
         List<Throwable> errors = new ArrayList<>();
         r.start(new PipeReader.Sink() {
-            @Override public void onData(java.nio.ByteBuffer data, Runnable release) { throw new AssertionError("data after loss"); }
             @Override public void onChunk(Chunk chunk, Runnable consumed) { throw new AssertionError("data after loss"); }
             @Override public void onEnd() { throw new AssertionError("end after loss"); }
             @Override public void onError(Throwable t) { errors.add(t); }
@@ -47,5 +46,93 @@ class BodyCarrierLeakTest {
         assertTrue(errors.get(0) instanceof ClosedChannelException);
         r.close();
         ch.finishAndReleaseAll();
+    }
+
+    /**
+     * The whole body arrived (its end too) before zmux started the reader, then the carrier was
+     * lost: the queue goes at the loss, and a late reader sees the loss.
+     */
+    @Test void endedThenLostBeforeReaderStartReleasesQueue() {
+        EmbeddedChannel ch = new EmbeddedChannel();
+        BodyCarrier c = carrier(ch);
+        PipeReader r = c.reader();
+        ByteBuf a = Unpooled.buffer().writeBytes(new byte[] {1, 2, 3});
+        ByteBuf b = Unpooled.buffer().writeBytes(new byte[] {4});
+        c.in(a);
+        c.in(b);
+        c.inEnd();
+        assertEquals(1, a.refCnt());
+        c.lost(new ClosedChannelException());
+        assertEquals(0, a.refCnt());
+        assertEquals(0, b.refCnt());
+        LoopShutdownTest.ErrorSink sink = new LoopShutdownTest.ErrorSink();
+        r.start(sink);
+        assertEquals(1, sink.errors.size());
+        assertTrue(sink.errors.getFirst() instanceof ClosedChannelException);
+        r.close();
+        ch.finishAndReleaseAll();
+    }
+
+    /** A reader that is taking a complete body keeps it when the carrier is lost meanwhile: the rest and the end still arrive. */
+    @Test void endedThenLostWhileReadingDeliversTheRest() {
+        EmbeddedChannel ch = new EmbeddedChannel();
+        BodyCarrier c = carrier(ch);
+        List<Chunk> got = new ArrayList<>();
+        List<String> ends = new ArrayList<>();
+        List<Runnable> consumed = new ArrayList<>();
+        c.reader().start(new PipeReader.Sink() {
+            @Override public void onChunk(Chunk chunk, Runnable c) { got.add(chunk); consumed.add(c); }
+            @Override public void onEnd() { ends.add("end"); }
+            @Override public void onError(Throwable t) { ends.add("error"); }
+        });
+        // Over the receive memory: the second piece waits for the first to be consumed.
+        ByteBuf a = Unpooled.buffer().writeBytes(new byte[BodyCarrier.RECEIVE_MEMORY]);
+        ByteBuf b = Unpooled.buffer().writeBytes(new byte[] {4});
+        c.in(a);
+        c.in(b);
+        c.inEnd();
+        c.lost(new ClosedChannelException());
+        assertEquals(1, got.size());
+        assertEquals(1, b.refCnt(), "the rest of a complete body stays for the reader");
+        got.getFirst().close();
+        consumed.getFirst().run();
+        assertEquals(2, got.size());
+        assertEquals(List.of("end"), ends);
+        got.get(1).close();
+        assertEquals(0, a.refCnt());
+        assertEquals(0, b.refCnt());
+        ch.finishAndReleaseAll();
+    }
+
+    /**
+     * The loop of a carrier with queued input shuts down: closing its channel releases the
+     * queue, and zmux's later calls fail what they brought at once.
+     */
+    @Test void loopShutDownReleasesQueueAndFailsCalls() throws Exception {
+        var group = new io.netty.channel.MultiThreadIoEventLoopGroup(1, io.netty.channel.nio.NioIoHandler.newFactory());
+        try {
+            var server = new io.netty.bootstrap.ServerBootstrap().group(group).channel(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+                    .childHandler(new io.netty.channel.ChannelInboundHandlerAdapter())
+                    .bind(java.net.InetAddress.getLoopbackAddress(), 0).sync().channel();
+            BodyCarrier[] carrier = new BodyCarrier[1];
+            var ch = new io.netty.bootstrap.Bootstrap().group(group).channel(io.netty.channel.socket.nio.NioSocketChannel.class)
+                    .handler(new io.netty.channel.ChannelInboundHandlerAdapter() {
+                        @Override public void channelInactive(io.netty.channel.ChannelHandlerContext ctx) {
+                            carrier[0].lost(new ClosedChannelException()); // as the router does
+                        }
+                    })
+                    .connect(server.localAddress()).sync().channel();
+            ByteBuf data = Unpooled.directBuffer().writeBytes(new byte[] {1, 2, 3});
+            ch.eventLoop().submit(() -> {
+                carrier[0] = carrier(ch);
+                carrier[0].in(data);
+            }).sync();
+            assertEquals(1, data.refCnt(), "queued for a reader that has not started");
+            assertTrue(group.shutdownGracefully(0, 0, java.util.concurrent.TimeUnit.SECONDS).await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(0, data.refCnt(), "the loop closed the channel, and its loss released the queue");
+            LoopShutdownTest.assertCallsFailAtOnce(new io.zmux.carrier.PipeIo(carrier[0].reader(), carrier[0].writer(), Framing.BYTE_STREAM, "test", null));
+        } finally {
+            group.shutdownGracefully(0, 0, java.util.concurrent.TimeUnit.SECONDS);
+        }
     }
 }

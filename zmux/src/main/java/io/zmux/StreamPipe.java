@@ -51,7 +51,6 @@ final class StreamPipe {
                 PipeIo io = lane.io();
                 // The reverse direction must end gracefully, never STOP_SENDING/RESET.
                 io.reader().start(new PipeReader.Sink() {
-                    @Override public void onData(ByteBuffer ignored, Runnable release) { release.run(); }
                     @Override public void onChunk(Chunk chunk, Runnable consumed) { chunk.close(); consumed.run(); }
                     @Override public void onEnd() {}
                     @Override public void onError(Throwable ignored) {}

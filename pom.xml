@@ -48,9 +48,11 @@
 
     <modules>
         <module>zmux</module>
+        <module>zmux-netty-test</module>
         <module>zmux-quic</module>
         <module>zmux-shaping</module>
         <module>zmux-http</module>
+        <module>zmux-bench</module>
     </modules>
 
     <properties>
@@ -112,7 +114,7 @@
                  off are listed below with their reasons. -->
             <id>errorprone</id>
             <properties>
-                <errorprone.version>2.51.0</errorprone.version>
+                <errorprone.version>2.52.0</errorprone.version>
                 <!--
                     Checks turned off for all sources.
                     Deliberate design:

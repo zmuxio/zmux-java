@@ -16,6 +16,8 @@ import java.util.concurrent.locks.LockSupport;
  * {@link PipePool.Dial#open} is still executing. Whatever that attempt then creates (a joined
  * pipe) is released as soon as it returns. A dial that ignores interruption
  * therefore delays only its own cleanup, never the run, its completion or {@link #close()}.
+ * A dial that fails with {@link CarrierClientClosedException} ends the run, with it as the cause:
+ * nothing can be dialled through that client any more.
  */
 public final class PipeMaintenance implements AutoCloseable {
     /** The outcome of a run: its counts of joins, rotations and failures, the pipes it retained, and the failure that ended it (null when none did). */
@@ -308,8 +310,8 @@ public final class PipeMaintenance implements AutoCloseable {
             d = PoolPolicy.Decision.KEEP;
         }
         target = d.count().orElse(policy.count());
-        decidedAt = now; recheck = d.recheckDelay().map(ZmuxConfig::nanos).orElse(0L);
-        dialAfter = d.dialAfter().isEmpty() ? -1 : Math.min(PipePool.nanos(d.dialAfter().get(), true), policy.backoff().max().toNanos());
+        decidedAt = now; recheck = d.recheckDelay() == null ? 0 : ZmuxConfig.nanos(d.recheckDelay());
+        dialAfter = d.dialAfter() == null ? -1 : Math.min(PipePool.nanos(d.dialAfter(), true), policy.backoff().max().toNanos());
         dialOptions = policy.options().withLiveness(d.liveness());
         for (Member m : members) if (d.retirePipes().contains(m.pipeId())) m.retire = true;
         boolean changed = false;
@@ -365,25 +367,43 @@ public final class PipeMaintenance implements AutoCloseable {
         // The attempt's creation is settled once both the attempt has returned and the owner has
         // decided; whichever comes last runs it, so the owner never waits for a dial that ignores
         // interruption.
-        attemptDone.thenCombine(verdict, (ignored, ok) -> ok).thenAccept(ok -> {
-            PipePool.Attempt scope = creation.get(); if (scope != null) scope.finish(ok);
+        attemptDone.thenCombine(verdict, (ignored, ok) -> ok).whenComplete((ok, error) -> {
+            PipePool.Attempt scope = creation.get(); if (scope != null && ok != null) scope.finish(ok);
         });
-        Thread attempt = Thread.ofVirtual().name("zmux-pipe-dial").start(() -> {
-            List<ZmuxPipe> p = null; Throwable failure = null;
-            try {
-                if (cancellation.isCancelled()) throw new InterruptedException("dial cancelled");
-                // A replacement retires its original only once the peer attached it (takesOver), and a
-                // redial must not wait for an acknowledgement only the direction it restores could carry.
-                var scope = new PipePool.Attempt(session, dialOptions.toBuilder().returnOnReply(true).build(), cancellation, kind);
-                creation.set(scope);
-                p = Objects.requireNonNull(policy.join().open(scope), "join returned null");
-                if (!scope.adopt(p)) { failure = new CallbackFailedException("a dial must return the pipes created by its Attempt"); p = null; }
-            } catch (Throwable error) { failure = error; }
-            // Returned before the owner sees the outcome: a rejected creation is then reclaimed
-            // by the owner's verdict itself, before the run reports completion.
+        try {
+            while (!session.dialPermit.tryAcquire(policy.inspectionInterval().toNanos(), TimeUnit.NANOSECONDS)) check();
+        } catch (InterruptedException stop) {
+            check();
+            throw new InterruptedIOException("pipe dial interrupted");
+        }
+        // The session's next dial may start once the owner decided: an abandoned attempt's pipes are
+        // released whenever it returns, so a dial that ignores interruption holds the permit no longer
+        // than the attempt timeout.
+        verdict.whenComplete((ok, error) -> session.dialPermit.release());
+        Thread attempt;
+        try {
+            attempt = Thread.ofVirtual().name("zmux-pipe-dial").unstarted(() -> {
+                List<ZmuxPipe> p = null; Throwable failure = null;
+                try {
+                    if (cancellation.isCancelled()) throw new InterruptedException("dial cancelled");
+                    // A replacement retires its original only once the peer attached it (takesOver), and a
+                    // redial must not wait for an acknowledgement only the direction it restores could carry.
+                    var scope = new PipePool.Attempt(session, dialOptions.toBuilder().returnOnReply(true).build(), cancellation, kind);
+                    creation.set(scope);
+                    p = Objects.requireNonNull(policy.join().open(scope), "join returned null");
+                    if (!scope.adopt(p)) { failure = new CallbackFailedException("a dial must return the pipes created by its Attempt"); p = null; }
+                } catch (Throwable error) { failure = error; }
+                // Returned before the owner sees the outcome: a rejected creation is then reclaimed
+                // by the owner's verdict itself, before the run reports completion.
+                attemptDone.complete(null);
+                if (failure == null) outcome.complete(p); else outcome.completeExceptionally(failure);
+                });
+            attempt.start();
+        } catch (RuntimeException | Error failure) {
             attemptDone.complete(null);
-            if (failure == null) outcome.complete(p); else outcome.completeExceptionally(failure);
-        });
+            verdict.complete(false);
+            throw failure;
+        }
         List<ZmuxPipe> pipe;
         try {
             pipe = awaitDial(outcome, rotating);
@@ -481,7 +501,13 @@ public final class PipeMaintenance implements AutoCloseable {
                             if (mode != null) mode.established(session, kind);
                             if (once) break;
                         }
-                        catch (IOException error) { check(); dialFailures++; if (once) { failures++; throw error; } failed(); }
+                        catch (IOException error) {
+                            check(); dialFailures++;
+                            CarrierClientClosedException closed = Errors.clientClosed(error);
+                            if (closed != null) { failures++; throw closed; } // nothing to dial through any more
+                            if (once) { failures++; throw error; }
+                            failed();
+                        }
                         continue;
                     }
                     if (canRotate()) for (Member m : members) {
@@ -497,7 +523,12 @@ public final class PipeMaintenance implements AutoCloseable {
                                 publish(); succeeded();
                             }
                             catch (RotationPreempted yielded) { retryDelay = 0; }
-                            catch (IOException error) { check(); dialFailures++; failed(); }
+                            catch (IOException error) {
+                                check(); dialFailures++;
+                                CarrierClientClosedException closed = Errors.clientClosed(error);
+                                if (closed != null) { failures++; throw closed; }
+                                failed();
+                            }
                             break; // At most one replacement is dialled in this pass.
                         }
                     }

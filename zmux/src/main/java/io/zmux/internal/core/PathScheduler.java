@@ -502,7 +502,7 @@ public final class PathScheduler {
     }
 
     boolean allSampled(Tiers.Gate g) {
-        for (Pipe q : g.pipes) if (!q.mp().rtt.has()) return false;
+        for (Pipe q : g.pipes) if (!q.mp().rtt().has()) return false;
         return true;
     }
 
@@ -688,7 +688,7 @@ public final class PathScheduler {
                 if (ti >= 0 && ti <= g.last()) sat = g.tiers.get(ti).sat();
             }
             long inFlight = p.out().snd.so() - Math.min(p.out().snd.so(), p.out().snd.cum());
-            req.pipes.add(new PickPipe(p.id, Attach.OUT_STATES[a.health.out()], a.rtt.smoothed(), a.rtt.rttvar(), (long) metrics.rateOf(p),
+            req.pipes.add(new PickPipe(p.id, Attach.OUT_STATES[a.health.out()], a.rtt().smoothed(), a.rtt().rttvar(), (long) metrics.rateOf(p),
                     0, inFlight, a.effPrio(), a.tier.weight(), metrics.open(p), a.effStandby(), sat, a.prob.probOn(), eligible,
                     p.shape() != null && p.shape().active(), p.shape() != null && p.shape().active() ? p.shape().weight() : 0));
         }

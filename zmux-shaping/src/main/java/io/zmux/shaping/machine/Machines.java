@@ -55,7 +55,8 @@ public final class Machines {
     static final class Compiled {
         final Definition d;
         final long[] shared;
-        final Set<Capability> caps = EnumSet.of(Capability.PLAN);
+        /** Read only: every shaper of the definition returns it. */
+        final Set<Capability> caps;
         private final MachineOptions o;
 
         Compiled(Definition d, Sampler compile, MachineOptions o) {
@@ -63,6 +64,7 @@ public final class Machines {
             this.o = o;
             shared = new long[d.sharedSlots];
             for (Value v : d.sites()) if (v.scope == Scope.SHARED) shared[v.slot] = compile.draw(v.segments);
+            Set<Capability> caps = EnumSet.of(Capability.PLAN);
             for (Machine m : d.machines) {
                 for (State st : m.states()) {
                     for (Transition t : st.next()) {
@@ -75,6 +77,7 @@ public final class Machines {
                     }
                 }
             }
+            this.caps = java.util.Collections.unmodifiableSet(caps);
         }
 
         MachineShaper newShaper() { return new MachineShaper(this, Sampler.of(o)); }

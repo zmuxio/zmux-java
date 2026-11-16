@@ -1,0 +1,16 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.1.6</version></parent>
+ <artifactId>zmux-netty-test</artifactId><name>zmux-netty-test</name>
+ <description>The Netty adapters' shared test support (the leak check); a test dependency only, never published.</description>
+ <properties>
+  <maven.deploy.skip>true</maven.deploy.skip>
+  <maven.javadoc.skip>true</maven.javadoc.skip>
+  <maven.source.skip>true</maven.source.skip>
+ </properties>
+ <dependencies>
+  <dependency><groupId>io.netty</groupId><artifactId>netty-buffer</artifactId><version>${netty.version}</version></dependency>
+  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-api</artifactId><version>${junit.version}</version></dependency>
+ </dependencies>
+</project>

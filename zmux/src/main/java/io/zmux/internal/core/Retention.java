@@ -301,7 +301,7 @@ final class Retention {
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
             if (a == null || p.out() == null || a.handshaking() || !a.liveOut()) continue;
-            sum += p.out().snd.re().value() * (a.rtt.smoothed() + pd) / 1e9;
+            sum += p.out().snd.re().value() * (a.rtt().smoothed() + pd) / 1e9;
         }
         long b = (long) (4 * sum);
         return Math.clamp(b, 1 << 20, Math.max(port.sendBufferLimit(), 1 << 20));
@@ -511,7 +511,7 @@ final class Retention {
         Attach a = p.mp(), fa = f.mp();
         // Re-send once the original is older than both the fast path's ack round trip and the
         // original path's loss horizon (its PTO, capped at twice the frame's own deadline).
-        long fastAck = Time.mul(fa.rtt.smoothed(), 2) + ack.peerDelay();
+        long fastAck = Time.mul(fa.rtt().smoothed(), 2) + ack.peerDelay();
         long horizon = Math.min(metrics.pto(a), Time.mul(e.due, 2));
         long thr = Math.max(fastAck, horizon);
         if (Time.sub(port.now(), e.sent) <= thr) return true;

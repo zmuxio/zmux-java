@@ -340,7 +340,8 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     /**
      * Waits for the outcome until deadline (System.nanoTime based) without cancelling: an
      * interruption neither ends the wait nor is lost (the flag is set again on return). Whether
-     * the outcome was decided. Never on a loop or completion thread.
+     * the outcome was decided. Never on a loop thread; on the completion thread only for an
+     * outcome that does not need that thread.
      */
     public boolean awaitUninterruptibly(long deadline) {
         driver.checkBlocking();
@@ -363,7 +364,8 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
      * Waits for the outcome until deadline (System.nanoTime based; Long.MAX_VALUE: none).
      * On timeout or interruption the operation is cancelled; when that cancellation wins the
      * result is SocketTimeoutException or InterruptedIOException (the interrupt flag stays
-     * set), otherwise the decided outcome. Never on a loop or completion thread.
+     * set), otherwise the decided outcome. Never on a loop thread; on the completion thread only for
+     * an outcome that does not need that thread.
      */
     public Object await(long deadline) {
         driver.checkBlocking();
@@ -374,8 +376,10 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
                 if (deadline == Long.MAX_VALUE) { LockSupport.park(this); continue; }
                 long left = deadline - System.nanoTime();
                 if (left > 0) { LockSupport.parkNanos(this, left); continue; }
-                // Expired before the loop attempted it: the loop judges the deadline after its first attempt.
-                if ((int) STATE.getVolatile(this) == QUEUED) { LockSupport.parkNanos(this, 1_000_000); continue; }
+                // Expired before the loop attempted it. An operation that carries this deadline is
+                // judged by the loop after its first attempt (a mailbox operation) or by its armed
+                // lane timer, and settling it wakes this thread; one that does not is cancelled now.
+                if ((int) STATE.getVolatile(this) == QUEUED && this.deadline == deadline) { LockSupport.park(this); continue; }
             }
             // Interrupted or expired: give up unless the outcome won the race.
             if (cancel()) {

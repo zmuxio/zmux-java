@@ -11,7 +11,7 @@ final class Errors {
     private Errors() {}
 
     /**
-     * Clears the interrupt a library-owned worker (a splice or pool thread) received as an
+     * Clears the interrupt a library-owned worker (a pool thread) received as an
      * internal wake-up. Its cause lives in the worker's shared state, so the flag carries
      * nothing to restore, and clearing it lets the teardown that follows block normally.
      */
@@ -96,5 +96,11 @@ final class Errors {
     static Object check(Object r) throws IOException {
         if (r instanceof Throwable) throw outcome(r, 0);
         return r;
+    }
+
+    /** The {@link CarrierClientClosedException} behind a failed dial, null when none is: a dial loop then stops. */
+    static CarrierClientClosedException clientClosed(Throwable failure) {
+        for (Throwable t = failure; t != null; t = t.getCause()) if (t instanceof CarrierClientClosedException c) return c;
+        return null;
     }
 }

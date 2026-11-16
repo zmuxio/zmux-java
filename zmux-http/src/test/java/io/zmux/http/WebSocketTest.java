@@ -140,7 +140,7 @@ class WebSocketTest {
         Throwable[] err = new Throwable[1];
         boolean[] end = new boolean[1];
         c.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { got.add(StandardCharsets.US_ASCII.decode(data).toString()); release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(StandardCharsets.US_ASCII.decode(data).toString()); release.run(); }
             @Override public void onEnd() { end[0] = true; }
             @Override public void onError(Throwable cause) { err[0] = cause; }
         });
@@ -164,7 +164,7 @@ class WebSocketTest {
         BodyCarrier c2 = new BodyCarrier(ch2, Framing.MESSAGES, true, true, WebSocketFrames.OUT, () -> {}, x -> null);
         WebSocketFrames f2 = new WebSocketFrames(c2);
         c2.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); }
             @Override public void onEnd() { }
             @Override public void onError(Throwable cause) { err[0] = cause; }
         });

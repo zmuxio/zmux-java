@@ -118,7 +118,7 @@ public abstract class SessionHost implements Executor {
     }
 
     /** Registers work to run on the host when it closes (sessions fail themselves). */
-    final void onShutdown(Runnable r) {
+    public final void onShutdown(Runnable r) {
         shutdownHooks.add(r);
     }
 

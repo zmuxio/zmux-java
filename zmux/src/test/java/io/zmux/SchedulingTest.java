@@ -90,7 +90,10 @@ class SchedulingTest {
     @Test void invalidQualitySettingsAreRejectedAtTheBoundary() {
         assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(-1, 0));
         assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, 0.5));
-        assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 1, Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, -1));
+        assertEquals(1.0, new CapacityFloor(1, 1).recoveryRatio()); // no hysteresis
+        assertEquals(1.0, new QualityBand(Duration.ZERO, 1, Duration.ZERO).rateRatio()); // every rate change reports
+        assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 0.5, Duration.ZERO));
         assertThrows(IllegalArgumentException.class, () -> new Scheduler.Answer(0, -1, false));
     }
 }

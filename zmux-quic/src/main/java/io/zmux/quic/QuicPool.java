@@ -68,7 +68,7 @@ public final class QuicPool implements AutoCloseable {
     }
     private boolean closed;
     /** Asks the policy again at the latest decision's recheck; null: none pending. */
-    private io.netty.util.concurrent.ScheduledFuture<?> recheck;
+    private java.util.concurrent.ScheduledFuture<?> recheck;
     /** Counts the rechecks scheduled or dropped; a firing recheck is the pending one only when it matches. */
     private long recheckGeneration;
 
@@ -110,7 +110,7 @@ public final class QuicPool implements AutoCloseable {
         int active, pending;
         long total;
         boolean retiring;
-        volatile io.netty.util.concurrent.ScheduledFuture<?> expiry;
+        volatile java.util.concurrent.ScheduledFuture<?> expiry;
         Entry(ConnectionCarrier carrier, long fate) { this.carrier = carrier; this.fate = fate; }
     }
     private final class Request {
@@ -267,10 +267,9 @@ public final class QuicPool implements AutoCloseable {
             if (!adopted) { carrier.dispose(); shared.ready.completeExceptionally(new CancellationException()); return; }
             carrier.channel().closeFuture().addListener(ignored -> retire(entry));
             if (maxAge > 0) {
-                try {
-                    entry.expiry = ChannelLoops.schedule(carrier.channel(), () -> retire(entry), maxAge, TimeUnit.NANOSECONDS);
-                    if (entry.disposed.get()) entry.expiry.cancel(false);
-                } catch (RejectedExecutionException ended) { retire(entry); }
+                // The close future retires the entry too, so the timer is never its only end.
+                entry.expiry = io.zmux.internal.spi.Loops.schedule(carrier.channel().eventLoop(), () -> retire(entry), maxAge, TimeUnit.NANOSECONDS, () -> retire(entry));
+                if (entry.disposed.get()) io.zmux.internal.spi.Loops.cancel(entry.expiry);
             }
             shared.ready.complete(entry);
             maintain();
@@ -313,22 +312,26 @@ public final class QuicPool implements AutoCloseable {
             decision = policy.decide(new PoolPolicy.View(view, failures, dialed ? Duration.ofNanos(now - lastDial) : null));
             if (decision == null) decision = PoolPolicy.Decision.KEEP;
         } catch (RuntimeException error) { decision = PoolPolicy.Decision.KEEP; }
-        recheckLocked(decision.recheckDelay().map(d -> { try { return d.toNanos(); } catch (ArithmeticException tooLong) { return Long.MAX_VALUE; } }).orElse(0L));
+        recheckLocked(nanos(decision.recheckDelay()));
         int open = view.size();
         for (Entry entry : entries)
             if (!entry.retiring && decision.retireConnections().contains(entry.fate)) { entry.retiring = true; open--; replacements++; }
-        long after;
-        try { after = decision.dialAfter().map(Duration::toNanos).orElse(0L); } catch (ArithmeticException tooLong) { after = Long.MAX_VALUE; }
+        long after = nanos(decision.dialAfter());
         return (open < decision.count().orElse(0) || replacements > 0) && (!dialed || now - lastDial >= after);
     }
+    /** d in nanoseconds, saturated; null: 0. */
+    private static long nanos(Duration d) {
+        if (d == null) return 0;
+        try { return d.toNanos(); } catch (ArithmeticException tooLong) { return Long.MAX_VALUE; }
+    }
+
     /** Replaces the pending recheck by one after n nanoseconds (0: none). */
     private void recheckLocked(long n) {
         if (recheck != null) recheck.cancel(false);
         recheck = null;
         long generation = ++recheckGeneration;
         if (n <= 0) return;
-        try { recheck = client.nativeLoop().schedule(() -> rechecked(generation), n, TimeUnit.NANOSECONDS); }
-        catch (RejectedExecutionException ended) { /* The client is closed. */ }
+        recheck = io.zmux.internal.spi.Loops.schedule(client.nativeLoop(), () -> rechecked(generation), n, TimeUnit.NANOSECONDS, () -> {}); // refused: the client is closed
     }
     /** A recheck fired; one replaced (or dropped) after it started to fire leaves the pending one alone. */
     private void rechecked(long generation) {

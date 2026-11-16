@@ -22,12 +22,12 @@ final class PathMetrics {
     /** OWD_p. */
     long owd(Pipe p) {
         Attach a = p.mp();
-        if (!a.rtt.has()) return a.rtt.smoothed() / 2;
-        long m = a.rtt.min();
+        if (!a.rtt().has()) return a.rtt().smoothed() / 2;
+        long m = a.rtt().min();
         for (Pipe q : pipes.all()) {
-            if (q.mp() != null && q.out() != null && q.mp().liveOut() && q.mp().rtt.has() && q.mp().rtt.min() < m) m = q.mp().rtt.min();
+            if (q.mp() != null && q.out() != null && q.mp().liveOut() && q.mp().rtt().has() && q.mp().rtt().min() < m) m = q.mp().rtt().min();
         }
-        return a.rtt.min() - m / 2;
+        return a.rtt().min() - m / 2;
     }
 
     /** Whether an outbound pipe is usable for data; probOk lets pipes in probation or revalidation count. */
@@ -39,7 +39,7 @@ final class PathMetrics {
 
     /** PTO_p (RFC 9002 6.2.1 with the peer's max_ack_delay). */
     long pto(Attach a) {
-        long d = a.rtt.smoothed() + Math.max(4 * a.rtt.rttvar(), Time.MILLISECOND);
+        long d = a.rtt().smoothed() + Math.max(4 * a.rtt().rttvar(), Time.MILLISECOND);
         return d + (ack != null ? ack.peerDelay() : 25 * Time.MILLISECOND);
     }
 

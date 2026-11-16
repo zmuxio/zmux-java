@@ -141,9 +141,9 @@ class PacketStreamTest {
 
     @Test void limiterRefusalDropsWithoutACapsule() throws Exception {
         Limiter refuse = new Limiter() {
-            @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(max); }
-            @Override public int tryReady(int max) { return 0; }
-            @Override public void charge(int n) {}
+            @Override public CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
+            @Override public long tryAcquire(long min, long max) { return 0; }
+            @Override public void refund(long n) {}
         };
         try (EventLoops loops = EventLoops.create(2);
              var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(refuse, null).build())) {
@@ -316,6 +316,49 @@ class PacketStreamTest {
         }
     }
 
+    @Test void packetSpliceAcquiresEachWholeCapsuleAndPolicesDatagrams() throws Exception {
+        try (EventLoops loops = EventLoops.create(3); var left = Pair.memory(config(loops, true)); var right = Pair.memory(config(loops, true))) {
+            ZmuxStream endpoint = left.client().openStream(HELLO); endpoint.flush();
+            ZmuxStream a = left.server().acceptStream(Duration.ofSeconds(3));
+            ZmuxStream b = right.client().openStream(HELLO); b.flush();
+            var calls = new java.util.concurrent.CopyOnWriteArrayList<long[]>();
+            var charged = new java.util.concurrent.atomic.AtomicLong();
+            Limiter limiter = new Limiter() {
+                // A burst below the larger units: a whole unit still passes on its (n, n) grant.
+                @Override public CompletionStage<Long> acquire(long min, long max) {
+                    calls.add(new long[] {min, max}); long n = Math.min(max, 1000); charged.addAndGet(n); return CompletableFuture.completedFuture(n);
+                }
+                @Override public long tryAcquire(long min, long max) { calls.add(new long[] {min, max}); charged.addAndGet(max); return max; }
+                @Override public void refund(long n) { charged.addAndGet(-n); }
+            };
+            var splice = Zmux.splicePackets(a, b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
+            var destination = PacketStream.of(right.server().acceptStream(Duration.ofSeconds(3)));
+            int[] sizes = {100, 0, 3000};
+            long expected = 0;
+            for (int i = 0; i < sizes.length; i++) {
+                ByteBuffer head = ByteBuffer.allocate(io.zmux.internal.wire.Capsule.MAX_DATAGRAM_HEADER);
+                io.zmux.internal.wire.Capsule.putDatagramHeader(head, i, sizes[i]); head.flip();
+                expected += head.remaining() + sizes[i];
+                endpoint.write(head); endpoint.write(bytes(sizes[i], i));
+            }
+            for (int i = 0; i < sizes.length; i++) {
+                var p = destination.receive(Duration.ofSeconds(3));
+                assertEquals(i, p.context()); assertEquals(bytes(sizes[i], i), ByteBuffer.wrap(p.payload()));
+            }
+            endpoint.sendDatagram(9, bytes(10, 9));
+            var d = destination.receive(Duration.ofSeconds(3));
+            assertEquals(9, d.context()); assertEquals(10, d.payload().length);
+            endpoint.finish(); destination.close();
+            var result = splice.get(5, TimeUnit.SECONDS);
+            assertEquals(expected, result.aToB().streamBytes());
+            assertEquals(10, result.aToB().datagramBytes());
+            assertEquals(List.of(104L, 3L, 3004L, 10L), calls.stream().map(c -> c[1]).toList(), "acquire per capsule, tryAcquire per datagram");
+            for (long[] c : calls) assertEquals(c[0], c[1], "acquire(n, n)");
+            assertEquals(104 + 3 + 1000 + 10, charged.get(), "grants stay with their forwarded units");
+            endpoint.close();
+        }
+    }
+
     @Test void spliceCountsDatagramDropsByCause() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var left = Pair.memory(config(loops, true)); var right = Pair.memory(config(loops, false))) {
             ZmuxStream endpoint = left.client().openStream(HELLO); endpoint.flush();
@@ -323,9 +366,9 @@ class PacketStreamTest {
             ZmuxStream b = right.client().openStream(HELLO); b.flush();
             var dropped = new AtomicInteger();
             Limiter limiter = new Limiter() {
-                @Override public CompletionStage<Integer> ready(int min, int max) { return CompletableFuture.completedFuture(max); }
-                @Override public int tryReady(int max) { return dropped.incrementAndGet() == 1 ? 0 : max; }
-                @Override public void charge(int n) {}
+                @Override public CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
+                @Override public long tryAcquire(long min, long max) { return dropped.incrementAndGet() == 1 ? 0 : max; }
+                @Override public void refund(long n) {}
             };
             var splice = Zmux.splice(a, b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
             try (var peer = right.server().acceptStream(Duration.ofSeconds(3))) {

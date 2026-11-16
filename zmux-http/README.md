@@ -90,6 +90,15 @@ bootstrap is pipe 0 only. `tls(SslContextBuilder)` sets the trust
 configuration, `http1()` or `http2()` fixes the version, and `timeout(Duration)`
 bounds a dial.
 
+`close()` fails its exchange carriers with the client's close as the cause,
+closes every connection the client opened (those of carriers in use and those
+still connecting too), and shuts down its own event loop group; it returns
+once that is done, except when called on one of the group's event loops. A client built on your
+group with `group(EventLoopGroup)` leaves the group running: close the client
+first, then shut the group down, as the example above does. When the group
+shuts down first, calls on the client's carriers fail at once and the group's
+shutdown closes their connections.
+
 Streaming, split and WebSocket requests follow redirects on the same host name
 (another path, or an upgrade from http to https), at most five hops; any other
 redirect fails the carrier with `HttpRedirectException`, a status other than

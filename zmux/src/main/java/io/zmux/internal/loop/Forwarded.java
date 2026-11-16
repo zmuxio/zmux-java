@@ -140,7 +140,7 @@ final class Forwarded implements Inbound {
         }
         AtomicBoolean once = new AtomicBoolean();
         try {
-            sink.onData(ByteBuffer.wrap(b), () -> {
+            sink.onChunk(io.zmux.Chunk.of(ByteBuffer.wrap(b)), () -> { // b is a fresh copy: no second one
                 if (once.compareAndSet(false, true) && ahead.addAndGet(-n) <= AHEAD) carrier.loop().tryExecute(this::credit);
             });
         } catch (RuntimeException e) {

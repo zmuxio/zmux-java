@@ -486,6 +486,11 @@ public final class StreamTable {
         return st.snd.q().end();
     }
 
+    /** Whether st's sending part has nothing written, not even FIN, and the stream is not opening: a flush would open it. */
+    public boolean untouched(Stream st) {
+        return st.hasSend && !st.tab.idSet && !st.tab.openWant && !st.snd.finWritten() && st.snd.q().end() == 0;
+    }
+
     /** A provisional stream that never emitted a frame is gone. */
     void unopenedGone(Stream st) {
         provisional.remove(st);
@@ -810,7 +815,7 @@ public final class StreamTable {
 
     void wakeObservers(Stream st) {
         outbox.wake(st.rcv.rsig());
-        outbox.wake(st.snd.wsig());
+        StreamSend.wakeAll(outbox, st);
         dg.wakeStream(st);
     }
 

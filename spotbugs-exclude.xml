@@ -157,10 +157,11 @@
     </Or>
   </Match>
 
-  <!-- Splice.Direction: the counters are written by the one worker of the direction and read in result() after
-       that worker has finished (the future's completion orders the read). -->
+  <!-- Splice.Direction: its plain state belongs to the splice's serial context. Callbacks from loops, completions
+       and limiters only set atomics and wake that context, whose wake counter and task queue order every hand-off;
+       the detector sees the lambdas and assumes sharing. SpliceStructureTest lists those fields: a new one fails it. -->
   <Match>
-    <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
+    <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE, AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
     <Class name="io.zmux.Splice$Direction"/>
   </Match>
 
@@ -246,24 +247,19 @@
     <Bug pattern="WOC_WRITE_ONLY_COLLECTION_FIELD, DMC_DUBIOUS_MAP_COLLECTION"/>
     <Class name="io.zmux.shaping.machine.Bundle"/>
   </Match>
+  <!-- A returned switch expression whose arms yield from blocks: javac stores the yielded value before the return,
+       and Error Prone's RefactorSwitch asks for exactly this form. -->
+  <Match>
+    <Bug pattern="USBR_UNNECESSARY_STORE_BEFORE_RETURN"/>
+    <Class name="io.zmux.Splice$Direction"/>
+    <Or><Method name="pumpStream"/><Method name="pumpDatagramsOnce"/></Or>
+  </Match>
   <Match>
     <Bug pattern="USBR_UNNECESSARY_STORE_BEFORE_RETURN"/>
     <Class name="io.zmux.internal.join.Joiner"/>
     <Method name="writeConfirm"/>
   </Match>
 
-  <!-- The splice's turn lock is handed between the two directions: a direction may release the lock the other
-       took, checks whether it holds it, and takes it with tryLock when offered a turn. -->
-  <Match>
-    <Bug pattern="CWO_CLOSED_WITHOUT_OPENED, MDM_LOCK_ISLOCKED, MDM_THREAD_FAIRNESS"/>
-    <Class name="io.zmux.Splice$Direction"/>
-  </Match>
-  <!-- The datagram relays are best effort and end with the splice; the executor's close awaits them. -->
-  <Match>
-    <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE"/>
-    <Class name="io.zmux.Splice"/>
-    <Method name="runOwned"/>
-  </Match>
 
   <!-- A bounded packet queue: each added packet wakes one reader and each taken packet one writer, all waiting for
        the same condition; end() returns early under the lock, which the detector reads as an unmatched unlock. -->
@@ -318,4 +314,16 @@
     <Method name="earliestTwo"/>
   </Match>
 
+  <!-- The test-support leak check collects garbage and sleeps on purpose: a leaked buffer is reported only once collected. -->
+  <Match>
+    <Bug pattern="DM_GC, MDM_THREAD_YIELD"/>
+    <Class name="io.zmux.nettytest.LeakCheck"/>
+    <Method name="afterAll"/>
+  </Match>
+  <!-- The benchmark tool (unpublished): seeded Random for reproducible payloads, GC and sleeps to settle heap
+       measurements and wait for pipes, a watchdog that halts a stuck run, and options main sets before any thread starts. -->
+  <Match>
+    <Bug pattern="DMI_RANDOM_USED_ONLY_ONCE, PREDICTABLE_RANDOM, MDM_THREAD_YIELD, MDM_RUNTIME_EXIT_OR_HALT, AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+    <Class name="io.zmux.bench.Benchmark"/>
+  </Match>
 </FindBugsFilter>

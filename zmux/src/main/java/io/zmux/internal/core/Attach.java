@@ -16,7 +16,13 @@ final class Attach {
     /** The direction of a join pipe from the joiner: 0 up, 1 down, 2 bidirectional. */
     final int dir;
     final long fate;
-    /** The carrier's record mode; pipe 0 keeps it in the session. */
+    /**
+     * The carrier's record mode: set by the pipe's Join handshake, and for pipe 0 copied once from the
+     * configuration ({@link CoreConfig#firstPipeMode()}), which is immutable. The two are one value, not
+     * two sources: the configuration states pipe 0's mode for the session's
+     * life (it still counts for the weakest mode after pipe 0 is gone, and answers for a single-path
+     * session with no attachment), and nothing writes pipe 0's copy later, so they cannot drift.
+     */
     private io.zmux.internal.join.Mode mode;
     /** The Join handshake is running: nothing but it on the carrier. */
     private boolean handshaking;
@@ -31,7 +37,13 @@ final class Attach {
     /** The pipe's probe interval k, 0: off, -1: the session's; its probe jitter, NaN: the session's. */
     private long probeInterval;
     private double probeJitter;
-    final RttEstimator rtt = new RttEstimator();
+    /** The RTT of the pipe's outbound direction: the same estimator as its OutDir's once the pipe has one (Pipe shares it). */
+    private RttEstimator rtt = new RttEstimator();
+
+    RttEstimator rtt() { return rtt; }
+
+    /** Takes r as the pipe's one estimator (Pipe shares it with the outbound direction). */
+    void useRtt(RttEstimator r) { rtt = r; }
 
     // The per-component state of the attachment; each part is written only by its component.
     final PathHealth.Slot health;

@@ -1,5 +1,6 @@
 package io.zmux.carrier;
 
+import io.zmux.Chunk;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
@@ -52,7 +53,9 @@ public final class PipeChannel implements ByteChannel {
     private void start() {
         if (io.reader() == null || !started.compareAndSet(false, true)) return;
         io.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { offer(new Item(data, release)); }
+            @Override public void onChunk(Chunk chunk, Runnable consumed) {
+                offer(new Item(chunk.buffer(), () -> { chunk.close(); consumed.run(); }));
+            }
             @Override public void onEnd() { offer(true); }
             @Override public void onError(Throwable cause) { offer(cause == null ? new IOException("carrier failed") : cause); }
         });
@@ -178,9 +181,9 @@ public final class PipeChannel implements ByteChannel {
                             int n = in.read(b);
                             if (n < 0) { sink.onEnd(); return; }
                             if (n == 0) continue;
-                            var released = new java.util.concurrent.CountDownLatch(1);
-                            sink.onData(b.flip(), released::countDown);
-                            released.await(); // the release is the backpressure
+                            var consumed = new java.util.concurrent.CountDownLatch(1);
+                            sink.onChunk(Chunk.of(b.flip()), consumed::countDown);
+                            consumed.await(); // the backpressure
                         }
                     } catch (Throwable e) {
                         if (in.isOpen()) sink.onError(e); else sink.onEnd();

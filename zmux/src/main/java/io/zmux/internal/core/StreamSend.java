@@ -252,7 +252,7 @@ public final class StreamSend {
     /** Bounds the part's written-but-unreleased bytes. */
     public void setSendBuffer(Stream st, long n) {
         st.snd.bufLimit = Math.max(n, 16 << 10);
-        outbox.wake(st.snd.wsig);
+        changed(st);
     }
 
     /** Watches sending state without declaring an application write blocked on buffer space. */
@@ -289,7 +289,7 @@ public final class StreamSend {
         CoreException e = writeError(st);
         if (e != null) throw e;
         st.snd.finWritten = true;
-        checkCapacity(st);
+        changed(st);
         becomeSend(st);
     }
 
@@ -356,7 +356,7 @@ public final class StreamSend {
         sp.finWritten = false;
         ctl.stream(st, ControlQueue.RESET);
         sched.ensure(st);
-        checkCapacity(st);
+        changed(st);
         port.wantWrite();
     }
 
@@ -367,7 +367,7 @@ public final class StreamSend {
         // No peer can ever open the reverse half of an identifier that was not emitted.
         if (st.hasRecv) StreamRecv.neverOpened(st);
         table.wakeObservers(st);
-        checkCapacity(st);
+        changed(st);
         ctl.remove(st);
         table.unopenedGone(st);
         long h = st.heldClass();
@@ -390,7 +390,7 @@ public final class StreamSend {
             }
         }
         startReset(st, sp.reset ? sp.resetCode : code, true);
-        outbox.wake(st.snd.wsig);
+        changed(st);
     }
 
     /** Applies MAX_STREAM_DATA; returns whether it raised the limit. */
@@ -398,9 +398,8 @@ public final class StreamSend {
         if (v <= st.snd.maxData) return false;
         if (st.unsent() > 0 && Math.max(st.snd.sent, st.snd.q.base()) >= st.snd.maxData) st.snd.creditAt = port.now();
         st.snd.maxData = v;
-        checkCapacity(st);
+        changed(st);
         sched.ensure(st);
-        outbox.wake(st.snd.wsig);
         port.wantWrite();
         return true;
     }
@@ -411,7 +410,7 @@ public final class StreamSend {
         long h = st.heldClass();
         sp.q.release(upTo);
         conn.held(h, st.heldAfter());
-        outbox.wake(st.snd.wsig);
+        changed(st);
     }
 
     /** Records a terminal sending state and releases buffers. */
@@ -424,7 +423,7 @@ public final class StreamSend {
         sp.q.drop();
         conn.held(h, st.heldAfter());
         sched.remove(st);
-        outbox.wake(st.snd.wsig);
+        changed(st);
         table.maybeDiscard(st);
     }
 
@@ -500,7 +499,7 @@ public final class StreamSend {
             sp.finSent = true;
             sp.state = Stream.SEND_DATA_SENT;
         }
-        outbox.wake(sp.wsig); // A waiting flush, also where the bytes are retained.
+        wakeAll(outbox, st); // A waiting flush, also where the bytes are retained.
         return grown;
     }
 
@@ -519,8 +518,33 @@ public final class StreamSend {
         if (port.error() != null) throw CoreException.session(port.error());
         if (port.firstHeld()) return true;
         if (st.tab.opened() && sp.sent >= Math.min(target, sp.q().end())) return true;
-        sp.wsig = sig;
+        var waits = ext(st).flushWaits;
+        if (!waits.contains(sig)) waits.add(sig);
         return false;
+    }
+
+    /** Withdraws sig's flush wait; the writer's slot and other flushes stay. */
+    public void cancelFlushWait(Stream st, Waiter sig) {
+        if (st.snd.ext != null) st.snd.ext.flushWaits.remove(sig);
+    }
+
+    /**
+     * Wakes every waiter of st's sending part: its writer (the one slot, which only the writer
+     * of the part sets) and the flushes waiting for its data to leave, which wait again if they
+     * still have to.
+     */
+    static void wakeAll(Outbox outbox, Stream st) {
+        outbox.wake(st.snd.wsig);
+        Ext x = st.snd.ext;
+        if (x == null || x.flushWaits.isEmpty()) return;
+        for (Waiter w : x.flushWaits) outbox.wake(w);
+        x.flushWaits.clear();
+    }
+
+    /** The one entry for a change of st's sending state: its waiters wake, and its capacity waiters are checked. */
+    void changed(Stream st) {
+        wakeAll(outbox, st);
+        checkCapacity(st);
     }
 
     /** Marks st blocked at its current credit; false when already marked there. */
@@ -850,6 +874,8 @@ public final class StreamSend {
         private int reqUrgency;
         private boolean reqIncremental;
         private final java.util.ArrayList<Stream.CapacityWait> capWaits = new java.util.ArrayList<>(0);
+        /** Flushes waiting for the part's data to be sent. */
+        private final java.util.ArrayList<Waiter> flushWaits = new java.util.ArrayList<>(0);
 
         Ext() {
         }

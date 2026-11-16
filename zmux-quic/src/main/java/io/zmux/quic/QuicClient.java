@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import io.zmux.internal.spi.Loops;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioIoHandler;
@@ -122,7 +123,7 @@ public final class QuicClient implements AutoCloseable {
             if (result.isDone()) { carrier.channel().close(); return; }
             carrier.openPipe().whenComplete((pipe, failure) -> {
                 if (failure != null) { carrier.channel().close(); result.completeExceptionally(failure); return; }
-                try { workers.execute(() -> {
+                Loops.run(workers, () -> {
                     ZmuxSession session = null;
                     try {
                         if (result.isDone()) { carrier.channel().close(); return; }
@@ -133,9 +134,7 @@ public final class QuicClient implements AutoCloseable {
                         if (session != null) session.close();
                         carrier.channel().close(); result.completeExceptionally(cause);
                     }
-                }); } catch (RejectedExecutionException failureToStart) {
-                    carrier.channel().close(); result.completeExceptionally(failureToStart);
-                }
+                }, () -> { carrier.channel().close(); result.completeExceptionally(new io.zmux.CarrierClientClosedException("QUIC endpoint closed")); });
             });
         });
         return notified;
@@ -178,7 +177,7 @@ public final class QuicClient implements AutoCloseable {
     private <T> CompletableFuture<T> track(CompletableFuture<T> result) {
         pending.add(result);
         result.whenComplete((value, error) -> pending.remove(result));
-        if (closed.get()) result.completeExceptionally(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
+        if (closed.get()) result.completeExceptionally(new io.zmux.CarrierClientClosedException("QUIC endpoint closed"));
         return result;
     }
 
@@ -242,19 +241,19 @@ public final class QuicClient implements AutoCloseable {
     }
 
     private CompletableFuture<Channel> datagram(SocketProtocolFamily family) {
-        if (closed.get()) return CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
+        if (closed.get()) return CompletableFuture.failedFuture(new io.zmux.CarrierClientClosedException("QUIC endpoint closed"));
         var existing = datagrams.get(family);
         if (existing != null) return existing;
         var created = new CompletableFuture<Channel>();
         existing = datagrams.putIfAbsent(family, created);
         if (existing != null) return existing;
-        if (closed.get()) { bindFailed(family,created,new io.zmux.CarrierFailedException("QUIC endpoint closed")); return created; }
+        if (closed.get()) { bindFailed(family,created,new io.zmux.CarrierClientClosedException("QUIC endpoint closed")); return created; }
         // Binding is outside the map publication; callbacks and close never wait under a lock.
         try { bindDatagram(family).addListener(done -> {
             if (!done.isSuccess()) bindFailed(family,created,done.cause());
             else {
                 Channel channel = ((ChannelFuture)done).channel();
-                if (closed.get()) { channel.close(); bindFailed(family,created,new io.zmux.CarrierFailedException("QUIC endpoint closed")); }
+                if (closed.get()) { channel.close(); bindFailed(family,created,new io.zmux.CarrierClientClosedException("QUIC endpoint closed")); }
                 else if (!created.complete(channel)) channel.close();
             }
         }); } catch (RuntimeException error) { bindFailed(family,created,error); }
@@ -281,13 +280,13 @@ public final class QuicClient implements AutoCloseable {
     /** Closes owned connections and cancels pending handshakes. Native callbacks never wait on their own loop. */
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        for (CompletableFuture<?> operation : pending) operation.completeExceptionally(new io.zmux.CarrierFailedException("QUIC endpoint closed"));
+        for (CompletableFuture<?> operation : pending) operation.completeExceptionally(new io.zmux.CarrierClientClosedException("QUIC endpoint closed"));
         workers.shutdownNow();
         for (QuicChannel connection : connections) ConnectionCarrier.close(connection);
         for (var endpoint : datagrams.values()) endpoint.whenComplete((channel,error) -> { if (channel != null) channel.close(); });
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
-        if (!ChannelLoops.inLoop(nativeLoop())) termination.awaitUninterruptibly();
+        if (!nativeLoop().inEventLoop()) termination.awaitUninterruptibly();
     }
 
     /** stage as a ZmuxFuture; cancelling it cancels stage. */

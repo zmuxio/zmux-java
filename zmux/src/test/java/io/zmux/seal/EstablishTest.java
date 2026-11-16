@@ -35,6 +35,27 @@ class EstablishTest {
     }
 
     @Test
+    void closingAStaticKeyZeroesItsScalarAndKeepsItsPublicHalf() throws Exception {
+        StaticKey key = StaticKey.generate(), peer = StaticKey.generate();
+        String shown = key.toString();
+        byte[] pub = key.publicKey();
+        java.lang.reflect.Field held = StaticKey.class.getDeclaredField("scalar");
+        held.setAccessible(true);
+        byte[] scalar = (byte[]) held.get(key);
+        key.close();
+        key.close(); // idempotent
+        assertTrue(key.isClosed());
+        assertArrayEquals(new byte[StaticKey.KEY_LEN], scalar, "the scalar is zeroed");
+        assertThrows(IllegalStateException.class, key::scalar);
+        assertArrayEquals(pub, key.publicKey());
+        assertEquals(shown, key.toString());
+        assertFalse(shown.contains(HexFormat.of().formatHex(peer.scalar())));
+        var refused = assertThrows(SecureCarrierException.class, () -> key.dh(peer.publicKey()));
+        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, refused.code());
+        peer.close();
+    }
+
+    @Test
     void everyProfileAndMode() throws Exception {
         StaticKey cKey = StaticKey.generate();
         StaticKey sKey = StaticKey.generate();

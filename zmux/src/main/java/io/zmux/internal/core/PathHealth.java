@@ -396,7 +396,7 @@ final class PathHealth {
 
     long srttMaxOut() {
         long m = 0;
-        for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, p.mp().rtt.smoothed());
+        for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, p.mp().rtt().smoothed());
         return m == 0 ? 333 * Time.MILLISECOND : m;
     }
 
@@ -404,7 +404,7 @@ final class PathHealth {
     long srttMax() {
         long m = 0;
         for (Pipe p : pipes.all()) {
-            if (p.mp() != null && p.out() != null && p.mp().liveOut() && p.mp().rtt.smoothed() > m) m = p.mp().rtt.smoothed();
+            if (p.mp() != null && p.out() != null && p.mp().liveOut() && p.mp().rtt().smoothed() > m) m = p.mp().rtt().smoothed();
         }
         return m;
     }

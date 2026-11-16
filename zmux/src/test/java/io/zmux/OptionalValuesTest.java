@@ -14,13 +14,13 @@ class OptionalValuesTest {
     @Test void poolDecisionItemsAreUnsetOrSet() {
         var keep = PoolPolicy.Decision.KEEP;
         assertEquals(OptionalInt.empty(), keep.count());
-        assertEquals(Optional.empty(), keep.dialAfter());
+        assertNull(keep.dialAfter());
         assertTrue(keep.liveness().isInherit());
         var l = PipeLiveness.builder();
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ZERO), "0 is not off");
         assertTrue(PipeLiveness.builder().noProbeInterval().build().isNoProbeInterval());
         assertFalse(PipeLiveness.builder().noProbeInterval().probeInterval(Duration.ofSeconds(1)).build().isNoProbeInterval());
-        assertEquals(Optional.of(Duration.ZERO), keep.withDialAfter(Duration.ZERO).dialAfter(), "0: dial at once");
+        assertEquals(Duration.ZERO, keep.withDialAfter(Duration.ZERO).dialAfter(), "0: dial at once");
         assertEquals(OptionalDouble.of(0), PipeLiveness.builder().probeJitter(0).build().probeJitter());
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ofSeconds(-1)));
@@ -107,6 +107,10 @@ class OptionalValuesTest {
         assertEquals(Duration.ZERO, new QualityBand(Duration.ZERO, 1.5, Duration.ZERO).minInterval(), "0: no floor");
         assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 1.5, Duration.ofNanos(-1)));
         assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, Double.NaN));
+        assertEquals(1.0, new QualityBand(Duration.ZERO, 1.0).rateRatio(), "1 is valid");
+        assertEquals(0.0, new QualityBand(Duration.ZERO, 0).rateRatio(), "0 is off");
+        for (double bad : new double[] {0.5, -1, Double.POSITIVE_INFINITY})
+            assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, bad), String.valueOf(bad));
     }
 
     @Test void modePolicyRejectsANanTimerFactor() {
@@ -122,8 +126,8 @@ class OptionalValuesTest {
     }
 
     @Test void recheckZeroIsAsSoonAsTheFloorAllows() {
-        assertEquals(Optional.empty(), PoolPolicy.Decision.KEEP.recheckDelay(), "unset: none");
-        assertEquals(Optional.of(PoolPolicy.Decision.MIN_RECHECK), PoolPolicy.Decision.KEEP.withRecheck(Duration.ZERO).recheckDelay());
+        assertNull(PoolPolicy.Decision.KEEP.recheckDelay(), "unset: none");
+        assertEquals(PoolPolicy.Decision.MIN_RECHECK, PoolPolicy.Decision.KEEP.withRecheck(Duration.ZERO).recheckDelay());
         assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withRecheck(Duration.ofNanos(-1)));
     }
 

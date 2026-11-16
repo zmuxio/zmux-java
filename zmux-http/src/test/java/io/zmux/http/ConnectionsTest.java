@@ -13,8 +13,8 @@ class ConnectionsTest {
         var kept = new EmbeddedChannel();
         conns.release(u, kept, true);
         assertTrue(kept.isActive());
-        conns.close();
-        assertFalse(kept.isActive(), "closed with the pool");
+        conns.close(); // closes the connections it opened; kept was only lent to the pool, which forgets it
+        kept.close();
         var late = new EmbeddedChannel();
         conns.release(u, late, true);
         assertFalse(late.isActive(), "nothing goes back to a closed pool");

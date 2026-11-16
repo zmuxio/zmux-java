@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import io.zmux.internal.spi.Loops;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioIoHandler;
@@ -70,8 +71,19 @@ public final class QuicServer implements AutoCloseable {
             throw new io.zmux.CarrierFailedException("could not bind QUIC listener", error);
         }
     }
-    /** The hosts of the connections served by {@link #serveAsync}: one per Netty loop, for the loop's lifetime. */
-    private static final java.util.Map<EventLoop, NettyHost> HOSTS = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    /**
+     * The hosts of the connections served by {@link #serveAsync}: one per Netty loop, for the loop's lifetime.
+     * A loop's entry goes when it terminates (a weak map would keep it: the host references its loop).
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<EventLoop, NettyHost> HOSTS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static NettyHost hostOf(EventLoop loop) {
+        boolean[] made = {false};
+        NettyHost host = HOSTS.computeIfAbsent(loop, l -> { made[0] = true; return new NettyHost(l); });
+        // Outside the map's update: a loop already terminated runs the listener at once.
+        if (made[0]) loop.terminationFuture().addListener(f -> HOSTS.remove(loop, host));
+        return host;
+    }
 
     /**
      * Serves one established QUIC connection with listener, as a {@link QuicServer} serves each
@@ -100,7 +112,7 @@ public final class QuicServer implements AutoCloseable {
             result.completeExceptionally(new io.zmux.ListenerClosedException());
             return QuicClient.future(result);
         }
-        NettyHost host = HOSTS.computeIfAbsent(connection.eventLoop(), NettyHost::new);
+        NettyHost host = hostOf(connection.eventLoop());
         var carrier = ConnectionCarrier.established(options, listener, fallback, host, new io.zmux.internal.loop.SerialCallbacks());
         connection.closeFuture().addListener(ignored -> result.complete(null));
         Runnable add = () -> {
@@ -108,7 +120,7 @@ public final class QuicServer implements AutoCloseable {
             connection.pipeline().addLast(carrier);
         };
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
-        if (ChannelLoops.inLoop(connection)) add.run(); else ChannelLoops.executor(connection).execute(add);
+        Loops.dispatch(connection.eventLoop(), connection.eventLoop().inEventLoop(), add, () -> result.complete(null));
         result.whenComplete((v, e) -> { if (result.isCancelled()) carrier.stop(); });
         return QuicClient.future(result);
     }
@@ -154,6 +166,6 @@ public final class QuicServer implements AutoCloseable {
         datagram.close();
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
-        if (!ChannelLoops.inLoop(datagram)) termination.awaitUninterruptibly();
+        if (!datagram.eventLoop().inEventLoop()) termination.awaitUninterruptibly();
     }
 }

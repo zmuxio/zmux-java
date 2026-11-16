@@ -1,3 +1,5 @@
+package io.zmux.bench;
+
 import io.zmux.*;
 import io.zmux.carrier.*;
 import java.lang.management.*;
@@ -10,11 +12,15 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /** Standalone public-API measurements, not a conformance or performance pass gate. */
+// A command-line tool: its options are set once by main, it prints its results, and any failure ends the run.
+@SuppressWarnings({"NonFinalStaticField", "SystemOut", "InterruptedExceptionSwallowed"})
 public final class Benchmark {
+    private Benchmark() {}
+
     private static final Map<String, Number> samples = new LinkedHashMap<>();
     private static boolean quick, loadedOnly, footprintOnly;
     private record Pair(ZmuxSession client, ZmuxSession server) implements AutoCloseable {
-        public void close() throws Exception {
+        @Override public void close() throws java.io.IOException {
             client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
         }
     }
@@ -77,6 +83,80 @@ public final class Benchmark {
             }
         }
     }
+    private static void throughput(String key, long bytes, long ns) {
+        samples.put(key + "_bytes", bytes);
+        samples.put(key + "_ns", ns);
+        samples.put(key + "_bytes_per_second", bytes * 1e9 / ns);
+    }
+
+    /** A splice between two memory sessions: endpoint -> (a spliced to b) -> destination. */
+    private static void splice(EventLoops loops, ExecutorService workers) throws Exception {
+        var config = ZmuxConfig.builder().eventLoops(loops).build();
+        try (var left = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers);
+             var right = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
+            long bytes = quick ? 8L << 20 : 128L << 20;
+            var endpoint = left.client.openStream();
+            endpoint.write(new byte[] {1});
+            var a = left.server.acceptStream(Duration.ofSeconds(10));
+            if (a.read(ByteBuffer.allocate(1)) != 1) throw new AssertionError("no first byte");
+            var b = right.client.openStream();
+            var spliced = Zmux.splice(a, b);
+            var destination = workers.submit(() -> right.server.acceptStream(Duration.ofSeconds(10)));
+            // The destination is accepted once the first relayed bytes opened b.
+            long ns, start = System.nanoTime();
+            var sender = workers.submit(() -> relayedSend(endpoint, bytes));
+            try (var to = destination.get(10, TimeUnit.SECONDS)) {
+                long count = 0;
+                for (Chunk data; (data = to.readChunk(1 << 20)) != null;) {
+                    try (Chunk c = data) { count += c.buffer().remaining(); }
+                }
+                ns = System.nanoTime() - start;
+                if (count != bytes) throw new AssertionError("incomplete splice");
+                sender.get(10, TimeUnit.SECONDS);
+                to.finish();
+            }
+            endpoint.close();
+            spliced.get(10, TimeUnit.SECONDS);
+            throughput("splice_memory", bytes, ns);
+        }
+    }
+
+    private static Void relayedSend(ZmuxStream from, long bytes) throws Exception {
+        byte[] payload = new byte[65536]; Arrays.fill(payload, (byte) 29);
+        for (long sent = 0; sent < bytes;) {
+            int n = (int) Math.min(payload.length, bytes - sent);
+            from.write(ByteBuffer.wrap(payload, 0, n));
+            sent += n;
+        }
+        from.finish();
+        return null;
+    }
+
+    /** A session over one HTTP exchange carrier on loopback (plain HTTP, binary pieces). */
+    private static void exchange(EventLoops loops, ExecutorService workers) throws Exception {
+        byte[] psk = new byte[32]; Arrays.fill(psk, (byte) 9);
+        var exchange = io.zmux.http.ExchangeConfig.builder(psk).upPieceSize(256 << 10).downPieceSize(256 << 10).build();
+        var config = ZmuxConfig.builder().eventLoops(loops).build();
+        var group = new io.netty.channel.MultiThreadIoEventLoopGroup(2, io.netty.channel.nio.NioIoHandler.newFactory());
+        try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
+            var endpoint = io.zmux.http.HttpEndpoint.builder(listener).exchange(exchange).build();
+            var server = new io.netty.bootstrap.ServerBootstrap().group(group).channel(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+                    .childHandler(endpoint.initializer(null, null)).bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).sync().channel();
+            String base = "http://localhost:" + ((InetSocketAddress) server.localAddress()).getPort() + "/z";
+            try (var http = io.zmux.http.HttpCarrierClient.builder().group(group).timeout(Duration.ofSeconds(10)).build();
+                 var pair = new Pair(Zmux.open(http.exchangePipe(base, exchange), Role.CLIENT, config), listener.accept(Duration.ofSeconds(10)))) {
+                transfer(pair, workers, 65536, 1L << 20, false);
+                long bytes = quick ? 4L << 20 : 64L << 20;
+                throughput("exchange_http", bytes, transfer(pair, workers, 65536, bytes, false));
+            } finally {
+                endpoint.close();
+                server.close().syncUninterruptibly();
+            }
+        } finally {
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
+        }
+    }
+
     private record BulkResult(long bytes, long checksum) {}
 
     private static void ioTimeouts(ZmuxStream stream) {
@@ -137,11 +217,10 @@ public final class Benchmark {
         System.out.println("BENCH_PROGRESS," + key);
         try (var listener = Zmux.listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), ListenerConfig.of(config));
              var connected = new Pair(Zmux.connect(listener.localAddress(), config), listener.accept(Duration.ofSeconds(10)))) {
-            var pair = reverse ? new Pair(connected.server, connected.client) : connected;
+            var pair = reverse ? new Pair(/* client= */ connected.server, /* server= */ connected.client) : connected;
             for (int i = 1; i < pipes; i++) connected.client.addPipe(listener.localAddress(), PipeOptions.defaults());
             long readyDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (pipes > 1 && (pair.client.pipeStats().stream().filter(p -> p.eligible()).count() != pipes
-                    || pair.server.pipeStats().stream().filter(p -> p.eligible()).count() != pipes)) {
+            while (pipes > 1 && (eligible(pair.client) != pipes || eligible(pair.server) != pipes)) {
                 if (System.nanoTime() >= readyDeadline) throw new AssertionError("pipes not eligible");
                 Thread.sleep(1);
             }
@@ -186,9 +265,9 @@ public final class Benchmark {
                 var after = pair.client.pipeStats();
                 long bytes = 0;
                 for (var a : after) {
-                    var b = before.stream().filter(x -> x.pipe() == a.pipe()).findFirst().orElseThrow();
+                    var b = before.stream().filter(x -> x.pipeId().equals(a.pipeId())).findFirst().orElseThrow();
                     long delta = a.bytesSent() - b.bytesSent(); bytes += delta;
-                    samples.put(key + "_pipe" + a.pipe() + "_sent_bytes", delta);
+                    samples.put(key + "_pipe" + a.pipeId() + "_sent_bytes", delta);
                 }
                 long bulkDelta = progress.get() - bulkBefore;
                 if (bulkDelta <= 0) throw new AssertionError("bulk made no progress");
@@ -205,6 +284,11 @@ public final class Benchmark {
                 sent.cancel(true); received.cancel(true);
             }
         }
+    }
+    private static int eligible(ZmuxSession s) {
+        int n = 0;
+        for (var p : s.pipeStats()) if (p.eligible()) n++;
+        return n;
     }
     private static void loaded(EventLoops loops, ExecutorService workers) throws Exception {
         for (int round = 0; round < (quick ? 1 : 3); round++) {
@@ -224,7 +308,7 @@ public final class Benchmark {
         return ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class).stream()
                 .filter(pool -> pool.getName().equals("direct")).mapToLong(BufferPoolMXBean::getMemoryUsed).sum();
     }
-    private static void warmFootprint(EventLoops loops, ExecutorService workers, ZmuxConfig config) throws Exception {
+    private static void warmFootprint(ExecutorService workers, ZmuxConfig config) throws Exception {
         for (int i = 0; i < 8; i++) {
             try (var pair = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
                 for (int j = 0; j < 32; j++) pair.client.openStream().close();
@@ -236,7 +320,7 @@ public final class Benchmark {
         var builder = ZmuxConfig.builder().eventLoops(loops);
         if (multipath) builder.maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]));
         var config = builder.build();
-        warmFootprint(loops, workers, config);
+        warmFootprint(workers, config);
         String prefix = multipath ? "mp_bootstrap_" : "";
         var pipes = new ArrayList<PipeIo[]>();
         var pairs = new ArrayList<Pair>();
@@ -248,15 +332,15 @@ public final class Benchmark {
             long sessions = heap(), directSessions = direct();
             for (int i = 0; i < 200; i++) streams.add(pairs.getFirst().client.openStream());
             long withStreams = heap();
-            java.lang.ref.Reference.reachabilityFence(pipes);
-            java.lang.ref.Reference.reachabilityFence(pairs);
-            java.lang.ref.Reference.reachabilityFence(streams);
             samples.put(prefix + "footprint_session_count", 2 * count);
-            samples.put(prefix + "retained_heap_per_session_estimate", (sessions - baseline) / (2 * count));
-            samples.put(prefix + "direct_bytes_per_session_estimate", (directSessions - directBaseline) / (2 * count));
+            samples.put(prefix + "retained_heap_per_session_estimate", (sessions - baseline) / (2L * count));
+            samples.put(prefix + "direct_bytes_per_session_estimate", (directSessions - directBaseline) / (2L * count));
             samples.put(prefix + "footprint_unassigned_stream_count", streams.size());
             samples.put(prefix + "retained_heap_per_unassigned_stream_estimate", (withStreams - sessions) / streams.size());
         } finally {
+            java.lang.ref.Reference.reachabilityFence(pipes);
+            java.lang.ref.Reference.reachabilityFence(pairs);
+            java.lang.ref.Reference.reachabilityFence(streams);
             for (var stream : streams) stream.close();
             for (var pair : pairs) pair.close();
         }
@@ -287,6 +371,8 @@ public final class Benchmark {
                     var config = ZmuxConfig.builder().eventLoops(loops).build();
                     try (var pair = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) { control(pair.client); }
                     bulk(loops, workers);
+                    splice(loops, workers);
+                    exchange(loops, workers);
                     footprint(loops, workers, false);
                 }
                 if (io.zmux.internal.diag.Diagnostics.outstandingBuffers(loops) != 0) throw new AssertionError("outstanding receive buffers");
@@ -298,7 +384,8 @@ public final class Benchmark {
             json.append(quote(loadedOnly ? "loaded" : footprintOnly ? "footprint" : "standard"));
             for (var entry : samples.entrySet()) json.append(",\n  ").append(quote(entry.getKey())).append(": ").append(entry.getValue());
             json.append("\n}\n");
-            if (result.toAbsolutePath().getParent() != null) Files.createDirectories(result.toAbsolutePath().getParent());
+            Path dir = result.toAbsolutePath().getParent();
+            if (dir != null) Files.createDirectories(dir);
             Files.writeString(result, json); System.out.print(json);
         } finally { watchdog.interrupt(); }
     }

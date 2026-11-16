@@ -17,9 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Input: a session parses lent chunks in place ({@link PipeReader.Sink#onChunk}); only a
  * record cut by the chunk's end is carried, and the next chunk first completes that record
- * and is then parsed in place again. A lent byte-stream batch ({@link PipeReader.Sink#onData})
- * goes through the loop's read buffer; a lent message is parsed in place and the session
- * copies what it keeps. Output: the writer gets the session's batch itself.
+ * and is then parsed in place again. Output: the writer gets the session's batch itself.
  */
 final class ExternalTransport extends AbstractTransport {
     private final PipeIo pio;
@@ -49,7 +47,7 @@ final class ExternalTransport extends AbstractTransport {
     /**
      * What an admitted reader may queue ahead of the loop: the receive memory it declared,
      * which is charged to the memory budget, plus one reader batch. Beyond it the reader
-     * ignored the release backpressure of {@link PipeReader.Sink#onData}.
+     * ignored the consumed backpressure of {@link PipeReader.Sink#onChunk} and {@link PipeReader.Sink#onLent}.
      */
     private long admittedLimit() {
         long declared = pio.capabilities().receiveMemory();
@@ -175,9 +173,6 @@ final class ExternalTransport extends AbstractTransport {
         ready = true;
         if (!replay(reader)) return;
         if (!inherited && !readerClosed && pio.reader() != null) pio.reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) {
-                inbox.offer(new Input(data, release, null, false, null));
-            }
             @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
                 ByteBuffer bytes = chunk.buffer();
                 inbox.offer(new Input(bytes, consumed, new OwnedInput(loop, bytes, chunk::close), false, null));

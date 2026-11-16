@@ -42,6 +42,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *     ... read the reply ...
  * }                                // releases the handle
  * }</pre>
+ *
+ * <p><b>Blocking calls on the completion thread.</b> A blocking call may run on the session's completion
+ * thread (in a dependent stage of a {@link ZmuxFuture}), except one that would wait behind an asynchronous
+ * operation of the same direction: see {@link ZmuxFuture}, which states the rule.
  */
 public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     private static final Cleaner CLEANER = Cleaner.create(Thread.ofVirtual().name("zmux-cleaner").factory());
@@ -99,6 +103,10 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         } catch (InterruptedIOException interrupted) {
             carrierOwned.set(false);
             throw new IllegalStateException("interrupted while transferring stream I/O", interrupted);
+        } catch (RuntimeException refused) {
+            // For one, a wait on the completion thread behind an asynchronous operation: nothing was transferred.
+            carrierOwned.set(false);
+            throw refused;
         }
     }
 
@@ -427,12 +435,8 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     public void flush() throws IOException {
         checkApplicationIo();
         session.driver.checkBlocking();
-        long[] target = {-1};
-        session.call(op -> {
-            session.driver.lanes.flushSending(st);
-            if (target[0] < 0) target[0] = core.streams().flush(st);
-            return core.sending().flushDone(st, target[0], op) ? true : Operation.PENDING;
-        }, op -> core.sending().cancelWriteWait(st, op), ZmuxSession.until(writeTimeout));
+        long deadline = ZmuxSession.until(writeTimeout);
+        Errors.check(out.awaitSent(true, deadline).await(deadline));
     }
 
     @Override

@@ -174,7 +174,7 @@ class AdmissionTest {
                             if (ch.read(b) < 0) { sink.onEnd(); return; }
                             b.flip();
                             CountDownLatch done = new CountDownLatch(1);
-                            sink.onData(b, done::countDown);
+                            sink.onLent(b, done::countDown);
                             done.await();
                         }
                     } catch (Exception e) { if (!closed) sink.onError(e); }
@@ -299,7 +299,7 @@ class AdmissionTest {
             sources.add(info.source().getHostString());
             var got = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
-                @Override public void onData(ByteBuffer data, Runnable release) {
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
                     byte[] b = new byte[data.remaining()];
                     data.get(b);
                     got.writeBytes(b);
@@ -522,7 +522,7 @@ class AdmissionTest {
                         byte[] b = new byte[16384];
                         for (int n; !closed && (n = in.read(b)) >= 0;) {
                             CountDownLatch done = new CountDownLatch(1);
-                            sink.onData(ByteBuffer.wrap(b.clone(), 0, n), done::countDown);
+                            sink.onLent(ByteBuffer.wrap(b.clone(), 0, n), done::countDown);
                             done.await();
                         }
                         if (!closed) sink.onEnd();
@@ -592,7 +592,7 @@ class AdmissionTest {
         Admission.Fallback fallback = (carrier, info) -> {
             var all = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
-                @Override public void onData(ByteBuffer data, Runnable release) {
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
                     byte[] b = new byte[data.remaining()]; data.get(b); all.writeBytes(b); release.run();
                 }
                 @Override public void onEnd() {
@@ -805,7 +805,7 @@ class AdmissionTest {
         var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
         var ended = new CompletableFuture<Void>();
         pipe[0].reader().start(new PipeReader.Sink() {
-            @Override public void onData(ByteBuffer data, Runnable release) { release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); }
             @Override public void onEnd() { ended.complete(null); }
             @Override public void onError(Throwable cause) { ended.complete(null); }
         });

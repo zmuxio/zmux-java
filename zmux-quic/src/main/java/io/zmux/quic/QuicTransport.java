@@ -114,6 +114,8 @@ final class QuicTransport extends AbstractTransport {
         } finally {
             delivering = false;
         }
+        // Moved while delivering (moveTo skips held then): what is left goes to the next owner.
+        if (closed) for (ByteBuf b; (b = held.poll()) != null; ) carrier.leave(this, b);
         if (closed || paused || inEnded || !held.isEmpty()) return;
         if (endPending != 0) endInput(endPending == 1);
         else carrier.read();

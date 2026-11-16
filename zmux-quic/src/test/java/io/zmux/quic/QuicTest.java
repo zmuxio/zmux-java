@@ -243,7 +243,7 @@ class QuicTest {
                 stream.close().sync();
                 CompletableFuture<Throwable> failure = new CompletableFuture<>();
                 pipeIo.reader().start(new io.zmux.carrier.PipeReader.Sink() {
-                    @Override public void onData(ByteBuffer bytes, Runnable release) { release.run(); failure.completeExceptionally(new AssertionError("unexpected data")); }
+                    @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); failure.completeExceptionally(new AssertionError("unexpected data")); }
                     @Override public void onEnd() { failure.completeExceptionally(new AssertionError("failure mistaken for FIN")); }
                     @Override public void onError(Throwable error) { failure.complete(error); }
                 });

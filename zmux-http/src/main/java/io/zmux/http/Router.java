@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.Loops;
 import io.zmux.AdmissionVerdict;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
@@ -37,6 +38,7 @@ import java.util.List;
  * host's). State is the channel's event loop's.
  */
 final class Router extends ChannelInboundHandlerAdapter {
+    private static final Runnable NOTHING = () -> {};
     private enum Mode { IDLE, HOST, DISCARD, CARRIER, COLLECT, FRAMES }
 
     private final HttpEndpoint ep;
@@ -173,8 +175,10 @@ final class Router extends ChannelInboundHandlerAdapter {
         // The verdict and whether a session took the carrier: once both halves are closed, a
         // carrier the listener refused with nothing written goes to the host.
         var refused = new java.util.concurrent.CompletableFuture<Boolean>();
+        // A loop that refuses a task below is shutting down: it closes the channel, whose loss
+        // releases what the carrier keeps; a refused fallback closes the pipe it was given.
         BodyCarrier c = new BodyCarrier(ch, Framing.BYTE_STREAM, up, down, out, () -> refused.whenComplete((no, e) ->
-                ChannelLoops.executor(ch).execute(() -> end(self[0], r, down, Boolean.TRUE.equals(no)))), cause -> { ch.close(); return null; });
+                Loops.run(ch.eventLoop(), () -> end(self[0], r, down, Boolean.TRUE.equals(no)), NOTHING)), cause -> { ch.close(); return null; });
         self[0] = c;
         carrier = c;
         mode = Mode.CARRIER;
@@ -187,22 +191,22 @@ final class Router extends ChannelInboundHandlerAdapter {
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
-        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> ChannelLoops.executor(ch).execute(() -> fallback(c, r, given)));
+        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> Loops.run(ch.eventLoop(), () -> fallback(c, r, given), () -> closeQuietly(given)));
         // The verdict and the taken flag come from the listener adapter in another module; the analyzer takes the result for a constant.
         //noinspection ConstantValue
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
                 .whenComplete((no, e) -> refused.complete(Boolean.TRUE.equals(no)));
-        a.verdict().whenComplete((v, e) -> ChannelLoops.executor(ch).execute(() -> {
+        a.verdict().whenComplete((v, e) -> Loops.run(ch.eventLoop(), () -> {
             if (c.detached() || v == AdmissionVerdict.FALLBACK) return; // the fallback replays what was kept
             verdict = v == null ? AdmissionVerdict.CLOSE : v;
             if (v != AdmissionVerdict.ACCEPT) c.keepNoMore();
             else if (adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
-        }));
-        a.taken().whenComplete((taken, e) -> ChannelLoops.executor(ch).execute(() -> {
+        }, NOTHING));
+        a.taken().whenComplete((taken, e) -> Loops.run(ch.eventLoop(), () -> {
             if (c.detached() || !Boolean.TRUE.equals(taken)) return;
             c.keepNoMore();
             if (!down) c.start(); // an uplink's header goes out once a session took it
-        }));
+        }, NOTHING));
     }
 
     /**

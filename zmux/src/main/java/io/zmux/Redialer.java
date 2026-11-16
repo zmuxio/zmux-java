@@ -1,9 +1,14 @@
 package io.zmux;
 
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.loop.Bootstrap;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
@@ -13,6 +18,14 @@ import java.util.concurrent.locks.LockSupport;
  * exponential backoff from the minimum doubling up to the maximum, with jitter, measured from
  * the start of the previous attempt. A join the peer's refusal backoff holds waits as well, so a
  * dial waits for the longer of the two. It ends with the session.
+ *
+ * <p>Kept apart from {@link PipeMaintenance} on purpose: this run restores
+ * the directions the session lacks, under the session's configuration, for as long as the session
+ * lives; a pipe pool is an application's run over its own members, counted, rotated and steered by
+ * a policy, with its own result and end. One worker for both would mix those two lifecycles and
+ * counts. What they must share is that one further pipe is dialled at a time, which
+ * {@link ZmuxSession#dialPermit} gives; each side holds it at most for one attempt bounded by a
+ * deadline, so neither can starve the other.
  */
 final class Redialer {
     private final ZmuxSession session;
@@ -43,15 +56,87 @@ final class Redialer {
         return Math.max(1, (long) (d * (1 - ThreadLocalRandom.current().nextDouble() * jitter)));
     }
 
-    /** The direction the session lacks, or null while it has both. */
-    private PipeOptions.Direction need() {
-        boolean out = false, in = false;
-        for (PipeStats st : session.pipeStats()) {
-            if (st.outbound() != null) switch (st.outbound()) { case ACTIVE, SUSPECT, JOINING -> out = true; default -> { } }
-            if (st.inbound() != null) switch (st.inbound()) { case OPEN, JOINING -> in = true; default -> { } }
+    /** The direction the session lacks, or null while it has both: the core's count of live directions, the one authority. */
+    private PipeOptions.Direction need() throws IOException {
+        boolean[] live = (boolean[]) session.run(op -> session.core.liveDirections());
+        if (live[0] && live[1]) return null;
+        return live[0] ? PipeOptions.Direction.RECEIVE_ONLY : live[1] ? PipeOptions.Direction.SEND_ONLY : PipeOptions.Direction.BIDIRECTIONAL;
+    }
+
+    /**
+     * One run of the hook on a thread of its own, bounded by the session's join deadline: an attempt that
+     * outlives it is cancelled, interrupted and abandoned, never awaited, so it holds the session's dial
+     * permit no longer than that; a pipe input it returns later is closed.
+     */
+    private PipeIo attempt(PipeOptions.Direction need) throws IOException, InterruptedException {
+        var outcome = new CompletableFuture<PipeIo>();
+        var attempt = new Cancellation();
+        Cancellation.Registration closing = cancellation.onCancel(attempt::cancel);
+        Thread dial;
+        try {
+            dial = Thread.ofVirtual().name("zmux-redial-attempt").start(() -> {
+                try {
+                    PipeIo io = hook.dial(need, attempt);
+                    if (io == null) throw new IOException("the redial hook returned no pipe input");
+                    if (!outcome.complete(io)) Bootstrap.discard(io, new java.net.SocketTimeoutException("redial attempt abandoned"));
+                } catch (InterruptedException abandoned) {
+                    // The attempt was abandoned or the session closed: the thread ends here.
+                    outcome.completeExceptionally(abandoned);
+                } catch (Throwable failure) {
+                    outcome.completeExceptionally(failure);
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            closing.close();
+            throw failure;
         }
-        if (out && in) return null;
-        return out ? PipeOptions.Direction.RECEIVE_ONLY : in ? PipeOptions.Direction.SEND_ONLY : PipeOptions.Direction.BIDIRECTIONAL;
+        try {
+            return settle(outcome, f -> f.get(session.core.joinDeadline(), TimeUnit.NANOSECONDS), () -> {
+                attempt.cancel();
+                dial.interrupt();
+            });
+        } finally {
+            closing.close();
+        }
+    }
+
+    /** How {@link #settle} waits for an attempt's outcome: bounded, it throws TimeoutException at its deadline. */
+    @FunctionalInterface
+    interface Wait {
+        PipeIo await(CompletableFuture<PipeIo> outcome) throws InterruptedException, ExecutionException, TimeoutException;
+    }
+
+    /**
+     * The one hand-off of an attempt's pipe input: returned to the caller, who passes it to
+     * {@link ZmuxSession#addPipe(PipeIo, PipeOptions)} (which owns it from then on, whatever the
+     * outcome), or closed here, exactly once. The caller's side claims the outcome by completing it
+     * exceptionally when it stops waiting (deadline, interruption, failure); if the attempt's thread
+     * completed it first, the input it delivered is closed here, since nobody else will see it,
+     * and an input delivered later meets the claim and is closed by that thread.
+     */
+    static PipeIo settle(CompletableFuture<PipeIo> outcome, Wait wait, Runnable abandon)
+            throws IOException, InterruptedException {
+        boolean handedOff = false;
+        try {
+            PipeIo io = wait.await(outcome);
+            handedOff = true;
+            return io;
+        } catch (TimeoutException late) {
+            throw new java.net.SocketTimeoutException("redial attempt outlived the join deadline");
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof IOException io) throw io;
+            throw new CallbackFailedException("redial hook failed", cause);
+        } finally {
+            if (!handedOff) {
+                var abandoned = new java.net.SocketTimeoutException("redial attempt abandoned");
+                // Lost the claim to a result: nobody returns it, so it is closed here.
+                if (!outcome.completeExceptionally(abandoned) && !outcome.isCompletedExceptionally()) {
+                    Bootstrap.discard(outcome.join(), abandoned);
+                }
+                abandon.run();
+            }
+        }
     }
 
     private void run() {
@@ -81,24 +166,32 @@ final class Redialer {
                     if (Thread.interrupted() && session.isClosed()) return;
                     continue;
                 }
-                attempted = true;
-                last = System.nanoTime();
                 try {
-                    PipeIo io = hook.dial(need, cancellation);
-                    if (io == null) throw new IOException("the redial hook returned no pipe input");
-                    session.addPipe(io, PipeOptions.builder().direction(need).build());
+                    session.dialPermit.acquire();
+                    try {
+                        // Another dial may have restored it meanwhile.
+                        need = need();
+                        if (need == null) continue;
+                        // The backoff counts from the attempt's start, not from the wait for the permit.
+                        attempted = true;
+                        last = System.nanoTime();
+                        session.addPipe(attempt(need), PipeOptions.builder().direction(need).build());
+                    } finally {
+                        session.dialPermit.release();
+                    }
                     backoff = min;
                     delay = jittered(min);
-                } catch (InterruptedException | InterruptedIOException stop) {
-                    if (session.isClosed()) return;
-                    // Only close interrupts this run's own thread. With the session open, the interrupt came from the hook:
-                    // it is cleared on purpose and not restored, so the next park and dial do not end on it at once.
-                    //noinspection ResultOfMethodCallIgnored
+                } catch (InterruptedException | InterruptedIOException stopped) {
+                    // A SocketTimeoutException is an InterruptedIOException too: an attempt past its
+                    // deadline, a hook's own connect timeout, a peer that did not attach in time. Only
+                    // the session's close ends this run; anything else is a failed attempt. The flag is
+                    // cleared before the check, so a close that interrupts after it is still seen.
                     Thread.interrupted();
+                    if (session.isClosed()) return;
                     delay = jittered(backoff);
                     backoff = backoff > max / 2 ? max : Math.min(max, backoff * 2);
                 } catch (IOException | RuntimeException failed) {
-                    if (session.isClosed()) return;
+                    if (session.isClosed() || Errors.clientClosed(failed) != null) return; // the hook's client closed: final
                     delay = jittered(backoff);
                     backoff = backoff > max / 2 ? max : Math.min(max, backoff * 2);
                 }

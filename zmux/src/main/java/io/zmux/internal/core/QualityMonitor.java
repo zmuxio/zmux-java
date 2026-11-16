@@ -26,7 +26,7 @@ final class QualityMonitor {
     private double estRate;
 
     private boolean estimates(Pipe p) {
-        RttEstimator r = p.mp() != null ? p.mp().rtt : p.out().snd.rtt();
+        RttEstimator r = p.out().snd.rtt();
         if (!r.has()) return false;
         estRtt = r.smoothed();
         estRate = p.out().snd.re().value();

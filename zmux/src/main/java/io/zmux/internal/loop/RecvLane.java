@@ -53,7 +53,7 @@ public final class RecvLane {
     private final SessionRuntime driver;
     private final Session core;
     private final Stream st;
-    final Turn turn = new Turn();
+    final Turn turn = new Turn("read (readAsync or readChunkAsync)");
     private volatile long cut = Long.MAX_VALUE;
     private final AtomicLong read = new AtomicLong(), dropped = new AtomicLong();
     private volatile long reportBytes;
@@ -216,7 +216,7 @@ public final class RecvLane {
 
     /** Reads at least one byte into dst, waiting until deadline: the count, -1 at FIN; throws the part's failure. */
     public int read(ByteBuffer dst, long deadline) throws CoreException, InterruptedIOException {
-        if (!turn.tryEnter()) SendLane.waitTurn(turn, deadline, 0);
+        if (!turn.tryEnter()) SendLane.waitTurn(driver, turn, deadline, 0);
         try {
             SendLane.Blocked self = null;
             while (true) {
@@ -242,18 +242,13 @@ public final class RecvLane {
      * or -1 when the next read returns the end. Throws when the lane was closed.
      */
     public long awaitReadable(long deadline) throws CoreException, InterruptedIOException {
-        if (!turn.tryEnter()) SendLane.waitTurn(turn, deadline, 0);
+        if (!turn.tryEnter()) SendLane.waitTurn(driver, turn, deadline, 0);
         try {
             SendLane.Blocked self = null;
             while (true) {
                 if (closed || stopped) throw closedOutcome();
                 Piece p = peek();
-                if (p != null) {
-                    if (p.end != null) return -1;
-                    long n = 0;
-                    for (Piece q = p; q != null && q.end == null; q = q.next) n += Math.clamp(cut - q.off, 0, q.data.remaining());
-                    return n;
-                }
+                if (p != null) return readable(p);
                 if (self == null) self = new SendLane.Blocked();
                 if (!awaitData(self)) continue;
                 while (waiter == self) {
@@ -269,9 +264,17 @@ public final class RecvLane {
         }
     }
 
+    /** What a wait for something to read reports for p, the piece {@link #peek} returned: -1 at the end, else the bytes readable now. */
+    private long readable(Piece p) {
+        if (p.end != null) return -1;
+        long n = 0;
+        for (Piece q = p; q != null && q.end == null; q = q.next) n += Math.clamp(cut - q.off, 0, q.data.remaining());
+        return n;
+    }
+
     /** Takes up to max bytes without copying, waiting until deadline; null at FIN. */
     public StreamRecv.Chunk readChunk(int max, long deadline) throws CoreException, InterruptedIOException {
-        if (!turn.tryEnter()) SendLane.waitTurn(turn, deadline, 0);
+        if (!turn.tryEnter()) SendLane.waitTurn(driver, turn, deadline, 0);
         try {
             SendLane.Blocked self = null;
             while (true) {
@@ -311,7 +314,7 @@ public final class RecvLane {
 
     /** Waits until operations that hold or wait for the direction have ended. */
     public void quiesce() throws InterruptedIOException {
-        if (!turn.tryEnter()) SendLane.waitTurn(turn, Long.MAX_VALUE, 0);
+        if (!turn.tryEnter()) SendLane.waitTurn(driver, turn, Long.MAX_VALUE, 0);
         leave();
     }
 
@@ -320,12 +323,24 @@ public final class RecvLane {
     /** A read run by its turn holder: first the caller, later the completion context. */
     private final class AsyncRead extends Operation<Object> implements SendLane.Resumable, Turn.Waiting {
         private final ByteBuffer dst;
+        /** The chunk limit; 0 with no dst: a wait for something to read that takes nothing. */
         private final int max;
+        /** A wait's report: the bytes readable, -1 at the end. */
+        long readable;
 
         AsyncRead(ByteBuffer dst, int max, long deadline) {
             super(RecvLane.this.driver, self -> ((AsyncRead) self).withdraw(), deadline);
             this.dst = dst;
             this.max = max;
+        }
+
+        /** The wait's outcome: TRUE with {@link #readable} set, the failure, or null to wait on. */
+        private Object peekReadable() {
+            if (closed || stopped) return closedOutcome();
+            Piece p = peek();
+            if (p == null) return null;
+            readable = RecvLane.this.readable(p);
+            return true;
         }
 
         private void withdraw() {
@@ -346,7 +361,7 @@ public final class RecvLane {
         void step() {
             if (!begin()) { leave(); return; }
             while (true) {
-                Object r = dst != null ? RecvLane.this.take(dst) : takeChunk(max);
+                Object r = dst != null ? RecvLane.this.take(dst) : max == 0 ? peekReadable() : takeChunk(max);
                 if (r != null) {
                     finish(dst != null ? asRead(r) : r); // a chunk read reports FIN itself
                     leave();
@@ -361,19 +376,34 @@ public final class RecvLane {
     }
 
     /**
-     * Starts an asynchronous read into dst (or, when dst is null, a chunk read of up to max).
+     * Starts an asynchronous read into dst (or, when dst is null, a chunk read of up to max;
+     * max 0 is {@link #awaitReadableAsync}).
      * The outcome is the count (-1 at FIN), a StreamRecv.Chunk, StreamRecv.FIN, or a core outcome.
      */
     public Operation<Object> readAsync(ByteBuffer dst, int max, long deadline) {
         AsyncRead op = new AsyncRead(dst, max, deadline);
         op.armDeadline();
-        if (turn.tryEnter()) {
+        if (turn.tryEnterAsync()) {
             if (op.grant()) op.step();
             else leave();
         } else {
             turn.enqueue(op);
         }
         return op;
+    }
+
+    /**
+     * Starts an asynchronous {@link #awaitReadable}: completes TRUE once something can be read
+     * ({@link #readable(Operation)} then tells how much, -1 for the end), or with the part's
+     * failure. Takes nothing.
+     */
+    public Operation<Object> awaitReadableAsync(long deadline) {
+        return readAsync(null, 0, deadline);
+    }
+
+    /** What a completed {@link #awaitReadableAsync} reported: the bytes readable, -1 at the end. */
+    public static long readable(Operation<?> op) {
+        return op instanceof AsyncRead r ? r.readable : 0;
     }
 
     // ---- loop side ----

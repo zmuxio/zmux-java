@@ -132,17 +132,19 @@ final class CarrierChoiceSource {
     /** Joins io as a pipe of s, aborting it when the join is not confirmed within timer. */
     private static ZmuxPipe addWithin(ZmuxSession s, PipeIo io, PipeOptions options, Duration timer) throws IOException {
         CompletableFuture<ZmuxPipe> f = new CompletableFuture<>();
-        Thread.ofVirtual().name("zmux-carrier-join").start(() -> {
+        Thread join = Thread.ofVirtual().name("zmux-carrier-join").start(() -> {
             try { f.complete(s.addPipe(io, options)); } catch (Throwable e) { f.completeExceptionally(e); }
         });
         try {
             return f.get(timer.toNanos(), TimeUnit.NANOSECONDS);
         } catch (TimeoutException e) {
             // Confirmed late: not usable all the same.
+            join.interrupt();
             f.thenAccept(CarrierChoiceSource::abort);
             throw new SocketTimeoutException("join not confirmed within the timer");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            join.interrupt();
             f.thenAccept(CarrierChoiceSource::abort);
             throw new InterruptedIOException("interrupted");
         } catch (ExecutionException e) {

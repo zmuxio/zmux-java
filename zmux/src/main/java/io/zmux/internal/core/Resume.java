@@ -78,7 +78,7 @@ final class Resume {
         Attach a = p.mp();
         a.res.held1 = true;
         a.res.holdSent = 0;
-        a.res.holdUntil = Time.add(port.now(), a.rtt.smoothed());
+        a.res.holdUntil = Time.add(port.now(), a.rtt().smoothed());
     }
 
     boolean reinjectRoom(Pipe p) {

@@ -181,8 +181,12 @@ public final class ListenerHub {
         SessionRuntime driver = chosen.get().getKey();
         evictionPending = true;
         boolean queued = driver.loop().tryExecute(() -> {
-            synchronized (ListenerHub.this) {
-                long n = resources.values().stream().filter(v -> v.state() == io.zmux.internal.core.SessionState.SUSPENDED).count();
+            // The hub's lock only for its own table: the session's core is called outside it.
+            try {
+                long n;
+                synchronized (ListenerHub.this) {
+                    n = resources.values().stream().filter(v -> v.state() == io.zmux.internal.core.SessionState.SUSPENDED).count();
+                }
                 if (driver.core().state() == io.zmux.internal.core.SessionState.SUSPENDED
                         && (n > maxSuspended || (budget != null && budget.pressure()))) {
                     driver.core().closeResumeTimeout();
@@ -191,7 +195,9 @@ public final class ListenerHub {
                 driver.core().memory().charge();
                 driver.publishResources();
                 driver.markDirty();
-                evictionPending = false;
+            } finally {
+                // A core failure must not stop eviction for good.
+                synchronized (ListenerHub.this) { evictionPending = false; }
             }
             reconcile();
         });
@@ -343,6 +349,13 @@ public final class ListenerHub {
         for (Transformed t : java.util.List.copyOf(transforming)) t.abandon();
         for (Admitting a : java.util.List.copyOf(deciding)) {
             if (!a.carrier.loop().tryExecute(() -> a.abandon(counts.closed))) a.carrier.close(null);
+        }
+        for (Object k : java.util.List.copyOf(handshakes.keySet())) {
+            Runnable c = handshakes.remove(k);
+            if (c != null) c.run();
+        }
+        for (Pending p : java.util.List.copyOf(pendings)) {
+            if (!p.carrier.loop().tryExecute(p.shutdown)) p.carrier.close(null);
         }
         java.util.List<Stalled> stalled;
         synchronized (this) { stalled = java.util.List.copyOf(stalls); }
@@ -639,6 +652,10 @@ public final class ListenerHub {
     private final byte[] stallKey = new byte[32];
     /** The admissions waiting for their decision, cancelled when the listener stops taking carriers. */
     private final java.util.Set<Admitting> deciding = ConcurrentHashMap.newKeySet();
+    /** The TLS handshakes under way, by key, with their cancels: close cancels them at once. */
+    private final java.util.Map<Object, Runnable> handshakes = new ConcurrentHashMap<>();
+    /** The carriers waiting for their first record: close refuses them at once instead of at their timeout. */
+    private final java.util.Set<Pending> pendings = ConcurrentHashMap.newKeySet();
     /** The stalled carriers that hold their slots, in the order their stalls began; guarded by this. */
     private final java.util.LinkedHashSet<Stalled> stalls = new java.util.LinkedHashSet<>();
 
@@ -728,13 +745,23 @@ public final class ListenerHub {
     /** Takes a TLS carrier from peer: its slot, the handshake within handshakeTimeout, the admission, the first record. */
     public void tls(EventLoop loop, SocketChannel ch, SSLEngine engine, long handshakeTimeout, boolean secure, InetSocketAddress peer) {
         if (!slotOrReject(loop, ch, peer)) return;
-        TlsTransport.handshake(loop, ch, engine, handshakeTimeout, secure, (c, err) -> {
+        // Tracked until the handshake ends, so that close cancels it at once instead of at its timeout.
+        Object key = new Object();
+        var ended = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable cancel = TlsTransport.handshake(loop, ch, engine, handshakeTimeout, secure, (c, err) -> {
+            ended.set(true);
+            handshakes.remove(key);
             if (err != null) { handshakeFailed(peer); return; }
             String alpn = c.info().applicationProtocol();
             var info = new Admission.CarrierInfo(peer, peer, alpn, c.serverName(), c::export, io.zmux.RequestHead.NONE, true);
             admit(c, info, false, Admitted.NONE, socketFallback, null, false,
                     transformed(io.zmux.JoinHint.inBand(peer), info, (x, value) -> gate(x, peer, alpn, value, info, ignored -> {}) != null));
         });
+        handshakes.put(key, cancel);
+        // A handshake that ended before it was tracked leaves no entry; close writes closed
+        // before it reads handshakes, so one of the two cancels one that races it.
+        if (ended.get()) handshakes.remove(key);
+        else if (closed && handshakes.remove(key) != null) cancel.run();
     }
 
     /** The admission verdict code: 0 for any accept. */
@@ -1183,6 +1210,15 @@ public final class ListenerHub {
             return null;
         }
         Pending p = new Pending(c, source, alpn, admitted, info, started);
+        pendings.add(p);
+        // close writes closed before it reads pendings: one of the two refuses the carrier.
+        if (closed) {
+            pendings.remove(p);
+            release(source);
+            c.close(null);
+            counts.refused();
+            return null;
+        }
         c.loop().onShutdown(p.shutdown);
         c.loop().schedule(p, Time.add(Clock.now(), firstRecordTimeout));
         c.start(p);
@@ -1212,6 +1248,7 @@ public final class ListenerHub {
         /** Ends the pending phase: the timer goes. */
         private void classified() {
             done = true;
+            pendings.remove(this);
             carrier.loop().schedule(this, Time.NEVER);
             carrier.loop().removeShutdownHook(shutdown);
         }
@@ -1590,13 +1627,7 @@ public final class ListenerHub {
     private static void closeIo(io.zmux.carrier.PipeIo io, Throwable cause) {
         if (io == null) return;
         // The host's code: never on the loop.
-        Callbacks.EXECUTOR.execute(() -> {
-            try { if (io.reader() != null) io.reader().close(); }
-            catch (RuntimeException ignored) { /* Closing anyway. */ }
-            finally {
-                try { if (io.writer() != null) io.writer().abort(cause); } catch (RuntimeException ignored) { /* Closing anyway. */ }
-            }
-        });
+        Callbacks.EXECUTOR.execute(() -> Bootstrap.discard(io, cause));
     }
 
     /**

@@ -1,5 +1,6 @@
 package io.zmux.quic;
 
+import io.zmux.internal.spi.Loops;
 import io.netty.channel.*;
 import io.netty.handler.codec.quic.*;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
@@ -81,7 +82,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     private boolean stopped;
 
     /** Stops handing the connection's new streams to the listener; they are closed. Any thread. */
-    void stop() { ChannelLoops.executor(channel).execute(() -> stopped = true); }
+    void stop() { Loops.run(channel.eventLoop(), () -> stopped = true, () -> {}); } // a refused stop: the loop closes the connection
 
     /** A client connection's carrier: its first bidirectional stream starts with credential's prefix (null: none). */
     ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
@@ -221,10 +222,8 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         if (who == POOLED) return;
         if (lastLocal) { close(channel); return; }
         if (who == DEDICATED) {
-            // The event loop is the channel's, owned and closed by Netty.
-            //noinspection resource
-            channel.eventLoop().schedule(() -> { if (pipes == 0) close(channel); },
-                    PEER_CLOSE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            Loops.schedule(channel.eventLoop(), () -> { if (pipes == 0) close(channel); },
+                    PEER_CLOSE_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS, () -> close(channel));
         }
     }
 
@@ -246,7 +245,8 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     }
 
     void bind(ZmuxSession owner) {
-        ChannelLoops.executor(channel).execute(() -> { if (listener == null) session = owner; handshake = true; routePending(); });
+        // Refused: the loop is shutting down and closes the connection, which fails the session's pipe.
+        Loops.run(channel.eventLoop(), () -> { if (listener == null) session = owner; handshake = true; routePending(); }, () -> {});
     }
     void incoming(QuicStreamChannel stream) {
         boolean bidi = stream.type() == QuicStreamType.BIDIRECTIONAL;
@@ -304,7 +304,8 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
                 : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
         this.first = admitted;
         var decision = admitted.verdict();
-        decision.whenComplete((verdict, error) -> ChannelLoops.executor(connection).execute(() -> {
+        // A loop that refuses the verdict closes the connection and its held streams as it shuts down.
+        decision.whenComplete((verdict, error) -> Loops.run(connection.eventLoop(), () -> {
             if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {
                 admission = ACCEPTED;
                 var waiting = new ArrayList<>(held);
@@ -318,7 +319,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             // A connection that carried no session closes with code 0.
             if (verdict == io.zmux.AdmissionVerdict.STALL) admitted.closed().whenComplete((v, e) -> close(connection));
             else if (verdict != io.zmux.AdmissionVerdict.FALLBACK) close(connection);
-        }));
+        }, () -> {}));
     }
     /**
      * The application's view of an endpoint operation: completed in the endpoint's serial

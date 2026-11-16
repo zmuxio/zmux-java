@@ -297,7 +297,7 @@ class CloseHandOffTest {
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 long t0 = System.nanoTime();
                 assertFalse(f.client.cancelJoinedPipe(99), "the stuck loop did not run the abort");
-                assertFalse(Splice.ownerCleanup(stream, () -> { }), "the stuck loop did not run the cleanup");
+                assertFalse(Splice.boundedCleanup(stream, () -> { }).join(), "the stuck loop did not run the cleanup");
                 long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
                 assertTrue(took >= 350 && took < 2_000, "two bounded waits took " + took + " ms");
             } finally {
@@ -341,7 +341,7 @@ class CloseHandOffTest {
             PipeIo io = PipeChannel.pipe(ch, ch, Framing.BYTE_STREAM, 1 << 16);
             var got = new LinkedBlockingQueue<Object>();
             io.reader().start(new PipeReader.Sink() {
-                @Override public void onData(java.nio.ByteBuffer data, Runnable release) { got.add(data.remaining()); release.run(); }
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(data.remaining()); release.run(); }
                 @Override public void onEnd() { got.add("end"); }
                 @Override public void onError(Throwable cause) { got.add(cause); }
             });
