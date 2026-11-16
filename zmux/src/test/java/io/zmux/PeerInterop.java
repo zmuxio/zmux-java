@@ -59,8 +59,9 @@ class PeerInterop {
                 assertTrue(small.remove(key), "unexpected packet of " + packet.payload().length + " bytes");
                 smallBack++;
             }
-            assertTrue(big.isEmpty(), "capsule packets lost"); assertTrue(smallBack >= 1, "no datagram packet came back");
-            assertTrue(packets.stats().receivedAsDatagrams() >= 1 && packets.stats().receivedAsCapsules() == 2, packets.stats().toString());
+            // The carrier is reliable and the datagrams precede the FIN on both directions' wires, so every one comes back as a datagram.
+            assertTrue(big.isEmpty(), "capsule packets lost"); assertEquals(8, smallBack, () -> "datagram packets lost: " + packets.stats());
+            assertTrue(packets.stats().receivedAsDatagrams() == 8 && packets.stats().receivedAsCapsules() == 2, packets.stats().toString());
             packets.close();
         }
         // Capsules only, both ways, in order.

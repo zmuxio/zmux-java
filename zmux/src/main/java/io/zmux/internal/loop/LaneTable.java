@@ -78,7 +78,16 @@ public final class LaneTable {
     void partEnded(Stream st) {
         StreamLanes l = map.get(st);
         if (l == null) return;
-        if ((l.send() == null || l.send().appDone) && (l.recv() == null || l.recv().appDone)) releaseStream(st);
+        if ((l.send() == null || l.send().appDone) && (l.recv() == null || l.recv().appDone)) endStream(st);
+    }
+
+    /** Releases st as ended: as {@link #releaseStream}, keeping the datagrams queued for it readable; on the loop. */
+    private void endStream(Stream st) {
+        StreamLanes l = map.remove(st);
+        if (l != null && l.recv() != null) l.recv().close();
+        driver.pickers.forget(st);
+        driver.core.streams().releaseEnded(st);
+        endSending(st, l);
     }
 
     private void endSending(Stream st) {

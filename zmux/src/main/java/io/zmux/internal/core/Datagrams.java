@@ -718,6 +718,15 @@ public final class Datagrams {
         sendW.wakeAll(outbox);
     }
 
+    /**
+     * A stream discarded after the application finished with both its parts: the datagrams queued for it stay
+     * readable until its handle is released ({@link #dropStream}); without any, it has nothing to keep.
+     */
+    void endStream(Stream st) {
+        PerStream ps = streams.get(st);
+        if (ps == null || ps.q.isEmpty()) dropStream(st);
+    }
+
     /** A released stream: its queued and limiter-held datagrams go. */
     void dropStream(Stream st) {
         PerStream ps = streams.remove(st);

@@ -744,6 +744,22 @@ public final class StreamTable {
 
     /** Drops every handle: an unfinished sending part is reset with ZMUX_CANCELLED and an unread receiving part stopped with code 0 (EXTENSIONS.md 7.4). */
     public void release(Stream st) {
+        release(st, false);
+        // The handle is gone: nothing reads the datagrams a stream kept after it ended.
+        dg.dropStream(st);
+    }
+
+    /**
+     * The application is done with both parts of st (the end read, its own end finished): released as if the
+     * handle were closed, except that the datagrams that reached it before its end stay readable until the
+     * handle is released ({@link #release}); later ones are dropped, as for any ended stream.
+     */
+    public void releaseEnded(Stream st) {
+        release(st, true);
+    }
+
+    private void release(Stream st, boolean ended) {
+        st.tab.keepDatagrams = ended;
         // A sending part the application did not finish: abandoned, never a clean end (EXTENSIONS.md 7.4).
         if (st.hasSend && !st.snd.finWritten() && !st.snd.reset()) port.reset(st, TransportError.CANCELLED);
         st.tab.releasedSend = true;
@@ -801,7 +817,7 @@ public final class StreamTable {
         } else if (loc[t].reserved > 0) {
             loc[t].reserved--;
         }
-        dg.dropStream(st);
+        if (st.tab.keepDatagrams) dg.endStream(st); else dg.dropStream(st);
         life.streamGone();
     }
 
@@ -882,6 +898,8 @@ public final class StreamTable {
         private boolean releasedRecv;
         private boolean stackReject;
         private boolean discarded;
+        /** Released by the application finishing both parts: the queued datagrams outlive the discard. */
+        private boolean keepDatagrams;
         /** Counted by the read drain as holding unread data. */
         private boolean drainUnread;
         private boolean pinned;

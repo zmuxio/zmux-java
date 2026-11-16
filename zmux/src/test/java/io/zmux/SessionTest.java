@@ -137,6 +137,34 @@ class SessionTest {
         }
     }
 
+    /**
+     * Datagrams that reached a stream before its end stay readable after the application read the end and
+     * finished: the stream is released then, as if its handle were closed, but only closing the handle drops them.
+     */
+    @Test
+    void streamDatagramsOutliveTheReleaseOfAnEndedStream() throws Exception {
+        try (Pair p = Pair.memory(cfg)) {
+            ZmuxStream a = p.client().openStream();
+            a.write(new byte[] {9});
+            for (int i = 1; i <= 3; i++) a.sendDatagram(i, ByteBuffer.wrap(new byte[] {(byte) i}));
+            a.finish();
+            ZmuxStream b = p.server().acceptStream();
+            // The datagrams precede the FIN on the wire: reading to the end means they are queued.
+            assertArrayEquals(new byte[] {9}, b.inputStream().readAllBytes());
+            b.finish();
+            long end = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (p.server().stats().streamsActive() > 0 && System.nanoTime() < end) Thread.sleep(2);
+            assertEquals(0, p.server().stats().streamsActive(), "the ended stream was not released");
+            for (int i = 1; i <= 3; i++) {
+                StreamDatagram d = b.receiveDatagram(Duration.ofSeconds(5));
+                assertEquals(i, d.context());
+                assertArrayEquals(new byte[] {(byte) i}, d.payload());
+            }
+            assertThrows(java.net.SocketTimeoutException.class, () -> b.receiveDatagram(Duration.ofMillis(20)));
+            b.close();
+        }
+    }
+
     @Test
     void concurrentStreamDatagramWaitersAreEachServedAndTimeoutsWithdraw() throws Exception {
         try (Pair p = Pair.memory(cfg); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
