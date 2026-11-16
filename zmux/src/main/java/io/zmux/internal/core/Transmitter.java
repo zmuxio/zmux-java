@@ -701,6 +701,7 @@ public final class Transmitter {
             if (!st.sendable()) sched.remove(st);
             return CHUNK_SENT;
         }
+        if (d != null && !st.tab.opened()) sp.mp().openedOn(d.p());
         send.writing(st);
         if (dg.queued()) pipes.wakeWriters();
         if (!established) early.sent();

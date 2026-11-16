@@ -379,4 +379,40 @@ class ChannelDatagramTest {
         Stream peer = p.b.streams.lookup(0, true);
         assertEquals(7, p.b.datagrams().receive(peer).context());
     }
+    /** MULTIPATH.md S7: while its opening frame is unacknowledged, a stream's datagrams go only on the pipe that carried it. */
+    @Test void streamDatagramsFollowTheUnacknowledgedOpeningPipe() throws Exception {
+        Pair p = new Pair(null, null);
+        p.pump();
+        Stream st = p.a.streams().openStream(true);
+        p.a.streams().pinId(st);
+        p.a.streams().markOpened(st); // its opening frame went out
+        Pipe opening = p.a.pipes().get(0), other = p.b.pipes().get(0);
+        assertNull(Session.openingPipe(st), "outside multipath no pipe is recorded");
+        st.snd.mp().openedOn(opening);
+        assertSame(opening, Session.openingPipe(st));
+
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), new SessionStats(), new Outbox());
+        dg.recordCaps(() -> 65535, () -> 65535);
+        dg.peer(65535, 65535, true);
+        dg.channels(new Datagrams.Channels() {
+            @Override public Pipe datagramPipe() { return null; }
+            @Override public Datagrams.ChannelUse of(Pipe x) { return Datagrams.ChannelUse.NONE; }
+            @Override public boolean carries(Stream s, Pipe x) { Pipe o = Session.openingPipe(s); return o == null || o == x; }
+        });
+        dg.send(st, 1, new byte[] {9}, true);
+        assertFalse(dg.sendable(other, 65535), "another pipe could let it overtake the opening frame");
+        assertTrue(dg.sendable(opening, 65535));
+        RecordWriter w = new RecordWriter();
+        w.init(new Batch(), Framing.BYTES, 65535, Session.DEFAULT_BATCH);
+        dg.write(w, other);
+        assertTrue(dg.queued());
+        dg.write(w, opening);
+        assertFalse(dg.queued());
+
+        // Once the opening is acknowledged, any pipe.
+        st.snd.mps().ret.acked().add(0, 1);
+        assertNull(Session.openingPipe(st));
+        dg.send(st, 1, new byte[] {9}, true);
+        assertTrue(dg.sendable(other, 65535));
+    }
 }

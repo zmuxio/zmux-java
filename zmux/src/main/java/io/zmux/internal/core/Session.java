@@ -1701,6 +1701,15 @@ public final class Session {
         @Override public long holdUntil() { return Time.add(now, srtt()); }
     };
 
+    /**
+     * The pipe that carried st's opening frame while that frame is unacknowledged, else null: st's datagrams
+     * follow it there so that they cannot overtake it (MULTIPATH.md S7).
+     */
+    static Pipe openingPipe(Stream st) {
+        PathStreamState m = st.snd.mps();
+        return m == null ? null : m.openingPipe(st.snd.q().base());
+    }
+
     /** The pipe DATAGRAM frames go to now: the primary pipe of a multipath session, else the outbound pipe. */
     Pipe datagramPipe() {
         if (path instanceof PathSession mp) return mp.primary();
@@ -1725,6 +1734,11 @@ public final class Session {
     private final class ChannelsPort implements Datagrams.Channels {
         @Override public Pipe datagramPipe() { return Session.this.datagramPipe(); }
         @Override public Datagrams.ChannelUse of(Pipe p) { return channelOf(p); }
+        @Override public boolean carries(Stream st, Pipe p) {
+            if (st == null || !(path instanceof PathSession mp)) return true;
+            Pipe open = openingPipe(st);
+            return open == null || open == p || !mp.pipeUsable(open);
+        }
     }
 
     /**

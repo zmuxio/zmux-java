@@ -51,6 +51,9 @@ public final class Datagrams {
 
         /** How DATAGRAM frames for p may use its carrier's channel. */
         ChannelUse of(Pipe p);
+
+        /** Whether a DATAGRAM frame of stream st (null: a session datagram) may go on p now. */
+        default boolean carries(Stream st, Pipe p) { return true; }
     }
 
     private static final Channels NO_CHANNELS = new Channels() {
@@ -268,12 +271,12 @@ public final class Datagrams {
      * Decides o at a pipe with channel use ch and records of recordLimit bytes; datagramChannel is the datagram
      * pipe's channel as it is now, which takes what it takes whatever the records could hold.
      */
-    private Fate fate(Out o, ChannelUse ch, ChannelUse datagramChannel, int recordLimit, int largest) {
+    private Fate fate(Out o, Pipe p, ChannelUse ch, ChannelUse datagramChannel, int recordLimit, int largest) {
         int n = o.data().length;
         if (o.dead()) return Fate.DROP;
         if (n > largest && !datagramChannel.takes(n)) return Fate.DROP;
         // Behind an unopened stream, for the channel, or too large for these records only: it keeps its place.
-        if (!o.ready() || ch.takes(n) || n > maxData(Math.min(peerMax, recordLimit))) return Fate.HOLD;
+        if (!o.ready() || !channels.carries(o.st(), p) || ch.takes(n) || n > maxData(Math.min(peerMax, recordLimit))) return Fate.HOLD;
         return Fate.SEND;
     }
 
@@ -286,7 +289,7 @@ public final class Datagrams {
         ChannelUse ch = useOf(p);
         ChannelUse dch = channels.of(channels.datagramPipe());
         int largest = largestData(recordLimit);
-        for (Out o : send) if (fate(o, ch, dch, recordLimit, largest) != Fate.HOLD) return true;
+        for (Out o : send) if (fate(o, p, ch, dch, recordLimit, largest) != Fate.HOLD) return true;
         return false;
     }
 
@@ -303,7 +306,7 @@ public final class Datagrams {
         ArrayDeque<Out> kept = null;
         while (!send.isEmpty()) {
             Out o = send.peek();
-            Fate f = fate(o, ch, dch, limit, largest);
+            Fate f = fate(o, p, ch, dch, limit, largest);
             if (f == Fate.DROP) {
                 send.poll();
                 stats.datagramDroppedSend();
