@@ -27,7 +27,7 @@ export ZMUX_RS_HTTP_PEER="$CARGO_TARGET_DIR/release/zmux-http-peer"
 export ZMUX_GO_WS_PEER="$repo_root/target/interop/web-go/wspeer"
 export ZMUX_GO_HTTP_PEER="$repo_root/target/interop/web-go/httppeer"
 export ZMUX_GO_TLS_FRONT="$repo_root/target/interop/web-go/tlsfront"
-(cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux -am -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
+(cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux -am -Dzmux.bufferTracking=true -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
 # Maven must have actually executed every role in both suites.
 python3 - "$repo_root" <<'CHECK'
 from pathlib import Path

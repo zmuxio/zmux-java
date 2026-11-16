@@ -71,9 +71,12 @@ class QmuxInterop {
                     assertArrayEquals(text("datagram"), session.datagrams().receive());
                     session.abort(42, "bye");
                     assertEquals("app 42 bye", child.expect("CLOSED ")); child.awaitExit();
+                    // An abort returns before the session's end: the linger and the release of the
+                    // carriers and stream buffers follow on the loop, so the leak check waits for it.
+                    PeerInterop.get(session.closed());
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            assertEquals(0, loops.outstandingBuffers(), () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
         }
     }
     @Test void rustQmuxResponder() throws Exception { run("ZMUX_QMUX_RS_PEER", true); }

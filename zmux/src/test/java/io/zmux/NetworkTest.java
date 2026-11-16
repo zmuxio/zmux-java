@@ -179,4 +179,30 @@ class NetworkTest {
             assertEquals(0, loops.outstandingBuffers());
         }
     }
+    /**
+     * An abort returns before the session's end: while it lingers for a silent peer, its stream
+     * buffers still hold a read buffer, released only by the end that {@link ZmuxSession#closed()}
+     * reports. A leak check must wait for that end.
+     */
+    @Test
+    void anAbortedSessionKeepsItsReadBuffersUntilItsEnd() throws Exception {
+        try (EventLoops loops = EventLoops.create(1)) {
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            try (var listener = Zmux.listen(any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
+                 var client = Zmux.connect(relay.address(), cfg); var server = listener.accept(java.time.Duration.ofSeconds(5))) {
+                var out = client.openStream();
+                out.write(new byte[64 << 10]);
+                var in = server.acceptStream();
+                // Pushed to the stream's lane without copying: the rest of the piece references a read buffer.
+                try (Chunk first = in.readChunk(1)) { assertEquals(1, first.buffer().remaining()); }
+                relay.blackhole = true;
+                server.abort(1, "gone");
+                assertTrue(loops.outstandingBuffers() > 0, "released before the session's end");
+                server.awaitClosed();
+                assertEquals(0, loops.outstandingBuffers(), () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
+                client.abort(0, "done");
+            }
+        }
+    }
 }
+

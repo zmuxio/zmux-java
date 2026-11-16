@@ -84,6 +84,15 @@ public final class EventLoopGroup implements AutoCloseable {
         return n;
     }
 
+    /** The reference histories of the read buffers not yet returned, over all loops; empty unless tracking (tests). */
+    public String outstandingTrace() {
+        var out = new StringBuilder();
+        synchronized (lock) {
+            for (EventLoop l : loops) if (l != null) out.append(l.pool.outstandingTrace());
+        }
+        return out.toString();
+    }
+
     /** A host counter summed over the group's loops (diagnostics). */
     public long sum(java.util.function.ToLongFunction<SessionHost> counter) {
         long n = 0;

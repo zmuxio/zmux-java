@@ -24,6 +24,8 @@ public final class BufferPool {
     private final ConcurrentLinkedQueue<ByteBuffer> idle = new ConcurrentLinkedQueue<>();
     private final AtomicInteger idleCount = new AtomicInteger();
     private final AtomicInteger outstanding = new AtomicInteger();
+    /** The buffers taken and not yet returned, when {@link ReadBuf#TRACKING} (tests). */
+    private final java.util.Set<ReadBuf> live = ReadBuf.TRACKING ? java.util.concurrent.ConcurrentHashMap.newKeySet() : null;
 
     /** A buffer with one reference held by the caller. */
     ReadBuf take() {
@@ -35,11 +37,14 @@ public final class BufferPool {
         }
         b.clear();
         outstanding.incrementAndGet();
-        return new ReadBuf(b, this::give);
+        ReadBuf rb = new ReadBuf(b, this::give);
+        if (live != null) live.add(rb);
+        return rb;
     }
 
     private void give(ReadBuf rb) {
         outstanding.decrementAndGet();
+        if (live != null) live.remove(rb);
         if (idleCount.incrementAndGet() <= maxIdle) {
             idle.add(rb.data());
         } else {
@@ -50,5 +55,13 @@ public final class BufferPool {
     /** Buffers taken and not yet returned (tests: leak checks). */
     int outstanding() {
         return outstanding.get();
+    }
+
+    /** The reference histories of the buffers not yet returned; empty unless tracking (tests). */
+    String outstandingTrace() {
+        if (live == null) return "";
+        var out = new StringBuilder();
+        for (ReadBuf rb : live) out.append("outstanding read buffer, refs ").append(rb.refs()).append('\n').append(rb.trace());
+        return out.toString();
     }
 }

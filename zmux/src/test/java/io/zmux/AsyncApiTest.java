@@ -256,4 +256,38 @@ class AsyncApiTest {
             sender.close(); receiver.close();
         }
     }
+    /**
+     * A chunk read decided just before the application completes its future from outside (as
+     * orTimeout does) reaches nobody: the publication, queued on the completion context behind a
+     * blocked dependent, must release it rather than drop it.
+     */
+    @Test void aValueDecidedBeforeAnOutsideCompletionIsReleased() throws Exception {
+        try (var pair = Pair.memory(ZmuxConfig.defaults())) {
+            var driver = pair.client().driver;
+            var blocked = new CountDownLatch(1); var gate = new CountDownLatch(1);
+            // A dependent registered before its operation completes runs on the completion context: it holds it.
+            var holdOp = new Operation<Object>(driver, self -> true, null);
+            var hold = ZmuxSession.future(holdOp, r -> r).thenRun(() -> { blocked.countDown(); latch(gate); });
+            holdOp.submit();
+            latch(blocked);
+            var released = new AtomicInteger();
+            var buf = new io.zmux.internal.core.ReadBuf(ByteBuffer.allocate(16), ignored -> released.incrementAndGet());
+            var readOp = new Operation<Object>(driver, self -> new io.zmux.internal.core.StreamRecv.Chunk(buf.data(), buf, false), null);
+            ZmuxFuture<Chunk> read = ZmuxSession.future(readOp, r -> new Chunk((io.zmux.internal.core.StreamRecv.Chunk) r));
+            readOp.submit();
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!readOp.isDone() && System.nanoTime() < end) Thread.onSpinWait();
+            assertTrue(readOp.isDone());
+            // Decided, its publication queued behind the held context: the outside completion wins.
+            assertTrue(read.completeExceptionally(new TimeoutException()));
+            gate.countDown();
+            get(hold);
+            // Published after the read's publication on the same context.
+            var afterOp = new Operation<Object>(driver, self -> true, null);
+            var after = ZmuxSession.future(afterOp, r -> r);
+            afterOp.submit();
+            get(after);
+            assertEquals(1, released.get(), "the undelivered chunk was not released");
+        }
+    }
 }

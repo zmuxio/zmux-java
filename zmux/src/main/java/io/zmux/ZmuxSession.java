@@ -367,7 +367,9 @@ public final class ZmuxSession implements AutoCloseable {
         Runnable publish = () -> {
             if (op.isCancelled()) return;
             try {
-                f.publish(map.map(op.outcome()));
+                // The future may have been completed from outside after the outcome was decided:
+                // a value nobody receives (a chunk, a stream) is released, not dropped.
+                f.publishOrDiscard(map.map(op.outcome()));
             } catch (IOException | RuntimeException failure) {
                 f.publishFailure(failure);
             }

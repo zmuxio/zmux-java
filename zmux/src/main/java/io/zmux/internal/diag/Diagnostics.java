@@ -28,6 +28,14 @@ public final class Diagnostics {
         return groups.apply(loops).outstandingBuffers();
     }
 
+    /**
+     * Where the read buffers not yet returned were created and referenced: empty unless the
+     * system property {@code zmux.bufferTracking} is true; for a leak check's message.
+     */
+    public static String outstandingTrace(EventLoops loops) {
+        return groups.apply(loops).outstandingTrace();
+    }
+
     /** Input bytes the loops' transports copied into read buffers. */
     public static long copiedInputBytes(EventLoops loops) {
         return groups.apply(loops).sum(io.zmux.internal.loop.SessionHost::copiedInputBytes);
