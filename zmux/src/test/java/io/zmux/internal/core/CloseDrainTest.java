@@ -53,7 +53,7 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state(), "the last read ends the drain");
     }
 
-    /** F5: bytes pushed to the receive lane and not consumed there are unread too. */
+    /** Bytes pushed to the receive lane and not consumed there are unread too. */
     @Test void dataOnTheReceiveLaneIsUnreadUntilConsumed() throws Exception {
         Session a = a(), b = b();
         Stream in = setUp(a, b, 100, true)[1];
@@ -65,7 +65,7 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state());
     }
 
-    /** F1: an unaccepted stream is dropped at the close, holds nothing, and cannot be accepted. */
+    /** An unaccepted stream is dropped at the close, holds nothing, and cannot be accepted. */
     @Test void unacceptedStreamsAreDroppedAtTheClose() throws Exception {
         Session a = a(), b = b();
         setUp(a, b, 100, false);
@@ -74,7 +74,7 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state(), "nothing held");
     }
 
-    /** F2: a peer that ends its carrier without CONNECTION_CLOSE starts no drain. */
+    /** A peer that ends its carrier without CONNECTION_CLOSE starts no drain. */
     @Test void anEndWithoutTheCloseFrameStartsNoDrain() throws Exception {
         Session a = a(), b = unacked(CoreConfig.Role.RESPONDER);
         setUp(a, b, 100, true);
@@ -85,7 +85,7 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state(), "unread data holds only after the peer's close");
     }
 
-    /** F3: without a live outbound pipe the peer's close still drains, lingering from its processing. */
+    /** Without a live outbound pipe the peer's close still drains, lingering from its processing. */
     @Test void aPeersCloseWithoutAnOutboundPipeStillDrains() throws Exception {
         Session a = a(), b = b();
         setUp(a, b, 100, true);

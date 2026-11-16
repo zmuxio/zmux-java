@@ -45,7 +45,7 @@ final class Pacer {
         return lim != null ? raw - Math.min(raw, lim.leftOut(held)) : raw;
     }
 
-    /** Bytes acknowledged on their own lanes beyond the cumulative point (N14). */
+    /** Bytes acknowledged on their own lanes beyond the cumulative point. */
     private static long heldBytes(Pipe p) {
         Pipe.OutDir d = p.out();
         if (d.lanes.size() < 2) return 0;

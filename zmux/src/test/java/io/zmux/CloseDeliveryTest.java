@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** N16: a coded close over TCP and TLS delivers the data written before it, then the code. */
+/** A coded close over TCP and TLS delivers the data written before it, then the code. */
 @Timeout(60)
 class CloseDeliveryTest {
 

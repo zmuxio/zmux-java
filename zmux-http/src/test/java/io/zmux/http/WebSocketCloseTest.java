@@ -20,7 +20,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** N16 over WebSocket: a coded close delivers the data written before it, then the code. */
+/** Close delivery over WebSocket: a coded close delivers the data written before it, then the code. */
 @Timeout(60)
 class WebSocketCloseTest {
     /*

@@ -236,7 +236,7 @@ public final class Lanes {
         return r;
     }
 
-    // ---- data turns (N13) ----
+    // ---- data turns ----
 
     /** Whether data lane ol may take new stream data from the paced room now. */
     boolean dataTurn(Pipe p, Pipe.OutLane ol) {

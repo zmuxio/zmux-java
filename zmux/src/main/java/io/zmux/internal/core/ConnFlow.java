@@ -74,7 +74,7 @@ final class ConnFlow {
         return true;
     }
 
-    /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count (C1). */
+    /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count. */
     void buffer(long n, long cap, boolean pressure) {
         if (n == 0) return;
         if (buffered < cap && !pressure) {
@@ -88,7 +88,7 @@ final class ConnFlow {
         checkCredit();
     }
 
-    /** Accounts n buffered bytes consumed; the only function that lowers the buffered count (C1). */
+    /** Accounts n buffered bytes consumed; the only function that lowers the buffered count. */
     void unbuffer(long n, long cap, boolean pressure) {
         if (n == 0) return;
         if (n > buffered) throw new IllegalStateException("buffered bytes below zero");

@@ -115,9 +115,9 @@ class HttpInteropTest {
             echo.join(5000);
         }
         // Java clients against the peer's server.
-        int port = freePort();
-        String addr = "127.0.0.1:" + port;
-        Process p = startReady(List.of(bin, "server", addr));
+        Peer peer = startServer(a -> List.of(bin, "server", a), Map.of());
+        String addr = peer.addr();
+        Process p = peer.process();
         try (var f = Fixture.plain(b -> b); var hc = f.client(b -> b)) {
             URI u = URI.create("ws://" + addr + "/zmux");
             try (ZmuxSession s = Zmux.open(hc.webSocketPipe(u, Map.of(), List.of(), WS_AUTH), Role.CLIENT, f.config)) {
@@ -164,8 +164,9 @@ class HttpInteropTest {
                 echo.join(5000);
             }
             // A Java client against the peer's server.
-            String addr = "127.0.0.1:" + freePort();
-            Process p = startReady(List.of(bin, "server", kind, addr));
+            Peer peer = startServer(a -> List.of(bin, "server", kind, a), Map.of());
+            String addr = peer.addr();
+            Process p = peer.process();
             try (var f = Fixture.plain(b -> b); var hc = f.client(b -> h2 ? b.http2() : b.http1())) {
                 URI u = URI.create("http://" + addr + "/zmux");
                 var pipe = split ? hc.splitPipe(u, Map.of(), streamAuth("right"))
@@ -232,23 +233,23 @@ class HttpInteropTest {
     }
 
     /** Starts the TLS front on a free port forwarding to upstream, or returns null without a front. */
-    static Process startFront(String front, String upstream, String[] addr) throws Exception {
+    static Peer startFront(String front, String upstream) throws Exception {
         if (front == null) return null;
-        addr[0] = "127.0.0.1:" + freePort();
-        return startReady(List.of(front, addr[0], upstream));
+        return startServer(a -> List.of(front, a, upstream), Map.of());
     }
 
     /** The peer's client against the peer's server, directly or through the front; both report the join's mode. */
     private static void peerPair(String server, String client, String serverKind, String clientKind, String front, String want) throws Exception {
-        String addr = "127.0.0.1:" + freePort();
         String what = client + " -> " + server + " " + clientKind + (front != null ? " via front" : "");
         // The Go server serves WebSocket over HTTP/2 only with extended CONNECT turned on.
-        Process p = startReady(List.of(server, "server", serverKind, addr), Map.of("GODEBUG", "http2xconnect=1"));
-        String[] via = {addr};
+        Peer sp = startServer(a -> List.of(server, "server", serverKind, a), Map.of("GODEBUG", "http2xconnect=1"));
+        Process p = sp.process();
         Process fp = null;
         try {
-            fp = startFront(front, addr, via);
-            String out = run(List.of(client, "client", clientKind, via[0]));
+            Peer fpeer = startFront(front, sp.addr());
+            String via = fpeer == null ? sp.addr() : fpeer.addr();
+            fp = fpeer == null ? null : fpeer.process();
+            String out = run(List.of(client, "client", clientKind, via));
             assertEquals("OK ping", lastLine(out), () -> what + ": " + out);
             assertTrue(out.lines().anyMatch(l -> l.equals("MODE " + want)), () -> what + ": " + out);
             awaitOutput(p, "MODE " + want);
@@ -260,17 +261,18 @@ class HttpInteropTest {
 
     /** A Java client against the peer's server: the join's mode at both ends, then data on the session. */
     private static void javaClientTls(String server, String kind, String front, String want) throws Exception {
-        String addr = "127.0.0.1:" + freePort();
-        Process p = startReady(List.of(server, "server", kind, addr));
-        String[] via = {addr};
+        Peer sp = startServer(a -> List.of(server, "server", kind, a), Map.of());
+        Process p = sp.process();
         Process fp = null;
         try (var f = new Fixture(HttpInteropTest::mp, b -> b, e -> e.streaming(), false, null)) {
-            fp = startFront(front, addr, via);
+            Peer fpeer = startFront(front, sp.addr());
+            String via = fpeer == null ? sp.addr() : fpeer.addr();
+            fp = fpeer == null ? null : fpeer.process();
             boolean h1 = kind.equals("tls1");
             var ssl = io.netty.handler.ssl.SslContextBuilder.forClient().sslProvider(io.netty.handler.ssl.SslProvider.JDK)
                     .trustManager(io.netty.handler.ssl.util.InsecureTrustManagerFactory.INSTANCE).protocols("TLSv1.3");
             try (var hc = f.client(b -> (h1 ? b.http1() : b.http2()).tls(ssl))) {
-                URI u = URI.create("https://" + via[0] + "/zmux");
+                URI u = URI.create("https://" + via + "/zmux");
                 try (ZmuxSession s = Zmux.open(hc.pipe(u, Map.of(), BIDI, null), Role.CLIENT, f.config)) {
                     assertEquals("ping", new String(pingPong(s), StandardCharsets.US_ASCII));
                     assertEquals(want, joinMode(s, () -> hc.pipe(u, Map.of(), BIDI, null)), server + " " + kind);
@@ -290,11 +292,12 @@ class HttpInteropTest {
         try (var f = new Fixture(HttpInteropTest::mp, b -> b, e -> e.streaming(), front == null, null)) {
             Thread echo = echoSessions(f.listener, sessions);
             String addr = "127.0.0.1:" + f.base.getPort();
-            String[] via = {addr};
-            Process fp = startFront(front, addr, via);
+            Peer fpeer = startFront(front, addr);
+            String via = fpeer == null ? addr : fpeer.addr();
+            Process fp = fpeer == null ? null : fpeer.process();
             try {
                 String clientKind = front == null ? kind : "tls2";
-                String out = run(List.of(client, "client", clientKind, via[0]));
+                String out = run(List.of(client, "client", clientKind, via));
                 assertEquals("OK ping", lastLine(out), () -> client + " " + kind + ": " + out);
                 assertTrue(out.lines().anyMatch(l -> l.equals("MODE " + want)), () -> client + " " + kind + ": " + out);
                 ZmuxSession s = sessions.poll(5, TimeUnit.SECONDS);
@@ -385,20 +388,52 @@ class HttpInteropTest {
         return l[l.length - 1];
     }
 
-    /** Starts a peer server and waits for its READY line. */
-    static Process startReady(List<String> cmd) throws Exception {
-        return startReady(cmd, Map.of());
+    /** A started peer server and the address it listens on. */
+    record Peer(Process process, String addr) {}
+
+    private static final int BIND_ATTEMPTS = 3;
+    private static final java.util.regex.Pattern IN_USE = java.util.regex.Pattern.compile(
+            "address already in use|addrinuse|only one usage of each socket address", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Starts a peer server on a fresh loopback port and waits for its READY line. The peers take the address on
+     * their command line and do not bind port 0, so a port that another process takes between the probe and the
+     * peer's bind makes the peer exit with an address-in-use error; that, and only that, is retried with a new
+     * port, at most {@link #BIND_ATTEMPTS} times in all.
+     */
+    static Peer startServer(java.util.function.Function<String, List<String>> cmd, Map<String, String> env) throws Exception {
+        return launch(cmd, a -> env, (p, a) -> awaitReadyOrExit(p));
     }
 
-    static Process startReady(List<String> cmd, Map<String, String> env) throws Exception {
-        Process p = start(cmd, env);
-        try {
-            awaitOutput(p, "READY");
-        } catch (AssertionError | Exception e) {
-            stop(p);
-            throw e;
+    /** Waits until a started peer listens on its address. */
+    interface Ready { void await(Process p, String addr) throws Exception; }
+
+    /** {@link #startServer} with the peer's environment depending on the address and its own readiness check. */
+    static Peer launch(java.util.function.Function<String, List<String>> cmd,
+            java.util.function.Function<String, Map<String, String>> env, Ready ready) throws Exception {
+        for (int attempt = 1;; attempt++) {
+            String addr = "127.0.0.1:" + freePort();
+            Process p = start(cmd.apply(addr), env.apply(addr));
+            try {
+                ready.await(p, addr);
+                return new Peer(p, addr);
+            } catch (AssertionError | Exception e) {
+                String out = output(p);
+                stop(p);
+                if (attempt < BIND_ATTEMPTS && IN_USE.matcher(out).find()) continue;
+                throw e;
+            }
         }
-        return p;
+    }
+
+    /** Waits for READY; a peer that exits first fails at once with its output. */
+    private static void awaitReadyOrExit(Process p) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!output(p).lines().anyMatch(l -> l.startsWith("READY"))) {
+            if (!p.isAlive()) fail("the peer exited before READY: " + output(p));
+            if (System.nanoTime() - end > 0) fail("no READY from the peer: " + output(p));
+            Thread.sleep(20);
+        }
     }
 
     static void awaitOutput(Process p, String line) throws Exception {
@@ -474,13 +509,11 @@ class HttpInteropTest {
     }
 
     private static void javaClient(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
-        int port;
-        try (var s = new java.net.ServerSocket(0)) { port = s.getLocalPort(); }
-        var env = Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", "127.0.0.1:" + port, "ZMUX_EXCHANGE_FOR", "60s",
-                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0");
-        Process p = start(cmd, env);
+        Peer peer = launch(a -> cmd, a -> Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", a, "ZMUX_EXCHANGE_FOR", "60s",
+                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0"), (pr, a) -> awaitPort(Integer.parseInt(a.substring(a.indexOf(':') + 1)), pr));
+        Process p = peer.process();
+        int port = Integer.parseInt(peer.addr().substring(peer.addr().indexOf(':') + 1));
         try (var f = Fixture.plain(b -> b); var hc = f.client(b -> b)) {
-            awaitPort(port, p);
             String origin = "http://127.0.0.1:" + port;
             var c = config(psk, b64, split ? origin + "/down/{nonce}" : "");
             try (ZmuxSession s = Zmux.open(hc.exchangePipe(origin + "/up/{nonce}", c), Role.CLIENT, f.config)) {

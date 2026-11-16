@@ -10,7 +10,7 @@ import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** N18 (stream datagram bytes) and N19 (stream credit maximum). */
+/** The stream datagram-bytes limit and the stream credit maximum. */
 @Timeout(30)
 class StreamLimitsTest {
     static void await(java.util.function.BooleanSupplier done) throws InterruptedException {

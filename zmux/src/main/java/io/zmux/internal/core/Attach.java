@@ -154,7 +154,7 @@ final class Attach {
         this.probeJitter = probeJitter;
     }
 
-    /** Whether bytes sent at sent may give estimator samples (E2). */
+    /** Whether bytes sent at sent may give estimator samples. */
     boolean sampleOk(long sent) {
         return !health.noSample() || sent > health.noSampleAt();
     }

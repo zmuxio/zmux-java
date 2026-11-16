@@ -7,7 +7,7 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** N17: the close forms on a pair of in-memory sessions. */
+/** The close forms on a pair of in-memory sessions. */
 @Timeout(30)
 class CloseFormsTest {
     /** A carrier that takes each batch only after a delay: a flush through it takes a while. */

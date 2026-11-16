@@ -1366,7 +1366,7 @@ public final class Session {
 
     // ---- timers ----
 
-    /** The earliest deadline, {@link Time#NEVER} when none (T2: every deadline source is here). */
+    /** The earliest deadline, {@link Time#NEVER} when none (every deadline source is here). */
     public long nextTimeout() {
         if (state == SessionState.CLOSED) return Time.NEVER;
         long t = life.deadline();

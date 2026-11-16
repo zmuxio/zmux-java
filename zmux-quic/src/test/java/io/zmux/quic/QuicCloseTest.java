@@ -18,7 +18,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** N16 over QUIC: the zmux close reaches the peer first, then the QUIC connection closes with the same code. */
+/** Close delivery over QUIC: the zmux close reaches the peer first, then the QUIC connection closes with the same code. */
 @Timeout(60)
 class QuicCloseTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
@@ -37,7 +37,7 @@ class QuicCloseTest {
         return got;
     }
 
-    /** As the core's N16 check: 1 MiB, then close with code and reason; the peer reads it all, then sees the code. */
+    /** As the core close-delivery check: 1 MiB, then close with code and reason; the peer reads it all, then sees the code. */
     static void closeDelivers(ZmuxSession client, ZmuxSession server, long code, String reason) throws Exception {
         byte[] data = new byte[1 << 20];
         new java.util.Random(code).nextBytes(data);

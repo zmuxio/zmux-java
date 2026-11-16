@@ -7,7 +7,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pitfalls T5 and E5: an ack-eliciting record on an inbound pipe without a PIPE_ACK during the preceding
+ * An ack-eliciting record on an inbound pipe without a PIPE_ACK during the preceding
  * zmux_max_ack_delay is acknowledged at once, a bulk transfer is not acknowledged more often for it, unreported
  * positions ride along with credit frames, and the limiter's release time stays where the hold set it.
  */

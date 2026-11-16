@@ -177,12 +177,12 @@ public final class StreamTable {
         return Math.max(c, s);
     }
 
-    /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count (C1). */
+    /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count. */
     void bufAdd(long n) {
         if (n != 0) conn.buffer(n, bufferCap(), mem.pressure());
     }
 
-    /** Accounts n buffered bytes consumed; the only function that lowers the buffered count (C1). */
+    /** Accounts n buffered bytes consumed; the only function that lowers the buffered count. */
     void bufSub(long n) {
         if (n == 0) return;
         conn.unbuffer(n, bufferCap(), mem.pressure());
