@@ -363,7 +363,12 @@ class AdmissionTest {
             Thread.sleep(500);
             ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
             ch.shutdownOutput();
-            return readAll(ch);
+            try {
+                return readAll(ch);
+            } catch (java.net.SocketException reset) {
+                // A close with the late bytes unread resets the connection rather than ending it: closed either way.
+                return "";
+            }
         }
     }
 

@@ -368,10 +368,6 @@ class HttpInteropTest {
 
     // ---- processes ----
 
-    static int freePort() throws IOException {
-        try (var s = new java.net.ServerSocket(0)) { return s.getLocalPort(); }
-    }
-
     /** Runs a peer to its end (at most 30 s) and returns its output. */
     static String run(List<String> cmd) throws Exception {
         Process p = start(cmd, Map.of());
@@ -391,48 +387,24 @@ class HttpInteropTest {
     /** A started peer server and the address it listens on. */
     record Peer(Process process, String addr) {}
 
-    private static final int BIND_ATTEMPTS = 3;
-    private static final java.util.regex.Pattern IN_USE = java.util.regex.Pattern.compile(
-            "address already in use|addrinuse|only one usage of each socket address", java.util.regex.Pattern.CASE_INSENSITIVE);
-
     /**
-     * Starts a peer server on a fresh loopback port and waits for its READY line. The peers take the address on
-     * their command line and do not bind port 0, so a port that another process takes between the probe and the
-     * peer's bind makes the peer exit with an address-in-use error; that, and only that, is retried with a new
-     * port, at most {@link #BIND_ATTEMPTS} times in all.
+     * Starts a peer server on 127.0.0.1:0 and waits for its {@code READY <address>} line, which names the address it
+     * bound; a peer that exits first fails at once with its output.
      */
     static Peer startServer(java.util.function.Function<String, List<String>> cmd, Map<String, String> env) throws Exception {
-        return launch(cmd, a -> env, (p, a) -> awaitReadyOrExit(p));
-    }
-
-    /** Waits until a started peer listens on its address. */
-    interface Ready { void await(Process p, String addr) throws Exception; }
-
-    /** {@link #startServer} with the peer's environment depending on the address and its own readiness check. */
-    static Peer launch(java.util.function.Function<String, List<String>> cmd,
-            java.util.function.Function<String, Map<String, String>> env, Ready ready) throws Exception {
-        for (int attempt = 1;; attempt++) {
-            String addr = "127.0.0.1:" + freePort();
-            Process p = start(cmd.apply(addr), env.apply(addr));
-            try {
-                ready.await(p, addr);
-                return new Peer(p, addr);
-            } catch (AssertionError | Exception e) {
-                String out = output(p);
-                stop(p);
-                if (attempt < BIND_ATTEMPTS && IN_USE.matcher(out).find()) continue;
-                throw e;
+        Process p = start(cmd.apply("127.0.0.1:0"), env);
+        try {
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (true) {
+                var ready = output(p).lines().filter(l -> l.startsWith("READY ")).findFirst();
+                if (ready.isPresent()) return new Peer(p, ready.get().substring("READY ".length()).strip());
+                if (!p.isAlive()) fail("the peer exited before READY: " + output(p));
+                if (System.nanoTime() - end > 0) fail("no READY from the peer: " + output(p));
+                Thread.sleep(20);
             }
-        }
-    }
-
-    /** Waits for READY; a peer that exits first fails at once with its output. */
-    private static void awaitReadyOrExit(Process p) throws Exception {
-        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-        while (!output(p).lines().anyMatch(l -> l.startsWith("READY"))) {
-            if (!p.isAlive()) fail("the peer exited before READY: " + output(p));
-            if (System.nanoTime() - end > 0) fail("no READY from the peer: " + output(p));
-            Thread.sleep(20);
+        } catch (AssertionError | Exception e) {
+            stop(p);
+            throw e;
         }
     }
 
@@ -509,11 +481,16 @@ class HttpInteropTest {
     }
 
     private static void javaClient(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
-        Peer peer = launch(a -> cmd, a -> Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", a, "ZMUX_EXCHANGE_FOR", "60s",
-                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0"), (pr, a) -> awaitPort(Integer.parseInt(a.substring(a.indexOf(':') + 1)), pr));
+        // zmux-go's exchange test server prints no READY line: it gets a probed free port and is polled until it listens.
+        boolean go = cmd.size() > 1;
+        String bind = go ? "127.0.0.1:" + freePort() : "127.0.0.1:0";
+        var env = Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", bind, "ZMUX_EXCHANGE_FOR", "60s",
+                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0");
+        Peer peer = go ? new Peer(start(cmd, env), bind) : startServer(a -> cmd, env);
         Process p = peer.process();
         int port = Integer.parseInt(peer.addr().substring(peer.addr().indexOf(':') + 1));
         try (var f = Fixture.plain(b -> b); var hc = f.client(b -> b)) {
+            if (go) awaitPort(port, p);
             String origin = "http://127.0.0.1:" + port;
             var c = config(psk, b64, split ? origin + "/down/{nonce}" : "");
             try (ZmuxSession s = Zmux.open(hc.exchangePipe(origin + "/up/{nonce}", c), Role.CLIENT, f.config)) {
@@ -563,6 +540,10 @@ class HttpInteropTest {
         }
         Path log = logs.remove(p);
         if (log != null) { try { Files.deleteIfExists(log); } catch (IOException ignored) { /* Left in target. */ } }
+    }
+
+    static int freePort() throws IOException {
+        try (var srv = new java.net.ServerSocket(0)) { return srv.getLocalPort(); }
     }
 
     static void awaitPort(int port, Process p) throws Exception {

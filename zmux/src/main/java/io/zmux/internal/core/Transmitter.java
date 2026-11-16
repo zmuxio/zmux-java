@@ -538,6 +538,11 @@ public final class Transmitter {
             return p;
         }
         if (p.off + p.n == sp.q().end() && sp.finWritten() && !sp.finSent() && !sp.reset()) p.fin = true;
+        if (p.off == 0 && dg.waitsFor(st)) {
+            // The opening frame alone: the stream's queued datagrams follow it, ahead of the data written after them.
+            p.n = Math.min(p.n, sp.preLen());
+            p.fin = false;
+        }
         p.open = p.n == 0 && !p.fin && !st.tab.opened() && (st.tab.pinned() || st.tab.openWant());
         return p;
     }
@@ -585,9 +590,12 @@ public final class Transmitter {
                     lanes.bind(lp, st);
                     if (elsewhere) continue;
                 }
+                boolean opening = !st.tab.opened();
                 int r = sendChunk(w, st, d);
                 if (r == CHUNK_FULL) return;
                 if (r == CHUNK_SENT) {
+                    // Datagrams held for the opening frame go right behind it, on lane 0 where datagrams go.
+                    if (opening && p != null && ol.lane == 0 && dg.queued()) writeDatagrams(w, p);
                     if (lp != null) {
                         // This direction already owns bytes in the batch being built. Its
                         // final lane position is known only in afterBatch; do not rebind

@@ -238,6 +238,13 @@ public final class Datagrams {
         return !send.isEmpty();
     }
 
+    /** Whether a datagram of st waits for its opening frame. */
+    boolean waitsFor(Stream st) {
+        if (st.tab.opened()) return false;
+        for (Out o : send) if (o.st() == st) return true;
+        return false;
+    }
+
     /** What becomes of a queued datagram at a pipe: it goes in this pipe's records, waits, or is dropped. */
     private enum Fate { SEND, HOLD, DROP }
 

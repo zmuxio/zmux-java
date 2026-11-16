@@ -350,4 +350,33 @@ class ChannelDatagramTest {
         Stream st = openAndWrite(p);
         assertEquals(3, p.b.datagrams().receive(st).context());
     }
+    @Test void datagramsQueuedBeforeTheOpeningGoAheadOfLaterStreamData() throws Exception {
+        Pair p = new Pair(null, null);
+        p.pump();
+        Stream st = p.a.streams().openStream(true);
+        p.a.sendDatagram(st, 7, new byte[] {'d'});
+        p.a.sending().write(st, ByteBuffer.wrap(bytes(100, 1)), true);
+        p.recordsA.clear();
+        p.pump();
+        // The opening frame, then the datagram queued before the data, then the data and its FIN.
+        List<String> order = new ArrayList<>();
+        FrameDecoder d = new FrameDecoder();
+        Frame f = new Frame();
+        for (byte[] batch : p.recordsA) {
+            ByteBuffer b = ByteBuffer.wrap(batch);
+            for (int i = 0; i < batch.length; ) {
+                int size = (int) VarInt.get(b, i, batch.length);
+                int start = i + VarInt.lengthOf(batch[i]), end = start + size;
+                for (int q = start; q < end; ) {
+                    q += d.decode(b, q, end, f);
+                    if (f.kind == FrameKind.DATAGRAM) order.add("D");
+                    else if (f.kind == FrameKind.STREAM) order.add(f.fin ? "F" : "S");
+                }
+                i = end;
+            }
+        }
+        assertEquals(List.of("S", "D", "F"), order);
+        Stream peer = p.b.streams.lookup(0, true);
+        assertEquals(7, p.b.datagrams().receive(peer).context());
+    }
 }
