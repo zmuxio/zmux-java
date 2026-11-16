@@ -182,7 +182,7 @@ final class Splice {
 
     /** Submits a one-attempt operation on the stream's loop. */
     private static Operation<Object> onLoop(ZmuxStream s, Operation.Step step) {
-        return new Operation<Object>(s.session.driver, step, null).submit();
+        return new Operation<>(s.session.driver, step, null).submit();
     }
 
     /** Whether an outcome is the success a lane or loop operation reports. */
@@ -550,7 +550,7 @@ final class Splice {
             }
             if (packets && !converted.isEmpty() && atBoundary() && stage != DONE) {
                 if (targetClosed) return false; // counted as dropped in the result
-                startConverted(converted.poll());
+                startConverted(converted.remove()); // non-empty: checked above
                 return true;
             }
             if (stage == HOLD && held != null && !interrupted()) {
@@ -818,7 +818,7 @@ final class Splice {
             return switch (dgStage) {
                 case DG_IDLE -> {
                     if (dataDone || cancelled.get()) { dgStage = DG_DONE; yield true; }
-                    dgReceive = new Operation<Object>(source.session.driver, receiveStep, receiveWithdraw).submit();
+                    dgReceive = new Operation<>(source.session.driver, receiveStep, receiveWithdraw).submit();
                     listen(dgReceive);
                     dgStage = DG_RECEIVE;
                     yield true;

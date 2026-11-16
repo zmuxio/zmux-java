@@ -63,6 +63,7 @@ final class WebSocketFrames {
 
     /** zmux bounds the first message (before its reader starts): applied on the loop, to a first message already read too. */
     void limitFirstMessage(int limit) {
+        //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(ch.eventLoop(), ch.eventLoop().inEventLoop(), () -> {
             if (!firstDone) firstLimit = limit;
             else if (firstLength > limit) fail("a first message above " + limit + " bytes");

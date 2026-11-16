@@ -120,6 +120,7 @@ public final class QuicServer implements AutoCloseable {
             connection.pipeline().addLast(carrier);
         };
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
+        //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(connection.eventLoop(), connection.eventLoop().inEventLoop(), add, () -> result.complete(null));
         result.whenComplete((v, e) -> { if (result.isCancelled()) carrier.stop(); });
         return QuicClient.future(result);
@@ -166,6 +167,7 @@ public final class QuicServer implements AutoCloseable {
         datagram.close();
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+        //noinspection resource: borrowed: the group owns its event loop, shut down above
         if (!datagram.eventLoop().inEventLoop()) termination.awaitUninterruptibly();
     }
 }

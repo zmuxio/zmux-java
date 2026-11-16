@@ -186,6 +186,7 @@ final class Redialer {
                     // deadline, a hook's own connect timeout, a peer that did not attach in time. Only
                     // the session's close ends this run; anything else is a failed attempt. The flag is
                     // cleared before the check, so a close that interrupts after it is still seen.
+                    //noinspection ResultOfMethodCallIgnored: only clearing the flag; the session's state decides
                     Thread.interrupted();
                     if (session.isClosed()) return;
                     delay = jittered(backoff);

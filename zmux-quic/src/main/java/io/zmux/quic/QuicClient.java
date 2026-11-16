@@ -286,6 +286,7 @@ public final class QuicClient implements AutoCloseable {
         for (var endpoint : datagrams.values()) endpoint.whenComplete((channel,error) -> { if (channel != null) channel.close(); });
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+        //noinspection resource: borrowed: the group owns its event loop, shut down above
         if (!nativeLoop().inEventLoop()) termination.awaitUninterruptibly();
     }
 

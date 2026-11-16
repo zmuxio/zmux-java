@@ -222,7 +222,8 @@ final class Exchange {
     static ByteBuffer room(ByteBuffer buf, int n, int max) {
         if (buf.remaining() >= n) return buf;
         int need = buf.position() + n;
-        ByteBuffer grown = ByteBuffer.allocate((int) Math.min(max, Math.max(need, 2L * buf.capacity())));
+        long wanted = Math.max(need, 2L * buf.capacity());
+        ByteBuffer grown = ByteBuffer.allocate((int) Math.min(wanted, max));
         return grown.put(buf.flip());
     }
 

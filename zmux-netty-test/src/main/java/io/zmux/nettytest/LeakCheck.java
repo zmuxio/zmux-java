@@ -17,6 +17,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  * the garbage collector found the buffer, so the end of each class collects and allocates until the
  * detector has polled.
  */
+@org.jspecify.annotations.NullMarked
 public final class LeakCheck implements AfterAllCallback {
     private static final List<String> LEAKS = new CopyOnWriteArrayList<>();
     private static final List<String> UNHANDLED = new CopyOnWriteArrayList<>();

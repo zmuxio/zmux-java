@@ -176,6 +176,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     private void startHalves(PipeReader.Sink target) {
         if (!halvesStarted.compareAndSet(false, true)) throw new IllegalStateException("carrier reader already started");
         dispatch(() -> {
+            //noinspection resource: borrowed: the channel owns its event loop
             lent = new io.zmux.internal.spi.LentInput(1, stream.eventLoop(), stream.eventLoop()::inEventLoop,
                     more -> { if (more && !inputClosed && !end) stream.read(); });
             lent.start(target);
@@ -289,6 +290,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
 
     private void dispatch(Runnable action) { dispatch(action, () -> {}); }
     private void dispatch(Runnable action, Runnable rejected) {
+        //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(stream.eventLoop(), stream.eventLoop().inEventLoop(), action, rejected);
     }
 
@@ -346,6 +348,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         if (gone) return;
         gone = true;
         // A loop that is shutting down runs no more of zmux's calls: what the reader has not taken goes.
+        //noinspection resource: borrowed: the channel owns its event loop
         if (lent != null && stream.eventLoop().isShuttingDown()) lent.fail(new java.nio.channels.ClosedChannelException());
         if (receive && !inputClosed) ended(new IOException("QUIC stream ended without FIN"));
         for (ByteBuf b; (b = early.poll()) != null; ) b.release();

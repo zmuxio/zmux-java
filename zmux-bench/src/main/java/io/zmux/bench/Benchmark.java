@@ -222,6 +222,7 @@ public final class Benchmark {
             long readyDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (pipes > 1 && (eligible(pair.client) != pipes || eligible(pair.server) != pipes)) {
                 if (System.nanoTime() >= readyDeadline) throw new AssertionError("pipes not eligible");
+                //noinspection BusyWait: pipe eligibility has no change notification to wait on
                 Thread.sleep(1);
             }
             int warmup = quick ? 20 : 200, count = quick ? 100 : 2000;
@@ -346,7 +347,7 @@ public final class Benchmark {
         }
     }
     private static String quote(String s) { return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
-    public static void main(String[] args) throws Exception {
+    static void main(String[] args) throws Exception {
         Path result = Path.of("target/benchmark.json");
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--quick")) quick = true;

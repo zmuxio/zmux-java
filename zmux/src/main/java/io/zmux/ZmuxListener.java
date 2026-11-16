@@ -488,22 +488,28 @@ public final class ZmuxListener implements AutoCloseable {
         if (code < 0 || code > (1L << 62) - 1) throw new IllegalArgumentException("application error code outside 0 to 2^62 - 1");
         byte[] r = io.zmux.internal.wire.Utf8.truncate(Objects.requireNonNull(reason, "reason"), ZmuxSession.MAX_REASON_BYTES);
         if (stopped.get()) return ZmuxFuture.of(terminated, null);
-        AtomicBoolean once = new AtomicBoolean();
-        // Not on the thread that completed the future (the JDK's delay thread for orTimeout): close() blocks.
-        Runnable bound = () -> {
-            if (once.compareAndSet(false, true)) Thread.ofVirtual().name("zmux-shutdown").start(() -> {
-                // The bound: the sessions close at once, the listener with them.
-                for (SessionRuntime d : hub.registered()) d.post(() -> d.core().closeBounded(code, r, io.zmux.internal.core.Session.closeLimit,
-                        io.zmux.internal.loop.Clock.now()));
-                close();
-            });
-        };
+        Runnable bound = boundOf(code, r);
         Runnable running = shutdownBound.compareAndExchange(null, bound);
         if (running != null) return ZmuxFuture.of(terminated, running); // a later call: the running shutdown, bounded by it too
         closeAccept();
         for (SessionRuntime d : hub.registered()) d.post(() -> d.core().shutdown(code, r));
         hub.drain(this::close);
         return ZmuxFuture.of(terminated, bound);
+    }
+
+    /**
+     * The bound of a shutdown, run at most once: the sessions close at once, the listener with them.
+     * Not on the thread that completed the future (the JDK's delay thread for orTimeout): close() blocks.
+     */
+    private Runnable boundOf(long code, byte[] r) {
+        AtomicBoolean once = new AtomicBoolean();
+        return () -> {
+            if (once.compareAndSet(false, true)) Thread.ofVirtual().name("zmux-shutdown").start(() -> {
+                for (SessionRuntime d : hub.registered()) d.post(() -> d.core().closeBounded(code, r, io.zmux.internal.core.Session.closeLimit,
+                        io.zmux.internal.loop.Clock.now()));
+                close();
+            });
+        };
     }
 
     private void await(ZmuxFuture<Void> f, Duration timeout) throws IOException {
@@ -540,6 +546,7 @@ public final class ZmuxListener implements AutoCloseable {
      */
     private void closeAccept() {
         closed = true;
+        //noinspection resource: each polled session is aborted, which releases it
         for (ZmuxSession s; (s = ready.poll()) != null; ) { queued.decrementAndGet(); s.abort(0, "listener closed"); }
         available.release(); // Wakes one waiting acceptor; each passes the wake-up on.
     }

@@ -30,7 +30,7 @@ public final class Permit implements AutoCloseable {
     public static CompletionStage<Permit> acquire(Limiter limiter, long min, long max) {
         Objects.requireNonNull(limiter);
         if (max <= 0) return CompletableFuture.completedFuture(new Permit(limiter, 0));
-        long lo = Math.min(Math.max(min, 1), max);
+        long lo = Math.clamp(min, 1, max);
         CompletableFuture<Long> wait;
         try {
             wait = Objects.requireNonNull(limiter.acquire(lo, max), "limiter returned null").toCompletableFuture();
@@ -74,7 +74,7 @@ public final class Permit implements AutoCloseable {
         Objects.requireNonNull(limiter);
         if (max <= 0) return new Permit(limiter, 0);
         long got;
-        try { got = limiter.tryAcquire(Math.min(Math.max(min, 1), max), max); }
+        try { got = limiter.tryAcquire(Math.clamp(min, 1, max), max); }
         catch (RuntimeException | AssertionError e) { return new Permit(limiter, 0); }
         if (got > max) { refund(limiter, got); got = 0; }
         return new Permit(limiter, Math.max(got, 0));
@@ -87,6 +87,7 @@ public final class Permit implements AutoCloseable {
      */
     public static boolean police(Limiter limiter, long n) {
         if (n <= 0) return true;
+        //noinspection resource: a granted unit stays taken; an empty permit holds nothing
         Permit p = tryAcquire(limiter, n, n);
         if (p.isEmpty()) return false;
         p.left = 0;

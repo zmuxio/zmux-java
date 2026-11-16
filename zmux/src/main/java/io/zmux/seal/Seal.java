@@ -170,6 +170,7 @@ public final class Seal {
         PinAnchor.checkPqAuth(c.anchor(), c.isRequirePqAuth());
         Profile profile = Profiles.client(c);
         if (c.isAllowPskOnly() && !profile.isPskBased()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
+        //noinspection resource: borrowed: the config or the process owns the key
         StaticKey key = c.key() != null ? c.key() : ProcessKey.KEY;
         Mode mode = Mode.of(c.mode());
         byte[] binding = null;
