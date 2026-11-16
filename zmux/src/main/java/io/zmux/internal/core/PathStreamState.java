@@ -8,17 +8,24 @@ package io.zmux.internal.core;
 final class PathStreamState {
     final PathScheduler.StreamSlot sched = new PathScheduler.StreamSlot();
     final Retention.StreamSlot ret = new Retention.StreamSlot();
-    /** The pipe that carried the stream's opening frame: its datagrams follow it there until the opening is acknowledged. */
+    /** The pipe of the opening frame or of its latest reinjected copy: the stream's datagrams follow it (MULTIPATH.md S7). */
     private Pipe openPipe;
+    /** The opening frame (empty or not) was acknowledged. */
+    private boolean openAcked;
 
-    /** The opening frame went out on p. */
+    /** The opening frame, or a reinjected copy of it, went out on p. */
     void openedOn(Pipe p) {
         openPipe = p;
     }
 
-    /** The pipe that carried the opening frame while it is unacknowledged (send queue base past 0: acknowledged), else null. */
-    Pipe openingPipe(long sendBase) {
-        if (openPipe != null && ((ret.acked().size() > 0 && ret.acked().lo(0) == 0) || sendBase > 0 || ret.finAcked())) openPipe = null;
-        return openPipe;
+    /** A STREAM frame at offset 0, the opening or a copy of it, was acknowledged. */
+    void openingAcked() {
+        openAcked = true;
+        openPipe = null;
+    }
+
+    /** The pipe of the unacknowledged opening frame, or null. */
+    Pipe openingPipe() {
+        return openAcked ? null : openPipe;
     }
 }

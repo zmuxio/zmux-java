@@ -14,6 +14,9 @@ interface StreamsView {
     /** Releases acknowledged data of st below upTo and wakes its writer. */
     void releaseAcked(Stream st, long upTo);
 
+    /** Pins st's identifier, as its next chunk would; false when it cannot get one now. */
+    boolean pinId(Stream st);
+
     /** Records a terminal sending state of st and releases its buffers. */
     void sendTerminal(Stream st, int sendState);
 }

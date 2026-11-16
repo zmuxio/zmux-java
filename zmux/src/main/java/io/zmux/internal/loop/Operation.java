@@ -15,7 +15,8 @@ import java.util.concurrent.locks.LockSupport;
  * One application operation, shared by the blocking and the asynchronous API: a blocking
  * call is the same operation plus a bounded {@link #await}. The outcome is decided by one
  * CAS on {@link #state}: completion, cancellation, timeout and the session's end all go
- * through it and the first wins; the losers have no effect.
+ * through it and the first wins; the losers have no effect, and only the winner writes the
+ * outcome (a settle claims SETTLING first; a cancellation's outcome is its state).
  *
  * <p>States: QUEUED (submitted) → RUNNING (an attempt on the session's loop) → DONE, or
  * → WAITING (registered with the core) ⇄ RUNNING, or QUEUED/WAITING → CANCELLED. A cancel
@@ -40,7 +41,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         void withdraw(Operation<?> self);
     }
 
-    private static final int QUEUED = 0, WAITING = 1, RUNNING = 2, RUNNING_CANCEL = 3, DONE = 4, CANCELLED = 5;
+    private static final int QUEUED = 0, WAITING = 1, RUNNING = 2, RUNNING_CANCEL = 3, SETTLING = 4, DONE = 5, CANCELLED = 6;
     private static final VarHandle STATE, LISTENER;
     static {
         try {
@@ -144,7 +145,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     private void attempt() {
         int s = (int) STATE.getVolatile(this);
         if (s >= DONE) { withdrawNow(); return; }
-        if (s == RUNNING || s == RUNNING_CANCEL || !STATE.compareAndSet(this, s, RUNNING)) {
+        if (s == RUNNING || s == RUNNING_CANCEL || s == SETTLING || !STATE.compareAndSet(this, s, RUNNING)) {
             if ((int) STATE.getVolatile(this) >= DONE) withdrawNow();
             return;
         }
@@ -204,8 +205,10 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         while (true) {
             int s = (int) STATE.getVolatile(this);
             if (s != QUEUED && s != WAITING) return false;
-            outcome = r;
-            if (STATE.compareAndSet(this, s, DONE)) {
+            deciding();
+            if (STATE.compareAndSet(this, s, SETTLING)) {
+                outcome = r;
+                STATE.setVolatile(this, DONE);
                 if (!onLoop) withdraw.withdraw(this);
                 else if (driver.loop.inLoop()) withdrawNow();
                 released();
@@ -220,7 +223,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     boolean begin() {
         while (true) {
             int s = (int) STATE.getVolatile(this);
-            if (s == RUNNING) { Thread.onSpinWait(); continue; } // The previous attempt is about to pause.
+            if (s == RUNNING || s == SETTLING) { Thread.onSpinWait(); continue; } // The previous attempt is about to pause, or a settle to finish.
             if (s != QUEUED && s != WAITING) return false;
             if (STATE.compareAndSet(this, s, RUNNING)) return true;
         }
@@ -289,13 +292,14 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
             int s = (int) STATE.getVolatile(this);
             switch (s) {
                 case QUEUED, WAITING -> {
-                    outcome = CANCELLED_OUTCOME;
+                    deciding();
                     if (!STATE.compareAndSet(this, s, CANCELLED)) continue;
                     if (!onLoop) withdraw.withdraw(this);
                     else if (s == WAITING || deadline != Long.MAX_VALUE) driver.post(this::withdrawNow);
                     released();
                     return true;
                 }
+                case SETTLING -> Thread.onSpinWait();
                 case RUNNING -> {
                     // Without a discard hook the attempt's effect cannot be undone: let the
                     // nonblocking attempt end and report its outcome instead.
@@ -318,7 +322,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
 
     /** The decided outcome (a value or a Throwable); only after {@link #isDone}. */
     public Object outcome() {
-        return outcome;
+        return (int) STATE.getVolatile(this) == CANCELLED ? CANCELLED_OUTCOME : outcome;
     }
 
     /**
@@ -328,6 +332,9 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     public boolean onDone(Runnable listener) {
         return LISTENER.compareAndSet(this, null, listener);
     }
+
+    /** Between reading the state and claiming the decision; a test interleaves a competing decision here. */
+    void deciding() {}
 
     private void released() {
         Thread t = joiner;
@@ -369,7 +376,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
      */
     public Object await(long deadline) {
         driver.checkBlocking();
-        if (isDone()) return outcome;
+        if (isDone()) return outcome();
         joiner = Thread.currentThread();
         while (!isDone()) {
             if (!Thread.currentThread().isInterrupted()) {
@@ -387,6 +394,6 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
                         : new SocketTimeoutException("timed out");
             }
         }
-        return outcome;
+        return outcome();
     }
 }

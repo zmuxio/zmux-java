@@ -22,6 +22,23 @@ class CarrierSelectionTest {
         });
     }
 
+    /**
+     * As {@link #reaching}, its dial taking at least a second: the candidate's timer, from the dial's round trip,
+     * is then the policy's maximum rather than its minimum, so that only a silent candidate is judged by the minimum.
+     */
+    static Candidate reachingSlowly(CarrierKind kind, ZmuxListener l, AtomicInteger dials) {
+        Candidate fast = reaching(kind, l, dials);
+        return Candidate.of(kind, (cred, timeout) -> {
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new java.io.InterruptedIOException("interrupted");
+            }
+            return fast.dialer().dial(cred, timeout);
+        });
+    }
+
     /** A kind an intermediary refuses. */
     static Candidate refused(CarrierKind kind, AtomicInteger dials) {
         return Candidate.of(kind, (cred, timeout) -> {
@@ -111,11 +128,11 @@ class CarrierSelectionTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
                 var cache = new CarrierCache();
-                var policy = CarrierChoicePolicy.of(cache, "server").withTimer(3, Duration.ofMillis(200), Duration.ofMillis(300));
+                var policy = CarrierChoicePolicy.of(cache, "server").withTimer(3, Duration.ofMillis(200), Duration.ofSeconds(30));
                 var ws = new AtomicInteger(); var st = new AtomicInteger(); var ex = new AtomicInteger();
                 var keep = new ArrayList<PipeIo>();
                 var mode = CarrierChoice.auto(refused(CarrierKind.WEBSOCKET, ws), silent(CarrierKind.STREAMING, st, keep),
-                        reaching(CarrierKind.EXCHANGE, l, ex));
+                        reachingSlowly(CarrierKind.EXCHANGE, l, ex));
                 long t0 = System.nanoTime();
                 try (var s = Zmux.dial(mode, cfg, policy)) {
                     assertTrue(System.nanoTime() - t0 >= 150_000_000, "the silent candidate waited its timer");

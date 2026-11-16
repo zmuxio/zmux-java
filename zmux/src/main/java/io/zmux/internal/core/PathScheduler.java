@@ -693,9 +693,17 @@ public final class PathScheduler {
                     p.shape() != null && p.shape().active(), p.shape() != null && p.shape().active() ? p.shape().weight() : 0));
         }
         for (Stream st : pickQ) {
-            st.snd.mps().sched.pickQueued = false;
-            if (st.tab.discarded() || !st.sendable()) continue;
             PathStreamState m = st.snd.mps();
+            m.sched.pickQueued = false;
+            if (st.tab.discarded()) continue;
+            // A question nothing waits for any more (the fallback carried the data) is withdrawn, as is one about
+            // a direction that cannot be named: its next data asks the policy again rather than staying a miss. The
+            // policy names a direction by its identifier, so one not opened yet is pinned now, as its next chunk
+            // would be.
+            if (!st.sendable() || !streams.pinId(st)) {
+                m.sched.clearPick();
+                continue;
+            }
             req.frames.add(new PickFrame(st.tab.id(), metrics.readyBytes(st), g != null ? g.tiers.getFirst().prio() : 0, g != null,
                     m.sched.bindPipe, m.sched.bindSet, st.tab.urgency()));
             req.keys.add(st);

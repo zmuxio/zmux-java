@@ -379,17 +379,21 @@ class ChannelDatagramTest {
         Stream peer = p.b.streams.lookup(0, true);
         assertEquals(7, p.b.datagrams().receive(peer).context());
     }
-    /** MULTIPATH.md S7: while its opening frame is unacknowledged, a stream's datagrams go only on the pipe that carried it. */
+    /**
+     * MULTIPATH.md S7: while its opening frame is unacknowledged, a stream's datagrams go only on the pipe that
+     * carried it or its latest reinjected copy; the acknowledgement of the frame itself, empty or not, ends that.
+     */
     @Test void streamDatagramsFollowTheUnacknowledgedOpeningPipe() throws Exception {
         Pair p = new Pair(null, null);
         p.pump();
         Stream st = p.a.streams().openStream(true);
         p.a.streams().pinId(st);
-        p.a.streams().markOpened(st); // its opening frame went out
+        p.a.streams().markOpened(st); // its empty opening frame went out
         Pipe opening = p.a.pipes().get(0), other = p.b.pipes().get(0);
-        assertNull(Session.openingPipe(st), "outside multipath no pipe is recorded");
-        st.snd.mp().openedOn(opening);
-        assertSame(opening, Session.openingPipe(st));
+        assertNull(Session.followPipe(st), "outside multipath no pipe is followed");
+        PathStreamState m = st.snd.mp();
+        m.openedOn(opening);
+        assertSame(opening, m.openingPipe());
 
         Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), new SessionStats(), new Outbox());
         dg.recordCaps(() -> 65535, () -> 65535);
@@ -397,7 +401,7 @@ class ChannelDatagramTest {
         dg.channels(new Datagrams.Channels() {
             @Override public Pipe datagramPipe() { return null; }
             @Override public Datagrams.ChannelUse of(Pipe x) { return Datagrams.ChannelUse.NONE; }
-            @Override public boolean carries(Stream s, Pipe x) { Pipe o = Session.openingPipe(s); return o == null || o == x; }
+            @Override public boolean carries(Stream s, Pipe x) { Pipe o = s == null ? null : s.snd.mps().openingPipe(); return o == null || o == x; }
         });
         dg.send(st, 1, new byte[] {9}, true);
         assertFalse(dg.sendable(other, 65535), "another pipe could let it overtake the opening frame");
@@ -406,12 +410,18 @@ class ChannelDatagramTest {
         w.init(new Batch(), Framing.BYTES, 65535, Session.DEFAULT_BATCH);
         dg.write(w, other);
         assertTrue(dg.queued());
-        dg.write(w, opening);
+
+        // A reinjected copy moves it.
+        m.openedOn(other);
+        assertFalse(dg.sendable(opening, 65535));
+        dg.write(w, other);
         assertFalse(dg.queued());
 
-        // Once the opening is acknowledged, any pipe.
-        st.snd.mps().ret.acked().add(0, 1);
-        assertNull(Session.openingPipe(st));
+        // The empty opening frame acknowledged: any pipe.
+        m.openingAcked();
+        assertNull(m.openingPipe());
+        m.openedOn(opening);
+        assertNull(m.openingPipe(), "a late copy does not pin it again");
         dg.send(st, 1, new byte[] {9}, true);
         assertTrue(dg.sendable(other, 65535));
     }

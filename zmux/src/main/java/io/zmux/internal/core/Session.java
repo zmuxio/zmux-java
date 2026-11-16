@@ -1702,12 +1702,14 @@ public final class Session {
     };
 
     /**
-     * The pipe that carried st's opening frame while that frame is unacknowledged, else null: st's datagrams
-     * follow it there so that they cannot overtake it (MULTIPATH.md S7).
+     * The pipe a datagram of st follows in a multipath session: the pipe of st's opening frame, or of its latest
+     * reinjected copy, while that frame is unacknowledged and the pipe lives (MULTIPATH.md S7); null: the usual rule.
      */
-    static Pipe openingPipe(Stream st) {
+    static Pipe followPipe(Stream st) {
         PathStreamState m = st.snd.mps();
-        return m == null ? null : m.openingPipe(st.snd.q().base());
+        Pipe p = m == null ? null : m.openingPipe();
+        if (p == null || p.mp() == null || p.out() == null || p.out().failed() || !p.mp().liveOut() || p.mp().retired()) return null;
+        return p;
     }
 
     /** The pipe DATAGRAM frames go to now: the primary pipe of a multipath session, else the outbound pipe. */
@@ -1735,9 +1737,10 @@ public final class Session {
         @Override public Pipe datagramPipe() { return Session.this.datagramPipe(); }
         @Override public Datagrams.ChannelUse of(Pipe p) { return channelOf(p); }
         @Override public boolean carries(Stream st, Pipe p) {
-            if (st == null || !(path instanceof PathSession mp)) return true;
-            Pipe open = openingPipe(st);
-            return open == null || open == p || !mp.pipeUsable(open);
+            if (st == null || !(path instanceof PathSession)) return true;
+            Pipe f = followPipe(st);
+            // While the pipe of the opening frame may carry no DATAGRAM frame (SUSPECT, DRAINING), it stays queued.
+            return f == null || (f == p && f.mp().out() == Attach.OUT_ACTIVE);
         }
     }
 
@@ -2094,6 +2097,11 @@ public final class Session {
         @Override public void unretain(long n) { path.unretain(n); }
 
         @Override public Stream get(long id) { return streams.get(id); }
+        @Override public boolean pinId(Stream st) {
+            if (st.tab.idSet()) return true;
+            if (!streams.idAvailable(Stream.typeIndex(st.bidi))) return false;
+            try { streams.pinId(st); return true; } catch (CoreException e) { return false; }
+        }
         @Override public Iterable<Stream> live() { return streams.live(); }
         @Override public boolean streamsBlockedAtLimit(int t) { return streams.streamsBlockedAtLimit(t); }
         @Override public void releaseAcked(Stream st, long upTo) { send.release(st, upTo); }

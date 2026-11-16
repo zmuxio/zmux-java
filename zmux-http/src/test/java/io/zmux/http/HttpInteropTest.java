@@ -14,8 +14,6 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -46,7 +44,8 @@ import org.junit.jupiter.api.Timeout;
  * </ul>
  *
  * The exchange peers are configured by ZMUX_EXCHANGE* variables: a server echoes every
- * stream, a client sends random bytes on one stream and checks the echo.
+ * stream, a client sends random bytes on one stream and checks the echo. Every peer server
+ * is started on 127.0.0.1:0 and names the address it bound on its {@code READY <address>} line.
  */
 @Timeout(600)
 class HttpInteropTest {
@@ -481,16 +480,11 @@ class HttpInteropTest {
     }
 
     private static void javaClient(List<String> cmd, String psk, boolean b64, boolean split) throws Exception {
-        // zmux-go's exchange test server prints no READY line: it gets a probed free port and is polled until it listens.
-        boolean go = cmd.size() > 1;
-        String bind = go ? "127.0.0.1:" + freePort() : "127.0.0.1:0";
-        var env = Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", bind, "ZMUX_EXCHANGE_FOR", "60s",
-                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0");
-        Peer peer = go ? new Peer(start(cmd, env), bind) : startServer(a -> cmd, env);
+        Peer peer = startServer(a -> cmd, Map.of("ZMUX_EXCHANGE", "server", "ZMUX_EXCHANGE_ADDR", "127.0.0.1:0", "ZMUX_EXCHANGE_FOR", "60s",
+                "ZMUX_EXCHANGE_PSK", psk, "ZMUX_EXCHANGE_BASE64", b64 ? "1" : "0"));
         Process p = peer.process();
-        int port = Integer.parseInt(peer.addr().substring(peer.addr().indexOf(':') + 1));
+        int port = Integer.parseInt(peer.addr().substring(peer.addr().lastIndexOf(':') + 1));
         try (var f = Fixture.plain(b -> b); var hc = f.client(b -> b)) {
-            if (go) awaitPort(port, p);
             String origin = "http://127.0.0.1:" + port;
             var c = config(psk, b64, split ? origin + "/down/{nonce}" : "");
             try (ZmuxSession s = Zmux.open(hc.exchangePipe(origin + "/up/{nonce}", c), Role.CLIENT, f.config)) {
@@ -540,23 +534,5 @@ class HttpInteropTest {
         }
         Path log = logs.remove(p);
         if (log != null) { try { Files.deleteIfExists(log); } catch (IOException ignored) { /* Left in target. */ } }
-    }
-
-    static int freePort() throws IOException {
-        try (var srv = new java.net.ServerSocket(0)) { return srv.getLocalPort(); }
-    }
-
-    static void awaitPort(int port, Process p) throws Exception {
-        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-        while (true) {
-            try (Socket s = new Socket()) {
-                s.connect(new InetSocketAddress("127.0.0.1", port), 200);
-                return;
-            } catch (IOException e) {
-                if (!p.isAlive()) fail("the peer server exited: " + output(p));
-                if (System.nanoTime() - end > 0) fail("the peer server did not listen");
-                Thread.sleep(50);
-            }
-        }
     }
 }

@@ -181,6 +181,10 @@ final class Retention {
                 PathStreamState m = st.snd.mp();
                 if (d.n() > 0) m.ret.acked.add(d.off(), d.off() + d.n());
                 if (d.fin()) m.ret.finAcked = true;
+                if (d.off() == 0 && m.openingPipe() != null) {
+                    m.openingAcked();
+                    pipes.wakeWriters(); // its datagrams go by the usual rule now
+                }
                 streamAckProgress(st);
             }
             case RESET -> {

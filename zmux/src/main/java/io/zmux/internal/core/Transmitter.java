@@ -697,6 +697,7 @@ public final class Transmitter {
             w.copied(st.tab.id(), off, n);
             if (d != null) mp().resume.resent(d.p(), n);
             PathStreamState m = sp.mps();
+            if (off == 0 && d != null) m.openedOn(d.p()); // a reinjected copy of the opening frame
             m.ret.resent(off, n, fin);
             if (!st.sendable()) sched.remove(st);
             return CHUNK_SENT;
