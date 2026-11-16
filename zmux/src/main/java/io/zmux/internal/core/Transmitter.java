@@ -644,9 +644,10 @@ public final class Transmitter {
         long off = pl.off, n = pl.n;
         boolean fin = pl.fin;
         boolean resend = pl.resend;
-        if (d != null && !resend && n > cfg.spreadChunk()) {
-            // One scheduling decision per chunk.
-            n = cfg.spreadChunk();
+        long turnRoom = d != null && !resend ? mp().scheduler.chunkRoom(st) : Long.MAX_VALUE;
+        if (n > turnRoom) {
+            // One scheduling decision per chunk; a round-robin turn takes at most what is left of its chunk.
+            n = turnRoom;
             fin = false;
             if (off == 0 && sp.preLen() > n) n = sp.preLen();
         }

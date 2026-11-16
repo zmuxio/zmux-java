@@ -211,7 +211,7 @@ public final class PathScheduler {
         switch (policyOf(st)) {
             case AFFINITY -> bindOnSend(d, st);
             case SPREAD_ROUND_ROBIN, SPREAD_RATE_WEIGHTED -> {
-                if (d.g != null) rrCommit(d.g, d.tier, p, st);
+                if (d.g != null) rrSent(d.g, d.tier, p, st, n, off + n, st.snd.sendEnd());
             }
             case CUSTOM -> customUsed(st, n);
             default -> { }
@@ -384,6 +384,39 @@ public final class PathScheduler {
         }
     }
 
+    /** The session policy's round-robin turn: its pipe (-1: none) and the bytes given in it. */
+    private long turnPipe = -1, turnFill;
+
+    /** The pipe whose round-robin turn st's policy is filling, or -1. */
+    private long turnOf(Stream st, boolean own) {
+        return own ? st.snd.mp().sched.turnPipe : turnPipe;
+    }
+
+    private long fillOf(Stream st, boolean own) {
+        return own ? st.snd.mp().sched.turnFill : turnFill;
+    }
+
+    private void setTurn(Stream st, boolean own, long pipe, long fill) {
+        if (own) {
+            st.snd.mp().sched.turnPipe = pipe;
+            st.snd.mp().sched.turnFill = fill;
+        } else {
+            turnPipe = pipe;
+            turnFill = fill;
+        }
+    }
+
+    /**
+     * The most a chunk of st may carry on the decision's pipe: under a round-robin policy, what is left of the
+     * current turn, so that a pipe never takes more than one spread chunk per turn; else one spread chunk.
+     */
+    long chunkRoom(Stream st) {
+        CoreConfig.Policy p = policyOf(st);
+        if (p != CoreConfig.Policy.SPREAD_ROUND_ROBIN && p != CoreConfig.Policy.SPREAD_RATE_WEIGHTED) return cfg.spreadChunk();
+        boolean own = ownPolicy(st) != null;
+        return turnOf(st, own) < 0 ? cfg.spreadChunk() : Math.max(1, cfg.spreadChunk() - fillOf(st, own));
+    }
+
     double rrCurrent(Stream st, boolean own, Pipe p) {
         if (!own) return p.mp().sched.rrCur;
         return st.snd.mps() == null ? 0 : st.snd.mps().sched.rr(p.id);
@@ -394,7 +427,10 @@ public final class PathScheduler {
         boolean byRate = policyOf(st) == CoreConfig.Policy.SPREAD_RATE_WEIGHTED;
         Pipe[] best = {null};
         double[] bv = {0};
+        long turn = turnOf(st, own);
+        Pipe[] holding = {null};
         rrWeights(g, ti, byRate, (q, w) -> {
+            if (q.id == turn) holding[0] = q;
             double v = rrCurrent(st, own, q) + w;
             int order = Double.compare(v, bv[0]);
             if (best[0] == null || order > 0 || (order == 0 && q.id < best[0].id)) {
@@ -402,7 +438,25 @@ public final class PathScheduler {
                 bv[0] = v;
             }
         });
-        return best[0];
+        // A turn cut short (stream credit, record room) while data waits goes on until it carried one chunk.
+        return holding[0] != null ? holding[0] : best[0];
+    }
+
+    /**
+     * n bytes of st went to p under a round-robin policy: the turn ends once it carried one spread chunk or the
+     * write left nothing pending (end is the data's end, pending the end of what may still be sent); a FIN alone
+     * does not count.
+     */
+    private void rrSent(Tiers.Gate g, int ti, Pipe p, Stream st, long n, long end, long pending) {
+        if (n == 0) return;
+        boolean own = ownPolicy(st) != null;
+        long fill = turnOf(st, own) == p.id ? fillOf(st, own) + n : n;
+        if (fill >= cfg.spreadChunk() || end >= pending) {
+            setTurn(st, own, -1, 0);
+            rrCommit(g, ti, p, st);
+        } else {
+            setTurn(st, own, p.id, fill);
+        }
     }
 
     /** A chunk given to p: every candidate gains its weight, the chosen one gives up the sum. */
@@ -619,6 +673,8 @@ public final class PathScheduler {
     /** The session's policy changed: the previous policy's state is discarded. */
     void policyChanged() {
         for (Pipe q : pipes.all()) if (q.mp() != null) q.mp().sched.rrCur = 0;
+        turnPipe = -1;
+        turnFill = 0;
         for (Stream st : streams.live()) {
             if (ownPolicy(st) == null && st.snd.mps() != null) {
                 st.snd.mps().sched.clearBinding();
@@ -796,6 +852,8 @@ public final class PathScheduler {
         m.clearPick();
         m.rrPipes.clear();
         m.rrVals.clear();
+        m.turnPipe = -1;
+        m.turnFill = 0;
     }
 
     /** Overrides the session's redundancy for a stream direction: 1 on, -1 off, 0 the default. */
@@ -935,6 +993,9 @@ public final class PathScheduler {
             rrPipes.add(new long[] {pipe});
             rrVals.add(new double[] {dv});
         }
+
+        /** The round-robin turn this direction's own policy is filling: its pipe (-1: none) and the bytes given. */
+        private long turnPipe = -1, turnFill;
 
         void rrZero(long pipe) {
             for (int i = 0; i < rrPipes.size(); i++) if (rrPipes.get(i)[0] == pipe) rrVals.get(i)[0] = 0;
