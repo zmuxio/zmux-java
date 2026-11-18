@@ -593,7 +593,7 @@ final class PathHealth {
         for (Stream st : streams.live()) {
             if (st.snd.bind().laneBound() && st.snd.bind().lanePipe() == p.id) Lanes.pipeGone(st);
         }
-        port.emit(Event.pipeState(p.id, p.carrier(), Action.DIR_BIDI, PipeInfo.Out.RETIRED));
+        port.emit(Event.pipeRetired(p.id, p.carrier(), p.out() != null && a.health.out == Attach.OUT_FAILED));
         checkLastPipe(null);
         if (a.joinerLocal && !a.health.resLimited && !a.handshaking()) port.backoffCleared();
     }

@@ -51,10 +51,17 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** Whether the calling thread runs this session's completions now. */
     boolean onCompletionContext() { return SerialCallbacks.onContext(completions); }
-    private final java.util.concurrent.atomic.AtomicInteger tracePending = new java.util.concurrent.atomic.AtomicInteger();
-    private final java.util.concurrent.atomic.AtomicLong traceDropped = new java.util.concurrent.atomic.AtomicLong();
+    /** Events handed to the tracer and not yet delivered (the loop adds, the hook context subtracts). */
+    private final java.util.concurrent.atomic.AtomicInteger traceBacklog = new java.util.concurrent.atomic.AtomicInteger();
+    /** Events lost to a full backlog and not yet reported (loop only). */
+    private long traceLost;
     private boolean receiveHookBusy;
-    private boolean traceClosed;
+    /** The tracer was told of the establishment (loop only). */
+    private boolean traceEstablished;
+    /** The application events that arrived before the establishment, for the tracer (loop only; null once established). */
+    private List<io.zmux.SessionEvent> heldApplication;
+    /** CLOSED was delivered: the tracer is told nothing more, nor does the event queue take anything (loop only). */
+    private boolean ended;
     private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
     /** The session's identity in this process. */
     private final io.zmux.SessionId id = new io.zmux.SessionId(IDS.incrementAndGet());
@@ -80,29 +87,53 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** The outbound datagram limiter, called only by application threads. */
     public io.zmux.helper.Limiter datagramSendLimiter() { return hooks.datagramSend(); }
 
+    /** The tracer's backlog per session: events accepted and not yet delivered; established, dropped and closed take no room. */
+    static final int TRACE_BACKLOG = 256;
+
     private void trace(Event event) {
-        // PIPE_STATE is internal: the tracer sees the application's pipe kinds.
-        if (hooks.tracer() == null || traceClosed || event.kind() == Event.Kind.PIPE_STATE) return;
-        if (event.kind() == Event.Kind.CLOSED) traceClosed = true;
-        if (!terminal(event) && tracePending.get() >= hooks.tracerQueue()) {
-            traceDropped.incrementAndGet(); return;
+        var sink = hooks.tracer();
+        if (sink == null) return;
+        switch (event.kind()) {
+            case ESTABLISHED -> {
+                traceEstablished = true;
+                callbacks.execute(() -> sink.established(id));
+                // The application events that came first follow, in order.
+                var held = heldApplication;
+                heldApplication = null;
+                if (held != null) for (var view : held) traceEvent(sink, view);
+            }
+            case CLOSED -> {
+                // Nothing follows: the loss count that stands before it, then the end.
+                reportLost(sink);
+                callbacks.execute(() -> sink.closed(id, event.error()));
+            }
+            default -> {
+                var view = sink.view(event);
+                if (view != null) traceEvent(sink, view);
+            }
         }
-        tracePending.incrementAndGet();
+    }
+
+    /** Hands an event to the tracer, or counts it lost when the backlog is full; a count already lost is reported first. */
+    private void traceEvent(DriverHooks.TraceSink sink, io.zmux.SessionEvent view) {
+        if (traceBacklog.get() >= TRACE_BACKLOG) {
+            traceLost++;
+            return;
+        }
+        reportLost(sink);
+        traceBacklog.incrementAndGet();
         callbacks.execute(() -> {
-            try {
-                long dropped = traceDropped.getAndSet(0);
-                if (dropped != 0) {
-                    try { hooks.dropped().accept(id, dropped); }
-                    catch (RuntimeException | AssertionError ignored) { /* Still deliver the actual event. */ }
-                }
-                hooks.tracer().accept(id, event);
-            } finally { tracePending.decrementAndGet(); }
+            try { sink.event(id, view); }
+            finally { traceBacklog.decrementAndGet(); }
         });
     }
 
-    /** The events a full backlog never discards: the session's establishment and its end; every other event that arrives to a full backlog is dropped and counted. */
-    private static boolean terminal(Event e) {
-        return e.kind() == Event.Kind.CLOSED || e.kind() == Event.Kind.ESTABLISHED;
+    /** Queues the count of events lost since the last report, where they stood: before the next accepted event or the end. */
+    private void reportLost(DriverHooks.TraceSink sink) {
+        long lost = traceLost;
+        if (lost == 0) return;
+        traceLost = 0;
+        callbacks.execute(() -> sink.dropped(id, lost));
     }
 
     private void runHooks() {
@@ -1508,10 +1539,17 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** Told, on the loop, of every pipe that failed or closed: what the host above the core keeps per pipe goes. */
     public void pipeEnded(java.util.function.LongConsumer l) { pipeEnded = l; }
 
-    private void deliver(Event e) {
-        trace(e);
+    /** Delivers a core event to the tracer and the event queue; on the loop (package-private for the tests of the tracer backlog). */
+    void deliver(Event e) {
         if (e.pipeTerminal() && pipeEnded != null) pipeEnded.accept(e.pipe());
-        if (e.kind() == Event.Kind.CLOSED) return;
+        // From CLOSED on (the linger's retirements and carrier closes included) the tracer and the queue take nothing new.
+        if (ended) return;
+        trace(e);
+        if (e.kind() == Event.Kind.CLOSED) {
+            ended = true;
+            events.freeze();
+            return;
+        }
         if (e.kind() == Event.Kind.RESUME_UNATTENDED) {
             hooks.warn("zmux session suspended with nothing to redial it (no redial hook, no running pool): it ends at its resume timeout unless the application adds a pipe");
         }
@@ -1529,13 +1567,21 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /**
      * The retirement summary: pipes retired since it was last read, of
-     * those the ones whose failure or end was unread, the unread non-terminal events dropped,
-     * and the last few retired IDs, oldest first.
+     * those the ones whose failure or end was unread, and the last few retired IDs, oldest first.
      */
-    public record RetiredPipes(long retired, long failed, long closed, long dropped, List<Long> last) {}
+    public record RetiredPipes(long retired, long failed, long closed, List<Long> last) {}
 
     /** Queues an event of the API above the core (EventQueue#addApplication); on the loop. */
-    public void addApplicationEvent(Object key, Object event) {
+    public void addApplicationEvent(Object key, io.zmux.SessionEvent event) {
+        if (ended) return;
+        var sink = hooks.tracer();
+        if (sink != null) {
+            if (traceEstablished) traceEvent(sink, event);
+            else {
+                if (heldApplication == null) heldApplication = new ArrayList<>();
+                heldApplication.add(event);
+            }
+        }
         events.addApplication(key, event);
     }
 

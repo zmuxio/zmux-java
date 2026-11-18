@@ -1100,8 +1100,8 @@ public final class ZmuxSession implements AutoCloseable {
             while (true) {
                 Object ev = driver.pollEvent(op);
                 if (ev == null) break;
-                SessionEvent event = ev instanceof SessionRuntime.RetiredPipes(long retired, long failed, long closed, long dropped, List<Long> last)
-                        ? new SessionEvent.PipesRetired(retired, failed, closed, dropped, last.stream().map(PipeId::of).toList())
+                SessionEvent event = ev instanceof SessionRuntime.RetiredPipes(long retired, long failed, long closed, List<Long> last)
+                        ? new SessionEvent.PipesRetired(retired, failed, closed, last.stream().map(PipeId::of).toList())
                         : ev instanceof SessionEvent application ? application : Events.publicEvent((Event) ev);
                 if (event != null) { driver.cancelEventWait(op); return event; }
             }
@@ -1446,6 +1446,9 @@ public final class ZmuxSession implements AutoCloseable {
 
     private java.util.List<CandidateResult> carrierTries() { synchronized (carrierTries) { return java.util.List.copyOf(carrierTries); } }
 
+    /** The key of a candidate's event in the event queue (the event key table): its carrier kind and variant. */
+    private record CandidateKey(CarrierKind kind, String variant) {}
+
     /** Records tries of candidates and, when chosen is not null, the choice of kind: in the statistics and as events. */
     void reportCarrier(java.util.List<CandidateResult> results, CarrierKind chosen, String variant) {
         synchronized (carrierTries) {
@@ -1454,7 +1457,7 @@ public final class ZmuxSession implements AutoCloseable {
             if (chosen != null) { carrier = chosen; carrierVariant = variant; }
         }
         driver.post(() -> {
-            for (CandidateResult r : results) driver.addApplicationEvent(r.kind(), new SessionEvent.CarrierCandidate(r));
+            for (CandidateResult r : results) driver.addApplicationEvent(new CandidateKey(r.kind(), r.variant()), new SessionEvent.CarrierCandidate(r));
             if (chosen != null) driver.addApplicationEvent(SessionEvent.CarrierChosen.class, new SessionEvent.CarrierChosen(chosen, variant));
         });
     }

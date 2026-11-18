@@ -464,12 +464,17 @@ is `ZmuxConfig.Builder.noMemoryBudget()` or `ListenerConfig.Builder.noMemoryBudg
 
 ## Application hooks and budgets
 
-`ZmuxConfig.Builder.tracer(tracer, queueCapacity)` installs an ordered,
-asynchronous `Tracer`. Every callback names its session (`SessionId`, also
-`session.id()`), so one tracer can serve many sessions. The capacity bounds
-each session's own trace backlog: a slow tracer loses that session's events
-and reports the count with `dropped(session, count)`; its terminal
-notification is retained. Window growth can be approved
+`ZmuxConfig.Builder.tracer(tracer)` installs an ordered, asynchronous
+`Tracer`. Every callback names its session (`SessionId`, also `session.id()`),
+so one tracer can serve many sessions. It sees each occurrence of an event
+(a failed Hello with `count` 1, one `PipesRetired` per retired pipe), apart
+from the event stream. Each session has a trace backlog of 256 events, fixed:
+a slow tracer loses that session's events once it is full and learns the
+count from `dropped(session, count)`, called where the lost events stood,
+before the next event it receives or before `closed`. `established` is the
+first call and `closed` the last (nothing follows it); both and `dropped` take
+no room from the 256. An application that must not lose events reads
+`nextEvent()`. Window growth can be approved
 by `allowConnectionWindowIncrease`; the predicate runs off-loop and stale or
 now-unaffordable answers cannot increase credit.
 
@@ -490,12 +495,24 @@ kind is reported in `ShapedPipe`, `PipeStats.carrier` and the pipe events
 each with the direction it is about, `PipePriorityChanged`, with the source of the
 change, and `PipeQualityChanged`). Dropped datagrams are counted in the statistics,
 not reported as events. Retirement has one report only,
-`PipesRetired(retired, failed, closed, dropped, last)`: the pipes retired since it
-was last read, of those the ones whose failure or end was still unread, the unread
-events of retired pipes that left the queue, and the last four retired IDs. It
-accumulates until read, so the event queue stays bounded however many pipes a
-session goes through; compare `session.pipes()` with the handles you hold to find
-every retired ID.
+`PipesRetired(retired, failed, closed, last)`: the pipes retired since it
+was last read, of those the ones whose failure or end was still unread, and the
+last four retired IDs; the unread events of a retired pipe leave the queue with
+it. It accumulates until read, so the event queue stays bounded however many
+pipes a session goes through; compare `session.pipes()` with the handles you hold
+to find every retired ID.
+
+The event stream never drops an event: it is a keyed queue holding at most one
+unread event per key (`SessionEvent` lists the keys: for example a pipe event by
+pipe and direction, `TierSaturation` by priority, `JoinAuthFailed` by reason).
+An event whose key has an unread one updates it (the latest values replace it;
+`JoinAuthFailed.count` counts the failures since it was last read) and moves it
+to the tail, so events are read in the order of their keys' latest occurrences.
+`SessionResumed` removes an unread `ResumeUnattended`. The queue needs no
+configured bound: its keys are those of the pipes, tiers and carrier candidates
+the session holds plus a fixed few. Once the session has ended nothing more
+enters it; what is queued is still read, then `nextEvent()` throws the
+session's error.
 
 `io.zmux.helper.Limiter` is the reserve-then-refund interface shared by every
 zmux implementation: `CompletionStage<Long> acquire(long min, long max)` waits

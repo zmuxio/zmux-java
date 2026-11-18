@@ -120,11 +120,13 @@ public final class ZmuxConfig {
         spreadChunk = b.spreadChunk; overflowDelay = b.overflowDelay;
         redundancy = b.redundancy; logger = b.logger;
         Tracer tracer = b.tracer;
-        hooks = new io.zmux.internal.loop.DriverHooks(tracer == null ? null : (id, e) -> {
-            if (e.kind() == io.zmux.internal.core.Event.Kind.ESTABLISHED) tracer.established(id);
-            else if (e.kind() == io.zmux.internal.core.Event.Kind.CLOSED) tracer.closed(id, Errors.session(e.error()));
-            else { SessionEvent event = Events.publicEvent(e); if (event != null) tracer.event(id, event); }
-        }, tracer == null ? null : tracer::dropped, b.tracerQueue, b.allowWindowGrowth,
+        hooks = new io.zmux.internal.loop.DriverHooks(tracer == null ? null : new io.zmux.internal.loop.DriverHooks.TraceSink() {
+            @Override public SessionEvent view(io.zmux.internal.core.Event e) { return Events.traceEvent(e); }
+            @Override public void established(SessionId session) { tracer.established(session); }
+            @Override public void event(SessionId session, SessionEvent event) { tracer.event(session, event); }
+            @Override public void dropped(SessionId session, long count) { tracer.dropped(session, count); }
+            @Override public void closed(SessionId session, io.zmux.internal.core.SessionError error) { tracer.closed(session, Errors.session(error)); }
+        }, b.allowWindowGrowth,
                 b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), scheduler, joinPolicy(b), b.handshakeShaper, b.logger,
                 b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.min()), nanos(b.redialBackoff.max()), b.redialBackoff.jitter()));
         joinEarlyHello = b.joinEarlyHello;
@@ -512,7 +514,6 @@ public final class ZmuxConfig {
         private java.util.function.Supplier<io.zmux.shaping.ShapingBudget> shapingBudget;
         private io.zmux.shaping.ShaperFactory shaper;
         private Tracer tracer;
-        private int tracerQueue = 256;
         private java.util.function.LongPredicate allowWindowGrowth;
         private io.zmux.helper.Limiter datagramSend;
         private io.zmux.helper.Limiter datagramReceive;
@@ -881,10 +882,12 @@ public final class ZmuxConfig {
          */
         public Builder shaper(io.zmux.shaping.ShaperFactory factory) { shaper = factory; return this; }
 
-        /** The event hook: ordered asynchronous notifications naming the session; capacity bounds each session's queued events (default 256). */
-        public Builder tracer(Tracer t, int capacity) {
-            if (capacity < 1) throw new IllegalArgumentException("tracer queue below 1");
-            tracer = t; tracerQueue = capacity; return this;
+        /**
+         * The event hook: ordered asynchronous notifications naming the session. Each session's backlog holds
+         * 256 events, fixed; see {@link Tracer}.
+         */
+        public Builder tracer(Tracer t) {
+            tracer = t; return this;
         }
 
         /** Called off-loop with the proposed connection-window increase in bytes. */

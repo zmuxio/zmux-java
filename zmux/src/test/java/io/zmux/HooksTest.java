@@ -5,10 +5,6 @@ import io.zmux.helper.Limiter;
 import io.zmux.helper.LimitedStreams;
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.Test;
@@ -290,7 +286,7 @@ class HooksTest {
                         }
                         @Override public void dropped(SessionId session, long n) { if (!session.equals(seen.get())) return; dropped.addAndGet(n); throw new IllegalArgumentException("failed loss notification"); }
                         @Override public void closed(SessionId session, SessionError error) { if (session.equals(seen.get())) closed.countDown(); }
-                    }, 1).build();
+                    }).build();
             // Trace only the client, so both contexts cannot wait on the same gate.
             var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(serverConfig))) {
@@ -298,55 +294,14 @@ class HooksTest {
                 var c = Zmux.connect(listener.localAddress(), cfg); ref.set(c); var s = accepted.get();
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 var pipe = c.pipes().getFirst();
-                for (int i=0; i<20; i++) pipe.update(PipeUpdate.builder().sendPriority(i).build());
+                // More changes than the tracer's backlog holds (256), while its first call is blocked.
+                for (int i=0; i<300; i++) pipe.update(PipeUpdate.builder().sendPriority(i + 1).build());
                 assertTrue(c.ping().toNanos() > 0);
                 release.countDown();
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
                 assertTrue(closed.await(5, TimeUnit.SECONDS));
                 assertTrue(blocked.get()); assertTrue(dropped.get() > 0);
                 assertEquals(c.id(), seen.get(), "the tracer names its session"); assertNotEquals(c.id(), s.id());
-            } finally { release.countDown(); }
-        }
-    }
-
-    /** A full backlog drops the event that arrives, counts it, and never drops established or closed: after a blocked established, a session end delivers nothing but the loss count and closed. */
-    @Test void fullTracerBacklogDropsTheNewArrivalAndKeepsOnlyEstablishedAndClosed() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), closed = new CountDownLatch(1);
-            AtomicReference<SessionId> seen = new AtomicReference<>();
-            List<String> calls = Collections.synchronizedList(new ArrayList<>());
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
-                        @Override public void established(SessionId session) {
-                            seen.set(session); calls.add("established"); entered.countDown();
-                            try { assertTrue(release.await(5, TimeUnit.SECONDS)); } catch (InterruptedException e) { throw new AssertionError(e); }
-                        }
-                        @Override public void event(SessionId session, SessionEvent event) { if (session.equals(seen.get())) calls.add("event"); }
-                        @Override public void dropped(SessionId session, long n) { if (session.equals(seen.get()) && n > 0) calls.add("dropped"); }
-                        @Override public void closed(SessionId session, SessionError error) { if (session.equals(seen.get())) { calls.add("closed"); closed.countDown(); } }
-                    }, 1).build();
-            var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
-            try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(serverConfig))) {
-                var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
-                var c = Zmux.connect(listener.localAddress(), cfg); var s = accepted.get();
-                assertTrue(entered.await(5, TimeUnit.SECONDS));
-                // The backlog (capacity 1) holds the blocked established call: everything that follows arrives to a full one.
-                // A pipe's end is no exception: its terminal event is dropped like any other arrival.
-                ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.defaults());
-                added.close();
-                // The pipe is retired before its events are read: they are folded into the retirement summary, the only report of
-                // its end (a PipeClosed read earlier would be one as well).
-                added.awaitClosed(Duration.ofSeconds(10));
-                long pipe = added.id().value();
-                SessionEvent e;
-                do {
-                    e = c.nextEvent(Duration.ofSeconds(10));
-                    assertNotNull(e, "the session's own event stream reports the pipe's end");
-                } while (!(e instanceof SessionEvent.PipeClosed pc && pc.pipe().value() == pipe)
-                        && !(e instanceof SessionEvent.PipesRetired pr && pr.last().stream().anyMatch(p -> p.value() == pipe)));
-                c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
-                release.countDown();
-                assertTrue(closed.await(5, TimeUnit.SECONDS));
-                assertEquals(List.of("established", "dropped", "closed"), calls);
             } finally { release.countDown(); }
         }
     }

@@ -6,9 +6,10 @@ package io.zmux.internal.core;
  * @param dir {@link Action#DIR_IN} or {@link Action#DIR_OUT}, for PIPE_STATE and the application's pipe kinds;
  *     {@link Action#DIR_BIDI} for the retirement
  * @param code the epoch (EPOCH_*), GOAWAY code, tier priority (TIER_SATURATION) or effective priority (PIPE_PRIORITY)
- * @param count the weight (PIPE_PRIORITY)
+ * @param count the weight (PIPE_PRIORITY); the failures of the reason (JOIN_AUTH_FAILED), 1 as the core emits it
  * @param frame the Locator (LOCATOR_*)
- * @param flag saturated (TIER_SATURATION) or standby (PIPE_PRIORITY)
+ * @param flag saturated (TIER_SATURATION), standby (PIPE_PRIORITY), or failed (the retirement: an outbound
+ *     direction FAILED)
  * @param initiator for PIPE_PRIORITY: the peer's request changed the settings, not a local setting
  * @param rtt smoothed RTT (PIPE_QUALITY), nanoseconds
  * @param rate delivery rate (PIPE_QUALITY, CAPACITY_*), bytes per second
@@ -63,8 +64,18 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
         return new Event(Kind.PIPE_STATE, pipe, dir, state, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier);
     }
 
+    /** The retirement of a pipe; failed: its outbound direction FAILED (else it ended cleanly). */
+    static Event pipeRetired(long pipe, io.zmux.CarrierKind carrier, boolean failed) {
+        return new Event(Kind.PIPE_STATE, pipe, Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, failed, 0, 0, carrier);
+    }
+
+    /** This event with another {@code count}. */
+    public Event withCount(long n) {
+        return new Event(kind, pipe, dir, state, error, maxBidi, maxUni, code, n, frame, reason, features, initiator, flag, rtt, rate, carrier);
+    }
+
     static Event joinAuthFailed(String reason) {
-        return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 0, null, reason, null, false, false, 0, 0, null);
+        return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null);
     }
 
     static Event epoch(Kind k, long n) {

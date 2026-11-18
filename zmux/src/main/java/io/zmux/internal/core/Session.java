@@ -825,10 +825,11 @@ public final class Session {
         state = SessionState.CLOSED;
         clearJoinSecrets();
         mem.release();
+        // The end first: what the pipes' release reports after it never reaches the event stream or the tracer.
+        emitClosedEvent();
         if (graceful) pipes.closeAll(); else pipes.abortAll();
         life.clearTimers();
         grace = Time.NEVER;
-        emitClosedEvent();
         closedW.wakeAll(outbox);
         handOffW.wakeAll(outbox);
         releaseAll();

@@ -213,6 +213,7 @@ class SecureCarrierTcpTest {
                 assertEquals(RecordMode.UNMANAGED, st.getFirst().recordMode());
                 assertEquals(0, c.stats().joinFailures());
                 assertEquals(0, s.stats().joinBatchDropped());
+                assertEquals(0, s.stats().logLinesDropped(), "the logger is called directly: no queue to drop from");
             }
         }
     }

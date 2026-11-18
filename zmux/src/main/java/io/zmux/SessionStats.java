@@ -32,6 +32,8 @@ import java.util.List;
  * @param noEffectBudget gauge: the current tokens of the no-effect budget
  * @param joinFailures join attempts failed in a row since the last verified Reply
  * @param joinBatchDropped frames of a Hello's or a Reply's first batch dropped
+ * @param logLinesDropped log lines not delivered because a logger queue or hand-off was full; always 0 here: the
+ *     {@link System.Logger} of {@link ZmuxConfig.Builder#logger} is called directly, never through a queue
  * @param smoothedRtt pipe 0's estimate outside multipath, the primary pipe's in a multipath session
  * @param minRtt the minimum RTT
  * @param latestRtt the latest sample
@@ -71,7 +73,8 @@ public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCan
                            long reinjections, long bytesRedundant, long bytesDuplicateReceived, long sendBuffered,
                            long recvBuffered, long retained, long pipesActive, long pipesAdded, long pipeFailures,
                            long joinAuthFailures, long joinReplays, long joinPending, long joinRefusals, long suspensions,
-                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped) {
+                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped,
+                           long logLinesDropped) {
     public SessionStats {
         carrierCandidates = List.copyOf(carrierCandidates);
         java.util.Objects.requireNonNull(suspendedTime);
@@ -90,7 +93,7 @@ public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCan
                 s.bytesReinjected(), s.bytesOpportunistic(), s.penalties(), s.reinjections(), s.bytesRedundant(),
                 s.bytesDuplicateReceived(), g.sendBuffered(), g.recvBuffered(), g.retained(), g.pipesActive(),
                 s.pipesAdded(), s.pipeFailures(), s.joinAuthFailures(), s.joinReplays(), s.joinPending(), s.joinRefusals(), s.suspensions(),
-                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks(), s.firstFlightTimeouts(), s.joinFailures(), s.joinBatchDropped());
+                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks(), s.firstFlightTimeouts(), s.joinFailures(), s.joinBatchDropped(), 0);
     }
 
     private static Duration rtt(long nanos) {

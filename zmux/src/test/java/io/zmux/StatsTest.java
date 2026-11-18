@@ -143,6 +143,7 @@ class StatsTest {
                 SessionEvent e;
                 do e = s.nextEvent(Duration.ofSeconds(5)); while (!(e instanceof SessionEvent.JoinAuthFailed));
                 assertEquals("auth", ((SessionEvent.JoinAuthFailed) e).reason());
+                assertEquals(1, ((SessionEvent.JoinAuthFailed) e).count());
                 assertEquals(1, s.stats().joinAuthFailures());
                 PipePoolTest.await(() -> l.stats().rejected() == 1);
                 assertEquals(0, l.stats().joins());
