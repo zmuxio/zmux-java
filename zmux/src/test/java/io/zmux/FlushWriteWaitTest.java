@@ -16,17 +16,19 @@ class FlushWriteWaitTest {
     @Test void writerResumesAfterAFlushTimedOut() throws Exception {
         try (var loops = EventLoops.create(1); var pair = Pair.memory(NonBlockingCallsTest.small(loops))) {
             var s = pair.client().openStream();
-            s.setSendBuffer(0); // the least buffer: the writer waits for credit soon
+            // The send buffer holds more than the peer's window: the part beyond it can leave only on credit, which the
+            // peer's reader gives, so a flush of the whole buffer cannot finish before that. (With no buffer the flush would
+            // wait only for the congestion window's tail, which the peer's delayed acknowledgement, 25 ms, opens.)
+            s.setSendBuffer(2L * NonBlockingCallsTest.WINDOW);
             byte[] big = new byte[4 << 20];
             var written = new CompletableFuture<Void>();
             Thread writer = Thread.ofVirtual().start(() -> {
                 try { s.write(big); written.complete(null); } catch (IOException e) { written.completeExceptionally(e); }
             });
-            // The writer waits once the peer's window is used up, with bytes buffered unsent for the flush to wait on
-            // (a parked writer alone may still be handing its chunk to the loop).
+            // The window is used up and the buffer is full beyond it, with the writer parked for space.
             long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (s.sendCapacity() > 0 || s.stats().sendBuffered() == 0 || (writer.getState() != Thread.State.WAITING && writer.getState() != Thread.State.TIMED_WAITING)) {
-                assertTrue(System.nanoTime() - until < 0, "the writer never blocked: capacity " + s.sendCapacity() + ", buffered " + s.stats().sendBuffered() + ", " + writer.getState());
+            while (!blockedOnCredit(s) || (writer.getState() != Thread.State.WAITING && writer.getState() != Thread.State.TIMED_WAITING)) {
+                assertTrue(System.nanoTime() - until < 0, "the writer never blocked: " + s.stats() + ", " + writer.getState());
                 Thread.onSpinWait();
             }
             s.setWriteTimeout(Duration.ofMillis(20));
@@ -42,5 +44,10 @@ class FlushWriteWaitTest {
             r.close();
             reader.join(5000);
         }
+    }
+
+    private static boolean blockedOnCredit(ZmuxStream s) throws IOException {
+        var st = s.stats();
+        return st.bytesSent() >= NonBlockingCallsTest.WINDOW && st.sendBuffered() > 0;
     }
 }

@@ -276,11 +276,13 @@ public final class StreamRecv {
             if (n > 0) return new ReadResult(n, false);
             r.state = Stream.RECV_RESET_READ;
             table.maybeDiscard(st);
+            table.drainUpdate(st);
             throw CoreException.stream(r.errState);
         }
         if (r.finKnown && r.readOff == r.finalSize && !r.reset) {
             r.state = Stream.RECV_DATA_READ;
             table.maybeDiscard(st);
+            table.drainUpdate(st);
             return new ReadResult(n, true);
         }
         SessionError err = port.error();
@@ -314,11 +316,13 @@ public final class StreamRecv {
         if (r.reset && r.readOff >= r.resetRel) {
             r.state = Stream.RECV_RESET_READ;
             table.maybeDiscard(st);
+            table.drainUpdate(st);
             throw CoreException.stream(r.errState);
         }
         if (r.finKnown && r.readOff == r.finalSize && !r.reset) {
             r.state = Stream.RECV_DATA_READ;
             table.maybeDiscard(st);
+            table.drainUpdate(st);
             return new Chunk(ByteBuffer.allocate(0), null, true);
         }
         SessionError err = port.error();
@@ -401,6 +405,7 @@ public final class StreamRecv {
         else if (r.finKnown && r.readOff == r.finalSize && !r.reset && r.state != Stream.RECV_DATA_READ) r.state = Stream.RECV_DATA_READ;
         else return;
         table.maybeDiscard(st);
+        table.drainUpdate(st); // an end the application saw no longer holds the read drain
     }
 
     /** Where window updates become due: the application reports consumption at least this often. */

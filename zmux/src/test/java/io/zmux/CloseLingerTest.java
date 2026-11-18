@@ -119,4 +119,40 @@ class CloseLingerTest {
             }
         }
     }
+
+    /**
+     * The read drain keeps a stream's end, not only its bytes (SPEC.md Section 6.5): a finish or a reset received
+     * before the peer's close holds the session until the application reads it, though every carrier has ended.
+     */
+    @Test void aFinishReceivedBeforeTheCloseIsStillReadAsTheEndOfTheStream() throws Exception {
+        endBeforeTheClose(false);
+    }
+
+    @Test void aResetReceivedBeforeTheCloseIsStillReadAsAReset() throws Exception {
+        endBeforeTheClose(true);
+    }
+
+    private static void endBeforeTheClose(boolean reset) throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
+            try {
+                var l = link(cfg, false, w -> w);
+                var s = l.client().openStream();
+                s.write(new byte[] {7});
+                var r = l.server().acceptStream(Duration.ofSeconds(5));
+                if (reset) r.reset(9); else r.finish(); // the end alone: the client's stream never receives a byte
+                l.server().close();
+                l.server().awaitClosed();
+                awaitClosed(l, 1_500);
+                assertFalse(l.bothClosed(), "the unread end holds the closing session");
+                if (reset) assertThrows(StreamResetException.class, () -> s.read(new byte[16], 0, 16));
+                else assertEquals(-1, s.read(new byte[16], 0, 16));
+                awaitClosed(l, 5_000);
+                assertTrue(l.bothClosed(), "the session ends once the end was read");
+            } finally {
+                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
+            }
+        }
+    }
 }

@@ -194,13 +194,17 @@ public final class StreamTable {
     private int drainUnread = -1;
 
     /**
-     * Whether st, which the application holds (opened or accepted), has data it has not read:
-     * readable in the buffer, or pushed to its receive lane and not yet consumed there.
+     * Whether st, which the application holds (opened or accepted), has data or an end it has not
+     * read: readable in the buffer, pushed to its receive lane and not yet consumed there, or its
+     * finish or reset, received and not yet reported to the application (the read drain runs up to
+     * the end of stream, SPEC.md Section 6.5).
      */
     private static boolean unread(Stream st) {
         if (!st.hasRecv || st.rcv.stopped() || (!st.local && !st.tab.accepted)) return false;
         StreamRecv.RecvPart r = st.rcv;
-        return r.pushOff() > r.readOff() || r.buf().contiguous(r.pushOff()) > r.pushOff();
+        return r.pushOff() > r.readOff() || r.buf().contiguous(r.pushOff()) > r.pushOff()
+                || r.state() == Stream.RECV_RESET_RECVD
+                || (r.finKnown() && !r.reset() && r.state() != Stream.RECV_DATA_READ && r.buf().contiguous(r.pushOff()) >= r.finalSize());
     }
 
     /** Starts the drain after the peer's close: counts the held streams with unread data, once. */
