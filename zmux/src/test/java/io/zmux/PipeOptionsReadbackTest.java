@@ -107,6 +107,7 @@ class PipeOptionsReadbackTest {
             assertEquals(PipeOptions.Direction.SEND_ONLY, joiner.direction());
             assertEquals(9, joiner.fateGroup());
             assertTrue(joiner.returnOnReply(), "read as it was given");
+            p.awaitAttached(WAIT); // returnOnReply returns before the acceptor has the pipe
             var peer = f.server.pipes().stream().filter(q -> q.id().value() == p.id().value()).findFirst().orElseThrow().options();
             assertEquals(PipeOptions.Direction.RECEIVE_ONLY, peer.direction(), "from the acceptor's view");
             assertEquals(9, peer.fateGroup());
