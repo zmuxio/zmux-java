@@ -3,6 +3,7 @@ package io.zmux.http;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
@@ -31,6 +32,9 @@ import java.util.concurrent.CompletableFuture;
 /** Opens WebSocket carriers on an HTTP/1.1 connection of an {@link HttpCarrierClient}. */
 final class WebSocketClient {
     private WebSocketClient() {}
+
+    /** A test seam: sees each connection before its handshake, to reorder the channel's events; null: none. */
+    static volatile java.util.function.Consumer<Channel> connectedForTests;
 
     /** A carrier and the URL redirects led it to. */
     record Opened(PipeIo io, URI url) {}
@@ -91,6 +95,8 @@ final class WebSocketClient {
             }
             WebSocketClientHandshaker hs = WebSocketClientHandshakerFactory.newHandshaker(ws, WebSocketVersion.V13,
                     offer.isEmpty() ? null : String.join(",", offer), false, h, WebSocketFrames.READ_LIMIT, true, false, 10_000, false, false);
+            var seam = connectedForTests;
+            if (seam != null) seam.accept(ch);
             BodyCarrier[] self = new BodyCarrier[1];
             // Both halves closed: the connection closes once the close frame went out.
             BodyCarrier c = new BodyCarrier(ch, Framing.MESSAGES, true, true, WebSocketFrames.OUT, () -> self[0].afterWrites(ch::close),
@@ -99,8 +105,10 @@ final class WebSocketClient {
             WebSocketFrames frames = new WebSocketFrames(c);
             CompletableFuture<String> done = new CompletableFuture<>();
             ch.pipeline().addLast("ws-aggregator", new HttpObjectAggregator(64 << 10));
-            ch.pipeline().addLast(new Handler(hs, frames, done));
-            hs.handshake(ch).addListener(f -> { if (!f.isSuccess()) done.completeExceptionally(f.cause()); });
+            // The handshake's promise completes once its request went out and the frame encoder is installed.
+            ChannelPromise sent = ch.newPromise();
+            ch.pipeline().addLast(new Handler(hs, frames, done, sent));
+            hs.handshake(ch, sent).addListener(f -> { if (!f.isSuccess()) done.completeExceptionally(f.cause()); });
             String protocol = http.await(done, "websocket handshake");
             return Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
                     .withProtocol(protocol)
@@ -116,14 +124,40 @@ final class WebSocketClient {
         private final WebSocketClientHandshaker hs;
         private final WebSocketFrames frames;
         private final CompletableFuture<String> done;
+        private final ChannelPromise sent;
+        /**
+         * The response arrived before the handshake's request write was completed: Netty installs
+         * the frame encoder, and takes the HTTP codec out, in that completion and in finishing the
+         * response, so the response is finished only after it; what follows it on the connection
+         * waits here, and goes to the frame decoder then. Null: not waiting.
+         */
+        private java.util.ArrayList<Object> held;
 
-        Handler(WebSocketClientHandshaker hs, WebSocketFrames frames, CompletableFuture<String> done) {
-            this.hs = hs; this.frames = frames; this.done = done;
+        Handler(WebSocketClientHandshaker hs, WebSocketFrames frames, CompletableFuture<String> done, ChannelPromise sent) {
+            this.hs = hs; this.frames = frames; this.done = done; this.sent = sent;
         }
 
         @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            if (held != null) { held.add(msg); return; }
             if (msg instanceof WebSocketFrame) {
                 frames.read(msg);
+                return;
+            }
+            if (msg instanceof FullHttpResponse r && !hs.isHandshakeComplete() && !sent.isDone()) {
+                held = new java.util.ArrayList<>(1);
+                held.add(msg);
+                sent.addListener(f -> {
+                    var queue = held;
+                    held = null;
+                    if (!f.isSuccess()) { // the handshake's failure is the outcome
+                        for (Object m : queue) ReferenceCountUtil.release(m);
+                        return;
+                    }
+                    for (Object m : queue) {
+                        if (m == r) channelRead(ctx, m);
+                        else forward(ctx, m);
+                    }
+                });
                 return;
             }
             try {
@@ -143,6 +177,17 @@ final class WebSocketClient {
                 }
             } finally {
                 ReferenceCountUtil.release(msg);
+            }
+        }
+
+        /** What came after the response, to where the finished handshake put the frame decoder. */
+        private void forward(ChannelHandlerContext ctx, Object m) {
+            var decoder = ctx.pipeline().context("ws-decoder");
+            if (decoder == null) { ReferenceCountUtil.release(m); return; }
+            try {
+                ((io.netty.channel.ChannelInboundHandler) decoder.handler()).channelRead(decoder, m);
+            } catch (Exception e) {
+                exceptionCaught(ctx, e);
             }
         }
 
