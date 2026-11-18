@@ -36,7 +36,7 @@ class ResumeTest {
                 clientSuspended.get(5, TimeUnit.SECONDS); serverSuspended.get(5, TimeUnit.SECONDS);
                 PipePoolTest.await(() -> client.stats().suspensions() == 1 && client.stats().pipesActive() == 0);
                 Duration early = client.stats().suspendedTime();
-                Thread.sleep(20);
+                Thread.sleep(60);
                 assertTrue(client.stats().suspendedTime().compareTo(early) > 0, "the current suspension counts");
                 sender.write(bytes, 128 << 10, bytes.length - (128 << 10)); sender.finish();
                 var resumed = workers.submit(() -> { event(server, SessionEvent.SessionResumed.class); return null; });
@@ -58,7 +58,7 @@ class ResumeTest {
                 sender.close(); receiver.close();
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

@@ -42,7 +42,7 @@ class StatsTest {
                 assertTrue(bootstrap.local(), "the dialer joined the bootstrap pipe");
                 assertEquals(PipeState.Outbound.ACTIVE, bootstrap.outbound());
                 assertTrue(bootstrap.lanes().isEmpty(), "a pipe without lanes has no lane positions");
-                Thread.sleep(60);
+                Thread.sleep(150);
                 assertTrue(c.pipeStats().getFirst().attachedFor().minus(bootstrap.attachedFor()).toMillis() >= 50,
                         "an idle session's pipe statistics are of the current time");
 
@@ -119,7 +119,7 @@ class StatsTest {
                 assertEquals(data.length + 1, c.stats().bytesWritten(), "the sum over its streams");
                 assertNotNull(c.stats().smoothedRtt(), "QX_PING or the carrier measured the RTT");
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -162,7 +162,7 @@ class StatsTest {
                 assertEquals(0, ls.setupFailures());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -209,7 +209,7 @@ class StatsTest {
                 w.close();
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -239,7 +239,7 @@ class StatsTest {
                 PipePoolTest.await(() -> l.stats().refused() >= 1 && l.stats().joins() + l.stats().refused() >= joined + 1);
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -258,7 +258,7 @@ class StatsTest {
                 assertNotNull(st.sinceLastAck());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

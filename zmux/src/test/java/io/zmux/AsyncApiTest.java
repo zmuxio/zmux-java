@@ -222,7 +222,7 @@ class AsyncApiTest {
             assertThrows(ExecutionException.class, () -> get(write)); assertEquals(1, released.get());
             assertThrows(IllegalStateException.class, chunk::buffer);
             assertThrows(ExecutionException.class, () -> get(pair.client().acceptStreamAsync()));
-            assertEquals(0, loops.outstandingBuffers()); sender.close();
+            Leaks.none(loops); sender.close();
         }
     }
     @Test void writeOwnerNeverBlocksTryWriteAndBoundsShutdownOutput() throws Exception {

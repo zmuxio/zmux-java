@@ -69,7 +69,7 @@ class PathLossTest {
                 assertTrue(st.bytesReinjected() > 0 && st.bytesReinjected() >= st.bytesOpportunistic(), st.toString());
                 stream.close(); c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

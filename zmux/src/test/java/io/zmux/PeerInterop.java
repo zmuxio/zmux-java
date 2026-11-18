@@ -180,7 +180,7 @@ class PeerInterop {
                     child.expect("CLOSED"); child.awaitExit();
                 }
             }
-            assertEquals(0, loops.outstandingBuffers(), () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
+            Leaks.none(loops, () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
         }
     }
     @Test void javaInitiates() throws Exception { run(true, false); }

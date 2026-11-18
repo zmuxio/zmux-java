@@ -76,7 +76,7 @@ class QmuxInterop {
                     PeerInterop.get(session.closed());
                 }
             }
-            assertEquals(0, loops.outstandingBuffers(), () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
+            Leaks.none(loops, () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
         }
     }
     @Test void rustQmuxResponder() throws Exception { run("ZMUX_QMUX_RS_PEER", true); }

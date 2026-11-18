@@ -88,7 +88,7 @@ class MultipathTest {
                 exchange(ex, c, s, 2, 1 << 20, null);
                 closeBoth(c, s);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -104,10 +104,13 @@ class MultipathTest {
                 c.addPipe(l.localAddress(), PipeOptions.defaults());
                 ZmuxPipe zero = c.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow();
                 exchange(ex, c, s, 4, 4 << 20, () -> {
-                    Thread.sleep(20);
+                    // Mid-transfer: once the pipe has carried data, not after a guessed delay.
+                    for (long end = System.nanoTime() + 10_000_000_000L; zero.stats().map(st -> st.bytesSent()).orElse(1L) == 0 && System.nanoTime() < end; ) Thread.sleep(1);
                     zero.abort();
                     return null;
                 });
+                // The retirement completes with the peer's part of the exchange, not with abort's return.
+                zero.awaitClosed();
                 // A retired handle's reads report absence; its operations fail.
                 assertTrue(zero.state().isEmpty());
                 assertTrue(zero.stats().isEmpty());
@@ -115,7 +118,7 @@ class MultipathTest {
                 assertEquals(1, c.pipes().size());
                 closeBoth(c, s);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -133,7 +136,7 @@ class MultipathTest {
                 exchange(ex, c, s, 4, 1 << 20, null);
                 closeBoth(c, s);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -156,7 +159,7 @@ class MultipathTest {
                 exchange(ex, c, s, 1, 1 << 16, null);
                 closeBoth(c, s);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 

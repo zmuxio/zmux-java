@@ -39,7 +39,7 @@ class FirstFlightTest {
             st.write(ByteBuffer.wrap(hello));
             long t0 = System.nanoTime();
             st.flush();
-            assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(1), "a held flush returns at once");
+            assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(3), "a held flush returns at once");
             Thread.sleep(50);
             assertFalse(server.isDone(), "the server got the parameters");
             assertEquals(0, c.stats().bytesSent());

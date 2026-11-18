@@ -84,7 +84,7 @@ class SchedulingTest {
                 assertEquals(PipeStats.SettingSource.DEFAULT, added.stats().orElseThrow().sendPrioritySource());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 

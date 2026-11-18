@@ -49,7 +49,7 @@ class SplitBootstrapTest {
                     first.toCompletableFuture().get(5, TimeUnit.SECONDS); second.toCompletableFuture().get(5, TimeUnit.SECONDS);
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void handshakeTimeoutAndListenerCloseReleaseUnpairedHalves() throws Exception {
@@ -69,7 +69,7 @@ class SplitBootstrapTest {
                 listener.close(); down.toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(1, closes.get());
             } finally { listener.close(); }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
@@ -115,7 +115,7 @@ class SplitBootstrapTest {
             lifetime.toCompletableFuture().get(5, TimeUnit.SECONDS);
             input.onLent(ByteBuffer.allocate(1), released::incrementAndGet);
             assertEquals(12, released.get()); assertEquals(1, closed.get());
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 

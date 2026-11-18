@@ -83,7 +83,7 @@ class ListenerStatsTest {
                     client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -103,7 +103,7 @@ class ListenerStatsTest {
                 assertEquals(0, l.stats().rejected());
                 p[0].reader().close(); p[0].writer().close();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 

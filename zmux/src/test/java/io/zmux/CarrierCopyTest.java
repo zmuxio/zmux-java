@@ -125,7 +125,7 @@ class CarrierCopyTest {
                 assertTrue(copied * 4 < copied + inPlace, "copied " + copied + " of " + (copied + inPlace));
             }
             assertEquals(0, Diagnostics.retainedInputBytes(loops));
-            assertEquals(0, Diagnostics.outstandingBuffers(loops));
+            Leaks.none(loops);
         }
     }
 
@@ -145,7 +145,7 @@ class CarrierCopyTest {
                 assertEquals(0, copied, "a lent message went through the read buffer");
                 assertTrue(inPlace >= 2L * data.length, String.valueOf(inPlace));
             }
-            assertEquals(0, Diagnostics.outstandingBuffers(loops));
+            Leaks.none(loops);
         }
     }
 

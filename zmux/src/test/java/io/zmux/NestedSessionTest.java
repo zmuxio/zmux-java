@@ -63,7 +63,7 @@ class NestedSessionTest {
                     }
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void openPipeStreamCarriesOpenInfoAndApplicationTlvs() throws Exception {
@@ -125,7 +125,7 @@ class NestedSessionTest {
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -175,7 +175,7 @@ class NestedSessionTest {
                 outerServer.close(); outerClient.close(); routing.get(5, TimeUnit.SECONDS);
                 outerServer.awaitClosed(); outerClient.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -187,7 +187,7 @@ class NestedSessionTest {
                 assertThrows(PipeRefusedException.class, () -> outer.client().addPipe(carrier, PipeOptions.defaults()));
                 assertNotNull(outer.client().ping());
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

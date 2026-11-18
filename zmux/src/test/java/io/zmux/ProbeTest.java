@@ -66,7 +66,7 @@ class ProbeTest {
                 assertTrue(b <= 7, "return-pipe liveness: at most one per second, " + b + " PIPE_PING in 6.5 s");
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -94,7 +94,7 @@ class ProbeTest {
                 assertTrue(System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(4) - TimeUnit.MILLISECONDS.toNanos(200));
                 server.closed().get(10, TimeUnit.SECONDS);
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -125,7 +125,7 @@ class ProbeTest {
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -152,7 +152,7 @@ class ProbeTest {
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -185,7 +185,7 @@ class ProbeTest {
                 assertEquals(PipeState.Outbound.ACTIVE, st.outbound());
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

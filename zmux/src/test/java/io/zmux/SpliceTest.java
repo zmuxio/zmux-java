@@ -70,7 +70,7 @@ class SpliceTest {
                 assertEquals(response.length, result.bToA().bytes());
                 assertEquals(new SpliceEnd.Finished(), result.aToB().end()); assertEquals(new SpliceEnd.Finished(), result.bToA().end());
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -147,7 +147,7 @@ class SpliceTest {
                     sender.get(3, TimeUnit.SECONDS);
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -489,7 +489,7 @@ class SpliceTest {
                         }
                     } finally { gate.release(); }
                 }
-                assertEquals(0, loops.outstandingBuffers(), mode);
+                Leaks.none(loops, mode);
             }
         }
     }
@@ -701,7 +701,7 @@ class SpliceTest {
                         assertEquals(0x55, reset.code());
                     }
                 }
-                assertEquals(0, loops.outstandingBuffers());
+                Leaks.none(loops);
             }
         }
     }

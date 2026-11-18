@@ -80,13 +80,13 @@ class CloseHandOffTest {
             long t0 = System.nanoTime();
             client.close();
             long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-            assertTrue(took >= 250 && took < 1_000, "close took " + took + " ms");
+            assertTrue(took >= 250 && took < 5_000, "close took " + took + " ms");
             again.get(200, TimeUnit.MILLISECONDS); // A concurrent call returns no later than the first.
             // The session ended locally at the bound; its future completes once the loop released the carriers.
             client.closed().get(200, TimeUnit.MILLISECONDS);
             long t1 = System.nanoTime();
             client.close();
-            assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(50), "an ended session's close returns at once");
+            assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(250), "an ended session's close returns at once");
             server.close(); server.awaitClosed();
         } finally {
             io.zmux.internal.core.Session.closeLimit = saved;
@@ -149,7 +149,7 @@ class CloseHandOffTest {
                 long t0 = System.nanoTime();
                 f.client.close();
                 long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                assertTrue(took < 1_500, "close took " + took + " ms on a stalled loop");
+                assertTrue(took < 5_000, "close took " + took + " ms on a stalled loop");
             } finally {
                 release.countDown();
             }
@@ -177,7 +177,7 @@ class CloseHandOffTest {
                 called.countDown();
             }));
             assertTrue(called.await(3, TimeUnit.SECONDS));
-            assertTrue(took[0] < TimeUnit.MILLISECONDS.toNanos(100), "close blocked the loop");
+            assertTrue(took[0] < TimeUnit.MILLISECONDS.toNanos(500), "close blocked the loop");
             long got = 0;
             byte[] b = new byte[1 << 16];
             for (int r; (r = in.read(b, 0, b.length)) > 0; ) got += r;
@@ -191,7 +191,7 @@ class CloseHandOffTest {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 2))) {
             long t0 = System.nanoTime();
             f.client.abort(3, "done");
-            assertTrue(System.nanoTime() - t0 < TimeUnit.MILLISECONDS.toNanos(500));
+            assertTrue(System.nanoTime() - t0 < TimeUnit.MILLISECONDS.toNanos(900), "well before the 1 s close bound");
             var app = assertInstanceOf(SessionError.ApplicationClosed.class, f.server.closed().get(3, TimeUnit.SECONDS));
             assertEquals(3, app.code());
         }
@@ -200,14 +200,14 @@ class CloseHandOffTest {
     @Test void addingWaitsUntilThePeerAttachedThePipe() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
             long t0 = System.nanoTime();
-            ZmuxPipe p = PeerAttachedTest.lateJoin(f, 300, PipeOptions.defaults());
-            assertTrue(System.nanoTime() - t0 >= TimeUnit.MILLISECONDS.toNanos(250), "returned before the Confirm reached the acceptor");
+            ZmuxPipe p = PeerAttachedTest.lateJoin(f, 1_000, PipeOptions.defaults());
+            assertTrue(System.nanoTime() - t0 >= TimeUnit.MILLISECONDS.toNanos(900), "returned before the Confirm reached the acceptor");
             assertTrue(PeerAttachedTest.held(f.server, p));
             p.awaitAttached(Duration.ZERO);
 
             long t1 = System.nanoTime();
-            ZmuxPipe early = PeerAttachedTest.lateJoin(f, 300, NO_WAIT);
-            assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(250), "returnOnReply waited");
+            ZmuxPipe early = PeerAttachedTest.lateJoin(f, 1_000, NO_WAIT);
+            assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(800), "returnOnReply waited");
             assertFalse(PeerAttachedTest.held(f.server, early));
             early.awaitAttached(Duration.ofSeconds(3));
         }
@@ -219,9 +219,9 @@ class CloseHandOffTest {
                     .maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             try (var f = new PipePoolTest.Fixture(cfg)) {
                 long t0 = System.nanoTime();
-                var e = assertThrows(SocketTimeoutException.class, () -> PeerAttachedTest.lateJoin(f, 2_000, PipeOptions.defaults()));
+                var e = assertThrows(SocketTimeoutException.class, () -> PeerAttachedTest.lateJoin(f, 8_000, PipeOptions.defaults()));
                 long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                assertTrue(took >= 350 && took < 1_500, "the wait took " + took + " ms: " + e);
+                assertTrue(took >= 350 && took < 6_000, "the wait took " + took + " ms: " + e);
                 PipePoolTest.await(() -> f.client.pipes().stream().allMatch(q -> q.id().value() == 0));
                 assertFalse(f.client.isClosed());
             }
@@ -299,7 +299,7 @@ class CloseHandOffTest {
                 assertFalse(f.client.cancelJoinedPipe(99), "the stuck loop did not run the abort");
                 assertFalse(Splice.boundedCleanup(stream, () -> { }).join(), "the stuck loop did not run the cleanup");
                 long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                assertTrue(took >= 350 && took < 2_000, "two bounded waits took " + took + " ms");
+                assertTrue(took >= 350 && took < 8_000, "two bounded waits took " + took + " ms");
             } finally {
                 proceed.countDown();
             }

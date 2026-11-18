@@ -118,7 +118,7 @@ class ConcurrencyTest {
             p.server().awaitClosed();
             loops.close();
             assertEquals(0, loops.liveThreads());
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 

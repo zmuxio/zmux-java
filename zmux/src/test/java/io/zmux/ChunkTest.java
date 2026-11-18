@@ -37,7 +37,7 @@ class ChunkTest {
                 sending.get(5, TimeUnit.SECONDS); relay.get(5, TimeUnit.SECONDS);
                 send.close(); input.close(); output.close(); received.close();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void heldChunkRemainsValidAfterSessionCloseAndFailedWriteConsumesIt() throws Exception {
@@ -55,7 +55,7 @@ class ChunkTest {
             assertThrows(java.io.IOException.class, () -> sender.writeChunk(held));
             assertThrows(IllegalStateException.class, held::buffer);
             held.close();
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void timedOutReadDoesNotKeepTheOldWakeupSlot() throws Exception {

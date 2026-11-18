@@ -29,7 +29,7 @@ class ListenerResourcesTest {
                 c.close(); c.awaitClosed();
                 until(() -> listener.adapter().memoryUsed() == 0);
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -64,7 +64,7 @@ class ListenerResourcesTest {
                 c1.close(); c2.close(); s2.close();
                 c1.awaitClosed(); c2.awaitClosed(); s2.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

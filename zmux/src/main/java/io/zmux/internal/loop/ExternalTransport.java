@@ -106,7 +106,10 @@ final class ExternalTransport extends AbstractTransport {
         final AtomicBoolean overflow = new AtomicBoolean();
 
         void offer(Input input) {
-            long bytes = (input.data == null ? 0 : input.data.remaining()) + 128L; // Payload plus queue metadata.
+            // The end or failure of a half is one terminal signal, no payload: it is never charged, so it can
+            // neither fail the carrier behind a batch still queued nor be lost, and it stays ordered after it.
+            if (input.data == null) { queue.add(input); schedule(); return; }
+            long bytes = input.data.remaining() + 128L; // Payload plus queue metadata.
             long total = held.addAndGet(bytes);
             // After admission a batch is always taken while nothing else is queued: a reader
             // that waits for its releases never fails, whatever its batch size.

@@ -76,7 +76,7 @@ class LaneStressTest {
                 out.close();
                 in.close();
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -127,7 +127,7 @@ class LaneStressTest {
                 out.close();
                 in.close();
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -172,9 +172,7 @@ class LaneStressTest {
             out.close();
             in.close();
             System.gc();
-            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (loops.outstandingBuffers() != 0 && System.nanoTime() < until) Thread.sleep(5);
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 }

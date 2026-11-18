@@ -46,7 +46,7 @@ class ListenerEndpointTest {
                 assertThrows(java.net.SocketTimeoutException.class, () -> a.accept(Duration.ofMillis(20)),"a join must not create a second application session");
                 exchange(client,server); exchange(server,client); closed(client,server);
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void initiatedExternalSessionAcceptsJoinsOnEveryFraming() throws Exception {
@@ -66,7 +66,7 @@ class ListenerEndpointTest {
                     closed(client,server);
                 }
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void duplicateResolutionRejoinsTheLosersRouteAndSurvivesBootstrapLoss() throws Exception {
@@ -95,7 +95,7 @@ class ListenerEndpointTest {
                 }
                 closed(a1,b1); closed(a2,b2);
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void tlsEndpointRegistersBeforeParametersAndSupportsReverseJoin() throws Exception {
@@ -107,7 +107,7 @@ class ListenerEndpointTest {
                 var joined = server.addTlsPipe(a.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), PipeOptions.defaults());
                 assertEquals(PipeState.Outbound.ACTIVE, joined.state().orElseThrow().outbound()); exchange(client,server); closed(client,server);
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
@@ -130,7 +130,7 @@ class ListenerEndpointTest {
                     closed(client,server);
                 }
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void closeWakesBlockedAcceptAndEveryAcceptThenThrows() throws Exception {
@@ -178,7 +178,7 @@ class ListenerEndpointTest {
                     empty(a); empty(b);
                 }
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
@@ -227,7 +227,7 @@ class ListenerEndpointTest {
                 }
                 empty(a); empty(b);
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op

@@ -208,7 +208,7 @@ class HooksTest {
                 assertEquals(5, send.charged.get());
                 stream.close(); remote.close(); c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -244,7 +244,7 @@ class HooksTest {
                 assertEquals(1, s.stats().datagramsDroppedLimit());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 

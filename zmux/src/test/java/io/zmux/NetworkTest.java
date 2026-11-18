@@ -76,7 +76,7 @@ class NetworkTest {
             try (ZmuxListener l = Zmux.listen(any(), ListenerConfig.of(cfg))) {
                 exchange(l, cfg, Zmux::connect, 16, 4 << 20);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -91,7 +91,7 @@ class NetworkTest {
                     return s;
                 }, 8, 2 << 20);
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -136,7 +136,7 @@ class NetworkTest {
                     assertEquals(7, app.code());
                 }
             }
-            assertEquals(0, loops.outstandingBuffers(), "read buffers leaked");
+            Leaks.none(loops, "read buffers leaked");
         }
     }
 
@@ -175,8 +175,10 @@ class NetworkTest {
                 SessionError e = c.awaitClosed();
                 assertTrue(e instanceof SessionError.TransportClosed || e instanceof SessionError.PipesLost, e.toString());
                 peer.close();
+                // The server's end is its own: it lingers for the client's close and still holds what its streams received.
+                s.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     /**
@@ -199,7 +201,7 @@ class NetworkTest {
                 server.abort(1, "gone");
                 assertTrue(loops.outstandingBuffers() > 0, "released before the session's end");
                 server.awaitClosed();
-                assertEquals(0, loops.outstandingBuffers(), () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
+                Leaks.none(loops, () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
                 client.abort(0, "done");
             }
         }

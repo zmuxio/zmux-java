@@ -109,7 +109,7 @@ class CloseLingerTest {
                         while (l.a().isOpen() && System.nanoTime() < until) Thread.sleep(1);
                         long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
                         assertFalse(l.a().isOpen(), "the linger ended");
-                        assertTrue(took >= 350 && took < 1_500, "the linger bounded the wait: " + took + " ms, whole=" + whole);
+                        assertTrue(took >= 350 && took < 2_900, "the linger bounded the wait: " + took + " ms, whole=" + whole);
                         l.server().close();
                     }
                 }

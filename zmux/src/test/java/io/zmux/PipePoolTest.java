@@ -71,7 +71,7 @@ class PipePoolTest {
                 assertEquals(0, CancellationTest.registrations(cancel));
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 

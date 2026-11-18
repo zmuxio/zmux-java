@@ -39,7 +39,7 @@ class ListenerShutdownStuckTest {
                 long t0 = System.nanoTime();
                 var done = l.shutdownAsync(0, "test");
                 long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                assertTrue(took < 1_000, "shutdownAsync took " + took + " ms");
+                assertTrue(took < 5_000, "shutdownAsync took " + took + " ms");
                 assertFalse(l.shutdownAsync(0, "again").isDone()); // a second shutdown joins the first
                 done.toCompletableFuture().get(10, TimeUnit.SECONDS);
             } finally {

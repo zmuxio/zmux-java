@@ -41,7 +41,7 @@ class LivenessTest {
                 assertTrue(System.nanoTime() - start < 8_000_000_000L, "ended after " + (System.nanoTime() - start) / 1_000_000 + " ms");
                 server.close();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -66,7 +66,7 @@ class LivenessTest {
                 assertEquals(PipeState.Outbound.ACTIVE, peer.stats().orElseThrow().outbound());
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 
@@ -138,7 +138,7 @@ class LivenessTest {
                     assertTrue(contains(first, type(FrameType.PIPE_PING)), "and holds the PIPE_PING");
                 }
             }
-            assertEquals(0, loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
 }

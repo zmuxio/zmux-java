@@ -67,6 +67,10 @@ class ExternalTransportTest {
                             @Override public void ended(Transport n, boolean graceful, boolean partial) { n.close(null); }
                         };
                         target.execute(() -> moved.start(next));
+                        // The reader's end arrives now, while the carrier is between its loops and the rest of
+                        // the input is still held: a fast reader (EOF right after its last read) on a busy host
+                        // does this. The end may neither fail the carrier nor overtake the rest of the input.
+                        sink.get().onEnd();
                         return Inbound.GONE;
                     }
                     @Override public void ended(Transport c, boolean graceful, boolean partial) { c.close(null); }
@@ -76,7 +80,6 @@ class ExternalTransportTest {
             while (input.hasRemaining()) input.put((byte) (input.position() % 251));
             input.flip();
             sink.get().onLent(input, releases::incrementAndGet);
-            sink.get().onEnd();
             received.get(5, TimeUnit.SECONDS);
             run(source, () -> {}); run(target, () -> {});
             assertEquals(1, releases.get());

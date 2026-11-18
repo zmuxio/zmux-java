@@ -70,7 +70,7 @@ class DuplicateTest {
                     }
                 }
             }
-            assertEquals(0,loops.outstandingBuffers());
+            Leaks.none(loops);
         }
     }
     @Test void noncesUseOneCommonDomainAndBothEndpointsAgree() throws Exception {
