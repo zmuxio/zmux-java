@@ -24,8 +24,18 @@ import org.junit.jupiter.api.Timeout;
 class WebSocketHandshakeOrderTest {
     /** Holds the completion of the first write until the first read was passed on, then completes it as a later loop task. */
     private static final class LateWriteCompletion extends ChannelDuplexHandler {
+        private final boolean untilClosed;
         private ChannelPromise held;
         private boolean read;
+
+        /** untilClosed: the completion waits for the connection's close, not just the first read. */
+        LateWriteCompletion(boolean untilClosed) { this.untilClosed = untilClosed; }
+
+        @Override public void channelInactive(ChannelHandlerContext ctx) {
+            ctx.fireChannelInactive();
+            ChannelPromise p = held;
+            if (untilClosed && p != null) ctx.executor().execute(() -> p.trySuccess());
+        }
 
         @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
             if (held != null || read) { ctx.write(msg, promise); return; }
@@ -40,7 +50,7 @@ class WebSocketHandshakeOrderTest {
             if (read) return;
             read = true;
             ChannelPromise p = held;
-            if (p != null) ctx.executor().execute(() -> p.trySuccess());
+            if (!untilClosed && p != null) ctx.executor().execute(() -> p.trySuccess());
         }
     }
 
@@ -48,7 +58,7 @@ class WebSocketHandshakeOrderTest {
 
     @Test void writesAfterAnUpgradeWhoseRequestWriteCompletesLateStillGoThroughTheEncoder() throws Exception {
         try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(), false, null); var c = f.client(b -> b)) {
-            WebSocketClient.connectedForTests = (Channel ch) -> ch.pipeline().addFirst("late-write", new LateWriteCompletion());
+            WebSocketClient.connectedForTests = (Channel ch) -> ch.pipeline().addFirst("late-write", new LateWriteCompletion(false));
             var p = c.webSocketPipe(WebSocketTest.ws(f.base), Map.of(), List.of(), null);
             try (var client = Zmux.open(p, Role.CLIENT, f.config); var server = f.listener.accept(Duration.ofSeconds(5))) {
                 assertNotNull(server);
@@ -60,6 +70,16 @@ class WebSocketHandshakeOrderTest {
                 for (int n = 0, r; n < 3; n += r) { r = in.read(b, n, 3 - n); assertTrue(r > 0); }
                 assertArrayEquals(new byte[] {1, 2, 3}, b);
             }
+        }
+    }
+
+    @Test void aRedirectAnsweredBeforeTheRequestWriteCompletedIsReportedAsTheRedirectEvenWhenTheServerCloses() throws Exception {
+        try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(), false, null); var c = f.client(b -> b.http1());
+             var away = new RedirectTest.Front(f.base, 302, u -> "http://other.example/z")) {
+            WebSocketClient.connectedForTests = (Channel ch) -> ch.pipeline().addFirst("late-write", new LateWriteCompletion(true));
+            var e = assertThrows(io.zmux.HttpRedirectException.class,
+                    () -> c.webSocketPipe(WebSocketTest.ws(away.base), Map.of(), List.of(), null));
+            assertEquals("another host", e.reason());
         }
     }
 }

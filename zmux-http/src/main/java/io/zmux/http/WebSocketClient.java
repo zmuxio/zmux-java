@@ -132,6 +132,8 @@ final class WebSocketClient {
          * waits here, and goes to the frame decoder then. Null: not waiting.
          */
         private java.util.ArrayList<Object> held;
+        /** The connection ended or failed while the response was held: reported once it was handled. */
+        private Runnable afterHeld;
 
         Handler(WebSocketClientHandshaker hs, WebSocketFrames frames, CompletableFuture<String> done, ChannelPromise sent) {
             this.hs = hs; this.frames = frames; this.done = done; this.sent = sent;
@@ -143,20 +145,25 @@ final class WebSocketClient {
                 frames.read(msg);
                 return;
             }
-            if (msg instanceof FullHttpResponse r && !hs.isHandshakeComplete() && !sent.isDone()) {
+            if (msg instanceof FullHttpResponse r && !hs.isHandshakeComplete() && !sent.isDone()
+                    && r.status().code() == 101) { // anything else is refused, which needs no encoder
                 held = new java.util.ArrayList<>(1);
                 held.add(msg);
                 sent.addListener(f -> {
                     var queue = held;
                     held = null;
+                    var then = afterHeld;
+                    afterHeld = null;
                     if (!f.isSuccess()) { // the handshake's failure is the outcome
                         for (Object m : queue) ReferenceCountUtil.release(m);
+                        if (then != null) then.run();
                         return;
                     }
                     for (Object m : queue) {
                         if (m == r) channelRead(ctx, m);
                         else forward(ctx, m);
                     }
+                    if (then != null) then.run();
                 });
                 return;
             }
@@ -192,12 +199,14 @@ final class WebSocketClient {
         }
 
         @Override public void channelInactive(ChannelHandlerContext ctx) {
+            if (held != null) { afterHeld = () -> channelInactive(ctx); return; }
             done.completeExceptionally(new io.zmux.CarrierFailedException("WebSocket connection closed during the upgrade"));
             frames.carrier.lost(new ClosedChannelException());
             frames.closed();
         }
 
         @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            if (held != null) { afterHeld = () -> exceptionCaught(ctx, cause); return; }
             done.completeExceptionally(cause);
             frames.carrier.lost(cause);
             ctx.close();
