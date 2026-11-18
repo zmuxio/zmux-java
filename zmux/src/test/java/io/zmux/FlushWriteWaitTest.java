@@ -22,10 +22,11 @@ class FlushWriteWaitTest {
             Thread writer = Thread.ofVirtual().start(() -> {
                 try { s.write(big); written.complete(null); } catch (IOException e) { written.completeExceptionally(e); }
             });
-            // The writer waits once the peer's window is used up.
+            // The writer waits once the peer's window is used up, with bytes buffered unsent for the flush to wait on
+            // (a parked writer alone may still be handing its chunk to the loop).
             long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (s.sendCapacity() > 0 || (writer.getState() != Thread.State.WAITING && writer.getState() != Thread.State.TIMED_WAITING)) {
-                assertTrue(System.nanoTime() - until < 0, "the writer never blocked: capacity " + s.sendCapacity() + ", " + writer.getState());
+            while (s.sendCapacity() > 0 || s.stats().sendBuffered() == 0 || (writer.getState() != Thread.State.WAITING && writer.getState() != Thread.State.TIMED_WAITING)) {
+                assertTrue(System.nanoTime() - until < 0, "the writer never blocked: capacity " + s.sendCapacity() + ", buffered " + s.stats().sendBuffered() + ", " + writer.getState());
                 Thread.onSpinWait();
             }
             s.setWriteTimeout(Duration.ofMillis(20));
