@@ -81,7 +81,7 @@ class QuicCloseTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 for (long code : new long[] {0x2a, 0}) {
@@ -107,7 +107,7 @@ class QuicCloseTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 ZmuxSession client = endpoint.connect(server.address(), "localhost", config);
@@ -132,7 +132,7 @@ class QuicCloseTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 ZmuxSession client = endpoint.connect(server.address(), "localhost", config);

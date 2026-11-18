@@ -30,7 +30,7 @@ class FlushWriteWaitTest {
             }
             s.setWriteTimeout(Duration.ofMillis(20));
             assertThrows(SocketTimeoutException.class, s::flush);
-            s.setWriteTimeout(null);
+            s.clearWriteTimeout();
             var r = pair.server().acceptStream(Duration.ofSeconds(5));
             Thread reader = Thread.ofVirtual().start(() -> {
                 byte[] b = new byte[64 << 10];

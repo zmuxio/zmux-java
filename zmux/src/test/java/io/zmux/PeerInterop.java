@@ -28,14 +28,14 @@ class PeerInterop {
         return out.toByteArray();
     }
     static String command(ZmuxSession session, String command, byte[] body) throws Exception {
-        try (var stream = get(session.openStreamAsync(Preamble.openInfo(command.getBytes(StandardCharsets.UTF_8))))) {
+        try (var stream = get(session.openStreamAsync(Preamble.builder().openInfo(command.getBytes(StandardCharsets.UTF_8)).build()))) {
             var writing = stream.writeAsync(ByteBuffer.wrap(body)); var fin = stream.finishAsync();
             String result = new String(read(stream), StandardCharsets.UTF_8); get(writing); get(fin); return result;
         }
     }
     static void echo(ZmuxSession session, int size, int seed) throws Exception {
         byte[] bytes = new byte[size]; new Random(seed).nextBytes(bytes);
-        try (var stream = get(session.openStreamAsync(Preamble.openInfo("echo".getBytes(StandardCharsets.UTF_8))))) {
+        try (var stream = get(session.openStreamAsync(Preamble.builder().openInfo("echo".getBytes(StandardCharsets.UTF_8)).build()))) {
             var writing = stream.writeAsync(ByteBuffer.wrap(bytes)); var fin = stream.finishAsync();
             assertArrayEquals(bytes, read(stream)); get(writing); get(fin);
         }
@@ -44,7 +44,7 @@ class PeerInterop {
     static void packets(ZmuxSession session) throws Exception {
         var options = new PacketStream.Options(PacketStream.SendPolicy.PREFER_DATAGRAM, 1 << 20);
         // Small packets as datagrams, two above the largest datagram as capsules, Context IDs 0 and 5.
-        try (var stream = session.openStream(Preamble.openInfo("packets".getBytes(StandardCharsets.UTF_8)))) {
+        try (var stream = session.openStream(Preamble.builder().openInfo("packets".getBytes(StandardCharsets.UTF_8)).build())) {
             var packets = PacketStream.of(stream, options);
             int large = stream.maxDatagramPayload(5) + 100;
             var small = new HashSet<String>(); var big = new HashSet<String>();
@@ -65,7 +65,7 @@ class PeerInterop {
             packets.close();
         }
         // Capsules only, both ways, in order.
-        try (var stream = session.openStream(Preamble.openInfo("packets:stream".getBytes(StandardCharsets.UTF_8)))) {
+        try (var stream = session.openStream(Preamble.builder().openInfo("packets:stream".getBytes(StandardCharsets.UTF_8)).build())) {
             var packets = PacketStream.of(stream, new PacketStream.Options(PacketStream.SendPolicy.STREAM_ONLY, 1 << 20));
             int[] sizes = {0, 1, 100, 1500, 20000, 65535};
             for (int i = 0; i < sizes.length; i++) { byte[] bytes = new byte[sizes[i]]; Arrays.fill(bytes, (byte) i); packets.send(5L * (i % 2), ByteBuffer.wrap(bytes)); }
@@ -80,14 +80,14 @@ class PeerInterop {
             packets.close();
         }
         // A truncated capsule then FIN: the peer ends the stream with ZMUX_PACKET_ERROR.
-        try (var stream = session.openStream(Preamble.openInfo("packets".getBytes(StandardCharsets.UTF_8)))) {
+        try (var stream = session.openStream(Preamble.builder().openInfo("packets".getBytes(StandardCharsets.UTF_8)).build())) {
             stream.write(new byte[] {0x00, 0x0a, 0x00, (byte) 0xab}); stream.finish();
             var failure = assertThrows(ExecutionException.class, () -> read(stream));
             assertEquals(PacketStream.PACKET_ERROR, assertInstanceOf(StreamResetException.class, failure.getCause()).code());
         }
         // The peer writes one: this side ends the stream, and the peer reports the code it saw.
         var report = session.acceptReceiveStreamAsync().orTimeout(10, TimeUnit.SECONDS);
-        try (var stream = session.openStream(Preamble.openInfo("packets-bad".getBytes(StandardCharsets.UTF_8)))) {
+        try (var stream = session.openStream(Preamble.builder().openInfo("packets-bad".getBytes(StandardCharsets.UTF_8)).build())) {
             stream.id(); var packets = PacketStream.of(stream, options);
             assertThrows(PacketErrorException.class, () -> packets.receive(Duration.ofSeconds(10)));
             try (var back = get(report)) { assertEquals("packet-error=" + PacketStream.PACKET_ERROR, new String(read(back), StandardCharsets.UTF_8)); }
@@ -97,11 +97,11 @@ class PeerInterop {
     private static void run(boolean initiating, boolean multipath) throws Exception {
         String binary = InteropProcess.required("ZMUX_INTEROP_PEER");
         try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16);
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16);
             // The peer joins in Trusted mode, which an end admits only when told to.
             if (multipath) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             var config = builder.build();
-            try (var endpoint = initiating ? ZmuxListener.of(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
+            try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
                  var child = initiating ? new InteropProcess(binary, multipath ? "mp-server" : "server", "127.0.0.1:0")
                          : new InteropProcess(binary, multipath ? "mp-client" : "client", endpoint.localAddress().getHostString() + ":" + endpoint.localAddress().getPort())) {
                 var target = initiating ? address(child.expect("LISTEN ")) : endpoint.localAddress();
@@ -116,13 +116,13 @@ class PeerInterop {
                         session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
                         var before = session.pipeStats(); echo(session, 16 << 20, 1);
                         for (var pipe : session.pipeStats()) {
-                            long prior = before.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst().orElseThrow().bytesSent();
+                            long prior = before.stream().filter(p -> p.pipe().value() == pipe.pipe().value()).findFirst().orElseThrow().bytesSent();
                             assertTrue(pipe.bytesSent() - prior >= 1 << 20, "pipe did not carry spread data: " + pipe);
                         }
                         assertEquals("scheduled", command(session, "schedule:round-robin", new byte[0]));
                         var inbound = session.pipeStats(); echo(session, 8 << 20, 2);
                         for (var pipe : session.pipeStats()) {
-                            long prior = inbound.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst().orElseThrow().bytesReceived();
+                            long prior = inbound.stream().filter(p -> p.pipe().value() == pipe.pipe().value()).findFirst().orElseThrow().bytesReceived();
                             assertTrue(pipe.bytesReceived() - prior >= 1 << 20, "reverse pipe did not carry spread data: " + pipe);
                         }
                         assertEquals("dropped", command(session, "drop-bootstrap", new byte[0]));
@@ -134,19 +134,19 @@ class PeerInterop {
                         for (int i = 0; i < 4; i++) { int seed = i; bulk.add(jobs.submit(() -> { echo(session, 2 << 20, seed); return null; })); }
                         for (var task : bulk) get(task);
                     } finally { for (var task : bulk) if (!task.isDone()) task.cancel(true); }
-                    try (var stream = session.openStream(Preamble.openInfo("info".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("info".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.setPeerPriority(new Priority(5, true)); stream.finish();
                         assertEquals("info=info;prio=5,true", new String(read(stream), StandardCharsets.UTF_8));
                     }
-                    try (var stream = session.openStream(Preamble.openInfo("reset".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("reset".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.write(new byte[] {1}); stream.markReliableBoundary(); stream.reset(77);
                         assertEquals("reset=77", new String(read(stream), StandardCharsets.UTF_8));
                     }
-                    try (var stream = session.openStream(Preamble.openInfo("stop:9".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("stop:9".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.id(); assertEquals("stopped", new String(read(stream), StandardCharsets.UTF_8));
                         var stopped = assertThrows(StreamStoppedException.class, () -> stream.write(new byte[] {1})); assertEquals(9, stopped.code());
                     }
-                    try (var stream = session.openStream(Preamble.openInfo("sendreset:33".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("sendreset:33".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.finish(); var failure = assertThrows(ExecutionException.class, () -> read(stream));
                         var reset = assertInstanceOf(StreamResetException.class, failure.getCause()); assertEquals(33, reset.code());
                     }
@@ -166,13 +166,13 @@ class PeerInterop {
                     try (var stream = get(session.openSendStreamAsync(Preamble.EMPTY))) { get(stream.writeAsync(ByteBuffer.wrap(new byte[] {4, 5}))); get(stream.finishAsync()); }
                     try (var stream = get(returned)) { assertArrayEquals(new byte[] {4, 5}, read(stream)); }
                     session.datagrams().send(ByteBuffer.wrap(new byte[] {3})); assertArrayEquals(new byte[] {3}, session.datagrams().receive());
-                    try (var stream = session.openStream(Preamble.openInfo("dgram:1".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("dgram:1".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.id(); stream.sendDatagram(4, ByteBuffer.wrap(new byte[] {7}));
                         var value = stream.receiveDatagram(); assertEquals(5, value.context()); assertArrayEquals(new byte[] {7}, value.payload());
                         stream.finish(); assertEquals("dgram-done", new String(read(stream), StandardCharsets.UTF_8));
                     }
                     packets(session);
-                    try (var stream = session.openStream(Preamble.openInfo("close:42:bye".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var stream = session.openStream(Preamble.builder().openInfo("close:42:bye".getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.finish();
                     }
                     var closed = assertInstanceOf(SessionError.ApplicationClosed.class, session.awaitClosed());

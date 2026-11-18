@@ -1,14 +1,12 @@
 package io.zmux.adapter;
 
-import io.zmux.JoinPendingException;
-import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxSession;
 import io.zmux.internal.spi.AdapterPorts;
 import java.io.IOException;
 
 /**
- * The operations of a {@link ZmuxSession} that only a carrier adapter or a host that proves or
- * schedules the session's carriers itself needs. Reached through {@link ZmuxSession#adapter()};
+ * The operations of a {@link ZmuxSession} that only a carrier adapter needs; the end-to-end declaration and the
+ * release of a held first flight are application operations of the session itself. Reached through {@link ZmuxSession#adapter()};
  * thread-safe.
  */
 public final class SessionAdapter {
@@ -27,23 +25,5 @@ public final class SessionAdapter {
      */
     public boolean isJoinReady() throws IOException {
         return port.joinReady();
-    }
-
-    /**
-     * States that the host has proven pipe 0 end to end: local, sends nothing. Until then a
-     * session without a secure first pipe has no join keys: local joins fail with
-     * {@link JoinPendingException} and the peer's are held. With a secure first pipe, a no-op.
-     */
-    public void declareEndToEnd() throws IOException {
-        port.declareEndToEnd();
-    }
-
-    /**
-     * Ends {@link ZmuxConfig.Builder#holdFirstFlight(boolean)}: everything queued so far is built into
-     * records and written to the bootstrap carrier in one write, as far as one batch holds it.
-     * Calls after the first, and on a session without the hold, do nothing. It never blocks.
-     */
-    public void releaseFirstFlight() {
-        port.releaseFirstFlight();
     }
 }

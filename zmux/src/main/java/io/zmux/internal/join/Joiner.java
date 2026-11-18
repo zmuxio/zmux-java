@@ -1,8 +1,8 @@
 package io.zmux.internal.join;
 
 import io.zmux.seal.SecureCarrierException;
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
 
 import io.zmux.internal.wire.VarInt;
 import java.io.ByteArrayOutputStream;
@@ -152,7 +152,7 @@ public final class Joiner {
         try {
             cut = Frames.cutReply(b, off, len, c.framing, c.suite);
         } catch (SecureCarrierException e) {
-            if (e.code() == SecureCarrierException.Code.INCOMPLETE) throw e;
+            if (e.kind() == SecureCarrierException.Kind.INCOMPLETE) throw e;
             throw fail(e);
         }
         try {

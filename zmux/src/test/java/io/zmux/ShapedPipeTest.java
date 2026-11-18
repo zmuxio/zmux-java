@@ -56,7 +56,7 @@ class ShapedPipeTest {
             Seen cs = new Seen(), ss = new Seen();
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(cs).build();
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(ss).build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(scfg))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(scfg))) {
                 var first = MemoryPipe.pair(Framing.MESSAGES);
                 listener.adapter().handle(first[1].withCarrier(CarrierKind.WEBSOCKET), JoinHint.inBand(TestAddr.peer("peer")), null);
                 try (var client = Zmux.open(first[0].withCarrier(CarrierKind.WEBSOCKET), Role.CLIENT, ccfg);

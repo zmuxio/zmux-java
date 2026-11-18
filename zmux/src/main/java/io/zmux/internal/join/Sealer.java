@@ -1,7 +1,7 @@
 package io.zmux.internal.join;
 
 import io.zmux.seal.SecureCarrierException;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
 
 import java.nio.ByteBuffer;
 

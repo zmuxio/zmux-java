@@ -61,8 +61,8 @@ class PathLossTest {
                 boolean suspect = false;
                 while (!suspect) {
                     SessionEvent event = c.nextEvent();
-                    suspect = (event instanceof SessionEvent.PipeSuspect p && p.pipeId().value() == 0)
-                            || (event instanceof SessionEvent.PipeFailed f && f.pipeId().value() == 0);
+                    suspect = (event instanceof SessionEvent.PipeSuspect p && p.pipe().value() == 0)
+                            || (event instanceof SessionEvent.PipeFailed f && f.pipe().value() == 0);
                 }
                 PipePoolTest.await(() -> c.stats().reinjections() >= 1);
                 var st = c.stats();

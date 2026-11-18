@@ -37,7 +37,7 @@ class DialPermitTest {
             // The server's sessions have no hook of their own: only the client dials.
             var serverCfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(6).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
                     .resumeTimeout(Duration.ofSeconds(10)).build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(serverCfg))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(serverCfg))) {
                 listenerHolder[0] = listener;
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
@@ -77,7 +77,7 @@ class DialPermitTest {
                     }).build();
             var serverCfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(6).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
                     .resumeTimeout(Duration.ofSeconds(10)).build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(serverCfg))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(serverCfg))) {
                 listenerHolder[0] = listener;
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));

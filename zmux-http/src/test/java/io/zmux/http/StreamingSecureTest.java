@@ -26,7 +26,7 @@ class StreamingSecureTest {
                 b -> b, b -> b.streaming(), true, null);
              var http = f.client(b -> h1 ? b.http1() : b.http2())) {
             var io = http.pipe(f.base, Map.of(), BIDI, null);
-            assertTrue(io.isSecure(), "the client's pipe declares Secure");
+            assertTrue(io.isCarrierSecure(), "the client's pipe declares Secure");
             assertNotNull(io.capabilities().exporter());
             try (ZmuxSession c = Zmux.open(io, Role.CLIENT, f.config); ZmuxSession s = f.listener.accept(Duration.ofSeconds(5))) {
                 assertNotNull(s);
@@ -41,7 +41,7 @@ class StreamingSecureTest {
     @Test void h2cIsNotSecure() throws Exception {
         try (var f = Fixture.plain(b -> b.streaming()); var http = f.client(b -> b.http2())) {
             var io = http.pipe(f.base, Map.of(), BIDI, null);
-            assertFalse(io.isSecure());
+            assertFalse(io.isCarrierSecure());
             io.writer().close();
             io.reader().close();
         }
@@ -50,7 +50,7 @@ class StreamingSecureTest {
     @Test void splitHalvesOverTlsAreNotBound() throws Exception {
         try (var f = new Fixture(b -> b, b -> b, b -> b.streaming(), true, null); var http = f.client(b -> b.http2())) {
             var io = http.pipe(f.base, Map.of(), PipeOptions.Direction.SEND_ONLY, null);
-            assertFalse(io.isSecure());
+            assertFalse(io.isCarrierSecure());
             io.writer().close();
         }
     }
@@ -60,9 +60,9 @@ class StreamingSecureTest {
                 .sslProvider(io.netty.handler.ssl.SslProvider.JDK).trustManager(Fixture.tmf()).protocols("TLSv1.2");
         try (var f = new Fixture(b -> b, b -> b, b -> b.streaming(), true, null); var http = f.client(b -> b.http1().tls(tls12))) {
             var first = http.pipe(f.base, Map.of(), BIDI, null);
-            assertFalse(first.isSecure(), "a full TLS 1.2 handshake does not declare Secure");
+            assertFalse(first.isCarrierSecure(), "a full TLS 1.2 handshake does not declare Secure");
             var again = http.pipe(f.base, Map.of(), BIDI, null);
-            assertFalse(again.isSecure(), "a resumed TLS 1.2 session does not either");
+            assertFalse(again.isCarrierSecure(), "a resumed TLS 1.2 session does not either");
             for (var io : new io.zmux.carrier.PipeIo[] {first, again}) { io.writer().close(); io.reader().close(); }
         }
     }

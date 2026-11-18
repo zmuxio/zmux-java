@@ -90,7 +90,7 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 SocketChannel near = SocketChannel.open(party.getLocalAddress());
                 PipeIo io = PipeChannel.pipe(near, near, Framing.BYTE_STREAM, 1 << 16);
-                if (m == RecordMode.BOUND) io = io.withExporter((x, y, n) -> new byte[n]).withSecure(true);
+                if (m == RecordMode.BOUND) io = io.withExporter((x, y, n) -> new byte[n]).withCarrierSecure();
                 PipeIo carrier = io;
                 Thread adder = Thread.ofVirtual().start(() -> {
                     try { c.addPipe(carrier, mode(m)); } catch (Exception expected) { /* It never joins. */ }
@@ -173,7 +173,7 @@ class JoinAttackTest {
      * removing the first pipe before that leaves the acceptor without a live pipe (8.5).
      */
     static void attached(ZmuxSession acceptor, ZmuxPipe joined) throws Exception {
-        joined.awaitPeerAttached(java.time.Duration.ofSeconds(5));
+        joined.awaitAttached(java.time.Duration.ofSeconds(5));
         assertTrue(acceptor.pipes().stream().anyMatch(q -> q.id().value() == joined.id().value()), "the acceptor did not attach the pipe");
     }
 
@@ -363,8 +363,8 @@ class JoinAttackTest {
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 long before = l.stats().rejected();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.adapter().handle(pair[1].withExporter((x, y, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                PipeIo near = pair[0].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
+                l.adapter().handle(pair[1].withExporter((x, y, n) -> new byte[n]).withCarrierSecure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                PipeIo near = pair[0].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withCarrierSecure();
                 assertThrows(Exception.class, () -> c.addPipe(near, mode(RecordMode.BOUND)));
                 until("the rejection", () -> l.stats().rejected() > before);
                 until("the acceptor's count", () -> s.stats().joinAuthFailures() > 0);
@@ -417,7 +417,7 @@ class JoinAttackTest {
                 byte[] hello = helloFor(c, 40, Mode.BOUND, new byte[32], null);
                 long auth = s.stats().joinAuthFailures(), replays = s.stats().joinReplays();
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.adapter().handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).withSecure(true),
+                l.adapter().handle(pair[1].withExporter((x, y, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 2); return o; }).withCarrierSecure(),
                         JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
                 PipeChannel near = PipeChannel.of(pair[0]);
                 near.write(ByteBuffer.wrap(hello));
@@ -626,10 +626,10 @@ class JoinAttackTest {
                     @Override public void write(OutboundBatch d, Completion done) { writes.incrementAndGet(); a[0].writer().write(d, done); }
                     @Override public void close() { a[0].writer().close(); }
                 };
-                PipeIo up = new PipeIo(null, counted, Framing.BYTE_STREAM, "up", null).withExporter((x, y, n) -> new byte[n]).withSecure(true);
-                PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, "down", null).withExporter((x, y, n) -> new byte[n]).withSecure(true);
+                PipeIo up = new PipeIo(null, counted, Framing.BYTE_STREAM, "up", null).withExporter((x, y, n) -> new byte[n]).withCarrierSecure();
+                PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, "down", null).withExporter((x, y, n) -> new byte[n]).withCarrierSecure();
                 PipeIo split = PipeIo.split(up, down);
-                assertTrue(split.isSecure());
+                assertTrue(split.isCarrierSecure());
                 assertThrows(Exception.class, () -> c.addPipe(split, mode(RecordMode.BOUND)));
                 assertEquals(0, writes.get(), "no byte is sent");
                 alive(c, s);
@@ -1012,6 +1012,9 @@ class JoinAttackTest {
                         assertTrue(held[i].read(ByteBuffer.allocate(4096)) > 0, "a Reply");
                     }
                     assertEquals(-1, held[0].read(ByteBuffer.allocate(64)), "the oldest is evicted");
+                    // A session limit, not an unexplained rejection: counted refused only.
+                    until("the eviction is counted", () -> l.stats().refused() == 1);
+                    assertEquals(0, l.stats().rejected());
                     for (int i = 1; i < held.length; i++) {
                         held[i].configureBlocking(false);
                         assertEquals(0, held[i].read(ByteBuffer.allocate(64)), "carrier " + i + " is kept");
@@ -1055,7 +1058,7 @@ class JoinAttackTest {
                 assertEquals(0, c.stats().pipeFailures(), "joiner");
                 assertEquals(2, c.pipes().size());
                 until("acceptor", () -> s.pipes().size() == 2);
-                p.awaitPeerAttached(Duration.ofSeconds(5));
+                p.awaitAttached(Duration.ofSeconds(5));
                 assertEquals(0, c.stats().pipeFailures(), "joiner after the report");
                 alive(c, s);
             }

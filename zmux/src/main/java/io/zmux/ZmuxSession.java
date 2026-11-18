@@ -46,8 +46,8 @@ public final class ZmuxSession implements AutoCloseable {
     /**
      * One dial of a further pipe at a time, whoever dials it (the redial hook, a pipe pool): a
      * dial takes it before it decides what is missing and gives it back once its attempt returned
-     * or was abandoned at its deadline (the join deadline, or a pool's attempt timeout), so two never
-     * restore the same direction and a hung dial blocks the other side no longer than that deadline.
+     * or was abandoned (the redial's join deadline, or a pool's run closing or its rotation yielding), so two
+     * never restore the same direction. A pool sets no deadline of its own: its dial function bounds its attempt.
      * What an abandoned attempt still creates is released, never kept.
      */
     final java.util.concurrent.Semaphore dialPermit = new java.util.concurrent.Semaphore(1);
@@ -117,17 +117,18 @@ public final class ZmuxSession implements AutoCloseable {
         return Optional.ofNullable((byte[]) run(op -> core.sessionBinding()));
     }
 
-    /** The session's liveness settings in effect: setting them changes nothing. */
-    public Liveness liveness() throws IOException {
-        return (Liveness) run(op -> {
-            var l = core.config().live();
-            Liveness.Builder b = Liveness.builder().suspectFloor(Duration.ofNanos(l.suspectFloor())).probeJitter(l.probeJitter());
-            if (l.keepAlive() < 0) b.noKeepAlive(); else b.keepAlivePeriod(Duration.ofNanos(l.keepAlive()));
-            if (l.deadTimeout() > 0) b.deadTimeout(Duration.ofNanos(l.deadTimeout()));
-            if (l.standbyProbe() <= 0) b.noStandbyProbe(); else b.standbyProbe(Duration.ofNanos(l.standbyProbe()));
-            if (l.probeInterval() <= 0) b.noProbeInterval(); else b.probeInterval(Duration.ofNanos(l.probeInterval()));
-            return b.build();
-        });
+    /** The liveness settings the session holds: the last set ({@link #setLiveness}), else the configured. Local state: it never fails or waits. */
+    public Liveness liveness() { return liveness; }
+
+    private volatile Liveness liveness;
+
+    private static Liveness livenessOf(io.zmux.internal.core.CoreConfig.Live l) {
+        Liveness.Builder b = Liveness.builder().suspectFloor(Duration.ofNanos(l.suspectFloor())).probeJitter(l.probeJitter());
+        if (l.keepAlive() < 0) b.noKeepAlivePeriod(); else b.keepAlivePeriod(Duration.ofNanos(l.keepAlive()));
+        if (l.deadTimeout() > 0) b.deadTimeout(Duration.ofNanos(l.deadTimeout()));
+        if (l.standbyProbe() <= 0) b.noStandbyProbe(); else b.standbyProbe(Duration.ofNanos(l.standbyProbe()));
+        if (l.probeInterval() <= 0) b.noProbeInterval(); else b.probeInterval(Duration.ofNanos(l.probeInterval()));
+        return b.build();
     }
 
     /**
@@ -146,6 +147,7 @@ public final class ZmuxSession implements AutoCloseable {
                 l.probeInterval().map(ZmuxConfig::nanos).orElse(0L),
                 l.probeJitter());
         run(op -> { core.setLiveness(v); return true; });
+        liveness = l;
     }
 
     /**
@@ -171,10 +173,10 @@ public final class ZmuxSession implements AutoCloseable {
         return (io.zmux.shaping.ShapingMeters) run(op -> core.shapingMeters());
     }
 
-    /** The session's shaping limits. */
-    public io.zmux.shaping.ShapingLimits shapingLimits() throws IOException {
-        return (io.zmux.shaping.ShapingLimits) run(op -> core.shapingLimits());
-    }
+    /** The shaping limits the session holds: the last set ({@link #setShapingLimits}), else the configured. Local state: it never fails or waits. */
+    public io.zmux.shaping.ShapingLimits shapingLimits() { return shapingLimits; }
+
+    private volatile io.zmux.shaping.ShapingLimits shapingLimits;
 
     /**
      * Replaces the session's shaping limits, tightened or loosened; they are never sent. What was
@@ -183,6 +185,7 @@ public final class ZmuxSession implements AutoCloseable {
     public void setShapingLimits(io.zmux.shaping.ShapingLimits l) throws IOException {
         java.util.Objects.requireNonNull(l, "l");
         run(op -> { core.setShapingLimits(l); return true; });
+        shapingLimits = l;
     }
 
     /**
@@ -216,11 +219,46 @@ public final class ZmuxSession implements AutoCloseable {
     /** {@link #admitted()} when it is a type; empty otherwise. */
     public <T> java.util.Optional<T> admitted(Class<T> type) { return admitted().filter(type::isInstance).map(type::cast); }
 
+    /**
+     * What a live pipe holds as its options: {@code value} is what the pipe was added with and every update applied,
+     * null while nothing was held (a pipe the peer joined). A handle that took the holder keeps it after the pipe's end,
+     * so it still reads the last held.
+     */
+    static final class HeldOptions {
+        /** Written only on the loop (one writer), read from any thread. */
+        private volatile PipeOptions value;
+
+        PipeOptions value() { return value; }
+
+        void set(PipeOptions v) { value = v; }
+
+        /** Applies u to the held options, or to the defaults with the pipe's fixed fields when nothing was held. On the loop. */
+        void apply(PipeUpdate u, io.zmux.internal.core.Session.PipeFixed f) {
+            PipeOptions cur = value;
+            value = (cur != null ? cur : PipeOptions.defaults().fixed(f)).applied(u);
+        }
+    }
+
+    /**
+     * The holders of the live pipes by pipe ID: written on the loop, read from any thread, and a pipe's entry goes with the
+     * pipe's end. An entry is made only for a pipe that is there ({@link #heldOf}), so nothing is re-inserted after the end.
+     */
+    final java.util.concurrent.ConcurrentHashMap<Long, HeldOptions> heldOptions = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The holder of live pipe id, made if needed; null when the pipe is gone. On the loop. */
+    HeldOptions heldOf(long id) {
+        return core.pipeFixed(id) == null ? null : heldOptions.computeIfAbsent(id, k -> new HeldOptions());
+    }
+
     ZmuxSession(SessionRuntime driver, Session core, String applicationProtocol, CarrierCredential credential) {
         this.driver = driver;
+        driver.pipeEnded(heldOptions::remove); // on the loop, like heldOf: no entry is made after this
+        this.liveness = livenessOf(core.config().live());
+        this.shapingLimits = core.shapingLimits();
         this.core = core;
         this.applicationProtocol = applicationProtocol;
         this.credential = credential;
+        this.scheduler = driver.hooks().scheduler() instanceof Scheduler s ? s : Scheduler.AFFINITY;
         driver.host(this);
         var redial = driver.hooks().redial();
         if (redial != null) Redialer.start(this, (ZmuxConfig.Redial) redial.hook(), redial.minBackoff(), redial.maxBackoff(), redial.jitter());
@@ -231,7 +269,7 @@ public final class ZmuxSession implements AutoCloseable {
      * then a session without a secure first pipe has no join keys: local joins fail with
      * {@link JoinPendingException} and the peer's are held. With a secure first pipe, a no-op.
      */
-    void declareEndToEnd() throws IOException {
+    public void declareEndToEnd() throws IOException {
         run(op -> { driver.declareEndToEnd(); return null; });
     }
 
@@ -407,15 +445,15 @@ public final class ZmuxSession implements AutoCloseable {
      * the destination a relay routes by; both need the preamble extension, and without it
      * (a plain QMux peer) must be null and empty.
      */
-    public io.zmux.carrier.PipeIo openStreamAsPipe(byte[] info, List<Preamble.Tlv> tlvs) throws IOException {
+    public io.zmux.carrier.PipeIo openPipeStream(byte[] info, List<Preamble.Tlv> tlvs) throws IOException {
         List<Preamble.Tlv> values = List.copyOf(tlvs);
         boolean preamble = (Boolean) run(op -> core.preambleInUse());
         if (!preamble && (info != null || !values.isEmpty())) throw new IllegalArgumentException("OPEN_INFO and application TLVs require the preamble extension");
         return pipeOf(open(true, preamble ? new Preamble(info, values, true) : Preamble.EMPTY, true, Long.MAX_VALUE));
     }
 
-    /** {@link #openStreamAsPipe(byte[], List)} without OPEN_INFO or application TLVs. */
-    public io.zmux.carrier.PipeIo openStreamAsPipe() throws IOException { return openStreamAsPipe(null, List.of()); }
+    /** {@link #openPipeStream(byte[], List)} without OPEN_INFO or application TLVs. */
+    public io.zmux.carrier.PipeIo openPipeStream() throws IOException { return openPipeStream(null, List.of()); }
 
     /** Opens a bidirectional stream without waiting; fails with {@link StreamLimitException} without credit. */
     public ZmuxStream tryOpenStream(Preamble preamble) throws IOException {
@@ -481,7 +519,7 @@ public final class ZmuxSession implements AutoCloseable {
             try {
                 if (pre.rawOpenInfo() != null) core.streams().setOpenInfo(s, pre.rawOpenInfo());
                 for (Preamble.Tlv t : pre.tlvs()) core.streams().addPreambleTlv(s, t.type(), t.raw());
-                if (pre.pipeCarrier()) core.streams().setPipeCarrier(s);
+                if (pre.isPipeCarrier()) core.streams().setPipeCarrier(s);
             } catch (CoreException e) {
                 core.streams().release(s);
                 throw e;
@@ -652,7 +690,7 @@ public final class ZmuxSession implements AutoCloseable {
 
     /**
      * Joins a new TCP connection to address as a pipe and waits until the peer attached it
-     * ({@link ZmuxPipe#awaitPeerAttached}), or with {@link PipeOptions.Builder#returnOnReply(boolean)}
+     * ({@link ZmuxPipe#awaitAttached}), or with {@link PipeOptions.Builder#returnOnReply(boolean)}
      * until the Reply verified; the join timeout ({@link ZmuxConfig.Builder#joinTimeout(Duration)}) bounds
      * the whole call, from its start. A pipe still unattached then is aborted and
      * {@link SocketTimeoutException} thrown; interruption aborts it as well
@@ -736,9 +774,11 @@ public final class ZmuxSession implements AutoCloseable {
      * call with {@link PipeGoneException}, the session's end with the session's exception.
      */
     private ZmuxPipe attached(ZmuxPipe p, PipeOptions o, long deadline) throws IOException {
+        p.hold(o);
         if (o.settings.qualityBand == PipeUpdate.Change.SET) {
             try {
-                p.update(PipeUpdate.builder().qualityBand(o.settings.qualityBandValue).build());
+                var band = o.settings.qualityBandValue;
+                p.update((band == null ? PipeUpdate.builder().noQualityBand() : PipeUpdate.builder().qualityBand(band)).build());
             } catch (IOException | RuntimeException e) {
                 cancelJoinedPipe(p.rawId());
                 throw e;
@@ -865,7 +905,7 @@ public final class ZmuxSession implements AutoCloseable {
 
     /** The attachments as of the loop's last round; no I/O. Works on every session. */
     public List<ZmuxPipe> pipes() {
-        return driver.pipeSnapshot().stream().map(i -> new ZmuxPipe(this, i.pipeId().value())).toList();
+        return driver.pipeSnapshot().stream().map(i -> new ZmuxPipe(this, i.pipe().value())).toList();
     }
 
     /** Maintains one route's joined pipes; closing the handle stops maintenance, preserving existing traffic. */
@@ -900,54 +940,79 @@ public final class ZmuxSession implements AutoCloseable {
      * Calls after the first, and on a session without the hold, do nothing. It never blocks.
      * <b>Advanced:</b> only with {@link ZmuxConfig.Builder#holdFirstFlight(boolean)}.
      */
-    void releaseFirstFlight() {
+    public void releaseFirstFlight() {
         driver.post(() -> core.releaseFirstFlight(io.zmux.internal.loop.Clock.now()));
     }
 
     private volatile io.zmux.adapter.SessionAdapter adapterView;
 
     /**
-     * The operations only a carrier adapter, or a host that proves or schedules the session's
-     * carriers itself, needs: join readiness, the end-to-end declaration, the dialer designation
-     * and the release of a held first flight.
+     * The operations only a carrier adapter needs: join readiness. The end-to-end declaration and the release of a
+     * held first flight are the application's, on the session itself.
      */
     public io.zmux.adapter.SessionAdapter adapter() {
         var a = adapterView;
         if (a == null) {
             adapterView = a = io.zmux.internal.spi.AdapterPorts.session(new io.zmux.internal.spi.AdapterPorts.Session() {
                 @Override public boolean joinReady() throws IOException { return ZmuxSession.this.joinReady(); }
-                @Override public void declareEndToEnd() throws IOException { ZmuxSession.this.declareEndToEnd(); }
-                @Override public void releaseFirstFlight() { ZmuxSession.this.releaseFirstFlight(); }
             });
         }
         return a;
     }
 
+    // The runtime settings as last set, read back by their getters (the session applies them on its loop).
+    private volatile Scheduler scheduler;
+    private volatile QualityBand qualityBand;
+    private volatile CapacityFloor capacityFloor;
+
     /** Changes the session's scheduling policy. */
     public void setScheduler(Scheduler s) {
         Objects.requireNonNull(s);
+        scheduler = s;
         driver.post(() -> driver.pickers.install(null, Scheduling.policy(s), Scheduling.picker(s)));
     }
+
+    /** The session's scheduling policy: the configured one, or the last {@link #setScheduler}. */
+    public Scheduler scheduler() { return scheduler; }
+
+    /** The default quality event band of outbound pipes; empty when cleared or never set. */
+    public java.util.Optional<QualityBand> qualityBand() { return java.util.Optional.ofNullable(qualityBand); }
+
+    /** The outbound capacity floor; empty when cleared or never set. */
+    public java.util.Optional<CapacityFloor> capacityFloor() { return java.util.Optional.ofNullable(capacityFloor); }
 
     /** Snapshots as of the loop's last round, including pipe 0. */
     public List<PipeStats> pipeStats() {
         return driver.pipeSnapshot();
     }
 
-    /** The default quality event band of outbound pipes. */
+    /** Sets the default quality event band of outbound pipes; a pipe's own band ({@link PipeUpdate}) wins. */
     public void setQualityBand(QualityBand band) throws IOException {
         Objects.requireNonNull(band);
-        run(op -> { core.setQualityBand(-1, ZmuxConfig.nanos(band.rtt()), band.rateRatio(),
-                ZmuxConfig.nanos(band.minInterval())); return true; });
+        run(op -> { core.setQualityBand(-1, band.rttNanos(), band.rawRateRatio(), band.minIntervalNanos()); return true; });
+        qualityBand = band;
+    }
+
+    /** Clears the default quality event band: pipes without their own band report nothing. */
+    public void clearQualityBand() throws IOException {
+        run(op -> { core.clearQualityBand(-1); return true; });
+        qualityBand = null;
     }
 
     /**
-     * The outbound capacity floor, with hysteresis. The floor's values were checked when it was built;
-     * the IOException is the session's: it failed or closed.
+     * Sets the outbound capacity floor, with hysteresis; it reports at once when the capacity is below it. The
+     * floor's values were checked when it was built; the IOException is the session's: it failed or closed.
      */
     public void setCapacityFloor(CapacityFloor floor) throws IOException {
         Objects.requireNonNull(floor);
         run(op -> { core.setCapacityFloor((double) floor.rate(), floor.recoveryRatio()); return true; });
+        capacityFloor = floor;
+    }
+
+    /** Clears the capacity floor: no more capacity events. */
+    public void clearCapacityFloor() throws IOException {
+        run(op -> { core.setCapacityFloor(0, CapacityFloor.DEFAULT_RECOVERY_RATIO); return true; });
+        capacityFloor = null;
     }
 
     // ---- record shaping ----
@@ -978,9 +1043,6 @@ public final class ZmuxSession implements AutoCloseable {
         var s = driver.shapingStats();
         return s == null ? io.zmux.shaping.ShapingStats.ZERO : s;
     }
-
-    /** A lane carrier for this session; for the carrier modules, through {@link io.zmux.internal.spi.Spi}. */
-    void handleLane(PipeIo io) { driver.handleLane(Objects.requireNonNull(io)); }
 
     // ---- session ----
 

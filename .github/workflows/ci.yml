@@ -17,29 +17,37 @@ concurrency:
 
 jobs:
   test:
-    name: Test (JDK ${{ matrix.java }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Test (${{ matrix.os }}, JDK ${{ matrix.java }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The Maven wrapper pins the Maven version on every OS (.mvn/wrapper/maven-wrapper.properties).
+      MVNW: ${{ runner.os == 'Windows' && './mvnw.cmd' || './mvnw' }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
         java: [ 25 ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Java
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: ${{ matrix.java }}
           cache: maven
 
       - name: Build and test
-        run: mvn -B verify
+        run: $MVNW -B verify
 
       - name: Verify release profile build
-        run: mvn -B -Prelease -Dgpg.skip=true -DskipTests verify
+        if: runner.os == 'Linux'
+        run: $MVNW -B -Prelease -Dgpg.skip=true -DskipTests verify
 
   static-checks:
     name: Static checks (Error Prone, SpotBugs)
@@ -47,10 +55,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Java
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: 25
@@ -58,11 +66,11 @@ jobs:
 
       # Every Error Prone finding fails the compile (-Werror); the profile lists the checks turned off.
       - name: Error Prone
-        run: mvn -B -Perrorprone clean test-compile
+        run: ./mvnw -B -Perrorprone clean test-compile
 
       # Effort Max, threshold Low, with find-sec-bugs and sb-contrib; spotbugs-exclude.xml lists the exclusions.
       - name: SpotBugs
-        run: mvn -B -Pstatic-checks clean test-compile spotbugs:check
+        run: ./mvnw -B -Pstatic-checks clean test-compile spotbugs:check
 
   interop:
     name: Interop (Go and Rust zmux, independent QMux peers)
@@ -70,33 +78,33 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout zmux-java
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: zmux-java
 
       - name: Checkout zmux-rs
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zmuxio/zmux-rs
           path: zmux-rs
 
       - name: Checkout zmux-go
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zmuxio/zmux-go
           path: zmux-go
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: 'stable'
           cache-dependency-path: zmux-java/interop/qmux-go-peer/go.sum
 
       - name: Set up Java
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: 25

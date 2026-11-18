@@ -80,7 +80,8 @@ func main() {
 			fail(err)
 		}
 		_ = ln.Close()
-		sc := &seal.ServerConfig{Gate: &gate{handle, psk}, Key: node, AcceptedProfiles: []proto.Profile{proto.ProfileEstablishPSK, proto.ProfileEstablishPSKAES, proto.ProfileEstablish, proto.ProfileEstablishAES}}
+		sc := &seal.ServerConfig{Gate: &gate{handle, psk}, AcceptedProfiles: []proto.Profile{proto.ProfileEstablishPSK, proto.ProfileEstablishPSKAES, proto.ProfileEstablish, proto.ProfileEstablishAES}}
+		sc.StaticKey = node
 		p, err := sc.WrapPipe(ctx, zmux.NetPipe(c), zmux.PipeHint{})
 		if err != nil {
 			fail(err)
@@ -110,7 +111,7 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		cc := &seal.ClientConfig{Anchor: seal.PinAnchor(seal.NodeKeyID(node.PublicKey().Bytes())), AllowedProfiles: []proto.Profile{profile}}
+		cc := &seal.ClientConfig{Anchor: seal.PinAnchor(seal.StaticKeyID(node.PublicKey().Bytes())), AllowedProfiles: []proto.Profile{profile}}
 		if profile.HasPSK() {
 			cc.Handle, cc.PSK = handle, psk
 		}

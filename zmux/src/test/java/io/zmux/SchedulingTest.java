@@ -75,8 +75,9 @@ class SchedulingTest {
                 assertArrayEquals(new byte[] {1, 2, 3}, fallback.get());
                 PipePoolTest.await(() -> c.stats().schedulerFallbacks() > fallbacks);
                 c.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
-                c.setQualityBand(new QualityBand(Duration.ofMillis(1), 1.5));
-                c.setCapacityFloor(new CapacityFloor(Long.MAX_VALUE, 1.25));
+                c.setQualityBand(QualityBand.builder().rtt(Duration.ofMillis(1)).rateRatio(1.5).build());
+                c.clearQualityBand(); c.setQualityBand(QualityBand.builder().rtt(Duration.ofMillis(1)).rateRatio(1.5).build());
+                c.setCapacityFloor(new CapacityFloor(Long.MAX_VALUE));
                 boolean below = false;
                 while (!below) below = c.nextEvent() instanceof SessionEvent.CapacityBelow;
                 added.update(PipeUpdate.builder().clearSendPriority().build());
@@ -88,12 +89,14 @@ class SchedulingTest {
     }
 
     @Test void invalidQualitySettingsAreRejectedAtTheBoundary() {
-        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(-1, 0));
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(-1));
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(0), "0 is not off: clearCapacityFloor is");
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, 0), "0 is not the default");
         assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, 0.5));
         assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, -1));
+        assertThrows(IllegalArgumentException.class, () -> new CapacityFloor(1, Double.NaN));
         assertEquals(1.0, new CapacityFloor(1, 1).recoveryRatio()); // no hysteresis
-        assertEquals(1.0, new QualityBand(Duration.ZERO, 1, Duration.ZERO).rateRatio()); // every rate change reports
-        assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 0.5, Duration.ZERO));
+        assertEquals(CapacityFloor.DEFAULT_RECOVERY_RATIO, new CapacityFloor(1).recoveryRatio());
         assertThrows(IllegalArgumentException.class, () -> new Scheduler.Answer(0, -1, false));
     }
 }

@@ -24,6 +24,28 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
      */
     byte[] readAll(long maxBytes) throws IOException;
 
+    /**
+     * Reads what is readable now into dst without waiting: advances it by the bytes taken and returns their count;
+     * 0 when nothing is readable now (also while a read of this stream waits for data) or when dst has no room;
+     * -1 at the end of a finished stream, as {@link java.nio.channels.ReadableByteChannel#read} does. "Nothing now"
+     * and "ended" are always distinct answers. A reset, a stop by this endpoint or the session's end fails with the
+     * stream's error, as {@link #read(ByteBuffer)} does. Pair it with {@link #awaitReadable()}.
+     */
+    int tryRead(ByteBuffer dst) throws IOException;
+
+    /**
+     * Waits, at most the {@linkplain #setReadTimeout read timeout}, until the next read returns at once, without
+     * taking anything: data is readable, or the receiving part has ended (FIN, a reset, a {@link #stop} by this
+     * endpoint, the session's end). It returns normally in every one of these cases and reports neither how much is
+     * readable nor the end: the read that follows ({@link #tryRead} or {@link #read(ByteBuffer)}) reports the data or
+     * the end, once, in its own form. It fails only with its own bound, {@link java.net.SocketTimeoutException}; any
+     * number of threads may wait at once, none of them queued behind a read.
+     */
+    void awaitReadable() throws IOException;
+
+    /** {@link #awaitReadable()} bounded by timeout instead of the read timeout. */
+    void awaitReadable(Duration timeout) throws IOException;
+
     /** Declines the stream before reading (ZMUX_REJECTED on both parts, retryable for the peer). */
     void reject();
 
@@ -35,10 +57,26 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     void setPeerPriority(Priority priority) throws IOException;
 
     /**
-     * The receive window: initial raises the advertised limit at once, max caps auto-tuning
-     * (0 leaves a value). Queued like {@link ZmuxSendStream#setPriority}.
+     * The receive window: initial is advertised at once when it is above the window in force, max
+     * caps auto-tuning, 0 making the cap automatic whatever the session configuration says. Credit
+     * already advertised is never withdrawn: an
+     * initial below the window in force changes only what {@link #receiveWindow} reads back. Queued
+     * like {@link ZmuxSendStream#setPriority}.
+     *
+     * @throws IllegalArgumentException a negative value, an {@code initial} below 4096 (the floor of
+     *     {@link ZmuxConfig.Builder#initialStreamReceiveWindow}), or a nonzero {@code max} below
+     *     {@code initial} (nothing changed)
+     * @throws IllegalStateException the stream has no receiving part (a unidirectional stream this endpoint opened)
      */
     void setReceiveWindow(long initial, long max);
+
+    /**
+     * The receive window this part holds, as set: what {@link #setReceiveWindow} set last, else the session configuration's
+     * value copied when the part was created (it does not follow the configuration afterwards); {@code max} is 0
+     * while the cap is automatic. Local state: it never waits or fails, and answers after the stream or session
+     * ended with the value held last.
+     */
+    ReceiveWindow receiveWindow();
 
     /** The opening information the peer sent (empty for local streams). */
     Preamble preamble();
@@ -56,8 +94,23 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
      */
     boolean isReplayable();
 
-    /** Limits blocking reads; null for none. */
+    /**
+     * Bounds every blocking read, the {@link #inputStream()} and channel views included, as a socket's timeout does:
+     * a positive duration; {@link java.net.SocketTimeoutException} after it.
+     */
     void setReadTimeout(Duration timeout);
+
+    /** Blocking reads wait without bound again (the default). */
+    void clearReadTimeout();
+
+    /** The read timeout; empty when reads wait without bound. */
+    java.util.Optional<Duration> readTimeout();
+
+    /**
+     * The priority last requested for the peer's sending part ({@link #setPeerPriority}); empty when none was.
+     * Local state: it never waits or fails, and answers after the stream or session ended.
+     */
+    java.util.Optional<Priority> peerPriority();
 
     /**
      * An InputStream view; close() stops only the receiving part ({@code stop(0)},

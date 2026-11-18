@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /** Application data of Establish messages 1, 2 and 3 over real TCP. */
+@org.junit.jupiter.api.Timeout(60)
 class AppDataTest {
     private record Asked(int message, AppDataSource.Known peer) {}
 
@@ -113,7 +114,7 @@ class AppDataTest {
 
                 var huge = SealTest.client().appData((m, peer) -> CompletableFuture.completedFuture(Optional.of(new byte[70000]))).build();
                 var big = assertFails(Seal.establish(SealTest.tcp(l.localAddress()), huge).toCompletableFuture());
-                assertEquals(SecureCarrierException.Code.TOO_LARGE, ((SecureCarrierException) big).code());
+                assertEquals(SecureCarrierException.Kind.TOO_LARGE, ((SecureCarrierException) big).kind());
             }
         }
     }

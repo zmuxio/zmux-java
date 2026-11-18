@@ -60,10 +60,11 @@ public final class QuicOptions {
     public Duration idleTimeout() { return idleTimeout; }
 
     /**
-     * Whether the connection negotiates QUIC DATAGRAM frames (RFC 9221), the datagram channel of
-     * its pipes: a session that enables datagrams sends those that fit on it instead of in records.
+     * Whether the connection negotiates QUIC DATAGRAM frames (RFC 9221). A connection always offers them, and a
+     * session uses them when it enables datagrams ({@link io.zmux.ZmuxConfig.Builder#enableDatagrams}, the one
+     * switch); only this module's tests turn them off, to stand for a peer without the extension.
      */
-    public boolean isDatagrams() { return datagrams; }
+    boolean isDatagrams() { return datagrams; }
 
     /** Enough connection credit for all configured receive streams to fill their own windows. */
     public long connectionWindow() { return streamWindow * (bidirectionalStreams + lanes); }
@@ -130,8 +131,8 @@ public final class QuicOptions {
             return this;
         }
 
-        /** Whether the connection negotiates QUIC DATAGRAM frames; default on. */
-        public Builder datagrams(boolean on) { datagrams = on; return this; }
+        /** Tests only: a connection without QUIC DATAGRAM frames, standing for a peer without the extension. */
+        Builder datagrams(boolean on) { datagrams = on; return this; }
 
         /**
          * Builds the options.

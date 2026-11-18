@@ -88,7 +88,7 @@ class RefusedCarrierTest {
         // ends without reaching the host; Close and Stall do not reach it either.
         for (var d : new Admission.Decision[] {Admission.Decision.accept(0), Admission.Decision.CLOSE, Admission.Decision.STALL}) {
             var seen = new LinkedBlockingQueue<HostHandler.Seen>();
-            try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> d))), e -> e.streaming(), false,
+            try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> d)).build()), e -> e.streaming(), false,
                     () -> new HostHandler(seen))) {
                 String got = RawHttp.send(f.base, "POST /z HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(GARBAGE).getBytes(UTF_8));
                 assertFalse(got.endsWith("host"), d + ": " + got);

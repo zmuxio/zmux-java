@@ -147,6 +147,7 @@ final class TraceRunner {
         io.zmux.internal.wire.Preamble.Tlv greaseTlv = null;
         long pingSeqStart = 0, testRtt = 0;
         int pipeCap = 0;
+        unconfirmedCap = io.zmux.ListenerConfig.defaults().maxPendingPerSession();
         Map<Long, Long> pipeRtt = Map.of();
         cfg.local(TraceFrames.paramsFromMap(tp));
         if (th.get("grease_tp") instanceof Map<?, ?>) {
@@ -161,6 +162,7 @@ final class TraceRunner {
         if (th.containsKey("ping_seq_start")) pingSeqStart = num(th.get("ping_seq_start"));
         if (th.containsKey("rtt_ms")) testRtt = ms(th.get("rtt_ms"));
         if (th.containsKey("pipe_cap")) pipeCap = (int) num(th.get("pipe_cap"));
+        if (th.containsKey("unconfirmed_cap")) unconfirmedCap = (int) num(th.get("unconfirmed_cap"));
         if (th.get("pipe_rtt_ms") instanceof Map<?, ?>) {
             Map<Long, Long> pr = new java.util.HashMap<>();
             for (var e : map(th.get("pipe_rtt_ms")).entrySet()) pr.put(Long.valueOf(e.getKey()), ms(e.getValue()));
@@ -661,7 +663,11 @@ final class TraceRunner {
         peerSend(send);
     }
 
+    /** The session's bound on Unconfirmed carriers: the hook unconfirmed_cap, else the listener's default. */
+    private int unconfirmedCap;
+
     void closeCarrier(RCarrier c, String outcome) {
+        if (c.pj != null) s.unconfirmedEnded(c.pj);
         c.rejected = true;
         c.outcome = outcome;
         c.buf = new byte[0];
@@ -704,10 +710,13 @@ final class TraceRunner {
             closeCarrier(c, "reject"); // Local policy: the Pipe ID's bit stays clear.
             return;
         }
-        Joins.Claimed cl = s.claimHello(o.join(), joinCarrier(c), io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, 1 << 20);
+        Joins.Claimed cl = s.claimHello(o.join(), joinCarrier(c), io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, 1 << 20, unconfirmedCap);
         drainEvents();
         switch (cl.result()) {
             case ACCEPTED -> {
+                if (cl.evicted() != null) {
+                    for (RCarrier e : carriers.values()) if (e.pj == cl.evicted()) closeCarrier(e, "evicted");
+                }
                 c.reply = cl.reply();
                 c.pj = o.join();
                 c.outcome = "accept";
@@ -746,7 +755,7 @@ final class TraceRunner {
         try {
             c.pj.readConfirm(b, 0, b.length);
         } catch (SecureCarrierException e) {
-            if (e.code() != SecureCarrierException.Code.INCOMPLETE) closeCarrier(c, "reject");
+            if (e.kind() != SecureCarrierException.Kind.INCOMPLETE) closeCarrier(c, "reject");
             return;
         }
         Joins.PeerJoin pj = c.pj;
@@ -1048,7 +1057,7 @@ final class TraceRunner {
                 try {
                     h = Hello.parse(c.buf, 0, c.buf.length, io.zmux.internal.join.Framing.STREAM);
                 } catch (SecureCarrierException e) {
-                    if (e.code() != SecureCarrierException.Code.INCOMPLETE) closeCarrier(c, "reject");
+                    if (e.kind() != SecureCarrierException.Kind.INCOMPLETE) closeCarrier(c, "reject");
                     return;
                 }
                 c.buf = java.util.Arrays.copyOfRange(c.buf, h.consumed(), c.buf.length);
@@ -1373,8 +1382,19 @@ final class TraceRunner {
     }
 
     void expectPipeClosed(Map<String, Object> st) {
-        RPipe p = pipes.get(num(st.get("pipe")));
+        long id = num(st.get("pipe"));
+        RPipe p = pipes.get(id);
         String how = (String) st.get("how");
+        if (p == null) {
+            // A carrier whose join was accepted but never attached (TRACES.md 5.1): closed when the session closed it.
+            for (RCarrier c : carriers.values()) {
+                if (c.pipe != id || c.attached || (!"accept".equals(c.outcome) && !"evicted".equals(c.outcome))) continue;
+                if (!c.rejected) throw fail("pipe " + id + ": its Unconfirmed carrier " + c.name + " is open");
+                if (!how.equals("any") && !how.equals("abort")) throw fail("pipe " + id + ": its Unconfirmed carrier was closed, not " + how);
+                return;
+            }
+            throw fail("no pipe " + id);
+        }
         java.util.Collection<RLane> lanes = st.containsKey("lane") ? List.of(p.lane(num(st.get("lane")))) : p.lanes.values();
         for (RLane l : lanes) {
             if (l.closed.isEmpty() || (!how.equals("any") && !l.closed.equals(how))) throw fail("pipe closed '" + l.closed + "', want " + how);

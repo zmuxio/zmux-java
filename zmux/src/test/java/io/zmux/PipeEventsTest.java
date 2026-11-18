@@ -40,34 +40,61 @@ class PipeEventsTest {
                 ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.builder().receivePriority(12).build());
                 long id = added.id().value();
                 List<SessionEvent> seen = new ArrayList<>();
-                var a = await(c, SessionEvent.PipeAdded.class, e -> e.pipeId().value() == id, seen);
+                var a = await(c, SessionEvent.PipeAdded.class, e -> e.pipe().value() == id, seen);
                 assertEquals(PipeOptions.Direction.SEND_ONLY, a.direction());
-                await(c, SessionEvent.PipeJoined.class, e -> e.pipeId().value() == id && e.direction() == PipeOptions.Direction.SEND_ONLY, seen);
+                await(c, SessionEvent.PipeJoined.class, e -> e.pipe().value() == id && e.direction() == PipeOptions.Direction.SEND_ONLY, seen);
 
-                added.awaitPeerAttached(Duration.ofSeconds(10));
+                added.awaitAttached(Duration.ofSeconds(10));
                 var st = added.stats().orElseThrow();
                 assertTrue(st.peerAttached());
                 assertEquals(RecordMode.SEALED, st.recordMode());
                 assertEquals("", st.variant());
-                assertTrue(c.pipeStats().stream().filter(x -> x.pipeId().value() == 0).findFirst().orElseThrow().peerAttached());
+                assertTrue(c.pipeStats().stream().filter(x -> x.pipe().value() == 0).findFirst().orElseThrow().peerAttached());
 
                 // A receive priority set on the joined pipe reaches the server as a request: source PEER there.
                 added.update(PipeUpdate.builder().receivePriority(5).build());
                 List<SessionEvent> serverSeen = new ArrayList<>();
-                var peer = await(s, SessionEvent.PipePriorityChanged.class, e -> e.pipeId().value() == id && e.priority() == 5, serverSeen);
+                var peer = await(s, SessionEvent.PipePriorityChanged.class, e -> e.pipe().value() == id && e.priority() == 5, serverSeen);
                 assertEquals(PipeStats.SettingSource.PEER, peer.source());
 
                 added.update(PipeUpdate.builder().sendPriority(9).build());
-                var local = await(c, SessionEvent.PipePriorityChanged.class, e -> e.pipeId().value() == id && e.priority() == 9, seen);
+                var local = await(c, SessionEvent.PipePriorityChanged.class, e -> e.pipe().value() == id && e.priority() == 9, seen);
                 assertEquals(PipeStats.SettingSource.LOCAL, local.source());
 
                 added.close();
-                var closed = await(c, SessionEvent.PipeClosed.class, e -> e.pipeId().value() == id, seen);
+                var closed = await(c, SessionEvent.PipeClosed.class, e -> e.pipe().value() == id, seen);
                 assertNotNull(closed.direction());
                 for (SessionEvent e : seen) {
                     if (e instanceof SessionEvent.PipeSuspect || e instanceof SessionEvent.PipeRecovered || e instanceof SessionEvent.PipeFailed) {
                         fail("a clean pipe reported " + e);
                     }
+                }
+                c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
+            }
+        }
+    }
+
+    /**
+     * A pipe retired before the application read its events is reported by the retirement summary alone: its
+     * unread events (PipeClosed among them) are folded into it, and no per-pipe event follows.
+     * Reading only after the pipe's removal finished makes that order certain.
+     */
+    @Test void aPipeRetiredBeforeItsEventsAreReadHasNoPipeClosedButTheSummary() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            ZmuxConfig cfg = config(loops);
+            try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg))) {
+                var sf = ex.submit((Callable<ZmuxSession>) listener::accept);
+                ZmuxSession c = Zmux.connect(listener.localAddress(), cfg), s = sf.get();
+                ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.defaults());
+                long id = added.id().value();
+                added.awaitAttached(Duration.ofSeconds(10));
+                added.close();
+                added.awaitClosed(Duration.ofSeconds(10)); // retired: nothing of the pipe was read before
+                List<SessionEvent> seen = new ArrayList<>();
+                var summary = await(c, SessionEvent.PipesRetired.class, e -> e.last().stream().anyMatch(p -> p.value() == id), seen);
+                assertTrue(summary.retired() >= 1 && summary.closed() >= 1, "the unread end is counted as closed: " + summary);
+                for (SessionEvent e : seen) {
+                    assertFalse(e instanceof SessionEvent.PipeClosed, "an unread event of a retired pipe is folded: " + seen);
                 }
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }

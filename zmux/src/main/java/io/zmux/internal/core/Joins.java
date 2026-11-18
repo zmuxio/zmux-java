@@ -483,7 +483,9 @@ public final class Joins {
         if (suite == null) throw CoreException.of(CoreException.Reason.INVALID);
         byte[][] k = e.keysOf(suite);
         // The epoch new joins use, with the Locator the peer announced for it.
-        Joiner j = Joiner.create(suite, a.mode(), framing, e.peer, k[initiator ? 0 : 1], a.binding(), joinGroup(a.group()), (int) (e.n & 1));
+        io.zmux.internal.join.Group used = joinGroup(a.group());
+        a.usedGroup(used.id());
+        Joiner j = Joiner.create(suite, a.mode(), framing, e.peer, k[initiator ? 0 : 1], a.binding(), used, (int) (e.n & 1));
         boolean up = a.dir == 0;
         JoinPipe pipe = new JoinPipe(p.id, a.dir, a.fate, up ? 0 : a.tier.recvPrio(), !up && a.tier.recvStandby());
         HelloPayload empty = new HelloPayload(pipe, null, 0);
@@ -524,12 +526,12 @@ public final class Joins {
     JoinStep verifyReply(Pipe p, byte[] b, int off, int len) {
         Attach a = p.mp();
         if (a == null || !a.joining() || a.joiner() == null || a.verified() != null) return new JoinStep(Step.FAILED, 0, 0);
-        if (len > JOIN_READ_BOUND) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.TOO_LARGE));
+        if (len > JOIN_READ_BOUND) return failedStep(p, new SecureCarrierException(SecureCarrierException.Kind.TOO_LARGE));
         int skip = 0;
         if (len > 0 && b[off] != 0x03) {
-            if (a.tpSkipped()) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+            if (a.tpSkipped()) return failedStep(p, new SecureCarrierException(SecureCarrierException.Kind.MALFORMED));
             if (a.joinFraming() == Framing.MESSAGE) {
-                if (!startsWithParameters(b, off, len)) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+                if (!startsWithParameters(b, off, len)) return failedStep(p, new SecureCarrierException(SecureCarrierException.Kind.MALFORMED));
                 a.tpSkipped(true);
                 return new JoinStep(Step.MORE, len, 0);
             }
@@ -537,7 +539,7 @@ public final class Joins {
             if (cl.kind() == CarrierAdmission.Kind.MORE || (cl.kind() == CarrierAdmission.Kind.SESSION && cl.firstRecordLength() == 0)) {
                 return new JoinStep(Step.MORE, 0, len + 1);
             }
-            if (cl.kind() != CarrierAdmission.Kind.SESSION) return failedStep(p, new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+            if (cl.kind() != CarrierAdmission.Kind.SESSION) return failedStep(p, new SecureCarrierException(SecureCarrierException.Kind.MALFORMED));
             a.tpSkipped(true);
             skip = cl.firstRecordLength();
             off += skip;
@@ -550,7 +552,7 @@ public final class Joins {
             reply = j.readReply(b, off, len);
             used = j.replyConsumed();
         } catch (SecureCarrierException e) {
-            if (e.code() == SecureCarrierException.Code.INCOMPLETE) return new JoinStep(Step.MORE, skip, e.need());
+            if (e.kind() == SecureCarrierException.Kind.INCOMPLETE) return new JoinStep(Step.MORE, skip, e.need());
             return failedStep(p, e);
         }
         joinFailures = 0;
@@ -667,7 +669,7 @@ public final class Joins {
             acceptor = Acceptor.accept(h, f, psk, binding, usableGroups);
         } catch (SecureCarrierException failed) {
             stats.joinAuthFailed();
-            port.emit(Event.joinAuthFailed(failed.code().name().toLowerCase(java.util.Locale.ROOT)));
+            port.emit(Event.joinAuthFailed(failed.kind().name().toLowerCase(java.util.Locale.ROOT)));
             return new Opened(JoinResult.CLOSE, null);
         }
         if (e != null) epochPeerJoined(e.n); // a verified join of d+1: A uses d+1 too
@@ -684,11 +686,33 @@ public final class Joins {
         return new Opened(JoinResult.ACCEPTED, new PeerJoin(payload.pipe(), h.mode(), acceptor, payload));
     }
 
-    /** The reply of a claimed Hello, and whether it refuses. */
-    public record Claimed(JoinResult result, byte[] reply) {}
+    /**
+     * The reply of a claimed Hello, and whether it refuses; evicted, when not null, is the session's oldest
+     * Unconfirmed join, which the caller closes as a failed join (MULTIPATH.md 5.4 step 7) before it writes the Reply.
+     */
+    public record Claimed(JoinResult result, byte[] reply, PeerJoin evicted) {
+        public Claimed(JoinResult result, byte[] reply) { this(result, reply, null); }
+    }
+
+    /** The session's Unconfirmed peer joins, oldest first (MULTIPATH.md 5.6): a Bound join never holds one. */
+    private final java.util.ArrayDeque<PeerJoin> unconfirmed = new java.util.ArrayDeque<>();
+
+    /**
+     * Admits an accepted join as Unconfirmed within cap: at the bound, the oldest is taken out and returned
+     * for the caller to close; below it nothing is evicted.
+     */
+    private PeerJoin holdUnconfirmed(PeerJoin pj, int cap) {
+        if (pj.mode == Mode.BOUND) return null;
+        PeerJoin evicted = unconfirmed.size() >= cap ? unconfirmed.pollFirst() : null;
+        unconfirmed.addLast(pj);
+        return evicted;
+    }
+
+    /** An Unconfirmed join ended without its confirmation (closed, timed out, failed): it holds no slot any more. */
+    void unconfirmedEnded(PeerJoin pj) { unconfirmed.remove(pj); }
 
     /** The rest of step 7: sets the Pipe ID's bit, applies the first batch, writes the Reply. Moves no pipe, cap or suspension. */
-    Claimed claimHello(PeerJoin pj, JoinCarrier c, UnitPlan plan, int overhead, long received) {
+    Claimed claimHello(PeerJoin pj, JoinCarrier c, UnitPlan plan, int overhead, long received, int unconfirmedCap) {
         long id = pj.pipe.id();
         if (pipes.get(id) != null || idRetired(id)) {
             stats.joinReplay();
@@ -714,7 +738,7 @@ public final class Joins {
             int item = HandshakePlans.item(plan, wire, limited < 0 ? room : Math.min(room, limited));
             byte[] reply = pj.acceptor.writeReply(new ReplyPayload(bare.decision(), null, Tlv.paddingField(item)));
             if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
-            return new Claimed(refuse ? JoinResult.REFUSED : JoinResult.ACCEPTED, reply);
+            return refuse ? new Claimed(JoinResult.REFUSED, reply) : new Claimed(JoinResult.ACCEPTED, reply, holdUnconfirmed(pj, unconfirmedCap));
         } catch (SecureCarrierException failed) {
             return new Claimed(JoinResult.CLOSE, null);
         }
@@ -727,6 +751,7 @@ public final class Joins {
 
     /** Admission of a confirmed peer join: the only place where a peer join moves a pipe, the cap or a suspension. */
     JoinResult confirmJoin(PeerJoin pj, JoinCarrier c) {
+        unconfirmed.remove(pj);
         JoinPipe j = pj.pipe;
         long id = j.id();
         boolean needIn = j.direction() != 1, needOut = j.direction() != 0;
@@ -738,6 +763,7 @@ public final class Joins {
         Attach a = new Attach(false, j.direction(), j.fateGroup(), 0, 0, -1, Double.NaN, needOut ? Attach.OUT_ACTIVE : Attach.OUT_NONE,
                 needIn ? Attach.IN_OPEN : Attach.IN_NONE, needOut, port.now());
         a.mode(pj.mode);
+        a.usedGroup(pj.acceptor.joinerShare().group().id());
         Tiers.initPeer(a, j.priority(), j.standby());
         initialRtt(a, id);
         CarrierInfo info = needOut ? c.out() : c.in();

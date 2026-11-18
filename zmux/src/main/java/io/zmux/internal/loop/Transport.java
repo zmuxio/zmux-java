@@ -171,6 +171,16 @@ public interface Transport {
         Transport t = claim(io);
         if (t == null) t = new ExternalTransport(host, io);
         else if (t.loop() != host) t = t.moveTo(host);
+        return sealed(t, io);
+    }
+
+    /** As {@link #of}, on the input's own host when it has one (a native carrier), else on fallback. */
+    static Transport onOwnHost(io.zmux.carrier.PipeIo io, SessionHost fallback) {
+        Transport t = claim(io);
+        return sealed(t != null ? t : new ExternalTransport(fallback, io), io);
+    }
+
+    private static Transport sealed(Transport t, io.zmux.carrier.PipeIo io) {
         var records = PipeIoAccess.get().records(io);
         if (t == null || records == null) return t;
         try {

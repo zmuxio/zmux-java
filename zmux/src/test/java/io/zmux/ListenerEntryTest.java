@@ -55,9 +55,9 @@ class ListenerEntryTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var seen = new LinkedBlockingQueue<Admission.CarrierInfo>();
             var lc = ListenerConfig.builder().session(config(loops)).maxPendingPerSource(1)
-                    .admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> { seen.add(info); return Admission.Decision.accept(0); })))
+                    .admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> { seen.add(info); return Admission.Decision.accept(0); })).build())
                     .build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 var peer = ip("192.0.2.9", 4000);
                 var source = ip("2001:db8:1:2::7", 5000);
                 var one = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -87,13 +87,13 @@ class ListenerEntryTest {
             var later = new AtomicReference<CompletableFuture<Admission.Decision>>();
             var deadlines = new LinkedBlockingQueue<Admission.Deadline>();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.of(0, (info, prefix, deadline) -> {
+                    .admission(Admission.builder(0, (info, prefix, deadline) -> {
                         var f = new CompletableFuture<Admission.Decision>();
                         later.set(f);
                         deadlines.add(deadline); // after the set: the test reads later once it sees the deadline
                         return f;
-                    }).withPeekTimeout(Duration.ofMillis(800))).build();
-            try (var l = ZmuxListener.of(lc)) {
+                    }).peekTimeout(Duration.ofMillis(800)).build()).build();
+            try (var l = Zmux.listener(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var handled = l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("a")));
                 Admission.Deadline d = deadlines.poll(5, TimeUnit.SECONDS);
@@ -124,12 +124,12 @@ class ListenerEntryTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var pending = new LinkedBlockingQueue<CompletableFuture<Admission.Decision>>();
             var lc = ListenerConfig.builder().session(config(loops))
-                    .admission(Admission.of(0, (info, prefix, deadline) -> {
+                    .admission(Admission.builder(0, (info, prefix, deadline) -> {
                         var f = new CompletableFuture<Admission.Decision>();
                         pending.add(f);
                         return f;
-                    }).withPeekTimeout(Duration.ofSeconds(30))).build();
-            var l = ZmuxListener.of(lc);
+                    }).peekTimeout(Duration.ofSeconds(30)).build()).build();
+            var l = Zmux.listener(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
             l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
@@ -147,15 +147,15 @@ class ListenerEntryTest {
             var closeDone = new java.util.concurrent.CountDownLatch(1);
             var pending = new LinkedBlockingQueue<CompletableFuture<Admission.Decision>>();
             var lc = ListenerConfig.builder().session(config(loops))
-                    .admission(Admission.of(0, (info, prefix, deadline) -> {
+                    .admission(Admission.builder(0, (info, prefix, deadline) -> {
                         var f = new CompletableFuture<Admission.Decision>();
                         pending.add(f);
                         inDecider.countDown();
                         // The close runs while the decider has not returned its stage yet.
                         try { closeDone.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                         return f;
-                    }).withPeekTimeout(Duration.ofSeconds(30))).build();
-            var l = ZmuxListener.of(lc);
+                    }).peekTimeout(Duration.ofSeconds(30)).build()).build();
+            var l = Zmux.listener(lc);
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var ended = watchEnd(p[0]);
             l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("a")));
@@ -172,12 +172,12 @@ class ListenerEntryTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var next = new AtomicReference<Admission.Decision>();
             var lc = ListenerConfig.builder().session(config(loops)).maxPendingPerSource(3)
-                    .admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> {
                         var d = next.get();
                         if (d == null) throw new IllegalStateException("decider failure");
                         return d;
-                    })).withStall(Duration.ofSeconds(20), Duration.ofSeconds(20))).build();
-            try (var l = ZmuxListener.of(lc)) {
+                    })).stall(Duration.ofSeconds(20), Duration.ofSeconds(20)).build()).build();
+            try (var l = Zmux.listener(lc)) {
                 java.util.function.Function<Admission.Decision, io.zmux.adapter.Handled> carrier = d -> {
                     next.set(d);
                     var p = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -206,7 +206,7 @@ class ListenerEntryTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
             for (boolean admission : new boolean[] {true, false}) {
                 var b = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).maxPendingPerSource(1);
-                if (admission) b.admission(Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0))));
+                if (admission) b.admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0))).build());
                 try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), b.build());
                      var _ = new Socket("127.0.0.1", l.localAddress().getPort())) {
                     Thread.sleep(200);
@@ -228,8 +228,8 @@ class ListenerEntryTest {
 
     @Test void anOversizedPreambleIsRefusedWhenOpened() throws Exception {
         try (EventLoops loops = EventLoops.create(1); var p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
-            assertThrows(PreambleTooLargeException.class, () -> p.client().openStream(Preamble.openInfo(new byte[5000])));
-            try (var s = p.client().openStream(Preamble.openInfo(new byte[100]))) {
+            assertThrows(PreambleTooLargeException.class, () -> p.client().openStream(Preamble.builder().openInfo(new byte[5000]).build()));
+            try (var s = p.client().openStream(Preamble.builder().openInfo(new byte[100]).build())) {
                 s.write(new byte[] {1});
                 s.finish();
                 try (var in = p.server().acceptStream(Duration.ofSeconds(5))) {
@@ -243,7 +243,7 @@ class ListenerEntryTest {
     @Test void aShutdownTakesNoNewSessionButJoinsUntilItsSessionsEnd() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            var l = ZmuxListener.of(ListenerConfig.of(cfg));
+            var l = Zmux.listener(ListenerConfig.of(cfg));
             var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
             l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
             var client = Zmux.open(boot[0], Role.CLIENT, cfg);

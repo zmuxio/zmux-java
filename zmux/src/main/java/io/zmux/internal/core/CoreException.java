@@ -17,7 +17,9 @@ public final class CoreException extends Exception {
         /** The deferred PSK was supplied already. */
         JOIN_SECRET_SET,
         /** The peer's verified Reply refused a local join. */
-        JOIN_REFUSED
+        JOIN_REFUSED,
+        /** The wait for a pipe ended because this endpoint aborted the pipe (by the application, at its bound, or to make room). */
+        PIPE_ABORTED
     }
 
     private final Reason reason;
@@ -52,6 +54,11 @@ public final class CoreException extends Exception {
         return new CoreException(Reason.SESSION, null, e, 0, -1);
     }
 
+    /** The wait for pipe ended because this endpoint aborted it. */
+    public static CoreException pipeAborted(long pipe) {
+        return new CoreException(Reason.PIPE_ABORTED, null, null, 0, pipe);
+    }
+
     /** The peer refused the local join of pipe. */
     public static CoreException joinRefused(long pipe) {
         return new CoreException(Reason.JOIN_REFUSED, null, null, 0, pipe);
@@ -74,7 +81,7 @@ public final class CoreException extends Exception {
     public SessionError sessionError() { return session; }
     /** The largest datagram payload for DATAGRAM_TOO_LARGE; what is missing for JOIN_PENDING. */
     public int max() { return max; }
-    /** The pipe of JOIN_REFUSED; -1 otherwise. */
+    /** The pipe of JOIN_REFUSED and PIPE_ABORTED; -1 otherwise. */
     public long pipe() { return pipe; }
 
     @Override

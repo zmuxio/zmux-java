@@ -23,7 +23,7 @@ class WebSocketSecureTest {
              var http = f.client(b -> b.http1())) {
             URI url = URI.create(f.base.toString().replace("https://", "wss://"));
             var io = http.webSocketPipe(url, Map.of(), List.of(), null);
-            assertTrue(io.isSecure(), "the client's wss pipe declares Secure");
+            assertTrue(io.isCarrierSecure(), "the client's wss pipe declares Secure");
             assertTrue(io.capabilities().exporter() != null, "the client's wss pipe has the TLS exporter");
             try (ZmuxSession c = Zmux.open(io, Role.CLIENT, f.config); ZmuxSession s = f.listener.accept(Duration.ofSeconds(5))) {
                 assertNotNull(s);
@@ -38,7 +38,7 @@ class WebSocketSecureTest {
         try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(), false, null); var http = f.client(b -> b.http1())) {
             URI url = URI.create(f.base.toString().replace("http://", "ws://"));
             var io = http.webSocketPipe(url, Map.of(), List.of(), null);
-            assertFalse(io.isSecure());
+            assertFalse(io.isCarrierSecure());
             io.writer().close();
             io.reader().close();
         }

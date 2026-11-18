@@ -49,13 +49,13 @@ class QuicLoopTerminationTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var served = new CompletableFuture<EventLoop>();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(config))) {
                 QuicOptions options = QuicOptions.defaults();
                 ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
                         .handler(new ChannelInboundHandlerAdapter() {
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                 if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess()) {
-                                    QuicServer.serveAsync((QuicChannel) ctx.channel(), options, listener, null);
+                                    QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null);
                                     served.complete(ctx.channel().eventLoop());
                                 }
                                 ctx.fireUserEventTriggered(evt);

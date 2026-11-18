@@ -26,7 +26,7 @@ import java.util.OptionalLong;
  * names it: off or none ({@link #handshakeTimeout()}, {@link #resumeTimeout()}), unlimited
  * ({@link #memoryBudget()}), automatic ({@link #maxStreamReceiveWindow()},
  * {@link #maxConnectionReceiveWindow()}, {@link #sendBufferMax()}, {@link #replayWindow()},
- * {@link #probation()}) or staged ({@link #incomingUniStreams()}). No option has two such settings.
+ * {@link #probation()}) or staged ({@link #maxIncomingUniStreams()}). No option has two such settings.
  */
 public final class ZmuxConfig {
     /** The default ALPN identifier, as of QMux draft-02. */
@@ -48,6 +48,8 @@ public final class ZmuxConfig {
 
     /** The default number of extra attachments the peer may hold beyond {@link #maxPipes()}. */
     public static final int DEFAULT_PIPE_HEADROOM = 8;
+    /** The default number of lanes accepted on each inbound pipe ({@link Builder#maxLanes}). */
+    public static final long DEFAULT_MAX_LANES = 258;
     /** The default size of a Hello's first batch. */
     public static final int DEFAULT_JOIN_EARLY_HELLO = 8 << 10;
 
@@ -60,8 +62,8 @@ public final class ZmuxConfig {
     final long maxStreamReceiveWindow, maxConnectionReceiveWindow; // 0: auto
     final long memoryBudget; // -1: unlimited
     final Duration latencyBudget;
-    final long incomingStreams;
-    final long incomingUniStreams; // -1: staged credit
+    final long maxIncomingStreams;
+    final long maxIncomingUniStreams; // -1: staged credit
     final long maxLanes;
     final boolean datagrams;
     final int datagramSendQueue, datagramReceiveQueue, datagramStreamQueue;
@@ -99,7 +101,7 @@ public final class ZmuxConfig {
         initialStreamReceiveWindow = b.initialStreamReceiveWindow; initialConnectionReceiveWindow = b.initialConnectionReceiveWindow;
         maxStreamReceiveWindow = b.maxStreamReceiveWindow; maxConnectionReceiveWindow = b.maxConnectionReceiveWindow;
         memoryBudget = b.memoryBudget; latencyBudget = b.latencyBudget;
-        incomingStreams = b.incomingStreams; incomingUniStreams = b.incomingUniStreams; maxLanes = b.maxLanes;
+        maxIncomingStreams = b.maxIncomingStreams; maxIncomingUniStreams = b.maxIncomingUniStreams; maxLanes = b.maxLanes;
         datagramSendQueue = b.datagramSendQueue; datagramReceiveQueue = b.datagramReceiveQueue;
         datagramStreamQueue = b.datagramStreamQueue; datagramReceiveBytes = b.datagramReceiveBytes;
         datagramStreamBytes = b.datagramStreamBytes;
@@ -123,7 +125,7 @@ public final class ZmuxConfig {
             else if (e.kind() == io.zmux.internal.core.Event.Kind.CLOSED) tracer.closed(id, Errors.session(e.error()));
             else { SessionEvent event = Events.publicEvent(e); if (event != null) tracer.event(id, event); }
         }, tracer == null ? null : tracer::dropped, b.tracerQueue, b.allowWindowGrowth,
-                b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), joinPolicy(b), b.handshakeShaper, b.logger,
+                b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), scheduler, joinPolicy(b), b.handshakeShaper, b.logger,
                 b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.min()), nanos(b.redialBackoff.max()), b.redialBackoff.jitter()));
         joinEarlyHello = b.joinEarlyHello;
     }
@@ -161,7 +163,7 @@ public final class ZmuxConfig {
         initialStreamReceiveWindow = o.initialStreamReceiveWindow; initialConnectionReceiveWindow = o.initialConnectionReceiveWindow;
         maxStreamReceiveWindow = o.maxStreamReceiveWindow; maxConnectionReceiveWindow = o.maxConnectionReceiveWindow;
         memoryBudget = o.memoryBudget; latencyBudget = o.latencyBudget;
-        incomingStreams = o.incomingStreams; incomingUniStreams = o.incomingUniStreams; maxLanes = o.maxLanes;
+        maxIncomingStreams = o.maxIncomingStreams; maxIncomingUniStreams = o.maxIncomingUniStreams; maxLanes = o.maxLanes;
         datagramSendQueue = o.datagramSendQueue; datagramReceiveQueue = o.datagramReceiveQueue;
         datagramStreamQueue = o.datagramStreamQueue; datagramReceiveBytes = o.datagramReceiveBytes;
         datagramStreamBytes = o.datagramStreamBytes;
@@ -195,9 +197,9 @@ public final class ZmuxConfig {
     /** The session's own memory budget; empty: unlimited. */
     public OptionalLong memoryBudget() { return memoryBudget < 0 ? OptionalLong.empty() : OptionalLong.of(memoryBudget); }
     /** Concurrent peer bidirectional streams; 0: none. */
-    public long incomingStreams() { return incomingStreams; }
+    public long maxIncomingStreams() { return maxIncomingStreams; }
     /** Concurrent peer unidirectional streams advertised at once (0: none); empty: staged credit. */
-    public OptionalLong incomingUniStreams() { return incomingUniStreams < 0 ? OptionalLong.empty() : OptionalLong.of(incomingUniStreams); }
+    public OptionalLong maxIncomingUniStreams() { return maxIncomingUniStreams < 0 ? OptionalLong.empty() : OptionalLong.of(maxIncomingUniStreams); }
     /** Lanes accepted on each inbound pipe; 1: none. */
     public long maxLanes() { return maxLanes; }
     public int datagramSendQueue() { return datagramSendQueue; }
@@ -220,8 +222,8 @@ public final class ZmuxConfig {
             return io.zmux.shaping.ShapingBudget.NONE;
         }
     }
-    /** Whether datagrams and datagram flows are on. */
-    public boolean isDatagrams() { return datagrams; }
+    /** Whether datagrams and datagram flows are on ({@link Builder#enableDatagrams}). */
+    public boolean enableDatagrams() { return datagrams; }
     public EarlyData earlyData() { return earlyData; }
     /** Whether a client holds its first carrier write ({@link Builder#holdFirstFlight}). */
     public boolean isHoldFirstFlight() { return holdFirstFlight; }
@@ -394,10 +396,10 @@ public final class ZmuxConfig {
         p.maxStreamDataBidiLocal = initialStreamReceiveWindow;
         p.maxStreamDataBidiRemote = initialStreamReceiveWindow;
         p.maxStreamDataUni = initialStreamReceiveWindow;
-        p.maxStreamsBidi = incomingStreams;
-        if (incomingUniStreams >= 0) {
+        p.maxStreamsBidi = maxIncomingStreams;
+        if (maxIncomingUniStreams >= 0) {
             c.stagedUni(false);
-            p.maxStreamsUni = incomingUniStreams;
+            p.maxStreamsUni = maxIncomingUniStreams;
         }
         c.streamWindowCap(maxStreamReceiveWindow);
         c.connWindowCap(maxConnectionReceiveWindow);
@@ -496,7 +498,7 @@ public final class ZmuxConfig {
         private long maxStreamReceiveWindow, maxConnectionReceiveWindow;
         private long memoryBudget = DEFAULT_MEMORY_BUDGET;
         private Duration latencyBudget = Duration.ofNanos(CoreConfig.DEFAULT_LATENCY_BUDGET);
-        private long incomingStreams = 256, incomingUniStreams = -1, maxLanes = 258;
+        private long maxIncomingStreams = 256, maxIncomingUniStreams = -1, maxLanes = DEFAULT_MAX_LANES;
         private boolean datagrams;
         private int datagramSendQueue = 64, datagramReceiveQueue = 128, datagramStreamQueue = 32;
         private long datagramReceiveBytes = 1 << 20;
@@ -575,7 +577,7 @@ public final class ZmuxConfig {
         public Builder maxIdleTimeout(Duration d) { maxIdleTimeout = Liveness.atLeast(d, Duration.ofMillis(1), "maxIdleTimeout"); return this; }
 
         /** No idle timeout; none is announced. */
-        public Builder noIdleTimeout() { maxIdleTimeout = null; return this; }
+        public Builder noMaxIdleTimeout() { maxIdleTimeout = null; return this; }
 
         /**
          * The liveness settings: keep-alive, failure suspicion and probes (default
@@ -632,10 +634,10 @@ public final class ZmuxConfig {
          * Concurrent peer bidirectional streams, default 256: 0 (none), or from 4 to
          * {@link Zmux#MAX_STREAM_CREDIT}.
          */
-        public Builder incomingStreams(long n) {
+        public Builder maxIncomingStreams(long n) {
             if ((n != 0 && n < 4) || n > Zmux.MAX_STREAM_CREDIT)
-                throw new IllegalArgumentException("incomingStreams must be 0 or from 4 to Zmux.MAX_STREAM_CREDIT");
-            incomingStreams = n; return this;
+                throw new IllegalArgumentException("maxIncomingStreams must be 0 or from 4 to Zmux.MAX_STREAM_CREDIT");
+            maxIncomingStreams = n; return this;
         }
 
         /**
@@ -643,10 +645,10 @@ public final class ZmuxConfig {
          * {@link Zmux#MAX_STREAM_CREDIT}; not calling it: staged credit, 16 at first and 256 once
          * the application first accepts a unidirectional stream.
          */
-        public Builder incomingUniStreams(long n) {
+        public Builder maxIncomingUniStreams(long n) {
             if (n < 0 || n > Zmux.MAX_STREAM_CREDIT)
-                throw new IllegalArgumentException("incomingUniStreams outside 0 to Zmux.MAX_STREAM_CREDIT");
-            incomingUniStreams = n; return this;
+                throw new IllegalArgumentException("maxIncomingUniStreams outside 0 to Zmux.MAX_STREAM_CREDIT");
+            maxIncomingUniStreams = n; return this;
         }
 
         /** Lanes accepted on each inbound pipe, default 258, at least 1; 1: no lanes toward this endpoint. */
@@ -836,7 +838,7 @@ public final class ZmuxConfig {
         public Builder logger(System.Logger l) { logger = l; return this; }
 
         /** Datagrams and datagram flows on or off (default off). */
-        public Builder datagrams(boolean on) { datagrams = on; return this; }
+        public Builder enableDatagrams(boolean on) { datagrams = on; return this; }
 
         /**
          * Early data: {@link EarlyData#ZMUX_PEER} declares the peer a zmux endpoint. It is
@@ -846,7 +848,7 @@ public final class ZmuxConfig {
         public Builder earlyData(EarlyData mode) { earlyData = Objects.requireNonNull(mode); return this; }
 
         /**
-         * Keeps the bootstrap pipe's first carrier write until {@link io.zmux.adapter.SessionAdapter#releaseFirstFlight},
+         * Keeps the bootstrap pipe's first carrier write until {@link ZmuxSession#releaseFirstFlight},
          * or until the handshake timeout has passed since the start ({@link SessionStats#firstFlightTimeouts});
          * the handshake timeout runs from the release. Streams written before the release leave in
          * the same write as the transport parameters. A client with {@link EarlyData#ZMUX_PEER} only.
@@ -890,9 +892,9 @@ public final class ZmuxConfig {
             allowWindowGrowth = predicate; return this;
         }
 
-        /** Datagram limiters per direction, each asked {@code tryAcquire(n, n)} per datagram (dropped and counted on 0); null: none. */
-        public Builder datagramLimiters(io.zmux.helper.Limiter send, io.zmux.helper.Limiter receive) {
-            datagramSend = send; datagramReceive = receive; return this;
+        /** The datagram limiters ({@link io.zmux.helper.DatagramLimiter}); null (the default): none. */
+        public Builder datagramLimiter(io.zmux.helper.DatagramLimiter l) {
+            datagramSend = l == null ? null : l.send(); datagramReceive = l == null ? null : l.receive(); return this;
         }
 
         /**

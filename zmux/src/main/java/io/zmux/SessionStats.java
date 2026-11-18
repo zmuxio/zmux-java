@@ -58,7 +58,7 @@ import java.util.List;
  * @param schedulerAnswers custom scheduler answers applied
  * @param schedulerFallbacks custom scheduler answers replaced by the affinity choice
  * @param firstFlightTimeouts 0 or 1: 1 when the first flight {@link ZmuxConfig.Builder#holdFirstFlight(boolean)} held was
- *     released by the handshake timeout rather than by {@link io.zmux.adapter.SessionAdapter#releaseFirstFlight}
+ *     released by the handshake timeout rather than by {@link ZmuxSession#releaseFirstFlight}
  */
 public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCandidates,
                            long bytesSent, long bytesReceived, long recordsSent, long recordsReceived,

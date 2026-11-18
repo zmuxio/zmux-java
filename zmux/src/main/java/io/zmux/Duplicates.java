@@ -27,11 +27,11 @@ final class Duplicates {
     }
     static DuplicateResult resolve(ZmuxSession a, ZmuxSession b, DuplicateOptions options) throws IOException {
         Objects.requireNonNull(a); Objects.requireNonNull(b); Objects.requireNonNull(options);
-        if (a == b) throw new DuplicateResolutionException(DuplicateResolutionException.Reason.SAME_SESSION);
+        if (a == b) throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.SAME_SESSION);
         Input x = input(a), y = input(b);
-        if (!x.established || !y.established) throw new DuplicateResolutionException(DuplicateResolutionException.Reason.NOT_ESTABLISHED);
-        if (!x.knownDialer || !y.knownDialer) throw new DuplicateResolutionException(DuplicateResolutionException.Reason.UNKNOWN_DIALER);
-        if (x.localDialer == y.localDialer) throw new DuplicateResolutionException(DuplicateResolutionException.Reason.SAME_DIALER);
+        if (!x.established || !y.established) throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.NOT_ESTABLISHED);
+        if (!x.knownDialer || !y.knownDialer) throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.UNKNOWN_DIALER);
+        if (x.localDialer == y.localDialer) throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.SAME_DIALER);
         int comparison; DuplicateResult.Rule rule;
         byte[] local = options.localIdentity(), peer = options.peerIdentity();
         if (local.length > 0) {
@@ -41,8 +41,8 @@ final class Duplicates {
             comparison = Arrays.compareUnsigned(x.sessionNonce, y.sessionNonce); rule = DuplicateResult.Rule.SESSION_NONCE;
         } else if (x.autoRole && y.autoRole) {
             comparison = Long.compareUnsigned(x.roleNonce, y.roleNonce); rule = DuplicateResult.Rule.ROLE_NONCE;
-        } else throw new DuplicateResolutionException(DuplicateResolutionException.Reason.NO_COMMON_INPUT);
-        if (comparison == 0) throw new DuplicateResolutionException(DuplicateResolutionException.Reason.EQUAL_VALUES);
+        } else throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.NO_COMMON_INPUT);
+        if (comparison == 0) throw new DuplicateUndecidedException(DuplicateUndecidedException.Reason.EQUAL_VALUES);
         ZmuxSession survivor = comparison < 0 ? a : b, loser = comparison < 0 ? b : a;
         boolean dialedLoser = comparison < 0 ? y.localDialer : x.localDialer;
         // Commit on the owner before returning: local openers cannot race a posted shutdown.

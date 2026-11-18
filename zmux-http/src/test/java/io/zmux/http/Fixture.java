@@ -44,7 +44,7 @@ final class Fixture implements AutoCloseable {
     Fixture(Function<ZmuxConfig.Builder, ZmuxConfig.Builder> cfg, Function<ListenerConfig.Builder, ListenerConfig.Builder> lcfg,
             Function<HttpEndpoint.Builder, HttpEndpoint.Builder> ep, boolean tls, Supplier<ChannelHandler> host) throws Exception {
         config = cfg.apply(ZmuxConfig.builder().eventLoops(loops)).build();
-        listener = ZmuxListener.of(lcfg.apply(ListenerConfig.builder().session(config)).build());
+        listener = io.zmux.Zmux.listener(lcfg.apply(ListenerConfig.builder().session(config)).build());
         endpoint = ep.apply(HttpEndpoint.builder(listener)).build();
         SslContext ssl = tls ? HttpEndpoint.serverSsl(SslContextBuilder.forServer(kmf()).sslProvider(SslProvider.JDK)) : null;
         server = new ServerBootstrap().group(group).channel(NioServerSocketChannel.class)
@@ -109,7 +109,7 @@ final class Fixture implements AutoCloseable {
             Path keytool = Path.of(System.getProperty("java.home"), "bin", "keytool");
             Process p = new ProcessBuilder(keytool.toString(), "-genkeypair", "-alias", "localhost", "-keyalg", "EC",
                     "-groupname", "secp256r1", "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1",
-                    "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
+                    "-startdate", "-1H", "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
                     "-keypass", "changeit").redirectErrorStream(true).start();
             if (!p.waitFor(60, TimeUnit.SECONDS) || p.exitValue() != 0) throw new IllegalStateException("keytool failed");
         }

@@ -21,8 +21,9 @@ import java.util.function.BooleanSupplier;
  * {@code *Async} stage variants with your own executor for work that blocks. Blocking zmux calls are allowed
  * there, except that a call that would wait for its stream direction's turn behind an asynchronous operation of that
  * direction still in progress throws {@link CompletionThreadBlockedException} (an {@link IllegalStateException}), as that operation needs this thread to go
- * on: a blocking read, {@code readChunk}, {@code awaitReadable}, write or {@code finish}, and a transfer of the
- * stream ({@code asPipe}, {@link Zmux#splice}), which waits for both directions.
+ * on: a blocking read, {@code readChunk}, write or {@code finish}, {@code tryRead} while data is readable, and a transfer of the
+ * stream ({@code asPipe}, {@link Zmux#splice}), which waits for both directions. {@code awaitReadable} never waits for the
+ * direction's turn.
  * A future that could complete at once is returned completed, and its dependents run on the calling thread.
  *
  * <p>Dependent stages are plain {@link CompletableFuture}s.
@@ -32,7 +33,6 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
 
     static {
         io.zmux.internal.spi.Spi.install(new io.zmux.internal.spi.Spi.Access() {
-            @Override public void handleLane(ZmuxSession session, io.zmux.carrier.PipeIo io) { session.handleLane(io); }
             @Override public <V> ZmuxFuture<V> future(java.util.concurrent.CompletionStage<V> stage, Runnable cancel) { return of(stage, cancel); }
         });
     }

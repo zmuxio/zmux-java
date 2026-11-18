@@ -30,8 +30,8 @@ class BindingMismatchTest {
     /** Runs a Bound Establish whose exporters differ; returns how long the client waited for the end, in ms. */
     private static long mismatchedEstablish(ZmuxListener l) throws Exception {
         PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-        l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-        PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withSecure(true);
+        l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withCarrierSecure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+        PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withCarrierSecure();
         long t0 = System.nanoTime();
         var f = Seal.establish(near, SealTest.client().mode(RecordMode.BOUND).handshakeTimeout(Duration.ofSeconds(20)).build()).toCompletableFuture();
         var e = assertThrows(ExecutionException.class, () -> f.get(20, TimeUnit.SECONDS));
@@ -54,7 +54,7 @@ class BindingMismatchTest {
     @Test void byDefaultAMismatchedEstablishIsStalled() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var lc = ListenerConfig.builder().session(sessions(loops)).inboundTransform(Seal.server(server())).build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 long ms = mismatchedEstablish(l);
                 assertTrue(ms >= STALL_MILLIS - 200, "ended before the stall: " + ms + " ms");
             }
@@ -66,7 +66,7 @@ class BindingMismatchTest {
             List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
             var lc = ListenerConfig.builder().session(sessions(loops, LONG_STALL_MILLIS)).inboundTransform(Seal.server(server()))
                     .onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 long ms = mismatchedEstablish(l);
                 assertTrue(ms < LONG_STALL_MILLIS / 4, "closed after " + ms + " ms");
                 assertEquals(1, rejected.size());
@@ -86,8 +86,8 @@ class BindingMismatchTest {
                 try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(10))) {
                     assertNotNull(s);
                     PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 2)));
-                    PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withSecure(true);
+                    l.adapter().handle(pair[1].withExporter((a, b, n) -> filled(n, 0)).withCarrierSecure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 2)));
+                    PipeIo near = pair[0].withExporter((a, b, n) -> filled(n, 1)).withCarrierSecure();
                     long t0 = System.nanoTime();
                     assertThrows(Exception.class, () -> c.addPipe(near, PipeOptions.builder().recordMode(RecordMode.BOUND).build()));
                     long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);

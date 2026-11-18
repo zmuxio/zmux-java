@@ -85,7 +85,7 @@ class CarrierSelectionTest {
             var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(refused(CarrierKind.WEBSOCKET, dials)), cfg, null));
             assertEquals(List.of(new CandidateResult(CarrierKind.WEBSOCKET, CandidateOutcome.REFUSED, false, e.results().getFirst().error())), e.results());
             assertEquals(1, dials.get());
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 try (var s = Zmux.dial(CarrierChoice.explicit(reaching(CarrierKind.STREAMING, l, dials)), cfg, null)) {
                     assertEquals(CarrierKind.STREAMING, s.stats().carrier());
                     assertEquals(CandidateOutcome.USABLE, s.stats().carrierCandidates().getFirst().outcome());
@@ -112,7 +112,7 @@ class CarrierSelectionTest {
             var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(refusedLater(CarrierKind.STREAMING)), cfg,
                     CarrierChoicePolicy.defaults().withTimer(3, Duration.ofSeconds(2), Duration.ofSeconds(2))));
             assertEquals(CandidateOutcome.REFUSED, e.results().getFirst().outcome(), String.valueOf(e.results().getFirst().error()));
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var dials = new AtomicInteger();
                 try (var s = Zmux.dial(CarrierChoice.auto(refusedLater(CarrierKind.STREAMING), reaching(CarrierKind.EXCHANGE, l, dials)), cfg,
                         CarrierChoicePolicy.defaults().withJoin(false))) {
@@ -126,7 +126,7 @@ class CarrierSelectionTest {
     @Test void autoTriesTheCandidatesInOrderAndRemembersTheOutcomes() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var cache = new CarrierCache();
                 var policy = CarrierChoicePolicy.of(cache, "server").withTimer(3, Duration.ofMillis(200), Duration.ofSeconds(30));
                 var ws = new AtomicInteger(); var st = new AtomicInteger(); var ex = new AtomicInteger();
@@ -179,7 +179,7 @@ class CarrierSelectionTest {
     @Test void autoEstablishesOnTheRobustKindAndMovesToAPreferredOne() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var policy = CarrierChoicePolicy.defaults().withSettle(Duration.ofMillis(200));
                 try (var s = Zmux.dial(CarrierChoice.auto(reaching(CarrierKind.WEBSOCKET, l, ws), reaching(CarrierKind.EXCHANGE, l, ex)), cfg, policy)) {

@@ -123,7 +123,7 @@ public abstract class AbstractTransport implements Transport {
         Forwarded f = new Forwarded(this, null, false, false);
         io.zmux.carrier.PipeIo io = f.pipe(info().applicationProtocol());
         if (exporterPresent()) io = io.withExporter(this::export).withTerminatedTls(info().carrier().tls());
-        return isSecure() ? io.withSecure(true) : io;
+        return isSecure() ? io.withCarrierSecure() : io;
     }
 
     // ---- input ----

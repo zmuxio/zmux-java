@@ -34,7 +34,7 @@ final class EstablishServer {
      */
     public static EstablishServer create(EstablishHello h, Framing f, byte[] psk, byte[] binding, StaticKey key)
             throws SecureCarrierException {
-        return create(h, f, psk, binding, key, StaticKey::random);
+        return create(h, f, psk, binding, key, StaticKey::generate);
     }
 
     /** With a given source of ephemeral keys, for vectors only. */
@@ -84,7 +84,7 @@ final class EstablishServer {
      * message 3 or none, then the proof of message 3 against its verdict.
      */
     public Verification.Judged verify(Anchor anchor, Finish finish, Object localContext, boolean requirePqAuth)
-            throws CredentialsFailedException, VerifierUnavailableException {
+            throws CredentialsFailedException, VerifyUnavailableException {
         return Verification.judge(anchor, new VerifyInput(io.zmux.Role.CLIENT, hello.profile(), finish.peerStatic(),
                 hello.profile().isPskBased() ? hello.handle() : null, finish.credential(), finish.appData(), localContext), proof, requirePqAuth);
     }

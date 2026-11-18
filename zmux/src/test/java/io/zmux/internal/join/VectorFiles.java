@@ -70,7 +70,7 @@ public final class VectorFiles {
 
     /** The error class of an exception, as the vectors name it. */
     public static String errorClass(SecureCarrierException e) {
-        return e.code().name().toLowerCase(java.util.Locale.ROOT);
+        return e.kind().name().toLowerCase(java.util.Locale.ROOT);
     }
 
     /** {@code n} repetitions of a byte. */

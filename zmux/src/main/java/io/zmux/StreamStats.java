@@ -1,6 +1,5 @@
 package io.zmux;
 
-import java.util.OptionalLong;
 
 /**
  * A snapshot of one stream, in payload bytes, the preamble excluded. The
@@ -23,13 +22,13 @@ import java.util.OptionalLong;
  * @param sendBuffered gauge: written bytes not yet released (unsent; unacknowledged in multipath)
  * @param recvBuffered gauge: received bytes not yet read
  * @param recvWindow gauge: the current, auto-tuned receive window
- * @param pipeId the pipe the sending direction is bound to under affinity; empty when unbound
+ * @param pipe the pipe the sending direction is bound to under affinity; empty when unbound
  */
 public record StreamStats(long bytesWritten, long bytesSent, long bytesAcknowledged, long bytesReceived, long bytesRead,
                           long datagramsSent, long datagramsReceived, long datagramsDroppedRecv, long datagramBytesSent,
                           long datagramBytesReceived, long sendBuffered, long recvBuffered, long recvWindow,
-                          OptionalLong pipeId) {
+                          java.util.Optional<PipeId> pipe) {
     public StreamStats {
-        java.util.Objects.requireNonNull(pipeId);
+        java.util.Objects.requireNonNull(pipe);
     }
 }

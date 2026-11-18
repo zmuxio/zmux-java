@@ -1,10 +1,10 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.BAD_FLAGS;
-import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
-import static io.zmux.seal.SecureCarrierException.Code.TRAILING_BYTES;
-import static io.zmux.seal.SecureCarrierException.Code.UNKNOWN_PROFILE;
+import static io.zmux.seal.SecureCarrierException.Kind.BAD_FLAGS;
+import static io.zmux.seal.SecureCarrierException.Kind.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.TRAILING_BYTES;
+import static io.zmux.seal.SecureCarrierException.Kind.UNKNOWN_PROFILE;
 
 import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.join.Framing;

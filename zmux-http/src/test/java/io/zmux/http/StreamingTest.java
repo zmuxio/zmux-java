@@ -1,6 +1,5 @@
 package io.zmux.http;
 
-import io.zmux.ZmuxListener;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
@@ -66,7 +65,7 @@ class StreamingTest {
 
     @Test void endpointRefusesBadPairFields() throws Exception {
         var plain = ExchangeConfig.builder(new byte[32]).build();
-        try (var l = ZmuxListener.of(io.zmux.ListenerConfig.of(io.zmux.ZmuxConfig.builder().build()))) {
+        try (var l = Zmux.listener(io.zmux.ListenerConfig.of(io.zmux.ZmuxConfig.builder().build()))) {
             assertThrows(IllegalArgumentException.class, () -> HttpEndpoint.builder(l).pairField("Host").build());
             assertThrows(IllegalArgumentException.class, () -> HttpCarrierClient.builder().pairField("Upgrade").build());
             HttpEndpoint.builder(l).pairField("zmux-pipe-pair").exchange(plain).build();

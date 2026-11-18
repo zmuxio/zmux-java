@@ -45,6 +45,7 @@ final class Errors {
             case INVALID -> throw new IllegalStateException("not valid in this state");
             case DATAGRAM_TOO_LARGE -> new DatagramTooLargeException(e.max());
             case PIPE_REFUSED -> new PipeRefusedException();
+            case PIPE_ABORTED -> new PipeAbortedException(PipeId.of(e.pipe()));
             case JOIN_PENDING -> new JoinPendingException((e.max() & CoreException.MISSING_END_TO_END) != 0, (e.max() & CoreException.MISSING_PSK) != 0);
             case JOIN_SECRET_SET -> new JoinSecretSetException();
             case JOIN_REFUSED -> new JoinRefusedException(PipeId.of(e.pipe()));

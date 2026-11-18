@@ -35,7 +35,7 @@ class InboundTransformTest {
     static byte[] readAll(ZmuxReceiveStream s) throws Exception { return SessionTest.readAll(s); }
 
     static Admission valued(Object value) {
-        return Admission.of(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0, value)));
+        return Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0, value))).build();
     }
 
     /** A carrier whose sending half counts its writes and reports a retransmission count. */
@@ -62,7 +62,7 @@ class InboundTransformTest {
             var cfg = config(loops);
             var serverCfg = builder(loops).shaper(p -> { shaped.add(p); return null; }).build();
             var lc = ListenerConfig.builder().session(serverCfg).admission(valued("tenant-7")).inboundTransform(t).build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")).withRequest(RequestHead.NONE));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
@@ -96,7 +96,7 @@ class InboundTransformTest {
     @Test void aFailingTransformClosesTheCarrierAsASetupFailure() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             InboundTransform t = (carrier, ctx) -> CompletableFuture.failedFuture(new java.io.IOException("no"));
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(config(loops)).inboundTransform(t).build())) {
+            try (var l = Zmux.listener(ListenerConfig.builder().session(config(loops)).inboundTransform(t).build())) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var ended = ListenerEntryTest.watchEnd(boot[0]);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
@@ -118,7 +118,7 @@ class InboundTransformTest {
                 never.whenComplete((v, e) -> { if (never.isCancelled()) cancelled.complete(null); });
                 return never;
             };
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(t).build())) {
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).inboundTransform(t).build())) {
                 for (int i = 0; i < 2; i++) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var ended = ListenerEntryTest.watchEnd(boot[0]);
@@ -139,9 +139,9 @@ class InboundTransformTest {
             // Each half's value names the half: the halves are admitted on their own loops, in no set order.
             var upPeer = TestAddr.peer("up");
             var downPeer = TestAddr.peer("down");
-            var adm = Admission.of(0, Admission.Decider.immediate((info, prefix) ->
-                    Admission.Decision.accept(0, info.peer().equals(upPeer) ? "half-up" : "half-down")));
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).inboundTransform(t).build())) {
+            var adm = Admission.builder(0, Admission.Decider.immediate((info, prefix) ->
+                    Admission.Decision.accept(0, info.peer().equals(upPeer) ? "half-up" : "half-down"))).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).inboundTransform(t).build())) {
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                 String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
@@ -164,7 +164,7 @@ class InboundTransformTest {
     @Test void anUnknownLocatorGetsNoAnswerAndFailsOnlyThatJoin() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var home = ZmuxListener.of(ListenerConfig.of(cfg)); var other = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var home = Zmux.listener(ListenerConfig.of(cfg)); var other = Zmux.listener(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 home.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 try (var c = Zmux.open(boot[0], Role.CLIENT, cfg); var _ = home.accept(Duration.ofSeconds(5))) {
@@ -181,7 +181,7 @@ class InboundTransformTest {
     @Test void pipeStatsReportLossAndTheCarriersRetransmissions() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
                 var writes = java.util.Collections.synchronizedList(new ArrayList<Integer>());

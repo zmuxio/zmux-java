@@ -46,8 +46,8 @@ class DuplicateTest {
         }, r -> Thread.ofVirtual().start(r));
         return new Pair(Zmux.open(carriers[0], Role.CLIENT, cfg),accepting.get(3,TimeUnit.SECONDS));
     }
-    static void expectReason(DuplicateResolutionException.Reason reason, ZmuxSession a, ZmuxSession b, DuplicateOptions opts) {
-        assertEquals(reason, assertThrows(DuplicateResolutionException.class, () -> Zmux.resolveDuplicate(a,b,opts)).reason());
+    static void expectReason(DuplicateUndecidedException.Reason reason, ZmuxSession a, ZmuxSession b, DuplicateOptions opts) {
+        assertEquals(reason, assertThrows(DuplicateUndecidedException.class, () -> Zmux.resolveDuplicate(a,b,opts)).reason());
     }
 
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
@@ -79,7 +79,7 @@ class DuplicateTest {
             try (Pair one = mp ? Pair.memory(cfg) : symmetric(cfg); Pair two = mp ? Pair.memory(cfg) : symmetric(cfg);
                  Held _ = Held.open(one); Held _ = Held.open(two)) {
                 if (!mp) {
-                    expectReason(DuplicateResolutionException.Reason.UNKNOWN_DIALER,one.client(),two.server(),ids(1,2));
+                    expectReason(DuplicateUndecidedException.Reason.UNKNOWN_DIALER,one.client(),two.server(),ids(1,2));
                     one.client().designateDialer(true); one.server().designateDialer(false);
                     two.client().designateDialer(true); two.server().designateDialer(false);
                     assertThrows(IllegalStateException.class,() -> one.client().designateDialer(false));
@@ -96,10 +96,10 @@ class DuplicateTest {
         try (EventLoops loops = EventLoops.create(3)) {
             var plain = ZmuxConfig.builder().eventLoops(loops).build(); var mp = PipePoolTest.config(loops,3);
             try (Pair one = Pair.memory(plain); Pair two = Pair.memory(mp)) {
-                expectReason(DuplicateResolutionException.Reason.SAME_SESSION,one.client(),one.client(),ids(1,2));
-                expectReason(DuplicateResolutionException.Reason.SAME_DIALER,one.client(),two.client(),ids(1,2));
-                expectReason(DuplicateResolutionException.Reason.NO_COMMON_INPUT,one.client(),two.server(),DuplicateOptions.defaults());
-                expectReason(DuplicateResolutionException.Reason.EQUAL_VALUES,one.client(),two.server(),ids(1,1));
+                expectReason(DuplicateUndecidedException.Reason.SAME_SESSION,one.client(),one.client(),ids(1,2));
+                expectReason(DuplicateUndecidedException.Reason.SAME_DIALER,one.client(),two.client(),ids(1,2));
+                expectReason(DuplicateUndecidedException.Reason.NO_COMMON_INPUT,one.client(),two.server(),DuplicateOptions.defaults());
+                expectReason(DuplicateUndecidedException.Reason.EQUAL_VALUES,one.client(),two.server(),ids(1,1));
                 try (Held a = Held.open(one); Held b = Held.open(two)) { a.finish(); b.finish(); }
             }
         }
@@ -182,7 +182,7 @@ class DuplicateTest {
     }
     @Test void losingSessionWakesAlreadyBlockedOpeners() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIncomingStreams(4).build();
             try (Pair one = Pair.memory(cfg); Pair two = Pair.memory(cfg); Held held = Held.open(two);
                  Held _ = Held.open(two); Held _ = Held.open(two); Held _ = Held.open(two)) {
                 var blocked = workers.submit(() -> two.client().openStream());

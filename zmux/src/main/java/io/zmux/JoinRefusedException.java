@@ -6,6 +6,6 @@ package io.zmux;
  */
 public final class JoinRefusedException extends PipeException {
     JoinRefusedException(PipeId pipeId) {
-        super("join refused by the peer", pipeId);
+        super("join refused by the peer");
     }
 }

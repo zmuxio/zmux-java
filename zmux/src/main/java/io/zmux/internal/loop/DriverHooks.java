@@ -9,7 +9,7 @@ import java.util.function.LongPredicate;
 
 /** Immutable driver callbacks; the core receives only the corresponding feature flags. */
 public record DriverHooks(BiConsumer<SessionId, Event> tracer, ObjLongConsumer<SessionId> dropped, int tracerQueue, LongPredicate allowWindowGrowth,
-                          Limiter datagramSend, Limiter datagramReceive, PickerBridge.Picker picker, JoinPolicy joinPolicy,
+                          Limiter datagramSend, Limiter datagramReceive, PickerBridge.Picker picker, Object scheduler, JoinPolicy joinPolicy,
                           io.zmux.carrier.HandshakeShaper handshakeShaper, System.Logger logger, Redial redial) {
     /** The session's redial hook and its backoff bounds (nanoseconds), for the public layer. */
     public record Redial(Object hook, long minBackoff, long maxBackoff, double jitter) {}
@@ -50,5 +50,5 @@ public record DriverHooks(BiConsumer<SessionId, Event> tracer, ObjLongConsumer<S
         }
     }
 
-    public static final DriverHooks NONE = new DriverHooks(null, null, 256, null, null, null, null, JoinPolicy.DEFAULT, null, null, null);
+    public static final DriverHooks NONE = new DriverHooks(null, null, 256, null, null, null, null, null, JoinPolicy.DEFAULT, null, null, null);
 }

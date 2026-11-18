@@ -6,15 +6,16 @@ import java.util.Objects;
 
 /**
  * The opening information of a stream, given once when the stream is opened and read on the
- * accepting side (the stream preamble). Byte arrays are copied in and out and compared by content.
- *
- * @param openInfo the OPEN_INFO value (an address, a request line), or null
- * @param tlvs application TLVs, types 0x1000 to 0x3fff, in order
- * @param pipeCarrier the stream carries a pipe of a nested session (PIPE_CARRIER)
+ * accepting side (the stream preamble), built with {@link #builder()}. Byte arrays are copied in and out and
+ * compared by content.
  */
-public record Preamble(byte[] openInfo, List<Tlv> tlvs, boolean pipeCarrier) {
+public final class Preamble {
     /** No opening information. */
     public static final Preamble EMPTY = new Preamble(null, List.of(), false);
+
+    private final byte[] openInfo;
+    private final List<Tlv> tlvs;
+    private final boolean pipeCarrier;
 
     /** An application TLV; the value is copied in and out and compared by content. */
     public record Tlv(long type, byte[] value) {
@@ -40,20 +41,60 @@ public record Preamble(byte[] openInfo, List<Tlv> tlvs, boolean pipeCarrier) {
         public String toString() { return "Tlv[type=0x" + Long.toHexString(type) + ", " + value.length + " bytes]"; }
     }
 
-    public Preamble {
-        openInfo = openInfo == null ? null : openInfo.clone();
-        tlvs = List.copyOf(tlvs);
+    Preamble(byte[] openInfo, List<Tlv> tlvs, boolean pipeCarrier) {
+        this.openInfo = openInfo == null ? null : openInfo.clone();
+        this.tlvs = List.copyOf(tlvs);
+        this.pipeCarrier = pipeCarrier;
     }
 
-    /** A preamble with only OPEN_INFO. */
-    public static Preamble openInfo(byte[] info) {
-        return new Preamble(Objects.requireNonNull(info, "info"), List.of(), false);
-    }
+    public static Builder builder() { return new Builder(); }
 
-    @Override public byte[] openInfo() { return openInfo == null ? null : openInfo.clone(); }
+    /** The OPEN_INFO value (an address, a request line), or null without one. */
+    public byte[] openInfo() { return openInfo == null ? null : openInfo.clone(); }
+
+    /** The application TLVs, types 0x1000 to 0x3fff, in order. */
+    public List<Tlv> tlvs() { return tlvs; }
+
+    /** Whether the stream carries a pipe of a nested session (PIPE_CARRIER). */
+    public boolean isPipeCarrier() { return pipeCarrier; }
 
     /** OPEN_INFO without a copy, for the session, which copies what it keeps; null without one. */
     byte[] rawOpenInfo() { return openInfo; }
+
+    /** Builds a {@link Preamble}; nothing set is {@link #EMPTY}. */
+    public static final class Builder {
+        private byte[] openInfo;
+        private final List<Tlv> tlvs = new java.util.ArrayList<>();
+        private boolean pipeCarrier;
+
+        private Builder() {}
+
+        /** The OPEN_INFO value (an address, a request line); copied. */
+        public Builder openInfo(byte[] info) {
+            openInfo = Objects.requireNonNull(info, "info").clone();
+            return this;
+        }
+
+        /** Adds an application TLV after those added before; repeatable. */
+        public Builder tlv(long type, byte[] value) {
+            tlvs.add(new Tlv(type, value));
+            return this;
+        }
+
+        /** Adds an application TLV after those added before. */
+        public Builder tlv(Tlv t) {
+            tlvs.add(Objects.requireNonNull(t, "t"));
+            return this;
+        }
+
+        /** Marks the stream as the carrier of a nested session's pipe (PIPE_CARRIER). */
+        public Builder pipeCarrier() {
+            pipeCarrier = true;
+            return this;
+        }
+
+        public Preamble build() { return new Preamble(openInfo, tlvs, pipeCarrier); }
+    }
 
     @Override
     public boolean equals(Object o) {

@@ -34,7 +34,9 @@ target/
 
 # Local scratch (never /tmp)
 .scratch/
-.jqwik-database
 
 # Built interop peer
 interop/qmux-go-peer/qmux-go-peer
+
+# Built interop peers
+interop/seal-go-peer/seal-go-peer

@@ -55,7 +55,7 @@ class QuicCapacityProbe {
             var config = settings.sessionConfig(loops, links);
             var options = settings.nativeOptions();
             results.add("WINDOW_CONFIG," + round + "," + name + "," + settings.describe(links));
-            try (var local = ZmuxListener.of(settings.listenerConfig(config)); var remote = ZmuxListener.of(settings.listenerConfig(config));
+            try (var local = Zmux.listener(settings.listenerConfig(config)); var remote = Zmux.listener(settings.listenerConfig(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, remote);
                  var client = new QuicClient(TestTls.client, options, local);
                  var topology = new Topology(client, server.address(), mode, pipes, link)) {
@@ -67,8 +67,8 @@ class QuicCapacityProbe {
                     }
                     // Exclude the separate bootstrap connection from every measured topology.
                     a.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> a.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).count() == pipes
-                            && b.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).count() == pipes);
+                    QuicPoolTest.until(() -> a.pipeStats().stream().filter(p -> p.pipe().value() != 0 && p.eligible()).count() == pipes
+                            && b.pipeStats().stream().filter(p -> p.pipe().value() != 0 && p.eligible()).count() == pipes);
                     int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                     assertEquals(mode >= 2 ? pipes : 1, connections);
                     for (int direction = 0; direction < 2; direction++) {
@@ -89,7 +89,7 @@ class QuicCapacityProbe {
                             } finally { for (var path : paths) path.update(io.zmux.PipeUpdate.builder().sendStandby(false).build()); }
                             results.add(String.format(Locale.ROOT, "TRAINING_ESTIMATE,%d,%s,%s,%.3f", round, name,
                                     direction == 0 ? "forward" : "reverse", sender.pipeStats().stream()
-                                            .filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));
+                                            .filter(p -> p.pipe().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum()));
                         }
                         System.out.printf("PROBE_PROGRESS,round=%d,mode=%s,direction=%d,phase=measure%n", round, name, direction);
                         var observed = measureTransfers(workers, List.of(new Traffic(sender, receiver)), bytes);
@@ -163,15 +163,15 @@ class QuicCapacityProbe {
             var prior = before.get(i);
             var after = traffic.get(i).sender().pipeStats();
             for (var old : prior) {
-                if (old.pipeId().value() != 0 && after.stream().noneMatch(p -> p.pipeId().value() == old.pipeId().value()))
-                    pipeTraffic.add(i + "," + old.pipeId().value() + ",-1,-1");
+                if (old.pipe().value() != 0 && after.stream().noneMatch(p -> p.pipe().value() == old.pipe().value()))
+                    pipeTraffic.add(i + "," + old.pipe().value() + ",-1,-1");
             }
             for (var pipe : after) {
-                if (pipe.pipeId().value() == 0) continue;
-                var old = prior.stream().filter(p -> p.pipeId().value() == pipe.pipeId().value()).findFirst();
+                if (pipe.pipe().value() == 0) continue;
+                var old = prior.stream().filter(p -> p.pipe().value() == pipe.pipe().value()).findFirst();
                 long sent = old.isPresent() ? pipe.bytesSent() - old.get().bytesSent() : -1;
                 long reinjected = old.isPresent() ? pipe.bytesReinjected() - old.get().bytesReinjected() : -1;
-                pipeTraffic.add(i + "," + pipe.pipeId().value() + "," + sent + "," + reinjected);
+                pipeTraffic.add(i + "," + pipe.pipe().value() + "," + sent + "," + reinjected);
             }
         }
         return new Observed(4L * bytes * traffic.size(), elapsed,
@@ -180,7 +180,7 @@ class QuicCapacityProbe {
     }
 
     private static double rateSum(ZmuxSession session) throws Exception {
-        return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipe().value() != 0 && p.eligible()).mapToDouble(p -> p.deliveryRate().orElse(0)).sum();
     }
 
     private record Pair(ZmuxSession local, ZmuxSession remote) implements AutoCloseable {
@@ -205,7 +205,7 @@ class QuicCapacityProbe {
             var config = settings.sessionConfig(loops, 1);
             var options = settings.nativeOptions();
             results.add("WINDOW_CONFIG," + round + "," + name + "," + settings.describe(1));
-            try (var local = ZmuxListener.of(settings.listenerConfig(config)); var remote = ZmuxListener.of(settings.listenerConfig(config));
+            try (var local = Zmux.listener(settings.listenerConfig(config)); var remote = Zmux.listener(settings.listenerConfig(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, remote);
                  var client = new QuicClient(TestTls.client, options, local);
                  var topology = new Topology(client, server.address(), mode, 2, link);
@@ -220,8 +220,8 @@ class QuicCapacityProbe {
                     else assertNotSame(identity, io.carrierConn());
                     pair.local().addPipe(io, PipeOptions.defaults());
                     pair.local().pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
-                    QuicPoolTest.until(() -> pair.local().pipeStats().stream().anyMatch(p -> p.pipeId().value() != 0 && p.eligible())
-                            && pair.remote().pipeStats().stream().anyMatch(p -> p.pipeId().value() != 0 && p.eligible()));
+                    QuicPoolTest.until(() -> pair.local().pipeStats().stream().anyMatch(p -> p.pipe().value() != 0 && p.eligible())
+                            && pair.remote().pipeStats().stream().anyMatch(p -> p.pipe().value() != 0 && p.eligible()));
                 }
                 int connections = topology.pools.stream().mapToInt(p -> p.connections().size()).sum();
                 assertEquals(mode == 1 ? 1 : 2, connections);
@@ -260,7 +260,7 @@ class QuicCapacityProbe {
                     if (link != null) {
                         var relay = new UdpBottleneck(server, link); relays.add(relay); address = relay.address();
                     }
-                    pools.add(new QuicPool(client, address, "localhost", QuicPool.Limits.defaults().withMaxPipesPerConnection(mode >= 2 ? 1 : pipes)));
+                    pools.add(QuicPool.builder(client, address, "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(mode >= 2 ? 1 : pipes)).build());
                 }
             } catch (Exception error) {
                 try { close(); } catch (Exception cleanup) { error.addSuppressed(cleanup); }
@@ -300,6 +300,6 @@ class QuicCapacityProbe {
     }
 
     private static long acknowledged(ZmuxSession session) throws Exception {
-        return session.pipeStats().stream().filter(p -> p.pipeId().value() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
+        return session.pipeStats().stream().filter(p -> p.pipe().value() != 0).mapToLong(p -> p.bytesAcked().orElse(0)).sum();
     }
 }

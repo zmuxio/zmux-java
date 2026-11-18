@@ -41,10 +41,15 @@ final class Splice {
     /** A packet relay (EXTENSIONS.md Section 12): the stream bytes are capsules, and datagrams may become capsules. */
     private final boolean packets;
     private final AtomicBoolean cancelled = new AtomicBoolean();
-    /** The code of a cancellation through the splice's control; -1 for none (a cancelled stage resets with ZMUX_CANCELLED and stops with 0). */
+    /** The code of an abort through the splice's {@link SpliceAbort}; -1 for none (a cancelled stage resets with ZMUX_CANCELLED and stops with 0). */
     private volatile long cancelCode = -1;
+    /**
+     * Set once the caller's future cancels the splice (its own cancellation, or a completion from outside): that
+     * caller completes the future right after, so the splice, which ends on its own thread meanwhile, must not.
+     */
+    private volatile boolean futureDecides;
     /** The caller's future: cancelling it, or completing it from outside, cancels the splice. */
-    private final ZmuxFuture<SpliceResult> result = new ZmuxFuture<>(() -> { cancel(); return true; });
+    private final ZmuxFuture<SpliceResult> result = new ZmuxFuture<>(() -> { futureDecides = true; cancel(); return true; });
     private final Direction forward, reverse;
 
     /** Where {@link #drain} runs: one at a time, on a callback thread taken only while there is work. */
@@ -65,7 +70,7 @@ final class Splice {
 
     private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
         this.a = a; this.b = b; this.options = options; this.packets = packets;
-        forward = new Direction(a, b, options.aToB()); reverse = new Direction(b, a, options.bToA());
+        forward = new Direction(a, b, options.aToB().orElse(null)); reverse = new Direction(b, a, options.bToA().orElse(null));
     }
 
     static ZmuxFuture<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
@@ -75,7 +80,11 @@ final class Splice {
         try { b.claimIo(); } catch (RuntimeException error) { a.unclaimIo(); throw error; }
         try {
             Splice splice = new Splice(a, b, options, packets);
-            if (options.control() != null) options.control().attach(splice);
+            SpliceAbort abort = options.abort().orElse(null);
+            if (abort != null) {
+                abort.attach(splice);
+                splice.result.whenComplete((r, e) -> abort.detach(splice));
+            }
             splice.wake();
             return splice.result;
         } catch (RuntimeException | Error failure) { a.unclaimIo(); b.unclaimIo(); throw failure; }
@@ -85,7 +94,7 @@ final class Splice {
         cancelled.set(true); wake();
     }
 
-    /** Cancels with code through the control; false when already cancelled or ended. */
+    /** Aborts with code through the splice's {@link SpliceAbort}; false when already cancelled or ended. */
     boolean cancelWith(long code) {
         if (cancelled.get() || result.isDone()) return false;
         cancelCode = code;
@@ -136,7 +145,7 @@ final class Splice {
 
     /** A relay bug: the splice fails with it, and both streams are torn down and released. */
     private void fatal(Throwable error) {
-        result.publishFailure(error);
+        if (!futureDecides) result.publishFailure(error);
         if (cleaning) return;
         cleaning = true; dataDone = true;
         try { forward.abandon(); reverse.abandon(); }
@@ -159,9 +168,10 @@ final class Splice {
 
     private void publish(boolean cleaned) {
         if (!cleaned) {
-            result.publishFailure(new java.net.SocketTimeoutException("splice cleanup timed out: a stream's event loop did not answer within the close bound; its release stays queued"));
+            if (!futureDecides) result.publishFailure(new java.net.SocketTimeoutException("splice cleanup timed out: a stream's event loop did not answer within the close bound; its release stays queued"));
             return;
         }
+        if (futureDecides) return;
         IOException failed = forward.callbackFailure != null ? forward.callbackFailure : reverse.callbackFailure;
         if (failed != null) result.publishFailure(failed);
         else result.publish(new SpliceResult(forward.result(), reverse.result()));
@@ -225,6 +235,7 @@ final class Splice {
         private Operation<?> op;
         /** The limiter wait in progress, null while none; cancelling it refunds a grant that arrives anyway. */
         private CompletableFuture<Permit> ready;
+
         /** The grant taken for the chunk being read, null while none; what the read does not fill is refunded. */
         private Permit permit;
         /** The granted bytes behind the chunk held or being written; what is not forwarded is refunded. */
@@ -246,7 +257,7 @@ final class Splice {
         private Datagrams.StreamDatagram dgSending;
         private final Operation.Step receiveStep;
         private final Operation.Withdraw receiveWithdraw;
-        private long bytes, datagramBytes, drops, tooLarge, limited;
+        private long bytes, datagramBytes, drops, tooLarge, limited, asCapsules;
         /** Packet relay: the capsule parser of the source's bytes. */
         private final Capsule.Header capsule = new Capsule.Header();
         /** Packet relay: the value bytes of the current capsule not yet read. */
@@ -271,7 +282,7 @@ final class Splice {
         /** Packet relay: the target can take no more capsules (finished or failed). */
         private boolean targetClosed;
         /** How the direction ended; null while running, when cancelled, or after a callback failure. */
-        private SpliceResult.End end;
+        private SpliceEnd end;
         /** A limiter callback failed, and the splice completes with it. */
         private IOException callbackFailure;
         /** The stream path is in an operation on the target, so a failure it throws is the downstream side's. */
@@ -358,8 +369,8 @@ final class Splice {
                 try {
                     boolean wrote = pumpTarget();
                     moved = pumpStream() || wrote;
-                } catch (CallbackFailed failed) {
-                    stopForwarding(); callbackFailed(failed.cause); finished();
+                } catch (LimiterFailed failed) {
+                    stopForwarding(); limiterFailed();
                     moved = true;
                 } catch (IOException error) {
                     stopForwarding(); failed(error);
@@ -382,7 +393,7 @@ final class Splice {
                 case IDLE -> {
                     check();
                     if (limiter != null) { op = source.in.awaitReadableAsync(Long.MAX_VALUE); listen(op); stage = PEEK; }
-                    else startRead(sized(options.chunkSize()));
+                    else startRead(sized(options.chunk()));
                     yield true;
                 }
                 case PEEK -> {
@@ -393,7 +404,7 @@ final class Splice {
                     long available = RecvLane.readable(w);
                     if (available < 0) { endRead = true; startRead(1); yield true; }
                     if (available == 0) { stage = IDLE; yield true; }
-                    int n = sized((int) Math.min(options.chunkSize(), available));
+                    int n = sized((int) Math.min(options.chunk(), available));
                     if (packets) {
                         // Each whole capsule is acquired at once, (n, n), from its header; its value bytes then flow.
                         if (capsuleRemaining > 0) { startRead((int) Math.min(n, capsuleRemaining)); yield true; }
@@ -411,12 +422,13 @@ final class Splice {
                     if (!f.isDone() && !poked && !interrupted()) yield false;
                     ready = null;
                     if (poked || !f.isDone()) {
-                        Permit.abandon(f); check();
+                        io.zmux.internal.spi.Spi.abandon(f); check();
                         // A source reset: read again, up to its end; a held header keeps its capsule's bytes to come.
                         if (headerReady) waitGrant(capsuleHeader.position() + capsuleRemaining, capsuleHeader.position() + capsuleRemaining);
                         else stage = IDLE;
                         yield true;
                     }
+                    if (interrupted()) { io.zmux.internal.spi.Spi.abandon(f); check(); } // a cancellation or a side failure wins over the grant
                     Permit granted = granted(f);
                     check();
                     if (headerReady) { writeHeader(granted); yield true; }
@@ -459,7 +471,7 @@ final class Splice {
                     Object r = outcome(op); op = null;
                     if (!ok(r)) throw failure(r);
                     atTarget = false;
-                    end = new SpliceResult.End.Finished(); finished();
+                    end = new SpliceEnd.Finished(); finished();
                     yield true;
                 }
                 case RESET_QUERY, RESET_SOURCE, RESET_TARGET, DRAIN, RESET_SEND -> pumpReset();
@@ -485,12 +497,11 @@ final class Splice {
             ready.whenComplete(wakeOnComplete);
         }
 
-        /** The decided grant; a failing limiter fails the direction. */
-        private static Permit granted(CompletableFuture<Permit> f) throws CallbackFailed {
+        /** The decided grant; a failing limiter ends the direction. */
+        private static Permit granted(CompletableFuture<Permit> f) throws LimiterFailed {
             try { return f.join(); }
             catch (CompletionException | CancellationException error) {
-                Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
-                throw new CallbackFailed(cause instanceof CallbackFailedException failed ? failed : new CallbackFailedException("limiter failed", cause));
+                throw new LimiterFailed(error instanceof CompletionException && error.getCause() != null ? error.getCause() : error);
             }
         }
 
@@ -604,14 +615,14 @@ final class Splice {
                         // The target failed or the splice ends: the stream path reports it. A capsule cut short can be followed by nothing.
                         if (ok(r) || r == CANCELLED) targetClosed = true;
                         refund(converting.payload().length);
-                        converting = null; dropTooLarge();
+                        converting = null; drops++; // not for its size: the capsule could not be written
                     }
                 }
                 default -> {
                     int n = converting.payload().length;
                     converting = null;
-                    if (ok(r)) datagramBytes += n;
-                    else { targetClosed = true; refund(n); dropTooLarge(); }
+                    if (ok(r)) { datagramBytes += n; asCapsules++; }
+                    else { targetClosed = true; refund(n); drops++; }
                 }
             }
         }
@@ -655,17 +666,17 @@ final class Splice {
         private void dropLimited() { drops++; limited++; }
 
         /** The source ended inside a capsule: the target is reset and the source stopped with ZMUX_PACKET_ERROR. */
-        private SpliceResult.End truncated() {
+        private SpliceEnd truncated() {
             long code = io.zmux.internal.wire.TransportError.PACKET_ERROR;
             source.stop(code); target.reset(code);
-            return new SpliceResult.End.Reset(code);
+            return new SpliceEnd.Reset(code);
         }
 
         // ---- settling ----
 
         /** The stream path stops: whatever it awaits is cancelled, a taken chunk released and its unused grant refunded. */
         private void stopForwarding() {
-            if (ready != null) { Permit.abandon(ready); ready = null; }
+            if (ready != null) { io.zmux.internal.spi.Spi.abandon(ready); ready = null; }
             if (op != null) {
                 op.cancel(); // decided once it returns: a lane read's or a loop step's attempt is not left running
                 if (outcome(op) instanceof StreamRecv.Chunk c) unref(c);
@@ -698,17 +709,17 @@ final class Splice {
         private void settle(IOException error) {
             if (cancelled.get() || error instanceof InterruptedIOException) {
                 long code = cancelCode;
-                end = code >= 0 ? new SpliceResult.End.Cancelled(code) : null;
+                end = code >= 0 ? new SpliceEnd.Cancelled(code) : null;
                 if (code >= 0) abortBoth(source, target, code);
                 else abortBoth(source, target, io.zmux.internal.wire.TransportError.CANCELLED, 0); // 7.4: reset with ZMUX_CANCELLED, stop with 0
                 finished();
             } else if (error instanceof StreamResetException reset) {
                 resetCode = reset.code();
-                end = new SpliceResult.End.Reset(resetCode);
+                end = new SpliceEnd.Reset(resetCode);
                 op = onLoop(target, o -> target.session.core.sending().resetAtInUse()); listen(op);
                 stage = RESET_QUERY;
             } else if (error instanceof StreamStoppedException stopped) {
-                end = new SpliceResult.End.Stopped(stopped.code()); source.stop(stopped.code());
+                end = new SpliceEnd.Stopped(stopped.code()); source.stop(stopped.code());
                 finished();
             } else {
                 // A lost session, or a carrier failure of one side: the side it came from.
@@ -717,7 +728,7 @@ final class Splice {
                 if (error == teardown && teardownLost != null) downstream = teardownLost == target;
                 else downstream = error == writeFault.get() || (error != readFault.get() && atTarget);
                 if (teardown == null) { teardown = error; teardownLost = downstream ? target : source; }
-                end = downstream ? new SpliceResult.End.DownstreamLost() : new SpliceResult.End.UpstreamLost();
+                end = downstream ? new SpliceEnd.DownstreamLost() : new SpliceEnd.UpstreamLost();
                 abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
                 finished();
             }
@@ -782,12 +793,23 @@ final class Splice {
             settle(next);
         }
 
+        /**
+         * The direction's limiter failed in acquire: the target is reset and the source stopped with ZMUX_CANCELLED,
+         * and the direction ends {@link SpliceEnd.LimiterFailed}; the other direction goes on.
+         */
+        private void limiterFailed() {
+            long code = io.zmux.internal.wire.TransportError.CANCELLED;
+            target.reset(code); source.stop(code);
+            end = new SpliceEnd.LimiterFailed();
+            finished();
+        }
+
         /** The stream path ended: its observers go, and the target takes no more capsules. */
         private void finished() {
             stage = DONE;
             if (write != null) stopForwarding();
             targetClosed = true;
-            for (Datagrams.StreamDatagram d; (d = converted.poll()) != null;) { refund(d.payload().length); dropTooLarge(); } // never written
+            for (Datagrams.StreamDatagram d; (d = converted.poll()) != null;) { refund(d.payload().length); drops++; } // never written
             if (closeRead != null) { closeRead.run(); closeWrite.run(); }
         }
 
@@ -874,7 +896,8 @@ final class Splice {
 
         /** A packet relay writes it as a capsule at the next boundary; a bounded wait, never a queue of its own. */
         private void convert(Datagrams.StreamDatagram data) {
-            if (targetClosed || converted.size() >= CONVERTED) { refund(data.payload().length); dropTooLarge(); }
+            if (data.payload().length > io.zmux.helper.PacketStream.DEFAULT_MAX_PACKET) { refund(data.payload().length); dropTooLarge(); }
+            else if (targetClosed || converted.size() >= CONVERTED) { refund(data.payload().length); drops++; } // not for its size
             else converted.add(data);
         }
 
@@ -888,18 +911,17 @@ final class Splice {
             abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
         }
 
-        SpliceResult.Direction result() {
-            return new SpliceResult.Direction(bytes, datagramBytes, drops, tooLarge, limited, end);
+        SpliceDirection result() {
+            return new SpliceDirection(bytes, datagramBytes, drops, tooLarge, limited, asCapsules, end);
         }
     }
 
     /** Packet relay: datagrams that wait for a capsule boundary, per direction; more are dropped as too large. */
     private static final int CONVERTED = 64;
 
-    /** A limiter callback failed or broke its contract; carries what the splice completes with. */
-    private static final class CallbackFailed extends IOException {
-        final IOException cause;
-        CallbackFailed(IOException cause) { super(cause.getMessage(), cause); this.cause = cause; }
+    /** The direction's limiter failed in acquire or broke its contract: the direction ends {@link SpliceEnd.LimiterFailed}. */
+    private static final class LimiterFailed extends IOException {
+        LimiterFailed(Throwable cause) { super("limiter failed", cause); }
     }
 
     private static void abortBoth(ZmuxStream a, ZmuxStream b, long code) {

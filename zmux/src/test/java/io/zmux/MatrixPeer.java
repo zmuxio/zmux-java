@@ -93,7 +93,7 @@ public final class MatrixPeer {
         };
         var sc0 = ServerConfig.builder(gate, SERVER_KEY).acceptedProfiles(Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES, Profile.XXHFS_CHACHA, Profile.XXHFS_AES).allowRecordMode(s.multipath ? ANY_MODE : null).build();
         if (s == Scenario.APPDATA) {
-            sc0 = sc0.toBuilder().anchor(new PinAnchor(KeyId.of(KeyAlg.X25519, CLIENT_KEY.publicKey())))
+            sc0 = sc0.toBuilder().anchor(new PinAnchor(KeyId.staticKeyId(CLIENT_KEY.publicKey())))
                     .appData(only(2, "srv-msg2")).build();
         }
         if (s == Scenario.PROOF) {
@@ -175,10 +175,10 @@ public final class MatrixPeer {
         Scenario s = Scenario.of(sc);
         InetSocketAddress at = address(rest[0]);
         var cc = ClientConfig.builder();
-        byte[] node = KeyId.of(KeyAlg.X25519, SERVER_KEY.publicKey());
+        byte[] node = KeyId.staticKeyId(SERVER_KEY.publicKey());
         cc.anchor(new PinAnchor(node)).allowedProfiles(s.profile);
         if (s.profile.isPskBased()) cc.psk(HP.handle(), HP.psk());
-        if (s == Scenario.APPDATA) cc.key(CLIENT_KEY).appData(only(3, "cli-msg3"));
+        if (s == Scenario.APPDATA) cc.staticKey(CLIENT_KEY).appData(only(3, "cli-msg3"));
         if (s == Scenario.PROOF) cc.anchor(new PinAnchor(node, HexFormat.of().parseHex(rest[1]))).requirePqAuth(true);
         PipeIo p = Seal.establish(tcp(at), cc.build())
                 .toCompletableFuture().get(WAIT.toMillis(), TimeUnit.MILLISECONDS);

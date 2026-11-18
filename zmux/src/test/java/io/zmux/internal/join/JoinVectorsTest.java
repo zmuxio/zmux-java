@@ -350,7 +350,7 @@ class JoinVectorsTest {
         Acceptor a = Acceptor.accept(Hello.parseExact(hello, 0, hello.length, Framing.STREAM), Framing.STREAM, psk, null);
         byte[] reply = a.writeReply(new ReplyPayload(1, null, 0));
         SecureCarrierException e = assertThrows(SecureCarrierException.class, () -> j.readReply(reply, 0, reply.length - 1));
-        assertEquals(SecureCarrierException.Code.INCOMPLETE, e.code());
+        assertEquals(SecureCarrierException.Kind.INCOMPLETE, e.kind());
         assertEquals(reply.length, e.need());
         assertEquals(1, j.readReply(reply, 0, reply.length).decision());
         byte[] tag = j.writeConfirm(0);

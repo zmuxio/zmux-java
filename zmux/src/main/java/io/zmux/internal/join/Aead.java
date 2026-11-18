@@ -1,7 +1,7 @@
 package io.zmux.internal.join;
 
 import io.zmux.seal.SecureCarrierException;
-import static io.zmux.seal.SecureCarrierException.Code.AUTH;
+import static io.zmux.seal.SecureCarrierException.Kind.AUTH;
 
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;

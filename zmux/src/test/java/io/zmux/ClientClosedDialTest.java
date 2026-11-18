@@ -26,7 +26,7 @@ class ClientClosedDialTest {
                 calls.incrementAndGet();
                 throw new CarrierClientClosedException("closed");
             }).build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(cfg(loops).build()))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(cfg(loops).build()))) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, cfg); var s = listener.accept(Duration.ofSeconds(5))) {
@@ -45,7 +45,7 @@ class ClientClosedDialTest {
 
     @Test void aPoolDialFailingWithAClosedClientEndsThePool() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            try (var listener = ZmuxListener.of(ListenerConfig.of(cfg(loops).build()))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(cfg(loops).build()))) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, cfg(loops).build()); var s = listener.accept(Duration.ofSeconds(5))) {

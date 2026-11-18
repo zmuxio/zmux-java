@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /** Transcript signatures of Establish over real TCP: each end proves, and PQ authentication follows. */
+@org.junit.jupiter.api.Timeout(60)
 class ProofTest {
     private static final SigningKey NODE_PROOF, CLIENT_PROOF;
     static {
@@ -35,7 +36,7 @@ class ProofTest {
     }
 
     private static PinAnchor pinWithProof() {
-        return new PinAnchor(KeyId.of(KeyAlg.X25519, SealTest.NODE.publicKey()), NODE_PROOF.keyId());
+        return new PinAnchor(KeyId.staticKeyId(SealTest.NODE.publicKey()), NODE_PROOF.keyId());
     }
 
     @Test void mutualProofsGivePqAuthentication() throws Exception {

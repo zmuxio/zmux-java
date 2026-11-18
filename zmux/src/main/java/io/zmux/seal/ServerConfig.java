@@ -82,7 +82,7 @@ public final class ServerConfig {
     public Gate gate() { return gate; }
 
     /** The node's static key. */
-    public StaticKey key() { return key; }
+    public StaticKey staticKey() { return key; }
 
     /** The Profiles a client may use, without duplicates. */
     public List<Profile> acceptedProfiles() { return acceptedProfiles; }

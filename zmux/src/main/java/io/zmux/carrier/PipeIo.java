@@ -119,8 +119,8 @@ public final class PipeIo {
 
     public String variant() { return variant; }
 
-    /** Whether this carrier declares the Bound contract ({@link #withSecure}). */
-    public boolean isSecure() { return capabilities.isSecure(); }
+    /** Whether this carrier declares the Bound contract ({@link #withCarrierSecure}). */
+    public boolean isCarrierSecure() { return capabilities.isCarrierSecure(); }
 
     /** Whether this process terminates this carrier's completed TLS or QUIC handshake ({@link #withTerminatedTls}). */
     public boolean isTerminatedTls() { return capabilities.isTerminatedTls(); }
@@ -197,7 +197,7 @@ public final class PipeIo {
      * Whether this carrier meets the Bound contract, record confidentiality and integrity included; an exporter alone
      * is no such declaration.
      */
-    public PipeIo withSecure(boolean secure) { return withCapabilities(capabilities.toBuilder().secure(secure).build()); }
+    public PipeIo withCarrierSecure() { return withCapabilities(capabilities.toBuilder().carrierSecure(true).build()); }
 
     /** The padding bytes a handshake run on the carrier before this input added; the session meters them. */
     public PipeIo withHandshakePadding(long bytes) { return withCapabilities(capabilities.toBuilder().handshakePadding(bytes).build()); }
@@ -252,16 +252,19 @@ public final class PipeIo {
         Capabilities caps = Capabilities.builder().exporter(exporter).receiveMemory(memory).applicationProtocol(uc.applicationProtocol())
                 .serverName(uc.serverName()).fateGroup(uc.fateGroup()).writeOverhead((upWrites ? uc : dc).writeOverhead()).maxRecord((upWrites ? uc : dc).maxRecord())
                 .terminatedTls(uc.isTerminatedTls() && dc.isTerminatedTls())
-                .secure(uc.isSecure() && dc.isSecure() && up != null && down != null).build();
+                .carrierSecure(uc.isCarrierSecure() && dc.isCarrierSecure() && up != null && down != null).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
                 uplink.framing, uplink.label, same ? uplink.carrierConn : new Object(), caps, CarrierKind.SPLIT, uplink.variant,
                 null, null, null);
     }
 
-    /** Opens an independent, send-only lane on the same carrier connection. */
+    /**
+     * Opens an independent, send-only lane on the same carrier connection. A lane is a sending half, so the opener
+     * returns its writer; the lane shares the pipe's framing and connection.
+     */
     @FunctionalInterface
     public interface LaneOpener {
-        CompletionStage<PipeIo> open();
+        CompletionStage<PipeWriter> open();
     }
 
     /**
@@ -357,8 +360,8 @@ public final class PipeIo {
         /** See {@link PipeIo#withTerminatedTls}. */
         public boolean isTerminatedTls() { return terminatedTls; }
 
-        /** See {@link PipeIo#withSecure}. */
-        public boolean isSecure() { return secure; }
+        /** See {@link PipeIo#withCarrierSecure}. */
+        public boolean isCarrierSecure() { return secure; }
 
         /** The padding bytes a handshake run on the carrier before this input added, which the session meters. */
         public long handshakePadding() { return handshakePadding; }
@@ -435,7 +438,7 @@ public final class PipeIo {
 
             public Builder terminatedTls(boolean on) { terminatedTls = on; return this; }
 
-            public Builder secure(boolean on) { secure = on; return this; }
+            public Builder carrierSecure(boolean on) { secure = on; return this; }
 
             /**
              * The padding bytes a handshake run on the carrier before this input added.

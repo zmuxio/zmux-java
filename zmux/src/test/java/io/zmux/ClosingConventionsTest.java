@@ -49,7 +49,7 @@ final class ClosingConventionsTest {
     @Test void timedWaitsThrowAndNeverReturnNull() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 assertThrows(SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(10)));
                 Pair p = Pair.memory(cfg);
                 assertThrows(SocketTimeoutException.class, () -> p.client().awaitClosed(Duration.ofMillis(10)));
@@ -64,7 +64,7 @@ final class ClosingConventionsTest {
     @Test void aListenerShutdownShutsItsSessionsDownAndClosesThemAtItsBound() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var l = ZmuxListener.of(ListenerConfig.of(cfg));
+            var l = Zmux.listener(ListenerConfig.of(cfg));
             var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
             l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
             try (var client = Zmux.open(boot[0], Role.CLIENT, cfg); var server = l.accept(WAIT)) {
@@ -86,7 +86,7 @@ final class ClosingConventionsTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             Pair p = Pair.memory(cfg);
             ZmuxPipe pipe = p.client().pipes().getFirst();
-            pipe.update(PipeUpdate.builder().qualityBand(new QualityBand(Duration.ofMillis(5), 1.5)).build());
+            pipe.update(PipeUpdate.builder().qualityBand(QualityBand.builder().rtt(Duration.ofMillis(5)).rateRatio(1.5).build()).build());
             pipe.update(PipeUpdate.builder().clearQualityBand().build());
             var done = pipe.closed();
             assertFalse(done.isDone());

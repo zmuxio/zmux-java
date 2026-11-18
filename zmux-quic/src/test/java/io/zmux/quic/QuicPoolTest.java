@@ -80,18 +80,22 @@ class QuicPoolTest {
     static final class Fixture implements AutoCloseable {
         final EventLoops loops=EventLoops.create(3);
         final ZmuxConfig config=QuicEndpointTest.config(loops);
-        final ZmuxListener local=ZmuxListener.of(ListenerConfig.of(config)),remote=ZmuxListener.of(ListenerConfig.of(config));
+        final ZmuxListener local=Zmux.listener(ListenerConfig.of(config)),remote=Zmux.listener(ListenerConfig.of(config));
         final QuicServer server;
         final QuicClient client;
         Fixture() throws Exception {
             server=new QuicServer(QuicTest.any(),TestTls.server,QuicOptions.defaults(),remote);
             client=new QuicClient(TestTls.client,QuicOptions.defaults(),local);
         }
-        QuicPool pool(int concurrent,PoolPolicy policy) {
-            return new QuicPool(client,server.address(),"localhost",QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent),null,policy);
+        QuicPool pool(int concurrent,PoolPolicy policy) { return pool(concurrent,policy,null); }
+        QuicPool pool(int concurrent,PoolPolicy policy,java.util.function.Consumer<Throwable> rejected) {
+            var b = QuicPool.builder(client, server.address(), "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent));
+            if (policy != null) b.policy(policy);
+            if (rejected != null) b.decisionRejected(rejected);
+            return b.build();
         }
         QuicPool pool(int concurrent,long lifetime,Duration age) {
-            return new QuicPool(client,server.address(),"localhost",limits(concurrent, lifetime, age));
+            return QuicPool.builder(client, server.address(), "localhost").limits(limits(concurrent, lifetime, age)).build();
         }
         static QuicPool.Limits limits(int concurrent, long lifetime, Duration age) {
             var l = QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent);
@@ -185,7 +189,7 @@ class QuicPoolTest {
             assertNotSame(old.carrierConn(),next.carrierConn());assertNotEquals(old.capabilities().fateGroup(),next.capabilities().fateGroup());release(next);
         }
         try(var f=new Fixture();var blackhole=new java.net.DatagramSocket(QuicTest.any());
-            var pool=new QuicPool(f.client,(java.net.InetSocketAddress)blackhole.getLocalSocketAddress(),"localhost")) {
+            var pool=QuicPool.builder(f.client, (java.net.InetSocketAddress)blackhole.getLocalSocketAddress(), "localhost").build()) {
             var one=pool.openPipeAsync();var two=pool.openPipeAsync();
             assertTrue(one.cancel(false));Thread.sleep(30);assertFalse(two.isDone());
             pool.close();assertThrows(ExecutionException.class,() -> two.get(3,TimeUnit.SECONDS));
@@ -289,7 +293,7 @@ class QuicPoolTest {
             var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
             var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipeAsync())).withCount(2)
-                    .withInspectionInterval(Duration.ofMillis(5)).withBackoff(new Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
+.withBackoff(new Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
             try {
                 until(() -> maintenance.pipes().size()==2);assertEquals(1,pool.connections().size());
                 var old=maintenance.pipes().getFirst();old.abort();
@@ -305,7 +309,7 @@ class QuicPoolTest {
 
     static PipeIo get(QuicPool pool) throws Exception { return pool.openPipeAsync().get(5,TimeUnit.SECONDS); }
     @Test void policyCountSpreadsPipesOverThatManyConnections() throws Exception {
-        PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withCount(3);
+        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(3);
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
             var pipes=new ArrayList<PipeIo>();
             try {
@@ -317,9 +321,128 @@ class QuicPoolTest {
             } finally { pipes.forEach(QuicPoolTest::release); }
         }
     }
+    @Test void aLowerCountRetiresTheIdleSurplus() throws Exception {
+        var count=new AtomicInteger(3);
+        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(count.get());
+        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+            var pipes=new ArrayList<PipeIo>();
+            for (int i=0;i<3;i++) pipes.add(get(pool));
+            assertEquals(3,pool.connections().size());
+            var kept=pipes.removeFirst();
+            pipes.forEach(QuicPoolTest::release);
+            count.set(1); // the next look (at most 100 ms away) retires the two idle connections first, not the busy one
+            until(() -> pool.connections().size()==1);
+            assertEquals(1,pool.connections().getFirst().active());
+            assertFalse(pool.connections().getFirst().retiring());
+            release(kept);
+        }
+    }
+    @Test void aLowerCountRetiresBusyConnectionsTooAndTheyCloseAfterTheirLastPipe() throws Exception {
+        var count=new AtomicInteger(2);
+        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(count.get());
+        try (var f=new Fixture();var pool=f.pool(1,policy)) {
+            var one=get(pool); var two=get(pool);
+            assertEquals(2,pool.connections().size());
+            count.set(1); // both carry a pipe (idle 0, one pipe each): the younger retires
+            until(() -> pool.connections().stream().filter(QuicPool.PooledConnection::retiring).count()==1);
+            var retired=pool.connections().stream().filter(QuicPool.PooledConnection::retiring).findFirst().orElseThrow();
+            assertSame(two.carrierConn(),retired.connection(),"the least age retires first");
+            assertTrue(retired.connection().isActive(),"its pipe is not cut");
+            release(two);
+            until(() -> pool.connections().size()==1 && !pool.connections().getFirst().retiring());
+            release(one);
+        }
+    }
+    /** A dial a pipe request waits for is on-demand: not in the view's dialing, not counted, and a shrink never cancels it. */
+    @Test void anOnDemandDialIsNeitherCountedNorCancelledByAShrink() throws Exception {
+        var dialing=new java.util.concurrent.ConcurrentLinkedQueue<Integer>();
+        var since=new java.util.concurrent.ConcurrentLinkedQueue<Duration>();
+        PoolPolicy policy = v -> { dialing.add(v.dialing()); v.sinceLastDial().ifPresent(since::add); return PoolDecision.KEEP.withCount(1).withRecheck(Duration.ofMillis(10)); };
+        try (var f=new Fixture();var blackhole=new java.net.DatagramSocket(QuicTest.any());
+             var pool=QuicPool.builder(f.client,(java.net.InetSocketAddress)blackhole.getLocalSocketAddress(),"localhost").policy(policy).build()) {
+            var pending=pool.openPipeAsync(); // no connection answers: its dial stays in progress, for the request
+            until(() -> pool.appliedLooks()>=5);
+            assertFalse(pending.isDone(),"the request's dial was cancelled");
+            assertTrue(dialing.stream().allMatch(n -> n==0),"an on-demand dial is not a growth dial: "+dialing);
+            // A cancel and redial would restart the time since the last dial.
+            Duration last=Duration.ZERO;
+            for (Duration d : since) { assertTrue(d.compareTo(last)>=0,"the dial was restarted: "+since); last=d; }
+            pending.cancel(false);
+        }
+    }
+    /** A request that a connection with room was passed over for, to reach the count, waits for a growth dial: the view counts it. */
+    @Test void aDialForADivertedRequestIsStillAGrowthDial() throws Exception {
+        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofSeconds(1));
+        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+            var one=get(pool);
+            until(() -> pool.appliedLooks()>=1);
+            var growth=QuicPool.class.getDeclaredMethod("growthDial"); growth.setAccessible(true);
+            io.zmux.ZmuxFuture<PipeIo> request;
+            // Holding the lock keeps the pool's own looks out, so that the request meets the due growth dial first.
+            synchronized (pool) {
+                assertEquals(1,pool.connections().size());
+                // Until the dial spacing passed; the lock is held on purpose, so that no look of the pool starts the dial first.
+                for (long end=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(1100);System.nanoTime()<end;) java.util.concurrent.locks.LockSupport.parkNanos(10_000_000L);
+                request=pool.openPipeAsync();
+                assertTrue((Boolean) growth.invoke(pool),"the dial the request was diverted to is a growth dial");
+            }
+            release(request.get(5,TimeUnit.SECONDS)); release(one);
+        }
+    }
+    /** The look loop leaves and clears its flag in one step: a look asked for meanwhile goes on, never lost. */
+    @Test void endingTheLookLoopAndTheFlagAreOneStep() throws Exception {
+        try (var f=new Fixture();var pool=f.pool(8,v -> PoolDecision.KEEP)) {
+            var looking=QuicPool.class.getDeclaredField("looking"); looking.setAccessible(true);
+            var again=QuicPool.class.getDeclaredField("lookAgain"); again.setAccessible(true);
+            looking.setBoolean(pool,true); again.setBoolean(pool,true);
+            assertFalse(pool.endLook(),"a look was asked for meanwhile: the loop goes on");
+            assertTrue(looking.getBoolean(pool));
+            again.setBoolean(pool,false);
+            assertTrue(pool.endLook());
+            assertFalse(looking.getBoolean(pool),"leaving clears the flag in the same step");
+        }
+    }
+    /** The policy is asked on a thread of the pool's own, never under the pool's lock, and a slow policy holds back no request. */
+    @Test void thepolicyIsAskedOffTheEventLoopAndOutsideTheLock() throws Exception {
+        var pool=new AtomicReference<QuicPool>();
+        var locked=new java.util.concurrent.ConcurrentLinkedQueue<Boolean>(); var threads=new java.util.concurrent.ConcurrentLinkedQueue<Thread>();
+        var release=new java.util.concurrent.CountDownLatch(1); var asked=new java.util.concurrent.CountDownLatch(1);
+        PoolPolicy policy = v -> {
+            locked.add(Thread.holdsLock(pool.get())); threads.add(Thread.currentThread());
+            asked.countDown();
+            try { release.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return PoolDecision.KEEP;
+        };
+        try (var f=new Fixture();var p=f.pool(8,policy)) {
+            pool.set(p);
+            var pipe=get(p); // returns although the policy has not answered: no timeout, and the request does not wait for it
+            try {
+                assertTrue(asked.await(5,TimeUnit.SECONDS));
+                assertTrue(locked.stream().noneMatch(b -> b),"asked under the pool's lock");
+                assertTrue(threads.stream().noneMatch(t -> t==Thread.currentThread() || t instanceof io.netty.util.concurrent.FastThreadLocalThread),"asked on the caller's or an event loop thread");
+                assertEquals(1,p.connections().size());
+            } finally { release.countDown(); release(pipe); }
+        }
+    }
+    /** The pool grows by its own dial to the policy's count, and a lower count then retires the surplus. */
+    @Test void thePoolGrowsToTheCountByItsOwnDialAndShrinksBack() throws Exception {
+        var count=new AtomicInteger(2);
+        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(count.get()).withRecheck(Duration.ofMillis(10));
+        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+            var one=get(pool); // a connection; the policy wants two: the pool dials the second itself
+            try {
+                until(() -> pool.connections().size()==2);
+                assertTrue(pool.appliedLooks()>=1);
+                count.set(1);
+                long before=pool.appliedLooks();
+                until(() -> pool.appliedLooks()>=before+2);
+                until(() -> pool.connections().stream().filter(c -> !c.retiring()).count()==1);
+            } finally { release(one); }
+        }
+    }
     @Test void policyDialAfterSpacesAddedConnections() throws Exception {
         var since=new AtomicReference<Duration>();
-        PoolPolicy policy = v -> { since.set(v.sinceLastDial()); return PoolPolicy.Decision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(400)); };
+        PoolPolicy policy = v -> { since.set(v.sinceLastDial().orElse(null)); return PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(400)); };
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
             var pipes=new ArrayList<PipeIo>();
             try {
@@ -332,9 +455,9 @@ class QuicPoolTest {
             } finally { pipes.forEach(QuicPoolTest::release); }
         }
     }
-    @Test void policyRetireReplacesTheConnectionBeforeItsSessionsEnd() throws Exception {
+    @Test void policyRetireStopsNewPipesAndClosesAfterTheLastOne() throws Exception {
         var retire=new AtomicLong(-1);
-        PoolPolicy policy = v -> PoolPolicy.Decision.KEEP.withRetireConnections(retire.get()<0 ? Set.of() : Set.of(retire.get()));
+        PoolPolicy policy = v -> PoolDecision.KEEP.withRetireConnections(retire.get()<0 ? Set.of() : Set.of(retire.get()));
         try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
@@ -343,24 +466,26 @@ class QuicPoolTest {
                 var spare=get(pool);assertSame(old,spare.carrierConn());
                 retire.set(first.capabilities().fateGroup());
                 release(spare); // the release asks the policy, which retires the connection
-                until(() -> pool.connections().size()==2 && pool.connections().stream().anyMatch(c -> !c.retiring()));
-                assertTrue(old.isActive());
+                until(() -> pool.connections().size()==1 && pool.connections().getFirst().retiring());
+                assertTrue(old.isActive(), "a retired connection keeps the pipes it carries");
                 QuicTest.transfer(workers,a,b,2,64<<10);
+                // The pool dials a new connection when a pipe needs room: the retired one takes none.
                 var next=get(pool);assertNotSame(old,next.carrierConn());release(next);
                 QuicEndpointTest.closed(a,b);
                 until(() -> !old.isActive() && pool.connections().size()==1);
             } finally { QuicEndpointTest.closed(a,b); }
         }
     }
-    @Test void policyExceptionsAndNullDecisionsKeepThePoolBehaviour() throws Exception {
-        var calls=new AtomicInteger();
+    @Test void policyExceptionsAndNullDecisionsAreRejectedAndKeepThePoolBehaviour() throws Exception {
+        var calls=new AtomicInteger(); var rejected=new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
         PoolPolicy policy = v -> { if (calls.incrementAndGet()%2==0) return null; throw new IllegalStateException("policy failure"); };
-        try (var f=new Fixture();var pool=f.pool(2,policy)) {
+        try (var f=new Fixture();var pool=f.pool(2,policy,rejected::add)) {
             var pipes=new ArrayList<PipeIo>();
             try {
                 for (int i=0;i<3;i++) pipes.add(get(pool));
                 assertEquals(2,pool.connections().size());
                 assertTrue(calls.get()>=3);
+                until(() -> rejected.stream().anyMatch(e -> e instanceof NullPointerException) && rejected.stream().anyMatch(e -> e instanceof IllegalStateException));
             } finally { pipes.forEach(QuicPoolTest::release); }
             until(() -> pool.connections().stream().allMatch(c -> c.active()==0));
         }
@@ -399,46 +524,57 @@ class QuicPoolTest {
             until(() -> pool.connections().stream().noneMatch(c -> c.fateGroup()==fate));
         }
     }
-    @Test void handWrittenRecheckIsHonouredAndFloored() throws Exception {
+    /** The recheck's floor and cap as pure arithmetic: no clock, no count of looks in a window. */
+    @Test void aRecheckIsFlooredAndCappedByTheInterval() {
+        long tick=1_000_000; // nanoseconds in one tick of 1 ms
+        assertEquals(10*tick,QuicPool.recheckDelay(PoolDecision.KEEP.withRecheck(Duration.ofNanos(1))),"the 10 ms floor");
+        assertEquals(20*tick,QuicPool.recheckDelay(PoolDecision.KEEP.withRecheck(Duration.ofMillis(20))));
+        assertEquals(100*tick,QuicPool.recheckDelay(PoolDecision.KEEP.withRecheck(Duration.ofSeconds(30))),"a long recheck adds nothing to the interval");
+        assertEquals(100*tick,QuicPool.recheckDelay(PoolDecision.KEEP),"unset: the maintenance interval");
+    }
+    /** A policy that asks for a recheck is asked again by it, within a generous bound. */
+    @Test void aShortRecheckAsksAgain() throws Exception {
         var calls=new AtomicInteger();
-        PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolPolicy.Decision.KEEP.withRecheck(Duration.ofNanos(1)); };
+        PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolDecision.KEEP.withRecheck(Duration.ofNanos(1)); };
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
             var pipe=get(pool);
             try {
                 int before=calls.get();
-                Thread.sleep(300);
-                int n=calls.get()-before;
-                assertTrue(n>=5, n+" rechecks in 300 ms");
-                assertTrue(n<=45, n+" rechecks in 300 ms: the 10 ms floor does not hold");
+                until(() -> calls.get()>=before+5);
             } finally { release(pipe); }
         }
     }
     /** A recheck that fires after a newer one was scheduled leaves the newer one pending. */
     @Test void aStaleRecheckKeepsTheNewerOne() throws Exception {
         var calls=new AtomicInteger();
-        PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolPolicy.Decision.KEEP.withRecheck(Duration.ofSeconds(30)); };
+        PoolPolicy policy = v -> { calls.incrementAndGet(); return PoolDecision.KEEP.withRecheck(Duration.ofSeconds(30)); };
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
             var pipe=get(pool);
             try {
+                var looking=QuicPool.class.getDeclaredField("looking"); looking.setAccessible(true);
+                var lookAgain=QuicPool.class.getDeclaredField("lookAgain"); lookAgain.setAccessible(true);
                 var recheck=QuicPool.class.getDeclaredField("recheck"); recheck.setAccessible(true);
                 var generation=QuicPool.class.getDeclaredField("recheckGeneration"); generation.setAccessible(true);
                 var fired=QuicPool.class.getDeclaredMethod("rechecked", long.class); fired.setAccessible(true);
-                Object pending; long g;
-                synchronized (pool) { pending=recheck.get(pool); g=(long) generation.get(pool); }
-                assertNotNull(pending);
-                int before=calls.get();
-                fired.invoke(pool, g-1); // an older recheck, replaced while it fired
-                synchronized (pool) { assertSame(pending, recheck.get(pool), "the newer recheck was dropped"); }
-                assertEquals(before, calls.get(), "a stale recheck asked the policy");
-                fired.invoke(pool, g); // the pending one
-                assertTrue(calls.get()>before);
+                // Under the pool's lock no look can start or finish, so the asking is read off its two flags.
+                synchronized (pool) {
+                    Object pending=recheck.get(pool); long g=(long) generation.get(pool);
+                    assertNotNull(pending);
+                    boolean wasLooking=(boolean) looking.get(pool), wasAgain=(boolean) lookAgain.get(pool);
+                    fired.invoke(pool, g-1); // an older recheck, replaced while it fired
+                    assertSame(pending, recheck.get(pool), "the newer recheck was dropped");
+                    assertEquals(wasLooking, looking.get(pool), "a stale recheck asked the policy");
+                    assertEquals(wasAgain, lookAgain.get(pool), "a stale recheck asked the policy");
+                    fired.invoke(pool, g); // the pending one
+                    assertTrue((boolean) looking.get(pool) || (boolean) lookAgain.get(pool), "the pending recheck did not ask the policy");
+                }
             } finally { release(pipe); }
         }
     }
     /** A connection member is idle 0 while it carries a pipe, else since its last pipe ended (or since it was added). */
     @Test void connectionIdleFollowsItsPipes() throws Exception {
-        var seen=new AtomicReference<List<PoolPolicy.Member>>();
-        PoolPolicy policy = v -> { seen.set(List.copyOf(v.members())); return PoolPolicy.Decision.KEEP.withRecheck(Duration.ofMillis(10)); };
+        var seen=new AtomicReference<List<PoolMember>>();
+        PoolPolicy policy = v -> { seen.set(List.copyOf(v.members())); return PoolDecision.KEEP.withRecheck(Duration.ofMillis(10)); };
         try (var f=new Fixture();var pool=f.pool(8,policy)) {
             var pipe=get(pool);
             Thread.sleep(50);

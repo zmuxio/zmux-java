@@ -189,7 +189,7 @@ public final class SealedTransport implements Transport, Inbound {
     /** Opens one record for the session, into a buffer the session may keep. */
     private boolean open(ByteBuffer ct) {
         if (ct.remaining() < Suite.TAG_LEN) {
-            openFailed(new SecureCarrierException(SecureCarrierException.Code.MALFORMED));
+            openFailed(new SecureCarrierException(SecureCarrierException.Kind.MALFORMED));
             return false;
         }
         ByteBuffer plain = ByteBuffer.allocate(ct.remaining() - Suite.TAG_LEN);

@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
+@org.junit.jupiter.api.Timeout(60)
 class CancellationTest {
     static int registrations(Cancellation source) throws Exception {
         var field = Cancellation.class.getDeclaredField("listeners"); field.setAccessible(true);

@@ -249,9 +249,12 @@ public final class StreamSend {
         return Math.min(room, allowed);
     }
 
+    /** The bound a requested send buffer takes: never below 16 KiB. */
+    public static long bufferLimit(long n) { return Math.max(n, 16 << 10); }
+
     /** Bounds the part's written-but-unreleased bytes. */
     public void setSendBuffer(Stream st, long n) {
-        st.snd.bufLimit = Math.max(n, 16 << 10);
+        st.snd.bufLimit = bufferLimit(n);
         changed(st);
     }
 

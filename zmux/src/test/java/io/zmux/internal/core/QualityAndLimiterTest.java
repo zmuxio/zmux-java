@@ -25,6 +25,24 @@ class QualityAndLimiterTest {
         assertNull(session.outbox().pollEvent());
     }
 
+    @Test void aPipeWhoseBandIsOffReportsNothingWhateverTheSessionBand() throws Exception {
+        Session session = new Session(CoreConfig.defaults(), 0);
+        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false);
+        session.pipes().attachBootstrap(info, info, null);
+        session.setQualityBand(-1, 10, 0, 0); // the session's band: every 10 ns of RTT change
+        assertTrue(session.offQualityBand(0));
+        Pipe pipe = session.pipes.get(0);
+        Poke.set(pipe.out().snd.rtt(), "has", true); Poke.set(pipe.out().snd.rtt(), "smoothed", 100);
+        session.quality().sample(pipe);
+        Poke.set(pipe.out().snd.rtt(), "smoothed", 500); session.quality().sample(pipe);
+        assertNull(session.outbox().pollEvent());
+        // Cleared, it follows the session's band again.
+        assertTrue(session.clearQualityBand(0));
+        session.quality().sample(pipe);
+        Poke.set(pipe.out().snd.rtt(), "smoothed", 900); session.quality().sample(pipe);
+        assertEquals(Event.Kind.PIPE_QUALITY, session.outbox().pollEvent().kind());
+    }
+
     @Test void delayedWindowPermissionCannotSpendAnExhaustedBudget() {
         CoreConfig config = CoreConfig.builder().windowPredicate(true).budget(new MemoryBudget(100, null)).build();
         Session session = new Session(config, 0);

@@ -19,7 +19,7 @@ class MaxRecordTest {
 
     static ZmuxConfig config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
-                .noProbation().datagrams(true).build();
+                .noProbation().enableDatagrams(true).build();
     }
 
     /** The pipe input with its writer recording the largest message (one record on a message carrier). */
@@ -81,7 +81,7 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
-            try (var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var pair = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("open")));
                 try (var client = Zmux.open(recorded(pair[0].withMaxRecord(CAP), largest, records), Role.CLIENT, cfg);
@@ -96,7 +96,7 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var pair = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(recorded(pair[1].withMaxRecord(CAP), largest, records), JoinHint.inBand(TestAddr.peer("accepted")));
                 try (var client = a.open(pair[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
@@ -110,7 +110,7 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
@@ -133,7 +133,7 @@ class MaxRecordTest {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
             var serverLargest = new AtomicInteger(); var serverRecords = new AtomicInteger();
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
@@ -157,7 +157,7 @@ class MaxRecordTest {
     @Test void sealedJoinBelowTheFloorIsRefused() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
@@ -180,7 +180,7 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1].withMaxRecord(CAP), JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(recorded(bootstrap[0].withMaxRecord(CAP), largest, records), Role.CLIENT);
@@ -213,7 +213,7 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var gate = new NonBlockingCallsTest.Gate();
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(gate.wrap(bootstrap[0]), Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
@@ -248,15 +248,15 @@ class MaxRecordTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var largest = new AtomicInteger(); var records = new AtomicInteger();
-            try (var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var pair = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(pair[1].withMaxRecord(CAP), JoinHint.inBand(TestAddr.peer("open")));
                 try (var client = Zmux.open(recorded(pair[0].withMaxRecord(CAP), largest, records), Role.CLIENT, cfg);
                      var server = b.accept(Duration.ofSeconds(5))) {
-                    var tooLarge = assertThrows(PreambleTooLargeException.class, () -> client.openStream(Preamble.openInfo(new byte[5000])));
+                    var tooLarge = assertThrows(PreambleTooLargeException.class, () -> client.openStream(Preamble.builder().openInfo(new byte[5000]).build()));
                     assertEquals(4096, tooLarge.max(), "the peer's bound, within the record floor");
                     int info = 4000; // with its TLV header, near the 4096-byte bound
-                    try (var s = client.openStream(Preamble.openInfo(new byte[info]))) {
+                    try (var s = client.openStream(Preamble.builder().openInfo(new byte[info]).build())) {
                         s.write(new byte[CAP * 2]); s.finish();
                         try (var t = server.acceptStream(Duration.ofSeconds(5))) {
                             assertEquals(0, t.id(), "the refused open took no stream");

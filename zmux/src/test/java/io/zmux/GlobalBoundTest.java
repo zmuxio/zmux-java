@@ -54,7 +54,7 @@ class GlobalBoundTest {
 
     /** With maxPending 1, a carrier occupied in one stage leaves no slot: a new carrier is closed at once, counted rejected, nothing written. */
     static void holdsTheSlot(String stage, ListenerConfig.Builder b, Consumer<ZmuxListener> occupy) throws Exception {
-        try (var l = ZmuxListener.of(b.maxPending(1).build())) {
+        try (var l = Zmux.listener(b.maxPending(1).build())) {
             occupy.accept(l);
             Thread.sleep(50); // the occupying carrier reaches its stage
             long rejected = l.stats().rejected();
@@ -68,9 +68,9 @@ class GlobalBoundTest {
     @Test void everyStageBeforeASessionHoldsASlot() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var never = new CompletableFuture<Admission.Decision>();
-            Admission deciding = Admission.of(1, (info, prefix, deadline) -> never).withPeekTimeout(Duration.ofSeconds(30));
-            Admission more = Admission.of(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.more(2)))
-                    .withMaxPeek(2).withPeekTimeout(Duration.ofSeconds(30));
+            Admission deciding = Admission.builder(1, (info, prefix, deadline) -> never).peekTimeout(Duration.ofSeconds(30)).build();
+            Admission more = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.more(2)))
+                    .maxPeek(2).peekTimeout(Duration.ofSeconds(30)).build();
             // The handshake: a slot reserved by an entry before its outer handshake.
             holdsTheSlot("handshake", base(loops), l -> assertNotNull(l.adapter().reserve(TestAddr.peer("a"), null)));
             // The admission's prefix read, then its decision.
@@ -97,10 +97,10 @@ class GlobalBoundTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var never = new CompletableFuture<Admission.Decision>();
             // Byte 1 stalls; anything else waits for a decision that never comes.
-            Admission adm = Admission.of(1, (info, prefix, deadline) -> prefix.get(0) == 1
+            Admission adm = Admission.builder(1, (info, prefix, deadline) -> prefix.get(0) == 1
                             ? CompletableFuture.completedFuture(Admission.Decision.STALL) : never)
-                    .withPeekTimeout(Duration.ofSeconds(30)).withStall(Duration.ofSeconds(30), Duration.ofSeconds(30));
-            try (var l = ZmuxListener.of(base(loops).maxPending(4).admission(adm).build())) {
+                    .peekTimeout(Duration.ofSeconds(30)).stall(Duration.ofSeconds(30), Duration.ofSeconds(30)).build();
+            try (var l = Zmux.listener(base(loops).maxPending(4).admission(adm).build())) {
                 Fake s1 = handle(l, "s1"); s1.send((byte) 1);
                 PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
                 Fake s2 = handle(l, "s2"); s2.send((byte) 1);
@@ -155,7 +155,7 @@ class GlobalBoundTest {
 
     @Test void unlimitedNeverClosesForTheBound() throws Exception {
         try (EventLoops loops = EventLoops.create(2);
-             var l = ZmuxListener.of(base(loops).noMaxPending().build())) {
+             var l = Zmux.listener(base(loops).noMaxPending().build())) {
             assertTrue(base(loops).noMaxPending().build().maxPending().isEmpty());
             assertEquals(1024, base(loops).build().maxPending().orElseThrow());
             var all = new java.util.ArrayList<Fake>();

@@ -18,7 +18,7 @@ class DatagramPipesTest {
     @Test void theMaximumFollowsTheUsablePipes() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = MaxRecordTest.config(loops);
-            try (var a = ZmuxListener.of(ListenerConfig.of(cfg)); var b = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
                 var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
                 b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
                 try (var client = a.open(bootstrap[0], Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {

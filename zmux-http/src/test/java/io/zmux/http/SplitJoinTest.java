@@ -30,8 +30,7 @@ class SplitJoinTest {
              var c = f.client(b -> b)) {
             try (var s = Zmux.open(c.pipe(f.base, Map.of(), PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, f.config);
                  var server = f.listener.accept(Duration.ofSeconds(5))) {
-                var pool = PipePool.join(a -> List.of(c.splitJoin(a.session(), f.base, Map.of(), null, a.options())))
-                        .withInspectionInterval(Duration.ofMillis(5));
+                var pool = PipePool.join(a -> List.of(c.splitJoin(a.session(), f.base, Map.of(), null, a.options())));
                 try (var run = s.maintainPipes(pool)) {
                     await(() -> run.pipes().size() == 1);
                     List<ZmuxPipe> first = run.pipes();

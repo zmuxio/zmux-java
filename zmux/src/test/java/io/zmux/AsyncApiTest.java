@@ -59,7 +59,7 @@ class AsyncApiTest {
         }
     }
     @Test void cancelledAcceptAndCreditWaitDoNotConsumeAnotherStreamsSlot() throws Exception {
-        try (var loops = EventLoops.create(2); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build())) {
+        try (var loops = EventLoops.create(2); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).maxIncomingStreams(4).build())) {
             var accept = pair.server().acceptStreamAsync(); assertTrue(accept.cancel(true));
             var held = new ArrayList<ZmuxStream>();
             for (int i = 0; i < 4; i++) held.add(get(pair.client().openStreamAsync()));
@@ -121,7 +121,7 @@ class AsyncApiTest {
             var error = assertThrows(ExecutionException.class, () -> get(next));
             assertInstanceOf(SocketTimeoutException.class, error.getCause()); assertEquals(0, destination.position());
             assertTrue(first.cancel(true));
-            receiver.setReadTimeout(null); sender.write(new byte[] {3});
+            receiver.clearReadTimeout(); sender.write(new byte[] {3});
             var got = ByteBuffer.allocate(1); assertEquals(1, get(receiver.readAsync(got))); assertEquals(3, got.get(0));
         }
     }
@@ -193,7 +193,7 @@ class AsyncApiTest {
             var failure = assertThrows(ExecutionException.class, () -> get(timed));
             assertInstanceOf(SocketTimeoutException.class, failure.getCause());
             assertFalse(timed.isCancelled()); assertEquals(0, destination.position());
-            receiver.setReadTimeout(null); sender.write(new byte[] {11});
+            receiver.clearReadTimeout(); sender.write(new byte[] {11});
             var next = ByteBuffer.allocate(1); assertEquals(1, get(receiver.readAsync(next)));
             assertEquals(11, next.get(0)); assertEquals(0, destination.position()); sender.close(); receiver.close();
         }

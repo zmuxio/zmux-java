@@ -30,8 +30,8 @@ class StatsTest {
     @Test
     void streamAndSessionCountsFollowTheirEvents() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingStreams(4).build();
-            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+            ZmuxConfig server = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingStreams(4).build();
+            ZmuxConfig client = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
             PipeIo[] p = MemoryPipe.pair(Framing.BYTE_STREAM);
             PipeIo labelled = new PipeIo(p[0].reader(), p[0].writer(), p[0].framing(), "memory-a", p[0].carrierConn()).withCapabilities(p[0].capabilities());
             Future<ZmuxSession> sf = ex.submit(() -> Zmux.open(p[1], Role.SERVER, server));
@@ -71,7 +71,7 @@ class StatsTest {
                 assertEquals(data.length, w.bytesSent(), "one copy of each byte without multipath");
                 assertEquals(data.length, w.bytesAcknowledged(), "passed to the carrier");
                 assertEquals(0, w.sendBuffered());
-                assertTrue(w.pipeId().isEmpty(), "no affinity binding outside multipath");
+                assertTrue(w.pipe().isEmpty(), "no affinity binding outside multipath");
 
                 // Datagrams: session and stream counts and bytes, then a stream's full queue.
                 assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[100])));
@@ -225,15 +225,15 @@ class StatsTest {
                 ZmuxSession s = sf.get(5, TimeUnit.SECONDS);
                 // The peer's limit is its pipe count and a headroom of 8: joins beyond it are refused.
                 int added = 0;
-                long refusedPipe = -1;
+                boolean refusedSeen = false;
                 for (int i = 0; i < 14 && c.stats().joinRefusals() == 0; i++) {
                     try { c.addPipe(l.localAddress(), PipeOptions.defaults()); added++; }
-                    catch (JoinRefusedException refused) { refusedPipe = refused.pipeId().orElseThrow().value(); }
+                    catch (JoinRefusedException refused) { refusedSeen = true; }
                     catch (IOException failed) { /* Counted below. */ }
                     Thread.sleep(5);
                 }
                 PipePoolTest.await(() -> c.stats().joinRefusals() == 1);
-                assertTrue(refusedPipe > 0, "the refusal names the refused pipe");
+                assertTrue(refusedSeen, "the add fails with the refusal");
                 assertEquals(9, l.stats().joins(), "with the bootstrap pipe, two pipes and the headroom");
                 int joined = added;
                 PipePoolTest.await(() -> l.stats().refused() >= 1 && l.stats().joins() + l.stats().refused() >= joined + 1);

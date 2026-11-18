@@ -33,7 +33,7 @@ class QuicEndpointTest {
     @Test void responderJoinsAnInitiatedSessionAndKeepsTheSharedConnectionAlive() throws Exception {
         try (EventLoops loops = EventLoops.create(4); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops); var options = QuicOptions.defaults();
-            try (var local = ZmuxListener.of(ListenerConfig.of(cfg)); var remote = ZmuxListener.of(ListenerConfig.of(cfg));
+            try (var local = Zmux.listener(ListenerConfig.of(cfg)); var remote = Zmux.listener(ListenerConfig.of(cfg));
                  var server = new QuicServer(QuicTest.any(),TestTls.server,options,remote);
                  var client = new QuicClient(TestTls.client,options,local)) {
                 var a = client.connectAsync(server.address(),"localhost").get(10,TimeUnit.SECONDS);
@@ -56,7 +56,7 @@ class QuicEndpointTest {
     @Test void freshJoinedConnectionsKeepTheSameListenerRoutingInBothDirections() throws Exception {
         try (EventLoops loops = EventLoops.create(4); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops); var options = QuicOptions.defaults();
-            try (var local = ZmuxListener.of(ListenerConfig.of(cfg)); var remote = ZmuxListener.of(ListenerConfig.of(cfg));
+            try (var local = Zmux.listener(ListenerConfig.of(cfg)); var remote = Zmux.listener(ListenerConfig.of(cfg));
                  var server = new QuicServer(QuicTest.any(),TestTls.server,options,remote);
                  var client = new QuicClient(TestTls.client,options,local)) {
                 var a = client.connectAsync(server.address(),"localhost").get(10,TimeUnit.SECONDS);
@@ -76,7 +76,7 @@ class QuicEndpointTest {
     @Test void cancellingAReversePipeReturnsOnlyItsStreamAndRejectsForeignConnections() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops); var options = QuicOptions.defaults();
-            try (var local = ZmuxListener.of(ListenerConfig.of(cfg)); var remote = ZmuxListener.of(ListenerConfig.of(cfg));
+            try (var local = Zmux.listener(ListenerConfig.of(cfg)); var remote = Zmux.listener(ListenerConfig.of(cfg));
                  var server = new QuicServer(QuicTest.any(),TestTls.server,options,remote);
                  var client = new QuicClient(TestTls.client,options,local)) {
                 var a = client.connectAsync(server.address(),"localhost").get(10,TimeUnit.SECONDS);
@@ -103,7 +103,7 @@ class QuicEndpointTest {
     @Test void duplicateResolutionRejoinsThroughQuicAfterTheLosingConnectionCloses() throws Exception {
         try (EventLoops loops = EventLoops.create(4); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops); var options = QuicOptions.defaults();
-            try (var left = ZmuxListener.of(ListenerConfig.of(cfg)); var right = ZmuxListener.of(ListenerConfig.of(cfg));
+            try (var left = Zmux.listener(ListenerConfig.of(cfg)); var right = Zmux.listener(ListenerConfig.of(cfg));
                  var leftServer = new QuicServer(QuicTest.any(),TestTls.server,options,left);
                  var rightServer = new QuicServer(QuicTest.any(),TestTls.server,options,right);
                  var leftClient = new QuicClient(TestTls.client,options,left);
@@ -136,9 +136,9 @@ class QuicEndpointTest {
     @Test void listenerRemainsTheConfigurationAuthorityAndRejectsMismatchedAlpn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops); var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(cfg)); var server = new QuicServer(QuicTest.any(),TestTls.server,options,listener);
+            try (var listener = Zmux.listener(ListenerConfig.of(cfg)); var server = new QuicServer(QuicTest.any(),TestTls.server,options,listener);
                  var backed = new QuicClient(TestTls.client,options,listener); var plain = new QuicClient(TestTls.client,options);
-                 var mismatched = ZmuxListener.of(ListenerConfig.of(ZmuxConfig.builder().eventLoops(loops).alpn(java.util.List.of("another-protocol")).build()));
+                 var mismatched = Zmux.listener(ListenerConfig.of(ZmuxConfig.builder().eventLoops(loops).alpn(java.util.List.of("another-protocol")).build()));
                  var wrong = new QuicClient(TestTls.client,options,mismatched)) {
                 assertThrows(ExecutionException.class,() -> backed.connectAsync(server.address(),"localhost",cfg).get(3,TimeUnit.SECONDS));
                 assertThrows(ExecutionException.class,() -> plain.connectAsync(server.address(),"localhost").get(3,TimeUnit.SECONDS));

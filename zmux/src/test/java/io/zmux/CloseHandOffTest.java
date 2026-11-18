@@ -68,7 +68,7 @@ class CloseHandOffTest {
     @Test void aCarrierThatTakesNothingEndsTheCloseAtTheBound() throws Exception {
         long saved = io.zmux.internal.core.Session.closeLimit;
         io.zmux.internal.core.Session.closeLimit = TimeUnit.MILLISECONDS.toNanos(300);
-        try (EventLoops loops = EventLoops.create(2); var listener = ZmuxListener.of(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
+        try (EventLoops loops = EventLoops.create(2); var listener = Zmux.listener(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
             listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("stall"))).closed();
             var writer = new Stalling(io[0].writer());
@@ -203,13 +203,13 @@ class CloseHandOffTest {
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 300, PipeOptions.defaults());
             assertTrue(System.nanoTime() - t0 >= TimeUnit.MILLISECONDS.toNanos(250), "returned before the Confirm reached the acceptor");
             assertTrue(PeerAttachedTest.held(f.server, p));
-            p.awaitPeerAttached(Duration.ZERO);
+            p.awaitAttached(Duration.ZERO);
 
             long t1 = System.nanoTime();
             ZmuxPipe early = PeerAttachedTest.lateJoin(f, 300, NO_WAIT);
             assertTrue(System.nanoTime() - t1 < TimeUnit.MILLISECONDS.toNanos(250), "returnOnReply waited");
             assertFalse(PeerAttachedTest.held(f.server, early));
-            early.awaitPeerAttached(Duration.ofSeconds(3));
+            early.awaitAttached(Duration.ofSeconds(3));
         }
     }
 
@@ -234,7 +234,7 @@ class CloseHandOffTest {
             // The Confirm is held past the test: only the removal can end the add.
             var add = workers.submit(() -> PeerAttachedTest.lateJoin(f, 60_000, PipeOptions.defaults()));
             // Joined (the Reply verified) but not attached: the acceptor has not read the Confirm.
-            PipePoolTest.await(() -> f.client.pipeStats().stream().anyMatch(q -> q.pipeId().value() != 0 && q.outbound() == PipeState.Outbound.ACTIVE));
+            PipePoolTest.await(() -> f.client.pipeStats().stream().anyMatch(q -> q.pipe().value() != 0 && q.outbound() == PipeState.Outbound.ACTIVE));
             ZmuxPipe removed = f.client.pipes().stream().filter(q -> q.id().value() != 0).findFirst().orElseThrow();
             removed.abort();
             var e = assertThrows(ExecutionException.class, () -> add.get(3, TimeUnit.SECONDS));
@@ -244,7 +244,7 @@ class CloseHandOffTest {
             assertTrue(removed.stats().isPresent(), "the add waited for the retirement");
 
             var ended = workers.submit(() -> PeerAttachedTest.lateJoin(f, 2_000, PipeOptions.defaults()));
-            PipePoolTest.await(() -> f.client.pipeStats().stream().anyMatch(q -> q.pipeId().value() != 0 && q.outbound() == PipeState.Outbound.ACTIVE));
+            PipePoolTest.await(() -> f.client.pipeStats().stream().anyMatch(q -> q.pipe().value() != 0 && q.outbound() == PipeState.Outbound.ACTIVE));
             f.client.close();
             var c = assertThrows(ExecutionException.class, () -> ended.get(3, TimeUnit.SECONDS));
             assertInstanceOf(java.io.IOException.class, c.getCause());
@@ -311,7 +311,7 @@ class CloseHandOffTest {
 
     /** close returns only once the carrier's write side is shut, not when its shutdown is merely requested. */
     @Test void closeReturnsAfterTheWriteSideIsShut() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var listener = ZmuxListener.of(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
+        try (EventLoops loops = EventLoops.create(2); var listener = Zmux.listener(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
             listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("slow-shut"))).closed();
             var shut = new java.util.concurrent.atomic.AtomicLong();

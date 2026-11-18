@@ -100,9 +100,9 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         });
     }
 
-    /** The events a queue limit never discards: the session's end and a pipe direction's terminal state. */
+    /** The events a full backlog never discards: the session's establishment and its end; every other event that arrives to a full backlog is dropped and counted. */
     private static boolean terminal(Event e) {
-        return e.kind() == Event.Kind.CLOSED || e.pipeTerminal();
+        return e.kind() == Event.Kind.CLOSED || e.kind() == Event.Kind.ESTABLISHED;
     }
 
     private void runHooks() {
@@ -127,13 +127,16 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                 callbacks.execute(() -> {
                     // tryAcquire(n, n) for the whole payload; a failing limiter counts as nothing taken.
                     boolean accepted = data.active() && io.zmux.helper.Permit.police(hooks.datagramReceive(), data.bytes());
-                    post(() -> {
+                    // The grant was taken: it is refunded when the queue refuses the datagram, and here when the session
+                    // is gone and cannot take the answer (this runs on the callback context, not on the loop).
+                    if (!post(() -> {
                         receiveHookBusy = false;
-                        // The grant was taken; it is refunded when the queue refuses the datagram.
                         if (!core.deliverDatagram(data, !accepted) && accepted) {
                             callbacks.execute(() -> io.zmux.helper.Permit.refund(hooks.datagramReceive(), data.bytes()));
                         }
-                    });
+                    }) && accepted) {
+                        io.zmux.helper.Permit.refund(hooks.datagramReceive(), data.bytes());
+                    }
                 });
             }
         }
@@ -168,6 +171,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         pickers = new PickerBridge(core, hooks.picker());
         mailbox = new Mailbox(loop, this);
         events = new EventQueue();
+        LaneRoutes.add(this); // the process routes lanes naming this session's Lane Key to it
     }
 
     /** The session's command queue. */
@@ -574,10 +578,16 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     private void claim(OfferedHello o, Joins.PeerJoin pj, Joins.JoinCarrier jc, Runnable edge, io.zmux.carrier.HandshakeShaper.UnitPlan plan) {
         Transport c = o.c;
-        Joins.Claimed claimed = core.claimHello(pj, jc, plan, c.info().carrier().writeOverhead(), Math.max(o.hello.consumed(), o.skip));
+        Joins.Claimed claimed = core.claimHello(pj, jc, plan, c.info().carrier().writeOverhead(), Math.max(o.hello.consumed(), o.skip),
+                o.maxUnconfirmed);
         markDirty();
         switch (claimed.result()) {
-            case ACCEPTED -> new AcceptorGate(o, pj, jc, edge).begin(claimed.reply());
+            case ACCEPTED -> {
+                // The session's bound on Unconfirmed carriers: the core named the oldest, closed as a failed join first.
+                AcceptorGate evicted = claimed.evicted() == null ? null : unconfirmed.get(claimed.evicted());
+                if (evicted != null) evicted.drop(ListenerHub.Outcome.REFUSED);
+                new AcceptorGate(o, pj, jc, edge).begin(claimed.reply());
+            }
             case REFUSED -> {
                 if (edge != null) edge.run();
                 o.slot.settled();
@@ -618,9 +628,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         }
 
         void begin(byte[] reply) {
-            // The listener's bound on Unconfirmed attachments: a new one closes the oldest.
-            if (unconfirmed.size() >= o.maxUnconfirmed) unconfirmed.getFirst().drop(ListenerHub.Outcome.REJECTED);
-            unconfirmed.addLast(this);
+            if (!confirmed) unconfirmed.put(pj, this);
             loop.schedule(this, Time.add(o.slotAt, joinWait()));
             o.c.taken();
             o.c.start(this);
@@ -631,7 +639,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         void drop(ListenerHub.Outcome how) {
             if (done) return;
             done = true;
-            unconfirmed.remove(this);
+            if (unconfirmed.remove(pj) != null) core.unconfirmedEnded(pj);
             loop.schedule(this, Time.NEVER);
             o.c.close(null);
             edge.run();
@@ -646,7 +654,8 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                 return;
             }
             done = true;
-            unconfirmed.remove(this);
+            unconfirmed.remove(pj);
+            core.unconfirmedEnded(pj); // a confirmation that then fails to finish holds no slot either
             loop.schedule(this, Time.NEVER);
             io.zmux.internal.join.Result result;
             Joins.JoinResult res;
@@ -696,7 +705,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             try {
                 n = pj.readConfirm(b, 0, b.length);
             } catch (io.zmux.seal.SecureCarrierException e) {
-                if (e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE) return 0;
+                if (e.kind() == io.zmux.seal.SecureCarrierException.Kind.INCOMPLETE) return 0;
                 drop(ListenerHub.Outcome.REJECTED);
                 return GONE;
             }
@@ -734,7 +743,8 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     }
 
     private final java.util.HashMap<Long, JoinerGate> joinerGates = new java.util.HashMap<>();
-    private final java.util.ArrayDeque<AcceptorGate> unconfirmed = new java.util.ArrayDeque<>();
+    /** The Unconfirmed carriers by their join; the core keeps their order and bound. */
+    private final java.util.IdentityHashMap<Joins.PeerJoin, AcceptorGate> unconfirmed = new java.util.IdentityHashMap<>();
 
     /** The configured callbacks, the logger among them. */
     public DriverHooks hooks() { return hooks; }
@@ -929,9 +939,6 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** The admission value of the session's bootstrap carrier, null without one. */
     public Object admitted() { return admitted; }
 
-    /** Routes an authenticated-connection lane through the same core admission checks. */
-    public void handleLane(io.zmux.carrier.PipeIo io) { ListenerHub.laneInput(this, io); }
-
     /** An inbound lane of this session over carrier: its inbound, or null when refused (the carrier is closed). */
     Inbound acceptLane(Transport carrier, byte[] body) {
         var frame = CarrierAdmission.parseLane(body);
@@ -1011,7 +1018,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                 core.closingWithoutPipe(id);
             }
         }
-        if (!unconfirmed.isEmpty()) for (AcceptorGate g : new ArrayList<>(unconfirmed)) g.drop(ListenerHub.Outcome.REFUSED);
+        if (!unconfirmed.isEmpty()) for (AcceptorGate g : new ArrayList<>(unconfirmed.values())) g.drop(ListenerHub.Outcome.REFUSED);
         if (!planningHellos.isEmpty()) for (PlanningHello h : new ArrayList<>(planningHellos)) h.drop(ListenerHub.Outcome.REFUSED);
     }
 
@@ -1023,7 +1030,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
             return true;
         });
         armHeldJoins();
-        for (AcceptorGate g : new ArrayList<>(unconfirmed)) if (g.o.slot == slot) g.drop(ListenerHub.Outcome.REFUSED);
+        for (AcceptorGate g : new ArrayList<>(unconfirmed.values())) if (g.o.slot == slot) g.drop(ListenerHub.Outcome.REFUSED);
         for (PlanningHello h : new ArrayList<>(planningHellos)) if (h.o.slot == slot) h.drop(ListenerHub.Outcome.REFUSED);
         markDirty();
     }
@@ -1195,6 +1202,11 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
 
     /** Published once requested, then refreshed with the counters: per-pipe information. */
     private volatile java.util.List<io.zmux.PipeStats> pipes;
+    /** What the pipes of the {@link #pipes} snapshot were fixed as, by pipe ID; published with it. */
+    private volatile java.util.Map<Long, io.zmux.internal.core.Session.PipeFixed> pipesFixed = java.util.Map.of();
+
+    /** What the pipes of the last {@link #pipeSnapshot} were fixed as; any thread, never waits. */
+    public java.util.Map<Long, io.zmux.internal.core.Session.PipeFixed> pipeFixed() { return pipesFixed; }
     private volatile boolean pipesWanted;
     // Loop only.
     private long pipesVersion = -1;
@@ -1226,10 +1238,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         core.pipes().ids(ids);
         long now = Clock.now(), nano = System.nanoTime();
         var out = new java.util.ArrayList<io.zmux.PipeStats>(ids.size());
+        var fixed = new java.util.HashMap<Long, io.zmux.internal.core.Session.PipeFixed>();
         for (long id : ids) {
             var i = core.pipeStats(id, now, nano);
-            if (i != null) out.add(i);
+            var f = i == null ? null : core.pipeFixed(id);
+            if (f != null) { out.add(i); fixed.put(id, f); }
         }
+        pipesFixed = java.util.Map.copyOf(fixed);
         pipesVersion = core.stats().version();
         pipesCount = ids.size();
         pipes = java.util.List.copyOf(out);
@@ -1488,8 +1503,14 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     /** Installs the listener of Locator changes; on the loop or before the session runs. */
     public void locatorListener(java.util.function.BiConsumer<byte[], Boolean> l) { locatorListener = l; }
 
+    private java.util.function.LongConsumer pipeEnded;
+
+    /** Told, on the loop, of every pipe that failed or closed: what the host above the core keeps per pipe goes. */
+    public void pipeEnded(java.util.function.LongConsumer l) { pipeEnded = l; }
+
     private void deliver(Event e) {
         trace(e);
+        if (e.pipeTerminal() && pipeEnded != null) pipeEnded.accept(e.pipe());
         if (e.kind() == Event.Kind.CLOSED) return;
         if (e.kind() == Event.Kind.RESUME_UNATTENDED) {
             hooks.warn("zmux session suspended with nothing to redial it (no redial hook, no running pool): it ends at its resume timeout unless the application adds a pipe");
@@ -1569,6 +1590,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     private void finish() {
         if (finished) return;
         finished = true;
+        LaneRoutes.remove(this);
         releaseSlots();
         publishSnapshots();
         loop.schedule(timer, io.zmux.internal.core.Time.NEVER);

@@ -1,6 +1,6 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
 import io.zmux.internal.join.Kdf;

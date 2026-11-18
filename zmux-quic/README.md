@@ -83,7 +83,7 @@ The listener owns the session configuration and advertises its locator before
 bootstrap parameters are sent:
 
 ```java
-try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+try (var listener = Zmux.listener(ListenerConfig.of(config));
      var client = new QuicClient(tls, QuicOptions.defaults(), listener)) {
     ZmuxSession session = client.connect(peerAddress, serverName);
     // Incoming joined pipes and lanes on every connection use this listener.
@@ -129,7 +129,7 @@ an interrupted wait races a completed future, reclaim the completed carrier too.
 // keys is a configured javax.net.ssl.KeyManagerFactory.
 var tls = QuicSslContextBuilder.forServer(keys, keyPassword)
         .applicationProtocols("qmux-02");
-try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+try (var listener = Zmux.listener(ListenerConfig.of(config));
      var endpoint = new QuicServer(new InetSocketAddress("0.0.0.0", 9000),
              tls, QuicOptions.defaults(), listener)) {
     ZmuxSession session = listener.accept();
@@ -154,7 +154,7 @@ already accepted sessions application-owned; endpoint closure closes every
 connection that endpoint owns.
 
 A host that runs its own QUIC endpoint hands each established connection to
-`QuicServer.serveAsync(connection, options, listener, fallback)`, on the
+`QuicServer.serve(connection, options, listener, fallback)`, on the
 connection's loop once its handshake completes: the connection takes a slot of
 its source, its first bidirectional stream the listener's admission, then the
 inbound transform, as on a `QuicServer` endpoint. Its codec hands streams on
@@ -193,13 +193,14 @@ listener-backed client so one connection can route joins and lanes for several
 sessions through the existing listener:
 
 ```java
-try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+try (var listener = Zmux.listener(ListenerConfig.of(config));
      var client = new QuicClient(tls, QuicOptions.defaults(), listener);
-     var pool = new QuicPool(client, peerAddress, serverName,
-             QuicPool.Limits.defaults()
+     var pool = QuicPool.builder(client, peerAddress, serverName)
+             .limits(QuicPool.Limits.defaults()
                      .withMaxPipesPerConnection(8)
                      .withMaxPipesPerConnectionLifetime(2000)
-                     .withMaxConnectionAge(Duration.ofMinutes(30)))) {
+                     .withMaxConnectionAge(Duration.ofMinutes(30)))
+             .build()) {
     var carrier = pool.openPipe();
     session.addPipe(carrier, PipeOptions.defaults());
 }
@@ -230,18 +231,29 @@ age or lifetime limit stops new allocation on that connection. Existing streams
 continue and the connection closes after the last one ends. An idle connection
 past its age limit also closes without another pool call.
 
-`new QuicPool(client, address, serverName, limits, credential, policy)` takes a
-`PoolPolicy`, the same `View`/`Decision` model as `PipePool.withPolicy`. Each
-member is a connection that takes new pipes: its fate group as ID, its age, the
-time since its last pipe ended as idle, its active pipes, and zero byte counts.
-The policy is asked when a pipe is taken or released and after a connection is
-added. A nonzero `count` is the connections to spread pipes over: while fewer
-are open and `dialAfter` has passed since the last dial started, the next pipe
-goes to a new connection, or the pool opens one itself. `dialAfter` spaces only
-these policy dials; a pipe with no room anywhere still dials at once. A retired
-connection takes no new pipe and a replacement is dialled; its sessions keep
-their streams, and it closes after the last one ends. A null decision or an
-exception keeps the pool's own behaviour.
+`QuicPool.builder(client, address, serverName)` takes the `limits`, a
+`credential`, a `policy`, a `decisionRejected` callback and a `logger`. The
+policy is a `PoolPolicy`, the same `PoolView`/`PoolDecision` model as
+`PipePool.withPolicy`. Each member is a connection: its fate group, its age,
+the time since its last pipe ended as idle, its active pipes, zero byte
+counts, and `usable` while it is not retired and has room; `PoolView.dialing`
+counts a dial in progress. The policy is asked when a pipe is taken or
+released, after each dial ends, no later than a decision's recheck, and every
+100 ms. A `count` is the connections to spread pipes over: while fewer are
+open and `dialAfter` has passed since the last dial started, the next pipe
+goes to a new connection, or the pool opens one itself. A `count` below the
+pool's size (connections not retired and the policy's dial in progress)
+cancels that dial first, then retires connections: those
+`retireConnections` names, then the longest idle (a connection carrying
+pipes is idle 0), ties broken by the fewest pipes, the least age and the
+highest fate group. `dialAfter` spaces only the policy's dials; a pipe with
+no room anywhere still dials at once. A retired connection takes no new pipe
+at once, no longer counts and is reported unusable; its sessions keep their
+streams, it closes after the last one ends, and the pool dials a new
+connection when a pipe needs room. A policy that throws or returns null is
+rejected: the pool keeps its own behaviour for that look and hands the error
+to `decisionRejected`, or, without one, logs it through the builder's
+`logger`; without a logger nothing is logged.
 
 Pool `close()` stops new requests, fails uncommitted requests and retires its
 connections. A concurrently completed carrier may have committed before close;
@@ -274,7 +286,7 @@ Do not use the explicitly insecure mode on untrusted paths.
 Standalone clients accept reverse unidirectional lanes. Listener-backed clients
 also route server-initiated joined pipes; servers can open them on their accepted
 connections. The connections of an externally owned endpoint are served with
-`QuicServer.serveAsync` (see [Server](#server)).
+`QuicServer.serve` (see [Server](#server)).
 Cross-language interoperability and remote platform validation are separate
 release gates.
 

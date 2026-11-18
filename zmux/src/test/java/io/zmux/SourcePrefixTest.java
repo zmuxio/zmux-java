@@ -36,10 +36,10 @@ class SourcePrefixTest {
     }
 
     @Test void slotsAndStallDurationsAreSharedWithinAPrefix() throws Exception {
-        var adm = Admission.of(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.CLOSE))
-                .withStall(Duration.ofSeconds(1), Duration.ofDays(1));
+        var adm = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.CLOSE))
+                .stall(Duration.ofSeconds(1), Duration.ofDays(1)).build();
         var lc = ListenerConfig.builder().maxPendingPerSource(2).sourcePrefixV4(24).sourcePrefixV6(56).admission(adm).build();
-        try (var l = ZmuxListener.of(lc)) {
+        try (var l = Zmux.listener(lc)) {
             // Two IPv4 sources of one /24 hold its two slots; a third, mapped or not, has none.
             assertNotNull(l.adapter().reserve(at("10.0.0.1", 1), null));
             assertNotNull(l.adapter().reserve(at("10.0.0.2", 2), null));

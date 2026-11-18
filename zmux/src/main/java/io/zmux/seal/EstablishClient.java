@@ -1,6 +1,6 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
 
 import io.zmux.internal.join.Framing;
 import io.zmux.internal.join.Frames;
@@ -46,7 +46,7 @@ final class EstablishClient {
      */
     public static EstablishClient create(Profile p, Mode m, Framing f, byte[] handle, byte[] psk, byte[] binding, StaticKey key)
             throws SecureCarrierException {
-        return create(p, m, f, handle, psk, binding, key, StaticKey::random);
+        return create(p, m, f, handle, psk, binding, key, StaticKey::generate);
     }
 
     /** Bounds the application data of message 2, in bytes; {@link Long#MAX_VALUE}: none. */
@@ -87,7 +87,7 @@ final class EstablishClient {
      * {@code localContext} is handed to it unread.
      */
     public Verification.Judged verify(Anchor anchor, Object localContext, boolean requirePqAuth)
-            throws CredentialsFailedException, VerifierUnavailableException {
+            throws CredentialsFailedException, VerifyUnavailableException {
         if (!replied) throw new IllegalStateException("no Reply yet");
         VerifyInput in = input(localContext);
         judgedPeer = Verification.judge(anchor, in, proof, requirePqAuth);

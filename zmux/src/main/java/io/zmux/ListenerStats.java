@@ -18,8 +18,9 @@ package io.zmux;
  *     ListenerConfig#maxPending()} was taken and none was stalled (a stalled carrier closed to make room is not
  *     counted again); an admission's decisions are counted in {@code admission} only
  * @param refused inputs refused at a limit: of the listener (MaxPendingPerSource, the memory budget), of the session
- *     (a join closed with ZMUX_PIPE_RESOURCE_LIMIT), new sessions after the listener was shut down, and every carrier
- *     after it was closed
+ *     (a join closed with ZMUX_PIPE_RESOURCE_LIMIT, and the oldest Unconfirmed carrier evicted by a newer one beyond
+ *     {@link ListenerConfig#maxPendingPerSession()}), new sessions after the listener was shut down, and every
+ *     carrier after it was closed
  * @param timedOut inputs without a first record, or join, within the first-record timeout, and split halves whose
  *     other half did not arrive in time
  * @param admission the outcomes of the listener's admission

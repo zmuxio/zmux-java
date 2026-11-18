@@ -2,7 +2,7 @@ package io.zmux.seal;
 
 import io.zmux.internal.kex.X25519;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
 
 import java.security.PrivateKey;
 
@@ -32,20 +32,12 @@ public final class StaticKey implements AutoCloseable {
     }
 
     /**
-     * A new random key, from the operating system's source.
+     * A new random key, from the operating system's source, which can fail (early boot, a sandbox without it) and
+     * has no fallback.
      *
-     * @throws java.io.UncheckedIOException wrapping {@code random_failed} when that source fails
+     * @throws SecureCarrierException {@code RANDOM_FAILED} when that source fails, as a handshake reports it
      */
-    public static StaticKey generate() {
-        try {
-            return random();
-        } catch (SecureCarrierException e) {
-            throw new java.io.UncheckedIOException(e);
-        }
-    }
-
-    /** A new random key; a failure of the source is {@code random_failed}, as a handshake reports it. */
-    static StaticKey random() throws SecureCarrierException {
+    public static StaticKey generate() throws SecureCarrierException {
         byte[] scalar = X25519.generate(null);
         try {
             return fromScalar(scalar);
@@ -54,9 +46,9 @@ public final class StaticKey implements AutoCloseable {
         }
     }
 
-    /** The key of a 32-byte private scalar; another length is {@code invalid_config}. */
+    /** The key of a 32-byte private scalar; another length is an {@link IllegalArgumentException}. */
     public static StaticKey fromScalar(byte[] scalar) throws SecureCarrierException {
-        if (scalar == null || scalar.length != KEY_LEN) throw new SecureCarrierException(INVALID_CONFIG, "static key");
+        if (scalar == null || scalar.length != KEY_LEN) throw new IllegalArgumentException("static key scalar must be 32 bytes");
         PrivateKey priv = X25519.privateKey(scalar);
         return new StaticKey(priv, scalar.clone(), X25519.publicKey(priv));
     }

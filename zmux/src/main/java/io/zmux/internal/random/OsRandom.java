@@ -1,6 +1,6 @@
 package io.zmux.internal.random;
 
-import static io.zmux.seal.SecureCarrierException.Code.RANDOM_FAILED;
+import static io.zmux.seal.SecureCarrierException.Kind.RANDOM_FAILED;
 
 import io.zmux.seal.SecureCarrierException;
 import java.security.GeneralSecurityException;

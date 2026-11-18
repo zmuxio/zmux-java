@@ -299,6 +299,7 @@ final class PathHealth {
                 // No stall clock runs until the attachment is ACTIVE. The join deadline runs
                 // from JOINING, a join the cap or the backoff holds included.
                 if (a.joining() && at(Time.add(a.joining.attachedAt(), cfg.joinDeadline())) && apply) {
+                    a.health.aborted = true;
                     failPipe(p, TransportError.PIPE_FAILED, null);
                 }
                 continue;
@@ -491,8 +492,10 @@ final class PathHealth {
         Pipe p = pipes.get(id);
         if (p == null || p.mp() == null || p.mp().health.retired) return false;
         // A graceful removal needs the carrier.
-        if (!graceful || p.mp().handshaking()) failPipe(p, TransportError.PIPE_FAILED, null);
-        else startDrain(p);
+        if (!graceful || p.mp().handshaking()) {
+            p.mp().health.aborted = !graceful; // a graceful removal of a pipe still joining is the application's close, not an abort
+            failPipe(p, TransportError.PIPE_FAILED, null);
+        } else startDrain(p);
         return true;
     }
 
@@ -720,6 +723,7 @@ final class PathHealth {
     /** Fails the pipe without owing a PIPE_ABANDON for it (displacement while suspended). */
     void failWithoutAbandon(Pipe p, long code) {
         p.mp().health.abandonSent = true;
+        p.mp().health.aborted = true;
         failPipe(p, code, null);
     }
 
@@ -738,6 +742,8 @@ final class PathHealth {
         private boolean noSample;
         private long noSampleAt;
         private boolean resLimited;
+        /** This endpoint aborted the pipe: by the application, at the join's bound, or to make room. */
+        private boolean aborted;
         private boolean abandonSent;
         private boolean abandonQueued;
         private long abandonCode;
@@ -819,6 +825,10 @@ final class PathHealth {
 
         boolean resLimited() {
             return resLimited;
+        }
+
+        boolean aborted() {
+            return aborted;
         }
 
         boolean abandonSent() {

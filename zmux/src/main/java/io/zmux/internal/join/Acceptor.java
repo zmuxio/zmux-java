@@ -1,11 +1,11 @@
 package io.zmux.internal.join;
 
 import io.zmux.seal.SecureCarrierException;
-import static io.zmux.seal.SecureCarrierException.Code.AUTH;
-import static io.zmux.seal.SecureCarrierException.Code.BAD_CONFIRM;
-import static io.zmux.seal.SecureCarrierException.Code.INCOMPLETE;
-import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.AUTH;
+import static io.zmux.seal.SecureCarrierException.Kind.BAD_CONFIRM;
+import static io.zmux.seal.SecureCarrierException.Kind.INCOMPLETE;
+import static io.zmux.seal.SecureCarrierException.Kind.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
 
 import java.security.MessageDigest;
 import java.util.Arrays;
@@ -149,7 +149,7 @@ public final class Acceptor {
             state = State.CONFIRMED;
             return n;
         } catch (SecureCarrierException e) {
-            if (e.code() == INCOMPLETE) throw e;
+            if (e.kind() == INCOMPLETE) throw e;
             throw fail(e);
         }
     }

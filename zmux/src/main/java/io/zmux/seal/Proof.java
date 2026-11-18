@@ -1,6 +1,6 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.TLV_TRUNCATED;
+import static io.zmux.seal.SecureCarrierException.Kind.TLV_TRUNCATED;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
 import io.zmux.internal.wire.VarInt;

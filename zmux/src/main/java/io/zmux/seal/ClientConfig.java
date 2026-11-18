@@ -77,7 +77,7 @@ public final class ClientConfig {
     boolean hasHandle() { return handle != null; }
 
     /** The client's static key; null is a key generated once per process. */
-    public StaticKey key() { return key; }
+    public StaticKey staticKey() { return key; }
 
     /** The Profiles the client may use, in order; null: the default list. */
     public List<Profile> allowedProfiles() { return allowedProfiles; }
@@ -160,7 +160,7 @@ public final class ClientConfig {
         }
 
         /** The client's static key; null (the default) is a key generated once per process. */
-        public Builder key(StaticKey k) { key = k; return this; }
+        public Builder staticKey(StaticKey k) { key = k; return this; }
 
         /**
          * The Profiles it may use, the first that fits the key being used; none set: the Profiles of both ciphers, the

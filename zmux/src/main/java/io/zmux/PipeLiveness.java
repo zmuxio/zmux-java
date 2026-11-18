@@ -8,7 +8,7 @@ import java.util.OptionalDouble;
 /**
  * A pipe's own liveness settings, the four of {@link Liveness} that apply to one pipe: held by
  * {@link PipeOptions.Builder#liveness}, by a pool's options, by a pool decision
- * ({@link PoolPolicy.Decision#liveness()}) and by {@link PipeUpdate.Builder#liveness}. Each setting
+ * ({@link PoolDecision#liveness()}) and by {@link PipeUpdate.Builder#liveness}. Each setting
  * not written follows the session's ({@link #inherit()} for all four). Immutable.
  */
 public final class PipeLiveness {

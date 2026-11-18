@@ -25,7 +25,7 @@ class QuicEndpointFamilyTest {
                 assertInstanceOf(Inet4Address.class,((InetSocketAddress)udp4.localAddress()).getAddress(),
                         "IPv4 dials must not use an IPv6 wildcard socket");
                 try (var server6 = new QuicServer(ipv6(),TestTls.server,QuicOptions.defaults(),f.remote);
-                     var v6 = new QuicPool(f.client,server6.address(),"localhost")) {
+                     var v6 = QuicPool.builder(f.client, server6.address(), "localhost").build()) {
                     var b = v6.openPipeAsync().get(5,TimeUnit.SECONDS);
                     var udp6 = ((QuicChannel)b.carrierConn()).parent();
                     try {
@@ -57,7 +57,7 @@ class QuicEndpointFamilyTest {
     @Test void simultaneousIpv6DialsReuseOneLazyUdpEndpoint() throws Exception {
         try (var f = new QuicPoolTest.Fixture();
              var server6 = new QuicServer(ipv6(),TestTls.server,QuicOptions.defaults(),f.remote);
-             var pool = new QuicPool(f.client,server6.address(),"localhost",QuicPool.Limits.defaults().withMaxPipesPerConnection(2))) {
+             var pool = QuicPool.builder(f.client, server6.address(), "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(2)).build()) {
             var futures = new ArrayList<CompletableFuture<PipeIo>>();
             var pipes = new ArrayList<PipeIo>();
             try {

@@ -5,7 +5,8 @@ import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CompletionStage;
+import io.zmux.ZmuxFuture;
+import io.zmux.internal.spi.Spi;
 
 /**
  * Bytes taken from a {@link Limiter}: what is not {@linkplain #consume consumed} goes back when it is closed.
@@ -23,19 +24,20 @@ public final class Permit implements AutoCloseable {
 
     /**
      * Waits for a grant of min through max bytes ({@link Limiter#acquire}); with {@code max <= 0} an empty permit at
-     * once, without calling the limiter. Cancel-safe: cancelling the returned stage cancels the limiter's wait, and a
-     * grant that arrives anyway goes back. The stage fails with {@link CallbackFailedException} when the limiter
-     * throws, fails its stage or grants outside {@code 1..max} (a positive invalid grant is refunded).
+     * once, without calling the limiter. Cancel-safe: cancelling the returned future cancels the limiter's wait, and
+     * a grant that arrives after the cancellation goes back, so there is nothing else to abandon. The future fails
+     * with {@link CallbackFailedException} when the limiter throws, fails its stage or grants outside {@code 1..max}
+     * (a positive invalid grant is refunded). A permit the future already holds is the caller's to close.
      */
-    public static CompletionStage<Permit> acquire(Limiter limiter, long min, long max) {
+    public static ZmuxFuture<Permit> acquire(Limiter limiter, long min, long max) {
         Objects.requireNonNull(limiter);
-        if (max <= 0) return CompletableFuture.completedFuture(new Permit(limiter, 0));
+        if (max <= 0) return Spi.future(CompletableFuture.completedFuture(new Permit(limiter, 0)), null);
         long lo = Math.clamp(min, 1, max);
         CompletableFuture<Long> wait;
         try {
             wait = Objects.requireNonNull(limiter.acquire(lo, max), "limiter returned null").toCompletableFuture();
         } catch (RuntimeException | AssertionError e) {
-            return CompletableFuture.failedFuture(new CallbackFailedException("limiter failed", e));
+            return Spi.future(CompletableFuture.failedFuture(new CallbackFailedException("limiter failed", e)), null);
         }
         CompletableFuture<Permit> out = new CompletableFuture<>();
         wait.whenComplete((got, error) -> {
@@ -53,16 +55,8 @@ public final class Permit implements AutoCloseable {
             if (!out.complete(p)) p.close(); // cancelled meanwhile: the grant goes back
         });
         out.whenComplete((p, error) -> { if (error instanceof CancellationException) wait.cancel(true); });
-        return out;
-    }
-
-    /**
-     * Abandons a stage of {@link #acquire}: cancels it while it waits, and closes the permit it already produced,
-     * so the grant goes back either way.
-     */
-    public static void abandon(CompletionStage<Permit> pending) {
-        CompletableFuture<Permit> f = pending.toCompletableFuture();
-        if (!f.cancel(true) && f.isDone() && !f.isCompletedExceptionally()) f.join().close();
+        // A grant published after the future was cancelled or completed from outside is closed: it goes back.
+        return Spi.future(out, () -> out.cancel(true));
     }
 
     /**

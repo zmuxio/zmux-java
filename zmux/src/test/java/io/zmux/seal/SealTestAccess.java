@@ -29,7 +29,7 @@ public final class SealTestAccess {
                 client.readReply(b.array(), 0, b.position());
                 break;
             } catch (io.zmux.seal.SecureCarrierException e) {
-                if (e.code() != io.zmux.seal.SecureCarrierException.Code.INCOMPLETE) throw e;
+                if (e.kind() != io.zmux.seal.SecureCarrierException.Kind.INCOMPLETE) throw e;
             }
         }
         client.trustPskOnly(null);

@@ -247,7 +247,7 @@ public record CoreConfig(
         p.maxStreamsUni = 16;
         p.maxRecordSize = 65535;
         p.maxPreambleSize = 4096;
-        p.maxLanes = 258;
+        p.maxLanes = io.zmux.ZmuxConfig.DEFAULT_MAX_LANES;
         return p;
     }
 

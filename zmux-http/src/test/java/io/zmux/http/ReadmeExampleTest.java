@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 final class ReadmeExampleTest {
     @Test @Timeout(30) void streamingCarrierEcho() throws Exception {
         var group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
-        try (ZmuxListener listener = ZmuxListener.of(ListenerConfig.defaults());
+        try (ZmuxListener listener = Zmux.listener(ListenerConfig.defaults());
              HttpEndpoint endpoint = HttpEndpoint.builder(listener).streaming().build()) {
             var server = new ServerBootstrap().group(group).channel(NioServerSocketChannel.class)
                     .childHandler(endpoint.initializer(null, null))            // cleartext HTTP/1.1 and h2c

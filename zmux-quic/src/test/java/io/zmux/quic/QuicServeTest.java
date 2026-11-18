@@ -29,16 +29,16 @@ class QuicServeTest {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var decisions = new AtomicInteger();
             var lc = ListenerConfig.builder().session(config)
-                    .admission(Admission.of(0, Admission.Decider.immediate((i, p) -> { decisions.incrementAndGet(); return Admission.Decision.accept(0, "q"); })))
+                    .admission(Admission.builder(0, Admission.Decider.immediate((i, p) -> { decisions.incrementAndGet(); return Admission.Decision.accept(0, "q"); })).build())
                     .build();
             var served = new CompletableFuture<java.util.concurrent.CompletionStage<Void>>();
-            try (var listener = ZmuxListener.of(lc)) {
+            try (var listener = Zmux.listener(lc)) {
                 QuicOptions options = QuicOptions.defaults();
                 ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
                         .handler(new ChannelInboundHandlerAdapter() {
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                 if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
-                                    served.complete(QuicServer.serveAsync((QuicChannel) ctx.channel(), options, listener, null));
+                                    served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null));
                                 ctx.fireUserEventTriggered(evt);
                             }
                             @Override public boolean isSharable() { return true; }
@@ -69,6 +69,40 @@ class QuicServeTest {
                 } finally {
                     udp.close().sync();
                 }
+            }
+        } finally {
+            group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).sync();
+        }
+    }
+
+    @Test void aClosedListenerClosesTheConnectionAndFailsTheCall() throws Exception {
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        try (EventLoops loops = EventLoops.create(2)) {
+            var config = ZmuxConfig.builder().eventLoops(loops).build();
+            var served = new CompletableFuture<java.util.concurrent.CompletionStage<Void>>();
+            var listener = Zmux.listener(ListenerConfig.of(config));
+            listener.close();
+            QuicOptions options = QuicOptions.defaults();
+            ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
+                    .handler(new ChannelInboundHandlerAdapter() {
+                        @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                            if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
+                                served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null));
+                            ctx.fireUserEventTriggered(evt);
+                        }
+                        @Override public boolean isSharable() { return true; }
+                    })
+                    .streamHandler(QuicServer.streamHandler()).build();
+            Channel udp = new Bootstrap().group(group).channel(NioDatagramChannel.class).handler(codec)
+                    .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
+            try (var endpoint = new QuicClient(TestTls.client, options)) {
+                var dialing = endpoint.connectAsync((InetSocketAddress) udp.localAddress(), "localhost", config);
+                var done = served.get(10, TimeUnit.SECONDS).toCompletableFuture();
+                var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> done.get(10, TimeUnit.SECONDS));
+                assertInstanceOf(ListenerClosedException.class, failure.getCause());
+                dialing.toCompletableFuture().cancel(true);
+            } finally {
+                udp.close().sync();
             }
         } finally {
             group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).sync();

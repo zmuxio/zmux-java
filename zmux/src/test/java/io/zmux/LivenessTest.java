@@ -28,7 +28,7 @@ class LivenessTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void aDeadTimeoutBelowTheSuspicionFailsTheLastPipeInTheSamePass() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noKeepAlive().probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1)).suspectFloor(Duration.ofSeconds(2)).build())
+            var cfg = ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noKeepAlivePeriod().probeInterval(Duration.ofSeconds(1)).probeJitter(0).deadTimeout(Duration.ofSeconds(1)).suspectFloor(Duration.ofSeconds(2)).build())
                     .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
                             .build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress());
@@ -52,8 +52,8 @@ class LivenessTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void anEndWithProbesOffAnswersWithAProbeOfItsOwn() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().probeJitter(0).noKeepAlive().build())).build();
-            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noProbeInterval().noKeepAlive().build())).build();
+            var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().probeJitter(0).noKeepAlivePeriod().build())).build();
+            var scfg = multipath(ZmuxConfig.builder().eventLoops(loops).liveness(Liveness.builder().noProbeInterval().noKeepAlivePeriod().build())).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(scfg));
                  var client = Zmux.connect(listener.localAddress(), ccfg); var server = listener.accept(Duration.ofSeconds(5))) {
                 var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().liveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(2)).build()).build());
@@ -118,7 +118,7 @@ class LivenessTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var ccfg = multipath(ZmuxConfig.builder().eventLoops(loops)).recordPolicy(c -> RecordMode.TRUSTED).build();
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).allowRecordMode((c, m, p) -> true).shaper(ShapingTest.firstDelay(30_000_000, false)).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(scfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(scfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                 try (var c = Zmux.open(boot[0], Role.CLIENT, ccfg); var s = l.accept(Duration.ofSeconds(5))) {

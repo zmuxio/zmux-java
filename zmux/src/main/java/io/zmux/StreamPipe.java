@@ -35,8 +35,8 @@ final class StreamPipe {
     StreamPipe(ZmuxStream stream) { this.stream = stream; this.released = () -> {}; this.sendOnlyLane = false; }
     private StreamPipe(ZmuxStream stream, Runnable released) { this.stream = stream; this.released = released; this.sendOnlyLane = true; }
 
-    private java.util.concurrent.CompletionStage<PipeIo> openLane() {
-        var result = new java.util.concurrent.CompletableFuture<PipeIo>();
+    private java.util.concurrent.CompletionStage<PipeWriter> openLane() {
+        var result = new java.util.concurrent.CompletableFuture<PipeWriter>();
         if (!post(() -> {
             if (result.isCancelled()) return;
             var outer = stream.session;
@@ -55,7 +55,7 @@ final class StreamPipe {
                     @Override public void onEnd() {}
                     @Override public void onError(Throwable ignored) {}
                 });
-                if (!result.complete(new PipeIo(null, io.writer(), io.framing(), io.label(), io.carrierConn()))) {
+                if (!result.complete(io.writer())) {
                     io.writer().abort(new IOException("lane opening cancelled"));
                     io.reader().close();
                 }

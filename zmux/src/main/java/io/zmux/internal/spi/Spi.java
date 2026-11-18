@@ -1,8 +1,8 @@
 package io.zmux.internal.spi;
 
 import io.zmux.ZmuxFuture;
-import io.zmux.ZmuxSession;
-import io.zmux.carrier.PipeIo;
+import io.zmux.helper.Permit;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -12,7 +12,6 @@ import java.util.concurrent.CompletionStage;
 public final class Spi {
     /** What io.zmux implements. */
     public interface Access {
-        void handleLane(ZmuxSession session, PipeIo io);
 
         <T> ZmuxFuture<T> future(CompletionStage<T> stage, Runnable cancel);
     }
@@ -40,10 +39,12 @@ public final class Spi {
     }
 
     /**
-     * Hands a lane carrier (a further stream of the connection that one of session's pipes runs
-     * on) to the session, which reads its lane header and attaches it to its pipe.
+     * Gives a pending grant up: cancelled while it waits, its permit closed once granted, so the bytes go back either way.
+     * The one place the abandon of a {@link Permit#acquire} future is written.
      */
-    public static void handleLane(ZmuxSession session, PipeIo io) { access().handleLane(session, io); }
+    public static void abandon(CompletableFuture<Permit> grant) {
+        if (!grant.cancel(true) && grant.isDone() && !grant.isCompletedExceptionally()) grant.join().close();
+    }
 
     /** A future that completes as stage does; cancelling it runs cancel (null: nothing). */
     public static <T> ZmuxFuture<T> future(CompletionStage<T> stage, Runnable cancel) { return access().future(stage, cancel); }

@@ -39,7 +39,7 @@ class QuicPeerInterop {
     }
 
     private static ZmuxConfig config(EventLoops loops, boolean exporter) {
-        var b = ZmuxConfig.builder().eventLoops(loops).datagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4).incomingUniStreams(16)
+        var b = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4).maxIncomingUniStreams(16)
                 .allowRecordMode((carrier, mode, peer) -> true);
         return (exporter ? b.pipeAuth(PipeAuth.exporter().withEndToEnd()) : b.pipeAuth(PipeAuth.psk(PSK).withEndToEnd())).build();
     }
@@ -50,7 +50,7 @@ class QuicPeerInterop {
     }
 
     private static String command(ZmuxSession session, String command, byte[] body) throws Exception {
-        try (var stream = session.openStream(Preamble.openInfo(command.getBytes(StandardCharsets.UTF_8)))) {
+        try (var stream = session.openStream(Preamble.builder().openInfo(command.getBytes(StandardCharsets.UTF_8)).build())) {
             if (body.length > 0) stream.write(body, 0, body.length);
             stream.finish();
             return new String(stream.readAll(1 << 20), StandardCharsets.UTF_8);
@@ -60,7 +60,7 @@ class QuicPeerInterop {
     private static void echo(ZmuxSession session, int size) throws Exception {
         byte[] bytes = new byte[size];
         new java.util.Random(size).nextBytes(bytes);
-        try (var stream = session.openStream(Preamble.openInfo("echo".getBytes(StandardCharsets.UTF_8)));
+        try (var stream = session.openStream(Preamble.builder().openInfo("echo".getBytes(StandardCharsets.UTF_8)).build());
              var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
             var writing = jobs.submit(() -> { stream.write(bytes, 0, bytes.length); stream.finish(); return null; });
             assertArrayEquals(bytes, stream.readAll(size + 1L));
@@ -118,7 +118,7 @@ class QuicPeerInterop {
     private static void server(boolean exporter) throws Exception {
         TestTls.init();
         try (var loops = EventLoops.create(2);
-             var listener = ZmuxListener.of(ListenerConfig.of(config(loops, exporter)));
+             var listener = Zmux.listener(ListenerConfig.of(config(loops, exporter)));
              var server = new QuicServer(new InetSocketAddress("127.0.0.1", 0), TestTls.server, OPTIONS, listener)) {
             String address = "127.0.0.1:" + server.address().getPort();
             try (var peer = new QuicChannelInteropTest.Peer(Stream.of(binary(), "quic-client", address, exporter ? "exporter" : "").filter(a -> !a.isEmpty()).toArray(String[]::new))) {

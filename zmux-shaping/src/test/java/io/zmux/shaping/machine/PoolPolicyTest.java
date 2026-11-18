@@ -2,7 +2,9 @@ package io.zmux.shaping.machine;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.zmux.PoolPolicy;
+import io.zmux.PoolDecision;
+import io.zmux.PoolMember;
+import io.zmux.PoolView;
 import io.zmux.shaping.machine.MachinePoolPolicy.Metrics;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -71,15 +73,15 @@ class PoolPolicyTest {
 
     @Test void decisionMapsToThePool() throws Exception {
         var p = policy("{\"count\":2,\"dial_after\":[250000],\"retire\":[{\"metric\":\"bytes\",\"above\":10}]}");
-        var d = p.decide(new PoolPolicy.View(List.of(
-                new PoolPolicy.Member(io.zmux.PipeId.of(4), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false),
-                new PoolPolicy.Member(io.zmux.PipeId.of(5), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false)), 0, null));
-        assertEquals(PoolPolicy.Decision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(250)).withRetirePipes(Set.of(io.zmux.PipeId.of(4))), d);
+        var d = p.decide(new PoolView(List.of(
+                new PoolMember(io.zmux.PipeId.of(4), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false),
+                new PoolMember(io.zmux.PipeId.of(5), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false)), 0, java.util.Optional.empty(), 0));
+        assertEquals(PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(250)).withRetirePipes(Set.of(io.zmux.PipeId.of(4))), d);
     }
 
     @Test void aProbeIntervalBelowOneSecondIsRejectedNotRaised() throws Exception {
         var p = policy("{\"probe_interval\":500000}");
         assertEquals(500000, p.decide(0, null, List.of()).probeInterval());
-        assertThrows(IllegalArgumentException.class, () -> p.decide(new PoolPolicy.View(List.of(), 0, null)));
+        assertThrows(IllegalArgumentException.class, () -> p.decide(new PoolView(List.of(), 0, java.util.Optional.empty(), 0)));
     }
 }

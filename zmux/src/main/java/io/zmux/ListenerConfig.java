@@ -14,6 +14,12 @@ public final class ListenerConfig {
     /** The longest instance ID. */
     public static final int MAX_INSTANCE_ID = 8;
 
+    /**
+     * The default {@link #firstRecordTimeout()}, 2 s; also what {@link Zmux#handleLane} gives a lane carrier to
+     * deliver its header, which is its first record (the session it belongs to is not known before it is read).
+     */
+    public static final Duration DEFAULT_FIRST_RECORD_TIMEOUT = Duration.ofSeconds(2);
+
     private static final ListenerConfig DEFAULTS = builder().build();
     /** {@link #memoryBudget()} unlimited. */
     private static final long NO_BUDGET = -1;
@@ -112,7 +118,7 @@ public final class ListenerConfig {
      * arrived): one more evicts the session's oldest.
      */
     public int maxPendingPerSession() { return maxPendingPerSession; }
-    /** How long a new carrier may take to send its first record. */
+    /** How long a new carrier may take to send its first record; default {@link #DEFAULT_FIRST_RECORD_TIMEOUT}. */
     public Duration firstRecordTimeout() { return firstRecordTimeout; }
     /** The leading bytes of every 16-byte session locator; random bytes fill the rest. */
     public byte[] instanceId() { return instanceId.clone(); }
@@ -176,7 +182,7 @@ public final class ListenerConfig {
         private int sourcePrefixV4 = io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V4;
         private int sourcePrefixV6 = io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V6;
         private int maxPendingPerSession = 4;
-        private Duration firstRecordTimeout = Duration.ofSeconds(2);
+        private Duration firstRecordTimeout = DEFAULT_FIRST_RECORD_TIMEOUT;
         private byte[] instanceId = new byte[0];
         private int maxSuspended = 1024;
         private BiConsumer<Long, Long> memoryPressureListener;

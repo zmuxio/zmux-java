@@ -63,7 +63,7 @@ class QuicSecureCarrierTest {
         byte[] key = new byte[32];
         PrefixAuth auth = new PrefixAuth(key, Duration.ofSeconds(30), true, 1, 0);
         ZmuxConfig plain = ZmuxConfig.builder().build();
-        try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(plain).admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier())).build());
+        try (ZmuxListener l = Zmux.listener(ListenerConfig.builder().session(plain).admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).build()).build());
              QuicServer server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), l);
              QuicClient client = new QuicClient(TestTls.client, QuicOptions.defaults())) {
             ZmuxSession c = client.connectAsync(server.address(), "localhost", ZmuxConfig.builder().carrierCredential(auth).build()).get(10, TimeUnit.SECONDS);
@@ -82,7 +82,7 @@ class QuicSecureCarrierTest {
 
     @Test void aJoinIsSealedByDefaultAndBoundOnRequest() throws Exception {
         ZmuxConfig cfg = config();
-        try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).build());
+        try (ZmuxListener l = Zmux.listener(ListenerConfig.builder().session(cfg).build());
              QuicServer server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), l);
              QuicClient client = new QuicClient(TestTls.client, QuicOptions.defaults())) {
             ZmuxSession c = client.connectAsync(server.address(), "localhost", cfg).get(10, TimeUnit.SECONDS);
@@ -90,7 +90,7 @@ class QuicSecureCarrierTest {
             assertTrue(c.adapter().isJoinReady(), "the exporter of the key log is the session's secret");
             echo(c, s);
             PipeIo p1 = client.dialAsync(server.address(), "localhost", c).get(10, TimeUnit.SECONDS);
-            assertTrue(p1.isSecure());
+            assertTrue(p1.isCarrierSecure());
             assertNotNull(p1.capabilities().exporter().export("EXPORTER-x", null, 32));
             ZmuxPipe sealed = c.addPipe(p1, PipeOptions.defaults());
             PipeStats st = sealed.stats().orElseThrow();
@@ -101,7 +101,7 @@ class QuicSecureCarrierTest {
             assertEquals(RecordMode.BOUND, bound.stats().orElseThrow().recordMode());
             echo(c, s);
             for (var ps : c.pipeStats()) {
-                if (ps.pipeId().equals(sealed.id())) assertTrue(ps.lanesOut() <= 1, "a Sealed pipe has no lanes");
+                if (ps.pipe().equals(sealed.id())) assertTrue(ps.lanesOut() <= 1, "a Sealed pipe has no lanes");
             }
             c.close();
         }
@@ -120,7 +120,7 @@ class QuicSecureCarrierTest {
         ZmuxConfig cfg = ZmuxConfig.builder().maxPipes(4).noProbation().allowRecordMode((c, m, p) -> true).build();
         var lc = ListenerConfig.builder().session(cfg).inboundTransform(io.zmux.seal.Seal.server(io.zmux.seal.ServerConfig.builder(gate, node).allowRecordMode((c, m, p) -> c.isSecure()).build())).build();
         for (RecordMode mode : java.util.List.of(RecordMode.SEALED, RecordMode.BOUND)) {
-            try (ZmuxListener l = ZmuxListener.of(lc);
+            try (ZmuxListener l = Zmux.listener(lc);
                  QuicServer server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), l);
                  QuicClient client = new QuicClient(TestTls.client, QuicOptions.defaults())) {
                 ZmuxSession c = client.connectAsync(server.address(), "localhost", cfg, p -> io.zmux.seal.Seal.establish(p,

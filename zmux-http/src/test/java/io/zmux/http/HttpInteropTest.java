@@ -101,7 +101,7 @@ class HttpInteropTest {
         // The peer's clients against a Java server.
         var seen = new LinkedBlockingQueue<String>();
         var verifier = WS_AUTH.verifier();
-        try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier)), e -> e.webSocket(),
+        try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()), e -> e.webSocket(),
                 false, () -> new Teapot(seen))) {
             Thread echo = echoSessions(f.listener);
             String addr = "127.0.0.1:" + f.base.getPort();
@@ -151,7 +151,7 @@ class HttpInteropTest {
             // The peer's client against a Java server.
             var seen = new LinkedBlockingQueue<String>();
             var verifier = streamAuth("right").verifier();
-            try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier)), e -> e.streaming(),
+            try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()), e -> e.streaming(),
                     false, () -> new Teapot(seen))) {
                 Thread echo = echoSessions(f.listener);
                 String addr = "127.0.0.1:" + f.base.getPort();
@@ -301,7 +301,7 @@ class HttpInteropTest {
                 assertTrue(out.lines().anyMatch(l -> l.equals("MODE " + want)), () -> client + " " + kind + ": " + out);
                 ZmuxSession s = sessions.poll(5, TimeUnit.SECONDS);
                 assertNotNull(s);
-                assertTrue(s.pipeStats().stream().anyMatch(st -> st.pipeId().value() != 0 && st.recordMode().toString().equalsIgnoreCase(want)),
+                assertTrue(s.pipeStats().stream().anyMatch(st -> st.pipe().value() != 0 && st.recordMode().toString().equalsIgnoreCase(want)),
                         () -> client + " " + kind + ": " + s.pipeStats());
             } finally {
                 if (fp != null) stop(fp);

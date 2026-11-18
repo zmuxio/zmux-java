@@ -84,7 +84,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         return PipeIo.of(reader, writer).withCarrierConn(connection.channel())
                 .withReceiveMemory(connection.options().connectionWindow())
                 .withProtocol(connection.applicationProtocol())
-                .withTerminatedTls(true).withExporter(connection::export).withSecure(true) // A QUIC stream is end to end.
+                .withTerminatedTls(true).withExporter(connection::export).withCarrierSecure() // A QUIC stream is end to end.
                 .withLaneOpener(send ? connection::openLane : null).withCarrier(CarrierKind.QUIC);
     }
 
@@ -167,7 +167,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         PipeIo io = PipeIo.of(r, w).withTerminatedTls(true).withCarrierConn(info.connection()).withReceiveMemory(info.receiveMemory())
                 .withProtocol(info.applicationProtocol()).withFateGroup(info.fateGroup())
                 .withCarrier(CarrierKind.QUIC);
-        io = io.withExporter(connection::export).withSecure(true);
+        io = io.withExporter(connection::export).withCarrierSecure();
         return lanes == null ? io : io.withLaneOpener(lanes);
     }
 

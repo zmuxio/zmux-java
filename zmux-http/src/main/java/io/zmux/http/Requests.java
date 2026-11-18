@@ -93,7 +93,8 @@ final class Requests {
         // A connection whose handshake has not completed counts as without TLS; the exporter reads it late.
         boolean complete = e.getHandshakeStatus() == javax.net.ssl.SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING;
         if (sni.isEmpty() && e.getUseClientMode() && e.getPeerHost() != null) sni = e.getPeerHost();
-        return io.withExporter(x).withServerName(sni).withTerminatedTls(complete).withSecure(complete && e.getSession().getProtocol().equals("TLSv1.3"));
+        io = io.withExporter(x).withServerName(sni).withTerminatedTls(complete);
+        return complete && e.getSession().getProtocol().equals("TLSv1.3") ? io.withCarrierSecure() : io;
     }
 
     /** The keying material exporter of a TLS connection (RFC 5705). */

@@ -21,9 +21,9 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(60)
 class PacketStreamTest {
-    static final Preamble HELLO = Preamble.openInfo(new byte[] {'p'});
+    static final Preamble HELLO = Preamble.builder().openInfo(new byte[] {'p'}).build();
     static ZmuxConfig config(EventLoops loops, boolean datagrams) {
-        return ZmuxConfig.builder().eventLoops(loops).datagrams(datagrams).build();
+        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(datagrams).build();
     }
     static ByteBuffer bytes(int n, int seed) {
         byte[] b = new byte[n];
@@ -146,7 +146,7 @@ class PacketStreamTest {
             @Override public void refund(long n) {}
         };
         try (EventLoops loops = EventLoops.create(2);
-             var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(refuse, null).build())) {
+             var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(refuse, null)).build())) {
             var s = PacketStream.open(pair.client(), HELLO, Options.defaults());
             var peer = PacketStream.of(pair.server().acceptStream(Duration.ofSeconds(3)));
             assertFalse(s.send(ByteBuffer.wrap(new byte[] {1})));
@@ -290,8 +290,9 @@ class PacketStreamTest {
             assertNull(destination.receive(Duration.ofSeconds(3)));
             destination.close();
             var result = splice.get(5, TimeUnit.SECONDS);
-            assertEquals(new SpliceResult.End.Finished(), result.aToB().end());
+            assertEquals(new SpliceEnd.Finished(), result.aToB().end());
             assertEquals(3 + 20, result.aToB().datagramBytes(), "converted datagrams count as datagrams");
+            assertEquals(21, result.aToB().datagramsAsCapsules(), "every datagram went as a capsule");
             assertEquals(0, result.aToB().datagramsDropped());
         }
     }
@@ -310,8 +311,8 @@ class PacketStreamTest {
             destination.close();
             assertNull(raw.readChunk(1));
             var result = splice.get(5, TimeUnit.SECONDS);
-            assertEquals(new SpliceResult.End.Reset(PacketStream.PACKET_ERROR), result.aToB().end());
-            assertEquals(new SpliceResult.End.Finished(), result.bToA().end());
+            assertEquals(new SpliceEnd.Reset(PacketStream.PACKET_ERROR), result.aToB().end());
+            assertEquals(new SpliceEnd.Finished(), result.bToA().end());
             raw.close();
         }
     }
@@ -331,7 +332,7 @@ class PacketStreamTest {
                 @Override public long tryAcquire(long min, long max) { calls.add(new long[] {min, max}); charged.addAndGet(max); return max; }
                 @Override public void refund(long n) { charged.addAndGet(-n); }
             };
-            var splice = Zmux.splicePackets(a, b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
+            var splice = Zmux.splicePackets(a, b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             var destination = PacketStream.of(right.server().acceptStream(Duration.ofSeconds(3)));
             int[] sizes = {100, 0, 3000};
             long expected = 0;
@@ -350,11 +351,53 @@ class PacketStreamTest {
             assertEquals(9, d.context()); assertEquals(10, d.payload().length);
             endpoint.finish(); destination.close();
             var result = splice.get(5, TimeUnit.SECONDS);
-            assertEquals(expected, result.aToB().streamBytes());
+            assertEquals(expected, result.aToB().bytes());
             assertEquals(10, result.aToB().datagramBytes());
             assertEquals(List.of(104L, 3L, 3004L, 10L), calls.stream().map(c -> c[1]).toList(), "acquire per capsule, tryAcquire per datagram");
             for (long[] c : calls) assertEquals(c[0], c[1], "acquire(n, n)");
             assertEquals(104 + 3 + 1000 + 10, charged.get(), "grants stay with their forwarded units");
+            endpoint.close();
+        }
+    }
+
+    @Test void packetSpliceDropsADatagramWhoseLimiterFailsAndKeepsRelayingCapsules() throws Exception {
+        try (EventLoops loops = EventLoops.create(3); var left = Pair.memory(config(loops, true)); var right = Pair.memory(config(loops, true))) {
+            ZmuxStream endpoint = left.client().openStream(HELLO); endpoint.flush();
+            ZmuxStream a = left.server().acceptStream(Duration.ofSeconds(3));
+            ZmuxStream b = right.client().openStream(HELLO); b.flush();
+            var tries = new AtomicInteger(); var refunded = new java.util.concurrent.atomic.AtomicLong();
+            Limiter limiter = new Limiter() {
+                @Override public CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
+                // Datagram 1 throws, 2 grants more than asked, 3 grants a negative amount: each counts as nothing taken.
+                @Override public long tryAcquire(long min, long max) {
+                    return switch (tries.incrementAndGet()) {
+                        case 1 -> throw new IllegalStateException("datagram limiter broke");
+                        case 2 -> max + 1;
+                        case 3 -> -7;
+                        default -> max;
+                    };
+                }
+                @Override public void refund(long n) { refunded.addAndGet(n); }
+            };
+            var splice = Zmux.splicePackets(a, b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
+            var destination = PacketStream.of(right.server().acceptStream(Duration.ofSeconds(3)));
+            for (int i = 1; i <= 3; i++) endpoint.sendDatagram(i, bytes(10, i));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (tries.get() < 3 && System.nanoTime() < deadline) Thread.onSpinWait();
+            assertEquals(3, tries.get());
+            ByteBuffer head = ByteBuffer.allocate(io.zmux.internal.wire.Capsule.MAX_DATAGRAM_HEADER);
+            io.zmux.internal.wire.Capsule.putDatagramHeader(head, 5, 20); head.flip();
+            endpoint.write(head); endpoint.write(bytes(20, 5));
+            var capsule = destination.receive(Duration.ofSeconds(3));
+            assertEquals(5, capsule.context()); assertEquals(20, capsule.payload().length);
+            endpoint.sendDatagram(6, bytes(10, 6));
+            var d = destination.receive(Duration.ofSeconds(3));
+            assertEquals(6, d.context());
+            endpoint.finish(); destination.close();
+            var result = splice.get(5, TimeUnit.SECONDS);
+            assertEquals(3, result.aToB().datagramsLimited()); assertEquals(3, result.aToB().datagramsDropped());
+            assertEquals(10, result.aToB().datagramBytes());
+            assertEquals(11, refunded.get(), "only the over-large grant is given back");
             endpoint.close();
         }
     }
@@ -370,7 +413,7 @@ class PacketStreamTest {
                 @Override public long tryAcquire(long min, long max) { return dropped.incrementAndGet() == 1 ? 0 : max; }
                 @Override public void refund(long n) {}
             };
-            var splice = Zmux.splice(a, b, new SpliceOptions(65536, limiter, null)).toCompletableFuture();
+            var splice = Zmux.splice(a, b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             try (var peer = right.server().acceptStream(Duration.ofSeconds(3))) {
                 endpoint.sendDatagram(1, ByteBuffer.wrap(new byte[] {1}));
                 endpoint.sendDatagram(2, ByteBuffer.wrap(new byte[] {2}));
@@ -456,9 +499,9 @@ class PacketStreamTest {
             Thread.sleep(200); // It waits for a capsule boundary that never comes.
             raw.finish(); destination.finish();
             var result = splice.get(5, TimeUnit.SECONDS);
-            assertEquals(new SpliceResult.End.Reset(PacketStream.PACKET_ERROR), result.aToB().end());
+            assertEquals(new SpliceEnd.Reset(PacketStream.PACKET_ERROR), result.aToB().end());
             assertEquals(0, result.aToB().datagramBytes(), "never written: not forwarded");
-            assertEquals(1, result.aToB().datagramsTooLarge());
+            assertEquals(0, result.aToB().datagramsTooLarge(), "dropped for the end, not for its size");
             assertEquals(1, result.aToB().datagramsDropped());
             destination.close(); raw.close();
         }

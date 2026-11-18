@@ -1,6 +1,5 @@
 package io.zmux.quic;
 
-import io.zmux.ZmuxListener;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.zmux.EarlyData;
@@ -35,7 +34,7 @@ public final class QuicInteropPeer {
         // A last argument "exporter": the join secret from the exporter alone, and KEYS <hex> for each session.
         boolean exporter = args[args.length - 1].equals("exporter");
         try (var loops = EventLoops.create(2)) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4);
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4);
             if (exporter) builder.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             else builder.pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
@@ -50,7 +49,7 @@ public final class QuicInteropPeer {
 
     private static void server(int sessions, ZmuxConfig config, Consumer<ZmuxSession> script) throws Exception {
         TestTls.init();
-        try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+        try (var listener = io.zmux.Zmux.listener(ListenerConfig.of(config));
              var server = new QuicServer(new InetSocketAddress("127.0.0.1", 0), TestTls.server, OPTIONS, listener)) {
             System.out.println("LISTEN 127.0.0.1:" + server.address().getPort());
             for (int i = 0; i < sessions; i++) {
@@ -69,7 +68,7 @@ public final class QuicInteropPeer {
         try (var client = new QuicClient(tls, OPTIONS)) {
             script.accept(client.connectAsync(remote, "localhost", config).get(10, TimeUnit.SECONDS));
             ZmuxSession session = client.connectAsync(remote, "localhost", config).get(10, TimeUnit.SECONDS);
-            try (var stream = session.openStream(Preamble.openInfo("early".getBytes(StandardCharsets.UTF_8)))) {
+            try (var stream = session.openStream(Preamble.builder().openInfo("early".getBytes(StandardCharsets.UTF_8)).build())) {
                 stream.write("early-data".getBytes(StandardCharsets.UTF_8));
                 stream.finish();
                 var reply = new ByteArrayOutputStream();

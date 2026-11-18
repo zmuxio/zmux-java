@@ -17,7 +17,7 @@ class SplitBootstrapTest {
     @Test void halvesPairInEitherOrderAndTokenStaysUsedUntilTheSessionEnds() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(config))) {
                 for (Framing framing : Framing.values()) for (boolean upFirst : new boolean[] {false, true}) {
                     var up = MemoryPipe.pair(framing); var down = MemoryPipe.pair(framing);
                     String token = token((upFirst ? 1 : 2) + 10 * framing.ordinal());
@@ -55,7 +55,7 @@ class SplitBootstrapTest {
     @Test void handshakeTimeoutAndListenerCloseReleaseUnpairedHalves() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(300)).build();
-            var listener = ZmuxListener.of(ListenerConfig.builder().session(config).firstRecordTimeout(Duration.ofMillis(20)).build());
+            var listener = Zmux.listener(ListenerConfig.builder().session(config).firstRecordTimeout(Duration.ofMillis(20)).build());
             try {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var waiting = listener.adapter().handle(PipeIo.of(pair[1].reader(), null), JoinHint.pair(token(3), true, TestAddr.peer("client"))).closed();
@@ -76,7 +76,7 @@ class SplitBootstrapTest {
     @Test void splitExporterBindsBothHalvesInUplinkDownlinkOrder() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var _ = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.exporter().withEndToEnd()).noProbation().build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(config))) {
                 PipeIo.Exporter upKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 3); return key; };
                 PipeIo.Exporter downKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 9); return key; };
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM); var down = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -95,7 +95,7 @@ class SplitBootstrapTest {
         }
     }
     @Test void stalledPairInputHasABoundedQueueAndReleasesRejectedDeliveries() throws Exception {
-        try (EventLoops loops = EventLoops.create(1); var listener = ZmuxListener.of(ListenerConfig.of(ZmuxConfig.builder().eventLoops(loops).build()))) {
+        try (EventLoops loops = EventLoops.create(1); var listener = Zmux.listener(ListenerConfig.of(ZmuxConfig.builder().eventLoops(loops).build()))) {
             var sink = new CompletableFuture<PipeReader.Sink>(); AtomicInteger released = new AtomicInteger(), closed = new AtomicInteger();
             PipeReader reader = new PipeReader() {
                 @Override public void start(Sink input) { sink.complete(input); }

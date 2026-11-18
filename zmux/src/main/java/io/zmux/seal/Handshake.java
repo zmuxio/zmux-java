@@ -2,10 +2,10 @@ package io.zmux.seal;
 
 import io.zmux.internal.kex.MlKem768;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.seal.SecureCarrierException.Code.PEER_IS_SELF;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Kind.PEER_IS_SELF;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
 import io.zmux.internal.join.Kdf;
@@ -112,7 +112,7 @@ final class Handshake {
     /** With a given source of the KEM's randomness: the seed (d, z) of a key pair, or the m of an encapsulation. */
     Handshake(Profile p, Mode m, boolean initiator, byte[] handle, byte[] psk, byte[] binding, StaticKey s, EphemeralSource source,
               SecureRandom kemRandom) throws SecureCarrierException {
-        if (p == null) throw new SecureCarrierException(SecureCarrierException.Code.UNKNOWN_PROFILE);
+        if (p == null) throw new SecureCarrierException(SecureCarrierException.Kind.UNKNOWN_PROFILE);
         if (m == null) throw new SecureCarrierException(INVALID_CONFIG, "mode");
         int hl = handle == null ? 0 : handle.length;
         if (p.isPskBased() ? hl != HANDLE_LEN : hl != 0) throw new SecureCarrierException(INVALID_CONFIG, "handle");
@@ -288,7 +288,7 @@ final class Handshake {
     EstablishPayload readMessage(byte[] msg) throws SecureCarrierException {
         ready(false);
         // A first message in Bound and no Binding here: refused, unread.
-        if (noBinding && idx == 0) throw fail(new SecureCarrierException(SecureCarrierException.Code.AUTH));
+        if (noBinding && idx == 0) throw fail(new SecureCarrierException(SecureCarrierException.Kind.AUTH));
         int known = known(idx);
         try {
             // Application data in a message 1 without a key is refused, not skipped.

@@ -16,7 +16,7 @@ class QuicAdmissionTest {
 
     static ListenerConfig admitting(ZmuxConfig config, java.util.function.BiFunction<Admission.CarrierInfo, ByteBuffer, Admission.Decision> decider) {
         return ListenerConfig.builder().session(config)
-                .admission(Admission.of(4, Admission.Decider.immediate(decider)).withPeekTimeout(Duration.ofSeconds(2))).build();
+                .admission(Admission.builder(4, Admission.Decider.immediate(decider)).peekTimeout(Duration.ofSeconds(2)).build()).build();
     }
 
     @Test void anAcceptedFirstStreamOpensTheConnectionToTheListener() throws Exception {
@@ -24,7 +24,7 @@ class QuicAdmissionTest {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var seen = new LinkedBlockingQueue<String>();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(admitting(config, (info, prefix) -> {
+            try (var listener = Zmux.listener(admitting(config, (info, prefix) -> {
                      seen.add(info.source().getAddress().getHostAddress() + " " + info.applicationProtocol() + " " + prefix.remaining());
                      return Admission.Decision.accept(0);
                  }));
@@ -63,7 +63,7 @@ class QuicAdmissionTest {
                     @Override public void onError(Throwable cause) { got.complete(all.toByteArray()); }
                 });
             };
-            try (var listener = ZmuxListener.of(admitting(config, (info, prefix) -> Admission.Decision.FALLBACK));
+            try (var listener = Zmux.listener(admitting(config, (info, prefix) -> Admission.Decision.FALLBACK));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener, fallback);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var connecting = endpoint.connectAsync(server.address(), "localhost", config);
@@ -80,7 +80,7 @@ class QuicAdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(admitting(config, (info, prefix) -> Admission.Decision.CLOSE));
+            try (var listener = Zmux.listener(admitting(config, (info, prefix) -> Admission.Decision.CLOSE));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var connecting = endpoint.connectAsync(server.address(), "localhost", config);
@@ -109,9 +109,9 @@ class QuicAdmissionTest {
             var config = QuicEndpointTest.config(loops);
             var dialing = QuicEndpointTest.builder(loops).carrierCredential(auth).build();
             var options = QuicOptions.defaults();
-            try (var local = ZmuxListener.of(ListenerConfig.of(dialing));
-                 var remote = ZmuxListener.of(ListenerConfig.builder().session(config)
-                         .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, decider).withPeekTimeout(Duration.ofSeconds(5))).build());
+            try (var local = Zmux.listener(ListenerConfig.of(dialing));
+                 var remote = Zmux.listener(ListenerConfig.builder().session(config)
+                         .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, decider).peekTimeout(Duration.ofSeconds(5)).build()).build());
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, remote);
                  var client = new QuicClient(TestTls.client, options, local)) {
                 var a = client.connectAsync(server.address(), "localhost").get(10, TimeUnit.SECONDS);
@@ -123,7 +123,7 @@ class QuicAdmissionTest {
                 a.addPipe(joined, PipeOptions.defaults());
                 assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
 
-                try (var pool = new QuicPool(client, server.address(), "localhost", QuicPool.Limits.defaults().withMaxPipesPerConnection(2), auth)) {
+                try (var pool = QuicPool.builder(client, server.address(), "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(2)).credential(auth).build()) {
                     var first = pool.openPipeAsync();
                     var second = pool.openPipeAsync();
                     var one = first.get(5, TimeUnit.SECONDS);
@@ -158,8 +158,8 @@ class QuicAdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.builder().session(config)
-                         .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(5))).build());
+            try (var listener = Zmux.listener(ListenerConfig.builder().session(config)
+                         .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(5)).build()).build());
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var withCredential = ZmuxConfig.builder().eventLoops(loops).carrierCredential(auth).build();

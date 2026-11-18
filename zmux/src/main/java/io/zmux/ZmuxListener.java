@@ -33,7 +33,7 @@ import javax.net.ssl.SSLEngine;
  * Accepts sessions, and the pipes that join them, on a TCP or TLS port. A new carrier is classified by its first record: it starts a session, which
  * {@link #accept()} offers once established (at most {@code backlog} wait, later ones are
  * refused), or it joins the session its Hello names. The listener's sessions share one
- * memory budget. A listener without a socket ({@link #of(ListenerConfig)}) runs nothing of its own
+ * memory budget. A listener without a socket ({@link Zmux#listener(ListenerConfig)}) runs nothing of its own
  * until its first carrier; one with a socket runs its acceptor from creation. Either must be
  * {@link #close() closed}, which stops its tasks and ends its sessions.
  */
@@ -134,7 +134,7 @@ public final class ZmuxListener implements AutoCloseable {
         hub.rejectStallMax(stallMax);
         if (adm != null) {
             long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
-            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, adm.fallbackOnPeekTimeout(), stallMin, stallMax, forward(o.fallback()));
+            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, adm.isFallbackOnPeekTimeout(), stallMin, stallMax, forward(o.fallback()));
         }
         hub.inbound(o.inboundTransform());
         hub.onReject(o.onReject());
@@ -151,8 +151,8 @@ public final class ZmuxListener implements AutoCloseable {
         return lo + Long.remainderUnsigned(RANDOM.nextLong(), hi - lo + 1);
     }
 
-    /** A listener without a socket: carriers arrive through its {@link #adapter()}. */
-    public static ZmuxListener of(ListenerConfig cfg) {
+    /** A listener without a socket ({@link Zmux#listener}). */
+    static ZmuxListener unbound(ListenerConfig cfg) {
         return new ZmuxListener(null, cfg);
     }
 

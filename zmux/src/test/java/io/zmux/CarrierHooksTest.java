@@ -96,7 +96,7 @@ class CarrierHooksTest {
     private static Pair pair(EventLoops loops, PipeAuth clientM, PipeAuth serverM, java.util.function.UnaryOperator<PipeIo> side) throws IOException {
         var s = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(serverM).build();
         var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(clientM).build();
-        var l = ZmuxListener.of(ListenerConfig.of(s));
+        var l = Zmux.listener(ListenerConfig.of(s));
         var p = MemoryPipe.pair(Framing.BYTE_STREAM);
         l.adapter().handle(side.apply(p[1]), JoinHint.inBand(TestAddr.peer("peer")));
         var client = Zmux.open(side.apply(p[0]), Role.CLIENT, c);
@@ -174,7 +174,7 @@ class CarrierHooksTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var bad = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
             var good = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(good))) {
+            try (var l = Zmux.listener(ListenerConfig.of(good))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1].withExporter((x, y, z) -> new byte[z]), JoinHint.inBand(TestAddr.peer("peer")));
                 // The read fails in the step that establishes the session: open never returns it.
@@ -240,7 +240,7 @@ class CarrierHooksTest {
             assertEquals(want, p.client.liveness(), "setting what it returns changes nothing");
             p.client.setLiveness(Liveness.defaults());
             assertEquals(Liveness.defaults(), p.client.liveness(), "not written is the default, not the start value");
-            var off = Liveness.builder().noKeepAlive().noProbeInterval().probeJitter(0).build();
+            var off = Liveness.builder().noKeepAlivePeriod().noProbeInterval().probeJitter(0).build();
             p.client.setLiveness(off);
             assertEquals(off, p.client.liveness());
             assertTrue(p.client.liveness().keepAlivePeriod().isEmpty());
@@ -256,9 +256,9 @@ class CarrierHooksTest {
 
     @Test void raisingTheStreamLimitGrantsCredit() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var s = ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).build();
+            var s = ZmuxConfig.builder().eventLoops(loops).maxIncomingStreams(4).build();
             var c = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(s))) {
+            try (var l = Zmux.listener(ListenerConfig.of(s))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 try (var client = Zmux.open(p[0], Role.CLIENT, c); var server = l.accept(WAIT)) {
@@ -285,14 +285,14 @@ class CarrierHooksTest {
         var seen = new CopyOnWriteArrayList<Integer>();
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(2, Admission.Decider.immediate((info, prefix) -> {
+            var adm = Admission.builder(2, Admission.Decider.immediate((info, prefix) -> {
                 seen.add(prefix.remaining());
                 if (prefix.remaining() == 2) return Admission.Decision.more(6);
                 if (prefix.remaining() == 6) return new Admission.Decision(AdmissionVerdict.ACCEPT, 6, "v", 0, "x");
                 return Admission.Decision.CLOSE;
-            })).withMaxPeek(16).withPeekTimeout(WAIT);
+            })).maxPeek(16).peekTimeout(WAIT).build();
             var lc = ListenerConfig.builder().session(cfg).admission(adm).build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 // The carrier starts with six bytes the accept skips, a byte at a time for the first.
@@ -319,7 +319,7 @@ class CarrierHooksTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var s = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
             var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(s).maxPendingPerSource(1).build())) {
+            try (var l = Zmux.listener(ListenerConfig.builder().session(s).maxPendingPerSource(1).build())) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("boot")));
                 try (var client = Zmux.open(boot[0], Role.CLIENT, c); var server = l.accept(WAIT)) {
@@ -351,11 +351,11 @@ class CarrierHooksTest {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(1, Admission.Decider.immediate((i, b) -> {
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> {
                 calls.incrementAndGet();
                 return b.remaining() < 8 ? Admission.Decision.more(8) : Admission.Decision.CLOSE;
-            })).withMaxPeek(8).withPeekTimeout(Duration.ofMillis(100));
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).build())) {
+            })).maxPeek(8).peekTimeout(Duration.ofMillis(100)).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[] {1});
@@ -376,8 +376,8 @@ class CarrierHooksTest {
     @Test void moreBeyondTheBoundCloses() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(1, Admission.Decider.immediate((i, b) -> Admission.Decision.more(99))).withMaxPeek(8).withPeekTimeout(WAIT);
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).build())) {
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.more(99))).maxPeek(8).peekTimeout(WAIT).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[] {1});
@@ -392,13 +392,13 @@ class CarrierHooksTest {
         var prefix = new java.util.concurrent.atomic.AtomicReference<byte[]>();
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(1, Admission.Decider.immediate((i, b) -> {
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> {
                 byte[] copy = new byte[b.remaining()];
                 b.duplicate().get(copy);
                 prefix.set(copy);
                 return Admission.Decision.accept(copy.length);
-            })).withMaxPeek(16).withPeekTimeout(WAIT);
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).build())) {
+            })).maxPeek(16).peekTimeout(WAIT).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.MESSAGES);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[] {9, 8, 7});
@@ -413,8 +413,8 @@ class CarrierHooksTest {
     @Test void aFirstMessageAboveTheLimitIsClosed() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).withMaxPeek(4).withPeekTimeout(WAIT);
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(cfg).admission(adm).build())) {
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).maxPeek(4).peekTimeout(WAIT).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.MESSAGES);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[32]);
@@ -442,7 +442,7 @@ class CarrierHooksTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var base = ZmuxConfig.builder().eventLoops(loops).build();
             var chosen = ZmuxConfig.builder().eventLoops(loops).carrierCredential(chosenCredential).build();
-            try (var l = ZmuxListener.of(ListenerConfig.builder().session(base).sessionConfigs((info, admitted) -> chosen).build())) {
+            try (var l = Zmux.listener(ListenerConfig.builder().session(base).sessionConfigs((info, admitted) -> chosen).build())) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 try (var _ = Zmux.open(p[0], Role.CLIENT, base); var s = l.accept(WAIT)) {
@@ -459,7 +459,7 @@ class CarrierHooksTest {
             var chosen = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
             var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
             var lc = ListenerConfig.builder().session(base).sessionConfigs((info, admitted) -> { infos.incrementAndGet(); return chosen; }).build();
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 try (var _ = Zmux.open(p[0], Role.CLIENT, c); var s = l.accept(WAIT)) {
@@ -469,7 +469,7 @@ class CarrierHooksTest {
                 }
             }
             var failing = ListenerConfig.builder().session(base).sessionConfigs((info, a) -> { throw new IllegalStateException("no"); }).build();
-            try (var l = ZmuxListener.of(failing)) {
+            try (var l = Zmux.listener(failing)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 var ended = new java.util.concurrent.CompletableFuture<Void>();
@@ -488,7 +488,7 @@ class CarrierHooksTest {
         var shaped = new CopyOnWriteArrayList<String>();
         try (EventLoops loops = EventLoops.create(1)) {
             var c = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(c))) {
+            try (var l = Zmux.listener(ListenerConfig.of(c))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 try (var client = Zmux.open(p[0].withVariant("w"), Role.CLIENT, c); var _ = l.accept(WAIT)) {

@@ -55,6 +55,13 @@ final class Turn {
         return held.get() == ASYNC;
     }
 
+    /** Whether an asynchronous operation holds the turn or queues for it. */
+    boolean asyncPending() {
+        if (held.get() == ASYNC) return true;
+        for (Waiting q : queue) if (q instanceof Operation<?>) return true;
+        return false;
+    }
+
     /** Queues w behind earlier operations; w is granted the turn through {@link Waiting#take}. */
     void enqueue(Waiting w) {
         queue.add(w);

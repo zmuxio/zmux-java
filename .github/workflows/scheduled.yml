@@ -1,0 +1,137 @@
+name: Scheduled
+
+# Weekly: the newest JDK with the newest dependency releases, and the interop suites against the latest published
+# zmux-go and zmux-rs. A failure opens an issue (or comments on the open one).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  latest:
+    name: Latest JDK and dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Newest JDK feature release
+        id: jdk
+        run: |
+          version="$(curl -fsS https://api.adoptium.net/v3/info/available_releases | python3 -c 'import json,sys; print(json.load(sys.stdin)["most_recent_feature_release"])')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Java
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.jdk.outputs.version }}
+
+      # The version properties of the parent pom to the newest stable releases.
+      - name: Update dependency properties
+        run: tools/use-latest-versions.sh
+
+      - name: Show the updated versions
+        run: git diff -U0 -- pom.xml | grep '^[+-] ' || true
+
+      - name: Build and test
+        run: ./mvnw -B -U verify
+
+      - name: Error Prone
+        run: ./mvnw -B -Perrorprone clean test-compile
+
+      - name: SpotBugs
+        run: ./mvnw -B -Pstatic-checks clean test-compile spotbugs:check
+
+  interop-latest:
+    name: Interop against the latest published peers
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Latest published versions
+        id: peers
+        run: |
+          latest() {
+            git ls-remote --tags --refs "https://github.com/zmuxio/$1" |
+              awk '{print $2}' | sed 's#refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
+          }
+          echo "go=$(latest zmux-go)" >> "${GITHUB_OUTPUT}"
+          echo "rs=$(latest zmux-rs)" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout zmux-java
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: zmux-java
+
+      - name: Checkout zmux-rs ${{ steps.peers.outputs.rs }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zmuxio/zmux-rs
+          ref: ${{ steps.peers.outputs.rs }}
+          path: zmux-rs
+
+      - name: Checkout zmux-go ${{ steps.peers.outputs.go }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zmuxio/zmux-go
+          ref: ${{ steps.peers.outputs.go }}
+          path: zmux-go
+
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: 'stable'
+          cache-dependency-path: zmux-java/interop/qmux-go-peer/go.sum
+
+      - name: Set up Java
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: zulu
+          java-version: 25
+          cache: maven
+          cache-dependency-path: zmux-java/**/pom.xml
+
+      # The Establish peer uses the StaticKey names, which the latest published zmux-go has from v1.5.0 on; until then
+      # this job fails (Java releases after Go).
+      - name: Run interop tests
+        working-directory: zmux-java
+        env:
+          ZMUX_RS_ROOT: ${{ github.workspace }}/zmux-rs
+          ZMUX_GO_ROOT: ${{ github.workspace }}/zmux-go
+        run: tools/verify-interop.sh
+
+  report:
+    name: Report a failure
+    needs: [latest, interop-latest]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled build failed"
+          body="The weekly run failed (latest JDK and dependencies, or interop against the latest published peers): ${RUN_URL}"
+          number="$(gh issue list --state open --search "\"${title}\" in:title" --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body "${body}"
+          else
+            gh issue create --title "${title}" --body "${body}"
+          fi

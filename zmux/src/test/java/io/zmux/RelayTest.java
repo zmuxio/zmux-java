@@ -19,7 +19,7 @@ class RelayTest {
 
     static PipePool through(TcpRelay relay, PipeOptions options) {
         return PipePool.of(attempt -> attempt.join(relay.address())).withOptions(options)
-                .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
+                .withBackoff(new Backoff(Duration.ofMillis(100), Duration.ofSeconds(1), 0));
     }
 
     static <T extends SessionEvent> T event(ZmuxSession s, Class<T> kind, java.util.function.Predicate<T> match, long ms) throws Exception {
@@ -89,7 +89,7 @@ class RelayTest {
                 Thread.sleep(300);
                 relay.blackhole = true;
                 long start = System.nanoTime();
-                event(client, SessionEvent.PipeFailed.class, e -> e.pipeId().equals(pipe.id()), 8000);
+                event(client, SessionEvent.PipeFailed.class, e -> e.pipe().equals(pipe.id()), 8000);
                 long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(ms <= 1000 + 2000 + 1500, "failed after " + ms + " ms (k = 1 s, T_fail = 2 s)");
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
@@ -107,7 +107,7 @@ class RelayTest {
                 byte[] data = new byte[8 << 20]; new java.util.Random(5).nextBytes(data);
                 var received = ex.submit(() -> SessionTest.readAll(server.acceptStream()));
                 var decisions = new AtomicLong();
-                PoolPolicy policy = view -> { decisions.incrementAndGet(); return PoolPolicy.Decision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(200)); };
+                PoolPolicy policy = view -> { decisions.incrementAndGet(); return PoolDecision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(200)); };
                 try (var run = client.maintainPipes(through(relay, PipeOptions.defaults()).withPolicy(policy))) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     var stream = client.openStream();
@@ -161,10 +161,10 @@ class RelayTest {
                 PoolPolicy ages = view -> {
                     var retire = new java.util.HashSet<PipeId>();
                     for (var m : view.members()) {
-                        long limit = thresholds.computeIfAbsent(m.pipeId(), id -> (long) (2500 * (1 - 0.3 * ThreadLocalRandom.current().nextDouble())));
-                        if (m.age().toMillis() > limit) retire.add(m.pipeId());
+                        long limit = thresholds.computeIfAbsent(m.pipe(), id -> (long) (2500 * (1 - 0.3 * ThreadLocalRandom.current().nextDouble())));
+                        if (m.age().toMillis() > limit) retire.add(m.pipe());
                     }
-                    return PoolPolicy.Decision.KEEP.withCount(1).withRetirePipes(retire).withRecheck(Duration.ofMillis(50));
+                    return PoolDecision.KEEP.withCount(1).withRetirePipes(retire).withRecheck(Duration.ofMillis(50));
                 };
                 try (var run = client.maintainPipes(through(relay, PipeOptions.defaults()).withPolicy(ages))) {
                     PipePoolTest.await(() -> run.pipes().size() == 1 && run.pipes().getFirst().stats().orElseThrow().outbound() == PipeState.Outbound.ACTIVE);

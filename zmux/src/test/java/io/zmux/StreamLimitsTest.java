@@ -45,8 +45,8 @@ class StreamLimitsTest {
     }
 
     private static Pair pair(EventLoops loops, UnaryOperator<ZmuxConfig.Builder> server) throws Exception {
-        var c = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
-        return Pair.memory(c, server.apply(ZmuxConfig.builder().eventLoops(loops).datagrams(true)).build(), io.zmux.carrier.Framing.BYTE_STREAM);
+        var c = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+        return Pair.memory(c, server.apply(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true)).build(), io.zmux.carrier.Framing.BYTE_STREAM);
     }
 
     @Test void aStreamsDatagramQueueIsBoundedByBytes() throws Exception {
@@ -90,7 +90,7 @@ class StreamLimitsTest {
             @Override public void refund(long bytes) { }
         };
         try (EventLoops loops = EventLoops.create(2);
-             var p = pair(loops, b -> b.datagramStreamQueue(32).datagramStreamBytes(16 << 10).datagramLimiters(null, never))) {
+             var p = pair(loops, b -> b.datagramStreamQueue(32).datagramStreamBytes(16 << 10).datagramLimiter(new io.zmux.helper.DatagramLimiter(null, never)))) {
             var st = p.client().openStream();
             st.write(new byte[] {0});
             var in = p.server().acceptStream(Duration.ofSeconds(5));
@@ -115,14 +115,14 @@ class StreamLimitsTest {
     @Test void theStreamCreditMaximumIsAdvertisedAndRaised() throws Exception {
         long max = Zmux.MAX_STREAM_CREDIT;
         assertEquals(1L << 60, max);
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().incomingStreams(max + 1));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().incomingUniStreams(max + 1));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxIncomingStreams(max + 1));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxIncomingUniStreams(max + 1));
         try (EventLoops loops = EventLoops.create(2)) {
-            try (var p = pair(loops, b -> b.incomingStreams(max).incomingUniStreams(max))) {
+            try (var p = pair(loops, b -> b.maxIncomingStreams(max).maxIncomingUniStreams(max))) {
                 assertEquals(max, CoreProbe.peerStreamCredit(p.client().core, true));
                 assertEquals(max, CoreProbe.peerStreamCredit(p.client().core, false));
             }
-            try (var p = pair(loops, b -> b.incomingUniStreams(16))) {
+            try (var p = pair(loops, b -> b.maxIncomingUniStreams(16))) {
                 assertThrows(IllegalArgumentException.class, () -> p.server().raiseIncomingStreams(max + 1, 0));
                 assertThrows(IllegalArgumentException.class, () -> p.server().raiseIncomingStreams(0, max + 1));
                 p.server().raiseIncomingStreams(max, max);

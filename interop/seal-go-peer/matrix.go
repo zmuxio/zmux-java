@@ -134,10 +134,11 @@ func matrixServer(sc string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	handle, psk := matrixKeys()
-	sc2 := &seal.ServerConfig{Gate: &matrixGate{handle, psk}, Key: mustKey(0x5a), AcceptedProfiles: allProfiles}
+	sc2 := &seal.ServerConfig{Gate: &matrixGate{handle, psk}, AcceptedProfiles: allProfiles}
+	sc2.StaticKey = mustKey(0x5a)
 	switch sc {
 	case "appdata":
-		sc2.ClientAnchor = seal.PinAnchor(seal.NodeKeyID(mustKey(0x6b).PublicKey().Bytes()))
+		sc2.ClientAnchor = seal.PinAnchor(seal.StaticKeyID(mustKey(0x6b).PublicKey().Bytes()))
 		sc2.AppData = func(_ context.Context, r seal.AppDataRequest) ([]byte, error) {
 			if r.Message == 2 {
 				return []byte("srv-msg2"), nil
@@ -308,7 +309,7 @@ func matrixClient(sc string, args []string) {
 	defer cancel()
 	addr := args[0]
 	node := mustKey(0x5a)
-	nodeID := seal.NodeKeyID(node.PublicKey().Bytes())
+	nodeID := seal.StaticKeyID(node.PublicKey().Bytes())
 	profile := scenarioProfile(sc)
 	cc := &seal.ClientConfig{Anchor: seal.PinAnchor(nodeID), AllowedProfiles: []proto.Profile{profile}}
 	if profile.HasPSK() {
@@ -316,7 +317,7 @@ func matrixClient(sc string, args []string) {
 	}
 	switch sc {
 	case "appdata":
-		cc.Key = mustKey(0x6b)
+		cc.StaticKey = mustKey(0x6b)
 		cc.AppData = func(_ context.Context, r seal.AppDataRequest) ([]byte, error) {
 			if r.Message == 3 {
 				return []byte("cli-msg3"), nil

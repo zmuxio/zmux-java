@@ -38,13 +38,13 @@ class DatagramMaxTest {
 
     @Test void tcp() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            check(ListenerConfig.builder(), ZmuxConfig.builder().eventLoops(loops).datagrams(true).build(), Zmux::connect);
+            check(ListenerConfig.builder(), ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build(), Zmux::connect);
         }
     }
 
     @Test void tls() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            check(ListenerConfig.builder().tls(TlsOptions.server(TestTls.server())), ZmuxConfig.builder().eventLoops(loops).datagrams(true).build(),
+            check(ListenerConfig.builder().tls(TlsOptions.server(TestTls.server())), ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build(),
                     (a, c) -> Zmux.connectTls(a, TlsOptions.client(TestTls.client(), "localhost"), c));
         }
     }

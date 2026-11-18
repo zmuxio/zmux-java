@@ -118,7 +118,7 @@ class WebSocketTest {
         PrefixAuth auth = AdmissionHttpTest.AUTH;
         var verifier = auth.verifier();
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
-        try (var f = new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, verifier)),
+        try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()),
                 e -> e.webSocket(), false, () -> new HostHandler(seen)); var c = f.client(b -> b)) {
             try (var s = Zmux.open(c.webSocketPipe(ws(f.base), Map.of(), List.of(), auth), Role.CLIENT, f.config)) {
                 f.echo(s);

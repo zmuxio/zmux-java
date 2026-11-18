@@ -5,9 +5,21 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.Objects;
 
-/** Immutable maintenance policy for one route. Scheduling and attachment limits stay in the session. */
-public record PipePool(Join join, int count, PipeOptions options, Rotation rotation, Backoff backoff,
-                       Duration inspectionInterval, Duration attemptTimeout, PoolPolicy policy) {
+/**
+ * Immutable maintenance policy for one route. Scheduling and attachment limits stay in the session. A pool has no
+ * deadline of its own for a dial: the {@link Dial} or {@link Join} bounds its own attempt, and the session's
+ * {@link ZmuxConfig.Builder#joinTimeout join timeout} bounds the join.
+ *
+ * @param join makes one member
+ * @param count the members to keep, at least 1
+ * @param options the options its pipes join with
+ * @param rotate when members are replaced, make before break
+ * @param backoff the redial backoff
+ * @param policy the application's {@link PoolPolicy}; null: none
+ * @param decisionRejected receives a policy decision the pool rejected; null: the session's logger logs it
+ */
+public record PipePool(Join join, int count, PipeOptions options, Rotation rotate, Backoff backoff, PoolPolicy policy,
+                       java.util.function.Consumer<Throwable> decisionRejected) {
     /**
      * Creates and joins one fresh pipe using the supplied options. Must cooperate with
      * cancellation and interruption: an attempt that does not is abandoned rather than awaited
@@ -40,9 +52,8 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
         public static Rotation none() { return new Rotation(0, Duration.ZERO, 0); }
     }
     public PipePool {
-        Objects.requireNonNull(join); Objects.requireNonNull(options); Objects.requireNonNull(rotation); Objects.requireNonNull(backoff);
+        Objects.requireNonNull(join); Objects.requireNonNull(options); Objects.requireNonNull(rotate); Objects.requireNonNull(backoff);
         if (count < 1) throw new IllegalArgumentException("count must be positive");
-        nanos(inspectionInterval, false); if (attemptTimeout != null) nanos(attemptTimeout, false);
     }
     static long nanos(Duration duration, boolean zero) {
         Objects.requireNonNull(duration);
@@ -58,7 +69,7 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
     }
     /** A pool whose members are groups of pipes joined by join. */
     public static PipePool join(Join join) {
-        return new PipePool(join, 1, PipeOptions.defaults(), Rotation.none(), Backoff.defaults(), Duration.ofMillis(250), null, null);
+        return new PipePool(join, 1, PipeOptions.defaults(), Rotation.none(), Backoff.defaults(), null, null);
     }
     /** A single attempt's creation scope; completed resources are committed by maintenance. */
     public static final class Attempt {
@@ -153,12 +164,19 @@ public record PipePool(Join join, int count, PipeOptions options, Rotation rotat
     CarrierChoiceSource choiceSource() { return join instanceof ChoiceJoin(CarrierChoiceSource source) ? source : null; }
     /** Adapts a raw carrier factory through the session's existing in-band join operation. */
     public static PipePool carriers(CarrierDial dial) { return join(new InBandDial(Objects.requireNonNull(dial))); }
-    public PipePool withCount(int value) { return new PipePool(join, value, options, rotation, backoff, inspectionInterval, attemptTimeout, policy); }
-    public PipePool withOptions(PipeOptions value) { return new PipePool(join, count, value, rotation, backoff, inspectionInterval, attemptTimeout, policy); }
-    public PipePool withRotation(Rotation value) { return new PipePool(join, count, options, value, backoff, inspectionInterval, attemptTimeout, policy); }
-    public PipePool withBackoff(Backoff value) { return new PipePool(join, count, options, rotation, value, inspectionInterval, attemptTimeout, policy); }
-    public PipePool withInspectionInterval(Duration value) { return new PipePool(join, count, options, rotation, backoff, value, attemptTimeout, policy); }
-    /** Consulted on every pass of the maintenance run; null: none. */
-    public PipePool withPolicy(PoolPolicy value) { return new PipePool(join, count, options, rotation, backoff, inspectionInterval, attemptTimeout, value); }
-    public PipePool withAttemptTimeout(Duration value) { return new PipePool(join, count, options, rotation, backoff, inspectionInterval, value, policy); }
+    public PipePool withCount(int value) { return new PipePool(join, value, options, rotate, backoff, policy, decisionRejected); }
+    public PipePool withOptions(PipeOptions value) { return new PipePool(join, count, value, rotate, backoff, policy, decisionRejected); }
+    /** Replaces members by bytes or age, make before break; {@link Rotation#none()} (the default): never. */
+    public PipePool withRotate(Rotation value) { return new PipePool(join, count, options, value, backoff, policy, decisionRejected); }
+    public PipePool withBackoff(Backoff value) { return new PipePool(join, count, options, rotate, value, policy, decisionRejected); }
+    /** The policy asked at each look of the maintenance run; null: none. */
+    public PipePool withPolicy(PoolPolicy value) { return new PipePool(join, count, options, rotate, backoff, value, decisionRejected); }
+    /**
+     * Receives each decision the pool rejected (the policy threw anything but a VirtualMachineError, or returned null), after the pool applied
+     * {@link PoolDecision#KEEP} for that look; null (the default): the session's logger logs it. It runs on the pool's
+     * task and must not block; what it throws is ignored.
+     */
+    public PipePool withDecisionRejected(java.util.function.Consumer<Throwable> value) {
+        return new PipePool(join, count, options, rotate, backoff, policy, value);
+    }
 }

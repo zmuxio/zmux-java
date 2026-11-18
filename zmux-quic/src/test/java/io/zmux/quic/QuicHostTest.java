@@ -21,7 +21,7 @@ class QuicHostTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
             NettyHost serverHost, clientHost;
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 serverHost = server.host(); clientHost = endpoint.host();
@@ -92,7 +92,7 @@ class QuicHostTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
             NettyHost host;
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener)) {
                 ZmuxSession client, accepted;
                 try (var endpoint = new QuicClient(TestTls.client, options)) {

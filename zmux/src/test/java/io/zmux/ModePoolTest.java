@@ -31,7 +31,7 @@ class ModePoolTest {
     @Test void membersStartOnTheRobustKindAndUpgradeMakeBeforeBreak() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var base = new AtomicInteger(); var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache(Duration.ofHours(1), Duration.ofMillis(300), Duration.ofSeconds(10));
                 cache.record("k", CarrierKind.WEBSOCKET, "", false, System.nanoTime());
@@ -64,7 +64,7 @@ class ModePoolTest {
     @Test void aFailedUpgradeKeepsTheMemberAndBacksTheKindOff() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var base = new AtomicInteger(); var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache(Duration.ofHours(1), Duration.ofMillis(100), Duration.ofSeconds(10));
                 var pool = PipePool.choice(CarrierChoice.auto(refused(CarrierKind.WEBSOCKET, ws), reaching(CarrierKind.EXCHANGE, l, ex)),
@@ -87,7 +87,7 @@ class ModePoolTest {
     @Test void aMemberLostWithinTheDropWindowCountsAgainstItsKind() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var base = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache();
                 var pool = PipePool.choice(CarrierChoice.auto(reaching(CarrierKind.EXCHANGE, l, ex)), CarrierChoicePolicy.of(cache, "k"));
@@ -110,7 +110,7 @@ class ModePoolTest {
         assertThrows(IllegalArgumentException.class, () -> CarrierChoicePolicy.defaults().withSettle(Duration.ofMillis(-1)));
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var l = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var wrapped = new AtomicInteger();
                 var cand = reaching(CarrierKind.WEBSOCKET, l, new AtomicInteger()).wrapDial(io -> { wrapped.incrementAndGet(); return io; });
                 try (var s = Zmux.dial(CarrierChoice.explicit(cand), cfg, null)) {

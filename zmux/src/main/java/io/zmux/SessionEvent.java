@@ -19,25 +19,25 @@ public sealed interface SessionEvent {
      */
 
     /** A local outbound pipe direction appeared (joining, or already active). */
-    record PipeAdded(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeAdded(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction became active. */
-    record PipeJoined(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeJoined(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction stopped making progress. */
-    record PipeSuspect(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeSuspect(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** A suspect outbound pipe direction is active again. */
-    record PipeRecovered(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeRecovered(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** An outbound pipe direction failed. */
-    record PipeFailed(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeFailed(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /**
      * A pipe direction ended: the outbound direction CLOSED, the inbound one ENDED. Retirement
      * is reported by {@link PipesRetired}.
      */
-    record PipeClosed(PipeId pipeId, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
+    record PipeClosed(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
 
     /** A tier's saturation state changed. Lower numbered tiers are preferred. */
     record TierSaturation(long priority, boolean saturated) implements SessionEvent {}
@@ -47,11 +47,11 @@ public sealed interface SessionEvent {
      * is {@link PipeStats.SettingSource#LOCAL} for a local setting and
      * {@link PipeStats.SettingSource#PEER} for the peer's request.
      */
-    record PipePriorityChanged(PipeId pipeId, CarrierKind carrier, long priority, boolean standby, long weight,
+    record PipePriorityChanged(PipeId pipe, CarrierKind carrier, long priority, boolean standby, long weight,
                                PipeStats.SettingSource source) implements SessionEvent {}
 
-    /** A quality estimate left the configured band; rate is bytes/s. */
-    record PipeQualityChanged(PipeId pipeId, CarrierKind carrier, java.time.Duration smoothedRtt, long rate) implements SessionEvent {}
+    /** A quality estimate left the configured band; deliveryRate is bytes/s. */
+    record PipeQualityChanged(PipeId pipe, CarrierKind carrier, java.time.Duration smoothedRtt, long deliveryRate) implements SessionEvent {}
 
     /** The sum of measured usable outbound rate estimates fell below the floor, in bytes/s. */
     record CapacityBelow(long rate) implements SessionEvent {}

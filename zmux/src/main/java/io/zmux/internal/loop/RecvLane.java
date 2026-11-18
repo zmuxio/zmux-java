@@ -58,6 +58,19 @@ public final class RecvLane {
     private final AtomicLong read = new AtomicLong(), dropped = new AtomicLong();
     private volatile long reportBytes;
     private volatile boolean endSeen;
+    // The readiness state, readable from any thread without the turn: how far data was pushed (loop), how far the
+    // reader consumed (turn holder), and whether the end was pushed (loop).
+    private volatile long pushedTo;
+    private final AtomicLong consumedTo = new AtomicLong();
+    private volatile boolean endPushed;
+    /** The waits for something to read, any number at once; each is woken once and checks again. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<Ready> readyWaiters = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /** Withdraws a cancelled or expired readiness wait from the waiters. */
+    private void withdrawReady(Operation<?> op) {
+        if (op instanceof Ready r) readyWaiters.remove(r);
+    }
+    private interface Ready { void ready(); }
     /** Set on the loop when the part was stopped or released: nothing more is reported or kept. */
     private volatile boolean closed;
     /** What reads report once closed; null: the part was stopped or released locally. */
@@ -73,6 +86,8 @@ public final class RecvLane {
     // Loop only.
     private Piece tail;
     private boolean ended;
+    /** Whether {@link #consumedTo} started at the first pushed offset; loop only. */
+    private boolean based;
     private boolean endReported;
     /** The application is done with this part: it saw the end, or stopped it; on the loop. */
     boolean appDone;
@@ -125,6 +140,7 @@ public final class RecvLane {
 
     private void consumed(int n) {
         read.addAndGet(n);
+        consumedTo.setRelease(consumedTo.getPlain() + n); // the turn holder is the only writer
         unreported += n;
         if (unreported >= reportBytes) report();
     }
@@ -238,38 +254,75 @@ public final class RecvLane {
     }
 
     /**
-     * Waits until deadline for something to read, without taking it: the bytes readable now,
-     * or -1 when the next read returns the end. Throws when the lane was closed.
+     * Reads what is available into dst without waiting for data: the count, 0 when nothing is readable now, -1 at FIN;
+     * throws the part's failure. A read that waits for data holds the direction while nothing is readable, so
+     * "nothing readable now" is the answer without waiting for it; while data is readable, whoever holds the direction
+     * takes it or leaves in a bounded step, and this call follows.
+     *
+     * @throws io.zmux.CompletionThreadBlockedException on the completion thread, when what holds the direction is an
+     *     asynchronous read, which needs that thread to take the data
      */
-    public long awaitReadable(long deadline) throws CoreException, InterruptedIOException {
-        if (!turn.tryEnter()) SendLane.waitTurn(driver, turn, deadline, 0);
-        try {
-            SendLane.Blocked self = null;
-            while (true) {
-                if (closed || stopped) throw closedOutcome();
-                Piece p = peek();
-                if (p != null) return readable(p);
-                if (self == null) self = new SendLane.Blocked();
-                if (!awaitData(self)) continue;
-                while (waiter == self) {
-                    if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
-                        if (WAITER.compareAndSet(this, self, null)) throw SendLane.interrupted(0);
-                        break;
-                    }
-                    self.park(deadline);
-                }
+    public int tryRead(ByteBuffer dst) throws CoreException {
+        while (!turn.tryEnter()) {
+            if (readableNow() == 0) return 0;
+            if (driver.onCompletionContext() && turn.asyncPending()) {
+                throw new io.zmux.CompletionThreadBlockedException("tryRead on the session's completion thread with data readable"
+                        + " behind this stream's pending asynchronous " + turn.asyncOperations + ", which needs that thread to take it");
             }
+            java.util.concurrent.locks.LockSupport.parkNanos(20_000); // the holder takes the data or leaves in a bounded step
+        }
+        try {
+            Object r = take(dst);
+            return r == null ? 0 : result(r);
         } finally {
             leave();
         }
     }
 
-    /** What a wait for something to read reports for p, the piece {@link #peek} returned: -1 at the end, else the bytes readable now. */
-    private long readable(Piece p) {
-        if (p.end != null) return -1;
-        long n = 0;
-        for (Piece q = p; q != null && q.end == null; q = q.next) n += Math.clamp(cut - q.off, 0, q.data.remaining());
-        return n;
+    /**
+     * The readiness now: the bytes readable, -1 when the next read reports the part's end (FIN, a reset, a local stop,
+     * the session's end), 0 when nothing is readable. Without the turn: the bytes are counted from the offsets.
+     */
+    private long readableNow() {
+        if (closed || stopped) return -1;
+        long n = Math.min(pushedTo, cut) - consumedTo.getAcquire();
+        if (n > 0) return n;
+        return endPushed ? -1 : 0;
+    }
+
+    private void wakeReady() {
+        for (Ready r; (r = readyWaiters.poll()) != null; ) r.ready();
+    }
+
+    /** A thread waiting for readiness. */
+    private static final class ReadyThread implements Ready {
+        private final Thread thread = Thread.currentThread();
+        volatile boolean fired;
+        @Override public void ready() { fired = true; java.util.concurrent.locks.LockSupport.unpark(thread); }
+    }
+
+    /**
+     * Waits until deadline for something to read, without taking it and without the turn, so it never queues behind a
+     * read and any number of waits proceed at once: the bytes readable now, or -1 when the next read reports the
+     * part's end, which that read then reports in its own form, once. Fails only with its own bound.
+     */
+    public long awaitReadable(long deadline) throws InterruptedIOException {
+        while (true) {
+            long r = readableNow();
+            if (r != 0) return r;
+            ReadyThread w = new ReadyThread();
+            readyWaiters.add(w);
+            r = readableNow(); // after registering: a push between the two checks wakes w
+            if (r != 0) { readyWaiters.remove(w); return r; }
+            while (!w.fired) {
+                if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
+                    readyWaiters.remove(w);
+                    throw SendLane.interrupted(0);
+                }
+                if (deadline == Long.MAX_VALUE) java.util.concurrent.locks.LockSupport.park(w);
+                else java.util.concurrent.locks.LockSupport.parkNanos(w, deadline - System.nanoTime());
+            }
+        }
     }
 
     /** Takes up to max bytes without copying, waiting until deadline; null at FIN. */
@@ -310,6 +363,7 @@ public final class RecvLane {
     /** The application stopped the part: reads fail from now on. */
     public void stopLocally() {
         stopped = true;
+        wakeReady();
     }
 
     /** Waits until operations that hold or wait for the direction have ended. */
@@ -323,24 +377,13 @@ public final class RecvLane {
     /** A read run by its turn holder: first the caller, later the completion context. */
     private final class AsyncRead extends Operation<Object> implements SendLane.Resumable, Turn.Waiting {
         private final ByteBuffer dst;
-        /** The chunk limit; 0 with no dst: a wait for something to read that takes nothing. */
+        /** The chunk limit of a chunk read (no dst). */
         private final int max;
-        /** A wait's report: the bytes readable, -1 at the end. */
-        long readable;
 
         AsyncRead(ByteBuffer dst, int max, long deadline) {
             super(RecvLane.this.driver, self -> ((AsyncRead) self).withdraw(), deadline);
             this.dst = dst;
             this.max = max;
-        }
-
-        /** The wait's outcome: TRUE with {@link #readable} set, the failure, or null to wait on. */
-        private Object peekReadable() {
-            if (closed || stopped) return closedOutcome();
-            Piece p = peek();
-            if (p == null) return null;
-            readable = RecvLane.this.readable(p);
-            return true;
         }
 
         private void withdraw() {
@@ -361,7 +404,7 @@ public final class RecvLane {
         void step() {
             if (!begin()) { leave(); return; }
             while (true) {
-                Object r = dst != null ? RecvLane.this.take(dst) : max == 0 ? peekReadable() : takeChunk(max);
+                Object r = dst != null ? RecvLane.this.take(dst) : takeChunk(max);
                 if (r != null) {
                     finish(dst != null ? asRead(r) : r); // a chunk read reports FIN itself
                     leave();
@@ -376,8 +419,7 @@ public final class RecvLane {
     }
 
     /**
-     * Starts an asynchronous read into dst (or, when dst is null, a chunk read of up to max;
-     * max 0 is {@link #awaitReadableAsync}).
+     * Starts an asynchronous read into dst (or, when dst is null, a chunk read of up to max).
      * The outcome is the count (-1 at FIN), a StreamRecv.Chunk, StreamRecv.FIN, or a core outcome.
      */
     public Operation<Object> readAsync(ByteBuffer dst, int max, long deadline) {
@@ -392,18 +434,42 @@ public final class RecvLane {
         return op;
     }
 
+    /** An asynchronous wait for readiness: it holds no turn, and the loop's pushes wake it. */
+    private final class ReadyWait extends Operation<Object> implements Ready {
+        /** The wait's report: the bytes readable, -1 at the end. */
+        volatile long readable;
+
+        ReadyWait(long deadline) {
+            super(RecvLane.this.driver, RecvLane.this::withdrawReady, deadline);
+        }
+
+        @Override public void ready() { driver.completions().execute(this::step); }
+
+        void step() {
+            if (!begin()) return;
+            long r = readableNow();
+            if (r != 0) { readable = r; finish(true); return; }
+            pause();
+            readyWaiters.add(this);
+            r = readableNow(); // after registering: a push between the two checks wakes this
+            if (r != 0 && readyWaiters.remove(this)) ready();
+        }
+    }
+
     /**
      * Starts an asynchronous {@link #awaitReadable}: completes TRUE once something can be read
-     * ({@link #readable(Operation)} then tells how much, -1 for the end), or with the part's
-     * failure. Takes nothing.
+     * ({@link #readable(Operation)} then tells how much, -1 for the end of any kind). Takes nothing, holds no turn.
      */
     public Operation<Object> awaitReadableAsync(long deadline) {
-        return readAsync(null, 0, deadline);
+        ReadyWait op = new ReadyWait(deadline);
+        op.armDeadline();
+        if (op.grant()) op.step();
+        return op;
     }
 
     /** What a completed {@link #awaitReadableAsync} reported: the bytes readable, -1 at the end. */
     public static long readable(Operation<?> op) {
-        return op instanceof AsyncRead r ? r.readable : 0;
+        return op instanceof ReadyWait r ? r.readable : 0;
     }
 
     // ---- loop side ----
@@ -418,13 +484,17 @@ public final class RecvLane {
             long off = core.receiving().pushed(st);
             StreamRecv.Chunk ch = core.receiving().push(st, PIECE);
             if (ch == null) break;
+            long to = off + ch.data().remaining(); // before the reader may take from the piece
+            if (!based) { based = true; consumedTo.set(off); } // offsets need not start at 0; nothing was pushed to consume yet
             append(new Piece(ch.data(), ch.buf(), off, null));
+            pushedTo = to;
             pushed = true;
         }
         Object end = core.receiving().pushEnd(st);
         if (end != null) {
             ended = true;
             append(new Piece(null, null, 0, end));
+            endPushed = true;
             pushed = true;
             if (end instanceof CoreException failure && endWatcher != null) endWatcher.accept(failure);
             core.receiving().cancelReadWait(st, hostWaiter);
@@ -436,6 +506,7 @@ public final class RecvLane {
             SendLane.Resumable w = waiter;
             if (w != null && WAITER.compareAndSet(this, w, null)) w.resume();
             if (hostReader != null) hostReader.run();
+            wakeReady();
         }
     }
 
@@ -471,6 +542,7 @@ public final class RecvLane {
         core.receiving().cancelReadWait(st, hostWaiter);
         SendLane.Resumable w = (SendLane.Resumable) WAITER.getAndSet(this, null);
         if (w != null) w.resume();
+        wakeReady();
         if (turn.tryEnter()) {
             discard();
             turn.leave();

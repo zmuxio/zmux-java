@@ -1,7 +1,7 @@
 package io.zmux.internal.kex;
 
-import static io.zmux.seal.SecureCarrierException.Code.KEX;
-import static io.zmux.seal.SecureCarrierException.Code.RANDOM_FAILED;
+import static io.zmux.seal.SecureCarrierException.Kind.KEX;
+import static io.zmux.seal.SecureCarrierException.Kind.RANDOM_FAILED;
 
 import io.zmux.seal.SecureCarrierException;
 import io.zmux.internal.random.OsRandom;
@@ -105,13 +105,13 @@ public final class MlKem768 {
         try {
             return secret(KEM.getInstance("ML-KEM").newDecapsulator(dk).decapsulate(ct));
         } catch (GeneralSecurityException | RuntimeException x) {
-            throw new SecureCarrierException(SecureCarrierException.Code.MALFORMED, "ciphertext", x);
+            throw new SecureCarrierException(SecureCarrierException.Kind.MALFORMED, "ciphertext", x);
         }
     }
 
     private static byte[] secret(SecretKey k) throws SecureCarrierException {
         byte[] s = k.getEncoded();
-        if (s == null || s.length != SECRET_LEN) throw new SecureCarrierException(SecureCarrierException.Code.MALFORMED, "shared secret");
+        if (s == null || s.length != SECRET_LEN) throw new SecureCarrierException(SecureCarrierException.Kind.MALFORMED, "shared secret");
         return s;
     }
 }

@@ -233,7 +233,7 @@ class SealTest {
         }
         var f = Seal.establish(MemoryPipe.pair(Framing.BYTE_STREAM)[0], client().allowedProfiles(Profile.XXHFS_CHACHA).build()).toCompletableFuture();
         var e = assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
-        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, ((SecureCarrierException) e.getCause()).code());
+        assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, ((SecureCarrierException) e.getCause()).kind());
     }
 
     /** Gate.commit gets the Handle and the client's whole Peer: credential, verdict, application data and the PQ facts. */
@@ -281,7 +281,21 @@ class SealTest {
                 var f = Seal.establish(tcp(l.localAddress()), client().anchor(new PinAnchor(new byte[io.zmux.seal.KeyId.LEN])).build()).toCompletableFuture();
                 var e = assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 var failed = assertInstanceOf(CredentialsFailedException.class, e.getCause());
-                assertEquals("credentials failed: key not pinned", failed.getMessage());
+                assertEquals("credentials failed: the verifier rejected the peer", failed.getMessage());
+                assertEquals("verify rejected: key not pinned", assertInstanceOf(VerifyRejectedException.class, failed.getCause()).getMessage());
+            }
+        }
+    }
+
+    @Test void aClientWhoseVerifierIsUnavailableFailsAsCredentialsFailed() throws Exception {
+        try (EventLoops loops = EventLoops.create(1)) {
+            ZmuxConfig cfg = sessions(loops).build();
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build())) {
+                Anchor down = in -> { throw new VerifyUnavailableException("store down", null); };
+                var f = Seal.establish(tcp(l.localAddress()), client().anchor(down).build()).toCompletableFuture();
+                var e = assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
+                var failed = assertInstanceOf(CredentialsFailedException.class, e.getCause());
+                assertInstanceOf(VerifyUnavailableException.class, failed.getCause());
             }
         }
     }
@@ -320,8 +334,8 @@ class SealTest {
                 Anchor anchor = in -> {
                     seen.add(in);
                     return switch (verdict) {
-                        case "reject" -> throw new CredentialsFailedException("unknown client");
-                        case "unavailable" -> throw new VerifierUnavailableException("store down", null);
+                        case "reject" -> throw new VerifyRejectedException("unknown client");
+                        case "unavailable" -> throw new VerifyUnavailableException("store down", null);
                         default -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
                     };
                 };
@@ -473,9 +487,9 @@ class SealTest {
                 // Without the client's declaration nothing is sent.
                 PipeIo plain = Zmux.dialTlsPipeAsync(l.localAddress(), tls, cfg).get(10, TimeUnit.SECONDS);
                 var bad = assertThrows(ExecutionException.class, () -> establish0(plain, client().mode(RecordMode.BOUND).build()));
-                assertEquals(SecureCarrierException.Code.INVALID_CONFIG, ((SecureCarrierException) bad.getCause()).code());
+                assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, ((SecureCarrierException) bad.getCause()).kind());
                 PipeIo p = Zmux.dialTlsPipeAsync(l.localAddress(), tls.withSecure(), cfg).get(10, TimeUnit.SECONDS);
-                assertTrue(p.isSecure());
+                assertTrue(p.isCarrierSecure());
                 try (var c = Zmux.open(establish(p, client().mode(RecordMode.BOUND).build()), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertEquals(RecordMode.BOUND, c.weakestRecordMode());
                     assertEquals(RecordMode.BOUND, s.weakestRecordMode());
@@ -501,8 +515,8 @@ class SealTest {
             var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.adapter().handle(pair[1].withExporter((a, b, n) -> new byte[n]).withSecure(true), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                PipeIo near = pair[0].withExporter((a, b, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withSecure(true);
+                l.adapter().handle(pair[1].withExporter((a, b, n) -> new byte[n]).withCarrierSecure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                PipeIo near = pair[0].withExporter((a, b, n) -> { byte[] o = new byte[n]; Arrays.fill(o, (byte) 1); return o; }).withCarrierSecure();
                 var f = Seal.establish(near, client().mode(RecordMode.BOUND).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS));
                 for (long end = System.nanoTime() + 5_000_000_000L; rejected.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);

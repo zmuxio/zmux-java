@@ -15,7 +15,7 @@ timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZM
 timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/web-peer/Cargo.toml" --target-dir "$CARGO_TARGET_DIR"
 "$ZMUX_GO_ROOT/interop/webpeer/build.sh" "$repo_root/target/interop/web-go"
 (cd "$repo_root/interop/qmux-go-peer" && timeout --kill-after=5s 180s go build -o "$repo_root/target/interop/qmux-go-peer" .)
-# The Establish peer builds against the zmux-go checkout itself, through a workspace.
+# The Establish peer builds against the zmux-go checkout itself, through a workspace (v1.5.0 or later).
 printf 'go 1.27\n\nuse (\n\t%s\n\t%s\n\t%s\n)\n' "$repo_root/interop/seal-go-peer" "$ZMUX_GO_ROOT" "$ZMUX_GO_ROOT/seal" > "$repo_root/target/interop/go.work"
 (cd "$repo_root/interop/seal-go-peer" && GOWORK="$repo_root/target/interop/go.work" timeout --kill-after=5s 180s go build -o "$repo_root/target/interop/seal-go-peer" .)
 export ZMUX_INTEROP_PEER="$CARGO_TARGET_DIR/release/zmux-interop-peer"
@@ -27,7 +27,7 @@ export ZMUX_RS_HTTP_PEER="$CARGO_TARGET_DIR/release/zmux-http-peer"
 export ZMUX_GO_WS_PEER="$repo_root/target/interop/web-go/wspeer"
 export ZMUX_GO_HTTP_PEER="$repo_root/target/interop/web-go/httppeer"
 export ZMUX_GO_TLS_FRONT="$repo_root/target/interop/web-go/tlsfront"
-(cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux -am -Dzmux.bufferTracking=true -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
+(cd "$repo_root" && timeout --kill-after=5s 300s "$repo_root/mvnw" -B -pl zmux -am -Dzmux.bufferTracking=true -Dtest=PeerInterop,QmuxInterop,SealPeerInterop test)
 # Maven must have actually executed every role in both suites.
 python3 - "$repo_root" <<'CHECK'
 from pathlib import Path
@@ -38,7 +38,7 @@ for name, tests in (('PeerInterop', 4), ('QmuxInterop', 4), ('SealPeerInterop', 
 CHECK
 # QUIC against the Rust scripted peer (ZMUX_INTEROP_PEER), and WebSocket and HTTP streaming against both peers,
 # with the Bound joins over TLS and the Sealed ones behind a TLS front.
-(cd "$repo_root" && timeout --kill-after=5s 300s mvn -B -pl zmux-quic,zmux-http -am -Dsurefire.failIfNoSpecifiedTests=false \
+(cd "$repo_root" && timeout --kill-after=5s 300s "$repo_root/mvnw" -B -pl zmux-quic,zmux-http -am -Dsurefire.failIfNoSpecifiedTests=false \
   -Dtest='QuicPeerInterop,HttpInteropTest#webSocketWith*+streamingWith*+bound*+sealedBehindTlsFront' test)
 python3 - "$repo_root" <<'CHECK'
 from pathlib import Path

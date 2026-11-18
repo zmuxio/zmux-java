@@ -270,10 +270,60 @@ public final class StreamTable {
             StreamSend.raiseCredit(st, !st.bidi ? peer.maxStreamDataUni : st.local ? peer.maxStreamDataBidiRemote : peer.maxStreamDataBidiLocal);
         }
         if (st.hasRecv && st.rcv.window() == 0) {
-            TransportParams l = cfg.local();
-            StreamRecv.initWindow(st, !st.bidi ? l.maxStreamDataUni : st.local ? l.maxStreamDataBidiLocal : l.maxStreamDataBidiRemote);
+            StreamRecv.initWindow(st, configuredInitialWindow(st));
         }
     }
+
+    /** The initial receive window the session's configuration gives st's receiving part. */
+    private long configuredInitialWindow(Stream st) {
+        TransportParams l = cfg.local();
+        return !st.bidi ? l.maxStreamDataUni : st.local ? l.maxStreamDataBidiLocal : l.maxStreamDataBidiRemote;
+    }
+
+    // ---- held runtime settings: readable from any thread, never waiting ----
+
+    /**
+     * The send buffer the sending part holds: what the application set last, else the session's configured send
+     * buffer, which the part copied when it was created and does not follow afterwards.
+     */
+    public long heldSendBuffer(Stream st) {
+        long v = st.tab.heldSendBuffer;
+        return v < 0 ? cfg.sendBuffer() : v;
+    }
+
+    /**
+     * Records the send buffer the sending part holds; any thread. {@link Session#applyHeldSendBuffer} then applies
+     * on the loop whatever was held last.
+     */
+    public void holdSendBuffer(Stream st, long bytes) {
+        st.tab.heldSendBuffer = StreamSend.bufferLimit(bytes);
+    }
+
+    /** The send buffer last set, one read; negative: never set. */
+    public long heldSendBufferSet(Stream st) { return st.tab.heldSendBuffer; }
+
+    /**
+     * The receive window the receiving part holds, read once: what the application set last, else the configured
+     * initial window and cap (0: automatic).
+     */
+    public HeldWindow heldWindow(Stream st) {
+        HeldWindow w = st.tab.heldWindow;
+        return w != null ? w : new HeldWindow(configuredInitialWindow(st), cfg.streamWindowCap());
+    }
+
+    /** The receive window the application set: the initial and the cap are one value, so a reader never sees two settings mixed. */
+    public record HeldWindow(long initial, long max) {}
+
+    /**
+     * Records the receive window the receiving part holds, as {@link StreamRecv#setReceiveWindow} applies it; any
+     * thread. The arguments are valid ({@link StreamRecv#checkReceiveWindow}).
+     */
+    public void holdReceiveWindow(Stream st, long initial, long max) {
+        st.tab.heldWindow = new HeldWindow(initial, max);
+    }
+
+    /** The receive window last set, one read; null: never set. */
+    public HeldWindow heldWindowSet(Stream st) { return st.tab.heldWindow; }
 
     // ---- opening local streams ----
 
@@ -536,11 +586,38 @@ public final class StreamTable {
         checkPreamble(st, () -> ps.pipeCarrier = was);
     }
 
-    /** Sets local scheduling priority. */
-    public void setPriority(Stream st, int urgency, boolean incremental) {
-        st.tab.urgency = Math.clamp(urgency, 0, 7);
-        st.tab.incremental = incremental;
+    /** The sending part's urgency as the scheduler applies it, on the loop. */
+    public int urgency(Stream st) { return st.tab.urgency; }
+
+    /** Whether the sending part is incremental as the scheduler applies it, on the loop. */
+    public boolean incremental(Stream st) { return st.tab.incremental; }
+
+    /**
+     * The priority the sending part holds, from any thread, without waiting: the last one set by the application
+     * ({@link #holdPriority}) or signalled by the peer, whichever came last. Packed as urgency * 2 + incremental.
+     */
+    public int heldPriority(Stream st) { return st.tab.held; }
+
+    /**
+     * Records the priority the sending part holds; any thread. The scheduler uses it once {@link #applyHeldPriority}
+     * ran on the loop.
+     */
+    public void holdPriority(Stream st, int urgency, boolean incremental) {
+        st.tab.held = Math.clamp(urgency, 0, 7) << 1 | (incremental ? 1 : 0);
+    }
+
+    /** Gives the scheduler the held priority; on the loop. Whatever was held last is applied, however many holds came first. */
+    public void applyHeldPriority(Stream st) {
+        int h = st.tab.held;
+        st.tab.urgency = h >> 1;
+        st.tab.incremental = (h & 1) != 0;
         sched.reprioritize(st);
+    }
+
+    /** Sets local scheduling priority: holds and applies it; on the loop. */
+    public void setPriority(Stream st, int urgency, boolean incremental) {
+        holdPriority(st, urgency, incremental);
+        applyHeldPriority(st);
     }
 
     /**
@@ -874,6 +951,7 @@ public final class StreamTable {
 
     /** The priority the peer put in st's preamble. */
     void preamblePriority(Stream st, int urgency, boolean incremental) {
+        holdPriority(st, urgency, incremental);
         st.tab.urgency = urgency;
         st.tab.incremental = incremental;
     }
@@ -906,8 +984,15 @@ public final class StreamTable {
         /** Flush before establishment: the opening frame is owed once the stream may open. */
         private boolean openWant;
         private boolean opened;
+        /** The scheduler's copy of the priority, on the loop; see {@link #held}. */
         private int urgency = 3;
         private boolean incremental = true;
+        /** The held priority, urgency * 2 + incremental: any thread writes it, the loop applies it to the two fields above. */
+        private volatile int held = 3 << 1 | 1;
+        /** The send buffer last set (any thread writes it); negative: never set. */
+        private volatile long heldSendBuffer = -1;
+        /** The receive window last set (any thread writes it); null: never set. The cap is 0 when set automatic. */
+        private volatile HeldWindow heldWindow;
         private PreambleSpec pre;
         private long prioSeqApplied;
         private boolean prioApplied;

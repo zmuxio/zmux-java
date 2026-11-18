@@ -27,7 +27,7 @@ class JoinFloorTest {
             // The whole 8 KiB batch would not fit: too_large before anything is written.
             Joiner big = Joiner.create(Suite.AES, Mode.SEALED, f, locator, psk, null, Group.X25519_MLKEM768, 0);
             var e = assertThrows(io.zmux.seal.SecureCarrierException.class, () -> big.writeHello(new HelloPayload(pipe, new byte[8 << 10], 0)));
-            assertEquals(io.zmux.seal.SecureCarrierException.Code.TOO_LARGE, e.code());
+            assertEquals(io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE, e.kind());
         }
     }
 }

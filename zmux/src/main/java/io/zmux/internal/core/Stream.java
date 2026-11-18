@@ -80,14 +80,14 @@ public final class Stream {
     /** The stream's statistics now; on its session's loop. */
     public io.zmux.StreamStats stats() {
         long sent = 0, acked = 0, sendBuffered = 0, written = 0;
-        java.util.OptionalLong pipe = java.util.OptionalLong.empty();
+        java.util.Optional<io.zmux.PipeId> pipe = java.util.Optional.empty();
         if (hasSend) {
             long pre = snd.preLen();
             written = snd.appWritten();
             PathStreamState m = snd.mps();
             acked = m != null ? m.ret.acked().covered(pre, Long.MAX_VALUE) : Math.max(0, snd.sent() - pre);
             sendBuffered = Math.max(0, snd.q().end() - Math.max(snd.q().base(), pre));
-            if (m != null && m.sched.bound() >= 0) pipe = java.util.OptionalLong.of(m.sched.bound());
+            if (m != null && m.sched.bound() >= 0) pipe = java.util.Optional.of(io.zmux.PipeId.of(m.sched.bound()));
             sent = counters.bytesSent;
         }
         long received = 0, recvBuffered = 0, window = 0;

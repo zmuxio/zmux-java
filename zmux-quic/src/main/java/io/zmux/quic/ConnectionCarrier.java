@@ -68,7 +68,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         this(options, listener, fallback, host, completions, null, "", true);
     }
 
-    /** A server connection whose handshake completed before it was handed over ({@link QuicServer#serveAsync}). */
+    /** A server connection whose handshake completed before it was handed over ({@link QuicServer#serve}). */
     static ConnectionCarrier established(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
                                          io.zmux.internal.loop.SerialCallbacks completions) {
         ConnectionCarrier c = new ConnectionCarrier(options, listener, fallback, host, completions);
@@ -78,7 +78,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     /** The handshake was done before the carrier was added. */
     private boolean established;
-    /** No new stream goes to the listener any more ({@link QuicServer#serveAsync} cancelled); loop only. */
+    /** No new stream goes to the listener any more ({@link QuicServer#serve} cancelled); loop only. */
     private boolean stopped;
 
     /** Stops handing the connection's new streams to the listener; they are closed. Any thread. */
@@ -263,7 +263,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     private void route(StreamCarrier carrier) {
         if (stopped) { carrier.dispose(); return; }
         if (listener == null) {
-            if (carrier.unidirectional()) io.zmux.internal.spi.Spi.handleLane(session, carrier.io(this));
+            if (carrier.unidirectional()) io.zmux.Zmux.handleLane(carrier.io(this));
             else carrier.dispose();
             return;
         }
@@ -360,7 +360,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         javax.net.ssl.SSLEngine engine = channel.sslEngine();
         return engine == null ? null : engine.getApplicationProtocol();
     }
-    CompletionStage<PipeIo> openLane() { return open(QuicStreamType.UNIDIRECTIONAL); }
+    CompletionStage<io.zmux.carrier.PipeWriter> openLane() { return open(QuicStreamType.UNIDIRECTIONAL).thenApply(PipeIo::writer); }
     interface StreamObserver {
         void created(QuicStreamChannel stream);
         void failed(Throwable cause);

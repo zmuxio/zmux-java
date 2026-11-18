@@ -72,7 +72,7 @@ class ProbeTest {
 
     @Test void probesNeitherResetSinceLastTrafficNorKeepTheSessionAlive() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofSeconds(4)).liveness(Liveness.builder().noKeepAlive().probeInterval(Duration.ofSeconds(1)).build())
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxIdleTimeout(Duration.ofSeconds(4)).liveness(Liveness.builder().noKeepAlivePeriod().probeInterval(Duration.ofSeconds(1)).build())
                     .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), cfg);
@@ -106,12 +106,12 @@ class ProbeTest {
                  var client = Zmux.connect(listener.localAddress(), cfg);
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 var dials = new CopyOnWriteArrayList<Long>(); var options = new AtomicReference<PipeOptions>();
-                PoolPolicy policy = view -> PoolPolicy.Decision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(100)).withLiveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(3)).probeJitter(0.25).build());
+                PoolPolicy policy = view -> PoolDecision.KEEP.withCount(1).withDialAfter(Duration.ofMillis(100)).withLiveness(PipeLiveness.builder().probeInterval(Duration.ofSeconds(3)).probeJitter(0.25).build());
                 PipePool pool = PipePool.of(attempt -> {
                     dials.add(System.nanoTime()); options.set(attempt.options());
                     if (dials.size() <= 2) throw new java.io.IOException("refused");
                     return attempt.join(listener.localAddress());
-                }).withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofSeconds(10), Duration.ofSeconds(20), 0))
+                }).withBackoff(new Backoff(Duration.ofSeconds(10), Duration.ofSeconds(20), 0))
                         .withPolicy(policy);
                 try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
@@ -138,7 +138,7 @@ class ProbeTest {
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 var dials = new AtomicInteger();
                 PipePool pool = PipePool.of(attempt -> { dials.incrementAndGet(); return attempt.join(listener.localAddress()); })
-                        .withInspectionInterval(Duration.ofSeconds(30)).withBackoff(new Backoff(Duration.ofMillis(200), Duration.ofSeconds(1), 0));
+                        .withBackoff(new Backoff(Duration.ofMillis(200), Duration.ofSeconds(1), 0));
                 try (var run = client.maintainPipes(pool)) {
                     PipePoolTest.await(() -> run.pipes().size() == 1);
                     Thread.sleep(300); // older than the backoff: the redial goes at once

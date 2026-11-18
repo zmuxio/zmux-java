@@ -28,4 +28,9 @@ public final class KeyId {
         b.writeBytes(key);
         return Kdf.hash(b.toByteArray());
     }
+
+    /** The KeyId of an X25519 static public key ({@link StaticKey#publicKey()}), the one a {@link PinAnchor} pins. */
+    public static byte[] staticKeyId(byte[] publicKey) {
+        return of(KeyAlg.X25519, publicKey);
+    }
 }

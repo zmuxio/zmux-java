@@ -1,22 +1,65 @@
 package io.zmux;
 
 import io.zmux.helper.Limiter;
+import java.util.Optional;
 
 /**
- * Relay policy: the chunk size, each direction's limiter (null: none) and the control that may end the splice with
- * an application code (null: none).
+ * Relay policy of {@link Zmux#splice} and {@link Zmux#splicePackets}, built with {@link #builder()};
+ * {@link #DEFAULT} sets nothing.
  */
-public record SpliceOptions(int chunkSize, Limiter aToB, Limiter bToA, SpliceControl control) {
-    public SpliceOptions {
-        if (chunkSize < 1) throw new IllegalArgumentException("chunkSize must be positive");
+public final class SpliceOptions {
+    /** The default chunk, 64 KiB. */
+    public static final int DEFAULT_CHUNK = 65536;
+
+    /** No limiter, no abort handle and the default chunk. */
+    public static final SpliceOptions DEFAULT = builder().build();
+
+    private final int chunk;
+    private final Limiter aToB, bToA;
+    private final SpliceAbort abort;
+
+    private SpliceOptions(Builder b) {
+        chunk = b.chunk; aToB = b.aToB; bToA = b.bToA; abort = b.abort;
     }
-    /** The chunk size and the limiters, without a control. */
-    public SpliceOptions(int chunkSize, Limiter aToB, Limiter bToA) { this(chunkSize, aToB, bToA, null); }
-    public static SpliceOptions defaults() { return new SpliceOptions(65536, null, null, null); }
-    /**
-     * These options with control, which then serves the one splice started with them. A control
-     * serves one splice only: a second splice started with it fails at its start
-     * ({@link Zmux#splice}) with {@link IllegalStateException}, not here.
-     */
-    public SpliceOptions withControl(SpliceControl control) { return new SpliceOptions(chunkSize, aToB, bToA, control); }
+
+    public static Builder builder() { return new Builder(); }
+
+    /** The most bytes a direction holds between reading and writing. */
+    public int chunk() { return chunk; }
+
+    /** The limiter of the direction from a to b; empty: none. */
+    public Optional<Limiter> aToB() { return Optional.ofNullable(aToB); }
+
+    /** The limiter of the direction from b to a; empty: none. */
+    public Optional<Limiter> bToA() { return Optional.ofNullable(bToA); }
+
+    /** The handle that may end the splice with an application code; empty: none. */
+    public Optional<SpliceAbort> abort() { return Optional.ofNullable(abort); }
+
+    /** Builds {@link SpliceOptions}; every setting not called keeps its default. */
+    public static final class Builder {
+        private int chunk = DEFAULT_CHUNK;
+        private Limiter aToB, bToA;
+        private SpliceAbort abort;
+
+        private Builder() {}
+
+        /** The most bytes a direction holds between reading and writing, at least 1; default {@link #DEFAULT_CHUNK}. */
+        public Builder chunk(int n) {
+            if (n < 1) throw new IllegalArgumentException("chunk must be positive");
+            chunk = n;
+            return this;
+        }
+
+        /** The limiter of the direction from a to b. */
+        public Builder aToB(Limiter l) { aToB = java.util.Objects.requireNonNull(l, "l"); return this; }
+
+        /** The limiter of the direction from b to a. */
+        public Builder bToA(Limiter l) { bToA = java.util.Objects.requireNonNull(l, "l"); return this; }
+
+        /** The handle that may end the splice with an application code; one handle may serve several splices. */
+        public Builder abort(SpliceAbort a) { abort = java.util.Objects.requireNonNull(a, "a"); return this; }
+
+        public SpliceOptions build() { return new SpliceOptions(this); }
+    }
 }

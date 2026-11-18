@@ -23,8 +23,8 @@ import org.junit.jupiter.api.Timeout;
 class ProbeStormTest {
     /** The client probes every 3 s; the server at an hour, so the client's probes are the only exchanges started. */
     private static ZmuxConfig config(EventLoops loops, boolean client) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noIdleTimeout()
-                .liveness(Liveness.builder().noKeepAlive().probeInterval(client ? Duration.ofSeconds(3) : Duration.ofHours(1)).probeJitter(0).build())
+        return ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noMaxIdleTimeout()
+                .liveness(Liveness.builder().noKeepAlivePeriod().probeInterval(client ? Duration.ofSeconds(3) : Duration.ofHours(1)).probeJitter(0).build())
                 .build();
     }
 
@@ -51,8 +51,8 @@ class ProbeStormTest {
     private static void assertActive(ZmuxSession... sessions) {
         for (ZmuxSession s : sessions) {
             for (PipeStats st : s.pipeStats()) {
-                assertEquals(PipeState.Outbound.ACTIVE, st.outbound(), "pipe " + st.pipeId() + " " + st.suspectCount() + " suspicions");
-                assertEquals(0, st.suspectCount(), "pipe " + st.pipeId() + " turned suspect");
+                assertEquals(PipeState.Outbound.ACTIVE, st.outbound(), "pipe " + st.pipe() + " " + st.suspectCount() + " suspicions");
+                assertEquals(0, st.suspectCount(), "pipe " + st.pipe() + " turned suspect");
             }
         }
     }
@@ -66,7 +66,7 @@ class ProbeStormTest {
     @Test void shapingDelayKeepsAcknowledgementsInTime() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cc = config(loops, true), sc = config(loops, false);
-            try (var listener = ZmuxListener.of(ListenerConfig.of(sc))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(sc))) {
                 PipeIo[] io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("p")));
                 try (var client = Zmux.open(io[0], Role.CLIENT, cc); var server = listener.accept(Duration.ofSeconds(10))) {
@@ -92,7 +92,7 @@ class ProbeStormTest {
     @Test void longRoundTripLearnedDespiteSuspicion() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cc = config(loops, true), sc = config(loops, false);
-            try (var listener = ZmuxListener.of(ListenerConfig.of(sc))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(sc))) {
                 PipeIo[] io = SlowPathTest.linked(Duration.ofMillis(10), 1e9, 1 << 30);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("p")));
                 try (var client = Zmux.open(io[0], Role.CLIENT, cc); var server = listener.accept(Duration.ofSeconds(10))) {

@@ -58,7 +58,12 @@ final class QuicTransport extends AbstractTransport {
     @Override public void sessionEnded(io.zmux.internal.core.SessionError e) { carrier.sessionEnded(e); }
     @Override public java.util.concurrent.CompletionStage<Boolean> whenTaken() { return carrier.taken.stage(); }
     @Override public void taken() { carrier.taken.decide(true); }
-    @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() { return lanes == null ? null : lanes.open(); }
+    @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() {
+        if (lanes == null) return null;
+        var opening = lanes.open();
+        return opening == null ? null : opening.thenApply(w -> w == null ? null
+                : PipeIo.of(null, w).withCarrierConn(info().connection()).withCarrier(io.zmux.CarrierKind.QUIC));
+    }
 
     @Override
     public int directions() {

@@ -51,7 +51,7 @@ class EstablishTest {
         assertEquals(shown, key.toString());
         assertFalse(shown.contains(HexFormat.of().formatHex(peer.scalar())));
         var refused = assertThrows(SecureCarrierException.class, () -> key.dh(peer.publicKey()));
-        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, refused.code());
+        assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, refused.kind());
         peer.close();
     }
 
@@ -59,7 +59,7 @@ class EstablishTest {
     void everyProfileAndMode() throws Exception {
         StaticKey cKey = StaticKey.generate();
         StaticKey sKey = StaticKey.generate();
-        Anchor pin = new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey()));
+        Anchor pin = new PinAnchor(KeyId.staticKeyId(sKey.publicKey()));
         for (Profile p : Profile.values()) {
             for (Mode m : Mode.values()) {
                 for (Framing f : Framing.values()) {
@@ -153,15 +153,15 @@ class EstablishTest {
     void aRejectionAndAnUnavailableVerifierAreTold() throws Exception {
         StaticKey sKey = StaticKey.generate();
         assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client().verify(in -> {
-            throw new CredentialsFailedException("no");
+            throw new VerifyRejectedException("no");
         }, null, false));
-        // An error of the verifier, a panic, is a rejection too: only VerifierUnavailableException is temporary.
+        // An error of the verifier, a panic, is a rejection too: only VerifyUnavailableException is temporary.
         var panic = assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client().verify(in -> {
             throw new AssertionError("panic");
         }, null, false));
         assertInstanceOf(AssertionError.class, panic.getCause());
-        assertThrows(VerifierUnavailableException.class, () -> replied(sKey, null).client().verify(in -> {
-            throw new VerifierUnavailableException("store down", null);
+        assertThrows(VerifyUnavailableException.class, () -> replied(sKey, null).client().verify(in -> {
+            throw new VerifyUnavailableException("store down", null);
         }, null, false));
         var bug = assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client().verify(in -> {
             throw new IllegalStateException("bug");
@@ -169,10 +169,10 @@ class EstablishTest {
         assertInstanceOf(IllegalStateException.class, bug.getCause());
         assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client().verify(in -> null, null, false));
         assertThrows(CredentialsFailedException.class, () -> replied(StaticKey.generate(), null).client()
-                .verify(new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())), null, false));
+                .verify(new PinAnchor(KeyId.staticKeyId(sKey.publicKey())), null, false));
         // No static key to pin: a rejection, not a failure of the verifier.
         var none = new VerifyInput(io.zmux.Role.SERVER, Profile.of(1), null, null, null, List.of(), null);
-        assertThrows(CredentialsFailedException.class, () -> new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())).verify(none));
+        assertThrows(VerifyRejectedException.class, () -> new PinAnchor(KeyId.staticKeyId(sKey.publicKey())).verify(none));
     }
 
     @Test
@@ -190,12 +190,12 @@ class EstablishTest {
     @Test
     void requiredPqAuthenticationFailsWithoutAProof() throws Exception {
         StaticKey sKey = StaticKey.generate();
-        var j = replied(sKey, null).client().verify(new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())), null, false);
+        var j = replied(sKey, null).client().verify(new PinAnchor(KeyId.staticKeyId(sKey.publicKey())), null, false);
         assertFalse(j.pqAuthenticated());
         assertEquals(Principal.NODE_KEY, j.verdict().principal().type());
-        assertArrayEquals(KeyId.of(KeyAlg.X25519, sKey.publicKey()), j.verdict().principal().bytes());
+        assertArrayEquals(KeyId.staticKeyId(sKey.publicKey()), j.verdict().principal().bytes());
         assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
-                .verify(new PinAnchor(KeyId.of(KeyAlg.X25519, sKey.publicKey())), null, true));
+                .verify(new PinAnchor(KeyId.staticKeyId(sKey.publicKey())), null, true));
     }
 
     @Test
@@ -203,20 +203,28 @@ class EstablishTest {
         int k = EstablishPayload.KNOWN_APP_DATA;
         assertArrayEquals(new byte[] {5}, EstablishPayload.parse(new byte[] {2, 1, 5}, k, 1, false).appData());
         // Above the local bound, a second item, and any item in an unencrypted message 1.
-        assertEquals(SecureCarrierException.Code.TOO_LARGE, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {2, 2, 5, 5}, k, 1, false)).code());
-        assertEquals(SecureCarrierException.Code.TLV_ORDER, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {2, 1, 5, 2, 1, 6}, k, 256, false)).code());
-        assertEquals(SecureCarrierException.Code.MALFORMED, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {2, 0}, 0, 256, true)).code());
+        assertEquals(SecureCarrierException.Kind.TOO_LARGE, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {2, 2, 5, 5}, k, 1, false)).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_ORDER, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {2, 1, 5, 2, 1, 6}, k, 256, false)).kind());
+        assertEquals(SecureCarrierException.Kind.MALFORMED, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {2, 0}, 0, 256, true)).kind());
         // Unknown in a message that does not know it: an even type, skipped.
         assertNull(EstablishPayload.parse(new byte[] {2, 1, 5}, 0, 256, false).appData());
         // CredType 0 is no credential.
-        assertEquals(SecureCarrierException.Code.TLV_CREDENTIALS, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {1, 2, 0, 9}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).code());
+        assertEquals(SecureCarrierException.Kind.TLV_CREDENTIALS, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {1, 2, 0, 9}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).kind());
     }
 
-    private static final SigningKey SERVER_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44), CLIENT_PROOF = SigningKey.generate(KeyAlg.ML_DSA_44);
+    private static final SigningKey SERVER_PROOF = proofKey(), CLIENT_PROOF = proofKey();
+
+    private static SigningKey proofKey() {
+        try {
+            return SigningKey.generate(KeyAlg.ML_DSA_44);
+        } catch (SecureCarrierException e) {
+            throw new AssertionError(e);
+        }
+    }
 
     /** A verdict that names proofKey. */
     private static Anchor naming(byte[] proofKey) {
@@ -256,7 +264,7 @@ class EstablishTest {
         assertThrows(CredentialsFailedException.class, () -> signedReply(p, CLIENT_PROOF, null).client().verify(naming(SERVER_PROOF.keyId()), null, false));
         byte[] x25519 = new byte[32];
         Proof wrongAlg = new Proof(KeyAlg.X25519.id(), x25519, new byte[KeyAlg.ML_DSA_44.signatureLength()], null);
-        assertThrows(CredentialsFailedException.class, () -> signedReply(p, null, wrongAlg).client().verify(naming(KeyId.of(KeyAlg.X25519, x25519)), null, false));
+        assertThrows(CredentialsFailedException.class, () -> signedReply(p, null, wrongAlg).client().verify(naming(KeyId.staticKeyId(x25519)), null, false));
         Proof unsigned = Proof.placeholder(SERVER_PROOF);
         assertThrows(CredentialsFailedException.class, () -> signedReply(p, null, unsigned).client().verify(naming(SERVER_PROOF.keyId()), null, false));
         // PQ authentication required, and a verdict without a proof key.
@@ -268,8 +276,8 @@ class EstablishTest {
             @Override public byte[] publicKey() { return SERVER_PROOF.publicKey(); }
             @Override public byte[] signProof(byte[] m) { return new byte[1]; }
         };
-        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, assertThrows(SecureCarrierException.class,
-                () -> y.server().writeReply(new EstablishPayload(null, null, null, 0).withProof(Proof.placeholder(shortSig)), shortSig)).code());
+        assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, assertThrows(SecureCarrierException.class,
+                () -> y.server().writeReply(new EstablishPayload(null, null, null, 0).withProof(Proof.placeholder(shortSig)), shortSig)).kind());
     }
 
     @Test
@@ -279,10 +287,10 @@ class EstablishTest {
         assertEquals(3, back.alg());
         assertArrayEquals(SERVER_PROOF.publicKey(), back.pub());
         assertEquals(KeyAlg.ML_DSA_44.signatureLength(), back.sig().length);
-        assertEquals(SecureCarrierException.Code.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {0x40, 3, 0})).code());
-        assertEquals(SecureCarrierException.Code.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {3, 0x40, 0})).code());
-        assertEquals(SecureCarrierException.Code.TLV_TRUNCATED, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {3, 5, 1, 2})).code());
-        assertEquals(SecureCarrierException.Code.TLV_TRUNCATED, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[0])).code());
+        assertEquals(SecureCarrierException.Kind.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {0x40, 3, 0})).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {3, 0x40, 0})).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_TRUNCATED, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[] {3, 5, 1, 2})).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_TRUNCATED, assertThrows(SecureCarrierException.class, () -> Proof.parse(new byte[0])).kind());
         assertArrayEquals("zmux-seal proof r\0h".getBytes(java.nio.charset.StandardCharsets.US_ASCII), Proof.message(1, new byte[] {'h'}));
         assertArrayEquals("zmux-seal proof i\0h".getBytes(java.nio.charset.StandardCharsets.US_ASCII), Proof.message(2, new byte[] {'h'}));
     }
@@ -307,12 +315,12 @@ class EstablishTest {
     void aMessageCarriesOneCredential() throws Exception {
         // Types strictly increase: a second credential item is out of order.
         byte[] two = {1, 2, 7, 1, 1, 2, 7, 2};
-        assertEquals(SecureCarrierException.Code.TLV_ORDER, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(two, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).code());
-        assertEquals(SecureCarrierException.Code.TLV_CREDENTIALS, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {1, 0}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).code());
-        assertEquals(SecureCarrierException.Code.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class,
-                () -> EstablishPayload.parse(new byte[] {1, 2, 0x40, 7}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).code());
+        assertEquals(SecureCarrierException.Kind.TLV_ORDER, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(two, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_CREDENTIALS, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {1, 0}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).kind());
+        assertEquals(SecureCarrierException.Kind.TLV_NON_MINIMAL, assertThrows(SecureCarrierException.class,
+                () -> EstablishPayload.parse(new byte[] {1, 2, 0x40, 7}, EstablishPayload.KNOWN_CREDENTIAL, 256, false)).kind());
         Credential c = EstablishPayload.parse(new byte[] {1, 3, 7, 9, 9}, EstablishPayload.KNOWN_CREDENTIAL, 256, false).credential();
         assertEquals(7, c.type());
         assertArrayEquals(new byte[] {9, 9}, c.data());
@@ -376,7 +384,7 @@ class EstablishTest {
         Pair x = hello(Profile.XXHFS_AES, Mode.SEALED, Framing.STREAM, StaticKey.generate(), sKey);
         byte[] reply = x.server().writeReply(new EstablishPayload(null, null, null, 0), null);
         x.client().readReply(reply, 0, reply.length);
-        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, assertThrows(SecureCarrierException.class, () -> x.client().trustPskOnly(null)).code());
+        assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, assertThrows(SecureCarrierException.class, () -> x.client().trustPskOnly(null)).kind());
     }
 
     @Test
@@ -397,7 +405,7 @@ class EstablishTest {
         assertEquals(0, more.getStackTrace().length);
         assertEquals(7, more.need());
         assertInstanceOf(io.zmux.ZmuxException.class, more);
-        assertTrue(new SecureCarrierException(SecureCarrierException.Code.AUTH).getStackTrace().length > 0);
+        assertTrue(new SecureCarrierException(SecureCarrierException.Kind.AUTH).getStackTrace().length > 0);
     }
 
     /** Message 2 with an ML-DSA-44 proof leaves at least 3252 bytes for a credential within the 8192-byte floor; one byte more is too_large before writing. */
@@ -418,7 +426,7 @@ class EstablishTest {
             Pair x = hello(p, Mode.SEALED, Framing.STREAM, StaticKey.generate(), StaticKey.generate());
             EstablishPayload pl = new EstablishPayload(new Credential(7, new byte[over]), null, null, 0);
             var e = assertThrows(SecureCarrierException.class, () -> x.server().writeReply(pl.withProof(Proof.placeholder(SERVER_PROOF)), SERVER_PROOF));
-            assertEquals(SecureCarrierException.Code.TOO_LARGE, e.code());
+            assertEquals(SecureCarrierException.Kind.TOO_LARGE, e.kind());
         }
     }
 
@@ -429,7 +437,7 @@ class EstablishTest {
         try {
             return x.server().writeReply(pl.withProof(Proof.placeholder(SERVER_PROOF)), SERVER_PROOF);
         } catch (SecureCarrierException e) {
-            assertEquals(SecureCarrierException.Code.TOO_LARGE, e.code());
+            assertEquals(SecureCarrierException.Kind.TOO_LARGE, e.kind());
             return null;
         }
     }

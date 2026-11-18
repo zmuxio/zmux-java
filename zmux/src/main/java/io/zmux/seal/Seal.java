@@ -1,6 +1,6 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
 
 import io.zmux.InboundTransform;
 import io.zmux.RecordPolicyInput;
@@ -37,8 +37,17 @@ public final class Seal {
 
     private Seal() {}
 
-    private static final class ProcessKey {
-        static final StaticKey KEY = StaticKey.generate();
+    /** The key of clients without their own, generated once per process; a failed generation is tried again later. */
+    private static volatile StaticKey processKey;
+    private static final Object PROCESS_KEY_LOCK = new Object();
+
+    private static StaticKey processKey() throws SecureCarrierException {
+        StaticKey k = processKey;
+        if (k != null) return k;
+        synchronized (PROCESS_KEY_LOCK) {
+            if (processKey == null) processKey = StaticKey.generate();
+            return processKey;
+        }
     }
 
     /**
@@ -127,7 +136,7 @@ public final class Seal {
     /** The carrier's Binding, from its exporter, null when it has none that holds. */
     private static byte[] binding(PipeIo p) throws SecureCarrierException {
         var exporter = p.capabilities().exporter();
-        if (!p.isSecure() || exporter == null) return null;
+        if (!p.isCarrierSecure() || exporter == null) return null;
         byte[] v = exporter.export(Kdf.EXPORTER_SEAL_BOUND, null, Kdf.BINDING_LEN);
         if (v == null) return null;
         // A split carrier's exporter gives the uplink's value followed by the downlink's when they differ.
@@ -171,7 +180,7 @@ public final class Seal {
         Profile profile = Profiles.client(c);
         if (c.isAllowPskOnly() && !profile.isPskBased()) throw new SecureCarrierException(INVALID_CONFIG, "allowPskOnly without a pre-shared key");
         //noinspection resource: borrowed: the config or the process owns the key
-        StaticKey key = c.key() != null ? c.key() : ProcessKey.KEY;
+        StaticKey key = c.staticKey() != null ? c.staticKey() : processKey();
         Mode mode = Mode.of(c.mode());
         byte[] binding = null;
         if (mode == Mode.BOUND && (binding = binding(p)) == null) {
@@ -204,8 +213,9 @@ public final class Seal {
                 Verification.Judged j;
                 try {
                     j = hs.verify(c.anchor(), c.localContext(), c.isRequirePqAuth());
-                } catch (VerifierUnavailableException e) {
-                    throw new IOException(e.getMessage(), e);
+                } catch (VerifyUnavailableException e) {
+                    // The client judged the server and could not decide: its establishment fails as credentials failed.
+                    throw new CredentialsFailedException("the verifier is unavailable", e);
                 }
                 verdict = j.verdict();
                 pqAuth = j.pqAuthenticated();
@@ -264,7 +274,7 @@ public final class Seal {
                 io.consume(used);
                 return r;
             } catch (SecureCarrierException e) {
-                if (e.code() != SecureCarrierException.Code.INCOMPLETE || io.messages()) throw e;
+                if (e.kind() != SecureCarrierException.Kind.INCOMPLETE || io.messages()) throw e;
                 io.fill();
             }
         }
@@ -293,7 +303,7 @@ public final class Seal {
         }, peer);
     }
 
-    private static String reason(SecureCarrierException e) { return e.code().name().toLowerCase(Locale.ROOT); }
+    private static String reason(SecureCarrierException e) { return e.kind().name().toLowerCase(Locale.ROOT); }
 
     private static PipeIo server(PipeIo p, ServerConfig c, SocketAddress src) throws Exception {
         if (p.reader() == null || p.writer() == null) throw new SecureCarrierException(INVALID_CONFIG, "an Establish needs both halves");
@@ -329,7 +339,7 @@ public final class Seal {
                     h = EstablishHello.parseExact(io.buf, 0, io.buf.length, f);
                     break;
                 } catch (SecureCarrierException e) {
-                    if (e.code() != SecureCarrierException.Code.INCOMPLETE) throw new CarrierRejectedException(firstByte(io), null, reason(e), e);
+                    if (e.kind() != SecureCarrierException.Kind.INCOMPLETE) throw new CarrierRejectedException(firstByte(io), null, reason(e), e);
                     if (io.messages()) throw new CarrierRejectedException(firstByte(io), null, "malformed");
                     io.fill();
                 }
@@ -355,7 +365,7 @@ public final class Seal {
             io.consume(io.buf.length);
             EstablishServer hs;
             try {
-                hs = EstablishServer.create(h, f, psk, binding, c.key()).maxAppData(ClientConfig.appDataLimit(c.maxAppDataBound()));
+                hs = EstablishServer.create(h, f, psk, binding, c.staticKey()).maxAppData(ClientConfig.appDataLimit(c.maxAppDataBound()));
                 hs.readHello();
             } catch (SecureCarrierException e) {
                 throw refuse.of(reason(e), e);
@@ -400,7 +410,7 @@ public final class Seal {
                     j = hs.verify(c.anchor(), finish, c.localContext(), c.isRequirePqAuth());
                 } catch (CredentialsFailedException e) {
                     throw refuse.of("credentials_failed", e);
-                } catch (VerifierUnavailableException e) {
+                } catch (VerifyUnavailableException e) {
                     throw new IOException(e.getMessage(), e); // closes the carrier without counting a refusal
                 }
                 verdict = j.verdict();
@@ -410,7 +420,7 @@ public final class Seal {
             Peer early = new Peer(finish.peerStatic(), finish.credential(), verdict, null, h.profile(), mode, clientData, h.profile().pqConfidential(), pqAuth);
             if (c.allowRecordMode() != null) {
                 boolean exporter = p.capabilities().exporter() != null;
-                if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isSecure(), java.util.Optional.ofNullable(p.label()), true), mode, early)) throw refuse.of("record_mode", null);
+                if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isCarrierSecure(), java.util.Optional.ofNullable(p.label()), true), mode, early)) throw refuse.of("record_mode", null);
             }
             Object value;
             try {

@@ -58,8 +58,12 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     private final Preamble preamble;
     private final Cleaner.Cleanable cleanable;
     private final AtomicBoolean carrierOwned = new AtomicBoolean();
+    // The runtime settings as last set (null: not set), read back by their getters.
     private volatile Duration readTimeout;
     private volatile Duration writeTimeout;
+    private volatile Priority peerPriority;
+    private volatile Scheduler scheduler;
+    private volatile Boolean redundant;
 
     ZmuxStream(ZmuxSession session, LaneTable.StreamLanes lanes, Preamble preamble) {
         this.session = session;
@@ -246,39 +250,76 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     @Override
     public void setPriority(Priority priority) {
         Objects.requireNonNull(priority);
-        session.driver.post(() -> core.streams().setPriority(st, priority.urgency(), priority.incremental()));
+        core.streams().holdPriority(st, priority.urgency(), priority.incremental());
+        session.driver.post(() -> core.streams().applyHeldPriority(st));
     }
 
-    /** This direction's own scheduling policy. */
+    @Override
+    public Priority priority() {
+        int held = core.streams().heldPriority(st);
+        return new Priority(held >> 1, (held & 1) != 0);
+    }
+
+    @Override
     public void setScheduler(Scheduler s) {
         Objects.requireNonNull(s, "s");
+        scheduler = s;
         session.driver.post(() -> session.driver.pickers.install(st, Scheduling.policy(s), Scheduling.picker(s)));
     }
 
-    /** This direction follows the session's scheduling policy again. */
+    @Override
     public void clearScheduler() {
+        scheduler = null;
         session.driver.post(() -> session.driver.pickers.install(st, null, null));
     }
 
-    /** Whether this direction's data is sent on two pipes when possible, over the session's default. */
+    @Override
+    public java.util.Optional<Scheduler> scheduler() { return java.util.Optional.ofNullable(scheduler); }
+
+    @Override
     public void setRedundant(boolean on) {
+        redundant = on;
         session.driver.post(() -> core.setRedundant(st, on));
     }
 
-    /** This direction follows the session's redundancy again. */
+    @Override
     public void clearRedundant() {
+        redundant = null;
         session.driver.post(() -> core.setRedundant(st, null));
     }
 
     @Override
+    public java.util.Optional<Boolean> redundant() { return java.util.Optional.ofNullable(redundant); }
+
+    @Override
     public void setSendBuffer(long bytes) {
         if (bytes < 0) throw new IllegalArgumentException("negative send buffer");
-        session.driver.post(() -> core.sending().setSendBuffer(st, bytes));
+        if (out == null) throw new IllegalStateException("the stream has no sending part");
+        core.streams().holdSendBuffer(st, bytes);
+        // The loop applies what was held last, so concurrent setters leave the setting and the getter in agreement.
+        session.driver.post(() -> core.applyHeldSendBuffer(st));
+    }
+
+    @Override
+    public int sendBuffer() {
+        return (int) Math.min(core.streams().heldSendBuffer(st), Integer.MAX_VALUE);
     }
 
     @Override
     public void setWriteTimeout(Duration timeout) {
-        writeTimeout = timeout;
+        writeTimeout = positive(timeout);
+    }
+
+    @Override
+    public void clearWriteTimeout() { writeTimeout = null; }
+
+    @Override
+    public java.util.Optional<Duration> writeTimeout() { return java.util.Optional.ofNullable(writeTimeout); }
+
+    private static Duration positive(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("a timeout is a positive duration");
+        return timeout;
     }
 
     @Override
@@ -311,6 +352,34 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
         session.driver.checkBlocking();
         try {
             return in.read(dst, ZmuxSession.until(readTimeout));
+        } catch (CoreException e) {
+            throw Errors.io(e);
+        }
+    }
+
+    @Override
+    public void awaitReadable() throws IOException {
+        awaitReadable(ZmuxSession.until(readTimeout));
+    }
+
+    @Override
+    public void awaitReadable(Duration timeout) throws IOException {
+        awaitReadable(ZmuxSession.deadline(timeout));
+    }
+
+    private void awaitReadable(long deadline) throws IOException {
+        checkApplicationIo();
+        session.driver.checkBlocking();
+        in.awaitReadable(deadline);
+    }
+
+    @Override
+    public int tryRead(ByteBuffer dst) throws IOException {
+        checkApplicationIo();
+        checkReadDestination(dst);
+        if (!dst.hasRemaining()) return 0;
+        try {
+            return in.tryRead(dst);
         } catch (CoreException e) {
             throw Errors.io(e);
         }
@@ -373,12 +442,25 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
             core.streams().setPeerPriority(st, urgency, incremental);
             return true;
         });
+        peerPriority = priority;
     }
 
     @Override
+    public java.util.Optional<Priority> peerPriority() { return java.util.Optional.ofNullable(peerPriority); }
+
+    @Override
     public void setReceiveWindow(long initial, long max) {
-        if (initial < 0 || max < 0) throw new IllegalArgumentException("negative receive window");
-        session.driver.post(() -> core.receiving().setReceiveWindow(st, initial, max));
+        io.zmux.internal.core.StreamRecv.checkReceiveWindow(initial, max);
+        if (in == null) throw new IllegalStateException("the stream has no receiving part");
+        core.streams().holdReceiveWindow(st, initial, max);
+        // The loop applies what was held last, the initial and the cap together.
+        session.driver.post(() -> core.applyHeldReceiveWindow(st));
+    }
+
+    @Override
+    public ReceiveWindow receiveWindow() {
+        var w = core.streams().heldWindow(st); // one read: the initial and the cap of one setting
+        return new ReceiveWindow(w.initial(), w.max());
     }
 
     @Override
@@ -399,8 +481,14 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
 
     @Override
     public void setReadTimeout(Duration timeout) {
-        readTimeout = timeout;
+        readTimeout = positive(timeout);
     }
+
+    @Override
+    public void clearReadTimeout() { readTimeout = null; }
+
+    @Override
+    public java.util.Optional<Duration> readTimeout() { return java.util.Optional.ofNullable(readTimeout); }
 
     @Override
     public InputStream inputStream() {

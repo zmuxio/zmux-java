@@ -108,7 +108,7 @@ public final class WindowTuner {
         StreamRecv.RecvPart r = st.rcv;
         if (!on() || r.tune() == null) return;
         long maxW = cfg.streamWindowCap();
-        if (r.maxWin() > 0 && (maxW == 0 || r.maxWin() < maxW)) maxW = r.maxWin();
+        if (r.maxWin() != 0) maxW = r.maxWin() == StreamRecv.AUTOMATIC ? 0 : r.maxWin();
         long w = grow(r.tune(), r.window(), maxW, port.allowance());
         if (w > r.window()) {
             StreamRecv.growWindow(st, w);

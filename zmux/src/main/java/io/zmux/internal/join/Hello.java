@@ -1,13 +1,13 @@
 package io.zmux.internal.join;
 
 import io.zmux.seal.SecureCarrierException;
-import static io.zmux.seal.SecureCarrierException.Code.BAD_FLAGS;
-import static io.zmux.seal.SecureCarrierException.Code.BAD_HANDLE;
-import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
-import static io.zmux.seal.SecureCarrierException.Code.TRAILING_BYTES;
-import static io.zmux.seal.SecureCarrierException.Code.UNKNOWN_PROFILE;
-import static io.zmux.seal.SecureCarrierException.Code.UNKNOWN_SUITE;
+import static io.zmux.seal.SecureCarrierException.Kind.BAD_FLAGS;
+import static io.zmux.seal.SecureCarrierException.Kind.BAD_HANDLE;
+import static io.zmux.seal.SecureCarrierException.Kind.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.TRAILING_BYTES;
+import static io.zmux.seal.SecureCarrierException.Kind.UNKNOWN_PROFILE;
+import static io.zmux.seal.SecureCarrierException.Kind.UNKNOWN_SUITE;
 
 import io.zmux.internal.wire.VarInt;
 import java.util.Arrays;
@@ -104,7 +104,7 @@ public final class Hello {
 
     /**
      * Parses the clear head of a Hello, through R, at the start of the input; ciphertext is null
-     * and {@link #consumed()} is the head's length. With {@link SecureCarrierException.Code#INCOMPLETE}
+     * and {@link #consumed()} is the head's length. With {@link SecureCarrierException.Kind#INCOMPLETE}
      * the exception names the smallest total length that can make progress.
      */
     public static Hello parseHead(byte[] b, int off, int len, Framing f) throws SecureCarrierException {

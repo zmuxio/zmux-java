@@ -21,7 +21,8 @@ import java.util.Objects;
  *       session's.
  *   <li>{@code liveness}: set, the pipe's {@link PipeLiveness} as a whole; cleared, the session's.
  *   <li>{@code qualityBand}: set, the pipe's own quality event band ({@link QualityBand}, outbound
- *       pipes only); cleared, the session's ({@link ZmuxSession#setQualityBand}).
+ *       pipes only), or off ({@link Builder#noQualityBand()}: no reports for this pipe whatever the session's band
+ *       is); cleared, the session's ({@link ZmuxSession#setQualityBand}).
  * </ul>
  *
  * One update applies all its settings together (one that changes both receive settings sends one
@@ -58,6 +59,58 @@ public final class PipeUpdate {
     boolean onlyBand() {
         return sendPriority == Change.KEEP && sendStandby == Change.KEEP && receivePriority == Change.KEEP
                 && receiveStandby == Change.KEEP && weight == Change.KEEP && probation == Change.KEEP && liveness == Change.KEEP;
+    }
+
+    /** This update with every clear taken as keep: the form options are held in, where clearing and keeping both mean the default. */
+    PipeUpdate asHeld() {
+        Builder b = toBuilder();
+        b.sendPriority = held(sendPriority); b.receivePriority = held(receivePriority); b.sendStandby = held(sendStandby);
+        b.receiveStandby = held(receiveStandby); b.weight = held(weight); b.probation = held(probation);
+        b.liveness = held(liveness); b.qualityBand = held(qualityBand);
+        return b.build();
+    }
+
+    private static Change held(Change c) { return c == Change.CLEAR ? Change.KEEP : c; }
+
+    /**
+     * The settings a pipe holding these ones holds once u was applied to it: what u sets replaces them, what u clears
+     * is the default again, what it keeps stays. Held form: no clears.
+     */
+    PipeUpdate applied(PipeUpdate u) {
+        Builder b = toBuilder();
+        if (u.sendPriority != Change.KEEP) { b.sendPriority = held(u.sendPriority); b.sendPriorityValue = u.sendPriorityValue; }
+        if (u.receivePriority != Change.KEEP) { b.receivePriority = held(u.receivePriority); b.receivePriorityValue = u.receivePriorityValue; }
+        if (u.sendStandby != Change.KEEP) { b.sendStandby = held(u.sendStandby); b.sendStandbyValue = u.sendStandbyValue; }
+        if (u.receiveStandby != Change.KEEP) { b.receiveStandby = held(u.receiveStandby); b.receiveStandbyValue = u.receiveStandbyValue; }
+        if (u.weight != Change.KEEP) { b.weight = held(u.weight); b.weightValue = u.weightValue; }
+        if (u.probation != Change.KEEP) { b.probation = held(u.probation); b.probationValue = u.probationValue; }
+        if (u.liveness != Change.KEEP) { b.liveness = held(u.liveness); b.livenessValue = u.livenessValue; }
+        if (u.qualityBand != Change.KEEP) { b.qualityBand = held(u.qualityBand); b.qualityBandValue = u.qualityBandValue; }
+        return b.build();
+    }
+
+    /** Equal when every setting is in the same state and the set ones have the same value. */
+    @Override public boolean equals(Object o) {
+        return o instanceof PipeUpdate u
+                && sendPriority == u.sendPriority && receivePriority == u.receivePriority && sendStandby == u.sendStandby
+                && receiveStandby == u.receiveStandby && weight == u.weight && probation == u.probation
+                && liveness == u.liveness && qualityBand == u.qualityBand
+                && (sendPriority != Change.SET || sendPriorityValue == u.sendPriorityValue)
+                && (receivePriority != Change.SET || receivePriorityValue == u.receivePriorityValue)
+                && (sendStandby != Change.SET || sendStandbyValue == u.sendStandbyValue)
+                && (receiveStandby != Change.SET || receiveStandbyValue == u.receiveStandbyValue)
+                && (weight != Change.SET || weightValue == u.weightValue)
+                && (probation != Change.SET || Objects.equals(probationValue, u.probationValue))
+                && (liveness != Change.SET || Objects.equals(livenessValue, u.livenessValue))
+                && (qualityBand != Change.SET || Objects.equals(qualityBandValue, u.qualityBandValue));
+    }
+
+    @Override public int hashCode() {
+        return Objects.hash(sendPriority, receivePriority, sendStandby, receiveStandby, weight, probation, liveness, qualityBand,
+                sendPriority == Change.SET ? sendPriorityValue : 0, receivePriority == Change.SET ? receivePriorityValue : 0,
+                sendStandby == Change.SET && sendStandbyValue, receiveStandby == Change.SET && receiveStandbyValue,
+                weight == Change.SET ? weightValue : 0, probation == Change.SET ? probationValue : null,
+                liveness == Change.SET ? livenessValue : null, qualityBand == Change.SET ? qualityBandValue : null);
     }
 
     /** A builder holding this update. */
@@ -143,6 +196,9 @@ public final class PipeUpdate {
 
         /** The pipe's quality event band follows the session's again. */
         public Builder clearQualityBand() { qualityBand = Change.CLEAR; return this; }
+
+        /** No quality reports for this pipe, whatever the session's band is; the pipe must have an outbound direction. */
+        public Builder noQualityBand() { qualityBandValue = null; qualityBand = Change.SET; return this; }
 
         public PipeUpdate build() { return new PipeUpdate(this); }
 

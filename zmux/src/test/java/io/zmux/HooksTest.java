@@ -5,6 +5,10 @@ import io.zmux.helper.Limiter;
 import io.zmux.helper.LimitedStreams;
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.Test;
@@ -182,8 +186,8 @@ class HooksTest {
     @Test void datagramLimitersRunOffLoopAndChargeAcceptedPayloads() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             Budget send = new Budget(), receive = new Budget();
-            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(send, null).build();
-            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramLimiters(null, receive).build();
+            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(send, null)).build();
+            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(null, receive)).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
@@ -205,6 +209,70 @@ class HooksTest {
                 stream.close(); remote.close(); c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
             assertEquals(0, loops.outstandingBuffers());
+        }
+    }
+
+    @Test void aFailingDatagramLimiterDropsTheDatagramAndLeavesTheSessionUsable() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            var failing = new io.zmux.helper.Limiter() {
+                final AtomicInteger calls = new AtomicInteger();
+                @Override public java.util.concurrent.CompletionStage<Long> acquire(long min, long max) { return java.util.concurrent.CompletableFuture.completedFuture(max); }
+                @Override public long tryAcquire(long min, long max) {
+                    // The first datagram of the direction throws, the second grants beyond max, the rest pass.
+                    return switch (calls.incrementAndGet()) { case 1 -> throw new IllegalStateException("limiter broke"); case 2 -> max + 1; default -> max; };
+                }
+                @Override public void refund(long n) { }
+            };
+            var failingReceive = new io.zmux.helper.Limiter() {
+                final AtomicInteger calls = new AtomicInteger();
+                @Override public java.util.concurrent.CompletionStage<Long> acquire(long min, long max) { return java.util.concurrent.CompletableFuture.completedFuture(max); }
+                @Override public long tryAcquire(long min, long max) { if (calls.incrementAndGet() == 1) throw new IllegalStateException("limiter broke"); return max; }
+                @Override public void refund(long n) { }
+            };
+            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(failing, null)).build();
+            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(null, failingReceive)).build();
+            try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
+                var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
+                var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
+                assertFalse(c.datagrams().send(ByteBuffer.wrap(new byte[] {1})), "a throwing limiter drops the datagram");
+                assertFalse(c.datagrams().send(ByteBuffer.wrap(new byte[] {2})), "an invalid grant drops the datagram");
+                assertEquals(2, c.stats().datagramsDroppedSend());
+                // The receiving limiter throws on the first datagram that arrives: it is dropped, the next is delivered.
+                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {3})));
+                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {4})));
+                assertArrayEquals(new byte[] {4}, s.datagrams().receive());
+                assertEquals(1, s.stats().datagramsDroppedLimit());
+                c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
+            }
+            assertEquals(0, loops.outstandingBuffers());
+        }
+    }
+
+    /** A grant taken for a received datagram goes back when the session ended before it could take the answer. */
+    @Test void aReceiveGrantIsRefundedWhenTheSessionEndedBeforeTheAnswerWasPosted() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            CountDownLatch entered = new CountDownLatch(1), go = new CountDownLatch(1);
+            AtomicLong refunded = new AtomicLong();
+            var receive = new io.zmux.helper.Limiter() {
+                @Override public java.util.concurrent.CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
+                @Override public long tryAcquire(long min, long max) {
+                    entered.countDown();
+                    try { go.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    return max;
+                }
+                @Override public void refund(long n) { refunded.addAndGet(n); }
+            };
+            ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+            ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(null, receive)).build();
+            try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
+                var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
+                var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
+                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {1, 2, 3})));
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "the limiter was asked for the received datagram");
+                s.close(); s.awaitClosed(); c.close(); c.awaitClosed();
+                go.countDown(); // granted after the session is gone
+                ListenerResourcesTest.until(() -> refunded.get() == 3);
+            }
         }
     }
 
@@ -237,6 +305,48 @@ class HooksTest {
                 assertTrue(closed.await(5, TimeUnit.SECONDS));
                 assertTrue(blocked.get()); assertTrue(dropped.get() > 0);
                 assertEquals(c.id(), seen.get(), "the tracer names its session"); assertNotEquals(c.id(), s.id());
+            } finally { release.countDown(); }
+        }
+    }
+
+    /** A full backlog drops the event that arrives, counts it, and never drops established or closed: after a blocked established, a session end delivers nothing but the loss count and closed. */
+    @Test void fullTracerBacklogDropsTheNewArrivalAndKeepsOnlyEstablishedAndClosed() throws Exception {
+        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), closed = new CountDownLatch(1);
+            AtomicReference<SessionId> seen = new AtomicReference<>();
+            List<String> calls = Collections.synchronizedList(new ArrayList<>());
+            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
+                        @Override public void established(SessionId session) {
+                            seen.set(session); calls.add("established"); entered.countDown();
+                            try { assertTrue(release.await(5, TimeUnit.SECONDS)); } catch (InterruptedException e) { throw new AssertionError(e); }
+                        }
+                        @Override public void event(SessionId session, SessionEvent event) { if (session.equals(seen.get())) calls.add("event"); }
+                        @Override public void dropped(SessionId session, long n) { if (session.equals(seen.get()) && n > 0) calls.add("dropped"); }
+                        @Override public void closed(SessionId session, SessionError error) { if (session.equals(seen.get())) { calls.add("closed"); closed.countDown(); } }
+                    }, 1).build();
+            var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+            try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(serverConfig))) {
+                var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
+                var c = Zmux.connect(listener.localAddress(), cfg); var s = accepted.get();
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                // The backlog (capacity 1) holds the blocked established call: everything that follows arrives to a full one.
+                // A pipe's end is no exception: its terminal event is dropped like any other arrival.
+                ZmuxPipe added = c.addPipe(listener.localAddress(), PipeOptions.defaults());
+                added.close();
+                // The pipe is retired before its events are read: they are folded into the retirement summary, the only report of
+                // its end (a PipeClosed read earlier would be one as well).
+                added.awaitClosed(Duration.ofSeconds(10));
+                long pipe = added.id().value();
+                SessionEvent e;
+                do {
+                    e = c.nextEvent(Duration.ofSeconds(10));
+                    assertNotNull(e, "the session's own event stream reports the pipe's end");
+                } while (!(e instanceof SessionEvent.PipeClosed pc && pc.pipe().value() == pipe)
+                        && !(e instanceof SessionEvent.PipesRetired pr && pr.last().stream().anyMatch(p -> p.value() == pipe)));
+                c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
+                release.countDown();
+                assertTrue(closed.await(5, TimeUnit.SECONDS));
+                assertEquals(List.of("established", "dropped", "closed"), calls);
             } finally { release.countDown(); }
         }
     }

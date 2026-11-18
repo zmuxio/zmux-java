@@ -54,10 +54,10 @@ public final class InteropPeer {
         if (!List.of("server", "client").contains(mode)) throw new IllegalArgumentException("unknown mode");
         var remote = address(args.length > 1 ? args[1] : "127.0.0.1:0");
         try (var loops = EventLoops.create(2)) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16);
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16);
             if (mp) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
-            try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : ZmuxListener.of(ListenerConfig.of(config))) {
+            try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : Zmux.listener(ListenerConfig.of(config))) {
                 ZmuxSession session;
                 if (mode.equals("server")) {
                     var bound = endpoint.localAddress(); System.out.println("LISTEN " + bound.getHostString() + ":" + bound.getPort());
@@ -143,7 +143,7 @@ public final class InteropPeer {
                 case "stop" -> { stream.stop(Long.parseLong(arg)); reply(stream, "stopped"); }
                 case "sendreset" -> { byte[] bytes = new byte[1000]; java.util.Arrays.fill(bytes, (byte) 7); stream.write(bytes); Thread.sleep(20); stream.reset(Long.parseLong(arg)); read(stream); }
                 case "open-bidi" -> {
-                    try (var back = session.openStream(Preamble.openInfo("back".getBytes(StandardCharsets.UTF_8)))) {
+                    try (var back = session.openStream(Preamble.builder().openInfo("back".getBytes(StandardCharsets.UTF_8)).build())) {
                         back.write(arg.getBytes(StandardCharsets.UTF_8)); back.finish();
                         reply(stream, "opened=" + new String(read(back), StandardCharsets.UTF_8));
                     }

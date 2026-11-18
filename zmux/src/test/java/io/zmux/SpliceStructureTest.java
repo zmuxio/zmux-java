@@ -12,12 +12,13 @@ import org.junit.jupiter.api.Test;
  * Guards the SpotBugs exclusion of {@code Splice$Direction}: every plain mutable field of a direction belongs
  * to the splice's serial context, so a new one cannot appear without that decision (and its review).
  */
+@org.junit.jupiter.api.Timeout(60)
 class SpliceStructureTest {
     /** The direction's plain fields, all read and written only on the splice's serial context. */
     private static final Set<String> SERIAL = Set.of("closeRead", "closeWrite", "stage", "op", "ready", "permit", "endRead",
             "held", "write", "writeKind", "writeLength", "resetCode", "dgStage", "dgReceive", "dgSend", "dgSending", "bytes",
             "datagramBytes", "drops", "tooLarge", "limited", "capsuleRemaining", "converting", "targetClosed", "end",
-            "callbackFailure", "atTarget",
+            "callbackFailure", "atTarget", "asCapsules",
             "chunkPaid", "writePaid", "headerReady", "headerRead", "capsulePaid");
 
     @Test void everyPlainFieldOfADirectionIsSerialContextState() throws Exception {

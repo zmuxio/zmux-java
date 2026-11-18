@@ -21,7 +21,7 @@ class NonBlockingCallsTest {
 
     static ZmuxConfig small(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops).initialStreamReceiveWindow(WINDOW).maxStreamReceiveWindow(WINDOW)
-                .datagrams(true).build();
+                .enableDatagrams(true).build();
     }
 
     @Test void tryWriteTakesWhatFitsAndAdvancesTheBuffer() throws Exception {
@@ -49,7 +49,7 @@ class NonBlockingCallsTest {
     @Test void tryOpenFailsWithoutCreditInsteadOfWaiting() throws Exception {
         try (var loops = EventLoops.create(1)) {
             var ccfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var scfg = ZmuxConfig.builder().eventLoops(loops).incomingStreams(4).incomingUniStreams(4).build();
+            var scfg = ZmuxConfig.builder().eventLoops(loops).maxIncomingStreams(4).maxIncomingUniStreams(4).build();
             try (var pair = Pair.memory(ccfg, scfg, Framing.BYTE_STREAM)) {
                 var c = pair.client();
                 // The peer's credit arrives with its transport parameters.
@@ -104,7 +104,7 @@ class NonBlockingCallsTest {
 
     @Test void sendWaitWaitsForQueueSpaceWhereSendDrops() throws Exception {
         try (var loops = EventLoops.create(1)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).datagramSendQueue(2).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramSendQueue(2).build();
             var gate = new Gate();
             PipeIo[] p = MemoryPipe.pair(Framing.BYTE_STREAM);
             var server = java.util.concurrent.CompletableFuture.supplyAsync(() -> {

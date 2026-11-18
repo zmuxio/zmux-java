@@ -28,7 +28,7 @@ final class TestTls {
             Path keytool = Path.of(System.getProperty("java.home"), "bin", "keytool");
             Process p = new ProcessBuilder(keytool.toString(), "-genkeypair", "-alias", "localhost", "-keyalg", "EC",
                     "-groupname", "secp256r1", "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1",
-                    "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
+                    "-startdate", "-1H", "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
                     "-keypass", "changeit").redirectErrorStream(true).start();
             if (!p.waitFor(60, TimeUnit.SECONDS) || p.exitValue() != 0) {
                 throw new IllegalStateException("keytool failed: " + new String(p.getInputStream().readAllBytes(), UTF_8));

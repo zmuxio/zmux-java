@@ -1,7 +1,7 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.seal.SecureCarrierException.Code.RANDOM_FAILED;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.RANDOM_FAILED;
 
 import java.io.Serial;
 import java.security.GeneralSecurityException;
@@ -25,14 +25,14 @@ public final class SigningKey implements Signer {
      * A new key of alg from the operating system's entropy.
      *
      * @throws IllegalArgumentException when alg does not sign proofs
-     * @throws java.io.UncheckedIOException wrapping {@code random_failed} when key generation fails
+     * @throws SecureCarrierException {@code RANDOM_FAILED} when key generation fails
      */
-    public static SigningKey generate(KeyAlg alg) {
+    public static SigningKey generate(KeyAlg alg) throws SecureCarrierException {
         if (alg != KeyAlg.ML_DSA_44) throw new IllegalArgumentException("KeyAlg " + alg + " does not sign proofs");
         try {
             return new SigningKey(alg, MlDsa44.generate(new SecureRandom()));
         } catch (GeneralSecurityException e) {
-            throw new java.io.UncheckedIOException(new SecureCarrierException(RANDOM_FAILED, "ML-DSA key generation", e));
+            throw new SecureCarrierException(RANDOM_FAILED, "ML-DSA key generation", e);
         }
     }
 

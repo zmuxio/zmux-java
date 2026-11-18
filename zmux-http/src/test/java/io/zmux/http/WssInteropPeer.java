@@ -15,7 +15,6 @@ import io.zmux.RecordMode;
 import io.zmux.Role;
 import io.zmux.Zmux;
 import io.zmux.ZmuxConfig;
-import io.zmux.ZmuxListener;
 import io.zmux.ZmuxSession;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -38,7 +37,7 @@ public final class WssInteropPeer {
 
     public static void run(String[] args, Consumer<ZmuxSession> script) throws Exception {
         try (var loops = EventLoops.create(2); var group = new MultiThreadIoEventLoopGroup(2, NioIoHandler.newFactory())) {
-            var config = ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16).maxPipes(4)
+            var config = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).maxPipes(4)
                     .pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true).build();
             switch (args[0]) {
                 case "wss-server" -> server(config, group, script);
@@ -49,7 +48,7 @@ public final class WssInteropPeer {
     }
 
     private static void server(ZmuxConfig config, MultiThreadIoEventLoopGroup group, Consumer<ZmuxSession> script) throws Exception {
-        try (var listener = ZmuxListener.of(ListenerConfig.builder().session(config)
+        try (var listener = Zmux.listener(ListenerConfig.builder().session(config)
                      .onReject(info -> { System.err.println("rejected: " + info); return io.zmux.RejectInfo.Action.CLOSE; }).build());
              var endpoint = HttpEndpoint.builder(listener).webSocket().build()) {
             var ssl = HttpEndpoint.serverSsl(SslContextBuilder.forServer(Fixture.kmf()).sslProvider(SslProvider.JDK).protocols("TLSv1.3"));

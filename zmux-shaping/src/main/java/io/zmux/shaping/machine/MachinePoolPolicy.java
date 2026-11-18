@@ -5,7 +5,10 @@ import static io.zmux.shaping.machine.DefinitionJson.err;
 
 import io.zmux.PipeId;
 import io.zmux.PipeLiveness;
+import io.zmux.PoolDecision;
+import io.zmux.PoolMember;
 import io.zmux.PoolPolicy;
+import io.zmux.PoolView;
 import io.zmux.shaping.machine.Definition.Scope;
 import io.zmux.shaping.machine.Definition.Value;
 import io.zmux.shaping.machine.DefinitionJson.Family;
@@ -188,17 +191,17 @@ public final class MachinePoolPolicy implements PoolPolicy {
     }
 
     @Override
-    public Decision decide(View view) {
+    public PoolDecision decide(PoolView view) {
         List<Metrics> ms = new ArrayList<>(view.members().size());
         boolean connections = false;
-        for (Member m : view.members()) {
-            connections |= m.pipeId() == null;
-            long id = m.pipeId() == null ? m.fateGroup() : m.pipeId().value();
+        for (PoolMember m : view.members()) {
+            connections |= m.pipe() == null;
+            long id = m.pipe() == null ? m.fateGroup() : m.pipe().value();
             ms.add(new Metrics(id, micros(m.age()), micros(m.idle()), m.pipes(), m.bytesSent(), m.bytesReceived()));
         }
-        Result r = decide(view.failures(), view.sinceLastDial() == null ? null : micros(view.sinceLastDial()), ms);
-        Decision d = connections ? Decision.KEEP.withRetireConnections(new LinkedHashSet<>(r.retire()))
-                : Decision.KEEP.withRetirePipes(r.retire().stream().map(PipeId::of).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
+        Result r = decide(view.failures(), view.sinceLastDial().map(MachinePoolPolicy::micros).orElse(null), ms);
+        PoolDecision d = connections ? PoolDecision.KEEP.withRetireConnections(new LinkedHashSet<>(r.retire()))
+                : PoolDecision.KEEP.withRetirePipes(r.retire().stream().map(PipeId::of).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
         if (r.count() != null) d = d.withCount((int) Math.min(r.count(), Integer.MAX_VALUE));
         if (r.dialAfter() != null) d = d.withDialAfter(Duration.ofNanos(r.dialAfter() * 1000));
         if (r.recheck() != null) d = d.withRecheck(Duration.ofNanos(r.recheck() * 1000));

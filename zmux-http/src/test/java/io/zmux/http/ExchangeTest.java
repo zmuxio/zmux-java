@@ -249,7 +249,7 @@ class ExchangeTest {
 
     @Test void theAdmissionValueReachesTheCarriersSession() throws Exception {
         var c = cfg().holdTime(Duration.ofSeconds(2)).build();
-        var adm = io.zmux.Admission.of(0, io.zmux.Admission.Decider.immediate((info, prefix) -> io.zmux.Admission.Decision.accept(0, "tenant-7")));
+        var adm = io.zmux.Admission.builder(0, io.zmux.Admission.Decider.immediate((info, prefix) -> io.zmux.Admission.Decision.accept(0, "tenant-7"))).build();
         try (var f = new Fixture(b -> b, b -> b.admission(adm), b -> b.exchange(c), false, null); var hc = f.client(b -> b)) {
             try (var _ = Zmux.open(hc.exchangePipe(f.base.toString(), c), Role.CLIENT, f.config);
                  ZmuxSession s = f.listener.accept(Duration.ofSeconds(10))) {

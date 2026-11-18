@@ -29,7 +29,7 @@ class SessionTest {
     @BeforeAll
     static void setUp() {
         loops = EventLoops.create(2);
-        cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+        cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
     }
 
     @AfterAll
@@ -48,7 +48,7 @@ class SessionTest {
     @Test
     void echoWithPreamble() throws Exception {
         try (Pair p = Pair.memory(cfg)) {
-            ZmuxStream a = p.client().openStream(Preamble.openInfo("dst:1".getBytes(UTF_8)));
+            ZmuxStream a = p.client().openStream(Preamble.builder().openInfo("dst:1".getBytes(UTF_8)).build());
             a.write("hello".getBytes(UTF_8));
             a.finish();
             ZmuxStream b = p.server().acceptStream();
@@ -76,6 +76,16 @@ class SessionTest {
             ZmuxStream second = p.server().acceptStream();
             assertTrue(first.preamblePriority().isEmpty(), "the opener sent none");
             assertEquals(java.util.Optional.of(new Priority(1, true)), second.preamblePriority());
+            // The priority a sending part holds is the last set, by the application or the peer, whichever came last.
+            assertEquals(Priority.LOCAL_DEFAULT, first.priority());
+            assertTrue(!Priority.LOCAL_DEFAULT.equals(Priority.WIRE_DEFAULT));
+            assertEquals(new Priority(1, true), second.priority(), "the opener's PRIORITY TLV");
+            ranked.setPeerPriority(new Priority(5, false));
+            long end = System.nanoTime() + 10_000_000_000L;
+            while (!new Priority(5, false).equals(second.priority()) && System.nanoTime() < end) Thread.sleep(2);
+            assertEquals(new Priority(5, false), second.priority(), "a PRIORITY_UPDATE");
+            second.setPriority(new Priority(2, true));
+            assertEquals(new Priority(2, true), second.priority(), "read at once, without a round trip to the loop");
         }
     }
 
@@ -89,7 +99,7 @@ class SessionTest {
                 fs.add(ex.submit(() -> {
                     byte[] data = new byte[size];
                     new Random(seed).nextBytes(data);
-                    ZmuxStream s = p.client().openStream(Preamble.openInfo(new byte[] {(byte) seed}));
+                    ZmuxStream s = p.client().openStream(Preamble.builder().openInfo(new byte[] {(byte) seed}).build());
                     s.write(data);
                     s.finish();
                     assertArrayEquals(data, readAll(s));

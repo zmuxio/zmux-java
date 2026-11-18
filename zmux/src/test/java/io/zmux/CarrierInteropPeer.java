@@ -7,7 +7,6 @@ import io.zmux.carrier.PipeWriter;
 import io.zmux.seal.ClientConfig;
 import io.zmux.seal.Gate;
 import io.zmux.seal.HandlePsk;
-import io.zmux.seal.KeyAlg;
 import io.zmux.seal.KeyId;
 import io.zmux.seal.PinAnchor;
 import io.zmux.seal.Profile;
@@ -90,13 +89,13 @@ final class CarrierInteropPeer {
 
     /** Multipath whose join secret is the exporter; a join may be Bound. */
     private static ZmuxConfig tlsConfig(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16).maxPipes(4)
+        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).maxPipes(4)
                 .pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true).build();
     }
 
     private static void tlsServer(EventLoops loops) throws Exception {
         TestTls.init();
-        try (var listener = ZmuxListener.of(ListenerConfig.of(tlsConfig(loops)));
+        try (var listener = Zmux.listener(ListenerConfig.of(tlsConfig(loops)));
              var server = (SSLServerSocket) TestTls.server().getServerSocketFactory().createServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
             server.setEnabledProtocols(new String[] {"TLSv1.3"});
             System.out.println("LISTEN 127.0.0.1:" + server.getLocalPort());
@@ -220,7 +219,7 @@ final class CarrierInteropPeer {
                 return null;
             }
         };
-        return PipeIo.of(receive ? reader : null, send ? writer : null).withExporter(exporter).withSecure(true);
+        return PipeIo.of(receive ? reader : null, send ? writer : null).withExporter(exporter).withCarrierSecure();
     }
 
     // ---- secure carrier ----
@@ -241,7 +240,7 @@ final class CarrierInteropPeer {
 
     /** The secure carrier gives the session its secret: no pipe authentication. */
     private static ZmuxConfig sealConfig(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).datagrams(true).incomingUniStreams(16).build();
+        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).build();
     }
 
     private static void sealServer(EventLoops loops, String profiles, String addr) throws Exception {
@@ -264,7 +263,7 @@ final class CarrierInteropPeer {
 
     private static void sealClient(EventLoops loops, String addr, long value) throws Exception {
         Profile profile = Profile.of(value);
-        var cfg = ClientConfig.builder().anchor(new PinAnchor(KeyId.of(KeyAlg.X25519, NODE.publicKey()))).allowedProfiles(profile);
+        var cfg = ClientConfig.builder().anchor(new PinAnchor(KeyId.staticKeyId(NODE.publicKey()))).allowedProfiles(profile);
         if (profile.isPskBased()) cfg.psk(KEYS.handle(), KEYS.psk());
         SocketChannel channel = SocketChannel.open(address(addr));
         PipeIo carrier = io.zmux.carrier.PipeChannel.pipe(channel, channel, io.zmux.carrier.Framing.BYTE_STREAM, 1 << 16);

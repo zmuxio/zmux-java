@@ -20,7 +20,7 @@ final class TestTls {
         if (!Files.exists(storePath)) {
             Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
                     "-genkeypair", "-alias", "localhost", "-keyalg", "EC", "-groupname", "secp256r1",
-                    "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1", "-validity", "3650",
+                    "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1", "-startdate", "-1H", "-validity", "3650",
                     "-storetype", "PKCS12", "-keystore", storePath.toString(), "-storepass", "changeit", "-keypass", "changeit")
                     .redirectErrorStream(true).start();
             if (!process.waitFor(30, TimeUnit.SECONDS)) { process.destroyForcibly().waitFor(); throw new IllegalStateException("keytool timed out"); }

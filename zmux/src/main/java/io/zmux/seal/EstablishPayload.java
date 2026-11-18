@@ -1,9 +1,9 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
-import static io.zmux.seal.SecureCarrierException.Code.MALFORMED;
-import static io.zmux.seal.SecureCarrierException.Code.TLV_CREDENTIALS;
-import static io.zmux.seal.SecureCarrierException.Code.TOO_LARGE;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.MALFORMED;
+import static io.zmux.seal.SecureCarrierException.Kind.TLV_CREDENTIALS;
+import static io.zmux.seal.SecureCarrierException.Kind.TOO_LARGE;
 
 import io.zmux.internal.join.Tlv;
 import java.io.ByteArrayOutputStream;

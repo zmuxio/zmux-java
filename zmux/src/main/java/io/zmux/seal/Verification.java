@@ -12,19 +12,21 @@ final class Verification {
 
     /**
      * Asks anchor once. A rejection, any other exception or error of the verifier and a missing verdict
-     * are {@link CredentialsFailedException}; {@link VerifierUnavailableException} passes through.
+     * are {@link CredentialsFailedException} (the handshake's result); {@link VerifyUnavailableException} passes through.
      * Then the proof (transcript signature) the verdict requires is checked: proof is the one the
      * message carries, or null. PQ authentication holds when a proof key of a PQ KeyAlg was named and its
      * proof verified.
      */
-    static Judged judge(Anchor anchor, VerifyInput in, Proof proof, boolean requirePqAuth) throws CredentialsFailedException, VerifierUnavailableException {
+    static Judged judge(Anchor anchor, VerifyInput in, Proof proof, boolean requirePqAuth) throws CredentialsFailedException, VerifyUnavailableException {
         VerifyVerdict v;
         try {
             v = anchor.verify(in);
+        } catch (VerifyRejectedException e) {
+            throw new CredentialsFailedException("the verifier rejected the peer", e);
         } catch (VirtualMachineError e) {
             throw e; // the JVM itself, not the verifier's judgement
         } catch (RuntimeException | Error e) {
-            // Only VerifierUnavailableException is temporary: any other failure of the verifier rejects the peer.
+            // Any other failure of the verifier rejects the peer.
             throw new CredentialsFailedException("the verifier failed", e);
         }
         if (v == null) throw new CredentialsFailedException("the verifier returned no verdict");

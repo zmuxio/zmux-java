@@ -138,7 +138,7 @@ public final class Benchmark {
         var exchange = io.zmux.http.ExchangeConfig.builder(psk).upPieceSize(256 << 10).downPieceSize(256 << 10).build();
         var config = ZmuxConfig.builder().eventLoops(loops).build();
         var group = new io.netty.channel.MultiThreadIoEventLoopGroup(2, io.netty.channel.nio.NioIoHandler.newFactory());
-        try (var listener = ZmuxListener.of(ListenerConfig.of(config))) {
+        try (var listener = Zmux.listener(ListenerConfig.of(config))) {
             var endpoint = io.zmux.http.HttpEndpoint.builder(listener).exchange(exchange).build();
             var server = new io.netty.bootstrap.ServerBootstrap().group(group).channel(io.netty.channel.socket.nio.NioServerSocketChannel.class)
                     .childHandler(endpoint.initializer(null, null)).bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).sync().channel();
@@ -266,9 +266,9 @@ public final class Benchmark {
                 var after = pair.client.pipeStats();
                 long bytes = 0;
                 for (var a : after) {
-                    var b = before.stream().filter(x -> x.pipeId().equals(a.pipeId())).findFirst().orElseThrow();
+                    var b = before.stream().filter(x -> x.pipe().equals(a.pipe())).findFirst().orElseThrow();
                     long delta = a.bytesSent() - b.bytesSent(); bytes += delta;
-                    samples.put(key + "_pipe" + a.pipeId() + "_sent_bytes", delta);
+                    samples.put(key + "_pipe" + a.pipe() + "_sent_bytes", delta);
                 }
                 long bulkDelta = progress.get() - bulkBefore;
                 if (bulkDelta <= 0) throw new AssertionError("bulk made no progress");

@@ -8,7 +8,7 @@ package io.zmux;
  * the exporter here is rejected for such a session, and {@link #none()}{@code .withEndToEnd()} is
  * accepted without effect, so that one configuration serves both kinds of first pipe. A session whose
  * first pipe is not on the secure carrier also needs the proof that it is end to end: {@link
- * #withEndToEnd()} when known before the session starts, else {@link io.zmux.adapter.SessionAdapter#declareEndToEnd()};
+ * #withEndToEnd()} when known before the session starts, else {@link ZmuxSession#declareEndToEnd()};
  * neither is a source. What is configured is what is used: a source is never dropped because the
  * peer did not offer it.
  *

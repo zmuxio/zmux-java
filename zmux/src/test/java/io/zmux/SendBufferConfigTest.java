@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.internal.core.CoreConfig;
 import org.junit.jupiter.api.Test;
 
+@org.junit.jupiter.api.Timeout(60)
 class SendBufferConfigTest {
     @Test void aMaximumBelowTheBufferIsRejectedNotRaised() {
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().sendBufferMax(-1));

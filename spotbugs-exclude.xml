@@ -240,8 +240,10 @@
   </Match>
   <Match>
     <Bug pattern="WOC_WRITE_ONLY_COLLECTION_LOCAL"/>
-    <Class name="io.zmux.PipeMaintenance"/>
-    <Method name="consult"/>
+    <Or>
+      <And><Class name="io.zmux.PipeMaintenance"/><Method name="consult"/></And>
+      <And><Class name="io.zmux.quic.QuicPool"/><Method name="consultLocked"/></And>
+    </Or>
   </Match>
   <Match>
     <Bug pattern="WOC_WRITE_ONLY_COLLECTION_FIELD, DMC_DUBIOUS_MAP_COLLECTION"/>

@@ -238,7 +238,7 @@ class SealVectorsTest {
                             Verification.judge(in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, new byte[0]), proofKey, null),
                                     new VerifyInput(io.zmux.Role.SERVER, Profile.of(num(v, "profile")), hs.peerStatic(), null, last.credential(), List.of(), null),
                                     last.proof(), Boolean.TRUE.equals(s.get("require_pq_auth")));
-                        } catch (CredentialsFailedException | VerifierUnavailableException e) {
+                        } catch (CredentialsFailedException | VerifyUnavailableException e) {
                             assertEquals(steps.size() - 1, i, str(v, "name") + " failed early: " + e.getMessage());
                             return "credentials_failed";
                         }

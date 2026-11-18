@@ -118,9 +118,11 @@ class UsabilityTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new Backoff(Duration.ofSeconds(2), Duration.ofSeconds(1), 0));
         assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().sendBufferMax(1 << 20).build(), "below the send buffer");
-        assertEquals(OptionalLong.empty(), ZmuxConfig.defaults().incomingUniStreams(), "unset: staged credit");
-        assertEquals(OptionalLong.of(0), ZmuxConfig.builder().incomingUniStreams(0).build().incomingUniStreams(), "none");
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().incomingUniStreams(-1));
+        assertEquals(OptionalLong.empty(), ZmuxConfig.defaults().maxIncomingUniStreams(), "unset: staged credit");
+        assertEquals(OptionalLong.of(0), ZmuxConfig.builder().maxIncomingUniStreams(0).build().maxIncomingUniStreams(), "none");
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxIncomingUniStreams(-1));
+        assertEquals(ZmuxConfig.DEFAULT_MAX_LANES, ZmuxConfig.defaults().maxLanes());
+        assertEquals(16382, Zmux.DEFAULT_MAX_RECORD_SIZE);
     }
 
     @Test void theJoinTimeoutBoundsAJoinWhileTheHandshakeHasNone() throws Exception {
@@ -187,8 +189,8 @@ class UsabilityTest {
     private record Rejoinable(ZmuxListener serverListener, ZmuxListener clientListener, ZmuxSession client, ZmuxSession server)
             implements AutoCloseable {
         static Rejoinable open(ZmuxConfig server, ZmuxConfig client) throws Exception {
-            var sl = ZmuxListener.of(ListenerConfig.of(server));
-            var cl = ZmuxListener.of(ListenerConfig.of(client));
+            var sl = Zmux.listener(ListenerConfig.of(server));
+            var cl = Zmux.listener(ListenerConfig.of(client));
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
             sl.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
             var c = cl.open(io[0], Role.CLIENT);
@@ -235,7 +237,7 @@ class UsabilityTest {
         var logger = new CapturingLogger();
         try (EventLoops loops = EventLoops.create(2)) {
             var server = resuming(loops, new CapturingLogger()).build();
-            var listener = ZmuxListener.of(ListenerConfig.of(server));
+            var listener = Zmux.listener(ListenerConfig.of(server));
             var dials = new AtomicInteger();
             var client = resuming(loops, logger).redial((need, cancellation) -> {
                 dials.incrementAndGet();

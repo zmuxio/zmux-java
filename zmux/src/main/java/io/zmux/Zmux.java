@@ -25,19 +25,24 @@ public final class Zmux {
     /**
      * The largest stream count credit the encoding allows, 2<sup>60</sup> (RFC 9000 Section 4.6):
      * the value that grants the peer as many streams as the protocol can count, in effect no
-     * limit, for {@link ZmuxConfig.Builder#incomingStreams(long)}, {@link ZmuxConfig.Builder#incomingUniStreams}
+     * limit, for {@link ZmuxConfig.Builder#maxIncomingStreams(long)}, {@link ZmuxConfig.Builder#maxIncomingUniStreams}
      * and {@link ZmuxSession#raiseIncomingStreams}. It is a value of their range, not an unlimited
      * setting; their none setting stays 0.
      */
     public static final long MAX_STREAM_CREDIT = 1L << 60;
 
+    /** The record size limit before the peer's parameters arrive, 16382 bytes (SPEC.md Section 3.2). */
+    public static final int DEFAULT_MAX_RECORD_SIZE = io.zmux.internal.wire.TransportParams.DEFAULT_MAX_RECORD_SIZE;
+
     /**
      * Transfers both streams to a bounded, bidirectional relay. Cancelling the returned future, or
      * completing it from outside ({@link ZmuxFuture#orTimeout}), cancels the splice: both streams are reset with ZMUX_CANCELLED (0x5a4d0001) and stopped with code 0
-     * and there is no result. A {@link SpliceControl} in the options ends the splice with a chosen code instead: both
-     * streams are reset and stopped with it and the result reports {@link SpliceResult.End.Cancelled}. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
-     * finished, with how each direction ended, or exceptionally when a limiter failed, for stream data or for datagrams (the limiter's exception is the
-     * cause of the {@link java.io.IOException} the stage completes with). The ownership cleanup waits
+     * and there is no result. A {@link SpliceAbort} in the options ends the splice with a chosen code instead: both
+     * streams are reset and stopped with it and the result reports {@link SpliceEnd.Cancelled}. Otherwise the stage completes only after forwarding tasks and ownership cleanup have
+     * finished, with how each direction ended. A limiter that fails in {@code acquire} (an exception, a failed stage, or a grant
+     * outside its range) ends that direction {@link SpliceEnd.LimiterFailed}: the downstream stream is reset and the upstream stream
+     * stopped with ZMUX_CANCELLED, and the other direction goes on. A limiter that fails for a datagram
+     * ({@code tryAcquire} throwing or granting outside {@code 0..max}) only drops that datagram, counted as limited; the splice goes on. The ownership cleanup waits
      * for each stream's event loop at most one second; a loop that does not answer by then completes the stage
      * exceptionally with an {@link java.io.IOException} saying so (the cleanup still runs if the loop resumes).
      */
@@ -46,7 +51,25 @@ public final class Zmux {
     }
 
     public static ZmuxFuture<SpliceResult> splice(ZmuxStream a, ZmuxStream b) {
-        return splice(a, b, SpliceOptions.defaults());
+        return splice(a, b, SpliceOptions.DEFAULT);
+    }
+
+    /**
+     * Hands a lane carrier, a further stream that the peer opened on a lane-capable connection, to the process: it
+     * reads the lane header, routes the stream by its Lane Key over the sessions of the process, checks the
+     * connection and closes a stream that names no session or pipe (MULTIPATH.md 5.8). It is one process-wide entry,
+     * not a method of a session, since the stream names its session only through the Lane Key; a listener's
+     * {@link io.zmux.adapter.ListenerAdapter#handle} routes the same way. The header is the carrier's first record:
+     * it has {@link ListenerConfig#DEFAULT_FIRST_RECORD_TIMEOUT} to deliver it, else the carrier is closed as one
+     * naming no pipe. The built-in QUIC adapter calls it itself.
+     */
+    public static void handleLane(io.zmux.carrier.PipeIo pipe) {
+        io.zmux.internal.loop.ListenerHub.laneInput(java.util.Objects.requireNonNull(pipe, "pipe"));
+    }
+
+    /** A listener without a socket: carriers arrive through its {@link ZmuxListener#adapter()}. */
+    public static ZmuxListener listener(ListenerConfig cfg) {
+        return ZmuxListener.unbound(java.util.Objects.requireNonNull(cfg, "cfg"));
     }
 
     /**
@@ -59,14 +82,14 @@ public final class Zmux {
      * limiter, and a datagram that cannot wait for a boundary (too many already wait, or the
      * next hop's stream has ended) is dropped as too large. A source that ends inside a capsule
      * resets the next hop and stops the source with ZMUX_PACKET_ERROR, and the direction ends
-     * {@link SpliceResult.End.Reset} with that code. Ends, limiters and the result are as for splice.
+     * {@link SpliceEnd.Reset} with that code. Ends, limiters and the result are as for splice.
      */
     public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
         return Splice.start(a, b, options, true);
     }
 
     public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b) {
-        return splicePackets(a, b, SpliceOptions.defaults());
+        return splicePackets(a, b, SpliceOptions.DEFAULT);
     }
 
     /** Resolves two established sessions the application authenticated as connecting the same endpoints. */

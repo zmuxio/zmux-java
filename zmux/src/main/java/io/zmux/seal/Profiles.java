@@ -1,6 +1,6 @@
 package io.zmux.seal;
 
-import static io.zmux.seal.SecureCarrierException.Code.INVALID_CONFIG;
+import static io.zmux.seal.SecureCarrierException.Kind.INVALID_CONFIG;
 
 import io.zmux.internal.join.Suite;
 import java.util.List;

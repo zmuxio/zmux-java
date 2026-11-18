@@ -86,10 +86,6 @@ public final class AdapterPorts {
     /** What a session offers its adapter view. */
     public interface Session {
         boolean joinReady() throws java.io.IOException;
-
-        void declareEndToEnd() throws java.io.IOException;
-
-        void releaseFirstFlight();
     }
 
     /** Builds the views; io.zmux.adapter installs it when its classes initialise. */

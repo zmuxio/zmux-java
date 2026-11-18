@@ -72,7 +72,7 @@ public final class QuicServer implements AutoCloseable {
         }
     }
     /**
-     * The hosts of the connections served by {@link #serveAsync}: one per Netty loop, for the loop's lifetime.
+     * The hosts of the connections served by {@link #serve}: one per Netty loop, for the loop's lifetime.
      * A loop's entry goes when it terminates (a weak map would keep it: the host references its loop).
      */
     private static final java.util.concurrent.ConcurrentHashMap<EventLoop, NettyHost> HOSTS = new java.util.concurrent.ConcurrentHashMap<>();
@@ -98,10 +98,12 @@ public final class QuicServer implements AutoCloseable {
      *
      * <p>The stage completes when the connection ends; cancelling it stops handing the
      * connection's new streams to the listener (they are closed), and neither the connection
-     * nor its sessions are closed. A listener already closed closes the connection, and the
-     * stage fails with {@link io.zmux.ListenerClosedException}.
+     * nor its sessions are closed. A connection refused at a limit (no source slot) is closed and
+     * counted, and the stage completes: the connection ended. A listener already closed closes
+     * the connection, and the stage fails with {@link io.zmux.ListenerClosedException}. These
+     * outcomes belong to this adapter, which hands the connection to the listener as a whole.
      */
-    public static io.zmux.ZmuxFuture<Void> serveAsync(QuicChannel connection, QuicOptions options, ZmuxListener listener,
+    public static io.zmux.ZmuxFuture<Void> serve(QuicChannel connection, QuicOptions options, ZmuxListener listener,
                                                                   Fallback fallback) {
         java.util.Objects.requireNonNull(connection, "connection");
         java.util.Objects.requireNonNull(options, "options");
@@ -127,7 +129,7 @@ public final class QuicServer implements AutoCloseable {
     }
 
     /**
-     * The stream handler of a codec whose connections are given to {@link #serveAsync}: it hands
+     * The stream handler of a codec whose connections are given to {@link #serve}: it hands
      * each stream the peer opens to the zmux carrier of its connection, and closes the streams
      * of a connection that has none.
      */

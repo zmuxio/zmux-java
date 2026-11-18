@@ -17,52 +17,112 @@ import java.util.concurrent.CompletionStage;
  * listener reads up to {@code peek} bytes, never more, and asks the decider; nothing is sent
  * before the decision and nothing is consumed except what an accept skips.
  *
- * @param peek bytes read before the decision (0: none), at most {@link #MAX_PEEK}; fewer when
- *     the carrier ends or the peek timeout passes first; a carrier without a receiving half,
- *     or one decided on its HTTP request head, is decided at once. On a message-framed carrier
- *     any peek above 0 reads the first message whole as the prefix, of at most max(peek, maxPeek)
- *     bytes (a longer one is closed, counted once as closed); skip is then 0 (replayed) or its length
- * @param maxPeek bounds {@link Decision#need()}, at most {@link #MAX_PEEK}; 0: peek, so that
- *     {@link AdmissionVerdict#MORE} is invalid
- * @param peekTimeout runs from the end of the outer handshake and bounds the reading of the
- *     prefix and the decision together; zero: drawn once per admission from a secure random
- *     source between 5 s and 30 s
- * @param fallbackOnPeekTimeout a byte-stream carrier whose prefix has not arrived when the peek timeout
- *     ends, in the first read or in a {@link AdmissionVerdict#MORE} round, takes {@link AdmissionVerdict#FALLBACK} with every
- *     byte read replayed instead of being closed (without a fallback target it is stalled), counted in both
- *     the peek-timeout and fallback counters; a message-framed carrier and an HTTP request carrier are
- *     closed as before, and so is a carrier whose decider has not returned in time
- * @param stallMin lower bound of a {@link AdmissionVerdict#STALL}'s duration
- * @param stallMax upper bound of a {@link AdmissionVerdict#STALL}'s duration; when both bounds are
- *     zero (a stall of no duration is {@link AdmissionVerdict#CLOSE}), stallMax is drawn once between
- *     30 s and 120 s and stallMin between a quarter and three quarters of it
- * @param decider the decision function
+ * <p>Built with {@link #builder(int, Decider)}; every setting not called keeps its default.
  */
-public record Admission(int peek, int maxPeek, Duration peekTimeout, boolean fallbackOnPeekTimeout, Duration stallMin, Duration stallMax, Decider decider) {
+public final class Admission {
     /** The longest prefix: it is read into the carrier's read buffer, which holds a first record of at most this size. */
     public static final int MAX_PEEK = 65535;
 
-    public Admission {
+    private final int peek, maxPeek;
+    private final Duration peekTimeout, stallMin, stallMax;
+    private final boolean fallbackOnPeekTimeout;
+    private final Decider decider;
+
+    private Admission(Builder b) {
+        peek = b.peek; maxPeek = b.maxPeek; peekTimeout = b.peekTimeout; fallbackOnPeekTimeout = b.fallbackOnPeekTimeout;
+        stallMin = b.stallMin; stallMax = b.stallMax; decider = b.decider;
+    }
+
+    /**
+     * An admission that reads peek bytes (0: none), at most {@link #MAX_PEEK}, before it asks decider; fewer when the
+     * carrier ends or the peek timeout passes first; a carrier without a receiving half, or one decided on its HTTP
+     * request head, is decided at once. On a message-framed carrier any peek above 0 reads the first message whole as
+     * the prefix, of at most max(peek, maxPeek) bytes (a longer one is closed, counted once as closed); skip is then 0
+     * (replayed) or its length.
+     */
+    public static Builder builder(int peek, Decider decider) {
         Objects.requireNonNull(decider, "decider");
         if (peek < 0 || peek > MAX_PEEK) throw new IllegalArgumentException("peek outside [0, " + MAX_PEEK + "]");
-        if (maxPeek < 0 || maxPeek > MAX_PEEK) throw new IllegalArgumentException("maxPeek outside [0, " + MAX_PEEK + "]");
-        if (Objects.requireNonNull(peekTimeout).isNegative() || Objects.requireNonNull(stallMin).isNegative()
-                || Objects.requireNonNull(stallMax).isNegative()) throw new IllegalArgumentException("negative duration");
-        if (stallMin.compareTo(stallMax) > 0) throw new IllegalArgumentException("stallMin above stallMax");
-        if (stallMax.isZero() && !stallMin.isZero()) throw new IllegalArgumentException("stallMin without stallMax");
+        return new Builder(peek, decider);
     }
 
-    /** An admission with drawn timeouts and stall bounds. */
-    public static Admission of(int peek, Decider decider) {
-        return new Admission(peek, 0, Duration.ZERO, false, Duration.ZERO, Duration.ZERO, decider);
+    /** The bytes read before the decision. */
+    public int peek() { return peek; }
+
+    /** The bound of {@link Decision#need()}; 0: peek, so that {@link AdmissionVerdict#MORE} is invalid. */
+    public int maxPeek() { return maxPeek; }
+
+    /** The peek timeout; zero: drawn once per admission between 5 s and 30 s. */
+    public Duration peekTimeout() { return peekTimeout; }
+
+    /** See {@link Builder#fallbackOnPeekTimeout(boolean)}. */
+    public boolean isFallbackOnPeekTimeout() { return fallbackOnPeekTimeout; }
+
+    /** The lower bound of a {@link AdmissionVerdict#STALL}'s duration; zero with {@link #stallMax()}: drawn. */
+    public Duration stallMin() { return stallMin; }
+
+    /** The upper bound of a {@link AdmissionVerdict#STALL}'s duration; zero: drawn. */
+    public Duration stallMax() { return stallMax; }
+
+    /** The decision function. */
+    public Decider decider() { return decider; }
+
+    /** Builds an {@link Admission}; every method checks its argument. */
+    public static final class Builder {
+        private final int peek;
+        private final Decider decider;
+        private int maxPeek;
+        private Duration peekTimeout = Duration.ZERO, stallMin = Duration.ZERO, stallMax = Duration.ZERO;
+        private boolean fallbackOnPeekTimeout;
+
+        private Builder(int peek, Decider decider) { this.peek = peek; this.decider = decider; }
+
+        /** Bounds {@link Decision#need()}, at most {@link #MAX_PEEK}; not called: peek, so that MORE is invalid. */
+        public Builder maxPeek(int n) {
+            if (n < 0 || n > MAX_PEEK) throw new IllegalArgumentException("maxPeek outside [0, " + MAX_PEEK + "]");
+            maxPeek = n;
+            return this;
+        }
+
+        /**
+         * A positive bound on the reading of the prefix and the decision together, from the end of the outer
+         * handshake; not called: drawn once per admission from a secure random source between 5 s and 30 s.
+         */
+        public Builder peekTimeout(Duration d) {
+            if (Objects.requireNonNull(d, "d").isNegative() || d.isZero()) throw new IllegalArgumentException("peekTimeout not positive");
+            peekTimeout = d;
+            return this;
+        }
+
+        /**
+         * A byte-stream carrier whose prefix has not arrived when the peek timeout ends, in the first read or in a
+         * {@link AdmissionVerdict#MORE} round, takes {@link AdmissionVerdict#FALLBACK} with every byte read replayed
+         * instead of being closed (without a fallback target it is stalled), counted in both the peek-timeout and
+         * fallback counters; a message-framed carrier and an HTTP request carrier are closed as before, and so is a
+         * carrier whose decider has not returned in time. Default false.
+         */
+        public Builder fallbackOnPeekTimeout(boolean on) {
+            fallbackOnPeekTimeout = on;
+            return this;
+        }
+
+        /**
+         * The bounds of a {@link AdmissionVerdict#STALL}'s duration, min at most max and max positive; not called:
+         * max is drawn once between 30 s and 120 s and min between a quarter and three quarters of it.
+         */
+        public Builder stall(Duration min, Duration max) {
+            Objects.requireNonNull(min, "min");
+            Objects.requireNonNull(max, "max");
+            if (min.isNegative() || max.isNegative() || max.isZero()) throw new IllegalArgumentException("stall bounds: min >= 0, max > 0");
+            if (min.compareTo(max) > 0) throw new IllegalArgumentException("stall min above max");
+            stallMin = min;
+            stallMax = max;
+            return this;
+        }
+
+        public Admission build() { return new Admission(this); }
     }
 
-    public Admission withPeekTimeout(Duration d) { return new Admission(peek, maxPeek, d, fallbackOnPeekTimeout, stallMin, stallMax, decider); }
-    public Admission withStall(Duration min, Duration max) { return new Admission(peek, maxPeek, peekTimeout, fallbackOnPeekTimeout, min, max, decider); }
-    /** This admission with {@link #fallbackOnPeekTimeout} set to on. */
-    public Admission withFallbackOnPeekTimeout(boolean on) { return new Admission(peek, maxPeek, peekTimeout, on, stallMin, stallMax, decider); }
-    /** This admission with the bound of {@link Decision#need()}. */
-    public Admission withMaxPeek(int n) { return new Admission(peek, n, peekTimeout, fallbackOnPeekTimeout, stallMin, stallMax, decider); }
     /** The longest prefix a decider can see. */
     public int prefixLimit() { return Math.max(peek, maxPeek); }
 

@@ -1,5 +1,6 @@
 package io.zmux;
 
+import io.zmux.internal.spi.PoolShrink;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.*;
@@ -11,8 +12,13 @@ import java.util.concurrent.locks.LockSupport;
  * A maintenance run. Closing stops creation/rotation and closes a replacement still being rotated in;
  * the members' pipes remain owned by the session.
  *
- * <p>A dial attempt that outlives its deadline, a rotation preemption, closing or the session's
- * end is interrupted and abandoned, never awaited: the run may complete while the attempt's
+ * <p>The run looks at its members at once when a pipe of the session changes state or the session is
+ * suspended or resumed, after each dial attempt ends, no later than its policy's recheck, and every
+ * {@link #INTERVAL}. It sets no deadline of its own on a dial: the pool's {@link PipePool.Join} bounds
+ * its attempt and the join timeout the join.
+ *
+ * <p>A dial attempt that a rotation preemption, closing or the session's
+ * end interrupts is abandoned, never awaited: the run may complete while the attempt's
  * {@link PipePool.Dial#open} is still executing. Whatever that attempt then creates (a joined
  * pipe) is released as soon as it returns. A dial that ignores interruption
  * therefore delays only its own cleanup, never the run, its completion or {@link #close()}.
@@ -20,6 +26,8 @@ import java.util.concurrent.locks.LockSupport;
  * nothing can be dialled through that client any more.
  */
 public final class PipeMaintenance implements AutoCloseable {
+    /** The maintenance interval, the longest time between two looks: 100 ms, the same in every language. */
+    static final long INTERVAL = TimeUnit.MILLISECONDS.toNanos(100);
     /** The outcome of a run: its counts of joins, rotations and failures, the pipes it retained, and the failure that ended it (null when none did). */
     public record Result(long joined, long rotations, long failures, List<ZmuxPipe> pipes, IOException cause) {
         public Result { pipes = List.copyOf(pipes); }
@@ -71,7 +79,7 @@ public final class PipeMaintenance implements AutoCloseable {
         Member(List<ZmuxPipe> pipes, int kind, long added, long bytes, long age) {
             this.pipes = pipes; this.kind = kind; this.added = added; this.bytes = bytes; this.age = age; idleSince = added;
         }
-        PipeId pipeId() { return pipes.getFirst().id(); }
+        PipeId pipe() { return pipes.getFirst().id(); }
     }
     private PipeMaintenance(ZmuxSession session, PipePool policy, boolean once) {
         this.session = session; this.policy = policy; this.once = once; mode = policy.choiceSource(); backoff = minimumBackoff(); target = policy.count();
@@ -82,7 +90,7 @@ public final class PipeMaintenance implements AutoCloseable {
         return start(session, policy, cancellation, false);
     }
     static PipeMaintenance startOnce(ZmuxSession session, PipePool policy, Cancellation cancellation) throws IOException {
-        return start(session, policy.withCount(1).withRotation(PipePool.Rotation.none()).withPolicy(null), cancellation, true);
+        return start(session, policy.withCount(1).withRotate(PipePool.Rotation.none()).withPolicy(null), cancellation, true);
     }
     /**
      * A choice pool that takes first, a pipe of candidate kind chosen at chosen (System.nanoTime),
@@ -125,7 +133,7 @@ public final class PipeMaintenance implements AutoCloseable {
         return Math.max(1, (long)(limit * (1 - ThreadLocalRandom.current().nextDouble() * fraction)));
     }
     private Member member(List<ZmuxPipe> pipes, int kind, long added) {
-        var rotate = policy.rotation();
+        var rotate = policy.rotate();
         return new Member(pipes, kind, added, jitter(rotate.maxBytes(), rotate.jitter()), jitter(rotate.maxAge().toNanos(), rotate.jitter()));
     }
     /** The member that takes over from m: its replacement. */
@@ -173,7 +181,7 @@ public final class PipeMaintenance implements AutoCloseable {
         return true;
     }
     private boolean usable(PipeStats s) throws IOException {
-        return live(s) && (Boolean)session.run(op -> session.core.pipeUsable(s.pipeId().value()));
+        return live(s) && (Boolean)session.run(op -> session.core.pipeUsable(s.pipe().value()));
     }
     /** A member is usable while all of its pipes are. */
     private boolean usable(List<ZmuxPipe> pipes) throws IOException {
@@ -284,7 +292,7 @@ public final class PipeMaintenance implements AutoCloseable {
         PoolPolicy p = policy.policy();
         if (p == null) return;
         long now = System.nanoTime();
-        var view = new ArrayList<PoolPolicy.Member>(members.size());
+        var view = new ArrayList<PoolMember>(members.size());
         for (Member m : members) {
             // A group: its bytes summed, idle since the latest traffic of any of its pipes.
             long sent = 0, received = 0, idle = Long.MAX_VALUE;
@@ -296,37 +304,44 @@ public final class PipeMaintenance implements AutoCloseable {
             }
             if (idle == Long.MAX_VALUE) idle = now - m.idleSince;
             m.idleSince = now - idle;
-            view.add(new PoolPolicy.Member(m.pipeId(), 0, java.time.Duration.ofNanos(now - m.added), java.time.Duration.ofNanos(idle),
+            view.add(new PoolMember(m.pipe(), 0, java.time.Duration.ofNanos(now - m.added), java.time.Duration.ofNanos(idle),
                     m.pipes.size(), sent, received, usable(m.pipes), m.replacement != null));
         }
-        PoolPolicy.Decision d;
-        try {
-            d = p.decide(new PoolPolicy.View(view, dialFailures, lastDial == 0 ? null : java.time.Duration.ofNanos(now - lastDial)));
-            if (d == null) d = PoolPolicy.Decision.KEEP;
-        } catch (RuntimeException error) {
-            // A rejected decision (such as one Decision refuses to build) keeps the pool as it is,
-            // is reported, and the run goes on.
-            session.driver.hooks().log(System.Logger.Level.WARNING, "zmux pool policy decision rejected; keeping the pool", error);
-            d = PoolPolicy.Decision.KEEP;
-        }
+        // The run dials on its own thread and looks between dials, so no dial is in progress at a look.
+        var look = io.zmux.internal.spi.PolicyCall.decide(p, new PoolView(view, dialFailures,
+                lastDial == 0 ? Optional.empty() : Optional.of(java.time.Duration.ofNanos(now - lastDial)), 0));
+        // A rejected decision (such as one PoolDecision refuses to build) keeps the pool as it is, is reported, and the run goes on.
+        if (look.rejected() != null) rejected(look.rejected());
+        PoolDecision d = look.decision();
         target = d.count().orElse(policy.count());
-        decidedAt = now; recheck = d.recheckDelay() == null ? 0 : ZmuxConfig.nanos(d.recheckDelay());
-        dialAfter = d.dialAfter() == null ? -1 : Math.min(PipePool.nanos(d.dialAfter(), true), policy.backoff().max().toNanos());
+        decidedAt = now; recheck = d.recheckNanos();
+        dialAfter = d.dialAfter().isEmpty() ? -1 : Math.min(PoolDecision.saturated(d.dialAfter().get()), policy.backoff().max().toNanos());
         dialOptions = policy.options().withLiveness(d.liveness());
-        for (Member m : members) if (d.retirePipes().contains(m.pipeId())) m.retire = true;
+        for (Member m : members) if (d.retirePipes().contains(m.pipe())) m.retire = true;
+        // Shrinking (the shared rule: named members first, then the longest idle, ...); a member closes gracefully
+        // with its replacement. The run dials between looks, so no dial is in progress to cancel first.
+        var candidates = new ArrayList<PoolShrink.Candidate<Member>>(members.size());
+        for (Member m : members) {
+            candidates.add(new PoolShrink.Candidate<>(m, m.pipe().value(), m.retire, now - m.idleSince, m.pipes.size(), now - m.added));
+        }
         boolean changed = false;
-        while (members.size() > target) {
-            int k = 0;
-            for (int i = 1; i < members.size(); i++) {
-                Member m = members.get(i), best = members.get(k);
-                if ((m.retire && !best.retire) || (m.retire == best.retire && m.idleSince < best.idleSince)) k = i;
-            }
-            Member m = members.remove(k);
+        for (Member m : PoolShrink.plan(candidates, 0, target).close()) {
+            members.remove(m);
             closeQuietly(m.pipes);
             if (m.replacement != null) closeQuietly(m.replacement);
             changed = true;
         }
         if (changed) publish();
+    }
+
+    /** Hands a rejected decision to the pool's callback, else to the session's logger. */
+    private void rejected(Throwable error) {
+        var callback = policy.decisionRejected();
+        if (callback == null) {
+            session.driver.hooks().log(System.Logger.Level.WARNING, "zmux pool policy decision rejected; keeping the pool", error);
+            return;
+        }
+        io.zmux.internal.spi.PolicyCall.report(callback, error);
     }
 
     private static void closeQuietly(List<ZmuxPipe> pipes) {
@@ -338,7 +353,7 @@ public final class PipeMaintenance implements AutoCloseable {
     private boolean due(Member m) throws IOException {
         if (!usable(m.pipes)) return false;
         if (m.retire) return true;
-        var r = policy.rotation();
+        var r = policy.rotate();
         long sent = 0, received = 0, attached = Long.MAX_VALUE;
         for (ZmuxPipe pipe : m.pipes) {
             PipeStats s = stats(pipe);
@@ -371,14 +386,13 @@ public final class PipeMaintenance implements AutoCloseable {
             PipePool.Attempt scope = creation.get(); if (scope != null && ok != null) scope.finish(ok);
         });
         try {
-            while (!session.dialPermit.tryAcquire(policy.inspectionInterval().toNanos(), TimeUnit.NANOSECONDS)) check();
+            while (!session.dialPermit.tryAcquire(INTERVAL, TimeUnit.NANOSECONDS)) check();
         } catch (InterruptedException stop) {
             check();
             throw new InterruptedIOException("pipe dial interrupted");
         }
         // The session's next dial may start once the owner decided: an abandoned attempt's pipes are
-        // released whenever it returns, so a dial that ignores interruption holds the permit no longer
-        // than the attempt timeout.
+        // released whenever it returns, so a dial that ignores interruption does not hold the permit.
         verdict.whenComplete((ok, error) -> session.dialPermit.release());
         Thread attempt;
         try {
@@ -418,16 +432,15 @@ public final class PipeMaintenance implements AutoCloseable {
         return pipe;
     }
 
-    /** Waits for the attempt's pipes within the attempt timeout and checks their directions. */
+    /**
+     * Waits for the attempt's pipes and checks their directions. The pool sets no deadline of its own: the join
+     * bounds its attempt; the wait ends early only when the run stops or a rotation must yield.
+     */
     private List<ZmuxPipe> awaitDial(CompletableFuture<List<ZmuxPipe>> outcome, boolean rotating) throws IOException {
         try {
-            long timeout = policy.attemptTimeout() == null ? session.core.joinDeadline() : policy.attemptTimeout().toNanos();
-            long started = System.nanoTime();
             List<ZmuxPipe> pipe;
             while (true) {
-                long remaining = timeout - (System.nanoTime() - started);
-                if (remaining <= 0) throw new java.net.SocketTimeoutException("pipe dial deadline");
-                try { pipe = outcome.get(Math.min(remaining, policy.inspectionInterval().toNanos()), TimeUnit.NANOSECONDS); break; }
+                try { pipe = outcome.get(INTERVAL, TimeUnit.NANOSECONDS); break; }
                 catch (TimeoutException waiting) { check(); if (rotating && rotationUnsafe()) throw new RotationPreempted(); }
             }
             check();
@@ -457,12 +470,19 @@ public final class PipeMaintenance implements AutoCloseable {
         return failure;
     }
     /**
-     * The wait before the next pass: the inspection interval, cut short by the policy's recheck
+     * The wait the policy's recheck leaves before the next look: the maintenance interval, or the time left of the
+     * recheck (0: none) counted from the decision at decidedAt, whichever is less; a pure function of its arguments.
+     */
+    static long recheckWait(long recheck, long decidedAt, long now) {
+        return recheck > 0 ? Math.clamp(recheck - (now - decidedAt), 0, INTERVAL) : INTERVAL;
+    }
+
+    /**
+     * The wait before the next look: the maintenance interval, cut short by the policy's recheck
      * and by the next dial falling due while the pool is short of pipes.
      */
     private long pause() {
-        long now = System.nanoTime(), wait = policy.inspectionInterval().toNanos();
-        if (recheck > 0) wait = Math.clamp(recheck - (now - decidedAt), 0, wait);
+        long now = System.nanoTime(), wait = recheckWait(recheck, decidedAt, now);
         if (members.size() < target) wait = Math.clamp(dialWait() - (now - dialRef()), 0, wait);
         if (mode != null) for (Member m : members) {
             if (m.replacement != null && m.usableSince != 0) wait = Math.clamp(settleLeft(m, now), 0, wait);

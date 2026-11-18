@@ -75,7 +75,7 @@ class HandshakeWireTest {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = SealTest.sessions(loops).allowRecordMode((c, m, p) -> true).handshakeShaper(shaper).build();
             var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, p) -> true).shaper(shaper).build());
-            try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(seal).build())) {
+            try (ZmuxListener l = Zmux.listener(ListenerConfig.builder().session(cfg).inboundTransform(seal).build())) {
                 Side[] first = carrier(f, overhead);
                 l.adapter().handle(first[1].io(), JoinHint.inBand(SRC));
                 PipeIo p = Seal.establish(first[0].io(), SealTest.client().shaper(shaper).build()).toCompletableFuture().get(10, java.util.concurrent.TimeUnit.SECONDS);
@@ -124,7 +124,7 @@ class HandshakeWireTest {
         var m = MemoryPipe.pair(Framing.MESSAGES);
         Writes w = new Writes(m[0].writer());
         PipeIo io = new PipeIo(m[0].reader(), w, Framing.MESSAGES, "memory", null);
-        var cfg = ClientConfig.builder().anchor(new PinAnchor(KeyId.of(KeyAlg.X25519, SealTest.NODE.publicKey())))
+        var cfg = ClientConfig.builder().anchor(new PinAnchor(KeyId.staticKeyId(SealTest.NODE.publicKey())))
                 .shaper(v -> new UnitPlan(2000, 0, 0, null)).handshakeTimeout(Duration.ofMillis(200)).build();
         var stage = Seal.establish(io, cfg).toCompletableFuture();
         long until = System.nanoTime() + WAIT.toNanos();

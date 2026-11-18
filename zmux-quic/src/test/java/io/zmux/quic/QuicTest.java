@@ -70,7 +70,7 @@ class QuicTest {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 ZmuxSession client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
@@ -107,7 +107,7 @@ class QuicTest {
             var ccfg = ZmuxConfig.builder().eventLoops(loops).shaper(delayAll).build();
             var scfg = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(scfg));
+            try (var listener = Zmux.listener(ListenerConfig.of(scfg));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 ZmuxSession client = endpoint.connectAsync(server.address(), "localhost", ccfg).get(10, TimeUnit.SECONDS);
@@ -135,7 +135,7 @@ class QuicTest {
             var ccfg = ZmuxConfig.builder().eventLoops(loops).shaper(p -> { seenClient.add(p); return null; }).build();
             var scfg = ZmuxConfig.builder().eventLoops(loops).shaper(p -> { seenServer.add(p); return null; }).build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(scfg));
+            try (var listener = Zmux.listener(ListenerConfig.of(scfg));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 ZmuxSession client = endpoint.connectAsync(server.address(), "localhost", ccfg).get(10, TimeUnit.SECONDS);
@@ -155,7 +155,7 @@ class QuicTest {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).noProbation().build();
             var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
@@ -178,7 +178,7 @@ class QuicTest {
     @Test void invalidHostnameIsRejected() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 assertThrows(ExecutionException.class, () -> endpoint.connectAsync(server.address(), "wrong.invalid", config)
@@ -209,7 +209,7 @@ class QuicTest {
                 var pending = endpoint.connectAsync((InetSocketAddress) blackhole.getLocalSocketAddress(), "localhost", config);
                 assertTrue(pending.cancel(false)); assertTrue(pending.isCancelled());
             }
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 CompletableFuture<Void> callback = new CompletableFuture<>();
@@ -227,7 +227,7 @@ class QuicTest {
     @Test void readerStartingAfterNativeStreamFailureStillReceivesTheFailure() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(config));
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var session = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);

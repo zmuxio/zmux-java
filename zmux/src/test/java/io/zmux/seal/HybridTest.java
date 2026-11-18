@@ -51,11 +51,11 @@ class HybridTest {
     @Test void encapsulationKeyCheck() throws Exception {
         byte[] ek = MlKem768.generate(null).encapsulationKey();
         MlKem768.check(ek);
-        assertEquals(SecureCarrierException.Code.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.check(Arrays.copyOf(ek, 1183))).code());
+        assertEquals(SecureCarrierException.Kind.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.check(Arrays.copyOf(ek, 1183))).kind());
         byte[] bad = ek.clone();
         bad[1151] = (byte) 0xff; // the last coefficient's high bits: 0xff0 | low nibble, at least 4080
-        assertEquals(SecureCarrierException.Code.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.check(bad)).code());
-        assertEquals(SecureCarrierException.Code.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.encapsulate(bad, null)).code());
+        assertEquals(SecureCarrierException.Kind.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.check(bad)).kind());
+        assertEquals(SecureCarrierException.Kind.KEX, assertThrows(SecureCarrierException.class, () -> MlKem768.encapsulate(bad, null)).kind());
         byte[] rhoOnly = ek.clone();
         Arrays.fill(rhoOnly, 1152, 1184, (byte) 0xff); // rho is not a coefficient
         MlKem768.check(rhoOnly);
@@ -69,7 +69,7 @@ class HybridTest {
         var both = ClientConfig.builder().psk(HANDLE, PSK).allowedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_PSK0_AES);
         assertEquals(Profile.XXHFS_PSK0_AES, Profiles.client(both.build()));
         var none = ClientConfig.builder().psk(HANDLE, PSK).allowedProfiles(Profile.XXHFS_CHACHA).build();
-        assertEquals(SecureCarrierException.Code.INVALID_CONFIG, assertThrows(SecureCarrierException.class, () -> Profiles.client(none)).code());
+        assertEquals(SecureCarrierException.Kind.INVALID_CONFIG, assertThrows(SecureCarrierException.class, () -> Profiles.client(none)).kind());
         assertTrue(Profiles.client(ClientConfig.builder().psk(HANDLE, PSK).build()).isPskBased());
         assertFalse(Profiles.client(ClientConfig.builder().build()).isPskBased());
     }

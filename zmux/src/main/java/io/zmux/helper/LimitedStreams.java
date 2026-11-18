@@ -11,11 +11,12 @@ public final class LimitedStreams {
     /** Waits for a grant of 1 through max bytes; it is at most max, so it fits an int. */
     private static Permit allowance(Limiter limiter, int max) throws IOException {
         if (io.zmux.internal.loop.SessionHost.onHostThread()) throw new IllegalStateException("limiter on an event loop");
-        var pending = Permit.acquire(limiter, 1, max).toCompletableFuture();
+        var pending = Permit.acquire(limiter, 1, max);
         try {
             return pending.get();
         } catch (InterruptedException e) {
-            Permit.abandon(pending); // an allowance arriving anyway goes back
+            // An allowance arriving after the cancellation goes back; one already granted is closed here.
+            io.zmux.internal.spi.Spi.abandon(pending);
             Thread.currentThread().interrupt();
             throw new InterruptedIOException("interrupted while waiting for limiter");
         } catch (ExecutionException e) {

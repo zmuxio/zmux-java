@@ -146,7 +146,6 @@ public final class ListenerHub {
     private final java.util.HashSet<PairHalf> pendingPairs = new java.util.HashSet<>();
     private final long firstRecordTimeout;
     private final ConcurrentHashMap<String, SessionRuntime> sessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, SessionRuntime> laneSessions = new ConcurrentHashMap<>();
     private final java.util.HashSet<Registration> registrations = new java.util.HashSet<>();
     private final SecureRandom random = new SecureRandom();
     private volatile boolean closed;
@@ -242,14 +241,11 @@ public final class ListenerHub {
     public Runnable register(SessionRuntime driver) {
         var core = driver.core();
         String locator = core.localParams().has(TransportParams.MULTIPATH) ? HexFormat.of().formatHex(core.locator()) : null;
-        byte[] lane = core.lanes().key(); String laneId = lane == null ? null : HexFormat.of().formatHex(lane);
-        Registration registration = new Registration(driver, locator, laneId);
+        Registration registration = new Registration(driver, locator);
         synchronized (this) {
             if (closed || draining) throw new IllegalStateException("listener closed");
-            if ((locator != null && sessions.containsKey(locator)) || (laneId != null && laneSessions.containsKey(laneId)))
-                throw new IllegalStateException("duplicate session routing key");
+            if (locator != null && sessions.containsKey(locator)) throw new IllegalStateException("duplicate session routing key");
             if (locator != null) sessions.put(locator, driver);
-            if (laneId != null) laneSessions.put(laneId, driver);
             resources.put(driver, driver.resources()); registrations.add(registration);
         }
         driver.resourceListener(view -> {
@@ -267,10 +263,10 @@ public final class ListenerHub {
     }
 
     private final class Registration {
-        final SessionRuntime driver; final String locator, lane;
+        final SessionRuntime driver; final String locator;
         final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
         final java.util.concurrent.atomic.AtomicReference<Runnable> observer = new java.util.concurrent.atomic.AtomicReference<>();
-        Registration(SessionRuntime driver, String locator, String lane) { this.driver = driver; this.locator = locator; this.lane = lane; }
+        Registration(SessionRuntime driver, String locator) { this.driver = driver; this.locator = locator; }
         /** The Locators of later epochs: joins find the session by every accepted one. */
         final java.util.Set<String> more = new java.util.HashSet<>();
 
@@ -291,7 +287,6 @@ public final class ListenerHub {
                 for (String l : more) sessions.remove(l, driver);
                 more.clear();
                 if (locator != null) sessions.remove(locator, driver);
-                if (lane != null) laneSessions.remove(lane, driver);
                 resources.remove(driver); registrations.remove(this);
             }
             Runnable remove = observer.getAndSet(() -> {}); if (remove != null) remove.run();
@@ -365,7 +360,6 @@ public final class ListenerHub {
         management.close();
         resources.clear();
         sessions.clear();
-        laneSessions.clear();
     }
 
     /**
@@ -689,7 +683,7 @@ public final class ListenerHub {
             var h = io.zmux.internal.join.Hello.parseHead(b, 0, n, io.zmux.internal.join.Framing.STREAM);
             return new io.zmux.adapter.JoinLookup(sessions.containsKey(HexFormat.of().formatHex(h.locator())), 0);
         } catch (io.zmux.seal.SecureCarrierException e) {
-            return new io.zmux.adapter.JoinLookup(false, e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE ? e.need() : 0);
+            return new io.zmux.adapter.JoinLookup(false, e.kind() == io.zmux.seal.SecureCarrierException.Kind.INCOMPLETE ? e.need() : 0);
         }
     }
 
@@ -1289,7 +1283,7 @@ public final class ListenerHub {
                 try {
                     h = io.zmux.internal.join.Hello.parseExact(b, 0, b.length, f);
                 } catch (io.zmux.seal.SecureCarrierException e) {
-                    if (e.code() == io.zmux.seal.SecureCarrierException.Code.INCOMPLETE) return 0;
+                    if (e.kind() == io.zmux.seal.SecureCarrierException.Kind.INCOMPLETE) return 0;
                     bad = "malformed"; // whatever the class: the local reasons of a Join name no parse failure finer
                 }
                 classified(); // The join keeps the slot until it has its result.
@@ -1325,7 +1319,7 @@ public final class ListenerHub {
             data.get(pos + sn, body);
             decided();
             var frame = CarrierAdmission.parseLane(body);
-            SessionRuntime target = frame == null ? null : laneSessions.get(HexFormat.of().formatHex(CarrierAdmission.laneKey(frame)));
+            SessionRuntime target = frame == null ? null : LaneRoutes.of(CarrierAdmission.laneKey(frame));
             if (target == null) { c.close(null); counts.rejected(); } else transferLane(c, body, target);
             return Inbound.GONE;
         }
@@ -1392,23 +1386,34 @@ public final class ListenerHub {
         })) { moved.close(null); counts.refused(); }
     }
 
-    /** An inbound lane of a known session, bounded by its carrier's stream credit. */
-    static void laneInput(SessionRuntime driver, io.zmux.carrier.PipeIo io) {
+    /**
+     * The longest a lane carrier may take to deliver its lane header, its first record, before it is closed: the
+     * default first-record timeout (the session it names is not known before the header is read).
+     */
+    private static final long LANE_HEADER_NANOS = io.zmux.ListenerConfig.DEFAULT_FIRST_RECORD_TIMEOUT.toNanos();
+
+    /**
+     * The process-wide lane entry: reads a lane carrier's header on the carrier's own host, routes it by its Lane Key
+     * over the sessions of the process ({@link LaneRoutes}), and closes one that names no session or pipe.
+     */
+    public static void laneInput(io.zmux.carrier.PipeIo io) { laneInput(EventLoopGroup.nextShared(), io); }
+
+    /** {@link #laneInput(io.zmux.carrier.PipeIo)}, on fallback when the carrier has no host of its own. */
+    static void laneInput(SessionHost fallback, io.zmux.carrier.PipeIo io) {
         Transport carrier;
         try {
-            carrier = Transport.of(driver.loop(), io);
-        } catch (IllegalArgumentException belowFloor) { // Closed by Transport.of: the lane is refused, the listener goes on.
-            driver.hooks().log(System.Logger.Level.DEBUG, "a lane's carrier takes records below the floor; refused", belowFloor);
+            carrier = Transport.onOwnHost(io, fallback);
+        } catch (IllegalArgumentException belowFloor) { // Closed by Transport.of: the lane is refused.
             return;
         }
         if (carrier == null) return;
-        if (!driver.loop().tryExecute(() -> {
-            if (driver.finished()) { carrier.close(null); return; }
+        SessionHost host = carrier.loop();
+        if (!host.tryExecute(() -> {
             class LaneGate extends TimerHeap.Timer implements Inbound {
                 final Runnable shutdown = () -> ended(carrier, false, false);
                 private void stop() {
-                    driver.loop().schedule(this, Time.NEVER);
-                    driver.loop().removeShutdownHook(shutdown);
+                    host.schedule(this, Time.NEVER);
+                    host.removeShutdownHook(shutdown);
                 }
                 @Override void fire(long now) { ended(carrier, false, false); }
                 @Override public int bytes(Transport c, ReadBuf buf, ByteBuffer data, int pos, int lim) {
@@ -1418,14 +1423,22 @@ public final class ListenerHub {
                     if (cl.kind() != CarrierAdmission.Kind.LANE) { c.close(null); return Inbound.GONE; }
                     int size = VarInt.lengthOf(data.get(pos));
                     byte[] body = new byte[cl.firstRecordLength() - size]; data.get(pos + size, body);
-                    Inbound in = driver.acceptLane(c, body);
-                    return in == null ? Inbound.GONE : in.bytes(c, buf, data, pos, lim);
+                    var frame = CarrierAdmission.parseLane(body);
+                    SessionRuntime driver = frame == null ? null : LaneRoutes.of(CarrierAdmission.laneKey(frame));
+                    if (driver == null) { c.close(null); return Inbound.GONE; }
+                    if (driver.loop() == host) {
+                        Inbound in = driver.acceptLane(c, body);
+                        return in == null ? Inbound.GONE : in.bytes(c, buf, data, pos, lim);
+                    }
+                    Transport moved = c.moveTo(driver.loop());
+                    if (moved != null && !driver.loop().tryExecute(() -> driver.acceptLane(moved, body))) moved.close(null);
+                    return Inbound.GONE;
                 }
                 @Override public void ended(Transport c, boolean graceful, boolean partial) { stop(); carrier.close(null); }
             }
             LaneGate gate = new LaneGate();
-            driver.loop().onShutdown(gate.shutdown);
-            driver.loop().schedule(gate, Time.add(Clock.now(), driver.core().joinDeadline()));
+            host.onShutdown(gate.shutdown);
+            host.schedule(gate, Time.add(Clock.now(), LANE_HEADER_NANOS));
             carrier.start(gate);
         })) carrier.close(null);
     }
@@ -1666,7 +1679,7 @@ public final class ListenerHub {
             view = new Forwarded(c, replay, ended, graceful, messages);
             var caps = io.zmux.carrier.PipeIo.Capabilities.builder().exporter(info.exporter()).receiveMemory(Forwarded.AHEAD)
                     .applicationProtocol(info.applicationProtocol()).serverName(info.serverName()).fateGroup(ci.fateGroup())
-                    .writeOverhead(ci.carrier().writeOverhead()).terminatedTls(info.terminatedTls()).secure(c.isSecure())
+                    .writeOverhead(ci.carrier().writeOverhead()).terminatedTls(info.terminatedTls()).carrierSecure(c.isSecure())
                     .handshakePadding(c.handshakePadding()).build();
             given = PipeIoAccess.get().withCarrierPeer(view.pipe(info.applicationProtocol()).withCapabilities(caps).withLabel(ci.carrier().label())
                     .withCarrierConn(ci.connection()).withCarrier(ci.carrier().kind()).withVariant(v.variant()), c.carrierPeer());

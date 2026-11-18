@@ -7,7 +7,10 @@ package io.zmux.internal.core;
  */
 final class QualityMonitor {
     /** The band of PIPE_QUALITY: +-rtt nanoseconds, [last / ratio, last x ratio]; zero turns a half off. */
-    record Band(long rtt, double rateRatio, long minInterval) {}
+    record Band(long rtt, double rateRatio, long minInterval) {
+        /** Both halves off: a pipe's off setting, which reports nothing whatever the session's band is. */
+        static final Band OFF = new Band(0, 0, 0);
+    }
 
     private final Session s;
     private Band band;
@@ -44,7 +47,7 @@ final class QualityMonitor {
         if (p.out() == null) return;
         QualityMonitor.PipeQ q = p.out().q;
         Band b = q.band != null ? q.band : band;
-        if (b != null && estimates(p)) {
+        if (b != null && b != Band.OFF && estimates(p)) {
             if (!q.has) {
                 q.has = true;
                 q.rtt = estRtt;
@@ -97,7 +100,7 @@ final class QualityMonitor {
 
     void setFloor(double rate, double ratio) {
         floorRate = rate;
-        floorRatio = ratio <= 0 ? 1.25 : ratio;
+        floorRatio = ratio;
         below = false;
         floorSet = rate > 0;
         if (floorSet) checkFloor();

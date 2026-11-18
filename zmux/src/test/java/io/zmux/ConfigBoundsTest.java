@@ -8,6 +8,7 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /** Shaping limits and probe intervals reject what they cannot honour; the exported defaults are the ones in use. */
+@org.junit.jupiter.api.Timeout(60)
 class ConfigBoundsTest {
     @Test void anAccountFieldAboveItsMaximumIsInvalid() {
         assertDoesNotThrow(() -> new WireAccount(WireAccount.MAX_INITIAL, WireAccount.MAX_RATE, WireAccount.MAX_RATE));

@@ -11,8 +11,8 @@ public final class SecureCarrierException extends ZmuxException {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** The error classes. */
-    public enum Code {
+    /** The error classes of the secure carrier (secure-carrier/SPEC.md Section 9): what happened, not a wire error code. */
+    public enum Kind {
         INCOMPLETE,
         MALFORMED,
         TRAILING_BYTES,
@@ -39,21 +39,21 @@ public final class SecureCarrierException extends ZmuxException {
         INVALID_CONFIG
     }
 
-    private final Code code;
+    private final Kind kind;
     private final int need;
-    /** An {@link Code#INCOMPLETE} of the parsers, ordinary control flow: without a stack trace. */
+    /** An {@link Kind#INCOMPLETE} of the parsers, ordinary control flow: without a stack trace. */
     private final transient boolean flow;
 
-    public SecureCarrierException(Code code) {
-        this(code, code.name().toLowerCase(java.util.Locale.ROOT), null);
+    public SecureCarrierException(Kind kind) {
+        this(kind, kind.name().toLowerCase(java.util.Locale.ROOT), null);
     }
 
-    public SecureCarrierException(Code code, String detail) {
-        this(code, code.name().toLowerCase(java.util.Locale.ROOT) + ": " + detail, null);
+    public SecureCarrierException(Kind kind, String detail) {
+        this(kind, kind.name().toLowerCase(java.util.Locale.ROOT) + ": " + detail, null);
     }
 
-    public SecureCarrierException(Code code, String detail, Throwable cause) {
-        this.code = code;
+    public SecureCarrierException(Kind kind, String detail, Throwable cause) {
+        this.kind = kind;
         this.need = 0;
         this.flow = false;
         super(detail, cause);
@@ -61,7 +61,7 @@ public final class SecureCarrierException extends ZmuxException {
 
     private SecureCarrierException(int need) {
         // Set before the superclass constructor asks fillInStackTrace, which then records nothing.
-        this.code = Code.INCOMPLETE;
+        this.kind = Kind.INCOMPLETE;
         this.need = need;
         this.flow = true;
         super("incomplete", null);
@@ -77,11 +77,12 @@ public final class SecureCarrierException extends ZmuxException {
         return new SecureCarrierException(need);
     }
 
-    public Code code() {
-        return code;
+    /** The error class. */
+    public Kind kind() {
+        return kind;
     }
 
-    /** With {@link Code#INCOMPLETE}, the smallest total length that can make progress. */
+    /** With {@link Kind#INCOMPLETE}, the smallest total length that can make progress. */
     public int need() {
         return need;
     }

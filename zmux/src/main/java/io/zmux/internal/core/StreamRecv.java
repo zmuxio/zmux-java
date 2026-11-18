@@ -454,20 +454,39 @@ public final class StreamRecv {
 
     // ---- stream credit ----
 
+    /** The smallest initial stream receive window: the floor of the configured one, and of what {@link #setReceiveWindow} takes. */
+    public static final long MIN_INITIAL_WINDOW = 4096;
+
+    /** The cap an application set explicitly as automatic: {@code maxWin} holds it, the session's cap does not apply. */
+    public static final long AUTOMATIC = Long.MAX_VALUE;
+
+    /** The held form of a requested cap: 0 (automatic) is {@link #AUTOMATIC}. */
+    static long windowCap(long max) { return max == 0 ? AUTOMATIC : max; }
+
     /**
-     * Sets a receiving part's window: initial raises the advertised limit at once, max
-     * caps auto-tuning. Values below 16 KiB are raised to 16 KiB; 0 leaves a value.
+     * Checks the arguments of {@link #setReceiveWindow}.
+     *
+     * @throws IllegalArgumentException a negative value, an initial below {@link #MIN_INITIAL_WINDOW}, or a nonzero max
+     *     below initial
+     */
+    public static void checkReceiveWindow(long initial, long max) {
+        if (initial < 0 || max < 0) throw new IllegalArgumentException("negative receive window");
+        if (initial < MIN_INITIAL_WINDOW) throw new IllegalArgumentException("receive window initial " + initial + " below " + MIN_INITIAL_WINDOW);
+        if (max != 0 && max < initial) throw new IllegalArgumentException("receive window max " + max + " below initial " + initial);
+    }
+
+    /**
+     * Sets a receiving part's window: initial is advertised at once when it is above the window in
+     * force, max caps auto-tuning (0: automatic, whatever the session's cap is). The arguments are valid ({@link StreamRecv#checkReceiveWindow}).
+     * Credit already advertised is never withdrawn.
      */
     public void setReceiveWindow(Stream st, long initial, long max) {
         StreamRecv.RecvPart r = st.rcv;
-        if (max > 0) r.maxWin = Math.max(max, 16 << 10);
-        if (initial > 0) {
-            long w = Math.max(initial, 16 << 10);
-            if (r.maxWin > 0) w = Math.min(w, r.maxWin);
-            if (w > r.window) {
-                r.window = w;
-                ctl.stream(st, ControlQueue.MAX_STREAM_DATA);
-            }
+        long w = initial;
+        r.maxWin = StreamRecv.windowCap(max);
+        if (w > r.window) {
+            r.window = w;
+            ctl.stream(st, ControlQueue.MAX_STREAM_DATA);
         }
     }
 

@@ -201,8 +201,8 @@ class AdmissionTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
             var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).carrierCredential(auth).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(2))
-                            .withStall(stallFor, stallFor)).build();
+                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(2))
+                            .stall(stallFor, stallFor).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 assertEquals(stallFor, l.adapter().stallDuration(new java.net.InetSocketAddress("127.0.0.1", 0)));
                 try (var c = Zmux.connect(l.localAddress(), dialer); var s = l.accept(Duration.ofSeconds(5))) {
@@ -235,10 +235,10 @@ class AdmissionTest {
             AtomicReference<Admission.Decision> verdict = new AtomicReference<>(Admission.Decision.CLOSE);
             var seen = new AtomicReference<String>();
             var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(2)
-                    .admission(Admission.of(4, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
                         seen.set(info.source().getHostString() + " " + info.tls() + " " + prefix.remaining());
                         return verdict.get();
-                    })).withPeekTimeout(Duration.ofSeconds(2)).withStall(Duration.ofSeconds(5), Duration.ofSeconds(5))).build();
+                    })).peekTimeout(Duration.ofSeconds(2)).stall(Duration.ofSeconds(5), Duration.ofSeconds(5)).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {9, 9, 9, 9}));
@@ -275,8 +275,8 @@ class AdmissionTest {
             // An explicit stall and a fallback without a target, both far longer than the test.
             for (var d : java.util.List.of(Admission.Decision.STALL, Admission.Decision.FALLBACK)) {
                 var lc = ListenerConfig.builder().session(cfg)
-                        .admission(Admission.of(4, Admission.Decider.immediate((info, prefix) -> d))
-                                .withStall(Duration.ofMinutes(5), Duration.ofMinutes(5))).build();
+                        .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> d))
+                                .stall(Duration.ofMinutes(5), Duration.ofMinutes(5)).build()).build();
                 var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc);
                 try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[4]));
@@ -327,8 +327,8 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg).fallback(echo(sources))
-                    .admission(Admission.of(4, Admission.Decider.immediate((info, prefix) -> Admission.Decision.FALLBACK))
-                            .withPeekTimeout(Duration.ofMillis(200))).build();
+                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> Admission.Decision.FALLBACK))
+                            .peekTimeout(Duration.ofMillis(200)).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 // The whole prefix at once: decided on live input.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
@@ -381,7 +381,7 @@ class AdmissionTest {
                 decided.incrementAndGet();
                 return Admission.Decision.CLOSE;
             });
-            var on = Admission.of(4, closing).withPeekTimeout(Duration.ofMillis(200)).withFallbackOnPeekTimeout(true);
+            var on = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
                 assertEquals("abcdefgh", lateBytes(l, "ab", "cdefgh"));
                 assertEquals(0, decided.get(), "the decider never saw the late prefix");
@@ -400,7 +400,7 @@ class AdmissionTest {
                 assertEquals(1, l.stats().admission().closed());
             }
             // Off: the late prefix goes to the decider as it stood, which here closes.
-            var off = Admission.of(4, closing).withPeekTimeout(Duration.ofMillis(200));
+            var off = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(off).build())) {
                 assertEquals("", lateBytes(l, "ab", "cdefgh"));
                 assertEquals(2, decided.get());
@@ -413,8 +413,9 @@ class AdmissionTest {
         var sources = new LinkedBlockingQueue<String>();
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = new Admission(4, 8, Duration.ofMillis(200), true, Duration.ZERO, Duration.ZERO,
-                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? Admission.Decision.more(8) : Admission.Decision.CLOSE));
+            var adm = Admission.builder(4,
+                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? Admission.Decision.more(8) : Admission.Decision.CLOSE))
+                    .maxPeek(8).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(adm).build())) {
                 assertEquals("abcdefgh", lateBytes(l, "abcd", "efgh"));
                 assertEquals(1, l.stats().admission().peekTimedOut());
@@ -465,8 +466,8 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.of(8, Admission.Decider.immediate((info, prefix) -> prefix.remaining() == 4 ? Admission.Decision.accept(4) : Admission.Decision.CLOSE))
-                            .withPeekTimeout(Duration.ofMillis(200))).build();
+                    .admission(Admission.builder(8, Admission.Decider.immediate((info, prefix) -> prefix.remaining() == 4 ? Admission.Decision.accept(4) : Admission.Decision.CLOSE))
+                            .peekTimeout(Duration.ofMillis(200)).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 SocketChannel ch = SocketChannel.open(l.localAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {1, 2, 3, 4}));
@@ -484,11 +485,11 @@ class AdmissionTest {
              var server = java.nio.channels.ServerSocketChannel.open().bind(new InetSocketAddress("127.0.0.1", 0))) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.of(4, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
                         byte b = prefix.get(0);
                         return b == 7 ? Admission.Decision.accept(4) : b == 8 ? Admission.Decision.FALLBACK : Admission.Decision.CLOSE;
-                    })).withPeekTimeout(Duration.ofSeconds(2))).build();
-            try (var l = ZmuxListener.of(lc)) {
+                    })).peekTimeout(Duration.ofSeconds(2)).build()).build();
+            try (var l = Zmux.listener(lc)) {
                 SocketChannel ch = SocketChannel.open(server.getLocalAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {7, 7, 7, 7}));
                 var admitted = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
@@ -613,8 +614,8 @@ class AdmissionTest {
         };
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofMillis(300))
-                    .withStall(Duration.ofMillis(50), Duration.ofMillis(100));
+            var adm = Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofMillis(300))
+                    .stall(Duration.ofMillis(50), Duration.ofMillis(100)).build();
             var base = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).admission(adm);
             byte[] rec = firstRecord(cfg);
             byte[] random = new byte[64];
@@ -670,13 +671,13 @@ class AdmissionTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
             var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).carrierCredential(auth).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()))
-                    .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
                         seen.add(info.serverName() + " " + info.tls() + " " + info.head() + " " + info.header(PrefixAuth.HEADER_FIELD));
                         return verifier.decide(info, prefix);
-                    })).withPeekTimeout(Duration.ofSeconds(5))).build();
+                    })).peekTimeout(Duration.ofSeconds(5)).build()).build();
             var tls = TlsOptions.client(TestTls.client(), "localhost");
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc);
-                 var endpoint = ZmuxListener.of(ListenerConfig.builder().session(dialer).build())) {
+                 var endpoint = Zmux.listener(ListenerConfig.builder().session(dialer).build())) {
                 try (var c = Zmux.connectTls(l.localAddress(), tls, dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "accepted with the credential");
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
@@ -709,13 +710,13 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
                         seen.add(info.source().getHostString() + " " + info.serverName() + " " + info.head() + " " + prefix.remaining()
                                 + " " + info.header("x-app"));
                         return verifier.decide(info, prefix);
-                    })).withPeekTimeout(Duration.ofSeconds(30))).build();
+                    })).peekTimeout(Duration.ofSeconds(30)).build()).build();
             var client = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
-            try (var l = ZmuxListener.of(lc)) {
+            try (var l = Zmux.listener(lc)) {
                 var header = auth.header(client);
                 var request = RequestHead.of(java.util.Map.of(header.name(), java.util.List.of(header.value()),
                         "X-App", java.util.List.of("1")), true);
@@ -781,9 +782,9 @@ class AdmissionTest {
                 var cfg = ZmuxConfig.builder().eventLoops(loops)
                         .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
                 var lc = ListenerConfig.builder().session(cfg)
-                        .admission(Admission.of(PrefixAuth.TOKEN_LENGTH, auth.verifier()).withPeekTimeout(Duration.ofSeconds(5))).build();
+                        .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(5)).build()).build();
                 var plain = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
-                try (var l = ZmuxListener.of(lc)) {
+                try (var l = Zmux.listener(lc)) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                     l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
                     try (var c = Zmux.open(prefixed(boot[0], auth.prefix(plain)), Role.CLIENT, cfg);
@@ -831,8 +832,8 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(1).firstRecordTimeout(Duration.ofSeconds(10))
-                    .admission(Admission.of(2, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(1))).withPeekTimeout(Duration.ofSeconds(5))).build();
-            try (var l = ZmuxListener.of(lc)) {
+                    .admission(Admission.builder(2, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(1))).peekTimeout(Duration.ofSeconds(5)).build()).build();
+            try (var l = Zmux.listener(lc)) {
                 byte[] prefix = {0, 0x40}; // the leftover byte starts a record
                 var one = silentCarrier(l, "192.0.2.1", prefix);
                 var two = silentCarrier(l, "192.0.2.2", prefix);

@@ -52,16 +52,16 @@ class HandshakePlanTest {
                 int[] calls = new int[1];
                 var seal = Seal.server(ServerConfig.builder(SealTest.gate(null), SealTest.NODE).allowRecordMode((c, m, peer) -> c.isSecure()).build());
                 InboundTransform once = (carrier, ctx) -> { calls[0]++; return seal.transform(carrier, ctx); };
-                try (ZmuxListener l = ZmuxListener.of(ListenerConfig.builder().session(cfg).inboundTransform(once).build())) {
+                try (ZmuxListener l = Zmux.listener(ListenerConfig.builder().session(cfg).inboundTransform(once).build())) {
                     var up = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var down = MemoryPipe.pair(Framing.BYTE_STREAM);
                     PipeIo.Exporter eu = (x, y, n) -> new byte[n], ed = (x, y, n) -> { byte[] b = new byte[n]; b[0] = 1; return b; };
                     String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
                     var src = new InetSocketAddress("127.0.0.1", 9);
-                    l.adapter().handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true), JoinHint.pair(token, true, src));
-                    l.adapter().handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true), JoinHint.pair(token, false, src));
-                    PipeIo client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(eu).withSecure(true),
-                            new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(ed).withSecure(true));
+                    l.adapter().handle(new PipeIo(up[1].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(eu).withCarrierSecure(), JoinHint.pair(token, true, src));
+                    l.adapter().handle(new PipeIo(null, down[1].writer(), Framing.BYTE_STREAM, null, null).withExporter(ed).withCarrierSecure(), JoinHint.pair(token, false, src));
+                    PipeIo client = PipeIo.split(new PipeIo(null, up[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(eu).withCarrierSecure(),
+                            new PipeIo(down[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(ed).withCarrierSecure());
                     PipeIo p = Seal.establish(client, SealTest.client().mode(mode).build()).toCompletableFuture().get(10, TimeUnit.SECONDS);
                     try (var c = Zmux.open(p, Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                         assertEquals(1, calls[0]);
@@ -79,8 +79,8 @@ class HandshakePlanTest {
         PipeIo.Exporter e = (x, y, n) -> new byte[n];
         PipeIo up = new PipeIo(null, a[0].writer(), Framing.BYTE_STREAM, null, null).withExporter(e);
         PipeIo down = new PipeIo(b[0].reader(), null, Framing.BYTE_STREAM, null, null).withExporter(e);
-        assertFalse(PipeIo.split(up.withSecure(true), down).isSecure());
-        assertFalse(PipeIo.split(up, down.withSecure(true)).isSecure());
-        assertTrue(PipeIo.split(up.withSecure(true), down.withSecure(true)).isSecure());
+        assertFalse(PipeIo.split(up.withCarrierSecure(), down).isCarrierSecure());
+        assertFalse(PipeIo.split(up, down.withCarrierSecure()).isCarrierSecure());
+        assertTrue(PipeIo.split(up.withCarrierSecure(), down.withCarrierSecure()).isCarrierSecure());
     }
 }

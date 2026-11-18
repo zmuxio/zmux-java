@@ -100,7 +100,7 @@ public final class Liveness {
         public Builder keepAlivePeriod(Duration d) { keepAlivePeriod = atLeast(d, Duration.ofSeconds(1), "keepAlivePeriod"); return this; }
 
         /** Keep-alive off, which makes the idle timeout a limit on application inactivity. */
-        public Builder noKeepAlive() { keepAlivePeriod = null; return this; }
+        public Builder noKeepAlivePeriod() { keepAlivePeriod = null; return this; }
 
         /** The floor of failure suspicion, default 250 ms, at least 50 ms. */
         public Builder suspectFloor(Duration d) { suspectFloor = atLeast(d, Duration.ofMillis(50), "suspectFloor"); return this; }

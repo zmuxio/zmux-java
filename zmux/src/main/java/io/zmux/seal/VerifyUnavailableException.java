@@ -8,11 +8,11 @@ import java.io.Serial;
  * relies on failed): the carrier closes as for a rejection, but a server does not count it as
  * a refused carrier.
  */
-public final class VerifierUnavailableException extends ZmuxException {
+public final class VerifyUnavailableException extends ZmuxException {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    public VerifierUnavailableException(String message, Throwable cause) {
+    public VerifyUnavailableException(String message, Throwable cause) {
         super(message, cause);
     }
 }

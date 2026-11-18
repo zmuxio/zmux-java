@@ -27,7 +27,7 @@ public final class PipeOptions {
 
     private PipeOptions(Builder b) {
         direction = b.direction;
-        settings = b.settings.build();
+        settings = b.settings.build().asHeld();
         fateGroup = b.fateGroup;
         recordMode = b.recordMode;
         keyGroup = b.keyGroup;
@@ -42,10 +42,71 @@ public final class PipeOptions {
         return new Builder();
     }
 
+    // ---- the options as a pipe holds them (ZmuxPipe#options): each setting set, or unset: the default, or the session's ----
+
+    /** The directions of the pipe from this endpoint. */
+    public Direction direction() { return direction; }
+
+    /** The tier of the local outbound direction when set; empty: it follows the peer's request, else 0. */
+    public java.util.OptionalLong sendPriority() { return settings.sendPriority == PipeUpdate.Change.SET ? java.util.OptionalLong.of(settings.sendPriorityValue) : java.util.OptionalLong.empty(); }
+
+    /** The tier requested for the peer's outbound direction when set; empty: 0. */
+    public java.util.OptionalLong receivePriority() { return settings.receivePriority == PipeUpdate.Change.SET ? java.util.OptionalLong.of(settings.receivePriorityValue) : java.util.OptionalLong.empty(); }
+
+    /** Whether the local outbound direction is standby when set; empty: it follows the peer's request, else available. */
+    public java.util.Optional<Boolean> sendStandby() { return settings.sendStandby == PipeUpdate.Change.SET ? java.util.Optional.of(settings.sendStandbyValue) : java.util.Optional.empty(); }
+
+    /** Whether the peer's outbound direction is requested standby when set; empty: available. */
+    public java.util.Optional<Boolean> receiveStandby() { return settings.receiveStandby == PipeUpdate.Change.SET ? java.util.Optional.of(settings.receiveStandbyValue) : java.util.Optional.empty(); }
+
+    /** The weight when set; empty: 1. */
+    public java.util.OptionalLong weight() { return settings.weight == PipeUpdate.Change.SET ? java.util.OptionalLong.of(settings.weightValue) : java.util.OptionalLong.empty(); }
+
+    /** The probation base when set to a duration; empty when it follows the session's or is off ({@link #probationOff()}). */
+    public java.util.Optional<Duration> probation() { return settings.probation == PipeUpdate.Change.SET ? java.util.Optional.ofNullable(settings.probationValue) : java.util.Optional.empty(); }
+
+    /** Whether probation is set off for this pipe. */
+    public boolean probationOff() { return settings.probation == PipeUpdate.Change.SET && settings.probationValue == null; }
+
     /** The pipe's liveness settings: its own, or (unwritten) every one following the session's. */
-    PipeLiveness liveness() {
+    public PipeLiveness liveness() {
         return settings.liveness == PipeUpdate.Change.SET ? settings.livenessValue : PipeLiveness.inherit();
     }
+
+    /** The pipe's own quality band when set to one; empty when it follows the session's or is off ({@link #qualityBandOff()}). */
+    public java.util.Optional<QualityBand> qualityBand() { return settings.qualityBand == PipeUpdate.Change.SET ? java.util.Optional.ofNullable(settings.qualityBandValue) : java.util.Optional.empty(); }
+
+    /** Whether quality reports are set off for this pipe, whatever the session's band is. */
+    public boolean qualityBandOff() { return settings.qualityBand == PipeUpdate.Change.SET && settings.qualityBandValue == null; }
+
+    /** The group of pipes that share a path; 0: an independent path. */
+    public long fateGroup() { return fateGroup; }
+
+    /**
+     * The record mode: as given to {@code addPipe}, empty when the configuration's record policy decides; a pipe
+     * reads the mode actually in use, {@link RecordMode#UNMANAGED} for a first pipe without the secure carrier.
+     */
+    public java.util.Optional<RecordMode> recordMode() { return java.util.Optional.ofNullable(recordMode); }
+
+    /** The key group: as given, empty for the default (Group 1 when usable, otherwise Group 2); a pipe reads the one its join used. */
+    public java.util.OptionalLong keyGroup() { return keyGroup == 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(keyGroup); }
+
+    /** Whether adding the pipe returned at the verified Reply. */
+    public boolean returnOnReply() { return returnOnReply; }
+
+    /** These options once update was applied to a pipe holding them: what it sets is set, what it clears is unset. */
+    PipeOptions applied(PipeUpdate update) {
+        Builder b = toBuilder();
+        b.settings = settings.applied(update).toBuilder();
+        return b.buildHeld();
+    }
+
+    @Override public boolean equals(Object o) {
+        return o instanceof PipeOptions p && direction == p.direction && fateGroup == p.fateGroup && recordMode == p.recordMode
+                && keyGroup == p.keyGroup && returnOnReply == p.returnOnReply && settings.equals(p.settings);
+    }
+
+    @Override public int hashCode() { return Objects.hash(direction, fateGroup, recordMode, keyGroup, returnOnReply, settings); }
 
     /** These options with the liveness settings of a pool decision over their own. */
     PipeOptions withLiveness(PipeLiveness over) {
@@ -54,6 +115,23 @@ public final class PipeOptions {
         Builder b = toBuilder();
         b.liveness(l);
         return b.build();
+    }
+
+    /**
+     * These options with the values the pipe was fixed as (direction, record mode, key group, fate group) in place of
+     * those given: what a pipe holds is the actual value, also where the options left it to a policy or a default.
+     */
+    PipeOptions fixed(io.zmux.internal.core.Session.PipeFixed f) {
+        Builder b = toBuilder();
+        b.direction = switch (f.direction()) {
+            case 0 -> Direction.SEND_ONLY;
+            case 1 -> Direction.RECEIVE_ONLY;
+            default -> Direction.BIDIRECTIONAL;
+        };
+        b.recordMode = io.zmux.internal.join.Mode.record(f.mode());
+        b.keyGroup = f.keyGroup();
+        b.fateGroup = f.fateGroup();
+        return b.buildHeld();
     }
 
     /** A builder holding these options. */
@@ -89,7 +167,7 @@ public final class PipeOptions {
                 .deadTimeout(l.deadTimeoutNanos())
                 .probeInterval(l.probeIntervalNanos())
                 .probeJitter(l.probeJitterRaw())
-                .mode(recordMode == null ? null : io.zmux.internal.join.Mode.of(recordMode))
+                .mode(recordMode == null || recordMode == RecordMode.UNMANAGED ? null : io.zmux.internal.join.Mode.of(recordMode))
                 .group(keyGroup)
                 .build();
     }
@@ -158,6 +236,9 @@ public final class PipeOptions {
         /** {@link PipeUpdate.Builder#clearQualityBand}: the session's. */
         public Builder clearQualityBand() { settings.clearQualityBand(); return this; }
 
+        /** {@link PipeUpdate.Builder#noQualityBand}: no quality reports for this pipe. */
+        public Builder noQualityBand() { settings.noQualityBand(); return this; }
+
         /** Groups pipes that share a path; 0: an independent path. */
         public Builder fateGroup(long g) {
             if (g < 0 || g > io.zmux.internal.wire.VarInt.MAX) throw new IllegalArgumentException("fate group exceeds varint62");
@@ -185,7 +266,7 @@ public final class PipeOptions {
 
         /**
          * Whether adding the pipe returns once the Reply verified instead of once the peer attached
-         * it ({@link ZmuxPipe#awaitPeerAttached}); default false. Fixed when the pipe is added.
+         * it ({@link ZmuxPipe#awaitAttached}); default false. Fixed when the pipe is added.
          * Before the peer attached it, closing the session's last other pipes loses the session
          * unless it resumes: an application that replaces pipes itself waits for the attachment
          * first. Pools and their redials always join this way and judge the attachment themselves.
@@ -203,5 +284,8 @@ public final class PipeOptions {
                 throw new IllegalArgumentException("a receive-only pipe has no outbound quality to band");
             return o;
         }
+
+        /** The options of a pipe the core already accepted, with no check of their combination. */
+        private PipeOptions buildHeld() { return new PipeOptions(this); }
     }
 }

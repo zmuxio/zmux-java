@@ -6,6 +6,6 @@ package io.zmux;
  */
 public final class PipeRefusedException extends PipeException {
     public PipeRefusedException() {
-        super("pipe refused", null);
+        super("pipe refused");
     }
 }

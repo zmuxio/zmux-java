@@ -157,7 +157,7 @@ class EpochTest {
     /** Replacing the pipes waits for the new epoch, then replaces every pipe through the redial hook. */
     @Test void replacePipesWaitsForTheEpochAndRedials() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
+            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
             var dials = new java.util.concurrent.atomic.AtomicInteger();
             var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
                 dials.incrementAndGet();
@@ -184,7 +184,7 @@ class EpochTest {
     /** replacePipes' timeout bounds the joins of the replacements, not only the dials. */
     @Test void replacePipesTimeoutBoundsTheJoin() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
+            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
             var client = builder(loops).epochAfterFirstPipe(false).joinTimeout(Duration.ofSeconds(20)).redial((need, cancellation) -> {
                 return MemoryPipe.pair(Framing.BYTE_STREAM)[0]; // nobody answers its Hello
             }).build();
@@ -210,7 +210,7 @@ class EpochTest {
     /** Cancelling replacePipes signals the redial hook's cancellation, so a dial in progress can stop. */
     @Test void cancellingReplacePipesSignalsTheRedialHook() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var listener = ZmuxListener.of(ListenerConfig.of(config(loops)));
+            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
             var dialing = new java.util.concurrent.CountDownLatch(1);
             var signalled = new java.util.concurrent.CountDownLatch(1);
             var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {

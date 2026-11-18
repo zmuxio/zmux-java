@@ -135,7 +135,7 @@ class SlowPathTest {
             if (window > 0) cb.initialStreamReceiveWindow(window).maxStreamReceiveWindow(window)
                     .initialConnectionReceiveWindow(window).maxConnectionReceiveWindow(window);
             ZmuxConfig cfg = cb.build();
-            try (var listener = ZmuxListener.of(ListenerConfig.of(cfg))) {
+            try (var listener = Zmux.listener(ListenerConfig.of(cfg))) {
                 PipeIo[] slow = linked(Duration.ofMillis(300), 3e4, 16 << 20);
                 listener.adapter().handle(slow[1], JoinHint.inBand(TestAddr.peer("slow")));
                 try (var client = Zmux.open(slow[0], Role.CLIENT, cfg); var server = listener.accept(Duration.ofSeconds(10))) {
@@ -164,7 +164,7 @@ class SlowPathTest {
                     Thread.sleep(6_000);
                     long echoed = got.get();
                     SessionStats stats = client.stats();
-                    long slowSent = client.pipeStats().stream().filter(p -> p.pipeId().value() == 0).findFirst().orElseThrow().bytesSent();
+                    long slowSent = client.pipeStats().stream().filter(p -> p.pipe().value() == 0).findFirst().orElseThrow().bytesSent();
                     writer.interrupt();
                     st.reset(0);
                     client.close();

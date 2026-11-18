@@ -22,10 +22,10 @@ class AdmissionHttpTest {
 
     static Fixture fixture(LinkedBlockingQueue<HostHandler.Seen> seen, LinkedBlockingQueue<String> sources) throws Exception {
         var verifier = AUTH.verifier();
-        return new Fixture(b -> b, l -> l.admission(Admission.of(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
+        return new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
             sources.add(info.source().getAddress().getHostAddress());
             return verifier.decide(info, prefix);
-        }))), e -> e.streaming().trusted(TrustedProxies.of(List.of("127.0.0.1")).withHeader("X-Forwarded-For")), false,
+        })).build()), e -> e.streaming().trusted(TrustedProxies.of(List.of("127.0.0.1")).withHeader("X-Forwarded-For")), false,
                 () -> new HostHandler(seen));
     }
 

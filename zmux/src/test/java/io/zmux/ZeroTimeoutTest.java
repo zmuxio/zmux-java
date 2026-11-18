@@ -17,7 +17,7 @@ class ZeroTimeoutTest {
 
     @Test void zeroAndNegativeWaitsTakeWhatIsReady() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).datagrams(true).build();
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
             try (ZmuxListener l = Zmux.listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0),
                     ListenerConfig.builder().session(cfg).build());
                  ZmuxSession c = Zmux.connect(l.localAddress(), cfg); ZmuxSession s = l.accept(Duration.ofSeconds(5))) {

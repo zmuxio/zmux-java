@@ -164,6 +164,18 @@ public final class Session {
     public StreamSend sending() { return send; }
     /** The receiving parts of the session's streams. */
     public StreamRecv receiving() { return recv; }
+
+    /** Gives the sending part the send buffer held last (see {@link StreamTable#holdSendBuffer}); on the loop. */
+    public void applyHeldSendBuffer(Stream st) {
+        long held = streams.heldSendBufferSet(st);
+        if (held >= 0) send.setSendBuffer(st, held);
+    }
+
+    /** Gives the receiving part the receive window held last (see {@link StreamTable#holdReceiveWindow}); on the loop. */
+    public void applyHeldReceiveWindow(Stream st) {
+        var held = streams.heldWindowSet(st);
+        if (held != null) recv.setReceiveWindow(st, held.initial(), held.max());
+    }
     /** The session's pipes. */
     public PipeTable pipes() { return pipes; }
     public Outbox outbox() { return outbox; }
@@ -374,6 +386,22 @@ public final class Session {
         return cfg.secureFirstPipe() ? cfg.firstPipeMode() : null;
     }
 
+    /**
+     * What a pipe was fixed as when it was added: its direction as the local endpoint has it (0 send only, 1 receive
+     * only, 2 both), its record mode (null for an Unmanaged pipe 0), the Group of its key exchange (0 when none ran)
+     * and its fate group.
+     */
+    public record PipeFixed(int direction, io.zmux.internal.join.Mode mode, long keyGroup, long fateGroup) {}
+
+    /** The pipe's {@link PipeFixed}, or null when it is not there; on the loop. */
+    public PipeFixed pipeFixed(long id) {
+        Pipe p = pipes.get(id);
+        if (p == null) return null;
+        Attach a = p.mp();
+        int dir = p.in() != null && p.out() != null ? 2 : p.out() != null ? 0 : 1;
+        return new PipeFixed(dir, pipeMode(id), a == null ? 0 : a.usedGroup(), a == null ? 0 : a.fate);
+    }
+
     public long joinFailures() { return stats.joinFailures(); }
 
     /** Whether an attachment whose join finished is still there, neither of its directions failed or ended. */
@@ -433,10 +461,16 @@ public final class Session {
         return path instanceof PathSession mp ? mp.joins.openHello(h, f, binding) : new Joins.Opened(Joins.JoinResult.CLOSE, null);
     }
 
-    /** The rest of step 7. */
-    public Joins.Claimed claimHello(Joins.PeerJoin pj, Joins.JoinCarrier c, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long received) {
+    /** The rest of step 7; unconfirmedCap is the session's bound on Unconfirmed carriers (MULTIPATH.md 5.6), at least 1. */
+    public Joins.Claimed claimHello(Joins.PeerJoin pj, Joins.JoinCarrier c, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long received,
+                                    int unconfirmedCap) {
         if (isClosing() || !(path instanceof PathSession mp)) return new Joins.Claimed(Joins.JoinResult.CLOSE, null);
-        return mp.joins.claimHello(pj, c, plan, overhead, received);
+        return mp.joins.claimHello(pj, c, plan, overhead, received, unconfirmedCap);
+    }
+
+    /** An Unconfirmed join of {@link #claimHello} ended without its confirmation. */
+    public void unconfirmedEnded(Joins.PeerJoin pj) {
+        if (path instanceof PathSession mp) mp.joins.unconfirmedEnded(pj);
     }
 
     /** Step 8. */
@@ -1218,7 +1252,9 @@ public final class Session {
         if (path.peerAttached(p)) return Boolean.TRUE;
         // A pipe that failed, closed or is draining is gone for the wait: its retirement may
         // wait for a peer that never learns of it.
-        if (p.mp() != null && p.mp().ended(p.out() != null)) throw CoreException.of(CoreException.Reason.INVALID);
+        if (p.mp() != null && p.mp().ended(p.out() != null)) {
+            throw p.mp().health.aborted() ? CoreException.pipeAborted(id) : CoreException.of(CoreException.Reason.INVALID);
+        }
         if (err != null) throw CoreException.session(err);
         path.waitPeerAttached(sig);
         return null;
@@ -1966,6 +2002,12 @@ public final class Session {
      */
     public boolean setQualityBand(long pipe, long rtt, double rateRatio, long minInterval) throws CoreException {
         return band(pipe, new QualityMonitor.Band(rtt, rateRatio, minInterval)); // minInterval 0: no floor
+    }
+
+    /** Turns pipe's quality reports off whatever the session's band is; false when it has no outbound direction. */
+    public boolean offQualityBand(long pipe) throws CoreException {
+        if (pipe < 0) throw new IllegalArgumentException("off is a pipe's setting");
+        return band(pipe, QualityMonitor.Band.OFF);
     }
 
     /** Makes pipe follow the session's quality band again; false when it has no outbound direction. */

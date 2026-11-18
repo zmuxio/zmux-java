@@ -99,11 +99,8 @@ class ExternalTransportTest {
                 @Override public void started(SessionRuntime driver, String protocol, io.zmux.CarrierCredential credential) { fail("incomplete first record started a session"); }
             }, null, new byte[0], 8, 0, 0, 0, 0, 0);
             try {
-                if (knownLane) {
-                    var driver = new SessionRuntime(loop, new io.zmux.internal.core.Session(
-                            io.zmux.internal.core.CoreConfig.defaults(), Clock.now()), DriverHooks.NONE);
-                    ListenerHub.laneInput(driver, PipeIo.of(reader, null));
-                } else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null); }
+                if (knownLane) ListenerHub.laneInput(loop, PipeIo.of(reader, null));
+                else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null); }
                 run(loop, () -> {});
                 sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
@@ -114,6 +111,24 @@ class ExternalTransportTest {
                 awaitCount(closed, 2);
             } finally { hub.close(); loop.close(); }
         }
+    }
+
+    /** The process-wide lane entry gives a lane carrier the default first-record timeout (2 s) for its header, not the join timeout. */
+    @Test void aLaneCarrierWithoutAHeaderIsClosedAtTheFirstRecordTimeout() throws Exception {
+        EventLoop loop = new EventLoop("lane-header", true, BufferPool.DEFAULT_IDLE_BYTES);
+        AtomicInteger closed = new AtomicInteger();
+        PipeReader reader = new PipeReader() {
+            @Override public void start(Sink input) {}
+            @Override public void close() { closed.incrementAndGet(); }
+        };
+        try {
+            long start = System.nanoTime();
+            ListenerHub.laneInput(loop, PipeIo.of(reader, null));
+            awaitCount(closed, 1);
+            long took = System.nanoTime() - start;
+            assertTrue(took >= io.zmux.ListenerConfig.DEFAULT_FIRST_RECORD_TIMEOUT.toNanos() * 9 / 10, "not before the timeout: " + took);
+            assertTrue(took < io.zmux.ZmuxConfig.DEFAULT_JOIN_TIMEOUT.toNanos() / 2, "well before the join timeout: " + took);
+        } finally { loop.close(); }
     }
 
     private static void awaitCount(java.util.concurrent.atomic.AtomicInteger n, int want) throws Exception {

@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /** The secure carrier's record modes over real TCP: both directions of an added pipe, rejections, eviction and the stall. */
+@org.junit.jupiter.api.Timeout(60)
 class SecureCarrierTcpTest {
     private static final byte[] PSK = new byte[32];
     private static final Duration WAIT = Duration.ofSeconds(5);
@@ -53,8 +54,8 @@ class SecureCarrierTcpTest {
     private static void addedPipeCarries(ZmuxSession c, ZmuxSession s, ZmuxPipe added, RecordMode mode) throws Exception {
         assertTrue(added.id().value() > 0);
         ListenerEntryTest.await(() -> s.pipes().size() == 2);
-        assertEquals(mode, c.pipeStats().stream().filter(p -> p.pipeId().equals(added.id())).findFirst().orElseThrow().recordMode());
-        assertEquals(mode, s.pipeStats().stream().filter(p -> p.pipeId().equals(added.id())).findFirst().orElseThrow().recordMode());
+        assertEquals(mode, c.pipeStats().stream().filter(p -> p.pipe().equals(added.id())).findFirst().orElseThrow().recordMode());
+        assertEquals(mode, s.pipeStats().stream().filter(p -> p.pipe().equals(added.id())).findFirst().orElseThrow().recordMode());
         c.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
         ListenerEntryTest.await(() -> c.pipes().stream().noneMatch(p -> p.id().value() == 0));
         bidi(c, s, 1 << 18);

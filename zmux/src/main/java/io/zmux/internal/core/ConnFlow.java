@@ -74,7 +74,12 @@ final class ConnFlow {
         return true;
     }
 
-    /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count. */
+    /**
+     * Accounts n bytes stored in a stream buffer; the only function that raises the buffered count. Below the
+     * buffer cap and without memory pressure the session credit of a byte is released as it is buffered (a
+     * MUST of SPEC.md 8.3 rule 4, so that one unread stream cannot hold back the others); a byte at or above the
+     * cap, or under pressure, holds its credit until it is consumed ({@link #unbuffer}), never longer.
+     */
     void buffer(long n, long cap, boolean pressure) {
         if (n == 0) return;
         if (buffered < cap && !pressure) {

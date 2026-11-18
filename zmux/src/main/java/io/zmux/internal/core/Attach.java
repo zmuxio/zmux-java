@@ -81,6 +81,13 @@ final class Attach {
 
     void group(long g) { group = g; }
 
+    /** The Group the join's key exchange used (the one asked for, or the default's pick); 0 before one ran, and for pipe 0. */
+    private long usedGroup;
+
+    long usedGroup() { return usedGroup; }
+
+    void usedGroup(long g) { usedGroup = g; }
+
     void startHandshake(io.zmux.internal.join.Mode m, byte[] b) { mode = m; binding = b; handshaking = true; }
     void endHandshake() { handshaking = false; joiner = null; binding = null; verified = null; }
 

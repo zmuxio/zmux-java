@@ -20,11 +20,57 @@ public final class ZmuxPipe {
     private final ZmuxSession session;
     private final long id;
     private final PipeId pipeId;
+    /** This handle aborted the pipe: its waits then report the abort even after the pipe's retirement. */
+    private volatile boolean aborted;
 
     ZmuxPipe(ZmuxSession session, long id) {
         this.session = session;
         this.id = id;
         this.pipeId = PipeId.of(id);
+        this.held = session.heldOptions.get(id); // a pipe held before this handle was made keeps its options after its end
+    }
+
+    /** What the pipe was added with, until the session holds anything for it. */
+    private volatile PipeOptions given;
+    /** The holder of the pipe's options, once this handle met it; it outlives the pipe's entry in the session, so {@link #options()} reads the last held after the end. */
+    private volatile ZmuxSession.HeldOptions held;
+
+    /** Records the options the pipe was added with, if the pipe is still there; before its first update. */
+    void hold(PipeOptions o) throws IOException {
+        given = o;
+        session.run(op -> {
+            io.zmux.internal.core.Session.PipeFixed f = session.core.pipeFixed(id);
+            ZmuxSession.HeldOptions h = f == null ? null : session.heldOf(id);
+            if (h != null) {
+                held = h;
+                h.set(o.fixed(f));
+            }
+            return true;
+        });
+    }
+
+    /**
+     * The pipe's options as it holds them: those it was added with, every {@link #update} applied; a setting cleared
+     * or never set reads as unset, following the peer or the session. What was fixed when the pipe was added reads as
+     * its actual value: the direction (from this endpoint's view), the record mode (also where the record policy chose
+     * it) and key group the join used, and the fate group. A pipe the peer joined reads those and the defaults for
+     * every other field, with the updates since; {@code returnOnReply} is read as it was given to {@code addPipe}. Local state: it never fails or waits, and answers after the pipe's end with the last held.
+     */
+    public PipeOptions options() {
+        ZmuxSession.HeldOptions h = held;
+        if (h == null) {
+            h = session.heldOptions.get(id);
+            if (h != null) held = h;
+        }
+        PipeOptions o = h == null ? null : h.value();
+        if (o == null) o = given;
+        return o != null ? o : initial();
+    }
+
+    /** The options of a pipe nothing was held for (the peer added it): the defaults with what its join fixed. */
+    private PipeOptions initial() {
+        var f = session.driver.pipeFixed().get(id);
+        return f != null ? PipeOptions.defaults().fixed(f) : PipeOptions.defaults();
     }
 
     /** The pipe ID. */
@@ -84,6 +130,28 @@ public final class ZmuxPipe {
         }));
     }
 
+    /** The tier settings a {@link PipeUpdate} changes, every field other than the quality band and liveness. */
+    private static Tiers.PipeSettings settingsOf(PipeUpdate u) {
+        Tiers.PipeSettings.Builder b = Tiers.PipeSettings.builder();
+        change(u.sendPriority, () -> b.sendPriority(u.sendPriorityValue), () -> b.clearSendPriority(true));
+        change(u.sendStandby, () -> b.sendStandby(u.sendStandbyValue), () -> b.clearSendStandby(true));
+        change(u.receivePriority, () -> b.recvPriority(u.receivePriorityValue), () -> b.recvPriority(0L));
+        change(u.receiveStandby, () -> b.recvStandby(u.receiveStandbyValue), () -> b.recvStandby(false));
+        change(u.weight, () -> b.weight(u.weightValue), () -> b.weight(1L));
+        change(u.probation, () -> b.probation(u.probationValue == null ? 0L : ZmuxConfig.nanos(u.probationValue)),
+                () -> b.probation(-1L));
+        return b.build();
+    }
+
+    /** Runs set or clear as c says; KEEP runs neither. */
+    private static void change(PipeUpdate.Change c, Runnable set, Runnable clear) {
+        switch (c) {
+            case SET -> set.run();
+            case CLEAR -> clear.run();
+            case KEEP -> { }
+        }
+    }
+
     /**
      * Changes the pipe's runtime settings together ({@link PipeUpdate}): one call applies all its
      * settings at once, and one that changes both receive settings sends one PIPE_STATUS. A pipe
@@ -92,38 +160,7 @@ public final class ZmuxPipe {
      */
     public void update(PipeUpdate u) throws IOException {
         java.util.Objects.requireNonNull(u, "u");
-        Tiers.PipeSettings.Builder b = Tiers.PipeSettings.builder();
-        switch (u.sendPriority) {
-            case SET -> b.sendPriority(u.sendPriorityValue);
-            case CLEAR -> b.clearSendPriority(true);
-            case KEEP -> { }
-        }
-        switch (u.sendStandby) {
-            case SET -> b.sendStandby(u.sendStandbyValue);
-            case CLEAR -> b.clearSendStandby(true);
-            case KEEP -> { }
-        }
-        switch (u.receivePriority) {
-            case SET -> b.recvPriority(u.receivePriorityValue);
-            case CLEAR -> b.recvPriority(0L);
-            case KEEP -> { }
-        }
-        switch (u.receiveStandby) {
-            case SET -> b.recvStandby(u.receiveStandbyValue);
-            case CLEAR -> b.recvStandby(false);
-            case KEEP -> { }
-        }
-        switch (u.weight) {
-            case SET -> b.weight(u.weightValue);
-            case CLEAR -> b.weight(1L);
-            case KEEP -> { }
-        }
-        switch (u.probation) {
-            case SET -> b.probation(u.probationValue == null ? 0L : ZmuxConfig.nanos(u.probationValue));
-            case CLEAR -> b.probation(-1L);
-            case KEEP -> { }
-        }
-        Tiers.PipeSettings settings = u.onlyBand() ? null : b.build();
+        Tiers.PipeSettings settings = u.onlyBand() ? null : settingsOf(u);
         PipeLiveness l = switch (u.liveness) {
             case SET -> u.livenessValue;
             case CLEAR -> PipeLiveness.inherit();
@@ -135,12 +172,18 @@ public final class ZmuxPipe {
         boolean[] noOut = new boolean[1];
         gone(() -> {
             // The band first: the only setting refused for the pipe's kind (no outbound direction), before anything changed.
-            if (band == PipeUpdate.Change.SET) noOut[0] = !core.setQualityBand(id, ZmuxConfig.nanos(bandValue.rtt()), bandValue.rateRatio(),
-                    ZmuxConfig.nanos(bandValue.minInterval()));
+            if (band == PipeUpdate.Change.SET) noOut[0] = bandValue == null ? !core.offQualityBand(id)
+                    : !core.setQualityBand(id, bandValue.rttNanos(), bandValue.rawRateRatio(), bandValue.minIntervalNanos());
             else if (band == PipeUpdate.Change.CLEAR) noOut[0] = !core.clearQualityBand(id);
             if (noOut[0]) return;
             if (settings != null) core.setPipe(id, settings);
             if (l != null) core.setPipeLiveness(id, l.suspectFloorNanos(), l.deadTimeoutNanos(), l.probeIntervalNanos(), l.probeJitterRaw());
+            var f = core.pipeFixed(id);
+            ZmuxSession.HeldOptions h = f == null ? null : session.heldOf(id);
+            if (h != null) { // a pipe that is gone gets no entry again
+                held = h;
+                h.apply(u, f);
+            }
         });
         if (noOut[0]) throw new IllegalStateException("pipe " + id + " has no outbound direction for a quality band");
     }
@@ -172,26 +215,31 @@ public final class ZmuxPipe {
      * may leave the peer without a live pipe. {@link PipeGoneException} once the pipe is
      * retired, {@link SessionClosedException} once the session ended.
      */
-    public void awaitPeerAttached() throws IOException {
-        awaitPeerAttached(Long.MAX_VALUE);
+    public void awaitAttached() throws IOException {
+        awaitAttached(Long.MAX_VALUE);
     }
 
-    /** {@link #awaitPeerAttached()} bounded by timeout: {@link java.net.SocketTimeoutException} after it. */
-    public void awaitPeerAttached(Duration timeout) throws IOException {
-        awaitPeerAttached(ZmuxSession.deadline(Objects.requireNonNull(timeout, "timeout")));
+    /** {@link #awaitAttached()} bounded by timeout: {@link java.net.SocketTimeoutException} after it. */
+    public void awaitAttached(Duration timeout) throws IOException {
+        awaitAttached(ZmuxSession.deadline(Objects.requireNonNull(timeout, "timeout")));
     }
 
-    private void awaitPeerAttached(long deadline) throws IOException {
+    private void awaitAttached(long deadline) throws IOException {
         Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, deadline);
-        if (r == MISSING) throw new PipeGoneException(pipeId);
+        if (r == MISSING) throw gone();
     }
 
-    /** Like {@link #awaitPeerAttached()} without blocking; cancelling the future withdraws the wait. */
-    public ZmuxFuture<Void> peerAttachedAsync() {
+    /** Like {@link #awaitAttached()} without blocking; cancelling the future withdraws the wait. */
+    public ZmuxFuture<Void> attached() {
         return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, Long.MAX_VALUE, r -> {
-            if (r == MISSING) throw new PipeGoneException(pipeId);
+            if (r == MISSING) throw gone();
             return null;
         });
+    }
+
+    /** What a wait reports once the pipe is gone: the abort, when this endpoint aborted it, else the pipe's absence. */
+    private PipeException gone() {
+        return aborted ? new PipeAbortedException(pipeId) : new PipeGoneException(pipeId);
     }
 
     io.zmux.internal.loop.Operation.Step attachedStep() {
@@ -202,6 +250,7 @@ public final class ZmuxPipe {
                 return held != null ? held : io.zmux.internal.loop.Operation.PENDING;
             } catch (CoreException e) {
                 if (e.reason() == CoreException.Reason.INVALID) return MISSING;
+                if (e.reason() == CoreException.Reason.PIPE_ABORTED) { aborted = true; return MISSING; }
                 throw e;
             }
         };
@@ -228,6 +277,7 @@ public final class ZmuxPipe {
      * {@link #close()} is.
      */
     public void abort() {
+        aborted = true;
         remove(false);
     }
 

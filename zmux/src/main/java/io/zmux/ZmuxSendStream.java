@@ -89,11 +89,59 @@ public sealed interface ZmuxSendStream extends AutoCloseable permits ZmuxStream 
      */
     void setPriority(Priority priority);
 
-    /** Bounds this direction's written-but-unreleased bytes (at least 16 KiB); queued like {@link #setPriority}. */
+    /**
+     * The local scheduling priority this part holds: the last {@link #setPriority}, or the one the peer requested
+     * since (the PRIORITY TLV of its preamble or a PRIORITY_UPDATE), whichever came last; a new part holds
+     * {@link Priority#LOCAL_DEFAULT}. Local state: it never waits or fails, and answers after the stream or session
+     * ended with the value held last.
+     */
+    Priority priority();
+
+    /** This direction's own scheduling policy; queued like {@link #setPriority}. */
+    void setScheduler(Scheduler s);
+
+    /** This direction follows the session's scheduling policy again. */
+    void clearScheduler();
+
+    /** This direction's own scheduling policy; empty while it follows the session's. */
+    java.util.Optional<Scheduler> scheduler();
+
+    /** Whether this direction's data is sent on two pipes when possible, over the session's redundancy. */
+    void setRedundant(boolean on);
+
+    /** This direction follows the session's redundancy again. */
+    void clearRedundant();
+
+    /** This direction's own redundancy; empty while it follows the session's. */
+    java.util.Optional<Boolean> redundant();
+
+    /**
+     * Bounds this direction's written-but-unreleased bytes (at least 16 KiB); queued like {@link #setPriority}.
+     *
+     * @throws IllegalStateException the stream has no sending part (a unidirectional stream the peer opened)
+     */
     void setSendBuffer(long bytes);
 
-    /** Limits blocking writes; null for none. */
+    /**
+     * The send buffer this direction holds in bytes: what {@link #setSendBuffer} set last (raised to 16 KiB at
+     * least, as the setter applies it), else the session configuration's value copied when the part was created
+     * (it does not follow the configuration afterwards); clamped to {@link Integer#MAX_VALUE}. Local state: it
+     * never waits or fails, and answers after the stream or session ended with the value held last.
+     */
+    int sendBuffer();
+
+    /**
+     * Bounds every blocking write, the {@link #outputStream()} and channel views included, as a socket's timeout
+     * does: a positive duration; {@link java.net.SocketTimeoutException} after it. The JDK fixes those views'
+     * signatures, so this runtime setting is the one exception to bounding a wait by its own argument.
+     */
     void setWriteTimeout(Duration timeout);
+
+    /** Blocking writes wait without bound again (the default). */
+    void clearWriteTimeout();
+
+    /** The write timeout; empty when writes wait without bound. */
+    java.util.Optional<Duration> writeTimeout();
 
     /** An OutputStream view: close() finishes the sending part. */
     OutputStream outputStream();

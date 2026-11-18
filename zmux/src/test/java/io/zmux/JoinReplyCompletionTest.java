@@ -49,8 +49,8 @@ class JoinReplyCompletionTest {
                 };
                 PipeIo server = new PipeIo(p[1].reader(), late, framing, "memory", null);
                 boolean bound = mode == RecordMode.BOUND;
-                l.adapter().handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withSecure(true) : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).withSecure(true) : p[0], PipeOptions.builder().recordMode(mode).build());
+                l.adapter().handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withCarrierSecure() : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
+                ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).withCarrierSecure() : p[0], PipeOptions.builder().recordMode(mode).build());
                 int streams = 30, size = 8000;
                 var received = readers.submit(() -> {
                     long total = 0;
@@ -77,7 +77,7 @@ class JoinReplyCompletionTest {
                 assertTrue(pipe.stats().orElseThrow().bytesSent() > 0, "the pipe carried records");
                 // Nothing the joiner wrote on it went missing, what a later retransmission would hide.
                 long sent = pipe.stats().orElseThrow().bytesSent();
-                for (var ps : s.pipeStats()) if (ps.pipeId().equals(pipe.id())) assertEquals(sent, ps.bytesReceived(), "bytes of the pipe");
+                for (var ps : s.pipeStats()) if (ps.pipe().equals(pipe.id())) assertEquals(sent, ps.bytesReceived(), "bytes of the pipe");
             }
         } finally {
             timer.shutdownNow();

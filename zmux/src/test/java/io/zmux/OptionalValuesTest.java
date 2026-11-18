@@ -10,17 +10,19 @@ import java.util.OptionalInt;
 import org.junit.jupiter.api.Test;
 
 /** Unset is the default, a set value is taken as it is (zero included), an invalid one is rejected. */
+@org.junit.jupiter.api.Timeout(60)
 class OptionalValuesTest {
     @Test void poolDecisionItemsAreUnsetOrSet() {
-        var keep = PoolPolicy.Decision.KEEP;
+        var keep = PoolDecision.KEEP;
         assertEquals(OptionalInt.empty(), keep.count());
-        assertNull(keep.dialAfter());
+        assertEquals(java.util.Optional.empty(), keep.dialAfter());
+        assertEquals(java.util.Optional.empty(), keep.recheck());
         assertTrue(keep.liveness().isInherit());
         var l = PipeLiveness.builder();
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ZERO), "0 is not off");
         assertTrue(PipeLiveness.builder().noProbeInterval().build().isNoProbeInterval());
         assertFalse(PipeLiveness.builder().noProbeInterval().probeInterval(Duration.ofSeconds(1)).build().isNoProbeInterval());
-        assertEquals(Duration.ZERO, keep.withDialAfter(Duration.ZERO).dialAfter(), "0: dial at once");
+        assertEquals(java.util.Optional.of(Duration.ZERO), keep.withDialAfter(Duration.ZERO).dialAfter(), "0: dial at once");
         assertEquals(OptionalDouble.of(0), PipeLiveness.builder().probeJitter(0).build().probeJitter());
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ofMillis(500)));
         assertThrows(IllegalArgumentException.class, () -> l.probeInterval(Duration.ofSeconds(-1)));
@@ -46,8 +48,8 @@ class OptionalValuesTest {
         var d = ZmuxConfig.defaults();
         assertEquals(Optional.of(ZmuxConfig.DEFAULT_HANDSHAKE_TIMEOUT), d.handshakeTimeout());
         assertEquals(Optional.empty(), ZmuxConfig.builder().noHandshakeTimeout().build().handshakeTimeout());
-        assertEquals(Optional.empty(), ZmuxConfig.builder().noIdleTimeout().build().maxIdleTimeout());
-        assertEquals(Optional.empty(), ZmuxConfig.builder().liveness(Liveness.builder().noKeepAlive().build()).build().liveness().keepAlivePeriod());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().noMaxIdleTimeout().build().maxIdleTimeout());
+        assertEquals(Optional.empty(), ZmuxConfig.builder().liveness(Liveness.builder().noKeepAlivePeriod().build()).build().liveness().keepAlivePeriod());
         var t = ZmuxConfig.builder();
         var lt = Liveness.builder();
         assertThrows(IllegalArgumentException.class, () -> lt.keepAlivePeriod(Duration.ZERO), "0 has no meaning");
@@ -57,7 +59,7 @@ class OptionalValuesTest {
         assertThrows(IllegalArgumentException.class, () -> t.maxIdleTimeout(Duration.ZERO), "below the 1 ms unit");
         assertThrows(IllegalArgumentException.class, () -> t.maxIdleTimeout(Duration.ofNanos(999_999)));
         assertThrows(IllegalArgumentException.class, () -> lt.keepAlivePeriod(Duration.ofNanos(-1)));
-        var cfg = ZmuxConfig.builder().noHandshakeTimeout().noIdleTimeout().liveness(Liveness.builder().noKeepAlive().build())
+        var cfg = ZmuxConfig.builder().noHandshakeTimeout().noMaxIdleTimeout().liveness(Liveness.builder().noKeepAlivePeriod().build())
                 .noMemoryBudget().build();
         assertEquals(java.util.OptionalLong.empty(), cfg.memoryBudget());
         var core = cfg.toCore(io.zmux.internal.core.CoreConfig.Role.INITIATOR, io.zmux.internal.core.CoreConfig.Role.INITIATOR);
@@ -102,15 +104,23 @@ class OptionalValuesTest {
         assertThrows(IllegalArgumentException.class, () -> m.standbyProbe(Duration.ofSeconds(-1)));
     }
 
-    @Test void qualityBandMinIntervalIsOneSecondUnlessSet() {
-        assertEquals(QualityBand.DEFAULT_MIN_INTERVAL, new QualityBand(Duration.ZERO, 1.5).minInterval());
-        assertEquals(Duration.ZERO, new QualityBand(Duration.ZERO, 1.5, Duration.ZERO).minInterval(), "0: no floor");
-        assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, 1.5, Duration.ofNanos(-1)));
-        assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, Double.NaN));
-        assertEquals(1.0, new QualityBand(Duration.ZERO, 1.0).rateRatio(), "1 is valid");
-        assertEquals(0.0, new QualityBand(Duration.ZERO, 0).rateRatio(), "0 is off");
-        for (double bad : new double[] {0.5, -1, Double.POSITIVE_INFINITY})
-            assertThrows(IllegalArgumentException.class, () -> new QualityBand(Duration.ZERO, bad), String.valueOf(bad));
+    @Test void qualityBandHalvesAreOffUnlessSetAndValuesAreCheckedWhereSet() {
+        var rate = QualityBand.builder().rateRatio(1.5).build();
+        assertEquals(java.util.Optional.of(QualityBand.DEFAULT_MIN_INTERVAL), rate.minInterval());
+        assertEquals(java.util.Optional.empty(), rate.rtt(), "not called: off");
+        assertEquals(1.5, rate.rateRatio().orElseThrow());
+        var rtt = QualityBand.builder().rtt(Duration.ofMillis(5)).noMinInterval().build();
+        assertEquals(java.util.OptionalDouble.empty(), rtt.rateRatio(), "not called: off");
+        assertEquals(java.util.Optional.empty(), rtt.minInterval(), "no minimum");
+        assertEquals(1.0, QualityBand.builder().rateRatio(1.0).build().rateRatio().orElseThrow(), "1 is valid");
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().build(), "both halves off");
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().noMinInterval().build(), "both halves off");
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().rtt(Duration.ZERO), "0 is not off");
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().rtt(Duration.ofNanos(-1)));
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().minInterval(Duration.ZERO), "0 is not no minimum");
+        assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().minInterval(Duration.ofNanos(-1)));
+        for (double bad : new double[] {0, 0.5, -1, Double.NaN, Double.POSITIVE_INFINITY})
+            assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().rateRatio(bad), String.valueOf(bad));
     }
 
     @Test void modePolicyRejectsANanTimerFactor() {
@@ -125,10 +135,14 @@ class OptionalValuesTest {
         assertThrows(IllegalArgumentException.class, () -> d.withMaxDelay(Duration.ZERO));
     }
 
-    @Test void recheckZeroIsAsSoonAsTheFloorAllows() {
-        assertNull(PoolPolicy.Decision.KEEP.recheckDelay(), "unset: none");
-        assertEquals(PoolPolicy.Decision.MIN_RECHECK, PoolPolicy.Decision.KEEP.withRecheck(Duration.ZERO).recheckDelay());
-        assertThrows(IllegalArgumentException.class, () -> PoolPolicy.Decision.KEEP.withRecheck(Duration.ofNanos(-1)));
+    @Test void recheckIsPositiveAndItsEffectFlooredByMinRecheck() {
+        assertEquals(0, PoolDecision.KEEP.recheckNanos(), "unset: no extra look");
+        assertEquals(PoolDecision.MIN_RECHECK.toNanos(), PoolDecision.KEEP.withRecheck(Duration.ofNanos(1)).recheckNanos());
+        assertEquals(Duration.ofHours(1), PoolDecision.KEEP.withRecheck(Duration.ofHours(1)).recheck().orElseThrow(), "no upper bound");
+        assertThrows(IllegalArgumentException.class, () -> PoolDecision.KEEP.withRecheck(Duration.ZERO), "0 is not a recheck");
+        assertThrows(IllegalArgumentException.class, () -> PoolDecision.KEEP.withRecheck(Duration.ofNanos(-1)));
+        assertThrows(IllegalArgumentException.class, () -> PoolDecision.KEEP.withDialAfter(Duration.ofNanos(-1)));
+        assertThrows(IllegalArgumentException.class, () -> PoolDecision.KEEP.withCount(0));
     }
 
     @Test void carrierCacheTakesZeroAndRejectsNegatives() {
