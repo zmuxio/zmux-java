@@ -23,20 +23,52 @@ class ShapingTest {
         private volatile boolean on;
         /** System.nanoTime of each recorded write. */
         final List<Long> writes = Collections.synchronizedList(new ArrayList<>());
+        /** Per write: whether it carries a PIPE_ACK (written together with the stamp, same index). */
+        final List<Boolean> withAck = Collections.synchronizedList(new ArrayList<>());
         Recorder(PipeWriter inner) { this.inner = inner; }
         @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
-            if (on) writes.add(System.nanoTime());
-            if (on) synchronized (out) { for (ByteBuffer b : data.segments(new ByteBuffer[data.segmentCount()])) { var d = b.duplicate(); byte[] a = new byte[d.remaining()]; d.get(a); out.writeBytes(a); } }
+            if (on) {
+                writes.add(System.nanoTime());
+                var batch = new ByteArrayOutputStream();
+                for (ByteBuffer b : data.segments(new ByteBuffer[data.segmentCount()])) { var d = b.duplicate(); byte[] a = new byte[d.remaining()]; d.get(a); batch.writeBytes(a); }
+                byte[] bytes = batch.toByteArray();
+                withAck.add(carriesPipeAck(bytes));
+                synchronized (out) { out.writeBytes(bytes); }
+            }
             inner.write(data, done);
         }
         @Override public void close() { inner.close(); }
         @Override public void abort(Throwable cause) { inner.abort(cause); }
+        /** Whether a record of the BYTE_STREAM bytes carries a PIPE_ACK frame. */
+        static boolean carriesPipeAck(byte[] b) {
+            var buf = ByteBuffer.wrap(b);
+            var dec = new io.zmux.internal.wire.FrameDecoder();
+            var f = new io.zmux.internal.wire.Frame();
+            try {
+                for (int i = 0; i < b.length;) {
+                    int len = 1 << (b[i] >> 6 & 3);
+                    long v = b[i] & 0x3f;
+                    for (int k = 1; k < len; k++) v = v << 8 | (b[i + k] & 0xff);
+                    int pos = i + len, end = (int) (pos + v);
+                    while (pos < end) {
+                        int n = dec.decode(buf, pos, end, f);
+                        if (f.type == io.zmux.internal.wire.FrameType.PIPE_ACK) return true;
+                        pos += n;
+                    }
+                    i = end;
+                }
+            } catch (io.zmux.internal.wire.WireException | RuntimeException e) {
+                throw new AssertionError("record does not parse", e);
+            }
+            return false;
+        }
         /** Records from now on, keeping what was recorded. */
         void startNow() { on = true; }
         void start() throws InterruptedException {
             Thread.sleep(50);
             synchronized (out) { out.reset(); }
             writes.clear();
+            withAck.clear();
             on = true;
         }
         /** Frames lengths and trailing zero bytes of the recorded records. */
@@ -211,7 +243,10 @@ class ShapingTest {
     /**
      * A planned delay holds the whole record: control frames the shaped side owes for data it
      * receives wait with it instead of leaving early in a record of their own, which would use up
-     * the plan and make the next record wait a second delay.
+     * the plan and make the next record wait a second delay. The one bound a delay never passes is
+     * the deadline of a PIPE_ACK the record carries (zmux_max_ack_delay after the first byte it
+     * reports): a record released short of its delay by that deadline carries the PIPE_ACK, any
+     * other record keeps the whole delay after the one before it.
      */
     @Test void aDelayedRecordHoldsItsControlFramesToo() throws Exception {
         long delay = 5_000_000;
@@ -226,12 +261,15 @@ class ShapingTest {
                     transfer(p.shaped(), p.other(), 60_000);
                     in.get(20, TimeUnit.SECONDS);
                 } finally { ex.shutdown(); }
-                List<Long> w;
+                List<Long> w; List<Boolean> acked;
                 synchronized (p.rec().writes) { w = new ArrayList<>(p.rec().writes); }
+                synchronized (p.rec().withAck) { acked = new ArrayList<>(p.rec().withAck); }
+                while (acked.size() > w.size()) acked.remove(acked.size() - 1);
+                while (w.size() > acked.size()) w.remove(w.size() - 1);
                 assertTrue(w.size() >= 15, w.size() + " writes");
                 for (int i = 1; i < w.size(); i++) {
                     long gap = w.get(i) - w.get(i - 1);
-                    assertTrue(gap >= delay - 1_000_000, "records " + gap / 1000 + " us apart, delay 5 ms");
+                    assertTrue(gap >= delay - 1_000_000 || acked.get(i), "record " + i + " without a PIPE_ACK " + gap / 1000 + " us after the one before, delay 5 ms");
                 }
             }
         }
