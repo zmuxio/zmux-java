@@ -62,8 +62,12 @@ class PipeEventsTest {
                 assertEquals(PipeStats.SettingSource.LOCAL, local.source());
 
                 added.close();
-                var closed = await(c, SessionEvent.PipeClosed.class, e -> e.pipe().value() == id, seen);
-                assertNotNull(closed.direction());
+                // The pipe's end is reported by PipeClosed, or, when it was retired before this read, only by the
+                // retirement summary that folds it (a clean end counts as closed): either is the report.
+                var end = await(c, SessionEvent.class, e -> (e instanceof SessionEvent.PipeClosed pc && pc.pipe().value() == id)
+                        || (e instanceof SessionEvent.PipesRetired pr && pr.last().stream().anyMatch(p -> p.value() == id)), seen);
+                if (end instanceof SessionEvent.PipeClosed pc) assertNotNull(pc.direction());
+                else assertEquals(0, ((SessionEvent.PipesRetired) end).failed(), "a clean pipe retired as failed: " + end);
                 for (SessionEvent e : seen) {
                     if (e instanceof SessionEvent.PipeSuspect || e instanceof SessionEvent.PipeRecovered || e instanceof SessionEvent.PipeFailed) {
                         fail("a clean pipe reported " + e);

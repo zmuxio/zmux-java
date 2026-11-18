@@ -361,12 +361,16 @@ class AdmissionTest {
         try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
             ch.write(ByteBuffer.wrap(part.getBytes(UTF_8)));
             Thread.sleep(500);
-            ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
-            ch.shutdownOutput();
             try {
+                ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
+                ch.shutdownOutput();
                 return readAll(ch);
-            } catch (java.net.SocketException reset) {
+            } catch (java.net.SocketTimeoutException silent) {
+                throw silent;
+            } catch (IOException reset) {
                 // A close with the late bytes unread resets the connection rather than ending it: closed either way.
+                // The platform names the reset its own way (a SocketException on Linux and macOS, an aborted
+                // connection on Windows), so any failure but a timeout is the close.
                 return "";
             }
         }

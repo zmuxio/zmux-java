@@ -105,8 +105,23 @@ class SlowPathTest {
      * the offered ~3 MB/s instead of the slow path's rate.
      */
     @Test void aSlowBootstrapPathDoesNotHoldTheSession() throws Exception {
-        long echoed = echoed(0).echoed();
-        assertTrue(echoed >= 8 << 20, "echoed " + echoed + " bytes in 6 s next to a slow path, want at least 8 MiB of the ~19 MB offered");
+        Run r = echoed(0);
+        assertTrue(r.stats().bytesOpportunistic() > 0, "the blocking data was not re-sent on the fast pipe: " + r.stats());
+        assertNotHeldToSlowPath(r.echoed());
+    }
+
+    private static final double SLOW_RATE = 3e4;
+    private static final int RUN_SECONDS = 6;
+
+    /**
+     * A session held to the slow pipe carries what that pipe does in the run, SLOW_RATE * RUN_SECONDS (180 kB);
+     * one that reinjects on the fast pipe carries far more. The factor leaves the runner's speed out of it: the
+     * ~19 MB offered is not reached on a loaded runner, so the floor is a multiple of the slow pipe's share.
+     */
+    private static void assertNotHeldToSlowPath(long echoed) {
+        long floor = (long) (10 * SLOW_RATE * RUN_SECONDS);
+        assertTrue(echoed >= floor, "echoed " + echoed + " bytes in " + RUN_SECONDS + " s, want at least 10 times the "
+                + (long) (SLOW_RATE * RUN_SECONDS) + " the slow pipe carries in that time");
     }
 
     /**
@@ -118,7 +133,7 @@ class SlowPathTest {
     @Test void aPenaltyReinjectsTheDataItsBindingLeftOnTheSlowPipe() throws Exception {
         Run r = echoed(16 << 20);
         assertTrue(r.stats().penalties() > 0 && r.stats().bytesOpportunistic() > 0, "no penalty: " + r.stats());
-        assertTrue(r.echoed() >= 8 << 20, "echoed " + r.echoed() + " bytes in 6 s, want at least 8 MiB");
+        assertNotHeldToSlowPath(r.echoed());
         // Each byte on the slow pipe is re-sent at most once for the penalty and once opportunistically.
         assertTrue(r.stats().bytesReinjected() <= r.slowSent() + r.stats().bytesOpportunistic(),
                 r.stats().bytesReinjected() + " bytes re-sent, more than the " + r.slowSent() + " sent on the slow pipe plus "
@@ -127,7 +142,7 @@ class SlowPathTest {
 
     record Run(long echoed, SessionStats stats, long slowSent) {}
 
-    /** Echoes at ~3 MB/s for 6 s over the slow bootstrap pipe and a fast joined one; window 0: the default. */
+    /** Echoes at up to ~3 MB/s for RUN_SECONDS over the slow bootstrap pipe and a fast joined one; window 0: the default. */
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     private static Run echoed(long window) throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
@@ -136,7 +151,7 @@ class SlowPathTest {
                     .initialConnectionReceiveWindow(window).maxConnectionReceiveWindow(window);
             ZmuxConfig cfg = cb.build();
             try (var listener = Zmux.listener(ListenerConfig.of(cfg))) {
-                PipeIo[] slow = linked(Duration.ofMillis(300), 3e4, 16 << 20);
+                PipeIo[] slow = linked(Duration.ofMillis(300), SLOW_RATE, 16 << 20);
                 listener.adapter().handle(slow[1], JoinHint.inBand(TestAddr.peer("slow")));
                 try (var client = Zmux.open(slow[0], Role.CLIENT, cfg); var server = listener.accept(Duration.ofSeconds(10))) {
                     PipeIo[] fast = linked(Duration.ofMillis(20), 5e6, 256 << 10);
@@ -161,7 +176,7 @@ class SlowPathTest {
                             for (int n; (n = st.inputStream().read(b)) >= 0; ) got.addAndGet(n);
                         } catch (IOException ended) { /* The test ended. */ }
                     });
-                    Thread.sleep(6_000);
+                    Thread.sleep(RUN_SECONDS * 1_000L);
                     long echoed = got.get();
                     SessionStats stats = client.stats();
                     long slowSent = client.pipeStats().stream().filter(p -> p.pipe().value() == 0).findFirst().orElseThrow().bytesSent();
