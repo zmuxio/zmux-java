@@ -673,7 +673,7 @@ public final class Session {
         if (state.compareTo(SessionState.CLOSING) < 0) return false;
         if (state == SessionState.CLOSED || !life.closeQueued()) return true;
         if (life.closePending()) return false;
-        return pipes.closeShut();
+        return handOffOver || pipes.closeShut();
     }
 
     /** Registers sig until {@link #closeHandedOff}; true when it holds now. */
@@ -715,8 +715,23 @@ public final class Session {
 
     /** Ends a close whose carriers did not take CONNECTION_CLOSE in time: CLOSED, every carrier closed. */
     public void endClose() {
-        if (state == SessionState.CLOSING && !closeHandedOff()) finishClose();
+        if (state != SessionState.CLOSING || closeHandedOff()) return;
+        if (!life.closeQueued() || life.closePending() || !pipes.closeWritten()) {
+            finishClose();
+            return;
+        }
+        // CONNECTION_CLOSE went out but a write side never reported its shutdown (its carrier went
+        // away with the write, or it is slow): the hand-off is over, and the linger of step 3 bounds
+        // what remains, the read drain included.
+        handOffOver = true;
+        lingerOnHandOff = false;
+        life.linger(Time.add(now, lingerTimeout()));
+        wakeHandOff();
+        checkLingerDone();
     }
+
+    /** The hand-off bound passed after CONNECTION_CLOSE was written: the close no longer waits for a write side's shutdown. */
+    private boolean handOffOver;
 
     /** The negotiated idle timeout, 0 when none. */
     private long idleTimeout() {
@@ -1241,6 +1256,7 @@ public final class Session {
         // A write side whose shutdown is slow, or never reported (its carrier went away with the
         // write), is bounded by the hand-off bound, which then ends the session.
         if (pipes.closeShut()) finishClose(true);
+        else if (handOffOver) finishClose(); // nothing more to wait for: the write side's shutdown never came
     }
 
     // ---- pipes ----

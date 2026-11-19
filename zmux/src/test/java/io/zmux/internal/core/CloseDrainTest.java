@@ -53,6 +53,27 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state(), "the last read ends the drain");
     }
 
+    /**
+     * The hand-off bound ends the wait for a write side that never reports its shutdown, not the read drain: the
+     * linger timeout bounds that (SPEC.md 6.5 step 3).
+     */
+    @Test void theHandOffBoundLeavesTheReadDrainToTheLinger() throws Exception {
+        Session a = a(), b = b();
+        Stream in = setUp(a, b, 100, true)[1];
+        a.close(0x2a, "bye".getBytes(UTF_8));
+        HeldControlTest.pump(a, b);
+        b.pipeEnded(0, 0, true, false, null, 0); // b's write side never reports its shutdown
+        assertFalse(b.closeHandedOff());
+        long bound = Session.closeLimit;
+        b.handleTimeout(bound);
+        assertTrue(b.closeHandedOff(), "the hand-off is over at its bound");
+        assertEquals(SessionState.CLOSING, b.state(), "the unread data still holds the session");
+        assertEquals(bound + b.lingerTimeout(), b.nextTimeout(), "the linger bounds the drain from there");
+        assertEquals(100, b.receiving().read(in, ByteBuffer.allocate(200)).n());
+        b.handleTimeout(b.nextTimeout());
+        assertEquals(SessionState.CLOSED, b.state());
+    }
+
     /** Bytes pushed to the receive lane and not consumed there are unread too. */
     @Test void dataOnTheReceiveLaneIsUnreadUntilConsumed() throws Exception {
         Session a = a(), b = b();
