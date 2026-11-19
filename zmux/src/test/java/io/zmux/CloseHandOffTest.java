@@ -309,7 +309,11 @@ class CloseHandOffTest {
         }
     }
 
-    /** close returns only once the carrier's write side is shut, not when its shutdown is merely requested. */
+    /**
+     * close returns only once the carrier's write side is shut, not when its shutdown is merely requested. The
+     * shutdown takes longer than the linger timeout (250 ms here) and less than the hand-off bound (one second): a
+     * linger started before the hand-off would expire first and end the session early.
+     */
     @Test void closeReturnsAfterTheWriteSideIsShut() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var listener = Zmux.listener(ListenerConfig.of(PipePoolTest.config(loops, 2)))) {
             var io = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -318,7 +322,7 @@ class CloseHandOffTest {
             PipeWriter w = io[0].writer();
             PipeWriter slowShut = new PipeWriter() {
                 @Override public void write(OutboundBatch batch, Completion done) { w.write(batch, done); }
-                @Override public void close() { sleep(200); w.close(); shut.set(System.nanoTime()); }
+                @Override public void close() { sleep(600); w.close(); shut.set(System.nanoTime()); }
                 @Override public void abort(Throwable error) { w.abort(error); }
             };
             var client = Zmux.open(PipeIo.of(io[0].reader(), slowShut), Role.CLIENT, PipePoolTest.config(loops, 2));

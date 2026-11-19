@@ -192,7 +192,7 @@ class CloseWaitTest {
      * completes long before its bound.
      */
     @Test void aPipeFailingDuringTheCloseWaitIsReinjected() throws Exception {
-        final int size = 96 << 10;
+        int size = 96 << 10;
         long was = bound();
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         try (EventLoops loops = EventLoops.create(2); ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -234,7 +234,7 @@ class CloseWaitTest {
      * the other end, waiting too, keeps sending. Both closes complete within a few RTTs, not at the bound.
      */
     @Test void aSimultaneousCloseCompletesWithinRoundTrips() throws Exception {
-        final int size = 64 << 10;
+        int size = 64 << 10;
         long was = bound();
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         try (EventLoops loops = EventLoops.create(2); ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {

@@ -181,7 +181,7 @@ class MultipathTest {
      */
     @Test
     void closeWithCodeDeliversTheTail() throws Exception {
-        final int size = 256 << 10, runs = 20;
+        int size = 256 << 10, runs = 20;
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));

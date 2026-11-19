@@ -686,7 +686,7 @@ public final class Session {
     public void cancelCloseHandOffWait(Waiter sig) { handOffW.remove(sig); }
 
     private void wakeHandOff() {
-        if (lingerOnHandOff && (state == SessionState.CLOSED || pipes.closeWritten())) {
+        if (lingerOnHandOff && (state == SessionState.CLOSED || pipes.closeShut())) {
             lingerOnHandOff = false;
             life.linger(Time.add(now, lingerTimeout()));
         }
@@ -705,7 +705,12 @@ public final class Session {
         return Math.max(2 * Time.SECOND, lingerForTests) + closeLimit;
     }
 
-    /** CONNECTION_CLOSE was queued on every carrier, and the linger waits for its writes to complete. */
+    /**
+     * CONNECTION_CLOSE was queued on every carrier, and the linger waits for the hand-off: its writes
+     * completed and the write sides shut. A linger running meanwhile could expire during a slow shutdown
+     * and end the session (aborting the carriers) before the hand-off, so the hand-off's own bound
+     * ({@link #closeLimit}) is the only one until then.
+     */
     private boolean lingerOnHandOff;
 
     /** Ends a close whose carriers did not take CONNECTION_CLOSE in time: CLOSED, every carrier closed. */
@@ -1209,8 +1214,8 @@ public final class Session {
     void closeSentOn() {
         if (!pipes.closeSentEverywhere()) return;
         pipes.shutdownOut();
-        // The linger runs from the delivery of CONNECTION_CLOSE (its write completed), not from its queueing.
-        lingerOnHandOff = !pipes.closeWritten();
+        // The linger runs from the hand-off of CONNECTION_CLOSE (written, write side shut), not from its queueing.
+        lingerOnHandOff = !pipes.closeShut();
         life.closeSent(lingerOnHandOff ? Time.NEVER : Time.add(now, lingerTimeout()));
         emitClosedEvent();
         checkLingerDone();
@@ -1233,14 +1238,9 @@ public final class Session {
         // After the peer's close, what arrived before it stays readable while the application
         // reads it, within the same linger bound: the peer's close follows its data.
         if (closeReceived && streams.unreadHeld()) return;
-        if (pipes.closeShut()) {
-            finishClose(true);
-        } else if (lingerOnHandOff) {
-            // The peer ended, but a write side never reported its shutdown (its carrier went away
-            // with the write): wait for it no longer than the linger timeout.
-            lingerOnHandOff = false;
-            life.linger(Time.add(now, lingerTimeout()));
-        }
+        // A write side whose shutdown is slow, or never reported (its carrier went away with the
+        // write), is bounded by the hand-off bound, which then ends the session.
+        if (pipes.closeShut()) finishClose(true);
     }
 
     // ---- pipes ----
