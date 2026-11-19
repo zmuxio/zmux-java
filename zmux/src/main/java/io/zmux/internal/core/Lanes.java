@@ -30,21 +30,22 @@ public final class Lanes {
         boolean urgentLane(Stream st);
 
         void failLocal(WireException e);
+
+        /** An acknowledgement advanced: the close wait may be over. */
+        void recheckCloseWait();
     }
 
     private final CoreConfig cfg;
     private final PipeTable pipes;
     private final Outbox outbox;
-    private final Lifecycle life;
     private final Port port;
     /** What the last {@link #laneFor} found: the binding holds; a new lane is wanted. */
     private boolean keep, needNew;
 
-    Lanes(CoreConfig cfg, PipeTable pipes, Outbox outbox, Lifecycle life, Port port) {
+    Lanes(CoreConfig cfg, PipeTable pipes, Outbox outbox, Port port) {
         this.cfg = cfg;
         this.pipes = pipes;
         this.outbox = outbox;
-        this.life = life;
         this.port = port;
     }
 
@@ -195,17 +196,23 @@ public final class Lanes {
             }
             i++;
         }
-        if (life.waitingLanes() && covered()) life.lanesDone();
+        port.recheckCloseWait();
         pipes.wakeWriters();
     }
 
-    /** Whether every record written on lanes other than 0 is acknowledged. */
+    /**
+     * Whether the records CONNECTION_CLOSE must not overtake are acknowledged: those on lanes
+     * other than 0 or, in a multipath session (whose peer closes on the first copy it reads), those
+     * on every lane of every outbound pipe that has not failed. Records that elicit no
+     * acknowledgement (a PIPE_ACK alone) are not waited for: no peer acknowledges them.
+     */
     boolean covered() {
+        int first = port.features().multipath() ? 0 : 1;
         for (Pipe p : pipes.all()) {
-            if (p.out() == null) continue;
-            for (int i = 1; i < p.out().lanes.size(); i++) {
+            if (p.out() == null || p.out().failed()) continue;
+            for (int i = first; i < p.out().lanes.size(); i++) {
                 Pipe.OutLane l = p.out().lanes.get(i);
-                if (!l.st.refused && l.ack.acked() < l.tx.pos()) return false;
+                if (!l.st.refused && l.ack.acked() < l.tx.elicitPos()) return false;
             }
         }
         return true;

@@ -166,12 +166,13 @@ public final class Transmitter {
             // any other record, unless CONNECTION_CLOSE is owed.
             return life.closePending() || pipes.shaping() == null || !Shaping.delaying(p, port.now());
         }
-        if (life.closePending()) return lane == 0 && !life.waitingLanes();
+        // CONNECTION_CLOSE is due: nothing else goes out. While it waits for coverage, the transport work goes on.
+        if (life.closePending() && !life.waitingLanes()) return lane == 0;
         if (ol.st.laneFirst()) {
             // The lane's PIPE_LANE record is a record of the pipe: a planned delay holds it too.
             return state.compareTo(SessionState.CLOSING) < 0 && (pipes.shaping() == null || !Shaping.delaying(p, port.now()));
         }
-        if (!ol.st.confirmed() || state == SessionState.CLOSING) return false;
+        if (!ol.st.confirmed() || (state == SessionState.CLOSING && !life.closeWait())) return false;
         if (!port.established()) return ka.wants() || (earlyActive() && dataPendingOn(null, null));
         if (pipes.shaping() != null) {
             if (Shaping.delaying(p, port.now())) return false;
@@ -198,6 +199,26 @@ public final class Transmitter {
         return false;
     }
 
+    /**
+     * Whether stream data or a FIN sent before and lost waits to go out again (multipath: reinjected
+     * from a failed pipe). A close waits for it, and for the control queue (lost control frames are
+     * queued there again), as for the acknowledgement of what was sent.
+     */
+    boolean reinjectPending() {
+        for (Stream st : streams.live()) {
+            if (!st.hasSend) continue;
+            StreamSend.SendPart sp = st.snd;
+            PathStreamState m = sp.mps();
+            if (m == null || sp.state() == Stream.SEND_DATA_RECVD || sp.state() == Stream.SEND_RESET_RECVD) continue;
+            if (m.ret.finResend() && !sp.reset() && sp.finSent()) return true;
+            long end = sp.reset() ? Math.min(sp.q().end(), sp.resetRel()) : sp.q().end();
+            for (int i = 0; i < m.ret.resend().size(); i++) {
+                if (Math.max(m.ret.resend().lo(i), sp.q().base()) < Math.min(m.ret.resend().hi(i), end)) return true;
+            }
+        }
+        return false;
+    }
+
     /** Whether control frames are due. */
     boolean controlPending() {
         if (ctl.pending()) return true;
@@ -209,17 +230,19 @@ public final class Transmitter {
 
     /** Whether a queued datagram goes in, or is dropped by, the next record of lane 0 of p. */
     boolean datagramsPending(Pipe p, Pipe.OutLane ol) {
-        return ol.lane == 0 && dg.sendable(p, recMax(ol));
+        // Datagrams are application data: a closing session sends none.
+        return ol.lane == 0 && port.state().compareTo(SessionState.CLOSING) < 0 && dg.sendable(p, recMax(ol));
     }
 
     /** Writes the queued datagrams that p's records hold. */
     void writeDatagrams(RecordWriter w, Pipe p) {
-        dg.write(w, p);
+        if (port.state().compareTo(SessionState.CLOSING) < 0) dg.write(w, p);
     }
 
     /** Whether the stream could put a frame out now; the same plan as sendChunk, so interest never spins (W8). */
     boolean canSendNow(Stream st) {
         if (!st.tab.idSet()) {
+            if (port.state().compareTo(SessionState.CLOSING) >= 0) return false; // never opened: nothing to send again
             int t = Stream.typeIndex(st.bidi);
             if ((!port.established() && !earlyActive()) || !streams.idAvailable(t)) return false;
             long pre = port.features().preamble() ? st.preSize() : 0;
@@ -240,11 +263,15 @@ public final class Transmitter {
         }
         if (lane > 0 && !ol.st.confirmed()) return; // nothing until confirmed
         if (life.closePending() && !ol.tx.closeSent && lane == 0) {
-            w.neverHold(); // a planned delay never holds CONNECTION_CLOSE
-            if (!life.waitingLanes() && life.writeClose(w)) ol.tx.closeSent = true;
-            return;
+            w.neverHold(); // a planned delay never holds CONNECTION_CLOSE, nor the transport work ahead of it
+            if (!life.waitingLanes()) {
+                if (life.writeClose(w)) ol.tx.closeSent = true;
+                return;
+            }
         }
-        if (state == SessionState.CLOSING || ol.tx.closeSent) return; // nothing after CONNECTION_CLOSE
+        // Nothing after CONNECTION_CLOSE; while it waits for coverage, acknowledgements, control and
+        // reinjected data still go out (planChunk takes no new stream data once closing).
+        if (ol.tx.closeSent || (state == SessionState.CLOSING && !life.closeWait())) return;
         if (!established) {
             ka.write(w, now, port.srtt());
             if (earlyActive()) writeEarly(w);
@@ -316,6 +343,7 @@ public final class Transmitter {
         for (int i = 0; i < b.messageCount(); i++) pos += Batch.positionBytes(b.recordSize(i));
         long startPos = ol.tx.pos;
         ol.tx.pos += pos;
+        if (w.anyElicit()) ol.tx.elicitPos = w.framing() == Framing.RECORDS ? ol.tx.pos : startPos + w.elicitEnd();
         for (Stream st : w.touched) Lanes.boundEnd(st, ol.tx.pos);
         stats.sent(pos, w.recs());
         // Earned are the bytes given to the carrier: a message carries no size field.
@@ -522,6 +550,8 @@ public final class Transmitter {
         p.fin = p.open = p.preBlocked = p.resend = false;
         PathStreamState m = sp.mps();
         if (m != null && (m.ret.resend().size() > 0 || m.ret.finResend()) && planResend(st, p)) return p;
+        // A closing session sends again what it sent before, never new data: the application's writes ended at the close.
+        if (port.state().compareTo(SessionState.CLOSING) >= 0) return p;
         p.off = Math.max(sp.sent(), sp.q().base());
         long end = sp.sendEnd();
         if (end > p.off) p.avail = end - p.off;
@@ -742,6 +772,11 @@ public final class Transmitter {
     /** The writer's state of one outbound lane. */
     static final class LaneTx {
         private long pos;
+        /**
+         * The lane position at the end of the last ack-eliciting record: what a close waits to see
+         * acknowledged, since the peer acknowledges no record that elicits nothing (a PIPE_ACK alone).
+         */
+        private long elicitPos;
         private boolean tpSent;
         private boolean closeSent;
         /** The batch that carried CONNECTION_CLOSE was written ({@link Session#closeHandedOff}). */
@@ -774,6 +809,10 @@ public final class Transmitter {
 
         long pos() {
             return pos;
+        }
+
+        long elicitPos() {
+            return elicitPos;
         }
 
         boolean tpSent() {

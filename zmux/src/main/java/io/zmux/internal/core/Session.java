@@ -110,7 +110,7 @@ public final class Session {
         send = new StreamSend(stats, outbox, conn, sched, ctl, streams, sp);
         recv = new StreamRecv(cfg, stats, outbox, conn, tuner, ctl, streams, sp);
         IoPort io = new IoPort();
-        lanes = new Lanes(cfg, pipes, outbox, life, io);
+        lanes = new Lanes(cfg, pipes, outbox, io);
         rx = new RecordReceiver(cfg, stats, life, io);
         tx = new Transmitter(cfg, stats, pipes, lanes, streams, send, recv, sched, ctl, conn, tuner, ka, life, early, dg, io);
         dg.recordCaps(tx::smallestRecordCap, tx::largestRecordCap);
@@ -629,7 +629,7 @@ public final class Session {
     public void cancelClosedWait(Waiter sig) { closedW.remove(sig); }
 
     /**
-     * Whether written stream data (or a written FIN) is still unsent: a graceful close flushes
+     * Whether written stream data, a written FIN or a reset's RESET_STREAM is still unsent: a graceful close flushes
      * until this is false or its bound ends, waiting for the peer's credit meanwhile (a peer that
      * reads opens its windows; one that does not holds the close to its bound). False once
      * closing, or without a live outbound pipe.
@@ -639,7 +639,12 @@ public final class Session {
         for (Stream st : streams.live()) {
             if (!st.hasSend) continue;
             StreamSend.SendPart sp = st.snd;
-            if (sp.reset() || sp.state() >= Stream.SEND_DATA_SENT) continue;
+            // A reset the application made before the close reaches the peer ahead of it, as a FIN does.
+            if (sp.reset()) {
+                if (!sp.resetSent()) return true;
+                continue;
+            }
+            if (sp.state() >= Stream.SEND_DATA_SENT) continue;
             if (st.unsent() > 0 || (sp.finWritten() && !sp.finSent())) return true;
         }
         return false;
@@ -655,7 +660,8 @@ public final class Session {
         setNow(t);
         boolean first = !isClosing();
         close(code, reason);
-        if (first && state == SessionState.CLOSING && !closeHandedOff()) life.handOffBy(Time.add(now, limit));
+        // The caller's bound is the hand-off's; a coverage wait comes first and the hand-off bound starts at its end.
+        if (first && state == SessionState.CLOSING && !closeHandedOff() && !life.closeWait()) life.handOffBy(Time.add(now, limit));
     }
 
     /**
@@ -689,6 +695,15 @@ public final class Session {
 
     /** The longest a close (flush and hand-off of CONNECTION_CLOSE) waits for the carriers before they are closed: the one authority, read by the session facade too; tests shorten it. */
     public static volatile long closeLimit = java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+
+    /**
+     * The longest a public close can take after its flush: the coverage wait (at most the linger
+     * timeout, 2 s or the test value) and then the hand-off. The core enforces it; the facade waits
+     * this long only to cover a loop that lags.
+     */
+    public static long closeCeiling() {
+        return Math.max(2 * Time.SECOND, lingerForTests) + closeLimit;
+    }
 
     /** CONNECTION_CLOSE was queued on every carrier, and the linger waits for its writes to complete. */
     private boolean lingerOnHandOff;
@@ -754,7 +769,7 @@ public final class Session {
             finishClose();
             return;
         }
-        boolean holdForLanes = !feat.multipath() && !e.remote() && (fr.app() || fr.code() == TransportError.NO_ERROR) && !lanes.covered();
+        boolean holdForLanes = !e.remote() && (fr.app() || fr.code() == TransportError.NO_ERROR) && !closeCovered();
         long laneWait = holdForLanes ? Time.add(now, lingerTimeout()) : Time.NEVER;
         life.closeQueued(fr, laneWait);
         // Every close is bounded: a carrier whose write side is stuck (a peer that does not read)
@@ -772,6 +787,23 @@ public final class Session {
         if (peerSeen || isClosing()) return false;
         closeWith(SessionError.of(SessionError.Kind.HANDSHAKE_TIMEOUT, false), null);
         return true;
+    }
+
+    /**
+     * Whether everything handed to the transport is covered for CONNECTION_CLOSE (SPEC.md 6.5 step
+     * 1): the records it must not overtake are acknowledged and, in a multipath session, nothing
+     * lost waits to be sent again while a pipe could carry it.
+     */
+    boolean closeCovered() {
+        if (!lanes.covered()) return false;
+        return !feat.multipath() || !pipes.hasLiveOutbound() || (!tx.reinjectPending() && !ctl.pending());
+    }
+
+    /** Ends the close wait once {@link #closeCovered} holds; the writers then take CONNECTION_CLOSE. */
+    void recheckCloseWait() {
+        if (!life.closeWait() || !closeCovered()) return;
+        life.lanesDone(now);
+        pipes.wakeWriters();
     }
 
     /** Closes the session with an application error. */
@@ -1053,11 +1085,14 @@ public final class Session {
         boolean allEnded = true;
         for (Pipe.InLane l : p.in().lanes) if (!l.rx.ended()) { allEnded = false; break; }
         if (allEnded) p.in().end();
+        boolean failed = (!graceful || partial) && !earlyEnd;
         if (isClosing()) {
+            // During the close wait a failed pipe is a failure as before: what it carried is reinjected.
+            if (failed && life.closeWait() && feat.multipath()) path.inboundEnded(p, true, allEnded, cause);
             checkLingerDone();
             return;
         }
-        path.inboundEnded(p, (!graceful || partial) && !earlyEnd, allEnded, cause);
+        path.inboundEnded(p, failed, allEnded, cause);
     }
 
     /** The single pipe's inbound side ended. */
@@ -1078,8 +1113,10 @@ public final class Session {
     void pipeWriteFailed(long pipeId, long lane, Throwable cause) {
         if (isClosing()) {
             if (state == SessionState.CLOSING) {
+                // During the close wait a failed pipe is a failure as before: what it carried is reinjected.
+                if (life.closeWait() && feat.multipath()) path.outboundFailed(pipeId, cause);
                 Pipe p = pipes.get(pipeId);
-                if (p != null && p.out() != null) { p.out().fail(); pipes.changed(); }
+                if (p != null && p.out() != null && !p.out().failed()) { p.out().fail(); pipes.changed(); }
                 checkLingerDone();
                 wakeHandOff();
             }
@@ -1185,6 +1222,8 @@ public final class Session {
         // A pipe whose peer's CONNECTION_CLOSE was read, with this side's complete, lingers no longer.
         pipes.endLingeringPipes();
         if (life.closePending()) {
+            // A pipe that failed is no longer waited for.
+            recheckCloseWait();
             if (!life.waitingLanes()) closeSentOn();
             return;
         }
@@ -1407,7 +1446,7 @@ public final class Session {
     public long nextTimeout() {
         if (state == SessionState.CLOSED) return Time.NEVER;
         long t = life.deadline();
-        if (isClosing()) return t;
+        if (isClosing()) return life.closeWait() ? Math.min(t, closeWaitDeadline()) : t;
         t = Math.min(t, lanes.deadline());
         if (state == SessionState.SUSPENDED) t = Math.min(t, grace);
         t = Math.min(t, ka.deadline(peerSeen && state != SessionState.SUSPENDED));
@@ -1454,7 +1493,10 @@ public final class Session {
         if (life.laneWaitDue(t)) {
             pipes.wakeWriters();
         }
-        if (isClosing()) return;
+        if (isClosing()) {
+            if (life.closeWait()) closeWaitTimeout(t);
+            return;
+        }
         lanes.onTimeout(t);
         if (state == SessionState.SUSPENDED && t >= grace) {
             // Grace expiry: CONNECTION_CLOSE on any live outbound pipe, otherwise a local close.
@@ -1475,6 +1517,27 @@ public final class Session {
         dg.expireHeld(t);
         if (ack != null && quality != null) quality.timers(t, true);
         if (pipes.shaping() != null) pipes.shaping().timeout(t);
+    }
+
+    /**
+     * The timers the close wait runs: acknowledgement, pacing and the path layer's (liveness, a
+     * pipe's failure and so reinjection) and the lanes' handshake timeout. Keepalive and idle,
+     * resume grace and shaping wait no more.
+     */
+    private long closeWaitDeadline() {
+        long t = Math.min(path.deadline(now), lanes.deadline());
+        if (ack != null) t = Math.min(t, Math.min(ack.deadline(), pacer.deadline(!sched.isEmpty())));
+        return t;
+    }
+
+    private void closeWaitTimeout(long t) {
+        if (ack != null) {
+            if (ack.onTimeout(now)) pipes.wakeWriters();
+            pacer.onTimeout(t);
+        }
+        path.onTimeout(t);
+        lanes.onTimeout(t);
+        checkLingerDone();
     }
 
     /** Closes on the idle timeout. */
@@ -2161,15 +2224,16 @@ public final class Session {
         @Override public TransportParams peer() { return peer; }
         @Override public boolean urgentLane(Stream st) { return path.urgentLane(st); }
         @Override public void failLocal(WireException e) { Session.this.failLocal(e); }
+        @Override public void recheckCloseWait() { Session.this.recheckCloseWait(); }
 
         @Override public Gates gates() { return gates; }
         @Override public void peerParams(TransportParams tp) throws WireException { processPeerParams(tp); }
         @Override public void dispatch(Pipe p, io.zmux.internal.wire.Frame f, ReadBuf buf) throws WireException { Session.this.dispatch(p, f, buf); }
 
         @Override
-        public void closingAck(io.zmux.internal.wire.Frame f) {
+        public void closingFrame(Pipe p, io.zmux.internal.wire.Frame f, ReadBuf buf) {
             try {
-                onPipeAck(f);
+                dispatch(p, f, buf);
             } catch (WireException ignored) {
                 // The session is closing already.
             }

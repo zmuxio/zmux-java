@@ -15,4 +15,14 @@ final class Poke {
             throw new LinkageError(e.getMessage(), e);
         }
     }
+
+    static Object get(Object target, String name) {
+        try {
+            Field f = target.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            return f.get(target);
+        } catch (ReflectiveOperationException e) {
+            throw new LinkageError(e.getMessage(), e);
+        }
+    }
 }

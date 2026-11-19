@@ -174,4 +174,48 @@ class MultipathTest {
         assertThrows(IllegalArgumentException.class, () -> PipeLiveness.builder().suspectFloor(Duration.ofMillis(1)));
         assertTrue(ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build().isMultipath());
     }
+
+    /**
+     * The server writes 256 KiB over several pipes and closes with a code at once: the client reads
+     * all of it, since CONNECTION_CLOSE waits for the acknowledgement of what every pipe carried.
+     */
+    @Test
+    void closeWithCodeDeliversTheTail() throws Exception {
+        final int size = 256 << 10, runs = 20;
+        try (EventLoops loops = EventLoops.create(2)) {
+            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).build();
+            try (ZmuxListener l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                 var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+                int fails = 0;
+                for (int i = 0; i < runs; i++) {
+                    Future<ZmuxSession> sf = ex.submit((Callable<ZmuxSession>) l::accept);
+                    ZmuxSession c = Zmux.connect(l.localAddress(), cfg);
+                    ZmuxSession s = sf.get();
+                    c.addPipe(l.localAddress(), PipeOptions.defaults());
+                    c.addPipe(l.localAddress(), PipeOptions.defaults());
+                    Future<Integer> got = ex.submit(() -> {
+                        ZmuxStream in = c.acceptStream();
+                        byte[] buf = new byte[65536];
+                        int total = 0;
+                        try {
+                            for (int n; (n = in.read(buf, 0, buf.length)) >= 0; ) total += n;
+                        } catch (java.io.IOException e) {
+                            // the session's close ends the stream
+                        }
+                        return total;
+                    });
+                    ZmuxStream st = s.openStream();
+                    st.write(new byte[size]);
+                    s.close(0x10, "");
+                    int n = got.get();
+                    if (n != size) fails++;
+                    c.awaitClosed(Duration.ofSeconds(10));
+                    s.awaitClosed(Duration.ofSeconds(10));
+                    st.close();
+                }
+                assertEquals(0, fails, fails + "/" + runs + " runs truncated");
+            }
+            Leaks.none(loops, "read buffers leaked");
+        }
+    }
 }

@@ -466,7 +466,8 @@ final class PathSession implements PathLayer {
         }
         if (!joins.writeOwedAbandons(w)) return;
         for (Pipe q : pipes.all()) if (Tiers.statusReady(q, p) && !tiers.writeStatus(w, q)) return;
-        joins.writeEpoch(w, p, epochRepeat(p));
+        // A closing session exchanges no epoch: no join follows.
+        if (!port.isClosing()) joins.writeEpoch(w, p, epochRepeat(p));
     }
 
     /** How often SESSION_EPOCH repeats on p: its probe interval, or 15 s where its probes are off. */
@@ -491,7 +492,7 @@ final class PathSession implements PathLayer {
             for (Pipe q : pipes.all()) {
                 if (q.mp() != null && !q.mp().health.retired() && ((q.mp().health.abandonQueued() && abandonGoesOn(q, p, prim)) || Tiers.statusReady(q, p))) return true;
             }
-            if (joins.owesAbandons() || joins.epochWanted(p)) return true;
+            if (joins.owesAbandons() || (!port.isClosing() && joins.epochWanted(p))) return true;
             if ((p == prim || prim == null) && tx.controlPending()) return true;
             if (tx.datagramsPending(p, ol)) return true;
         }

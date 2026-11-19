@@ -103,7 +103,7 @@ final class Lifecycle {
     /** True once when the wait for lanes to drain before CONNECTION_CLOSE expired at t. */
     boolean laneWaitDue(long t) {
         if (!waitLanes || t < laneWait) return false;
-        waitLanes = false;
+        lanesDone(t);
         return true;
     }
 
@@ -176,9 +176,23 @@ final class Lifecycle {
         return waitLanes;
     }
 
-    /** The lanes drained, or the peer's CONNECTION_CLOSE arrived: stop holding. */
-    void lanesDone() {
+    /**
+     * The close wait: CONNECTION_CLOSE is queued and held for coverage. The session keeps doing
+     * transport work meanwhile (acknowledgements, control, reinjection), only new data is refused.
+     */
+    boolean closeWait() {
+        return closePending && waitLanes;
+    }
+
+    /**
+     * The wait ended at t (covered, the peer's CONNECTION_CLOSE, or its bound): stop holding.
+     * CONNECTION_CLOSE then gets its own hand-off bound, {@link Session#closeLimit} from t (SPEC.md
+     * 6.5 step 1: the wait comes before the hand-off, it does not consume it).
+     */
+    void lanesDone(long t) {
+        if (!waitLanes) return;
         waitLanes = false;
+        handOff = Time.add(t, Session.closeLimit);
     }
 
     /** Every live outbound pipe took CONNECTION_CLOSE; linger until lingerUntil. */

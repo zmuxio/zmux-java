@@ -31,8 +31,11 @@ final class RecordReceiver {
         /** Applies one decoded frame. */
         void dispatch(Pipe p, Frame f, ReadBuf buf) throws WireException;
 
-        /** A PIPE_ACK while the session waits for its lanes before CONNECTION_CLOSE. */
-        void closingAck(Frame f);
+        /**
+         * A transport frame during the close wait (PIPE_ACK, PIPE_PING, PIPE_ABANDON, PIPE_STATUS,
+         * MAX_DATA, MAX_STREAM_DATA): applied as at any other time, an error ignored.
+         */
+        void closingFrame(Pipe p, Frame f, ReadBuf buf);
 
         void failLocal(WireException e);
 
@@ -117,7 +120,8 @@ final class RecordReceiver {
         if (p == null || p.in() == null) return;
         Pipe.InLane il = p.in().lane(lane);
         if (il == null || il.rx.ended) return;
-        if (closing()) {
+        // During the close wait records are still processed, as by receive: acknowledgements and the peer's close.
+        if (closing() && !(port.state() == SessionState.CLOSING && life.waitingLanes())) {
             if (port.state() == SessionState.CLOSING && lingerWatch(p, il) && holdsClose(data, pos, limit)) markClose(p);
             return;
         }
@@ -284,9 +288,13 @@ final class RecordReceiver {
             }
             if (f.kind == FrameKind.CONNECTION_CLOSE && il.lane == 0) p.in().readClose();
             if (closing()) {
-                // Waiting for lanes before CONNECTION_CLOSE: only acknowledgements and the peer's close matter.
-                if (f.kind == FrameKind.PIPE_ACK) port.closingAck(f);
-                if (f.kind == FrameKind.CONNECTION_CLOSE) life.lanesDone();
+                // The close wait: the record counts (it is acknowledged), acknowledgements and the peer's close apply;
+                // the streams failed at the close, so their frames are not applied.
+                switch (f.kind) {
+                    case PIPE_ACK, PIPE_PING, PIPE_ABANDON, PIPE_STATUS, MAX_DATA, MAX_STREAM_DATA -> port.closingFrame(p, f, buf);
+                    default -> { }
+                }
+                if (f.kind == FrameKind.CONNECTION_CLOSE) life.lanesDone(now);
                 pos += n;
                 idx++;
                 continue;

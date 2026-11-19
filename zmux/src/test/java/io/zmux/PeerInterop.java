@@ -172,17 +172,21 @@ class PeerInterop {
                         stream.finish(); assertEquals("dgram-done", new String(read(stream), StandardCharsets.UTF_8));
                     }
                     packets(session);
-                    try (var stream = session.openStream(Preamble.builder().openInfo("close:42:bye".getBytes(StandardCharsets.UTF_8)).build())) {
+                    // Multipath: the peer writes a tail and closes at once; its close must not overtake the tail on another pipe.
+                    String close = multipath ? "close-tail:42:" + TAIL : "close:42:bye";
+                    try (var stream = session.openStream(Preamble.builder().openInfo(close.getBytes(StandardCharsets.UTF_8)).build())) {
                         stream.finish();
                     }
+                    if (multipath) try (var tail = session.acceptStream(Duration.ofSeconds(10))) { assertEquals(TAIL, read(tail).length); }
                     var closed = assertInstanceOf(SessionError.ApplicationClosed.class, session.awaitClosed());
-                    assertEquals(42, closed.code()); assertEquals("bye", closed.reason()); assertTrue(closed.remote());
+                    assertEquals(42, closed.code()); assertEquals(multipath ? "" : "bye", closed.reason()); assertTrue(closed.remote());
                     child.expect("CLOSED"); child.awaitExit();
                 }
             }
             Leaks.none(loops, () -> io.zmux.internal.diag.Diagnostics.outstandingTrace(loops));
         }
     }
+    private static final int TAIL = 256 << 10;
     @Test void javaInitiates() throws Exception { run(true, false); }
     @Test void javaAccepts() throws Exception { run(false, false); }
     @Test void javaInitiatesMultipath() throws Exception { run(true, true); }

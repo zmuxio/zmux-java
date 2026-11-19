@@ -1135,13 +1135,15 @@ public final class ZmuxSession implements AutoCloseable {
 
     /**
      * Closes gracefully with an application error code and reason, which the peer sees as
-     * {@link SessionError.ApplicationClosed}: the data the streams have written and not yet sent
-     * is sent first, as far as flow control and the carriers allow, so that it reaches the peer
+     * {@link SessionError.ApplicationClosed}: the data, finishes and resets the streams have
+     * written and not yet sent are sent first, as far as flow control and the carriers allow, so that it reaches the peer
      * ahead of the code; then CONNECTION_CLOSE is handed to the carrier of every usable outbound
      * pipe (written to it; for a socket, taken into its send buffer). Open streams are not waited
      * for: they fail locally with the session's error. Returns once CONNECTION_CLOSE has been
-     * handed over, at once when no pipe can carry it, and at the latest after one second for the
-     * whole call, flushing included: what has not been handed over by then is discarded. Each
+     * handed over, at once when no pipe can carry it. Flush and hand-off take at most one second
+     * together; in a session where CONNECTION_CLOSE waits for the peer's acknowledgement of earlier records, that
+     * wait takes at most the linger timeout (at most two seconds), and the hand-off then takes at
+     * most one second from the wait's end: what has not been handed over by then is discarded. Each
      * pipe's write side is then shut down and its inbound side read until the peer ends it or the
      * linger timeout passes, in the background. The process may exit once it returned;
      * {@link #closed()} completes at the session's whole end.
@@ -1177,7 +1179,7 @@ public final class ZmuxSession implements AutoCloseable {
         CompletableFuture<Void> mine = new CompletableFuture<>();
         CompletableFuture<Void> first = ending.compareAndExchange(null, mine);
         if (first != null) {
-            if (driver.mayBlock()) awaitUninterruptibly(first, io.zmux.internal.core.Session.closeLimit);
+            if (driver.mayBlock()) awaitUninterruptibly(first, io.zmux.internal.core.Session.closeLimit + io.zmux.internal.core.Session.closeCeiling());
             return;
         }
         if (!driver.mayBlock()) {
@@ -1225,7 +1227,9 @@ public final class ZmuxSession implements AutoCloseable {
             return core.waitCloseHandedOff(o) ? true : Operation.PENDING;
         }, core::cancelCloseHandOffWait);
         op.submit();
-        if (!op.awaitUninterruptibly(deadline)) {
+        // The core bounds the coverage wait and then the hand-off (each from its own start); this
+        // ceiling only covers a loop that lags behind those bounds.
+        if (!op.awaitUninterruptibly(System.nanoTime() + io.zmux.internal.core.Session.closeCeiling())) {
             // The loop's own bound ends the close as well; this covers a loop that lags behind it.
             driver.post(endNow);
             op.awaitUninterruptibly(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50));

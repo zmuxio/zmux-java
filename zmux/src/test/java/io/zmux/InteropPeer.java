@@ -177,6 +177,15 @@ public final class InteropPeer {
                 case "schedule" -> { if (!arg.equals("round-robin")) throw new IOException("unknown policy"); session.setScheduler(Scheduler.SPREAD_ROUND_ROBIN); reply(stream, "scheduled"); }
                 case "drop-bootstrap" -> { session.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort(); reply(stream, "dropped"); }
                 case "goaway" -> { session.run(op -> { session.core.shutdown(Long.parseLong(arg), null); return true; }); read(stream); reply(stream, "draining"); }
+                case "tail" -> System.out.println("TAIL " + read(stream).length); // all before the peer's close
+                case "close-tail" -> {
+                    // Writes the bytes on a new stream and closes with the code at once.
+                    String[] close = arg.split(":", 2); read(stream);
+                    try (var tail = session.openStream()) {
+                        tail.write(new byte[close.length > 1 ? Integer.parseInt(close[1]) : 0]); tail.finish();
+                        session.close(Long.parseLong(close[0]), "");
+                    }
+                }
                 case "close" -> {
                     String[] close = arg.split(":", 2); read(stream);
                     if (closeReply) { reply(stream, "closing"); Thread.sleep(50); }
