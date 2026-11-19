@@ -35,6 +35,12 @@ class RedirectTest {
         /** The bytes after the head that a redirect waits for. */
         volatile int answerAfter;
         private final java.util.Set<java.net.Socket> open = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        /** The pass-through threads, by name, for a stall dump. */
+        private final java.util.Map<String, Thread> passing = new java.util.concurrent.ConcurrentHashMap<>();
+        /** The bytes passed through: from the client up, and from upstream down. */
+        final java.util.concurrent.atomic.AtomicLong upBytes = new java.util.concurrent.atomic.AtomicLong();
+        final java.util.concurrent.atomic.AtomicLong downBytes = new java.util.concurrent.atomic.AtomicLong();
+        private final java.util.concurrent.atomic.AtomicInteger conns = new java.util.concurrent.atomic.AtomicInteger();
 
         Front(URI upstream, int status, Function<String, String> location) throws Exception {
             server = new java.net.ServerSocket(0, 64, java.net.InetAddress.getLoopbackAddress());
@@ -72,14 +78,36 @@ class RedirectTest {
                 try (var up = new java.net.Socket(upstream.getHost(), upstream.getPort())) {
                     open.add(up);
                     up.getOutputStream().write(head.toByteArray());
-                    var t = Thread.ofVirtual().start(() -> { try { up.getInputStream().transferTo(s.getOutputStream()); } catch (java.io.IOException ignored) { } finally { try { s.close(); } catch (java.io.IOException ignored) { } } });
-                    try { in.transferTo(up.getOutputStream()); } catch (java.io.IOException ignored) { }
+                    int id = conns.incrementAndGet();
+                    var t = Thread.ofVirtual().name("front-down-" + id).unstarted(() -> { try { copy(up.getInputStream(), s.getOutputStream(), downBytes); } catch (java.io.IOException ignored) { } finally { try { s.close(); } catch (java.io.IOException ignored) { } } });
+                    passing.put(t.getName(), t);
+                    Thread.currentThread().setName("front-up-" + id);
+                    passing.put(Thread.currentThread().getName(), Thread.currentThread());
+                    t.start();
+                    try { copy(in, up.getOutputStream(), upBytes); } catch (java.io.IOException ignored) { }
                     try { up.shutdownOutput(); } catch (java.io.IOException ignored) { }
                     t.join(10_000);
                 }
             } catch (java.io.IOException | InterruptedException ignored) {
                 // Gone.
             }
+        }
+
+        /** Like transferTo, counting what it passed in n as it goes. */
+        private static void copy(java.io.InputStream in, java.io.OutputStream out, java.util.concurrent.atomic.AtomicLong n) throws java.io.IOException {
+            byte[] b = new byte[16384];
+            for (int r; (r = in.read(b, 0, b.length)) >= 0; ) {
+                out.write(b, 0, r);
+                n.addAndGet(r);
+            }
+        }
+
+        /** The front's counters and its pass-through threads' stacks, for a stall dump. */
+        String describe() {
+            var b = new StringBuilder("front ").append(base).append(" seen=").append(seen).append(" connections=").append(conns.get())
+                    .append(" upBytes=").append(upBytes.get()).append(" downBytes=").append(downBytes.get()).append('\n');
+            for (var t : passing.values()) b.append(Stall.stack(t));
+            return b.toString();
         }
 
         @Override public void close() throws IOException {
@@ -226,6 +254,7 @@ class RedirectTest {
     @Test void theModeCacheKeepsTheFinalUrl() throws Exception {
         try (var f = Fixture.plain(b -> b.streaming()); var c = f.client(b -> b.http1());
              var front = new Front(f.base, 308, u -> "/z")) {
+            f.diagnostics = front::describe;
             CarrierCache cache = new CarrierCache();
             var cand = c.streamingCandidate(front.base, Map.of());
             try (var s = Zmux.dial(CarrierChoice.auto(cand), f.config, CarrierChoicePolicy.of(cache, "k"))) {

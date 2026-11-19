@@ -65,18 +65,41 @@ final class Fixture implements AutoCloseable {
         return b.apply(x).build();
     }
 
+    /** What a stall dump adds for this fixture's exchanges (a proxy's state, say); null: nothing. */
+    volatile Supplier<String> diagnostics;
+
     /** One stream each way between client and the session the listener accepted. */
     void echo(ZmuxSession client) throws Exception {
         try (ZmuxSession s = listener.accept(Duration.ofSeconds(5))) {
             assertNotNull(s);
-            exchange(client, s, 200_000);
-            exchange(s, client, 300_000);
+            exchange(client, s, 200_000, diagnostics);
+            exchange(s, client, 300_000, diagnostics);
         }
     }
 
     static void exchange(ZmuxSession from, ZmuxSession to, int n) throws Exception {
+        exchange(from, to, n, null);
+    }
+
+    /** An exchange still under way after this long dumps its state (see {@link Stall}) and goes on. */
+    static final Duration STALL = Duration.ofSeconds(20);
+
+    /**
+     * One stream of n bytes from from to to. One that stalls past {@link #STALL}, or fails, dumps
+     * the threads, extra and both sessions' state to stderr; a failure is then rethrown as it was.
+     */
+    static void exchange(ZmuxSession from, ZmuxSession to, int n, Supplier<String> extra) throws Exception {
         byte[] data = new byte[n];
         new java.util.Random(n).nextBytes(data);
+        var sessions = java.util.Map.of("from", from, "to", to);
+        var done = new java.util.concurrent.CountDownLatch(1);
+        Thread watch = Thread.ofVirtual().name("stall-watch").start(() -> {
+            try {
+                if (!done.await(STALL.toMillis(), TimeUnit.MILLISECONDS)) Stall.dump("exchange of " + n + " bytes still under way after " + STALL, extra, sessions);
+            } catch (InterruptedException ignored) {
+                // Done.
+            }
+        });
         try (var ex = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             var st = from.openStream();
             var w = ex.submit(() -> { st.write(data); st.finish(); return null; });
@@ -86,6 +109,13 @@ final class Fixture implements AutoCloseable {
             }
             w.get(10, TimeUnit.SECONDS);
             st.close();
+        } catch (Exception | Error e) {
+            Stall.dump("exchange of " + n + " bytes failed: " + e, extra, sessions);
+            throw e;
+        } finally {
+            done.countDown();
+            watch.interrupt();
+            watch.join();
         }
     }
 
