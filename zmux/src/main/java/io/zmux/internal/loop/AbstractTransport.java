@@ -121,9 +121,8 @@ public abstract class AbstractTransport implements Transport {
     /** On the loop, not started: this carrier as a pipe input, its exporter and declaration kept. */
     final io.zmux.carrier.PipeIo asPipe() {
         Forwarded f = new Forwarded(this, null, false, false);
-        io.zmux.carrier.PipeIo io = f.pipe(info().applicationProtocol());
-        if (exporterPresent()) io = io.withExporter(this::export).withTerminatedTls(info().carrier().tls());
-        return isSecure() ? io.withCarrierSecure() : io;
+        boolean exporter = exporterPresent();
+        return f.pipe(exporter ? this::export : null, info().applicationProtocol(), "", exporter && info().carrier().tls(), null);
     }
 
     // ---- input ----

@@ -41,6 +41,8 @@ final class Forwarded implements Inbound {
     /** The target wrote: the carrier is no longer offered as a socket. */
     private boolean wrote;
     private PipeWriter.Completion pending;
+    /** A half's close or abort was called, on any thread; the carrier closed. */
+    private volatile boolean readerCalled, writerCalled, finished;
 
     /** Message carrier: input arrives as length-prefixed records, delivered one message per call. */
     private final boolean messages;
@@ -62,33 +64,75 @@ final class Forwarded implements Inbound {
         c.loop().onShutdown(shutdown);
     }
 
-    /** The carrier as a byte-stream pipe input. */
-    PipeIo pipe(String applicationProtocol) {
+    /**
+     * The carrier as a pipe input, its halves views of the carrier that forward its properties: the one place a
+     * takeover's view gets them ({@link #capabilities}). conn is the identity of its multi-stream connection.
+     */
+    PipeIo pipe(io.zmux.Admission.CarrierInfo info, Object conn) {
+        return pipe(info.exporter(), info.applicationProtocol(), info.serverName(), info.terminatedTls(), conn);
+    }
+
+    /** {@link #pipe(io.zmux.Admission.CarrierInfo, Object)} with the handshake's metadata given apart. */
+    PipeIo pipe(PipeIo.Exporter exporter, String protocol, String serverName, boolean terminatedTls, Object conn) {
         boolean in = (carrier.directions() & io.zmux.internal.core.Action.DIR_IN) != 0;
         boolean out = (carrier.directions() & io.zmux.internal.core.Action.DIR_OUT) != 0;
-        if (!in) readerClosed = true;
-        if (!out) writerClosed = true;
+        if (!in) { readerClosed = true; readerCalled = true; }
+        if (!out) { writerClosed = true; writerCalled = true; }
         PipeReader reader = !in ? null : new PipeReader() {
             @Override public void start(Sink s) {
                 if (!started.compareAndSet(false, true)) throw new IllegalStateException("reader already started");
                 if (!carrier.loop().tryExecute(() -> begin(s))) s.onError(new IOException("event loop closed"));
             }
 
-            @Override public void close() { carrier.loop().tryExecute(Forwarded.this::closeReader); }
+            @Override public void close() { readerCalled = true; carrier.loop().tryExecute(Forwarded.this::closeReader); }
         };
         PipeWriter writer = !out ? null : new PipeWriter() {
             @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
                 if (!carrier.loop().tryExecute(() -> write0(data, done))) done.failed(new IOException("event loop closed"));
             }
 
-            @Override public void close() { carrier.loop().tryExecute(Forwarded.this::closeWriter); }
+            @Override public java.util.OptionalLong unsent() { return count(carrier.unsent()); }
 
-            @Override public void abort(Throwable cause) { Forwarded.this.abort(cause); }
+            @Override public java.util.OptionalLong retransmitted() { return count(carrier.retransmitted()); }
+
+            @Override public void close() { writerCalled = true; carrier.loop().tryExecute(Forwarded.this::closeWriter); }
+
+            @Override public void abort(Throwable cause) { writerCalled = true; Forwarded.this.abort(cause); }
         };
-        PipeIo pio = PipeIo.of(reader, writer);
-        if (messages) pio = pio.withFraming(io.zmux.carrier.Framing.MESSAGES);
-        return applicationProtocol.isEmpty() ? pio : pio.withProtocol(applicationProtocol);
+        io.zmux.internal.core.CarrierInfo c = carrier.info().carrier();
+        return PipeIo.of(reader, writer).withFraming(messages ? io.zmux.carrier.Framing.MESSAGES : io.zmux.carrier.Framing.BYTE_STREAM)
+                .withLabel(c.label()).withCarrier(c.kind()).withVariant(c.variant()).withCarrierConn(conn)
+                .withCapabilities(capabilities(carrier, exporter, protocol, serverName, terminatedTls));
     }
+
+    /**
+     * What a view reports of the carrier's {@link PipeIo.Capabilities}: every capability but the lane opener, which
+     * runs zmux sessions on the carrier's connection, and with the view's own receive memory ({@link #AHEAD}: it
+     * copies its input). A capability added to PipeIo.Capabilities is forwarded here, or listed as not forwarded by
+     * the test that enumerates them (TakeoverCapabilitiesTest).
+     */
+    static PipeIo.Capabilities capabilities(Transport t, PipeIo.Exporter exporter, String protocol, String serverName, boolean terminatedTls) {
+        TransportInfo ti = t.info();
+        io.zmux.internal.core.CarrierInfo c = ti.carrier();
+        return PipeIo.Capabilities.builder()
+                .exporter(exporter)
+                .receiveMemory(AHEAD)
+                .applicationProtocol(protocol)
+                .serverName(serverName)
+                .fateGroup(ti.fateGroup())
+                .writeOverhead(c.writeOverhead())
+                .maxRecord(c.maxRecord())
+                .terminatedTls(terminatedTls)
+                .carrierSecure(t.isSecure())
+                .reportsFailure(c.ownFailure())
+                .handshakePadding(t.handshakePadding())
+                .build();
+    }
+
+    private static java.util.OptionalLong count(long n) { return n < 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(n); }
+
+    /** Whether every half of the view was closed (by the host, or by zmux), from any thread. */
+    boolean halvesClosed() { return finished || (readerCalled && writerCalled); }
 
     private void begin(PipeReader.Sink s) {
         if (closed || readerClosed) {
@@ -273,6 +317,7 @@ final class Forwarded implements Inbound {
     private void finish(Throwable cause) {
         if (closed || (cause == null && pending != null)) return;
         closed = true;
+        finished = true;
         carrier.loop().removeShutdownHook(shutdown);
         PipeWriter.Completion done = pending;
         pending = null;

@@ -147,6 +147,10 @@ public final class QuicServer implements AutoCloseable {
         return QuicClient.await(openPipeAsync(connection));
     }
 
+    /**
+     * Closes the endpoint and every connection on its socket, a connection whose taken-over stream the host detached
+     * included: they share the endpoint's socket and event loops, which end here.
+     */
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         for (QuicChannel connection : connections) ConnectionCarrier.close(connection);

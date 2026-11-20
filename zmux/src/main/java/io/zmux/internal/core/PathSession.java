@@ -107,6 +107,7 @@ final class PathSession implements PathLayer {
         for (Pipe pp : pipes.all()) {
             Attach a = new Attach(initiator, 2, 0, 0, 0, -1, Double.NaN, Attach.OUT_ACTIVE, Attach.IN_OPEN, false, now);
             if (cfg.firstPipeMode() != null) a.mode(cfg.firstPipeMode());
+            a.ownFailure(pp.ownFailure());
             joins.initialRtt(a, pp.id);
             pp.attach(a);
         }

@@ -186,14 +186,15 @@ public final class Admission {
 
 
     /**
-     * A verdict; skip and value apply to {@link AdmissionVerdict#ACCEPT} only. A skip outside the prefix
-     * is {@link AdmissionVerdict#CLOSE}.
+     * A verdict; skip applies to {@link AdmissionVerdict#ACCEPT} only, value to {@link AdmissionVerdict#ACCEPT} and
+     * {@link AdmissionVerdict#FALLBACK}. A skip outside the prefix is {@link AdmissionVerdict#CLOSE}.
      *
      * @param value the host's value for an accepted carrier, or null: zmux hands it on without
      *     looking at it to the {@link InboundTransform} ({@link InboundTransform.Context#admitted()})
      *     and to the session ({@link ZmuxSession#admitted()}) or pipe ({@link ZmuxPipe#admitted()})
      *     the carrier makes, and holds it until their state is released. Whether a join comes
-     *     from the session's client is the host's to decide: zmux compares no values
+     *     from the session's client is the host's to decide: zmux compares no values. On a
+     *     {@link AdmissionVerdict#FALLBACK} it is the host's routing of the carrier, {@link Takeover#value()}
      * @param need with {@link AdmissionVerdict#MORE}, the total prefix length asked for
      * @param variant a short label of the carrier for any verdict, one of a few constants of the
      *     host: counted in {@link ZmuxListener#variantStats()}, and on acceptance the pipe input's
@@ -214,6 +215,8 @@ public final class Admission {
         public static Decision accept(int skip) { return new Decision(AdmissionVerdict.ACCEPT, skip, null); }
         /** An accept carrying the host's value (null: none). */
         public static Decision accept(int skip, Object value) { return new Decision(AdmissionVerdict.ACCEPT, skip, value); }
+        /** A fallback carrying the host's value ({@link Takeover#value()}; null: none). */
+        public static Decision fallback(Object value) { return new Decision(AdmissionVerdict.FALLBACK, 0, value); }
         /** Asks for a prefix of need bytes. */
         public static Decision more(int need) { return new Decision(AdmissionVerdict.MORE, 0, null, need, ""); }
         /** This decision labelled v. */
@@ -230,11 +233,17 @@ public final class Admission {
      * The host's target of the carriers the admission hands back ({@link AdmissionVerdict#FALLBACK}, a prefix
      * {@link Builder#fallbackOnPeekTimeout} gave up on): {@link ListenerConfig#fallback()} takes every such carrier,
      * byte streams of the listener's sockets and of other entries, message-framed carriers (WebSocket after a
-     * deferred decision) and QUIC streams alike. serve runs off the event loops, once per carrier, and returns at
-     * once with a stage: the carrier is the host's until that stage completes (null: until serve returns), then zmux
-     * closes it. A serve that throws, and a stage that fails, close the carrier at once; neither reaches the
-     * listener. An HTTP request that is itself the carrier is answered by its HTTP adapter instead (see {@link
-     * io.zmux.adapter.ListenerAdapter#handleRequest}).
+     * deferred decision), QUIC streams and HTTP request carriers decided on the start of their body alike. serve runs
+     * off the event loops, once per carrier, and returns at once with a stage: the carrier is the host's until that
+     * stage completes (null: until serve returns), then zmux closes it unless the host called {@link Takeover#detach()}.
+     * A serve that throws, and a stage that fails, close the carrier at once unless it was detached; neither reaches
+     * the listener. That scope is the same at every entry point; nothing else cancels the stage. What an HTTP request
+     * is depends on the stage it is decided at: on its head ({@link Stage#HEAD}: an upgrade's head, an exchange
+     * request, a request without a body) it is a request, answered by its HTTP adapter (see {@link
+     * io.zmux.adapter.ListenerAdapter#handleRequest}); on the start of its body (a streaming or uplink request
+     * carrier) it is a carrier, taken over here as the full-duplex byte stream of its request body (in) and response
+     * body (out), the response head written by the adapter (its adapter answers it as a request only when the
+     * listener has no fallback).
      */
     @FunctionalInterface
     public interface Fallback {

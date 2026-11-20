@@ -31,9 +31,13 @@ final class Attach {
     private io.zmux.internal.join.Framing joinFraming;
     private boolean tpSkipped;
     private long suspectFloor;
+    /** The pipe's own dead timeout: 0 follows the carrier, then the session; negative: stall-based failure off. */
     private long deadTimeout;
-    /** What a pipe keeps from when it turned suspect, once the settings were replaced; -1: none. */
-    private long keptFloor = -1, keptDead = -1;
+    /** The carrier reports its own failure (CarrierInfo.ownFailure): its dead timeout defaults to off. */
+    private boolean ownFailure;
+    /** What a pipe keeps from when it turned suspect, once the settings were replaced (held: kept is set). */
+    private boolean keptHeld;
+    private long keptFloor, keptDead;
     /** The pipe's probe interval k, 0: off, -1: the session's; its probe jitter, NaN: the session's. */
     private long probeInterval;
     private double probeJitter;
@@ -148,10 +152,17 @@ final class Attach {
     long deadTimeout() { return deadTimeout; }
     long probeInterval() { return probeInterval; }
     double probeJitter() { return probeJitter; }
+    boolean ownFailure() { return ownFailure; }
+    void ownFailure(boolean on) { ownFailure = on; }
+    boolean keptHeld() { return keptHeld; }
     long keptFloor() { return keptFloor; }
     long keptDead() { return keptDead; }
 
-    void kept(long floor, long dead) { keptFloor = floor; keptDead = dead; }
+    /** Keeps the floor and the dead timeout in force (dead negative: off) while the pipe stays suspect. */
+    void kept(long floor, long dead) { keptHeld = true; keptFloor = floor; keptDead = dead; }
+
+    /** Drops what was kept. */
+    void unkept() { keptHeld = false; }
 
     /** Replaces the pipe's own liveness settings. */
     void liveness(long suspectFloor, long deadTimeout, long probeInterval, double probeJitter) {

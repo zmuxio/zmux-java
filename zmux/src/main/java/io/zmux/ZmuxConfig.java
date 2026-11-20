@@ -444,7 +444,7 @@ public final class ZmuxConfig {
         c.probeInterval(liveness.probeInterval().map(ZmuxConfig::nanos).orElse(0L)); c.probeJitter(liveness.probeJitter());
         c.redundancy(redundancy); c.latencyBudget(nanos(latencyBudget));
         c.suspectFloor(nanos(liveness.suspectFloor()));
-        liveness.deadTimeout().ifPresent(d -> c.deadTimeout(nanos(d)));
+        c.deadTimeout(liveness.deadTimeoutNanos());
         if (probation != null) c.probation(nanos(probation));
         if (isMultipath()) {
             c.resume(resumeTimeout == null ? 0 : nanos(resumeTimeout));

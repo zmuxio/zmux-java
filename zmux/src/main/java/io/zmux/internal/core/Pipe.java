@@ -291,4 +291,9 @@ final class Pipe {
 
     record Sample(long end, long sent, long delivered, long deliveredAt, long firstSentAt, long epoch,
                   boolean bubble, long queue, boolean probe) {}
+
+    /** Whether the pipe's carrier reports its own failure, as its first outbound lane says (CarrierInfo.ownFailure). */
+    boolean ownFailure() {
+        return out() != null && !out().lanes.isEmpty() && out().lanes.getFirst().st.info().ownFailure();
+    }
 }

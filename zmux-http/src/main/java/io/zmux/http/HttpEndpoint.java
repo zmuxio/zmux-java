@@ -38,6 +38,17 @@ import java.util.function.Supplier;
  * without an adapter, a request that is not a carrier, and one that its carrier's admission does
  * not accept goes on to the host's handler, with every body byte read replayed.
  *
+ * <p>What a {@link io.zmux.AdmissionVerdict#FALLBACK} hands on depends on the stage it is decided at. On a request's
+ * head ({@link io.zmux.Admission.Stage#HEAD}: a WebSocket upgrade's head, an exchange request, a request carrier
+ * without a body) it is a request, which goes to the host's handler. On the start of a streaming or uplink request
+ * carrier's body it is a carrier: the listener's {@link io.zmux.ListenerConfig#fallback()} takes it over as a
+ * {@link io.zmux.Takeover} whose pipe is the full-duplex byte stream of the request body (in, the bytes read
+ * replayed) and the response body (out), the response head ({@code 200}, as for an accepted carrier) written by the
+ * adapter; closing its sending half ends the response while the request body reads on, and the request ends once
+ * both halves are closed, by the host or, without a detach, by zmux. Only a listener without a fallback hands such a
+ * request to the host's handler. The exchange carrier is decided on each request's head, so a fallback of it is
+ * always a request.
+ *
  * <p>Every streaming and WebSocket carrier passes the listener's admission
  * ({@link ZmuxListener#admission()}); nothing is written before it is accepted. An exchange
  * carrier is authenticated per request by its {@link ExchangeConfig} PSK instead (the session's

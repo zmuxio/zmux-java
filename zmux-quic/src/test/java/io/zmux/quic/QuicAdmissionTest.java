@@ -102,6 +102,36 @@ class QuicAdmissionTest {
         }
     }
 
+    /**
+     * A stream the host detached leaves its connection to the host: zmux closes neither the stream when the fallback
+     * returns nor its connection (the client would end both on the stream's end); the host closes them itself.
+     */
+    @Test void aDetachedStreamLeavesItsConnectionToTheHost() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var config = ZmuxConfig.builder().eventLoops(loops).build();
+            var options = QuicOptions.defaults();
+            var taken = new CompletableFuture<Takeover>();
+            var lc = ListenerConfig.builder().session(config).fallback(t -> { assertTrue(t.detach()); taken.complete(t); return null; })
+                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> Admission.Decision.fallback(7)))
+                            .peekTimeout(Duration.ofSeconds(2)).build()).build();
+            try (var listener = Zmux.listener(lc);
+                 var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
+                 var endpoint = new QuicClient(TestTls.client, options)) {
+                var connecting = endpoint.connectAsync(server.address(), "localhost", config);
+                Takeover t = taken.get(10, TimeUnit.SECONDS);
+                assertEquals(7, t.value());
+                var quic = QuicTakeover.connection(t).orElseThrow();
+                Thread.sleep(300); // a carrier zmux still owned would be closed by now
+                assertTrue(quic.isActive(), "the detached stream and its connection are the host's");
+                t.pipe().reader().close();
+                t.pipe().writer().close();
+                ConnectionCarrier.close(quic);
+                quic.closeFuture().get(10, TimeUnit.SECONDS);
+                assertThrows(Exception.class, () -> connecting.get(10, TimeUnit.SECONDS));
+            }
+        }
+    }
+
     @Test void aClosedVerdictClosesTheConnection() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();

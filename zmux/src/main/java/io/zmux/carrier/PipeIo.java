@@ -199,6 +199,16 @@ public final class PipeIo {
      */
     public PipeIo withCarrierSecure() { return withCapabilities(capabilities.toBuilder().carrierSecure(true).build()); }
 
+    /**
+     * Declares that this carrier reports its own failure: when the path under it fails, its reads or writes fail (an
+     * error, a reset, an unexpected end), as a stream of an outer zmux session does when that session's liveness ends
+     * it ({@link io.zmux.ZmuxSession#openPipeStream}). Stall detection then never fails the pipe: a carrier queued behind
+     * a rate limit stalls without being dead, and its own end is the failure signal. The pipe still turns suspect and is
+     * avoided and probed while it stalls; the pipe's own {@link io.zmux.PipeLiveness.Builder#deadTimeout} overrides it.
+     * A transform may keep it when it fails whenever the carrier below it fails.
+     */
+    public PipeIo withReportsFailure() { return withCapabilities(capabilities.toBuilder().reportsFailure(true).build()); }
+
     /** The padding bytes a handshake run on the carrier before this input added; the session meters them. */
     public PipeIo withHandshakePadding(long bytes) { return withCapabilities(capabilities.toBuilder().handshakePadding(bytes).build()); }
 
@@ -252,7 +262,8 @@ public final class PipeIo {
         Capabilities caps = Capabilities.builder().exporter(exporter).receiveMemory(memory).applicationProtocol(uc.applicationProtocol())
                 .serverName(uc.serverName()).fateGroup(uc.fateGroup()).writeOverhead((upWrites ? uc : dc).writeOverhead()).maxRecord((upWrites ? uc : dc).maxRecord())
                 .terminatedTls(uc.isTerminatedTls() && dc.isTerminatedTls())
-                .carrierSecure(uc.isCarrierSecure() && dc.isCarrierSecure() && up != null && down != null).build();
+                .carrierSecure(uc.isCarrierSecure() && dc.isCarrierSecure() && up != null && down != null)
+                .reportsFailure(uc.reportsFailure() || dc.reportsFailure()).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
                 uplink.framing, uplink.label, same ? uplink.carrierConn : new Object(), caps, CarrierKind.SPLIT, uplink.variant,
                 null, null, null);
@@ -295,6 +306,7 @@ public final class PipeIo {
         private final int maxRecord;
         private final boolean terminatedTls;
         private final boolean secure;
+        private final boolean reportsFailure;
         private final long handshakePadding;
 
         private Capabilities(Builder b) {
@@ -308,6 +320,7 @@ public final class PipeIo {
             maxRecord = b.maxRecord;
             terminatedTls = b.terminatedTls;
             secure = b.secure;
+            reportsFailure = b.reportsFailure;
             handshakePadding = b.handshakePadding;
         }
 
@@ -326,6 +339,7 @@ public final class PipeIo {
             b.maxRecord = maxRecord;
             b.terminatedTls = terminatedTls;
             b.secure = secure;
+            b.reportsFailure = reportsFailure;
             b.handshakePadding = handshakePadding;
             return b;
         }
@@ -363,6 +377,9 @@ public final class PipeIo {
         /** See {@link PipeIo#withCarrierSecure}. */
         public boolean isCarrierSecure() { return secure; }
 
+        /** See {@link PipeIo#withReportsFailure}. */
+        public boolean reportsFailure() { return reportsFailure; }
+
         /** The padding bytes a handshake run on the carrier before this input added, which the session meters. */
         public long handshakePadding() { return handshakePadding; }
 
@@ -378,6 +395,7 @@ public final class PipeIo {
             private int maxRecord;
             private boolean terminatedTls;
             private boolean secure;
+            private boolean reportsFailure;
             private long handshakePadding;
 
             private Builder() {}
@@ -439,6 +457,8 @@ public final class PipeIo {
             public Builder terminatedTls(boolean on) { terminatedTls = on; return this; }
 
             public Builder carrierSecure(boolean on) { secure = on; return this; }
+
+            public Builder reportsFailure(boolean on) { reportsFailure = on; return this; }
 
             /**
              * The padding bytes a handshake run on the carrier before this input added.

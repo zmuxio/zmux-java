@@ -401,6 +401,7 @@ public final class Joins {
                 o.dir != 0 ? Attach.IN_JOINING : Attach.IN_NONE, o.dir != 1, port.now());
         a.startHandshake(o.mode, o.binding);
         a.group(o.group);
+        a.ownFailure((o.dir != 1 && o.out.ownFailure()) || (o.dir != 0 && o.in.ownFailure()));
         Tiers.initLocal(a, o);
         initialRtt(a, id);
         CarrierInfo info = o.dir != 1 ? o.out : o.in;
@@ -763,6 +764,7 @@ public final class Joins {
         Attach a = new Attach(false, j.direction(), j.fateGroup(), 0, 0, -1, Double.NaN, needOut ? Attach.OUT_ACTIVE : Attach.OUT_NONE,
                 needIn ? Attach.IN_OPEN : Attach.IN_NONE, needOut, port.now());
         a.mode(pj.mode);
+        a.ownFailure((c.hasOut() && c.out().ownFailure()) || (c.hasIn() && c.in().ownFailure()));
         a.usedGroup(pj.acceptor.joinerShare().group().id());
         Tiers.initPeer(a, j.priority(), j.standby());
         initialRtt(a, id);

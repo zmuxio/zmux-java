@@ -288,7 +288,8 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
      * only once it is accepted are the connection's other
      * streams handed to the listener, without a new admission. A connection that is not accepted is closed (after a stall, when the stalled
      * stream ends); one given back goes with that stream to the listener's fallback ({@link QuicTakeover#connection}),
-     * its other streams closed, and is closed once the fallback is done with the stream.
+     * its other streams closed, and is closed once the fallback is done with the stream, unless the host detached it
+     * ({@link io.zmux.Takeover#detach()}): the connection is then the host's.
      */
     // The handler comes from the listener adapter in another module, where the analyzer takes its result for null.
     @SuppressWarnings("ConstantValue")
@@ -314,9 +315,10 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             for (StreamCarrier stream : held) stream.dispose();
             held.clear();
             // A connection that carried no session closes with code 0.
-            // A stalled stream, and one taken over, end before the connection does.
+            // A stalled stream, and one taken over, end before the connection does; a stream the host detached
+            // leaves its connection to the host.
             if (verdict == io.zmux.AdmissionVerdict.STALL || verdict == io.zmux.AdmissionVerdict.FALLBACK)
-                admitted.closed().whenComplete((v, e) -> close(connection));
+                admitted.closed().whenComplete((v, e) -> { if (!admitted.detached()) close(connection); });
             else close(connection);
         }, () -> {}));
     }

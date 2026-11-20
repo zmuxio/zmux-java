@@ -198,10 +198,14 @@ final class Router extends ChannelInboundHandlerAdapter {
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
                 .whenComplete((no, e) -> refused.complete(Boolean.TRUE.equals(no)));
         a.verdict().whenComplete((v, e) -> Loops.run(ch.eventLoop(), () -> {
-            if (c.detached() || v == AdmissionVerdict.FALLBACK) return; // the fallback replays what was kept
+            // A request given back to the host's handler replays what was kept.
+            if (c.detached() || (v == AdmissionVerdict.FALLBACK && !a.takenOver())) return;
             verdict = v == null ? AdmissionVerdict.CLOSE : v;
             if (v != AdmissionVerdict.ACCEPT) c.keepNoMore();
-            else if (adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
+            // Taken over by the listener's fallback: the response head goes out, and the request and response bodies
+            // are the host's full-duplex byte stream until it closes both halves (detached or not).
+            if (v == AdmissionVerdict.FALLBACK) c.start();
+            else if (v == AdmissionVerdict.ACCEPT && adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
         }, NOTHING));
         a.taken().whenComplete((taken, e) -> Loops.run(ch.eventLoop(), () -> {
             if (c.detached() || !Boolean.TRUE.equals(taken)) return;
@@ -213,7 +217,8 @@ final class Router extends ChannelInboundHandlerAdapter {
     /**
      * Both halves of a streaming carrier are closed: a carrier the listener refused, with
      * nothing written, goes to the host's handler with every body byte replayed; otherwise the
-     * request ends (without a response when nothing was answered).
+     * request ends (without a response when nothing was answered). A carrier the listener's fallback took over ends
+     * here too, once its host closed both halves.
      */
     private void end(BodyCarrier c, HttpRequest r, boolean down, boolean refused) {
         if (c.detached()) return;
@@ -224,7 +229,7 @@ final class Router extends ChannelInboundHandlerAdapter {
             toHost(r, replay, requestEnded);
             return;
         }
-        if (verdict != AdmissionVerdict.ACCEPT) {
+        if (verdict != AdmissionVerdict.ACCEPT && verdict != AdmissionVerdict.FALLBACK) {
             // Stalled, closed or not decided: the request ends without a response.
             ch.close();
             return;

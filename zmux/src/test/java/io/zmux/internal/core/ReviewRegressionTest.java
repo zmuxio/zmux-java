@@ -108,7 +108,7 @@ class ReviewRegressionTest {
 
     private static Session withOverhead(CoreConfig.Role role, int over) {
         Session s = new Session(CoreConfig.builder().role(role).transportRole(role).build(), 0);
-        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false, null, null, "", over, "", 0);
+        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false, null, null, "", over, "", 0, false);
         s.attachBootstrap(info, info, null);
         return s;
     }

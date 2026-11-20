@@ -648,8 +648,14 @@ public final class ListenerHub {
         boolean start(Transport c, Admitted admitted);
     }
 
-    /** The outcome of a carrier's admission: a verdict code and an accept's value. */
-    public record Decided(int code, Object value) {}
+    /**
+     * The outcome of a carrier's admission: a verdict code, an accept's value, and the {@link io.zmux.Takeover} of a
+     * carrier the listener's fallback took over (null otherwise), whose {@link Handback#detached()} the adapter reads
+     * when the carrier closed.
+     */
+    public record Decided(int code, Object value, Handback takeover) {
+        public Decided(int code, Object value) { this(code, value, null); }
+    }
 
     private Admission.Decider decider;
     /** The listener's fallback: the target of every carrier given back (an HTTP request's excepted); null: none. */
@@ -776,8 +782,10 @@ public final class ListenerHub {
     }
 
     /** The admission verdict code: 0 for any accept. */
-    private static void report(CompletableFuture<Decided> verdict, int v, Object value) {
-        if (verdict != null) Callbacks.EXECUTOR.execute(() -> verdict.complete(new Decided(Math.min(v, 0), v >= 0 ? value : null)));
+    private static void report(CompletableFuture<Decided> verdict, int v, Object value) { report(verdict, v, value, null); }
+
+    private static void report(CompletableFuture<Decided> verdict, int v, Object value, Handback takeover) {
+        if (verdict != null) Callbacks.EXECUTOR.execute(() -> verdict.complete(new Decided(Math.min(v, 0), v >= 0 ? value : null, takeover)));
     }
 
     /**
@@ -870,6 +878,8 @@ public final class ListenerHub {
         final boolean messages;
         /** The first message is longer than {@link Admission#maxMessage()}: closed without a decision. */
         private boolean oversized;
+        /** The first message is empty: the carrier closes without a decision. */
+        private boolean empty;
         private boolean timedOut;
         private boolean decidingNow, done, paused, ended, graceful = true;
         private CompletableFuture<Admission.Decision> pending;
@@ -916,6 +926,8 @@ public final class ListenerHub {
                 oversized = true;
                 return true;
             }
+            // An empty first message is no prefix: a takeover could not replay it.
+            if (len == 0) empty = true;
             return seen.length >= sn + len;
         }
 
@@ -928,6 +940,7 @@ public final class ListenerHub {
                 c.pauseInput();
                 paused = true;
                 if (oversized) tooLarge();
+                else if (empty) abandon(counts.closed);
                 else decide();
             }
             return 0;
@@ -964,6 +977,7 @@ public final class ListenerHub {
             if (c.inputError() instanceof io.zmux.carrier.MessageTooLargeException) tooLarge();
             else if (!enough()) abandon(counts.closed);
             else if (oversized) tooLarge();
+            else if (empty) abandon(counts.closed);
             else decide();
         }
 
@@ -1077,10 +1091,15 @@ public final class ListenerHub {
             else carrier.redeliver();
         }
 
-        /** The target of a carrier given back: an HTTP request's own, or the listener's. */
+        /**
+         * The target of a carrier given back: a request decided on its head goes to the request's own (at the HTTP
+         * level); every carrier decided on its start, a request carrier's body included, to the listener's, and a
+         * request carrier to its request's own only when the listener has none.
+         */
         private Admission.Fallback target() {
-            boolean request = entry.request() && (entry.upgrade() == null || info.stage() == Admission.Stage.HEAD);
-            return request ? entry.requestFallback() : listenerFallback;
+            if (entry.request() && info.stage() == Admission.Stage.HEAD) return entry.requestFallback();
+            if (listenerFallback != null || !entry.request() || entry.upgrade() != null) return listenerFallback;
+            return entry.requestFallback();
         }
 
         /** Acts on the decision (null: none, a failure), on the carrier's loop. */
@@ -1150,13 +1169,16 @@ public final class ListenerHub {
             }
             (v == Admit.FALLBACK ? counts.fallback : counts.accepted).incrementAndGet();
             counts.variant(variant, v == Admit.FALLBACK ? Counts.FALLBACK : Counts.ACCEPTED);
-            report(verdict, v, value.value());
             if (v == Admit.FALLBACK) {
                 release(source);
                 // The bytes read stay in the read buffer (or, once the input ended, in seen).
-                forward(carrier, info, conn, target, ended ? seen : null, ended, graceful, messages);
+                Handback h = new Handback(carrier, info, conn, ended ? seen : null, ended, graceful, messages, d.value());
+                // The adapter learns of a takeover by the host (the listener's fallback), not of its own request fallback.
+                report(verdict, v, null, target == listenerFallback ? h : null);
+                serve(h, target);
                 return;
             }
+            report(verdict, v, value.value());
             if (ended) {
                 acceptEnded(v, graceful);
                 return;
@@ -1257,19 +1279,17 @@ public final class ListenerHub {
     }
 
     /**
-     * Hands a carrier that was not accepted to target as a {@link io.zmux.Takeover}, with replay
-     * (or what its read buffer holds) in front, off the loop; the carrier is closed when the
-     * stage target returned completes, at once when target throws or the stage fails.
+     * Hands a carrier that was not accepted to target as its {@link io.zmux.Takeover}, off the loop: the call lasts
+     * until the stage target returned completes (at once when target throws or the stage fails); the carrier is then
+     * closed unless the host detached it.
      */
-    private void forward(Transport c, Admission.CarrierInfo info, Object conn, Admission.Fallback target, byte[] replay,
-                         boolean ended, boolean graceful, boolean messages) {
-        Handback f = new Handback(c, info, conn, replay, ended, graceful, messages);
+    private void serve(Handback f, Admission.Fallback target) {
         Callbacks.EXECUTOR.execute(() -> {
             java.util.concurrent.CompletionStage<?> stage;
             try {
                 stage = target.serve(f);
             } catch (RuntimeException e) {
-                owner.log(System.Logger.Level.WARNING, "the listener's fallback failed; the carrier is closed", e);
+                owner.log(System.Logger.Level.WARNING, "the listener's fallback failed; the carrier is closed unless it was detached", e);
                 f.done(e);
                 return;
             }
@@ -1794,12 +1814,7 @@ public final class ListenerHub {
             var ci = c.info();
             boolean messages = ci.carrier().framing() == io.zmux.internal.core.Framing.RECORDS;
             view = new Forwarded(c, replay, ended, graceful, messages);
-            var caps = io.zmux.carrier.PipeIo.Capabilities.builder().exporter(info.exporter()).receiveMemory(Forwarded.AHEAD)
-                    .applicationProtocol(info.applicationProtocol()).serverName(info.serverName()).fateGroup(ci.fateGroup())
-                    .writeOverhead(ci.carrier().writeOverhead()).terminatedTls(info.terminatedTls()).carrierSecure(c.isSecure())
-                    .handshakePadding(c.handshakePadding()).build();
-            given = PipeIoAccess.get().withCarrierPeer(view.pipe(info.applicationProtocol()).withCapabilities(caps).withLabel(ci.carrier().label())
-                    .withCarrierConn(ci.connection()).withCarrier(ci.carrier().kind()).withVariant(v.variant()), c.carrierPeer());
+            given = PipeIoAccess.get().withCarrierPeer(view.pipe(info, ci.connection()).withVariant(v.variant()), c.carrierPeer());
             c.loop().onShutdown(shutdown);
             long due = Time.add(Clock.now(), owner.config().handshakeTimeout());
             c.loop().schedule(this, due);

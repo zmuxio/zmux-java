@@ -56,6 +56,7 @@ public final class AdapterPorts {
         private final CompletableFuture<Boolean> taken = new CompletableFuture<>();
         private final CompletableFuture<Void> closed = new CompletableFuture<>();
         private volatile Object value;
+        private volatile io.zmux.internal.loop.Handback takeover;
 
         /** The verdict; completed by the listener only. */
         public CompletionStage<AdmissionVerdict> verdict() { return verdict.minimalCompletionStage(); }
@@ -71,7 +72,16 @@ public final class AdapterPorts {
         public Object value() { return value; }
 
         /** Reports the verdict with the admission's value; the listener's side. */
-        public void decide(AdmissionVerdict v, Object admitted) { value = admitted; verdict.complete(v); }
+        public void decide(AdmissionVerdict v, Object admitted) { decide(v, admitted, null); }
+
+        /** Reports the verdict with the admission's value and the takeover of the listener's fallback (or null). */
+        public void decide(AdmissionVerdict v, Object admitted, io.zmux.internal.loop.Handback t) { value = admitted; takeover = t; verdict.complete(v); }
+
+        /** Whether the listener's fallback took the carrier over, once the verdict is decided. */
+        public boolean takenOver() { return takeover != null; }
+
+        /** Whether the host detached the carrier it took over. */
+        public boolean detached() { var t = takeover; return t != null && t.detached(); }
 
         /** Reports whether a session took the carrier; the listener's side. */
         public void taken(boolean t) { taken.complete(t); }

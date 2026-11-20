@@ -125,7 +125,7 @@ public final class ZmuxSession implements AutoCloseable {
     private static Liveness livenessOf(io.zmux.internal.core.CoreConfig.Live l) {
         Liveness.Builder b = Liveness.builder().suspectFloor(Duration.ofNanos(l.suspectFloor())).probeJitter(l.probeJitter());
         if (l.keepAlive() < 0) b.noKeepAlivePeriod(); else b.keepAlivePeriod(Duration.ofNanos(l.keepAlive()));
-        if (l.deadTimeout() > 0) b.deadTimeout(Duration.ofNanos(l.deadTimeout()));
+        if (l.deadTimeout() < 0) b.noDeadTimeout(); else if (l.deadTimeout() > 0) b.deadTimeout(Duration.ofNanos(l.deadTimeout()));
         if (l.standbyProbe() <= 0) b.noStandbyProbe(); else b.standbyProbe(Duration.ofNanos(l.standbyProbe()));
         if (l.probeInterval() <= 0) b.noProbeInterval(); else b.probeInterval(Duration.ofNanos(l.probeInterval()));
         return b.build();
@@ -142,7 +142,7 @@ public final class ZmuxSession implements AutoCloseable {
         var v = new io.zmux.internal.core.CoreConfig.Live(
                 l.keepAlivePeriod().map(ZmuxConfig::nanos).orElse(io.zmux.internal.core.CoreConfig.OFF),
                 ZmuxConfig.nanos(l.suspectFloor()),
-                l.deadTimeout().map(ZmuxConfig::nanos).orElse(0L),
+                l.deadTimeoutNanos(),
                 l.standbyProbe().map(ZmuxConfig::nanos).orElse(0L),
                 l.probeInterval().map(ZmuxConfig::nanos).orElse(0L),
                 l.probeJitter());

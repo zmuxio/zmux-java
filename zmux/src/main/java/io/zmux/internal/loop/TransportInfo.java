@@ -29,7 +29,8 @@ public record TransportInfo(CarrierInfo carrier, String applicationProtocol, Obj
         boolean messages = pipe.framing() == io.zmux.carrier.Framing.MESSAGES;
         return new TransportInfo(new CarrierInfo(messages ? io.zmux.internal.core.Framing.RECORDS : io.zmux.internal.core.Framing.BYTES,
                 false, false, caps.laneOpener() != null, false).withKind(pipe.carrier()).withLabel(pipe.label())
-                .withWriteOverhead(caps.writeOverhead()).withVariant(pipe.variant()).withMaxRecord(caps.maxRecord()), caps.applicationProtocol(), pipe.carrierConn(),
+                .withWriteOverhead(caps.writeOverhead()).withVariant(pipe.variant()).withMaxRecord(caps.maxRecord())
+                .withOwnFailure(caps.reportsFailure()), caps.applicationProtocol(), pipe.carrierConn(),
                 caps.receiveMemory(), caps.fateGroup());
     }
 }

@@ -134,20 +134,41 @@ final class PathHealth {
     /** Whether a's kept settings still apply: it has not left the suspicion they were kept for. */
     private static boolean kept(Attach a) {
         if (a.health.out == Attach.OUT_SUSPECT) return true;
-        a.kept(-1, -1);
+        a.unkept();
         return false;
     }
+
+    /** The suspicion floor of a: its own, else the session's. */
+    private long floorOf(Attach a) { return a.suspectFloor() > 0 ? a.suspectFloor() : cfg.suspectFloor(); }
+
+    /**
+     * The dead timeout of a (0: derived, negative: stall-based failure off): its own when set; else off on a carrier
+     * that reports its own failure; else the session's.
+     */
+    private long deadOf(Attach a) {
+        if (a.deadTimeout() != 0) return a.deadTimeout();
+        return a.ownFailure() ? -1 : cfg.deadTimeout();
+    }
+
+    /** The dead timeout in force for a: the one it turned suspect under while it is suspect and the settings changed. */
+    private long deadInForce(Attach a) { return kept(a) && a.keptHeld() ? a.keptDead() : deadOf(a); }
+
+    /**
+     * Whether a stall never fails p: its dead timeout in force is off. It still turns suspect, is avoided, reinjected
+     * and probed, and fails on its carrier's error or end, the drain deadline, removal and inbound silence.
+     */
+    boolean stallDeathOff(Pipe p) { return deadInForce(p.mp()) < 0; }
 
     /** Before the settings change: a suspect pipe keeps the values it turned suspect under. */
     void keepSuspect(Pipe p) {
         Attach a = p.mp();
-        if (a == null || !kept(a) || a.keptFloor() >= 0) return;
-        a.kept(a.suspectFloor() > 0 ? a.suspectFloor() : cfg.suspectFloor(), a.deadTimeout() > 0 ? a.deadTimeout() : cfg.deadTimeout());
+        if (a == null || !kept(a) || a.keptHeld()) return;
+        a.kept(floorOf(a), deadOf(a));
     }
 
     long tSuspect(Pipe p) {
         Attach a = p.mp();
-        long f = kept(a) && a.keptFloor() >= 0 ? a.keptFloor() : a.suspectFloor() > 0 ? a.suspectFloor() : cfg.suspectFloor();
+        long f = kept(a) && a.keptHeld() ? a.keptFloor() : floorOf(a);
         return Math.max(f, Time.mul(Time.add(metrics.pto(a), queueDelay(p)), 2));
     }
 
@@ -224,7 +245,8 @@ final class PathHealth {
 
     long tDead(Pipe p) {
         Attach a = p.mp();
-        long dt = kept(a) && a.keptDead() >= 0 ? a.keptDead() : a.deadTimeout() > 0 ? a.deadTimeout() : cfg.deadTimeout();
+        long dt = deadInForce(a);
+        if (dt < 0) return Time.NEVER;
         if (dt == 0) {
             if (feat.resume()) {
                 dt = tFail(p);
@@ -316,6 +338,7 @@ final class PathHealth {
                         }
                     }
                     case Attach.OUT_SUSPECT -> {
+                        if (stallDeathOff(p)) break;
                         long lim = otherActive(p) ? tFail(p) : tDead(p);
                         if (at(Time.add(stall, lim)) && apply) {
                             failPipe(p, TransportError.PIPE_FAILED, null);

@@ -438,6 +438,16 @@ probe interval and the idle probe interval and jitter. A pipe has its own
 `PipeOptions.Builder.liveness`, `PipeUpdate.Builder.liveness` and a pool
 decision's `withLiveness`; a setting it does not write follows the session's.
 
+`noDeadTimeout()` (on `Liveness.Builder` and `PipeLiveness.Builder`) turns
+stall-based failure off: a stalled pipe still turns suspect and traffic moves
+away from it (reinjection, probes), but only its carrier's error or end, its
+drain deadline, its removal or the inbound silence of a receive-only pipe fail
+it. It is off by default on carriers that report their own failure
+(`PipeIo.withReportsFailure()`), such as the nested-session carriers of
+`openPipeStream` and `ZmuxStream.asPipe`, whose outer session ends them when its
+path fails; a pipe's own dead timeout (a value or off) overrides that, and the
+carrier's report overrides the session's. Any large `deadTimeout` is safe.
+
 The idle probe interval (`probeInterval`, default 15 s, at least 1 s) is measured
 to the carrier: each probe waits a uniform draw from [k_eff(1 - j), k_eff] with
 k_eff = max(1 s, k - the pipe's longest shaping hold) and j the probe jitter
@@ -625,7 +635,7 @@ decide again on the carrier's first message), due within the peek timeout
 is cancelled and the carrier closed. `MORE` on a head or a message carrier, and
 `DEFER` anywhere but an upgrade's head, close the carrier. A first message above
 `maxMessage` closes the carrier without a decision (`tooLarge`), and so does one
-that fails or is not a binary message (`closed`).
+that fails, is not a binary message or is empty (`closed`).
 `Admission.Decider.immediate(...)` wraps a decision taken at once, and
 `PrefixAuth` provides a token decider. `listener.stats().admission()` counts
 the outcomes.
@@ -641,18 +651,47 @@ var config = ListenerConfig.builder()
 `ListenerConfig.fallback` receives every carrier the admission gives back,
 whatever entry took it: TCP and TLS carriers, WebSocket carriers decided after
 a `DEFER`, QUIC streams (`QuicTakeover.connection(t)` in zmux-quic gives the
-connection) and a host's own pipe inputs. The `Takeover` has the carrier's
-`info()` and `pipe()`, a `PipeIo` with what was read replayed in front (the
-first message whole, then the following ones, on a message carrier); a plain
-TCP carrier also offers `socket()`, its blocking `SocketChannel` with the bytes
-read, as long as the pipe view is unused. The carrier is the host's until the
-stage `serve` returned completes (null: when `serve` returns); zmux then closes
-it, at once when `serve` throws or the stage fails. Without a fallback a
+connection), HTTP request carriers decided on their body and a host's own pipe
+inputs. The `Takeover` has the carrier's `info()`, `value()` (the value of
+`Decision.fallback(value)`: one fallback per listener, the value routes the
+carrier to the host's service) and `pipe()`, a `PipeIo` with what was read
+replayed in front (the first message whole, then the following ones, on a
+message carrier, whose halves `messages()` also gives typed); the view keeps
+every property of the carrier (label, kind, variant, connection, the
+`PipeIo.Capabilities` but the lane opener, `unsent()`/`retransmitted()`). A
+plain TCP carrier also offers `socket()`, its blocking `SocketChannel` with the
+bytes read, as long as the pipe view is unused. The carrier is the host's until
+the stage `serve` returned completes (null: when `serve` returns), at every
+entry point alike; zmux then closes it, at once when `serve` throws or the
+stage fails, unless the host called `detach()` during the call: the carrier is
+then the host's for good, served after the stage completed and closed by the
+host (an adapter leaves its QUIC connection or HTTP request to the host too).
+Each half closes once, whoever closes it; `detach()` returns false for a
+carrier the host already closed and throws after the stage completed.
+
+```java
+.fallback(t -> {
+    if (!t.detach()) return null;                      // the host closed it already
+    var socket = t.socket();
+    if (socket.isPresent()) tunnels.hand(t.value(), socket.get());  // plain TCP: closed by the host
+    else if (t.messages().isPresent()) relays.hand(t.value(), t.messages().get());  // WebSocket
+    else streams.hand(t.value(), t.pipe());            // TLS, a QUIC stream, an HTTP request carrier, ...
+    return null;                                       // the carrier outlives the call
+})
+```
+
+Without a fallback a
 carrier given back stalls: nothing is sent, input is discarded, and the carrier
 closes after a duration that depends on its source alone and keeps its slot
 until then, or when the listener closes; a source keeps one slot free of
-stalls. An HTTP request that is itself the carrier is answered by its HTTP
-adapter rather than taken over (`handleRequest` below).
+stalls. What an HTTP request is depends on the stage it is decided at: on its
+head (an upgrade's head, an exchange request, a request without a body) it is
+a request, answered by its HTTP adapter (`handleRequest` below); on the start
+of its body (a streaming or uplink request carrier) it is a carrier, taken over
+by `ListenerConfig.fallback` as the full-duplex byte stream of its request body
+and response body, the response head written by the adapter (closing the
+pipe's writer ends the response while the request body reads on); only a
+listener without a fallback hands it to the HTTP adapter's host handler.
 
 `Admission.Decision.accept(skip, value)` attaches a host value to the carrier:
 `session.admitted()` returns the value of the carrier the session started on
@@ -705,7 +744,10 @@ the peek timeout and while the listener runs (`peekTimedOut`, `closed`,
 `handshakeFailed` otherwise), and decides again; a head given back goes to
 `headFallback`. Other carriers go to `listener.adapter().handle(io, hint)`.
 `Handled` has the final verdict and whether a session took the carrier
-(`taken()`: false when the listener refused it, having written nothing). What
+(`taken()`: false when the listener refused it, having written nothing);
+`takenOver()` and `detached()` say whether the listener's fallback took it over
+and its host detached it, in which case the adapter leaves what the carrier
+runs on (a connection, a request) to the host. What
 only such an adapter or an own accept loop needs (`reserve` and the `Slot` it
 returns, `handle`, `handleRequest`, `admitFirst`,
 `knownJoin`, `stallDuration`, `countSetupFailure`, `firstRecordTimeout`,

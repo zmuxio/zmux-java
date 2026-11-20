@@ -132,6 +132,7 @@ public record CoreConfig(
 
         public long keepAlive() { return keepAlive; }
         public long suspectFloor() { return suspectFloor; }
+        /** The dead timeout: 0 derived, negative stall-based failure off. */
         public long deadTimeout() { return deadTimeout; }
         public long standbyProbe() { return standbyProbe; }
         public long probeInterval() { return probeInterval; }

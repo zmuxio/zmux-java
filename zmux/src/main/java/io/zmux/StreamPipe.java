@@ -116,7 +116,9 @@ final class StreamPipe {
                 releaseIfClosed();
             }); }
         };
-        return PipeIo.of(reader, writer).withCarrierConn(stream.session.driver).withLaneOpener(this::openLane);
+        // The stream fails (a reset, the outer session's end) when its path fails, so a stall behind the outer
+        // session's queues or rate limits never fails the nested pipe.
+        return PipeIo.of(reader, writer).withCarrierConn(stream.session.driver).withLaneOpener(this::openLane).withReportsFailure();
     }
 
     private boolean post(Runnable task) { return stream.session.driver.executeCarrier(task); }

@@ -204,7 +204,7 @@ public final class ZmuxListener implements AutoCloseable {
             case ListenerHub.Admit.STALL -> AdmissionVerdict.STALL;
             case ListenerHub.Admit.CLOSE -> AdmissionVerdict.CLOSE;
             default -> AdmissionVerdict.ACCEPT;
-        }, d.value()));
+        }, d.value(), d.takeover()));
         try {
             String protocol = io.capabilities().applicationProtocol();
             if (!acceptsProtocol(protocol)) {

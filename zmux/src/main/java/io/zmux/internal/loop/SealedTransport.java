@@ -66,7 +66,7 @@ public final class SealedTransport implements Transport, Inbound {
         // The carrier's own record limit holds for the sealed record it carries.
         return new CarrierInfo(Framing.RECORDS, false, c.minRtt(), false, c.queueBound(), null, c.kind(), c.label(),
                 Math.min(overhead, io.zmux.carrier.PipeIo.MAX_WRITE_OVERHEAD), c.variant(),
-                c.maxRecord() > 0 ? Math.min(c.maxRecord() - seal, MAX_RECORD) : MAX_RECORD);
+                c.maxRecord() > 0 ? Math.min(c.maxRecord() - seal, MAX_RECORD) : MAX_RECORD, c.ownFailure());
     }
 
     @Override public TransportInfo info() { return info; }

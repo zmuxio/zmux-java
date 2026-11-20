@@ -105,7 +105,7 @@
       <Class name="~io\.zmux\.SessionError\$(PipesLost|ResumeTimeout)"/>
       <Class name="~io\.zmux\.SessionEvent\$PipesRetired"/>
       <Class name="~io\.zmux\.StreamDatagram"/>
-      <Class name="~io\.zmux\.Takeover\$Socket"/>
+      <Class name="~io\.zmux\.Takeover\$(Socket|Messages)"/>
       <Class name="~io\.zmux\.ZmuxPipe"/>
       <Class name="~io\.zmux\.carrier\.PipeIo"/>
       <Class name="~io\.zmux\.seal\.EstablishClient\$Reply"/>

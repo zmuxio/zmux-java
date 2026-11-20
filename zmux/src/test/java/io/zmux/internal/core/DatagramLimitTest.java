@@ -16,7 +16,7 @@ class DatagramLimitTest {
         l.present |= TransportParams.DATAGRAM;
         l.maxDatagramFrameSize = 65535;
         Session s = new Session(c.build(), 0);
-        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true, null, null, null, 0, "", maxRecord);
+        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true, null, null, null, 0, "", maxRecord, false);
         s.attachBootstrap(info, info, null);
         return s;
     }

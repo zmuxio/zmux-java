@@ -162,4 +162,51 @@ class WebSocketTakeoverTest {
                     + st.peekTimedOut() + st.handshakeFailed());
         }
     }
+
+    /**
+     * A WebSocket carrier the host detached outlives the fallback: the host answers on it after the fallback returned,
+     * through its typed message halves, and the connection closes only once the host closes the carrier.
+     */
+    @Test void aDetachedWebSocketIsServedAfterTheFallbackReturned() throws Exception {
+        Admission.Decider decider = Admission.Decider.immediate((info, prefix) -> info.stage() == Admission.Stage.HEAD
+                ? new Admission.Decision(AdmissionVerdict.DEFER, 0) : Admission.Decision.fallback("tunnel"));
+        var taken = new LinkedBlockingQueue<Takeover>();
+        try (var f = new Fixture(b -> b, b -> b.admission(Admission.builder(0, decider).peekTimeout(java.time.Duration.ofSeconds(10)).build())
+                .fallback(t -> { assertTrue(t.detach()); taken.add(t); return null; }), b -> b.webSocket(), false, null)) {
+            var c = Client.open(WebSocketTest.ws(f.base));
+            c.sendOnly("TUN1 open");
+            Takeover t = taken.poll(5, TimeUnit.SECONDS);
+            assertNotNull(t);
+            assertEquals("tunnel", t.value());
+            Takeover.Messages m = t.messages().orElseThrow();
+            Thread.sleep(200); // the fallback has returned: a carrier it did not detach would be closed by now
+            var got = new LinkedBlockingQueue<String>();
+            m.reader().start(new PipeReader.Sink() {
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
+                    ByteBuffer b = chunk.buffer();
+                    byte[] x = new byte[b.remaining()];
+                    b.get(x);
+                    chunk.close();
+                    consumed.run();
+                    got.add(new String(x, StandardCharsets.US_ASCII));
+                }
+                @Override public void onEnd() { got.add("end"); }
+                @Override public void onError(Throwable cause) { got.add("error"); }
+            });
+            assertEquals("TUN1 open", got.poll(5, TimeUnit.SECONDS), "the first message, replayed");
+            var wrote = new CompletableFuture<Void>();
+            m.writer().write(OutboundBatch.of(ByteBuffer.wrap("late".getBytes(StandardCharsets.US_ASCII))), new PipeWriter.Completion() {
+                @Override public void completed() { wrote.complete(null); }
+                @Override public void failed(Throwable cause) { wrote.completeExceptionally(cause); }
+            });
+            wrote.get(5, TimeUnit.SECONDS);
+            assertEquals("late", c.receive(), "answered after the fallback returned");
+            c.sendOnly("x");
+            assertEquals("x", got.poll(5, TimeUnit.SECONDS), "the host reads on");
+            m.reader().close();
+            m.writer().close();
+            assertEquals("close", c.receive(), "closed once the host closed it");
+            c.socket().close();
+        }
+    }
 }

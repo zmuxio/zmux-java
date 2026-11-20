@@ -1,6 +1,8 @@
 package io.zmux;
 
 import io.zmux.carrier.PipeIo;
+import io.zmux.carrier.PipeReader;
+import io.zmux.carrier.PipeWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.Objects;
@@ -9,27 +11,53 @@ import java.util.Optional;
 /**
  * A carrier the admission hands to the host ({@link ListenerConfig#fallback()}): on {@link AdmissionVerdict#FALLBACK},
  * or on a prefix {@link Admission.Builder#fallbackOnPeekTimeout} gave up on. What was read of it is replayed: the
- * bytes of a byte stream, the first message of a message-framed carrier (always a whole binary message: a carrier
- * whose first message fails is closed without a decision). The carrier is the host's until the stage its
- * {@link Admission.Fallback} returned completes; zmux then closes it.
+ * bytes of a byte stream, the first message of a message-framed carrier (always a whole, non-empty binary message: a
+ * carrier whose first read fails or returns an empty message is closed without a decision).
  *
- * <p>Two views share one replay, and the host uses one of them: {@link #pipe()} for every carrier, {@link #socket()}
- * for a plain TCP carrier. Once the pipe's reader started or it wrote, the socket view is no longer offered; once the
- * socket view was taken, the pipe's halves fail.
+ * <p>The carrier is the host's for the call of {@link Admission.Fallback#serve}, which lasts until the stage it
+ * returned completes (until it returns, for a null stage), at every entry point alike: zmux neither cancels that
+ * stage nor ends the carrier while it runs, except when the event loop the carrier runs on shuts down. When the stage
+ * completes zmux closes the carrier, unless the host called {@link #detach()} during the call: the carrier, and what
+ * an adapter runs it on (the QUIC connection of a stream, the HTTP request of a request carrier), is then the host's
+ * for good, to serve on any thread after the stage completed and to close once done.
+ *
+ * <p>Two views share one replay, and the host uses one of them: {@link #pipe()} for every carrier (with
+ * {@link #messages()} as its typed form on a message-framed carrier), {@link #socket()} for a plain TCP carrier. Once
+ * the pipe's reader started or it wrote, the socket view is no longer offered; once the socket view was taken, the
+ * pipe's halves fail. Each half is closed once, whoever closes it: the host, or zmux when the stage completes without
+ * a detach; a half the host closed is not closed again.
  */
 public interface Takeover {
     /** The carrier's metadata, as the decider saw it last. */
     Admission.CarrierInfo info();
 
     /**
+     * The {@link Admission.Decision#value()} of the {@link AdmissionVerdict#FALLBACK} that handed the carrier over
+     * ({@link Admission.Decision#fallback(Object)}), null without one or after
+     * {@link Admission.Builder#fallbackOnPeekTimeout}: the host's routing of the carrier, as an accepted carrier's value
+     * is its session's.
+     */
+    Object value();
+
+    /**
      * The carrier as a pipe input with what was read replayed in front of its input: with
      * {@link io.zmux.carrier.Framing#MESSAGES} its reader delivers the first message again first, then the
      * messages that follow. The host uses it as zmux uses a pipe input: it starts the reader once, has at most one
-     * write in flight, and closes (or aborts) each half once. Its sink and write completions run on a zmux event
-     * loop and must not block. The application protocol, and the identity of the carrier's multi-stream connection
-     * ({@link PipeIo#carrierConn()}, a QUIC connection), are the carrier's. The same view on every call.
+     * write in flight, and closes (or aborts) each half once; closing the sending half alone half-closes the
+     * carrier, and its receiving half reads on to the end. Its sink and write completions run on a zmux event loop
+     * and must not block. It carries the carrier's own properties: its label, kind, variant, the identity of its
+     * multi-stream connection ({@link PipeIo#carrierConn()}, a QUIC connection), and every capability of
+     * {@link PipeIo.Capabilities} but the lane opener (lanes run zmux sessions); its writer reports the carrier's
+     * {@link PipeWriter#unsent()} and {@link PipeWriter#retransmitted()}. The same view on every call.
      */
     PipeIo pipe();
+
+    /**
+     * The halves of a message-framed carrier ({@link io.zmux.carrier.Framing#MESSAGES}, a WebSocket), the halves of
+     * {@link #pipe()}: each chunk the reader delivers is one whole message, the first message again first, and each
+     * record of a write is one message. Empty for a byte stream.
+     */
+    Optional<Messages> messages();
 
     /**
      * The carrier as its socket, for a plain TCP carrier whose pipe view is untouched: the channel, in blocking mode
@@ -40,9 +68,29 @@ public interface Takeover {
     default Optional<Socket> socket() { return Optional.empty(); }
 
     /**
+     * Makes the carrier the host's: zmux does not close it when the fallback's stage completes and never touches it
+     * again, and its adapter leaves what it runs on to the host; the host must close it once done. It is called during
+     * the fallback, which may then hand the carrier to another thread and complete its stage. A second call returns
+     * true.
+     *
+     * @return true when the carrier is the host's; false when the host already closed it (every half of the pipe view,
+     *     or the socket view's channel), so there is nothing to detach
+     * @throws IllegalStateException after the fallback's stage completed without a detach: zmux has closed the carrier
+     */
+    boolean detach();
+
+    /**
+     * The message halves of a {@link Takeover}; a half the carrier does not have is null.
+     *
+     * @param reader delivers one whole message per chunk
+     * @param writer writes each record of a batch as one message
+     */
+    record Messages(PipeReader reader, PipeWriter writer) {}
+
+    /**
      * The socket view of a {@link Takeover}.
      *
-     * @param channel the carrier's socket, blocking; zmux closes it when the fallback's stage completes
+     * @param channel the carrier's socket, blocking; zmux closes it when the fallback's stage completes without a detach
      * @param replay the bytes read before the decision, read-only, to be read before the channel's own
      */
     record Socket(SocketChannel channel, ByteBuffer replay) {

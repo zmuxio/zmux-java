@@ -149,7 +149,7 @@ class AckSimTest {
 
     /** Sends one stream from client to server over c and reports the client's estimates. */
     static Result run(Cfg c) throws Exception {
-        CarrierInfo info = new CarrierInfo(c.framing(), false, false, false, c.queueBound(), null, null, "", 0, "", c.maxRecord());
+        CarrierInfo info = new CarrierInfo(c.framing(), false, false, false, c.queueBound(), null, null, "", 0, "", c.maxRecord(), false);
         long t0 = Time.SECOND;
         Link up = new Link(c.rate(), c.rtt() / 2), down = new Link(c.rate(), c.rtt() / 2);
         if (c.seed() != 0) {

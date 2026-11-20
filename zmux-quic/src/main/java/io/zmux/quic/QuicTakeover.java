@@ -8,7 +8,8 @@ import java.util.Optional;
  * The QUIC side of a {@link Takeover}: a QUIC stream the listener's admission gave back
  * ({@link io.zmux.ListenerConfig#fallback()}) belongs to a connection that the host serves along
  * with it. The connection's other streams were closed, and zmux closes the connection once the
- * fallback is done with the stream.
+ * fallback is done with the stream, unless the host detached the takeover ({@link Takeover#detach()}): the
+ * connection is then the host's to close.
  */
 public final class QuicTakeover {
     private QuicTakeover() {}

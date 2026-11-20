@@ -37,6 +37,20 @@ public final class Handled {
     public ZmuxFuture<Void> closed() { return Spi.future(carrier.closed(), null); }
 
     /**
+     * Whether the listener's fallback ({@link io.zmux.ListenerConfig#fallback()}) took the carrier over as a
+     * {@link io.zmux.Takeover}, once {@link #verdict()} completed with {@link AdmissionVerdict#FALLBACK}; false for a
+     * request given back to its adapter's own fallback.
+     */
+    public boolean takenOver() { return carrier.takenOver(); }
+
+    /**
+     * Whether the host detached the carrier it took over ({@link io.zmux.Takeover#detach()}): the adapter then leaves
+     * what the carrier runs on (its QUIC connection, its HTTP request) to the host instead of ending it with the
+     * carrier. Final once {@link #closed()} completed, since a detach precedes zmux's own close of the carrier.
+     */
+    public boolean detached() { return carrier.detached(); }
+
+    /**
      * Hands over a further carrier of the connection this carrier's admission accepted (a
      * further stream of a QUIC connection, admitted by its first): it takes its own source
      * slot and is classified like this one, without being decided again. Only after an
