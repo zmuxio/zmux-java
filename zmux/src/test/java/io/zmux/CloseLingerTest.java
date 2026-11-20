@@ -96,19 +96,27 @@ class CloseLingerTest {
             io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
             try {
                 for (boolean whole : new boolean[] {false, true}) {
-                    long worst = 0;
+                    long[] took = new long[100];
                     for (int i = 0; i < 105; i++) {
                         var l = link(cfg, whole, w -> w);
                         long t0 = System.nanoTime();
                         l.client().close(0x2a, "bye");
                         awaitClosed(l, 5_000);
-                        long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+                        long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
                         assertTrue(l.bothClosed(), "carriers closed, whole=" + whole + " round " + i);
-                        if (i >= 5) worst = Math.max(worst, took);
+                        if (i >= 5) took[i - 5] = ms;
                         assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", true), l.server().closed().get(5, TimeUnit.SECONDS));
                         assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", false), l.client().closed().get(5, TimeUnit.SECONDS));
                     }
-                    assertTrue(worst < 100, "worst close " + worst + " ms, whole=" + whole);
+                    // Ending at once, not on a timer: the typical close is
+                    // immediate, and none reaches the next timer the close
+                    // path has, the 1 s hand-off limit (the linger is 30 s).
+                    // A bound on the worst round alone would measure the
+                    // host's scheduling stalls.
+                    java.util.Arrays.sort(took);
+                    long p95 = took[94], worst = took[99];
+                    assertTrue(p95 < 100 && worst < 500,
+                            "close p95 " + p95 + " ms, worst " + worst + " ms, whole=" + whole);
                 }
             } finally {
                 io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
