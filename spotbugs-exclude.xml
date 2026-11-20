@@ -105,6 +105,7 @@
       <Class name="~io\.zmux\.SessionError\$(PipesLost|ResumeTimeout)"/>
       <Class name="~io\.zmux\.SessionEvent\$PipesRetired"/>
       <Class name="~io\.zmux\.StreamDatagram"/>
+      <Class name="~io\.zmux\.Takeover\$Socket"/>
       <Class name="~io\.zmux\.ZmuxPipe"/>
       <Class name="~io\.zmux\.carrier\.PipeIo"/>
       <Class name="~io\.zmux\.seal\.EstablishClient\$Reply"/>
@@ -188,6 +189,7 @@
       <Class name="io.zmux.internal.loop.TlsTransport"/>
       <And><Class name="io.zmux.ZmuxFuture"/><Method name="discard"/></And>
       <And><Class name="io.zmux.internal.loop.ListenerHub"/><Method name="closeQuietly"/></And>
+      <And><Class name="io.zmux.internal.loop.Handback"/><Method name="closeSocket"/></And>
     </Or>
   </Match>
 
