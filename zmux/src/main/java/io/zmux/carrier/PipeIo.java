@@ -205,7 +205,8 @@ public final class PipeIo {
      * it ({@link io.zmux.ZmuxSession#openPipeStream}). Stall detection then never fails the pipe: a carrier queued behind
      * a rate limit stalls without being dead, and its own end is the failure signal. The pipe still turns suspect and is
      * avoided and probed while it stalls; the pipe's own {@link io.zmux.PipeLiveness.Builder#deadTimeout} overrides it.
-     * A transform may keep it when it fails whenever the carrier below it fails.
+     * A transform may keep it when it fails whenever the carrier below it fails; {@link #split} keeps it only when both
+     * halves report it.
      */
     public PipeIo withReportsFailure() { return withCapabilities(capabilities.toBuilder().reportsFailure(true).build()); }
 
@@ -263,7 +264,8 @@ public final class PipeIo {
                 .serverName(uc.serverName()).fateGroup(uc.fateGroup()).writeOverhead((upWrites ? uc : dc).writeOverhead()).maxRecord((upWrites ? uc : dc).maxRecord())
                 .terminatedTls(uc.isTerminatedTls() && dc.isTerminatedTls())
                 .carrierSecure(uc.isCarrierSecure() && dc.isCarrierSecure() && up != null && down != null)
-                .reportsFailure(uc.reportsFailure() || dc.reportsFailure()).build();
+                // Both halves must report it: a plain half (a raw connection) can stall silently beside one that does.
+                .reportsFailure(uc.reportsFailure() && dc.reportsFailure()).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
                 uplink.framing, uplink.label, same ? uplink.carrierConn : new Object(), caps, CarrierKind.SPLIT, uplink.variant,
                 null, null, null);

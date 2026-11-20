@@ -445,7 +445,8 @@ drain deadline, its removal or the inbound silence of a receive-only pipe fail
 it. It is off by default on carriers that report their own failure
 (`PipeIo.withReportsFailure()`), such as the nested-session carriers of
 `openPipeStream` and `ZmuxStream.asPipe`, whose outer session ends them when its
-path fails; a pipe's own dead timeout (a value or off) overrides that, and the
+path fails (a `PipeIo.split` carrier only when both halves report it); a
+pipe's own dead timeout (a value or off) overrides that, and the
 carrier's report overrides the session's. Any large `deadTimeout` is safe.
 
 The idle probe interval (`probeInterval`, default 15 s, at least 1 s) is measured

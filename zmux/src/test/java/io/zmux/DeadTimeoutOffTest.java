@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.loop.SealedTransport;
 import io.zmux.internal.loop.TransportInfo;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
@@ -75,8 +76,22 @@ class DeadTimeoutOffTest {
         assertFalse(TransportInfo.of(plain).carrier().ownFailure());
         assertTrue(plain.withReportsFailure().withLabel("x").withHalves(plain.reader(), plain.writer()).capabilities().reportsFailure(),
                 "kept through the with methods");
+    }
+
+    /** A split reports its own failure only when both halves do; the core and Sealed records see the same. */
+    @Test void aSplitReportsItsOwnFailureOnlyWhenBothHalvesDo() {
         PipeIo[] a = MemoryPipe.pair(Framing.BYTE_STREAM), b = MemoryPipe.pair(Framing.BYTE_STREAM);
-        PipeIo up = a[0].withHalves(null, a[0].writer()).withReportsFailure(), down = b[0].withHalves(b[0].reader(), null);
-        assertTrue(PipeIo.split(up, down).capabilities().reportsFailure(), "either half of a split reports it");
+        PipeIo up = a[0].withHalves(null, a[0].writer()), down = b[0].withHalves(b[0].reader(), null);
+        assertSplit(up.withReportsFailure(), down, false, "a plain downlink keeps stall death");
+        assertSplit(up, down.withReportsFailure(), false, "a plain uplink keeps stall death");
+        assertSplit(up.withReportsFailure(), down.withReportsFailure(), true, "both halves report it");
+    }
+
+    private static void assertSplit(PipeIo up, PipeIo down, boolean want, String what) {
+        PipeIo split = PipeIo.split(up, down);
+        assertEquals(want, split.capabilities().reportsFailure(), what);
+        assertEquals(want, TransportInfo.of(split).carrier().ownFailure(), what + ", the core");
+        assertEquals(want, SealedTransport.sealedInfo(TransportInfo.of(split).carrier()).ownFailure(), what + ", Sealed");
+        assertEquals(want, split.withLabel("x").capabilities().reportsFailure(), what + ", a view");
     }
 }
