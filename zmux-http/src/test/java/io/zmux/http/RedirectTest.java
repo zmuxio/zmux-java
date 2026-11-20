@@ -27,6 +27,9 @@ class RedirectTest {
      * A front on its own port: a request whose target starts with /old is answered with status
      * and the Location location gives for the target, and the connection closed; any other
      * connection is passed through to upstream as it is.
+     * A connection passes through on platform threads: one reads the client socket while another
+     * writes it, and a virtual thread blocked in such a write on Windows may never be woken (the
+     * JDK registers the socket with a read and a write poller, and the write readiness can be lost).
      */
     static final class Front implements AutoCloseable {
         final java.net.ServerSocket server;
@@ -50,7 +53,7 @@ class RedirectTest {
                     java.net.Socket s;
                     try { s = server.accept(); } catch (java.io.IOException e) { return; }
                     open.add(s);
-                    Thread.ofVirtual().start(() -> serve(s, upstream, status, location));
+                    Thread.ofPlatform().daemon().start(() -> serve(s, upstream, status, location));
                 }
             });
         }
@@ -79,7 +82,7 @@ class RedirectTest {
                     open.add(up);
                     up.getOutputStream().write(head.toByteArray());
                     int id = conns.incrementAndGet();
-                    var t = Thread.ofVirtual().name("front-down-" + id).unstarted(() -> { try { copy(up.getInputStream(), s.getOutputStream(), downBytes); } catch (java.io.IOException ignored) { } finally { try { s.close(); } catch (java.io.IOException ignored) { } } });
+                    var t = Thread.ofPlatform().daemon().name("front-down-" + id).unstarted(() -> { try { copy(up.getInputStream(), s.getOutputStream(), downBytes); } catch (java.io.IOException ignored) { } finally { try { s.close(); } catch (java.io.IOException ignored) { } } });
                     passing.put(t.getName(), t);
                     Thread.currentThread().setName("front-up-" + id);
                     passing.put(Thread.currentThread().getName(), Thread.currentThread());

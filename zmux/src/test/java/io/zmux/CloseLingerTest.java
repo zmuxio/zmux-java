@@ -42,12 +42,38 @@ class CloseLingerTest {
         return PipeChannel.pipe(c, c, Framing.BYTE_STREAM, 1 << 16);
     }
 
+    /**
+     * A server channel whose close is held until released: the peer sees no end of the carrier, so this side's own
+     * write side is shut (and reported) before anything ends its inbound direction.
+     */
+    private static final class Held implements ByteChannel {
+        final SocketChannel ch;
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicBoolean asked = new java.util.concurrent.atomic.AtomicBoolean();
+        Held(SocketChannel ch) { this.ch = ch; }
+        @Override public int read(ByteBuffer dst) throws IOException { return ch.read(dst); }
+        @Override public int write(ByteBuffer src) throws IOException { return ch.write(src); }
+        @Override public boolean isOpen() { return ch.isOpen(); }
+        @Override public void close() {
+            if (!asked.compareAndSet(false, true)) return;
+            Thread.ofVirtual().start(() -> {
+                try { release.await(); ch.close(); } catch (InterruptedException | IOException e) { Thread.currentThread().interrupt(); }
+            });
+        }
+    }
+
     private static Linked link(ZmuxConfig cfg, boolean whole, java.util.function.UnaryOperator<io.zmux.carrier.PipeWriter> serverWriter) throws Exception {
+        return link(cfg, whole, serverWriter, null);
+    }
+
+    private static Linked link(ZmuxConfig cfg, boolean whole, java.util.function.UnaryOperator<io.zmux.carrier.PipeWriter> serverWriter, Held[] held) throws Exception {
         try (var listener = ServerSocketChannel.open().bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
             SocketChannel a = SocketChannel.open(listener.getLocalAddress());
             SocketChannel b = listener.accept();
             PipeIo ia = pipe(a, whole);
-            PipeIo ib = pipe(b, whole);
+            PipeIo ib;
+            if (held == null) ib = pipe(b, whole);
+            else { held[0] = new Held(b); ib = PipeChannel.pipe(held[0], held[0], Framing.BYTE_STREAM, 1 << 16); }
             var server = CompletableFuture.supplyAsync(() -> {
                 try { return Zmux.open(PipeIo.of(ib.reader(), serverWriter.apply(ib.writer())), Role.SERVER, cfg); }
                 catch (Exception e) { throw new CompletionException(e); }
@@ -122,7 +148,7 @@ class CloseLingerTest {
 
     /**
      * The read drain keeps a stream's end, not only its bytes (SPEC.md Section 6.5): a finish or a reset received
-     * before the peer's close holds the session until the application reads it, though every carrier has ended.
+     * before the peer's close holds the session until the application reads it, though its carriers may have ended.
      */
     @Test void aFinishReceivedBeforeTheCloseIsStillReadAsTheEndOfTheStream() throws Exception {
         endBeforeTheClose(false);
@@ -130,6 +156,44 @@ class CloseLingerTest {
 
     @Test void aResetReceivedBeforeTheCloseIsStillReadAsAReset() throws Exception {
         endBeforeTheClose(true);
+    }
+
+    /**
+     * This side's CONNECTION_CLOSE is written and its write side shut while the peer's carrier has not ended yet
+     * (its close is held): the pipe has both closes and its linger ends (SPEC.md Section 6.5 step 3), but the read
+     * drain is the session's, which stays closing until the unread end is read.
+     */
+    @Test void anUnreadEndHoldsThePipeWhoseWriteSideShutBeforeThePeerEnded() throws Exception {
+        for (boolean reset : new boolean[] {true, false}) {
+            try (EventLoops loops = EventLoops.create(2)) {
+                var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
+                var held = new Held[1];
+                try {
+                    var l = link(cfg, false, w -> w, held);
+                    var s = l.client().openStream();
+                    s.write(new byte[] {7});
+                    var r = l.server().acceptStream(Duration.ofSeconds(5));
+                    if (reset) r.reset(9); else r.finish();
+                    l.server().close();
+                    l.server().awaitClosed(); // the client's CONNECTION_CLOSE and FIN were read; the server's carrier is still open
+                    assertTrue(held[0].asked.get(), "the server let its carrier go");
+                    // Both closes are done on the client's pipe: it may end (step 3), the session may not.
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (l.a().isOpen() && System.nanoTime() < until) Thread.sleep(1);
+                    assertFalse(l.a().isOpen(), "the pipe's linger ended with both closes, reset=" + reset);
+                    assertFalse(l.client().closed().isDone(), "the unread end holds the closing session, reset=" + reset);
+                    if (reset) assertThrows(StreamResetException.class, () -> s.read(new byte[16], 0, 16));
+                    else assertEquals(-1, s.read(new byte[16], 0, 16));
+                    held[0].release.countDown();
+                    awaitClosed(l, 5_000);
+                    assertTrue(l.bothClosed(), "the session ends once the end was read, reset=" + reset);
+                } finally {
+                    if (held[0] != null) held[0].release.countDown();
+                    io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
+                }
+            }
+        }
     }
 
     private static void endBeforeTheClose(boolean reset) throws Exception {
@@ -145,7 +209,8 @@ class CloseLingerTest {
                 l.server().close();
                 l.server().awaitClosed();
                 awaitClosed(l, 1_500);
-                assertFalse(l.bothClosed(), "the unread end holds the closing session");
+                // The carriers may end first, once both closes are done on the pipe (SPEC.md Section 6.5 step 3).
+                assertFalse(l.client().closed().isDone(), "the unread end holds the closing session");
                 if (reset) assertThrows(StreamResetException.class, () -> s.read(new byte[16], 0, 16));
                 else assertEquals(-1, s.read(new byte[16], 0, 16));
                 awaitClosed(l, 5_000);

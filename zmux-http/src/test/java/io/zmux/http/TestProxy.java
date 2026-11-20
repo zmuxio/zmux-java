@@ -91,7 +91,9 @@ final class TestProxy implements Closeable {
             try {
                 Socket s = server.accept();
                 open.add(s);
-                Thread.ofVirtual().start(() -> { try (s) { serve(s); } catch (IOException ignored) { /* Gone. */ } finally { open.remove(s); } });
+                // Platform threads per connection, as in RedirectTest.Front: a virtual thread writing a socket
+                // another one reads may never be woken on Windows.
+                Thread.ofPlatform().daemon().start(() -> { try (s) { serve(s); } catch (IOException ignored) { /* Gone. */ } finally { open.remove(s); } });
             } catch (IOException e) {
                 return;
             }
@@ -378,7 +380,7 @@ final class TestProxy implements Closeable {
             OutputStream uo = u.getOutputStream();
             uo.write(h.with("Transfer-Encoding", "chunked").with("Connection", "close").bytes());
             uo.flush();
-            Thread up = Thread.ofVirtual().start(() -> {
+            Thread up = Thread.ofPlatform().daemon().start(() -> {
                 try {
                     for (byte[] c; (c = chunk(in)) != null; ) {
                         uo.write((Integer.toHexString(c.length) + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
@@ -412,7 +414,7 @@ final class TestProxy implements Closeable {
         try (u) {
             u.getOutputStream().write(h.bytes());
             u.getOutputStream().flush();
-            Thread t = Thread.ofVirtual().start(() -> {
+            Thread t = Thread.ofPlatform().daemon().start(() -> {
                 try { in.transferTo(u.getOutputStream()); } catch (IOException ignored) { /* Either side ended. */ }
                 try { u.shutdownOutput(); } catch (IOException ignored) { /* Gone. */ }
             });
