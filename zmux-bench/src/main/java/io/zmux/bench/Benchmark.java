@@ -387,6 +387,7 @@ public final class Benchmark {
             json.append("\n}\n");
             Path dir = result.toAbsolutePath().getParent();
             if (dir != null) Files.createDirectories(dir);
+            //noinspection JvmTaintAnalysis: the result file is the one the operator names on the command line
             Files.writeString(result, json); System.out.print(json);
         } finally { watchdog.interrupt(); }
     }

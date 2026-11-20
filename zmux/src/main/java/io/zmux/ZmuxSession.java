@@ -953,9 +953,7 @@ public final class ZmuxSession implements AutoCloseable {
     public io.zmux.adapter.SessionAdapter adapter() {
         var a = adapterView;
         if (a == null) {
-            adapterView = a = io.zmux.internal.spi.AdapterPorts.session(new io.zmux.internal.spi.AdapterPorts.Session() {
-                @Override public boolean joinReady() throws IOException { return ZmuxSession.this.joinReady(); }
-            });
+            adapterView = a = io.zmux.internal.spi.AdapterPorts.session(this::joinReady);
         }
         return a;
     }

@@ -32,9 +32,7 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
     private final BooleanSupplier operation;
 
     static {
-        io.zmux.internal.spi.Spi.install(new io.zmux.internal.spi.Spi.Access() {
-            @Override public <V> ZmuxFuture<V> future(java.util.concurrent.CompletionStage<V> stage, Runnable cancel) { return of(stage, cancel); }
-        });
+        io.zmux.internal.spi.Spi.install(ZmuxFuture::of);
     }
 
     /**

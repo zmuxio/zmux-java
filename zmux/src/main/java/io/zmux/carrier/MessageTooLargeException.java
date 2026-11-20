@@ -6,6 +6,7 @@ package io.zmux.carrier;
  * failed carrier.
  */
 public final class MessageTooLargeException extends java.net.ProtocolException {
+    @java.io.Serial
     private static final long serialVersionUID = 1L;
 
     /** A first message above limit bytes. */

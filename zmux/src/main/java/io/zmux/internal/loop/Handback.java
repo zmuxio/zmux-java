@@ -76,6 +76,7 @@ public final class Handback implements Takeover {
     /** Whether the host closed what it took: the socket's channel, or every half of the pipe view. */
     private boolean hostClosed() {
         Socket s = socket;
+        //noinspection AutoCloseableResource: a query on the channel the host owns, not a new resource
         return s != null ? !s.channel().isOpen() : forwarded.halvesClosed();
     }
 
