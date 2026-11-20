@@ -66,14 +66,14 @@ final class WebSocketFrames {
         //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(ch.eventLoop(), ch.eventLoop().inEventLoop(), () -> {
             if (!firstDone) firstLimit = limit;
-            else if (firstLength > limit) fail("a first message above " + limit + " bytes");
+            else if (firstLength > limit) tooLarge(limit);
         }, () -> {}); // refused: the channel goes with its loop
     }
 
     private void data(WebSocketFrame f, boolean continuation) {
         if (!firstDone) {
             int have = (partial == null ? 0 : partial.readableBytes()) + f.content().readableBytes();
-            if (firstLimit >= 0 && have > firstLimit) { fail("a first message above " + firstLimit + " bytes"); return; }
+            if (firstLimit >= 0 && have > firstLimit) { tooLarge(firstLimit); return; }
             if (f.isFinalFragment()) { firstDone = true; firstLength = have; }
         }
         if (continuation == (partial == null)) { fail("an unexpected continuation frame"); return; }
@@ -96,8 +96,17 @@ final class WebSocketFrames {
     }
 
     private void fail(String why) {
+        lose(new ProtocolException(why));
+    }
+
+    /** A first message above the admission's bound: the carrier fails with what the admission counts as too large. */
+    private void tooLarge(int limit) {
+        lose(new io.zmux.carrier.MessageTooLargeException(limit));
+    }
+
+    private void lose(ProtocolException cause) {
         dropPartial();
-        carrier.lost(new ProtocolException(why));
+        carrier.lost(cause);
         ch.close();
     }
 

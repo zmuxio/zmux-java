@@ -7,6 +7,7 @@ import io.zmux.ListenerConfig;
 import io.zmux.ListenerStats;
 import io.zmux.ZmuxListener;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.loop.ListenerHub;
 import io.zmux.internal.spi.AdapterPorts;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -69,24 +70,51 @@ public final class ListenerAdapter {
     }
 
     /**
-     * Hands a carrier to the listener, the one entry for carriers its own sockets do not
-     * accept (HTTP and WebSocket requests, QUIC connections, a host's own pipes): it takes a
-     * slot of hint's source, then the listener's {@link ListenerConfig#admission() admission},
-     * when configured, decides on it with hint's addresses and {@link JoinHint#request()
-     * request} (a carrier decided on its request head is decided at once, without a prefix) and
-     * the TLS metadata of io's capabilities; an accepted carrier is classified by hint's join or
-     * pairing or by its in-band first record. fallback (null: none) takes a carrier the
-     * admission gives back, with every byte read replayed. A carrier refused at its slot is closed.
+     * Hands a carrier to the listener, the entry for carriers its own sockets do not accept (QUIC streams, a
+     * host's own pipe inputs, any byte stream or message-framed carrier decided on its start): it takes a slot of
+     * hint's source, then the listener's {@link ListenerConfig#admission() admission}, when configured, decides on
+     * it at {@link Admission.Stage#CARRIER} with hint's addresses and the TLS metadata and framing of io; an
+     * accepted carrier is classified by hint's join or pairing or by its in-band first record. A carrier the
+     * admission gives back goes to {@link ListenerConfig#fallback()} as a {@link io.zmux.Takeover}. A carrier
+     * refused at its slot is closed.
      */
-    public Handled handle(PipeIo io, JoinHint hint, Admission.Fallback fallback) {
-        Objects.requireNonNull(io); Objects.requireNonNull(hint);
-        if (!port.reserve(hint.source())) return new Handled(port, port.refused(io));
-        return new Handled(port, port.transfer(io, hint, false, null, fallback));
+    public Handled handle(PipeIo io, JoinHint hint) {
+        return hand(io, hint, ListenerHub.Entry.CARRIER);
     }
 
-    /** {@link #handle(PipeIo, JoinHint, Admission.Fallback)} without a fallback target. */
-    public Handled handle(PipeIo io, JoinHint hint) {
-        return handle(io, hint, null);
+    /**
+     * {@link #handle} for an HTTP request that is itself the carrier (its body, or nothing after its head): it is
+     * decided on its head ({@link Admission.Stage#HEAD}, no prefix; a credential travels in a header field) when
+     * onHead, otherwise on the start of its body. A request the admission gives back is a request, not a carrier
+     * to take over: fallback (null: a fallback stalls) gets it, with the body bytes read replayed, to answer it at
+     * the HTTP level ({@link Admission.Fallback}, whose stage ends the carrier as for the listener's fallback).
+     */
+    public Handled handleRequest(PipeIo io, JoinHint hint, boolean onHead, Admission.Fallback fallback) {
+        return hand(io, hint, new ListenerHub.Entry(onHead, null, fallback));
+    }
+
+    /**
+     * Hands over the carrier of an HTTP upgrade (WebSocket) before the upgrade is answered, the entry of upgrade
+     * adapters. The admission decides on the request head ({@link Admission.Stage#HEAD}, {@link
+     * Admission.CarrierInfo#upgrade()} set). On {@link io.zmux.AdmissionVerdict#ACCEPT} the listener runs upgrade
+     * and takes the carrier at once, as {@link #handle} does after an accept. On {@link
+     * io.zmux.AdmissionVerdict#DEFER} the listener runs upgrade and waits, within what is left of the peek timeout
+     * and while it takes carriers, for the upgrade and the carrier's first message, then decides again on that
+     * message ({@link Admission.Stage#CARRIER}): a carrier that does not come in time counts in {@link
+     * io.zmux.AdmissionStats#peekTimedOut()} (in {@code closed} when the listener stopped), a failed upgrade in
+     * {@code handshakeFailed}; the carrier it gives back goes to {@link ListenerConfig#fallback()}. A head given
+     * back ({@link io.zmux.AdmissionVerdict#FALLBACK} on the head, before anything was answered) goes to
+     * headFallback (null: a fallback stalls) as a request. {@link Handled#verdict()} reports the final verdict.
+     */
+    public Handled admitFirst(PipeIo io, JoinHint hint, Upgrade upgrade, Admission.Fallback headFallback) {
+        Objects.requireNonNull(upgrade, "upgrade");
+        return hand(io, hint, new ListenerHub.Entry(true, upgrade, headFallback));
+    }
+
+    private Handled hand(PipeIo io, JoinHint hint, ListenerHub.Entry entry) {
+        Objects.requireNonNull(io); Objects.requireNonNull(hint);
+        if (!port.reserve(hint.source())) return new Handled(port, port.refused(io));
+        return new Handled(port, port.transfer(io, hint, false, null, entry));
     }
 
     /**

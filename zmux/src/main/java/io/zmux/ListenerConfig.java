@@ -131,7 +131,11 @@ public final class ListenerConfig {
      * given to {@link io.zmux.adapter.ListenerAdapter#handle}; null: none.
      */
     public Admission admission() { return admission; }
-    /** The fallback target of the listener's socket and TLS carriers; null: none (a fallback stalls). */
+    /**
+     * The target of every carrier the admission hands back ({@link Admission.Fallback}): the listener's socket and
+     * TLS carriers, the carriers of every adapter (WebSocket after a deferred decision, QUIC streams, a host's own
+     * pipe inputs); null: none (a fallback stalls).
+     */
     public Admission.Fallback fallback() { return fallback; }
 
     /** The transform of every carrier after its admission; null: none. */
@@ -225,7 +229,7 @@ public final class ListenerConfig {
         /** The admission of every new carrier; null (the default): none. */
         public Builder admission(Admission a) { admission = a; return this; }
 
-        /** The fallback target of the listener's socket and TLS carriers; null (the default): a fallback stalls. */
+        /** The target of every carrier the admission hands back ({@link #fallback()}); null (the default): a fallback stalls. */
         public Builder fallback(Admission.Fallback f) { fallback = f; return this; }
 
         public Builder session(ZmuxConfig cfg) { session = Objects.requireNonNull(cfg); return this; }

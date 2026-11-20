@@ -38,6 +38,8 @@ final class Forwarded implements Inbound {
     private boolean ended, graceful, endDelivered;
     private boolean readerClosed, writerClosed, closed;
     private boolean creditPaused;
+    /** The target wrote: the carrier is no longer offered as a socket. */
+    private boolean wrote;
     private PipeWriter.Completion pending;
 
     /** Message carrier: input arrives as length-prefixed records, delivered one message per call. */
@@ -184,6 +186,7 @@ final class Forwarded implements Inbound {
             return;
         }
         pending = done;
+        wrote = true;
         batch.wrap(data);
         carrier.write(batch);
     }
@@ -217,6 +220,28 @@ final class Forwarded implements Inbound {
         writerClosed = true;
         if (!closed) carrier.shutdownOutput();
         if (readerClosed) finish(null);
+    }
+
+    /**
+     * On the loop: the carrier's socket, off its loop and blocking, with the bytes read before it was handed over,
+     * when it is a plain TCP carrier and neither half was used; the halves fail from now on. Null otherwise.
+     */
+    io.zmux.Takeover.Socket detachSocket() {
+        if (closed || started.get() || wrote || pending != null || readerClosed || writerClosed || !(carrier instanceof SocketTransport st)) return null;
+        byte[] r = replay != null ? replay : st.takeUnread();
+        java.nio.channels.SocketChannel ch = st.detach();
+        if (ch == null) return null;
+        closed = true;
+        replay = null;
+        carrier.loop().removeShutdownHook(shutdown);
+        return new io.zmux.Takeover.Socket(ch, ByteBuffer.wrap(r == null ? new byte[0] : r));
+    }
+
+    /** From any thread: closes both halves gracefully, once a write in flight completed. */
+    void closeBoth() {
+        Runnable r = () -> { closeReader(); closeWriter(); };
+        if (carrier.loop().inLoop()) r.run();
+        else if (!carrier.loop().tryExecute(r)) carrier.close(null);
     }
 
     /** Whether the target has not started reading and no input was set aside (the input is all in the read buffer). */

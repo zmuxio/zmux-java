@@ -191,7 +191,7 @@ public final class QuicClient implements AutoCloseable {
         InetSocketAddress target;
         try { target = nativeAddress(address); }
         catch (RuntimeException error) { result.completeExceptionally(error); return result; }
-        ConnectionCarrier carrier = new ConnectionCarrier(options, listener, null, this.host, completions, credential,
+        ConnectionCarrier carrier = new ConnectionCarrier(options, listener, this.host, completions, credential,
                 literal(host) ? "" : host);
         carrier.closing(closing);
         result.whenComplete((value, error) -> { if (error != null) carrier.dispose(); });

@@ -38,7 +38,7 @@ class QuicServeTest {
                         .handler(new ChannelInboundHandlerAdapter() {
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                 if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
-                                    served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null));
+                                    served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener));
                                 ctx.fireUserEventTriggered(evt);
                             }
                             @Override public boolean isSharable() { return true; }
@@ -87,7 +87,7 @@ class QuicServeTest {
                     .handler(new ChannelInboundHandlerAdapter() {
                         @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                             if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
-                                served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null));
+                                served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener));
                             ctx.fireUserEventTriggered(evt);
                         }
                         @Override public boolean isSharable() { return true; }

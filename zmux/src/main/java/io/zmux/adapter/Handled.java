@@ -4,13 +4,15 @@ import io.zmux.AdmissionVerdict;
 import io.zmux.JoinHint;
 import io.zmux.ZmuxFuture;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.loop.ListenerHub;
 import io.zmux.internal.spi.AdapterPorts;
 import io.zmux.internal.spi.Spi;
 import java.util.Objects;
 
 /**
  * A carrier handed to a listener ({@link ListenerAdapter#handle}, {@link Slot#handle}).
- * {@link #verdict()} is the carrier's admission verdict ({@link AdmissionVerdict#ACCEPT} without
+ * {@link #verdict()} is the carrier's final admission verdict, never {@link AdmissionVerdict#DEFER}
+ * or {@link AdmissionVerdict#MORE} ({@link AdmissionVerdict#ACCEPT} without
  * an admission; a {@link AdmissionVerdict#FALLBACK} without a target is reported as
  * {@link AdmissionVerdict#STALL}, a stall beyond its source's share as
  * {@link AdmissionVerdict#CLOSE}); {@link #closed()} ends with the carrier's lifetime, which keeps
@@ -47,6 +49,6 @@ public final class Handled {
             throw new IllegalStateException("the carrier was not accepted");
         Objects.requireNonNull(io); Objects.requireNonNull(hint);
         if (!port.reserve(hint.source())) return new Handled(port, port.refused(io));
-        return new Handled(port, port.transfer(io, hint, true, carrier.value(), null));
+        return new Handled(port, port.transfer(io, hint, true, carrier.value(), ListenerHub.Entry.CARRIER));
     }
 }

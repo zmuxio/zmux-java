@@ -17,7 +17,6 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     static final io.netty.util.AttributeKey<ConnectionCarrier> KEY = io.netty.util.AttributeKey.valueOf(ConnectionCarrier.class, "owner");
     private final QuicOptions options;
     private final ZmuxListener listener;
-    private final QuicServer.Fallback fallback;
     /** The host of the sessions on this connection's streams: the connection's own loop. */
     private final NettyHost host;
     private final io.zmux.internal.loop.SerialCallbacks completions;
@@ -63,15 +62,15 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     private final io.zmux.internal.loop.ChannelDemux demux = new io.zmux.internal.loop.ChannelDemux();
 
     /** A server connection's carrier. */
-    ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
+    ConnectionCarrier(QuicOptions options, ZmuxListener listener, NettyHost host,
                       io.zmux.internal.loop.SerialCallbacks completions) {
-        this(options, listener, fallback, host, completions, null, "", true);
+        this(options, listener, host, completions, null, "", true);
     }
 
     /** A server connection whose handshake completed before it was handed over ({@link QuicServer#serve}). */
-    static ConnectionCarrier established(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
+    static ConnectionCarrier established(QuicOptions options, ZmuxListener listener, NettyHost host,
                                          io.zmux.internal.loop.SerialCallbacks completions) {
-        ConnectionCarrier c = new ConnectionCarrier(options, listener, fallback, host, completions);
+        ConnectionCarrier c = new ConnectionCarrier(options, listener, host, completions);
         c.established = true;
         return c;
     }
@@ -85,16 +84,16 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     void stop() { Loops.run(channel.eventLoop(), () -> stopped = true, () -> {}); } // a refused stop: the loop closes the connection
 
     /** A client connection's carrier: its first bidirectional stream starts with credential's prefix (null: none). */
-    ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
+    ConnectionCarrier(QuicOptions options, ZmuxListener listener, NettyHost host,
                       io.zmux.internal.loop.SerialCallbacks completions, io.zmux.CarrierCredential credential, String serverName) {
-        this(options, listener, fallback, host, completions, credential, serverName, false);
+        this(options, listener, host, completions, credential, serverName, false);
     }
 
-    private ConnectionCarrier(QuicOptions options, ZmuxListener listener, QuicServer.Fallback fallback, NettyHost host,
+    private ConnectionCarrier(QuicOptions options, ZmuxListener listener, NettyHost host,
                               io.zmux.internal.loop.SerialCallbacks completions, io.zmux.CarrierCredential credential, String serverName,
                               boolean server) {
         this.server = server;
-        this.options = options; this.listener = listener; this.fallback = fallback; this.host = host; this.completions = completions;
+        this.options = options; this.listener = listener; this.host = host; this.completions = completions;
         this.credential = credential; this.serverName = serverName;
     }
     QuicChannel channel() { return channel; }
@@ -288,20 +287,18 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
      * Admits the connection by the peer's first bidirectional stream, stream 0 of a client:
      * only once it is accepted are the connection's other
      * streams handed to the listener, without a new admission. A connection that is not accepted is closed (after a stall, when the stalled
-     * stream ends); a fallback target takes it with that stream, and its other streams are
-     * closed.
+     * stream ends); one given back goes with that stream to the listener's fallback ({@link QuicTakeover#connection}),
+     * its other streams closed, and is closed once the fallback is done with the stream.
      */
     // The handler comes from the listener adapter in another module, where the analyzer takes its result for null.
     @SuppressWarnings("ConstantValue")
     private void admit(StreamCarrier first) {
         admission = ADMITTING;
         QuicChannel connection = channel;
-        QuicServer.Fallback target = fallback;
         io.zmux.adapter.Slot s = slot;
         slot = null;
-        io.zmux.Admission.Fallback fb = target == null ? null : (stream, info) -> target.serve(connection, stream);
-        var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()), fb)
-                : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()), fb);
+        var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()))
+                : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()));
         this.first = admitted;
         var decision = admitted.verdict();
         // A loop that refuses the verdict closes the connection and its held streams as it shuts down.
@@ -317,8 +314,10 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             for (StreamCarrier stream : held) stream.dispose();
             held.clear();
             // A connection that carried no session closes with code 0.
-            if (verdict == io.zmux.AdmissionVerdict.STALL) admitted.closed().whenComplete((v, e) -> close(connection));
-            else if (verdict != io.zmux.AdmissionVerdict.FALLBACK) close(connection);
+            // A stalled stream, and one taken over, end before the connection does.
+            if (verdict == io.zmux.AdmissionVerdict.STALL || verdict == io.zmux.AdmissionVerdict.FALLBACK)
+                admitted.closed().whenComplete((v, e) -> close(connection));
+            else close(connection);
         }, () -> {}));
     }
     /**

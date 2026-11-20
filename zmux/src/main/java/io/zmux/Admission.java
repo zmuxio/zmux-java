@@ -9,13 +9,17 @@ import java.util.concurrent.CompletionStage;
 /**
  * The decision on every new carrier of a {@link ZmuxListener}, configured once on its
  * {@link ListenerConfig#admission()} and run by every entry of that listener: its socket and
- * TLS carriers, those given to {@link io.zmux.adapter.ListenerAdapter#handle} (the HTTP, WebSocket and exchange
+ * TLS carriers, those given to {@link io.zmux.adapter.ListenerAdapter} (the HTTP, WebSocket and exchange
  * carriers of an HTTP endpoint, the connections of a QUIC server), joins and resumptions
  * included. A carrier first takes a slot of its source ({@link
  * ListenerConfig#maxPendingPerSource()}) and one of the listener ({@link
  * ListenerConfig#maxPending()}), then completes its outer handshake (TLS), then the
- * listener reads up to {@code peek} bytes, never more, and asks the decider; nothing is sent
- * before the decision and nothing is consumed except what an accept skips.
+ * listener reads up to {@code peek} bytes of a byte stream, or the first message of a
+ * message-framed carrier (at most {@link #maxMessage()} bytes), never more, and asks the
+ * decider; nothing is sent before the decision and nothing is consumed except what an accept
+ * skips. An HTTP request carrier is decided on its request head ({@link Stage#HEAD}); on the
+ * head of an HTTP upgrade {@link AdmissionVerdict#DEFER} decides again on the carrier's first
+ * message once the upgrade completed.
  *
  * <p>Built with {@link #builder(int, Decider)}; every setting not called keeps its default.
  */
@@ -23,21 +27,26 @@ public final class Admission {
     /** The longest prefix: it is read into the carrier's read buffer, which holds a first record of at most this size. */
     public static final int MAX_PEEK = 65535;
 
-    private final int peek, maxPeek;
+    /** The longest first message of a message-framed carrier: the largest record. */
+    public static final int MAX_MESSAGE = 65535;
+
+    private final int peek, maxPeek, maxMessage;
     private final Duration peekTimeout, stallMin, stallMax;
     private final boolean fallbackOnPeekTimeout;
     private final Decider decider;
 
     private Admission(Builder b) {
-        peek = b.peek; maxPeek = b.maxPeek; peekTimeout = b.peekTimeout; fallbackOnPeekTimeout = b.fallbackOnPeekTimeout;
+        peek = b.peek; maxPeek = b.maxPeek; maxMessage = b.maxMessage == 0 ? MAX_MESSAGE : b.maxMessage; peekTimeout = b.peekTimeout; fallbackOnPeekTimeout = b.fallbackOnPeekTimeout;
         stallMin = b.stallMin; stallMax = b.stallMax; decider = b.decider;
     }
 
     /**
-     * An admission that reads peek bytes (0: none), at most {@link #MAX_PEEK}, before it asks decider; fewer when the
-     * carrier ends or the peek timeout passes first; a carrier without a receiving half, or one decided on its HTTP
-     * request head, is decided at once. On a message-framed carrier any peek above 0 reads the first message whole as
-     * the prefix, of at most max(peek, maxPeek) bytes (a longer one is closed, counted once as closed); skip is then 0
+     * An admission that reads peek bytes (0: none), at most {@link #MAX_PEEK}, of a byte stream before it asks decider;
+     * fewer when the carrier ends or the peek timeout passes first; a carrier without a receiving half, or one decided
+     * on its HTTP request head, is decided at once. On a message-framed carrier any peek above 0, and every decision
+     * deferred from an upgrade's head, reads the first message whole as the prefix, of at most {@link #maxMessage()}
+     * bytes: a longer one is closed without a decision ({@link AdmissionStats#tooLarge()}), and so is a carrier that
+     * ends, fails or sends a message that is not binary first ({@link AdmissionStats#closed()}); skip is then 0
      * (replayed) or its length.
      */
     public static Builder builder(int peek, Decider decider) {
@@ -49,8 +58,11 @@ public final class Admission {
     /** The bytes read before the decision. */
     public int peek() { return peek; }
 
-    /** The bound of {@link Decision#need()}; 0: peek, so that {@link AdmissionVerdict#MORE} is invalid. */
+    /** The bound of {@link Decision#need()} on a byte stream; 0: peek, so that {@link AdmissionVerdict#MORE} is invalid. */
     public int maxPeek() { return maxPeek; }
+
+    /** The bound of the first message of a message-framed carrier, the prefix of its decision. */
+    public int maxMessage() { return maxMessage; }
 
     /** The peek timeout; zero: drawn once per admission between 5 s and 30 s. */
     public Duration peekTimeout() { return peekTimeout; }
@@ -71,16 +83,30 @@ public final class Admission {
     public static final class Builder {
         private final int peek;
         private final Decider decider;
-        private int maxPeek;
+        private int maxPeek, maxMessage;
         private Duration peekTimeout = Duration.ZERO, stallMin = Duration.ZERO, stallMax = Duration.ZERO;
         private boolean fallbackOnPeekTimeout;
 
         private Builder(int peek, Decider decider) { this.peek = peek; this.decider = decider; }
 
-        /** Bounds {@link Decision#need()}, at most {@link #MAX_PEEK}; not called: peek, so that MORE is invalid. */
+        /**
+         * Bounds {@link Decision#need()} on a byte stream, at most {@link #MAX_PEEK}; not called: peek, so that MORE
+         * is invalid. It does not bound a first message ({@link #maxMessage(int)}).
+         */
         public Builder maxPeek(int n) {
             if (n < 0 || n > MAX_PEEK) throw new IllegalArgumentException("maxPeek outside [0, " + MAX_PEEK + "]");
             maxPeek = n;
+            return this;
+        }
+
+        /**
+         * Bounds the first message of a message-framed carrier (WebSocket), the prefix of its decision, at most
+         * {@link #MAX_MESSAGE}; 0 or not called: {@link #MAX_MESSAGE}. A longer first message closes the carrier
+         * without a decision, counted in {@link AdmissionStats#tooLarge()}.
+         */
+        public Builder maxMessage(int n) {
+            if (n < 0 || n > MAX_MESSAGE) throw new IllegalArgumentException("maxMessage outside [0, " + MAX_MESSAGE + "]");
+            maxMessage = n;
             return this;
         }
 
@@ -123,14 +149,13 @@ public final class Admission {
         public Admission build() { return new Admission(this); }
     }
 
-    /** The longest prefix a decider can see. */
-    public int prefixLimit() { return Math.max(peek, maxPeek); }
-
     /**
-     * Decides on a carrier, once per carrier and once more per {@link AdmissionVerdict#MORE}, and for different carriers concurrently, outside
+     * Decides on a carrier, once per carrier, once more per {@link AdmissionVerdict#MORE} and once more after a
+     * {@link AdmissionVerdict#DEFER}, and for different carriers concurrently, outside
      * every lock of zmux, on the listener's event loop: it must not block, and returns a stage
      * that completes later when the decision takes time. prefix is read-only and valid until
-     * the stage completes. The decision is due by deadline (what is left of the peek
+     * the stage completes; info is each call's own (a deferred decision gets the head's
+     * metadata at {@link Stage#CARRIER}). The decision is due by deadline (what is left of the peek
      * timeout): a stage not complete by then is cancelled ({@code toCompletableFuture().cancel(false)})
      * and the carrier closed; so is it when the listener stops taking carriers. A decider
      * that throws, a stage that fails, a null decision and a skip outside the prefix close
@@ -202,21 +227,37 @@ public final class Admission {
     public static final int MAX_VARIANTS = 64;
 
     /**
-     * The target of a carrier that was not accepted. serve runs off the event loop, once per
-     * carrier. carrier is a byte-stream pipe input with every byte read before the decision
-     * in front of its input; the target uses it as zmux uses a pipe input: it starts the
-     * reader once, has at most one write in flight, and closes (or aborts) each half once,
-     * which closes the carrier. Its sink and write completions are called on the listener's
-     * event loop and must not block. The application protocol of a TLS carrier is kept.
+     * The host's target of the carriers the admission hands back ({@link AdmissionVerdict#FALLBACK}, a prefix
+     * {@link Builder#fallbackOnPeekTimeout} gave up on): {@link ListenerConfig#fallback()} takes every such carrier,
+     * byte streams of the listener's sockets and of other entries, message-framed carriers (WebSocket after a
+     * deferred decision) and QUIC streams alike. serve runs off the event loops, once per carrier, and returns at
+     * once with a stage: the carrier is the host's until that stage completes (null: until serve returns), then zmux
+     * closes it. A serve that throws, and a stage that fails, close the carrier at once; neither reaches the
+     * listener. An HTTP request that is itself the carrier is answered by its HTTP adapter instead (see {@link
+     * io.zmux.adapter.ListenerAdapter#handleRequest}).
      */
     @FunctionalInterface
     public interface Fallback {
-        void serve(io.zmux.carrier.PipeIo carrier, CarrierInfo info);
+        java.util.concurrent.CompletionStage<?> serve(Takeover takeover);
+    }
+
+    /** What a decision is taken on ({@link CarrierInfo#stage()}). */
+    public enum Stage {
+        /** The carrier's start: the prefix is its first bytes ({@code peek}, {@link AdmissionVerdict#MORE}) or its first message. */
+        CARRIER,
+        /**
+         * An HTTP request's head, before any body byte is read or the upgrade is answered: an HTTP upgrade
+         * (WebSocket; {@link CarrierInfo#upgrade()}), an exchange carrier, or an HTTP request carrier without a body,
+         * such as a downlink GET. There is no prefix, and a credential travels in the request header field
+         * {@link PrefixAuth#HEADER_FIELD}.
+         */
+        HEAD
     }
 
     /**
-     * The metadata of a carrier, read-only, as far as its adapter has it: an admission decides with it, and a client's {@link CarrierCredential} is given it.
-     * Fields that do not apply are empty.
+     * The metadata of a carrier, immutable, as far as its adapter has it: an admission decides with it (each call
+     * gets its own), a {@link Takeover} carries it, and a client's {@link CarrierCredential} is given it. Fields
+     * that do not apply are empty.
      *
      * @param source the carrier's source, the one authority for every per-source limit: the
      *     client address a trusted intermediary reports (port 0 when it reports none), or what
@@ -232,19 +273,36 @@ public final class Admission {
      * @param request the HTTP request of the carrier; {@link RequestHead#NONE} for other carriers
      * @param terminatedTls whether this process terminated the carrier's completed TLS or QUIC
      *     handshake; no proof of an end-to-end handshake: an intermediary may have opened it
+     * @param stage what the decision is taken on: the carrier's start or an HTTP request head
+     * @param framing the carrier's framing, as {@link FirstBytes#classify} takes it: at {@link Stage#CARRIER} the
+     *     prefix is the start of a byte stream or, with {@link io.zmux.carrier.Framing#MESSAGES}, a first message
+     * @param upgrade the carrier of an HTTP upgrade (WebSocket), on its head and on the decision a
+     *     {@link AdmissionVerdict#DEFER} on that head takes on the carrier
      */
     public record CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
-                              io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls) {
-        /** The carrier of a completed handshake exactly when it has an exporter. */
+                              io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls,
+                              Stage stage, io.zmux.carrier.Framing framing, boolean upgrade) {
+        /**
+         * A byte stream decided on its start, the carrier of a completed handshake exactly when it has an exporter;
+         * {@link #at} sets the stage.
+         */
         public CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
                            io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request) {
-            this(source, peer, applicationProtocol, serverName, exporter, request, exporter != null);
+            this(source, peer, applicationProtocol, serverName, exporter, request, exporter != null,
+                    Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
         }
 
         public CarrierInfo {
             Objects.requireNonNull(applicationProtocol, "applicationProtocol");
             Objects.requireNonNull(serverName, "serverName");
             Objects.requireNonNull(request, "request");
+            Objects.requireNonNull(stage, "stage");
+            Objects.requireNonNull(framing, "framing");
+        }
+
+        /** This metadata at stage, of a carrier of framing, upgrade as {@link #upgrade()}. */
+        public CarrierInfo at(Stage stage, io.zmux.carrier.Framing framing, boolean upgrade) {
+            return new CarrierInfo(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing, upgrade);
         }
 
         /** Whether this process terminated the carrier's completed TLS or QUIC handshake. */
@@ -254,12 +312,6 @@ public final class Admission {
         public byte[] exportKeyingMaterial(String label, byte[] context, int length) {
             return exporter == null ? null : exporter.export(label, context, length);
         }
-
-        /**
-         * Whether the carrier is decided on its HTTP request head, without a prefix: an HTTP upgrade (WebSocket, WebTransport) or an HTTP request carrier whose
-         * request has no body. A credential travels in the request header field {@link PrefixAuth#HEADER_FIELD}.
-         */
-        public boolean head() { return request.head(); }
 
         /** The values of the request header field name, compared without regard to case; empty when absent and for carriers that are not HTTP requests. */
         public java.util.List<String> header(String name) { return request.header(name); }

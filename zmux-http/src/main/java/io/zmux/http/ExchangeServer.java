@@ -327,7 +327,7 @@ final class ExchangeServer {
         PipeIo io = new PipeIo(nc.new Reader(), nc.new Writer(), Framing.BYTE_STREAM, "http exchange", nc)
                 .withReceiveMemory(cfg.upStoreLimit()).withCarrier(CarrierKind.EXCHANGE);
         // Ended before a session took it while the listener closed: the listener closed before the carrier was established.
-        slot.handle(io, JoinHint.inBand(slot.peer()), null).taken().thenAccept(t -> {
+        slot.handle(io, JoinHint.inBand(slot.peer())).taken().thenAccept(t -> {
             if (!t && ep.listener.isClosed()) {
                 Loops.run(nc.loop, nc::refused, NOTHING); // refused: gone with its loop
             }

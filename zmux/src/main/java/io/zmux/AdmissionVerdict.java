@@ -5,10 +5,12 @@ public enum AdmissionVerdict {
     /** The carrier goes to the listener without the first {@link Admission.Decision#skip()} prefix bytes. */
     ACCEPT,
     /**
-     * The carrier goes, with every byte read replayed, to the fallback target of the entry
-     * that took it ({@link ListenerConfig#fallback()} for the listener's sockets, the target
-     * given to {@link io.zmux.adapter.ListenerAdapter#handle}: an HTTP endpoint's host handler, a QUIC
-     * server's fallback); without one it is {@link #STALL}.
+     * The carrier goes, with every byte or message read replayed, to {@link ListenerConfig#fallback()} as a
+     * {@link Takeover}, whatever entry took it; without a fallback it is stalled (counted as a fallback). An HTTP
+     * request that is itself the carrier, decided on its head or body, and an upgrade refused on its head, are
+     * requests rather than carriers to take over: their HTTP adapter answers them ({@link
+     * io.zmux.adapter.ListenerAdapter#handleRequest}). The carrier of an upgrade decided after a {@link #DEFER}
+     * is a carrier: it goes to the listener's fallback.
      */
     FALLBACK,
     /**
@@ -25,8 +27,15 @@ public enum AdmissionVerdict {
     /**
      * Asks for a longer prefix on a byte stream ({@link Admission.Decision#need()}): the listener reads
      * on, within the same peek timeout, and decides again. A need that does not exceed the
-     * prefix or exceeds the bound, and this verdict on a message-framed carrier or on a
-     * carrier that ended or timed out, are {@link #CLOSE}.
+     * prefix or exceeds {@link Admission#maxPeek()}, and this verdict on a message-framed carrier, on a
+     * request head (an upgrade's included) or on a carrier that ended or timed out, are {@link #CLOSE}.
      */
-    MORE
+    MORE,
+    /**
+     * Completes an HTTP upgrade whose head is being decided ({@link Admission.CarrierInfo#upgrade()}, {@link
+     * Admission.Stage#HEAD}) and decides again on the carrier: the decider is called with the same metadata at
+     * {@link Admission.Stage#CARRIER} and the carrier's first message as prefix. The peek timeout runs on from the
+     * head's decision, and the carrier keeps its slots throughout. On any other decision it is {@link #CLOSE}.
+     */
+    DEFER
 }

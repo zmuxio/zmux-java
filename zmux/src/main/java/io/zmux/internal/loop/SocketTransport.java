@@ -71,6 +71,24 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         replay(reader);
     }
 
+    /**
+     * On the loop, nothing written: gives the channel up, off the selector and in blocking mode, without closing it;
+     * the transport is closed from now on. Null when it cannot be (closed, writing, the mode refused), the channel then closed.
+     */
+    java.nio.channels.SocketChannel detach() {
+        if (closed || writing()) return null;
+        closed = true;
+        if (reader != null) reader.release();
+        try {
+            if (key != null) nio.deregister(key);
+            ch.configureBlocking(true);
+            return ch;
+        } catch (IOException | RuntimeException e) {
+            try { ch.close(); } catch (IOException ignored) { /* Gone. */ }
+            return null;
+        }
+    }
+
     @Override
     public Transport moveTo(SessionHost host) {
         if (closed) return null;

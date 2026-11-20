@@ -219,6 +219,22 @@ final class BodyCarrier {
     boolean started() { return started || starting; }
 
     /**
+     * {@link #start}, then a stage that completes once the head went out, failed when it could
+     * not; on the channel's loop.
+     */
+    java.util.concurrent.CompletableFuture<Void> opened() {
+        var done = new java.util.concurrent.CompletableFuture<Void>();
+        Runnable report = () -> {
+            if (aborted || detached) done.completeExceptionally(lostCause != null ? lostCause : new ClosedChannelException());
+            else done.complete(null);
+        };
+        start();
+        if (started) report.run();
+        else pending.add(report);
+        return done;
+    }
+
+    /**
      * zmux's graceful end of the outbound half before anything was written writes nothing,
      * not even the head: the adapter ends it with {@link #endOut} or gives the request away.
      */

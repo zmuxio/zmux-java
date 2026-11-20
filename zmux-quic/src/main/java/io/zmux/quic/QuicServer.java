@@ -30,27 +30,11 @@ public final class QuicServer implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
 
     /**
-     * The target of a connection whose first bidirectional stream the listener's admission
-     * did not accept: it takes the connection and that stream (every byte read replayed), as
-     * {@link io.zmux.Admission.Fallback} takes a carrier; the connection's other streams are
-     * closed. serve runs off the event loops.
-     */
-    @FunctionalInterface
-    public interface Fallback {
-        void serve(QuicChannel connection, io.zmux.carrier.PipeIo stream);
-    }
-
-    public QuicServer(InetSocketAddress address, QuicSslContextBuilder tlsBuilder, QuicOptions options, ZmuxListener listener) throws IOException {
-        this(address, tlsBuilder, options, listener, null);
-    }
-
-    /**
      * A server whose connections are admitted by their first bidirectional stream with the
-     * listener's admission (0-RTT is refused); fallback (or null: a fallback stalls) takes a
-     * connection that is not accepted.
+     * listener's admission (0-RTT is refused); a connection given back goes with that stream to
+     * the listener's {@link io.zmux.ListenerConfig#fallback()} ({@link QuicTakeover#connection}).
      */
-    public QuicServer(InetSocketAddress address, QuicSslContextBuilder tlsBuilder, QuicOptions options, ZmuxListener listener,
-                      Fallback fallback) throws IOException {
+    public QuicServer(InetSocketAddress address, QuicSslContextBuilder tlsBuilder, QuicOptions options, ZmuxListener listener) throws IOException {
         try {
             QuicSslContext tls = tlsBuilder.earlyData(false).keylog(QuicExporter.KEYLOG).build();
             if (tls.isClient()) throw new IllegalArgumentException("server TLS builder required");
@@ -60,7 +44,7 @@ public final class QuicServer implements AutoCloseable {
                             connections.add(channel);
                             if (closed.get()) { connections.remove(channel); channel.close(); return; }
                             channel.closeFuture().addListener(ignored -> connections.remove(channel));
-                            channel.pipeline().addLast(new ConnectionCarrier(options, listener, fallback, host, completions));
+                            channel.pipeline().addLast(new ConnectionCarrier(options, listener, host, completions));
                         }
                     }).streamHandler(STREAMS).build();
             datagram = new Bootstrap().group(group).channel(NioDatagramChannel.class).handler(codec).bind(address).sync().channel();
@@ -89,7 +73,8 @@ public final class QuicServer implements AutoCloseable {
      * Serves one established QUIC connection with listener, as a {@link QuicServer} serves each
      * connection it accepts: a slot of its source (its remote address), the admission of its
      * first bidirectional stream, the inbound transform, then the classification of every
-     * stream; fallback (or null: a fallback stalls) takes a connection that is not accepted.
+     * stream; a connection given back goes with that stream to the listener's fallback
+     * ({@link QuicTakeover#connection}), and is closed once the fallback is done with it.
      * The connection's codec must hand its streams on with {@link #streamHandler()}, and a
      * stream that arrives before serve is called is closed: call it on the connection's loop
      * when its handshake completes. Netty
@@ -103,8 +88,7 @@ public final class QuicServer implements AutoCloseable {
      * the connection, and the stage fails with {@link io.zmux.ListenerClosedException}. These
      * outcomes belong to this adapter, which hands the connection to the listener as a whole.
      */
-    public static io.zmux.ZmuxFuture<Void> serve(QuicChannel connection, QuicOptions options, ZmuxListener listener,
-                                                                  Fallback fallback) {
+    public static io.zmux.ZmuxFuture<Void> serve(QuicChannel connection, QuicOptions options, ZmuxListener listener) {
         java.util.Objects.requireNonNull(connection, "connection");
         java.util.Objects.requireNonNull(options, "options");
         java.util.Objects.requireNonNull(listener, "listener");
@@ -115,7 +99,7 @@ public final class QuicServer implements AutoCloseable {
             return QuicClient.future(result);
         }
         NettyHost host = hostOf(connection.eventLoop());
-        var carrier = ConnectionCarrier.established(options, listener, fallback, host, new io.zmux.internal.loop.SerialCallbacks());
+        var carrier = ConnectionCarrier.established(options, listener, host, new io.zmux.internal.loop.SerialCallbacks());
         connection.closeFuture().addListener(ignored -> result.complete(null));
         Runnable add = () -> {
             if (!connection.isActive()) { result.complete(null); return; }

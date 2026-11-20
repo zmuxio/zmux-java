@@ -154,7 +154,7 @@ already accepted sessions application-owned; endpoint closure closes every
 connection that endpoint owns.
 
 A host that runs its own QUIC endpoint hands each established connection to
-`QuicServer.serve(connection, options, listener, fallback)`, on the
+`QuicServer.serve(connection, options, listener)`, on the
 connection's loop once its handshake completes: the connection takes a slot of
 its source, its first bidirectional stream the listener's admission, then the
 inbound transform, as on a `QuicServer` endpoint. Its codec hands streams on
@@ -163,6 +163,12 @@ connection ends; cancelling it stops handing new streams to the listener and
 closes neither the connection nor its sessions. Netty offers no query for
 whether a connection used 0-RTT, so a host whose listener has an admission
 refuses early data in its TLS configuration.
+
+A connection whose first stream the admission gives back goes, with that
+stream, to the listener's `ListenerConfig.fallback` as a `Takeover`: its pipe
+replays the bytes read, and `QuicTakeover.connection(takeover)` gives the QUIC
+connection. Its other streams are closed, and the connection closes once the
+fallback is done with the stream.
 
 ## Multiple connections and lanes
 

@@ -89,7 +89,8 @@ final class WebSocketClient {
             if (credential != null) {
                 var e = Requests.tls(ch);
                 var info = new Admission.CarrierInfo(Connections.address(url), Connections.address(url), "", e == null ? "" : url.getHost(),
-                        e == null ? null : Requests.exporter(e), RequestHead.of(Map.of(), true));
+                        e == null ? null : Requests.exporter(e), RequestHead.of(Map.of()))
+                        .at(Admission.Stage.HEAD, io.zmux.carrier.Framing.MESSAGES, true);
                 CarrierCredential.HeaderField f = credential.header(info);
                 h.add(f.name(), f.value());
             }

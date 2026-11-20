@@ -111,7 +111,8 @@ final class StreamingRequest {
 
     /** Sends the request head on ch, then the credential's prefix and replay, and returns its carrier. */
     private BodyCarrier request(Channel ch, URI u, List<ByteBuf> replay) throws IOException {
-        var info = new Admission.CarrierInfo(Connections.address(u), Connections.address(u), "", "", null, RequestHead.of(Map.of(), get));
+        var info = new Admission.CarrierInfo(Connections.address(u), Connections.address(u), "", "", null, RequestHead.of(Map.of()))
+                .at(get ? Admission.Stage.HEAD : Admission.Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
         byte[] prefix = null;
         CarrierCredential.HeaderField field = null;
         if (credential != null) {

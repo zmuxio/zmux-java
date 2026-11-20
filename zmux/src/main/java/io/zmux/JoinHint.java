@@ -18,7 +18,7 @@ import java.util.Objects;
  *     or a trusted intermediary resolved; null (not resolved) is the peer
  * @param peer the address the carrier arrived from directly; null when unknown
  * @param request the HTTP request of the carrier, which the admission sees
- *     ({@link Admission.CarrierInfo#head()}, {@link Admission.CarrierInfo#header}); {@link
+ *     ({@link Admission.CarrierInfo#header}); {@link
  *     RequestHead#NONE} for a carrier that is not an HTTP request
  */
 public record JoinHint(String pairing, boolean uplink, InetSocketAddress source, InetSocketAddress peer,

@@ -413,13 +413,14 @@ class CarrierHooksTest {
     @Test void aFirstMessageAboveTheLimitIsClosed() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).maxPeek(4).peekTimeout(WAIT).build();
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).maxMessage(4).peekTimeout(WAIT).build();
             try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.MESSAGES);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[32]);
                 h.closed().toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
-                assertEquals(1, l.stats().admission().closed());
+                assertEquals(1, l.stats().admission().tooLarge(), "closed without a decision, counted as too large");
+                assertEquals(0, l.stats().admission().closed());
             }
         }
     }

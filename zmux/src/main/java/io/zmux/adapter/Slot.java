@@ -1,9 +1,9 @@
 package io.zmux.adapter;
 
-import io.zmux.Admission;
 import io.zmux.JoinHint;
 import io.zmux.ListenerConfig;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.loop.ListenerHub;
 import io.zmux.internal.spi.AdapterPorts;
 import java.net.InetSocketAddress;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * A slot of a carrier's source ({@link ListenerConfig#maxPendingPerSource()}) with one of the
  * listener ({@link ListenerConfig#maxPending()}), taken by {@link ListenerAdapter#reserve} when an
  * entry accepts a connection, before its outer handshake; it is used once, by
- * {@link #handle(PipeIo, JoinHint, Admission.Fallback)}, {@link #handshakeFailed()} or
+ * {@link #handle(PipeIo, JoinHint)}, {@link #handshakeFailed()} or
  * {@link #release()}.
  */
 public final class Slot {
@@ -33,13 +33,13 @@ public final class Slot {
     public InetSocketAddress source() { return source; }
 
     /**
-     * Hands the carrier over, as {@link ListenerAdapter#handle(PipeIo, JoinHint, Admission.Fallback)}
+     * Hands the carrier over, as {@link ListenerAdapter#handle(PipeIo, JoinHint)}
      * does after taking a slot; hint's addresses are this slot's.
      */
-    public Handled handle(PipeIo io, JoinHint hint, Admission.Fallback fallback) {
+    public Handled handle(PipeIo io, JoinHint hint) {
         take();
         return new Handled(port, port.transfer(io, new JoinHint(hint.pairing(), hint.uplink(), source, peer, hint.request()),
-                false, null, fallback));
+                false, null, ListenerHub.Entry.CARRIER));
     }
 
     /** The entry gave the carrier up before handing it over (its connection ended unused): the slot goes, counted nowhere. */

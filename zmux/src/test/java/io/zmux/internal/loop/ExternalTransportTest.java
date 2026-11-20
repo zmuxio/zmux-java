@@ -103,14 +103,14 @@ class ExternalTransportTest {
             }, null, new byte[0], 8, 0, 0, 0, 0, 0);
             try {
                 if (knownLane) ListenerHub.laneInput(loop, PipeIo.of(reader, null));
-                else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null); }
+                else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.CARRIER, null); }
                 run(loop, () -> {});
                 sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
                 loop.close();
                 // A half's close runs off the loop.
                 awaitCount(closed, 1); assertEquals(0, loop.pool.outstanding());
-                hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, null, null);
+                hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.CARRIER, null);
                 awaitCount(closed, 2);
             } finally { hub.close(); loop.close(); }
         }

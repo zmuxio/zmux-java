@@ -18,7 +18,7 @@ import java.util.Objects;
  *
  * <p>info describes the carrier as the server's admission sees it: {@link
  * Admission.CarrierInfo#source()} is the server's address, the exporter that of the
- * carrier's handshake (null without TLS), and {@link Admission.CarrierInfo#head()} is set for
+ * carrier's handshake (null without TLS), and {@link Admission.CarrierInfo#stage()} is {@link Admission.Stage#HEAD} for
  * {@link #header}. The methods may be called concurrently, on an event loop: they must not
  * block. An exception fails the dial.
  */

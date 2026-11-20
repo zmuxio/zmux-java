@@ -47,7 +47,7 @@ final class Requests {
             if ((version == 1 && !chunked) || full) cl = 0;
         }
         String protocol = r.headers().get(":protocol", "");
-        return new HttpClass.Head(r.method().name(), version, protocol, cl, RequestHead.of(fields(r.headers()), false));
+        return new HttpClass.Head(r.method().name(), version, protocol, cl, RequestHead.of(fields(r.headers())));
     }
 
     /** The address ch's connection arrived from directly; null when unknown. */
@@ -66,7 +66,7 @@ final class Requests {
         if (p == null) p = c.attr(HttpEndpoint.SOURCE).get();
         if (p == null) p = peer(ch);
         if (p == null || p.getAddress() == null || trusted == null) return p;
-        return trusted.source(p, RequestHead.of(fields(r.headers()), false));
+        return trusted.source(p, RequestHead.of(fields(r.headers())));
     }
 
     /** The TLS engine of ch's connection, or null. */

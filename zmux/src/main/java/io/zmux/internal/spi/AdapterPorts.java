@@ -1,6 +1,5 @@
 package io.zmux.internal.spi;
 
-import io.zmux.Admission;
 import io.zmux.AdmissionVerdict;
 import io.zmux.JoinHint;
 import io.zmux.adapter.JoinLookup;
@@ -36,7 +35,7 @@ public final class AdapterPorts {
         void handshakeFailed(InetSocketAddress source);
 
         /** Hands over a carrier whose slot is held. */
-        Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, Admission.Fallback fallback);
+        Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, io.zmux.internal.loop.ListenerHub.Entry entry);
 
         /** Closes a carrier refused at its slot. */
         Carrier refused(PipeIo io);

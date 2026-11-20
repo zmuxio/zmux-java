@@ -88,6 +88,16 @@ public final class EventLoop extends SessionHost {
     }
 
 
+    /**
+     * On the loop: cancels k and completes its deregistration at once, so that its channel may be put in
+     * blocking mode; the selection this runs adds what is ready to the selected set, handled by the next round.
+     */
+    void deregister(SelectionKey k) throws IOException {
+        assert inLoop();
+        k.cancel();
+        selector.selectNow();
+    }
+
     /** Stops the loop: its sessions are failed, its selector closed; waits for the thread to end. */
     void close() {
         closing = true;

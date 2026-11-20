@@ -1,7 +1,6 @@
 package io.zmux.http;
 
 import io.zmux.internal.spi.Loops;
-import io.zmux.AdmissionVerdict;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -21,12 +20,16 @@ import io.zmux.carrier.Framing;
 import io.zmux.carrier.PipeIo;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * The server of WebSocket carriers on HTTP/1.1: a valid upgrade request
- * that offers an accepted subprotocol passes the listener's admission on its head alone (a
- * prefix token in its {@code Zmux-Prefix-Auth} field), and only an accepted one is answered with
- * 101; any other request, and one the admission gives back, goes to the host's handler. The
+ * that offers an accepted subprotocol passes the listener's admission on its head (a
+ * prefix token in its {@code Zmux-Prefix-Auth} field), through {@link
+ * io.zmux.adapter.ListenerAdapter#admitFirst}; only a head the admission accepts, or whose
+ * decision it defers to the first message, is answered with 101. Any other request, and a head
+ * the admission gives back, goes to the host's handler; a carrier given back after a deferred
+ * decision goes to the listener's fallback. The
  * subprotocol is chosen in the server's order of preference, each identifier also accepted as
  * its draft-01 alias, and is the carrier's application protocol.
  */
@@ -86,7 +89,6 @@ final class WebSocketServer {
         if (hs == null) { l.adapter().countSetupFailure(); return null; }
         var full = new DefaultFullHttpRequest(r.protocolVersion(), r.method(), r.uri(), Unpooled.EMPTY_BUFFER, r.headers(),
                 io.netty.handler.codec.http.EmptyHttpHeaders.INSTANCE);
-        AdmissionVerdict[] verdict = new AdmissionVerdict[1];
         BodyCarrier[] self = new BodyCarrier[1];
         BodyCarrier.Out out = new BodyCarrier.Out() {
             @Override public ChannelFuture head() {
@@ -98,26 +100,33 @@ final class WebSocketServer {
         };
         BodyCarrier c = new BodyCarrier(ch, Framing.MESSAGES, true, true, out, () -> {
             if (self[0].detached()) return;
-            if (verdict[0] != AdmissionVerdict.ACCEPT || !self[0].started()) ch.close();
+            // Not upgraded (stalled or closed on its head): the request ends; upgraded: once the last write went out.
+            if (!self[0].started()) ch.close();
             else self[0].afterWrites(ch::close);
         }, cause -> { ch.close(); return null; });
         self[0] = c;
         // A WebSocket carrier is never half of a pair.
-        JoinHint hint = new JoinHint("", false, null, Requests.peer(ch), RequestHead.of(Requests.fields(r.headers()), true))
+        JoinHint hint = new JoinHint("", false, null, Requests.peer(ch), RequestHead.of(Requests.fields(r.headers())))
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.MESSAGES, "websocket", Requests.connection(ch)), ch)
                 .withProtocol(protocol).withCarrier(CarrierKind.WEBSOCKET);
-        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> Loops.run(ch.eventLoop(), () -> {
-            c.detach();
-            Router.closeQuietly(given);
-            router.toHost(r, List.of(), true);
-        }, () -> Router.closeQuietly(given)));
-        // A loop that refuses the verdict is shutting down and closes the channel, which ends the carrier.
-        a.verdict().whenComplete((v, e) -> Loops.run(ch.eventLoop(), () -> {
-            if (c.detached() || v == AdmissionVerdict.FALLBACK) return;
-            verdict[0] = v == null ? AdmissionVerdict.CLOSE : v;
-            if (v == AdmissionVerdict.ACCEPT) c.start(); // the 101 goes out now, and frames may follow
-        }, () -> {}));
+        // The upgrade (the 101) goes out once the admission accepted the head or deferred its decision to the
+        // first message; a head it gives back is the host's request, nothing answered yet.
+        l.adapter().admitFirst(io, hint, () -> {
+            var opened = new CompletableFuture<Void>();
+            Loops.run(ch.eventLoop(), () -> c.opened().whenComplete((v, e) -> {
+                if (e != null) opened.completeExceptionally(e); else opened.complete(null);
+            }), () -> opened.completeExceptionally(new java.nio.channels.ClosedChannelException()));
+            return opened;
+        }, t -> {
+            var given = new CompletableFuture<Void>();
+            Loops.run(ch.eventLoop(), () -> {
+                c.detach();
+                router.toHost(r, List.of(), true);
+                given.complete(null);
+            }, () -> given.complete(null));
+            return given;
+        });
         return new WebSocketFrames(c);
     }
 }

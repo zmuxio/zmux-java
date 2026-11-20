@@ -187,11 +187,12 @@ final class Router extends ChannelInboundHandlerAdapter {
         if (up) c.keepForReplay(); // until a session takes the carrier or the admission decides
         c.holdEmptyEnd();
         boolean headOnly = !up;
-        JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers()), headOnly), ep.pairField, cls == HttpClass.UPLINK, Requests.peer(ch))
+        JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers())), ep.pairField, cls == HttpClass.UPLINK, Requests.peer(ch))
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
                 .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
-        io.zmux.adapter.Handled a = l.adapter().handle(io, hint, (given, info) -> Loops.run(ch.eventLoop(), () -> fallback(c, r, given), () -> closeQuietly(given)));
+        // A request the admission gives back is a request: the host's handler answers it, with the body bytes read.
+        io.zmux.adapter.Handled a = l.adapter().handleRequest(io, hint, headOnly, t -> toHostLater(c, r));
         // The verdict and the taken flag come from the listener adapter in another module; the analyzer takes the result for a constant.
         //noinspection ConstantValue
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
@@ -248,16 +249,21 @@ final class Router extends ChannelInboundHandlerAdapter {
     }
 
     /** The admission's fallback: the request goes to the host's handler with every body byte replayed. */
-    private void fallback(BodyCarrier c, HttpRequest r, PipeIo given) {
+    private void fallback(BodyCarrier c, HttpRequest r) {
         List<ByteBuf> replay = c.detach();
-        closeQuietly(given);
         if (carrier == c) carrier = null;
         toHost(r, replay, requestEnded);
     }
 
-    static void closeQuietly(PipeIo io) {
-        try { if (io.reader() != null) io.reader().close(); } catch (RuntimeException ignored) { /* Gone. */ }
-        try { if (io.writer() != null) io.writer().close(); } catch (RuntimeException ignored) { /* Gone. */ }
+    /**
+     * The admission gave c's request back: on the channel's loop it goes to the host's handler,
+     * with what was kept of its body; the stage completes then, and zmux closes its view of the
+     * carrier, which no longer reaches the request.
+     */
+    java.util.concurrent.CompletionStage<Void> toHostLater(BodyCarrier c, HttpRequest r) {
+        var given = new java.util.concurrent.CompletableFuture<Void>();
+        Loops.run(ctx.channel().eventLoop(), () -> { fallback(c, r); given.complete(null); }, () -> given.complete(null));
+        return given;
     }
 
     /** The exchange or WebSocket adapter gives the request to the host after all, with what it read. */

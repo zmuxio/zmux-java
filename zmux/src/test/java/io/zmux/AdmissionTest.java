@@ -50,7 +50,8 @@ class AdmissionTest {
         var headers = new java.util.LinkedHashMap<String, java.util.List<String>>();
         for (int i = 0; i < fields.length; i += 2)
             headers.computeIfAbsent(fields[i], k -> new java.util.ArrayList<>()).add(fields[i + 1]);
-        return new Admission.CarrierInfo(TestAddr.peer("peer"), TestAddr.peer("peer"), "", "", exporter, RequestHead.of(headers, true));
+        return new Admission.CarrierInfo(TestAddr.peer("peer"), TestAddr.peer("peer"), "", "", exporter, RequestHead.of(headers))
+                .at(Admission.Stage.HEAD, Framing.BYTE_STREAM, false);
     }
 
     static PipeIo.Exporter exporting(byte[] binding) {
@@ -293,10 +294,12 @@ class AdmissionTest {
         }
     }
 
-    /** A fallback target that collects the input until it ends, then writes it back and closes both halves. */
+    /** A fallback target that collects the input until it ends, then writes it back and closes both halves; done then. */
     static Admission.Fallback echo(BlockingQueue<String> sources) {
-        return (carrier, info) -> {
-            sources.add(info.source().getHostString());
+        return t -> {
+            var carrier = t.pipe();
+            var done = new java.util.concurrent.CompletableFuture<Void>();
+            sources.add(t.info().source().getHostString());
             var got = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
                 @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
@@ -308,12 +311,13 @@ class AdmissionTest {
                 @Override public void onEnd() {
                     carrier.reader().close();
                     carrier.writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap(got.toByteArray())), new PipeWriter.Completion() {
-                        @Override public void completed() { carrier.writer().close(); }
-                        @Override public void failed(Throwable cause) { carrier.writer().abort(cause); }
+                        @Override public void completed() { carrier.writer().close(); done.complete(null); }
+                        @Override public void failed(Throwable cause) { done.completeExceptionally(cause); }
                     });
                 }
-                @Override public void onError(Throwable cause) { carrier.reader().close(); carrier.writer().abort(cause); }
+                @Override public void onError(Throwable cause) { done.completeExceptionally(cause); }
             });
+            return done;
         };
     }
 
@@ -488,15 +492,15 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2);
              var server = java.nio.channels.ServerSocketChannel.open().bind(new InetSocketAddress("127.0.0.1", 0))) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
-                        byte b = prefix.get(0);
-                        return b == 7 ? Admission.Decision.accept(4) : b == 8 ? Admission.Decision.FALLBACK : Admission.Decision.CLOSE;
-                    })).peekTimeout(Duration.ofSeconds(2)).build()).build();
-            try (var l = Zmux.listener(lc)) {
+            var adm = Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
+                byte b = prefix.get(0);
+                return b == 7 ? Admission.Decision.accept(4) : b == 8 ? Admission.Decision.FALLBACK : Admission.Decision.CLOSE;
+            })).peekTimeout(Duration.ofSeconds(2)).build();
+            var lc = ListenerConfig.builder().session(cfg).admission(adm).fallback(echo(sources)).build();
+            try (var l = Zmux.listener(lc); var bare = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 SocketChannel ch = SocketChannel.open(server.getLocalAddress());
                 ch.write(ByteBuffer.wrap(new byte[] {7, 7, 7, 7}));
-                var admitted = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
+                var admitted = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")));
                 try (var _ = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                     assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
@@ -504,7 +508,7 @@ class AdmissionTest {
                 try (SocketChannel raw = SocketChannel.open(server.getLocalAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {8, 'a', 'b', 'c', 'd'}));
                     raw.shutdownOutput();
-                    var fb = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), echo(sources));
+                    var fb = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")));
                     assertEquals(AdmissionVerdict.FALLBACK, fb.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                     assertEquals(new String(new byte[] {8, 'a', 'b', 'c', 'd'}, java.nio.charset.StandardCharsets.US_ASCII), readAll(raw));
                     assertEquals("peer", sources.poll(1, TimeUnit.SECONDS));
@@ -512,7 +516,7 @@ class AdmissionTest {
                 }
                 try (SocketChannel raw = SocketChannel.open(server.getLocalAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {8, 0, 0, 0}));
-                    var none = l.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")), null);
+                    var none = bare.adapter().handle(socketPipe(server.accept()), JoinHint.inBand(TestAddr.peer("peer")));
                     assertEquals(AdmissionVerdict.STALL, none.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS),
                             "a fallback without a target stalls");
                 }
@@ -599,7 +603,9 @@ class AdmissionTest {
     @Test void invalidPrefixesTakeTheFallbackPathAlike() throws Exception {
         var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 1, 0);
         var got = new LinkedBlockingQueue<byte[]>();
-        Admission.Fallback fallback = (carrier, info) -> {
+        Admission.Fallback fallback = t -> {
+            var carrier = t.pipe();
+            var done = new java.util.concurrent.CompletableFuture<Void>();
             var all = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
                 @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
@@ -609,12 +615,13 @@ class AdmissionTest {
                     got.add(all.toByteArray());
                     carrier.reader().close();
                     carrier.writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap("fallback".getBytes(UTF_8))), new PipeWriter.Completion() {
-                        @Override public void completed() { carrier.writer().close(); }
-                        @Override public void failed(Throwable cause) { carrier.writer().abort(cause); }
+                        @Override public void completed() { carrier.writer().close(); done.complete(null); }
+                        @Override public void failed(Throwable cause) { done.completeExceptionally(cause); }
                     });
                 }
-                @Override public void onError(Throwable cause) { got.add(all.toByteArray()); carrier.reader().close(); carrier.writer().abort(cause); }
+                @Override public void onError(Throwable cause) { got.add(all.toByteArray()); done.completeExceptionally(cause); }
             });
+            return done;
         };
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
@@ -676,7 +683,7 @@ class AdmissionTest {
             var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).carrierCredential(auth).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()))
                     .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
-                        seen.add(info.serverName() + " " + info.tls() + " " + info.head() + " " + info.header(PrefixAuth.HEADER_FIELD));
+                        seen.add(info.serverName() + " " + info.tls() + " " + (info.stage() == Admission.Stage.HEAD) + " " + info.header(PrefixAuth.HEADER_FIELD));
                         return verifier.decide(info, prefix);
                     })).peekTimeout(Duration.ofSeconds(5)).build()).build();
             var tls = TlsOptions.client(TestTls.client(), "localhost");
@@ -715,7 +722,7 @@ class AdmissionTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg)
                     .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
-                        seen.add(info.source().getHostString() + " " + info.serverName() + " " + info.head() + " " + prefix.remaining()
+                        seen.add(info.source().getHostString() + " " + info.serverName() + " " + (info.stage() == Admission.Stage.HEAD) + " " + prefix.remaining()
                                 + " " + info.header("x-app"));
                         return verifier.decide(info, prefix);
                     })).peekTimeout(Duration.ofSeconds(30)).build()).build();
@@ -723,9 +730,9 @@ class AdmissionTest {
             try (var l = Zmux.listener(lc)) {
                 var header = auth.header(client);
                 var request = RequestHead.of(java.util.Map.of(header.name(), java.util.List.of(header.value()),
-                        "X-App", java.util.List.of("1")), true);
+                        "X-App", java.util.List.of("1")));
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.adapter().handle(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), null);
+                var admitted = l.adapter().handleRequest(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), true, null);
                 // Decided before the client writes anything: a prefix read would wait out the peek timeout.
                 assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals("peer example.com true 0 [1]", seen.poll(1, TimeUnit.SECONDS));
@@ -734,10 +741,10 @@ class AdmissionTest {
                 }
                 // The same token again, and none at all: both stall at once.
                 var again = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handle(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), true, null)
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 var none = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handle(none[1], JoinHint.of(RequestHead.of(java.util.Map.of(), true), false, TestAddr.peer("peer")), null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(none[1], JoinHint.of(RequestHead.of(java.util.Map.of()), false, TestAddr.peer("peer")), true, null)
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 for (var p : new PipeIo[] {again[0], none[0]}) { p.reader().close(); p.writer().abort(new IOException("done")); }
             }
@@ -745,7 +752,7 @@ class AdmissionTest {
     }
 
     @Test void joinHintsOfARequestTakeThePairingField() {
-        var r = RequestHead.of(java.util.Map.of("Zmux-Pipe-Pair", java.util.List.of("p")), false);
+        var r = RequestHead.of(java.util.Map.of("Zmux-Pipe-Pair", java.util.List.of("p")));
         var h = JoinHint.of(r, true, TestAddr.peer("s"));
         assertEquals("p", h.pairing());
         assertTrue(h.uplink());

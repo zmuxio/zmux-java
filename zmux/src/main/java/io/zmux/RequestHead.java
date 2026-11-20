@@ -9,20 +9,16 @@ import java.util.TreeMap;
 
 /**
  * The HTTP request of a carrier, as the application's HTTP server received it: its header
- * fields and whether the carrier is decided on this head.
- * An HTTP adapter gives it to {@link io.zmux.adapter.ListenerAdapter#handle} with the carrier ({@link JoinHint#request()});
- * the admission sees it through {@link Admission.CarrierInfo}.
+ * fields. An HTTP adapter gives it to {@link io.zmux.adapter.ListenerAdapter} with the carrier
+ * ({@link JoinHint#request()}); the admission sees it through {@link Admission.CarrierInfo}, whose
+ * {@link Admission.CarrierInfo#stage()} says whether the decision is taken on this head.
  *
  * @param headers the request's header fields, names compared without regard to case; fields
  *     whose names differ only in case are one field with the values of both, in the given order
- * @param head the carrier is decided on this head, without a prefix: an HTTP upgrade
- *     (WebSocket, WebTransport) or an HTTP request carrier whose request has no body (such as
- *     the downlink GET of a split bootstrap); a credential then travels in the header field
- *     {@link PrefixAuth#HEADER_FIELD}
  */
-public record RequestHead(Map<String, List<String>> headers, boolean head) {
+public record RequestHead(Map<String, List<String>> headers) {
     /** No request: a carrier that is not an HTTP request. */
-    public static final RequestHead NONE = new RequestHead(Map.of(), false);
+    public static final RequestHead NONE = new RequestHead(Map.of());
 
     public RequestHead {
         Objects.requireNonNull(headers, "headers");
@@ -40,9 +36,9 @@ public record RequestHead(Map<String, List<String>> headers, boolean head) {
         headers = Collections.unmodifiableMap(fields);
     }
 
-    /** An HTTP request carrier with these header fields; head as {@link #head()}. */
-    public static RequestHead of(Map<String, List<String>> headers, boolean head) {
-        return new RequestHead(headers, head);
+    /** An HTTP request carrier with these header fields. */
+    public static RequestHead of(Map<String, List<String>> headers) {
+        return new RequestHead(headers);
     }
 
     /** The values of the header field name, in order, its name compared without regard to case; empty when absent. */

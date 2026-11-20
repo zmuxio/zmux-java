@@ -111,7 +111,12 @@ violated) reports `CarrierFailedException`. All of them are `ZmuxException`s.
 A request is classified on its head (`HttpClass.classify`): a carrier of an
 enabled kind passes the listener's admission before anything is written; any
 other request, and one the admission gives back, goes to the host's handler
-with every body byte replayed. Every carrier takes the listener's source and
+with every body byte replayed. A WebSocket upgrade is decided on its head; a
+decider that returns `DEFER` there has the upgrade answered (101) and decides
+again on the carrier's first binary message (`maxMessage`), within the same peek
+timeout. A WebSocket carrier given back then is no longer a request: it goes to
+the listener's `ListenerConfig.fallback` as a `Takeover`, its first message
+replayed, and is closed when the fallback is done. Every carrier takes the listener's source and
 pending slots like its TCP carriers; a split bootstrap holds one slot per half
 until the pair is complete, so `maxPendingPerSource` is at least 2. Behind a
 proxy, `trusted(TrustedProxies)` takes the client address from the PROXY
@@ -119,6 +124,7 @@ protocol or a forwarding header of a trusted hop, and a host that resolves the
 address itself sets `HttpEndpoint.SOURCE` on the connection's channel.
 
 An application that runs another HTTP server hands each carrier to the listener
-itself, through `listener.adapter().handle(io, hint, fallback)`
-(`io.zmux.adapter.ListenerAdapter`), with a `JoinHint` built from the request
-head.
+itself, through `listener.adapter().handleRequest(io, hint, onHead, fallback)`
+for a request carrier and `admitFirst(io, hint, upgrade, headFallback)` for an
+upgrade (`io.zmux.adapter.ListenerAdapter`), with a `JoinHint` built from the
+request head.

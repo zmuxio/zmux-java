@@ -58,13 +58,13 @@ class ShapedPipeTest {
             var scfg = multipath(ZmuxConfig.builder().eventLoops(loops)).shaper(ss).build();
             try (var listener = Zmux.listener(ListenerConfig.of(scfg))) {
                 var first = MemoryPipe.pair(Framing.MESSAGES);
-                listener.adapter().handle(first[1].withCarrier(CarrierKind.WEBSOCKET), JoinHint.inBand(TestAddr.peer("peer")), null);
+                listener.adapter().handle(first[1].withCarrier(CarrierKind.WEBSOCKET), JoinHint.inBand(TestAddr.peer("peer")));
                 try (var client = Zmux.open(first[0].withCarrier(CarrierKind.WEBSOCKET), Role.CLIENT, ccfg);
                      var server = listener.accept(Duration.ofSeconds(5))) {
                     ShapingTest.transfer(client, server, 100);
                     ShapingTest.transfer(server, client, 100);
                     var second = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.adapter().handle(second[1].withCarrier(CarrierKind.STREAMING), JoinHint.inBand(TestAddr.peer("peer")), null);
+                    listener.adapter().handle(second[1].withCarrier(CarrierKind.STREAMING), JoinHint.inBand(TestAddr.peer("peer")));
                     ZmuxPipe joined = client.addPipe(second[0].withCarrier(CarrierKind.STREAMING), PipeOptions.defaults());
                     assertEquals(CarrierKind.STREAMING, joined.stats().orElseThrow().carrier());
                     cs.await(2); ss.await(2);

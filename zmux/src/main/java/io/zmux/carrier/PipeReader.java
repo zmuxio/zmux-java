@@ -41,9 +41,9 @@ public interface PipeReader {
 
     /**
      * Before {@link #start}: a reader of messages may fail a first message longer than limit
-     * rather than hold it whole (the admission reads the first message as its prefix); later
-     * messages have the carrier's own limit. No effect by default: the message is then read
-     * up to that limit and checked.
+     * rather than hold it whole (the admission reads the first message as its prefix), with
+     * {@link MessageTooLargeException}; later messages have the carrier's own limit. No effect by
+     * default: the message is then read whole and checked.
      */
     default void limitFirstMessage(int limit) {}
 

@@ -71,6 +71,7 @@ public final class ListenerHub {
         final java.util.concurrent.atomic.AtomicLong accepted = new java.util.concurrent.atomic.AtomicLong(),
                 fallback = new java.util.concurrent.atomic.AtomicLong(), stalled = new java.util.concurrent.atomic.AtomicLong(),
                 closed = new java.util.concurrent.atomic.AtomicLong(), stallOverflow = new java.util.concurrent.atomic.AtomicLong(),
+                tooLarge = new java.util.concurrent.atomic.AtomicLong(),
                 peekTimedOut = new java.util.concurrent.atomic.AtomicLong(), handshakeFailed = new java.util.concurrent.atomic.AtomicLong();
 
         /** Per variant: accepted, fallback, stalled, closed. */
@@ -129,7 +130,7 @@ public final class ListenerHub {
         public long timedOutCount() { return timedOut.get(); }
         public io.zmux.AdmissionStats admission() {
             return new io.zmux.AdmissionStats(accepted.get(), fallback.get(), stalled.get(), closed.get(), stallOverflow.get(),
-                    peekTimedOut.get(), handshakeFailed.get());
+                    tooLarge.get(), peekTimedOut.get(), handshakeFailed.get());
         }
     }
 
@@ -366,15 +367,15 @@ public final class ListenerHub {
      * Takes an external carrier whose source slot was reserved ({@link #reserve}): the
      * admission, if configured and the carrier was not admitted with its connection, then
      * its classification: by hint's pairing, or by its first record.
-     * verdict (or null) receives the admission's verdict code, off the loop; fallback (or
-     * null) takes a carrier the admission does not accept. Returns the carrier, for its
-     * {@link Transport#whenTaken} and {@link Transport#whenClosed}.
+     * verdict (or null) receives the admission's final verdict code, off the loop; entry says
+     * what the carrier is decided on and where a carrier the admission gives back goes. Returns
+     * the carrier, for its {@link Transport#whenTaken} and {@link Transport#whenClosed}.
      */
     public Transport external(SessionHost loop, io.zmux.carrier.PipeIo io, io.zmux.JoinHint hint, boolean admitted,
-                              Object admittedValue, Forward fallback, CompletableFuture<Decided> verdict) {
+                              Object admittedValue, Entry entry, CompletableFuture<Decided> verdict) {
         boolean pair = !hint.pairing().isEmpty();
         Transport carrier = pair ? new ExternalTransport(loop, io) : carrier(loop, io);
-        var info = info(carrier, io, hint);
+        var info = info(carrier, io, hint).at(entry.head() ? Admission.Stage.HEAD : Admission.Stage.CARRIER, io.framing(), entry.upgrade() != null);
         InetSocketAddress source = hint.source();
         Next next;
         if (pair) {
@@ -389,7 +390,7 @@ public final class ListenerHub {
             String alpn = io.capabilities().applicationProtocol();
             next = transformed(hint, info, (c, value) -> gate(c, source, alpn, value, info, ignored -> {}) != null);
         }
-        if (!carrier.loop().tryExecute(() -> admit(carrier, info, admitted, new Admitted(admittedValue, ""), fallback, verdict, false, next))) {
+        if (!carrier.loop().tryExecute(() -> admit(carrier, info, admitted, new Admitted(admittedValue, ""), entry, io.carrierConn(), verdict, false, next))) {
             release(source);
             carrier.close(null);
             report(verdict, Admit.CLOSE, null);
@@ -408,7 +409,8 @@ public final class ListenerHub {
     private static Admission.CarrierInfo info(Transport carrier, io.zmux.carrier.PipeIo io, io.zmux.JoinHint hint) {
         var caps = io.capabilities();
         return new Admission.CarrierInfo(hint.source(), hint.peer(), caps.applicationProtocol(), caps.serverName(),
-                caps.exporter() == null ? null : carrier::export, hint.request(), io.isTerminatedTls());
+                caps.exporter() == null ? null : carrier::export, hint.request(), io.isTerminatedTls(),
+                Admission.Stage.CARRIER, io.framing(), false);
     }
 
     private static byte[] decodePairToken(String value) {
@@ -555,7 +557,8 @@ public final class ListenerHub {
             PairHalf up = uplink ? this : down;
             String alpn = combined.info().applicationProtocol();
             Admission.CarrierInfo paired = new Admission.CarrierInfo(up.info.source(), up.info.peer(), alpn, up.info.serverName(),
-                    combined.exporterPresent() ? combined::export : null, up.info.request(), info.terminatedTls() && down.info.terminatedTls());
+                    combined.exporterPresent() ? combined::export : null, up.info.request(), info.terminatedTls() && down.info.terminatedTls(),
+                    Admission.Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
             Next session = (c, value) -> gate(c, source, alpn, value, paired,
                     driver -> { adopted.set(true); driver.closedFuture().whenComplete((v, error) -> forget.run()); }) != null;
             if (transform == null) session.start(combined, up.admitted);
@@ -623,10 +626,20 @@ public final class ListenerHub {
         private Admit() {}
     }
 
-    /** A fallback target: takes a carrier that was not accepted, every byte read replayed; called off the loop. */
-    @FunctionalInterface
-    public interface Forward {
-        void serve(io.zmux.carrier.PipeIo carrier, Admission.CarrierInfo info);
+    /**
+     * How an entry hands a carrier over: whether it is an HTTP request that is itself the carrier
+     * (request), decided on its head (head) and the carrier of an upgrade (upgrade: its step, null
+     * for none); requestFallback (or null: a fallback stalls) answers such a request, and an upgrade
+     * refused on its head, at the HTTP level, where every other carrier goes to the listener's fallback.
+     */
+    public record Entry(boolean request, boolean head, io.zmux.adapter.Upgrade upgrade, Admission.Fallback requestFallback) {
+        /** A carrier decided on its start, given back to the listener's fallback. */
+        public static final Entry CARRIER = new Entry(false, false, null, null);
+
+        /** An HTTP request carrier, or with upgrade (decided on its head) an upgrade's. */
+        public Entry(boolean head, io.zmux.adapter.Upgrade upgrade, Admission.Fallback requestFallback) {
+            this(true, head || upgrade != null, upgrade, requestFallback);
+        }
     }
 
     /** What an accepted carrier continues with, on its loop; false when the carrier was closed. */
@@ -639,8 +652,9 @@ public final class ListenerHub {
     public record Decided(int code, Object value) {}
 
     private Admission.Decider decider;
-    private Forward socketFallback;
-    private int peek, maxPeek;
+    /** The listener's fallback: the target of every carrier given back (an HTTP request's excepted); null: none. */
+    private Admission.Fallback listenerFallback;
+    private int peek, maxPeek, maxMessage;
     private long peekTimeout, stallMin, stallMax;
     private boolean fallbackOnPeekTimeout;
     private final byte[] stallKey = new byte[32];
@@ -655,13 +669,15 @@ public final class ListenerHub {
 
     /**
      * Configures the admission of every new carrier, before the first one; times in
-     * nanoseconds. fallback (or null) is the target of socket and TLS carriers.
+     * nanoseconds. fallback (or null) is the listener's, the target of every carrier given back.
      */
-    public void admission(Admission.Decider d, int peek, int maxPeek, long peekTimeout, boolean fallbackOnPeekTimeout, long stallMin, long stallMax, Forward fallback) {
+    public void admission(Admission.Decider d, int peek, int maxPeek, int maxMessage, long peekTimeout, boolean fallbackOnPeekTimeout,
+                          long stallMin, long stallMax, Admission.Fallback fallback) {
         this.fallbackOnPeekTimeout = fallbackOnPeekTimeout;
         this.maxPeek = maxPeek;
+        this.maxMessage = maxMessage;
         decider = d;
-        socketFallback = fallback;
+        listenerFallback = fallback;
         this.peek = peek;
         this.peekTimeout = peekTimeout;
         this.stallMin = stallMin;
@@ -729,7 +745,7 @@ public final class ListenerHub {
         if (!slotOrReject(loop, ch, peer)) return;
         var info = new Admission.CarrierInfo(peer, peer, "", "", null, io.zmux.RequestHead.NONE);
         Next next = transformed(io.zmux.JoinHint.inBand(peer), info, (c, value) -> gate(c, peer, "", value, info, ignored -> {}) != null);
-        if (!loop.tryExecute(() -> admit(new SocketTransport(loop, ch), info, false, Admitted.NONE, socketFallback, null, false, next))) {
+        if (!loop.tryExecute(() -> admit(new SocketTransport(loop, ch), info, false, Admitted.NONE, Entry.CARRIER, null, null, false, next))) {
             release(peer);
             closeQuietly(ch);
             counts.refused();
@@ -747,8 +763,9 @@ public final class ListenerHub {
             handshakes.remove(key);
             if (err != null) { handshakeFailed(peer); return; }
             String alpn = c.info().applicationProtocol();
-            var info = new Admission.CarrierInfo(peer, peer, alpn, c.serverName(), c::export, io.zmux.RequestHead.NONE, true);
-            admit(c, info, false, Admitted.NONE, socketFallback, null, false,
+            var info = new Admission.CarrierInfo(peer, peer, alpn, c.serverName(), c::export, io.zmux.RequestHead.NONE, true,
+                    Admission.Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
+            admit(c, info, false, Admitted.NONE, Entry.CARRIER, null, null, false,
                     transformed(io.zmux.JoinHint.inBand(peer), info, (x, value) -> gate(x, peer, alpn, value, info, ignored -> {}) != null));
         });
         handshakes.put(key, cancel);
@@ -766,13 +783,15 @@ public final class ListenerHub {
     /**
      * On the carrier's loop, its slot held: the admission, if configured, then next. A
      * deferred next moves the carrier, so it runs only once the skipped bytes are consumed.
-     * A carrier decided on its request head is decided at once, without a prefix.
+     * A carrier decided on its request head is decided at once, without a prefix. conn is the
+     * identity of the carrier's multi-stream connection, which a takeover keeps (null: none).
      */
-    private void admit(Transport c, Admission.CarrierInfo info, boolean admitted, Admitted admittedValue, Forward fallback,
+    private void admit(Transport c, Admission.CarrierInfo info, boolean admitted, Admitted admittedValue, Entry entry, Object conn,
                        CompletableFuture<Decided> verdict, boolean deferred, Next next) {
         if (decider == null || admitted) {
             Admitted value = decider == null ? Admitted.NONE : admittedValue;
             report(verdict, 0, value.value());
+            if (entry.upgrade() != null && !openAccepted(c, entry.upgrade())) return;
             next.start(c, value);
             return;
         }
@@ -785,13 +804,34 @@ public final class ListenerHub {
             counts.refused();
             return;
         }
-        Admitting a = new Admitting(c, info, fallback, verdict, deferred, next, Time.add(Clock.now(), peekTimeout));
+        Admitting a = new Admitting(c, info, entry, conn, verdict, deferred, next, Time.add(Clock.now(), peekTimeout));
         c.loop().onShutdown(a.shutdown);
         c.loop().schedule(a, a.due);
-        if (peek == 0 || info.head() || (c.directions() & Action.DIR_IN) == 0) a.decide();
-        else {
-            if (a.messages) c.limitFirstMessage(Math.max(peek, maxPeek));
-            c.start(a);
+        if (info.stage() == Admission.Stage.HEAD || peek == 0 || (c.directions() & Action.DIR_IN) == 0) a.decide();
+        else a.read();
+    }
+
+    /**
+     * Runs the upgrade of a carrier accepted on its head (or without an admission): the carrier
+     * is taken at once; an upgrade that fails, at once or later, closes it. False: it failed at once.
+     */
+    private boolean openAccepted(Transport c, io.zmux.adapter.Upgrade upgrade) {
+        CompletableFuture<?> f = openUpgrade(upgrade);
+        if (f.isCompletedExceptionally()) {
+            c.close(null);
+            return false;
+        }
+        f.whenComplete((v, e) -> { if (e != null && !c.loop().tryExecute(() -> c.close(e))) c.close(e); });
+        return true;
+    }
+
+    /** The upgrade's stage: a throw or a null stage is a failed one. */
+    private static CompletableFuture<?> openUpgrade(io.zmux.adapter.Upgrade upgrade) {
+        try {
+            var stage = upgrade.open();
+            return stage == null ? CompletableFuture.failedFuture(new java.io.IOException("upgrade gave no stage")) : stage.toCompletableFuture();
+        } catch (RuntimeException failed) {
+            return CompletableFuture.failedFuture(failed);
         }
     }
 
@@ -804,14 +844,18 @@ public final class ListenerHub {
     /**
      * A carrier under admission: it reads the prefix, keeping every byte in the read buffer,
      * then pauses its input while the decider decides, and acts on the verdict on its loop.
-     * Its timer is the peek timeout, which bounds the reading and the decision.
+     * Its timer is the peek timeout, which bounds the reading and the decision, and, after a
+     * {@link AdmissionVerdict#DEFER} on an upgrade's head, the upgrade and the decision on the
+     * carrier's first message.
      */
     private final class Admitting extends TimerHeap.Timer implements Inbound {
         final Transport carrier;
-        final Admission.CarrierInfo info;
+        /** The metadata of the decision under way: a deferral moves it to the carrier's stage. */
+        private Admission.CarrierInfo info;
+        final Entry entry;
+        final Object conn;
         final InetSocketAddress source;
         final boolean deferred;
-        final Forward fallback;
         final CompletableFuture<Decided> verdict;
         final Next next;
         /** The accept's value and label. */
@@ -824,25 +868,37 @@ public final class ListenerHub {
         /** The prefix length asked for; on a byte stream the peek, then each {@link AdmissionVerdict#MORE}'s need. */
         private int want = peek;
         final boolean messages;
-        /** The first message is longer than the limit: its decision is closing. */
+        /** The first message is longer than {@link Admission#maxMessage()}: closed without a decision. */
         private boolean oversized;
         private boolean timedOut;
         private boolean decidingNow, done, paused, ended, graceful = true;
         private CompletableFuture<Admission.Decision> pending;
+        /** The upgrade a deferral waits for, until it completes. */
+        private CompletableFuture<?> upgrading;
         final Runnable shutdown;
 
-        Admitting(Transport c, Admission.CarrierInfo info, Forward fallback,
+        Admitting(Transport c, Admission.CarrierInfo info, Entry entry, Object conn,
                   CompletableFuture<Decided> verdict, boolean deferred, Next next, long due) {
             carrier = c;
             this.info = info;
             this.source = info.source();
-            this.fallback = fallback;
+            this.entry = entry;
+            this.conn = conn;
             this.verdict = verdict;
             this.deferred = deferred;
             this.next = next;
             this.due = due;
             shutdown = () -> abandon(counts.closed);
             messages = c.info().carrier().framing() == io.zmux.internal.core.Framing.RECORDS;
+        }
+
+        /** Starts reading the prefix: the first message of a message-framed carrier, bounded. */
+        void read() {
+            // Registered while it reads, so that the listener's stop ends it at once.
+            deciding.add(this);
+            if (closed) { abandon(counts.closed); return; }
+            if (messages) carrier.limitFirstMessage(maxMessage);
+            carrier.start(this);
         }
 
         /** Whether what was seen is enough to decide: a whole first message, or the prefix asked for. */
@@ -856,7 +912,7 @@ public final class ListenerHub {
             if (seen.length < sn) return false;
             long len = VarInt.get(ByteBuffer.wrap(seen), 0, seen.length);
             prefixAt = sn;
-            if (len > Math.max(peek, maxPeek)) {
+            if (len > maxMessage) {
                 oversized = true;
                 return true;
             }
@@ -871,7 +927,8 @@ public final class ListenerHub {
             if (!decidingNow && enough()) {
                 c.pauseInput();
                 paused = true;
-                decide();
+                if (oversized) tooLarge();
+                else decide();
             }
             return 0;
         }
@@ -881,8 +938,10 @@ public final class ListenerHub {
         void fire(long now) {
             if (done) return;
             if (!decidingNow) { // the deadline passed
+                // A deferral's upgrade or first message, and a first message, that did not come in time.
+                if (upgrading != null || messages) { abandon(counts.peekTimedOut); return; }
                 // A byte stream whose prefix is late goes to the fallback with the bytes read.
-                if (fallbackOnPeekTimeout && !messages && info.request() == io.zmux.RequestHead.NONE && !ended && seen.length < want) {
+                if (fallbackOnPeekTimeout && info.request() == io.zmux.RequestHead.NONE && !ended && seen.length < want) {
                     counts.peekTimedOut.incrementAndGet();
                     decided(Admission.Decision.FALLBACK);
                     return;
@@ -899,16 +958,23 @@ public final class ListenerHub {
             if (done) return;
             ended = true;
             this.graceful = graceful;
-            if (!decidingNow) decide();
+            if (decidingNow) return;
+            if (!messages) { decide(); return; }
+            // A message-framed carrier is decided on a whole binary first message, or closed without a decision.
+            if (c.inputError() instanceof io.zmux.carrier.MessageTooLargeException) tooLarge();
+            else if (!enough()) abandon(counts.closed);
+            else if (oversized) tooLarge();
+            else decide();
+        }
+
+        /** Closes a carrier whose first message is longer than the bound, without a decision. */
+        private void tooLarge() {
+            abandon(counts.tooLarge);
         }
 
         /** Asks the decider, outside every lock; its stage completes on any thread. */
         void decide() {
             decidingNow = true;
-            if (oversized) {
-                decided(Admission.Decision.CLOSE);
-                return;
-            }
             prefixLength = messages ? messagePrefix() : Math.min(want, seen.length);
             ByteBuffer prefix = ByteBuffer.wrap(seen, prefixAt, prefixLength).slice().asReadOnlyBuffer();
             var deadline = new Admission.Deadline(System.nanoTime() + Math.max(0, due - Clock.now()));
@@ -940,9 +1006,9 @@ public final class ListenerHub {
             return (int) Math.min(seen.length - prefixAt, VarInt.get(ByteBuffer.wrap(seen), 0, seen.length));
         }
 
-        /** Asks the decider again for a longer prefix; false when the verdict stands as closing. */
+        /** Asks the decider again for a longer prefix of a byte stream; false when the verdict stands as closing. */
         private boolean more(Admission.Decision d) {
-            if (messages || ended || timedOut || d.need() <= prefixLength || d.need() > maxPeek) return false;
+            if (messages || info.stage() == Admission.Stage.HEAD || ended || timedOut || d.need() <= prefixLength || d.need() > maxPeek) return false;
             deciding.remove(this);
             pending = null;
             decidingNow = false;
@@ -958,12 +1024,41 @@ public final class ListenerHub {
             return true;
         }
 
-        /** Ends the admission undecided: cancelled, timed out, or the listener stopped. */
+        /**
+         * The head of an upgrade deferred its decision to the carrier: the upgrade runs, then the
+         * carrier's first message (or its first peek bytes) is read and decided on, all by the
+         * head's deadline; the carrier stays registered, so that the listener's stop ends the wait.
+         */
+        private void defer() {
+            pending = null;
+            decidingNow = false;
+            info = info.at(Admission.Stage.CARRIER, info.framing(), true);
+            CompletableFuture<?> f = openUpgrade(entry.upgrade());
+            upgrading = f;
+            f.whenComplete((v, e) -> {
+                if (!carrier.loop().tryExecute(() -> upgraded(f, e))) carrier.close(null);
+            });
+        }
+
+        /** The deferral's upgrade completed (failed with e): the first message is read, or the carrier closed. */
+        private void upgraded(CompletableFuture<?> f, Throwable e) {
+            if (done || upgrading != f) return;
+            upgrading = null;
+            if (e != null) {
+                abandon(counts.handshakeFailed);
+                return;
+            }
+            if ((carrier.directions() & Action.DIR_IN) == 0 || (!messages && peek == 0)) decide();
+            else read();
+        }
+
+        /** Ends the admission undecided: cancelled, timed out, the listener stopped, or no first message. */
         void abandon(java.util.concurrent.atomic.AtomicLong count) {
             if (done) return;
             finish();
             count.incrementAndGet();
             if (pending != null) pending.cancel(false);
+            if (upgrading != null) upgrading.cancel(false);
             release(source);
             carrier.close(null);
             report(verdict, Admit.CLOSE, null);
@@ -982,18 +1077,30 @@ public final class ListenerHub {
             else carrier.redeliver();
         }
 
+        /** The target of a carrier given back: an HTTP request's own, or the listener's. */
+        private Admission.Fallback target() {
+            boolean request = entry.request() && (entry.upgrade() == null || info.stage() == Admission.Stage.HEAD);
+            return request ? entry.requestFallback() : listenerFallback;
+        }
+
         /** Acts on the decision (null: none, a failure), on the carrier's loop. */
         void decided(Admission.Decision d) {
             if (done) return;
             if (d != null && d.verdict() == AdmissionVerdict.MORE && more(d)) return;
+            boolean head = info.stage() == Admission.Stage.HEAD;
+            if (d != null && d.verdict() == AdmissionVerdict.DEFER && head && entry.upgrade() != null) {
+                defer();
+                return;
+            }
+            Admission.Fallback target = target();
             finish();
             String variant = d == null ? "" : d.variant();
             if (d != null && d.verdict() == AdmissionVerdict.ACCEPT) value = new Admitted(d.value(), variant);
             int v = d == null ? Admit.CLOSE : switch (d.verdict()) {
                 case ACCEPT -> skip(d.skip());
-                case FALLBACK -> fallback == null ? Admit.STALL : Admit.FALLBACK;
+                case FALLBACK -> target == null ? Admit.STALL : Admit.FALLBACK;
                 case STALL -> Admit.STALL;
-                case CLOSE, MORE -> Admit.CLOSE;
+                case CLOSE, MORE, DEFER -> Admit.CLOSE;
             };
             if (v == Admit.CLOSE) {
                 counts.closed.incrementAndGet();
@@ -1047,7 +1154,7 @@ public final class ListenerHub {
             if (v == Admit.FALLBACK) {
                 release(source);
                 // The bytes read stay in the read buffer (or, once the input ended, in seen).
-                forward(carrier, info, fallback, ended ? seen : null, ended, graceful);
+                forward(carrier, info, conn, target, ended ? seen : null, ended, graceful, messages);
                 return;
             }
             if (ended) {
@@ -1060,6 +1167,7 @@ public final class ListenerHub {
                 return;
             }
             Transport c = carrier;
+            if (head && entry.upgrade() != null && !openAccepted(c, entry.upgrade())) return;
             if (!next.start(c, value)) return;
             if (!c.isClosed() && c.inbound() != this && !parked(c)) resume();
         }
@@ -1148,16 +1256,25 @@ public final class ListenerHub {
         }
     }
 
-    /** Hands a carrier that was not accepted to target, with replay (or what its read buffer holds) in front. */
-    private static void forward(Transport c, Admission.CarrierInfo info, Forward target, byte[] replay, boolean ended, boolean graceful) {
-        Forwarded f = new Forwarded(c, replay, ended, graceful);
-        io.zmux.carrier.PipeIo io = f.pipe(info.applicationProtocol());
+    /**
+     * Hands a carrier that was not accepted to target as a {@link io.zmux.Takeover}, with replay
+     * (or what its read buffer holds) in front, off the loop; the carrier is closed when the
+     * stage target returned completes, at once when target throws or the stage fails.
+     */
+    private void forward(Transport c, Admission.CarrierInfo info, Object conn, Admission.Fallback target, byte[] replay,
+                         boolean ended, boolean graceful, boolean messages) {
+        Handback f = new Handback(c, info, conn, replay, ended, graceful, messages);
         Callbacks.EXECUTOR.execute(() -> {
+            java.util.concurrent.CompletionStage<?> stage;
             try {
-                target.serve(io, info);
+                stage = target.serve(f);
             } catch (RuntimeException e) {
-                f.abort(e);
+                owner.log(System.Logger.Level.WARNING, "the listener's fallback failed; the carrier is closed", e);
+                f.done(e);
+                return;
             }
+            if (stage == null) f.done(null);
+            else stage.whenComplete((v, e) -> f.done(e));
         });
     }
 

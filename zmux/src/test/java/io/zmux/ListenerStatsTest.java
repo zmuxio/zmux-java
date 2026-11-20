@@ -69,7 +69,7 @@ class ListenerStatsTest {
                     PipePoolTest.await(() -> l.stats().rejected() == 2);
                     // A pending carrier holds its source's only slot; the next one of that source is refused.
                     var idle = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    assertNotNull(l.adapter().reserve(TestAddr.peer("e"), null).handle(idle[1], JoinHint.inBand(TestAddr.peer("e")), null));
+                    assertNotNull(l.adapter().reserve(TestAddr.peer("e"), null).handle(idle[1], JoinHint.inBand(TestAddr.peer("e"))));
                     inputs++;
                     assertNull(l.adapter().reserve(TestAddr.peer("e"), null));
                     inputs++;
@@ -78,7 +78,7 @@ class ListenerStatsTest {
                     // An adapter's connection that never became an input.
                     l.adapter().countSetupFailure();
                     ListenerStats s = l.stats();
-                    assertEquals(new ListenerStats(1, 0, 1, 2, 1, 2, new AdmissionStats(0, 0, 0, 0, 0, 0, 0)), s);
+                    assertEquals(new ListenerStats(1, 0, 1, 2, 1, 2, new AdmissionStats(0, 0, 0, 0, 0, 0, 0, 0)), s);
                     assertEquals(inputs, sum(s), "every input once");
                     client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
                 }
@@ -95,7 +95,7 @@ class ListenerStatsTest {
                             .stall(Duration.ofMillis(300), Duration.ofMillis(300)).build()).build();
             try (var l = Zmux.listener(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")), null);
+                var admitted = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")));
                 assertEquals(AdmissionVerdict.STALL, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
                 assertEquals(0, sum(l.stats()), "an admission's decision is no pipe input");

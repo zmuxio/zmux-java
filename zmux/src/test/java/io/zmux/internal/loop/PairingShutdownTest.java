@@ -36,8 +36,8 @@ class PairingShutdownTest {
                     @Override public void close() { writesClosed.incrementAndGet(); }
                 };
                 String token = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
-                var a = hub.external(up, PipeIo.of(reader, null), reserved(hub, io.zmux.JoinHint.pair(token, true, null)), false, null, null, null);
-                var b = hub.external(down, PipeIo.of(null, writer), reserved(hub, io.zmux.JoinHint.pair(token, false, null)), false, null, null, null);
+                var a = hub.external(up, PipeIo.of(reader, null), reserved(hub, io.zmux.JoinHint.pair(token, true, null)), false, null, ListenerHub.Entry.CARRIER, null);
+                var b = hub.external(down, PipeIo.of(null, writer), reserved(hub, io.zmux.JoinHint.pair(token, false, null)), false, null, ListenerHub.Entry.CARRIER, null);
                 down.close(); hub.close(); up.close();
                 a.whenClosed().toCompletableFuture().get(5, TimeUnit.SECONDS); b.whenClosed().toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(1, readsClosed.get()); assertEquals(1, writesClosed.get());

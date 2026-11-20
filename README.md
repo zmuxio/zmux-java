@@ -609,15 +609,23 @@ bidirectional stream (the connection's other streams wait for it and then
 reach the listener without a new decision), joins and resumptions included.
 A carrier first takes a slot of its source (`maxPendingPerSource`, counted by
 its source prefix) and one of the listener (`maxPending`), then completes its TLS handshake, then the
-decider gets up to `peek` bytes and the carrier's `Admission.CarrierInfo`: its
-source and the peer it arrived from, the negotiated application protocol, the
-server name (SNI) the client sent, the TLS exporter, and for HTTP carriers the
-request's header fields (`info.header(name)`, case-insensitive) and whether
-the carrier is decided on its request head. It returns a `CompletionStage` of
-a decision whose `AdmissionVerdict` is `ACCEPT` (skipping a prefix), `FALLBACK`,
-`STALL`, `CLOSE` or `MORE` (a longer prefix), due within the peek
-timeout (`Admission.Deadline`); a stage still pending then, or when the
-listener closes, is cancelled and the carrier closed.
+decider gets up to `peek` bytes of a byte stream, or the whole first message of a
+message-framed carrier (WebSocket; at most `maxMessage` bytes, by default the
+largest record), and the carrier's `Admission.CarrierInfo`, immutable and its own
+per call: its source and the peer it arrived from, the negotiated application
+protocol, the server name (SNI) the client sent, the TLS exporter, its `stage`
+(`CARRIER`, the carrier's start, or `HEAD`, an HTTP request head), its `framing`,
+whether it is an HTTP `upgrade`, and for HTTP carriers the request's header
+fields (`info.header(name)`, case-insensitive). It returns a `CompletionStage`
+of a decision whose `AdmissionVerdict` is `ACCEPT` (skipping a prefix),
+`FALLBACK`, `STALL`, `CLOSE`, `MORE` (a longer prefix of a byte stream, at most
+`maxPeek`) or `DEFER` (on an upgrade's head only: complete the upgrade and
+decide again on the carrier's first message), due within the peek timeout
+(`Admission.Deadline`); a stage still pending then, or when the listener closes,
+is cancelled and the carrier closed. `MORE` on a head or a message carrier, and
+`DEFER` anywhere but an upgrade's head, close the carrier. A first message above
+`maxMessage` closes the carrier without a decision (`tooLarge`), and so does one
+that fails or is not a binary message (`closed`).
 `Admission.Decider.immediate(...)` wraps a decision taken at once, and
 `PrefixAuth` provides a token decider. `listener.stats().admission()` counts
 the outcomes.
@@ -626,19 +634,25 @@ the outcomes.
 var auth = new PrefixAuth(key, Duration.ofSeconds(30), true, 1, 0);
 var config = ListenerConfig.builder()
         .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).build())
-        .fallback((carrier, info) -> serveOtherProtocol(carrier))
+        .fallback(takeover -> serveOtherProtocol(takeover)) // a CompletionStage: done when it completes
         .build();
 ```
 
-A fallback target receives the carrier as a byte-stream `PipeIo` with every
-byte read replayed in front. `listener.adapter().handle(io, hint, fallback)`
-takes its own target and returns an `io.zmux.adapter.Handled` with the verdict and whether a session
-took the carrier (`taken()`: false when the listener refused it, having
-written nothing), and `QuicServer` takes one for QUIC connections. Without a
-target a fallback stalls: nothing is sent, input is discarded, and the carrier
+`ListenerConfig.fallback` receives every carrier the admission gives back,
+whatever entry took it: TCP and TLS carriers, WebSocket carriers decided after
+a `DEFER`, QUIC streams (`QuicTakeover.connection(t)` in zmux-quic gives the
+connection) and a host's own pipe inputs. The `Takeover` has the carrier's
+`info()` and `pipe()`, a `PipeIo` with what was read replayed in front (the
+first message whole, then the following ones, on a message carrier); a plain
+TCP carrier also offers `socket()`, its blocking `SocketChannel` with the bytes
+read, as long as the pipe view is unused. The carrier is the host's until the
+stage `serve` returned completes (null: when `serve` returns); zmux then closes
+it, at once when `serve` throws or the stage fails. Without a fallback a
+carrier given back stalls: nothing is sent, input is discarded, and the carrier
 closes after a duration that depends on its source alone and keeps its slot
 until then, or when the listener closes; a source keeps one slot free of
-stalls.
+stalls. An HTTP request that is itself the carrier is answered by its HTTP
+adapter rather than taken over (`handleRequest` below).
 
 `Admission.Decision.accept(skip, value)` attaches a host value to the carrier:
 `session.admitted()` returns the value of the carrier the session started on
@@ -678,19 +692,31 @@ keeps running while they do. Slow decisions belong in the asynchronous
 
 ### Carriers from an HTTP server
 
-An application that runs its own HTTP server gives each request carrier to
-`listener.adapter().handle(io, hint, fallback)`. What only such an adapter or
-an own accept loop needs (`reserve` and the `Slot` it returns, `handle`,
+An application that runs its own HTTP server gives each request whose body (or
+nothing after its head) is the carrier to
+`listener.adapter().handleRequest(io, hint, onHead, fallback)`: decided on its
+head (`Stage.HEAD`, no prefix) or on its body's start, and a request given back
+goes to that fallback, with the body bytes read replayed, for an HTTP answer.
+An upgrade (WebSocket) goes to `listener.adapter().admitFirst(io, hint,
+upgrade, headFallback)` before it is answered: the head is decided first; on
+`ACCEPT` the listener runs `upgrade` (the 101) and takes the carrier, on `DEFER`
+it runs `upgrade`, waits for it and for the first message within the rest of
+the peek timeout and while the listener runs (`peekTimedOut`, `closed`,
+`handshakeFailed` otherwise), and decides again; a head given back goes to
+`headFallback`. Other carriers go to `listener.adapter().handle(io, hint)`.
+`Handled` has the final verdict and whether a session took the carrier
+(`taken()`: false when the listener refused it, having written nothing). What
+only such an adapter or an own accept loop needs (`reserve` and the `Slot` it
+returns, `handle`, `handleRequest`, `admitFirst`,
 `knownJoin`, `stallDuration`, `countSetupFailure`, `firstRecordTimeout`,
 `memoryUsed`) is in `io.zmux.adapter.ListenerAdapter`, reached through
 `listener.adapter()`; a session's counterpart (`isJoinReady`,
 `declareEndToEnd`, `releaseFirstFlight`) is
 `session.adapter()`. The `JoinHint` carries the request:
-`JoinHint.of(RequestHead.of(headers, head), uplink, peer)` takes the
-`Zmux-Pipe-Pair` field from the headers (`JoinHint.of(head, pairField, uplink, peer)` another field), and `head` is
-true for a carrier decided on its request head: an HTTP upgrade (WebSocket,
-WebTransport) or a request without a body. Such a carrier is decided at once,
-without reading a prefix. `withSource(address)` gives the client address the
+`JoinHint.of(RequestHead.of(headers), uplink, peer)` takes the
+`Zmux-Pipe-Pair` field from the headers (`JoinHint.of(head, pairField, uplink, peer)` another field).
+A carrier decided on its request head is decided at once, without reading a
+prefix. `withSource(address)` gives the client address the
 host resolved itself (the peer otherwise); with `HttpEndpoint`, a host sets
 `HttpEndpoint.SOURCE` on the connection's channel instead. The pipe's
 capabilities supply the TLS metadata of the connection that carries the

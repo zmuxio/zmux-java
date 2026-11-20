@@ -178,7 +178,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
      * Verifies tokens and rejects each Nonce after its first use. Safe for concurrent use. As an
      * {@link Admission.Decider} (with peek {@link #TOKEN_LENGTH}) it accepts a carrier whose prefix
      * is a valid token, without the token; on a carrier decided on its request head
-     * ({@link Admission.CarrierInfo#head()}) the token is the request's only header field
+     * ({@link Admission.Stage#HEAD}) the token is the request's only header field
      * {@link PrefixAuth#headerField()} ({@link #decodeHeader}), and the accept skips nothing.
      * Otherwise, and with bindTls on a carrier without an exporter, it answers
      * {@link Admission.Decision#FALLBACK}.
@@ -238,7 +238,7 @@ public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, i
                 binding = binding(info);
                 if (binding == null) return Admission.Decision.FALLBACK;
             }
-            if (info.head()) {
+            if (info.stage() == Admission.Stage.HEAD) {
                 var values = info.header(header);
                 byte[] t = values.size() == 1 ? decodeHeader(values.getFirst()) : null;
                 return t != null && verify(t, binding) ? Admission.Decision.accept(0) : Admission.Decision.FALLBACK;

@@ -137,7 +137,7 @@ class ListenerEntryTest {
             l.close();
             ended.get(5, TimeUnit.SECONDS);
             assertTrue(f.isCancelled());
-            assertEquals(new AdmissionStats(0, 0, 0, 1, 0, 0, 0), l.stats().admission());
+            assertEquals(new AdmissionStats(0, 0, 0, 1, 0, 0, 0, 0), l.stats().admission());
         }
     }
 
@@ -164,7 +164,7 @@ class ListenerEntryTest {
             closeDone.countDown();
             ended.get(5, TimeUnit.SECONDS);
             await(() -> pending.peek().isCancelled());
-            assertEquals(new AdmissionStats(0, 0, 0, 1, 0, 0, 0), l.stats().admission());
+            assertEquals(new AdmissionStats(0, 0, 0, 1, 0, 0, 0, 0), l.stats().admission());
         }
     }
 
@@ -176,13 +176,13 @@ class ListenerEntryTest {
                         var d = next.get();
                         if (d == null) throw new IllegalStateException("decider failure");
                         return d;
-                    })).stall(Duration.ofSeconds(20), Duration.ofSeconds(20)).build()).build();
+                    })).stall(Duration.ofSeconds(20), Duration.ofSeconds(20)).build())
+                    .fallback(t -> java.util.concurrent.CompletableFuture.completedFuture(null)).build();
             try (var l = Zmux.listener(lc)) {
                 java.util.function.Function<Admission.Decision, io.zmux.adapter.Handled> carrier = d -> {
                     next.set(d);
                     var p = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")),
-                            (io, info) -> { io.reader().close(); io.writer().close(); });
+                    var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")));
                     try { h.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError(e); }
                     return h;
                 };
@@ -195,7 +195,7 @@ class ListenerEntryTest {
                 // Two stalls hold two of the source's three slots: a third stall is closed at once.
                 assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
                 await(() -> l.stats().admission().stallOverflow() == 1);
-                assertEquals(new AdmissionStats(0, 1, 2, 3, 1, 0, 0), l.stats().admission());
+                assertEquals(new AdmissionStats(0, 1, 2, 3, 1, 0, 0, 0), l.stats().admission());
                 assertEquals(0, l.stats().rejected(), "an admission's decision is not a rejection");
             }
         }

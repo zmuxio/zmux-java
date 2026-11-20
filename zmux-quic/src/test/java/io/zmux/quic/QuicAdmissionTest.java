@@ -43,34 +43,60 @@ class QuicAdmissionTest {
         }
     }
 
-    @Test void aConnectionThatIsNotAcceptedGoesToTheFallbackWithItsFirstStream() throws Exception {
+    /**
+     * A connection given back goes with its first stream to the listener's fallback: the takeover
+     * carries the stream with exactly the bytes the decider saw replayed in front, and its QUIC
+     * connection through zmux-quic; the connection's streams reach no session, and zmux closes the
+     * connection once the fallback is done.
+     */
+    @Test void aConnectionThatIsNotAcceptedGoesToTheListenersFallbackAsATakeover() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
+            var decided = new CompletableFuture<byte[]>();
             var got = new CompletableFuture<byte[]>();
-            QuicServer.Fallback fallback = (connection, stream) -> {
-                assertNotNull(connection);
+            var connection = new CompletableFuture<io.netty.handler.codec.quic.QuicChannel>();
+            var release = new CompletableFuture<Void>();
+            Admission.Fallback fallback = t -> {
+                QuicTakeover.connection(t).ifPresent(connection::complete);
+                assertTrue(t.socket().isEmpty(), "a QUIC stream has no socket view");
                 var all = new java.io.ByteArrayOutputStream();
-                stream.reader().start(new PipeReader.Sink() {
-                    @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
+                t.pipe().reader().start(new PipeReader.Sink() {
+                    @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
+                        ByteBuffer data = chunk.buffer();
                         byte[] b = new byte[data.remaining()];
                         data.get(b);
+                        chunk.close();
+                        consumed.run();
                         all.writeBytes(b);
-                        release.run();
                         if (all.size() >= 4) got.complete(all.toByteArray());
                     }
                     @Override public void onEnd() { got.complete(all.toByteArray()); }
                     @Override public void onError(Throwable cause) { got.complete(all.toByteArray()); }
                 });
+                return release; // the host holds the stream until the test lets it go
             };
-            try (var listener = Zmux.listener(admitting(config, (info, prefix) -> Admission.Decision.FALLBACK));
-                 var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener, fallback);
+            var lc = ListenerConfig.builder().session(config).fallback(fallback)
+                    .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
+                        byte[] b = new byte[prefix.remaining()];
+                        prefix.duplicate().get(b);
+                        decided.complete(b);
+                        return Admission.Decision.FALLBACK;
+                    })).peekTimeout(Duration.ofSeconds(2)).build()).build();
+            try (var listener = Zmux.listener(lc);
+                 var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var connecting = endpoint.connectAsync(server.address(), "localhost", config);
+                byte[] prefix = decided.get(10, TimeUnit.SECONDS);
                 byte[] first = got.get(10, TimeUnit.SECONDS);
-                assertTrue(first.length >= 4, "the bytes read are replayed to the fallback");
+                assertEquals(4, prefix.length);
+                assertArrayEquals(prefix, java.util.Arrays.copyOf(first, 4), "the bytes read are replayed first");
+                var quic = connection.get(5, TimeUnit.SECONDS);
+                assertTrue(quic.isActive(), "the connection is the host's during the takeover");
                 assertThrows(java.net.SocketTimeoutException.class, () -> listener.accept(Duration.ofMillis(200)));
-                server.connections().forEach(c -> c.close());
+                assertEquals(1, listener.stats().admission().fallback());
+                release.complete(null);
+                quic.closeFuture().get(10, TimeUnit.SECONDS);
                 assertThrows(Exception.class, () -> connecting.get(10, TimeUnit.SECONDS));
             }
         }

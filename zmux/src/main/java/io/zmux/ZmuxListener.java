@@ -134,16 +134,12 @@ public final class ZmuxListener implements AutoCloseable {
         hub.rejectStallMax(stallMax);
         if (adm != null) {
             long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
-            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), peekTimeout, adm.isFallbackOnPeekTimeout(), stallMin, stallMax, forward(o.fallback()));
+            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), adm.maxMessage(), peekTimeout, adm.isFallbackOnPeekTimeout(), stallMin, stallMax, o.fallback());
         }
         hub.inbound(o.inboundTransform());
         hub.onReject(o.onReject());
         hub.maxPendingPerSession(o.maxPendingPerSession());
         this.acceptor = server == null ? null : Thread.ofVirtual().name("zmux-acceptor").start(this::acceptLoop);
-    }
-
-    private static ListenerHub.Forward forward(Admission.Fallback f) {
-        return f == null ? null : f::serve;
     }
 
     /** Uniform in [lo, hi] from a secure random source. */
@@ -163,8 +159,8 @@ public final class ZmuxListener implements AutoCloseable {
         @Override public boolean reserve(InetSocketAddress source) { return hub.reserve(source); }
         @Override public void release(InetSocketAddress source) { hub.release(source); }
         @Override public void handshakeFailed(InetSocketAddress source) { hub.handshakeFailed(source); }
-        @Override public AdapterPorts.Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, Admission.Fallback fallback) {
-            return ZmuxListener.this.transfer(io, hint, admitted, value, fallback);
+        @Override public AdapterPorts.Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, ListenerHub.Entry entry) {
+            return ZmuxListener.this.transfer(io, hint, admitted, value, entry);
         }
         @Override public AdapterPorts.Carrier refused(PipeIo io) { return ZmuxListener.refused(io, admission); }
         @Override public void countSetupFailure() { hub.counts().setupFailed(); }
@@ -198,7 +194,7 @@ public final class ZmuxListener implements AutoCloseable {
     }
 
     /** Transfers a carrier whose slot is held. */
-    private AdapterPorts.Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, Admission.Fallback fallback) {
+    private AdapterPorts.Carrier transfer(PipeIo io, JoinHint hint, boolean admitted, Object value, ListenerHub.Entry entry) {
         Objects.requireNonNull(io); Objects.requireNonNull(hint);
         CompletableFuture<ListenerHub.Decided> code = new CompletableFuture<>();
         var h = new AdapterPorts.Carrier();
@@ -221,7 +217,7 @@ public final class ZmuxListener implements AutoCloseable {
                 return h;
             }
             var loop = io.carrierConn() instanceof SessionRuntime parent ? parent.loop() : cfg.nextLoop();
-            io.zmux.internal.loop.Transport carrier = hub.external(loop, io, hint, admitted, value, forward(fallback), code);
+            io.zmux.internal.loop.Transport carrier = hub.external(loop, io, hint, admitted, value, entry, code);
             carrier.whenTaken().whenComplete((t, e) -> h.taken(Boolean.TRUE.equals(t)));
             carrier.whenClosed().whenComplete((t, e) -> h.ended(null));
             return h;

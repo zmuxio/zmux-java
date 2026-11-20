@@ -55,7 +55,7 @@ class QuicLoopTerminationTest {
                         .handler(new ChannelInboundHandlerAdapter() {
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                 if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess()) {
-                                    QuicServer.serve((QuicChannel) ctx.channel(), options, listener, null);
+                                    QuicServer.serve((QuicChannel) ctx.channel(), options, listener);
                                     served.complete(ctx.channel().eventLoop());
                                 }
                                 ctx.fireUserEventTriggered(evt);

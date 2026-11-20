@@ -18,7 +18,7 @@ class ClassifyTest {
     static HttpClass.Head head(String method, int version, String protocol, long cl, String... fields) {
         Map<String, List<String>> m = new HashMap<>();
         for (int i = 0; i < fields.length; i += 2) m.computeIfAbsent(fields[i], k -> new java.util.ArrayList<>()).add(fields[i + 1]);
-        return new HttpClass.Head(method, version, protocol, cl, RequestHead.of(m, false));
+        return new HttpClass.Head(method, version, protocol, cl, RequestHead.of(m));
     }
 
     /** The classification rules of HTTP requests, each case with the first rule that matches. */
@@ -72,7 +72,7 @@ class ClassifyTest {
     }
 
     static RequestHead fields(String name, String... values) {
-        return RequestHead.of(Map.of(name, List.of(values)), false);
+        return RequestHead.of(Map.of(name, List.of(values)));
     }
 
     static InetSocketAddress peer(String ip) {
