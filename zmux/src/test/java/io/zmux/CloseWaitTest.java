@@ -9,6 +9,7 @@ import io.zmux.carrier.PipeReader;
 import io.zmux.internal.core.SessionState;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -47,12 +48,18 @@ class CloseWaitTest {
         io.zmux.internal.core.Session.closeLimit = was;
     }
 
-    /** The two directions of one in-memory pipe, each delivering what was written DELAY later; kill loses both. */
+    /**
+     * The two directions of one in-memory pipe, each delivering what was written DELAY later; kill loses both. While
+     * held, what reaches the client end waits undelivered, so nothing toward the client is read or acknowledged.
+     */
     private static final class Link {
         final ScheduledExecutorService timer;
         final long delayMs;
         final List<Delayed> ends = new ArrayList<>();
         volatile boolean killed;
+        /** Deliveries toward the client while held; touched only on the timer thread. */
+        final ArrayDeque<Runnable> waiting = new ArrayDeque<>();
+        boolean held;
         /** Bytes toward the client written and not delivered yet. */
         final AtomicInteger towardClient = new AtomicInteger();
         /** Bytes lost in flight. */
@@ -75,6 +82,19 @@ class CloseWaitTest {
                 ends.add(d);
             }
             return new PipeIo(d, io.writer(), Framing.BYTE_STREAM, "memory", null);
+        }
+
+        /** From now on what reaches the client end waits until {@link #release}. */
+        void hold() throws Exception {
+            timer.submit(() -> held = true).get();
+        }
+
+        /** Delivers, in order, what waited and from now on what arrives. */
+        void release() {
+            timer.execute(() -> {
+                held = false;
+                for (Runnable r; (r = waiting.poll()) != null; ) r.run();
+            });
         }
 
         /** The pipe is lost: what is in flight never arrives and both ends read an error. */
@@ -108,7 +128,7 @@ class CloseWaitTest {
                     public void onChunk(Chunk c, Runnable consumed) {
                         int n = c.buffer().remaining();
                         if (client) towardClient.addAndGet(n);
-                        timer.schedule(() -> {
+                        Runnable deliver = () -> {
                             if (client) towardClient.addAndGet(-n);
                             if (killed || ended.get()) {
                                 dropped.addAndGet(n);
@@ -117,6 +137,10 @@ class CloseWaitTest {
                                 return;
                             }
                             s.onChunk(c, consumed);
+                        };
+                        timer.schedule(() -> {
+                            if (client && held) waiting.add(deliver);
+                            else deliver.run();
                         }, delayMs, TimeUnit.MILLISECONDS);
                     }
 
@@ -189,10 +213,12 @@ class CloseWaitTest {
     /**
      * The server writes and closes; while its CONNECTION_CLOSE waits for coverage, the pipe carrying unacknowledged
      * data fails. What it carried is reinjected on the surviving pipes: the client reads all of it, and the close
-     * completes long before its bound.
+     * completes long before its bound. Every pipe holds what reaches the client until the failure, so the stream data
+     * is still unacknowledged when the pipe fails, whatever the timing of the host.
      */
     @Test void aPipeFailingDuringTheCloseWaitIsReinjected() throws Exception {
-        int size = 96 << 10;
+        // Below what the server may send before the client reads any of it: all of it is sent, none acknowledged.
+        int size = 48 << 10;
         long was = bound();
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         try (EventLoops loops = EventLoops.create(2); ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -200,7 +226,12 @@ class CloseWaitTest {
             try {
                 ZmuxStream out = m.server().openStream();
                 Future<Integer> got = ex.submit(() -> drain(m.client().acceptStream()));
+                for (Link k : m.links()) k.hold();
                 out.write(new byte[size]);
+                // The close covers what was sent; nothing toward the client is delivered while held, so this only
+                // waits for the sends.
+                ListenerEntryTest.await(() -> m.server().stats().sendBuffered() == 0
+                        && m.links().stream().mapToInt(k -> k.towardClient.get()).sum() >= size);
                 long start = System.nanoTime();
                 Future<?> closing = ex.submit(() -> {
                     m.server().close(0x10, "");
@@ -211,6 +242,7 @@ class CloseWaitTest {
                 for (Link k : m.links()) if (k.towardClient.get() > x.towardClient.get()) x = k;
                 assertTrue(x.towardClient.get() > 8192, "no stream data in flight toward the client");
                 x.kill();
+                for (Link k : m.links()) k.release();
                 closing.get(10, TimeUnit.SECONDS);
                 long took = System.nanoTime() - start;
                 assertTrue(x.dropped.get() > 8192, "the failed pipe lost no stream data in flight");
