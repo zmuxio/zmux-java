@@ -90,7 +90,7 @@
     <Class name="~io\.zmux\.internal\..*"/>
   </Match>
 
-  <!-- Public-API values that hold their argument by design: handles (sessions, pipes, carriers), throwables and
+  <!-- Public-API values that hold their argument by design: handles (sessions, pipes, carriers, a listener whose limits change at run time), throwables and
        immutable collections are shared, not copied; the byte arrays of StreamDatagram are documented as not copied
        (the datagram path moves payloads without a copy). The seal Reply and Finish records belong to
        package-private classes. -->
@@ -115,6 +115,7 @@
       <Class name="~io\.zmux\.shaping\.RecordPlan"/>
       <Class name="~io\.zmux\.shaping\.machine\.Bundle"/>
       <Class name="~io\.zmux\.quic\.QuicPool\$PooledConnection"/>
+      <Class name="~io\.zmux\.quic\.QuicClient"/>
     </Or>
   </Match>
 

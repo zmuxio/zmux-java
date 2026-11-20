@@ -145,7 +145,8 @@ public final class ListenerHub {
     private final CarrierAdmission admission;
     private final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing();
     private final java.util.HashSet<PairHalf> pendingPairs = new java.util.HashSet<>();
-    private final long firstRecordTimeout;
+    /** Changed by {@link #limits}; read by carrier loops. */
+    private volatile long firstRecordTimeout;
     private final ConcurrentHashMap<String, SessionRuntime> sessions = new ConcurrentHashMap<>();
     private final java.util.HashSet<Registration> registrations = new java.util.HashSet<>();
     private final SecureRandom random = new SecureRandom();
@@ -153,7 +154,8 @@ public final class ListenerHub {
     /** Shut down: no new session; the registered ones still take their joins until they end. */
     private volatile boolean draining;
     private Runnable drained;
-    private final int maxSuspended;
+    /** Changed by {@link #limits}; read by the management context and session loops. */
+    private volatile int maxSuspended;
     private final ConcurrentHashMap<SessionRuntime, SessionRuntime.Resources> resources = new ConcurrentHashMap<>();
     private final SerialCallbacks management = new SerialCallbacks();
     private final java.util.concurrent.atomic.AtomicBoolean managementQueued = new java.util.concurrent.atomic.AtomicBoolean();
@@ -222,7 +224,7 @@ public final class ListenerHub {
         this.instanceId = instanceId.clone();
         this.owner = owner;
         this.budget = budget;
-        this.admission = new CarrierAdmission(maxPendingPerSource, maxPending, firstRecordTimeout, sourcePrefixV4, sourcePrefixV6);
+        this.admission = new CarrierAdmission(maxPendingPerSource, maxPending, sourcePrefixV4, sourcePrefixV6);
         this.firstRecordTimeout = firstRecordTimeout > 0 ? firstRecordTimeout : 2 * Time.SECOND;
     }
 
@@ -1673,8 +1675,44 @@ public final class ListenerHub {
 
     private volatile int maxPendingPerSession = 4;
 
-    /** Sets the Unconfirmed join carriers one session keeps, before the first carrier. */
-    public void maxPendingPerSession(int n) { maxPendingPerSession = n; }
+    /**
+     * Replaces the bounds {@link io.zmux.ListenerLimits} holds, validated by the caller: the
+     * slot bounds apply to the next take and stall (held carriers keep their slots), the join
+     * bound to the next join, the first-record timeout to carriers that arrive after the call.
+     * Suspended sessions beyond a lowered maxSuspended are chosen under this monitor from the
+     * suspension table ({@link #resources}), the longest-suspended first, and their close is
+     * queued on each one's loop before this returns.
+     *
+     * <p>Why that covers every suspended session: a session enters the table as suspended
+     * under this monitor at the end of the loop pass in which its core suspended (its
+     * resource listener), and then reconciles against the volatile bound. A session in the
+     * table when the bound is written is trimmed here; one that enters later reads the
+     * written bound in its own {@link #manage}. The core is the owner thread's alone, so the
+     * end of that pass is the earliest point the listener can know of the suspension.
+     *
+     * @param maxPending negative: unlimited
+     */
+    public void limits(int maxPending, int maxPendingPerSource, int maxPendingPerSession, int maxSuspended, long firstRecordTimeout) {
+        this.maxPendingPerSession = maxPendingPerSession;
+        this.firstRecordTimeout = firstRecordTimeout;
+        java.util.List<SessionRuntime> over;
+        synchronized (this) {
+            admission.bounds(maxPendingPerSource, maxPending);
+            this.maxSuspended = maxSuspended;
+            var suspended = resources.entrySet().stream()
+                    .filter(e -> e.getValue().state() == io.zmux.internal.core.SessionState.SUSPENDED)
+                    .sorted(java.util.Comparator.comparingLong(e -> e.getValue().suspendedAt())).map(java.util.Map.Entry::getKey).toList();
+            over = suspended.subList(0, Math.max(0, suspended.size() - maxSuspended));
+        }
+        for (SessionRuntime d : over) {
+            d.loop().tryExecute(() -> {
+                if (d.core().state() != io.zmux.internal.core.SessionState.SUSPENDED) return;
+                d.core().closeResumeTimeout();
+                d.markDirty();
+            });
+        }
+        reconcile();
+    }
 
     /** Configures the listener's answer to a rejected Hello, before the first carrier. */
     public void onReject(java.util.function.Function<io.zmux.RejectInfo, io.zmux.RejectInfo.Action> f) { onReject = f; }

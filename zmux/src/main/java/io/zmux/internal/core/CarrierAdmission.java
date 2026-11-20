@@ -77,12 +77,11 @@ public final class CarrierAdmission {
     /** The default of {@link #CarrierAdmission}'s maxTotal. */
     public static final int DEFAULT_MAX_TOTAL = 1024;
 
-    private final int maxPerSource;
+    private int maxPerSource;
     /** The source prefixes: the leading bits of an IPv4 and of an IPv6 address that name its client. */
     private final int prefixV4, prefixV6;
     /** Negative: unlimited. */
-    private final int maxTotal;
-    private final long firstRecordTimeout;
+    private int maxTotal;
     private final Map<String, Integer> bySource = new HashMap<>();
     private final Map<String, Integer> stalledBySource = new HashMap<>();
     /** The slots taken in all, and those of stalled carriers. */
@@ -95,16 +94,23 @@ public final class CarrierAdmission {
 
     /**
      * maxPerSource 0: 8; maxTotal 0: {@link #DEFAULT_MAX_TOTAL}, negative: unlimited;
-     * firstRecordTimeout 0: 2 s; prefixV4 (1 to 32) and prefixV6 (1 to 128) 0: their defaults,
+     * prefixV4 (1 to 32) and prefixV6 (1 to 128) 0: their defaults,
      * validated by the caller.
      */
-    public CarrierAdmission(int maxPerSource, int maxTotal, long firstRecordTimeout, int prefixV4, int prefixV6) {
+    public CarrierAdmission(int maxPerSource, int maxTotal, int prefixV4, int prefixV6) {
         if (prefixV4 < 0 || prefixV4 > 32 || prefixV6 < 0 || prefixV6 > 128) throw new IllegalArgumentException("source prefix out of range");
         this.prefixV4 = prefixV4 == 0 ? DEFAULT_PREFIX_V4 : prefixV4;
         this.prefixV6 = prefixV6 == 0 ? DEFAULT_PREFIX_V6 : prefixV6;
+        bounds(maxPerSource, maxTotal);
+    }
+
+    /**
+     * Replaces the per-source and listener-wide bounds, as the constructor reads them; slots
+     * already taken stay: a lowered bound refuses new carriers until the count is below it.
+     */
+    public void bounds(int maxPerSource, int maxTotal) {
         this.maxPerSource = maxPerSource > 0 ? maxPerSource : 8;
         this.maxTotal = maxTotal == 0 ? DEFAULT_MAX_TOTAL : maxTotal;
-        this.firstRecordTimeout = firstRecordTimeout > 0 ? firstRecordTimeout : 2 * Time.SECOND;
     }
 
     /**
@@ -182,11 +188,6 @@ public final class CarrierAdmission {
         if (b.length != 16 || b[10] != (byte) 0xff || b[11] != (byte) 0xff) return false;
         for (int i = 0; i < 10; i++) if (b[i] != 0) return false;
         return true;
-    }
-
-    /** When a carrier accepted at t must have its first record. */
-    public long deadline(long t) {
-        return Time.add(t, firstRecordTimeout);
     }
 
     // ---- split bootstrap pairing ----

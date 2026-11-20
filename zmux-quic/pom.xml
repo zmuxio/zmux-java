@@ -1,7 +1,7 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
  <modelVersion>4.0.0</modelVersion>
- <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.2.3</version></parent>
+ <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.2.4</version></parent>
  <artifactId>zmux-quic</artifactId><name>zmux-quic</name>
  <description>QUIC streams as zmux carriers.</description>
  <url>https://github.com/zmuxio/zmux-java/tree/main/zmux-quic</url>

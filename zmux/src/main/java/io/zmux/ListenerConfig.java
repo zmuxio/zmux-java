@@ -21,22 +21,13 @@ public final class ListenerConfig {
     public static final Duration DEFAULT_FIRST_RECORD_TIMEOUT = Duration.ofSeconds(2);
 
     private static final ListenerConfig DEFAULTS = builder().build();
-    /** {@link #memoryBudget()} unlimited. */
-    private static final long NO_BUDGET = -1;
-    /** {@link #maxPending()} unlimited. */
-    private static final int NO_MAX_PENDING = -1;
 
     private final ZmuxConfig session;
     private final TlsOptions tls;
     private final int backlog;
-    private final long memoryBudget; // NO_BUDGET: unlimited
-    private final int maxPending; // NO_MAX_PENDING: unlimited
-    private final int maxPendingPerSource;
+    private final ListenerLimits limits;
     private final int sourcePrefixV4, sourcePrefixV6;
-    private final int maxPendingPerSession;
-    private final Duration firstRecordTimeout;
     private final byte[] instanceId;
-    private final int maxSuspended;
     private final BiConsumer<Long, Long> memoryPressureListener;
     private final Admission admission;
     private final Admission.Fallback fallback;
@@ -46,10 +37,10 @@ public final class ListenerConfig {
     private final System.Logger logger;
 
     private ListenerConfig(Builder b) {
-        session = b.session; tls = b.tls; backlog = b.backlog; memoryBudget = b.memoryBudget;
-        maxPending = b.maxPending; maxPendingPerSource = b.maxPendingPerSource;
-        sourcePrefixV4 = b.sourcePrefixV4; sourcePrefixV6 = b.sourcePrefixV6; maxPendingPerSession = b.maxPendingPerSession; firstRecordTimeout = b.firstRecordTimeout;
-        instanceId = b.instanceId.clone(); maxSuspended = b.maxSuspended; memoryPressureListener = b.memoryPressureListener;
+        session = b.session; tls = b.tls; backlog = b.backlog;
+        limits = b.limits.build();
+        sourcePrefixV4 = b.sourcePrefixV4; sourcePrefixV6 = b.sourcePrefixV6;
+        instanceId = b.instanceId.clone(); memoryPressureListener = b.memoryPressureListener;
         admission = b.admission; fallback = b.fallback;
         inboundTransform = b.inboundTransform; onReject = b.onReject; sessionConfigs = b.sessionConfigs; logger = b.logger;
     }
@@ -64,10 +55,10 @@ public final class ListenerConfig {
     /** A builder starting from this configuration. */
     public Builder toBuilder() {
         Builder b = new Builder();
-        b.session = session; b.tls = tls; b.backlog = backlog; b.memoryBudget = memoryBudget;
-        b.maxPending = maxPending; b.maxPendingPerSource = maxPendingPerSource;
-        b.sourcePrefixV4 = sourcePrefixV4; b.sourcePrefixV6 = sourcePrefixV6; b.maxPendingPerSession = maxPendingPerSession; b.firstRecordTimeout = firstRecordTimeout;
-        b.instanceId = instanceId.clone(); b.maxSuspended = maxSuspended; b.memoryPressureListener = memoryPressureListener;
+        b.session = session; b.tls = tls; b.backlog = backlog;
+        b.limits = limits.toBuilder();
+        b.sourcePrefixV4 = sourcePrefixV4; b.sourcePrefixV6 = sourcePrefixV6;
+        b.instanceId = instanceId.clone(); b.memoryPressureListener = memoryPressureListener;
         b.admission = admission; b.fallback = fallback;
         b.inboundTransform = inboundTransform; b.onReject = onReject; b.sessionConfigs = sessionConfigs; b.logger = logger;
         return b;
@@ -84,7 +75,7 @@ public final class ListenerConfig {
      * window-growth bytes, default 1 GiB; empty ({@link Builder#noMemoryBudget()}) is unlimited. It replaces
      * the sessions' own budget.
      */
-    public OptionalLong memoryBudget() { return memoryBudget == NO_BUDGET ? OptionalLong.empty() : OptionalLong.of(memoryBudget); }
+    public OptionalLong memoryBudget() { return limits.memoryBudget(); }
     /**
      * The bound of the listener's carriers before a session, from arrival through the outer
      * handshake, the admission, the inbound transform, a split half's wait for its pair, the
@@ -96,12 +87,12 @@ public final class ListenerConfig {
      * carriers hold at most half of it (rounded down); a further stall is closed at once
      * ({@link AdmissionStats#stallOverflow()}).
      */
-    public OptionalInt maxPending() { return maxPending == NO_MAX_PENDING ? OptionalInt.empty() : OptionalInt.of(maxPending); }
+    public OptionalInt maxPending() { return limits.maxPending(); }
     /**
      * Carriers of one source (as {@link #sourcePrefixV4()} and {@link #sourcePrefixV6()} aggregate
      * it) before a session, over the same stages as {@link #maxPending()}; default 8.
      */
-    public int maxPendingPerSource() { return maxPendingPerSource; }
+    public int maxPendingPerSource() { return limits.maxPendingPerSource(); }
     /**
      * The leading bits of an IPv4 source address that name its client, 1 to 32, default 32 (the
      * address on its own). An IPv4-mapped IPv6 address counts as IPv4. The one aggregation of
@@ -117,13 +108,18 @@ public final class ListenerConfig {
      * The Unconfirmed join carriers one session keeps (authenticated Hellos whose Confirm has not
      * arrived): one more evicts the session's oldest.
      */
-    public int maxPendingPerSession() { return maxPendingPerSession; }
+    public int maxPendingPerSession() { return limits.maxPendingPerSession(); }
     /** How long a new carrier may take to send its first record; default {@link #DEFAULT_FIRST_RECORD_TIMEOUT}. */
-    public Duration firstRecordTimeout() { return firstRecordTimeout; }
+    public Duration firstRecordTimeout() { return limits.firstRecordTimeout(); }
     /** The leading bytes of every 16-byte session locator; random bytes fill the rest. */
     public byte[] instanceId() { return instanceId.clone(); }
     /** Suspended session bound; zero permits none. */
-    public int maxSuspended() { return maxSuspended; }
+    public int maxSuspended() { return limits.maxSuspended(); }
+    /**
+     * The bounds of this configuration that {@link ZmuxListener#setLimits} changes later: the
+     * listener's initial {@link ZmuxListener#limits()}.
+     */
+    public ListenerLimits limits() { return limits; }
     /** Ordered off-loop callback with (used, limit) on pressure entry and recovery; may be null. */
     public BiConsumer<Long, Long> memoryPressureListener() { return memoryPressureListener; }
     /**
@@ -180,15 +176,10 @@ public final class ListenerConfig {
         private ZmuxConfig session = ZmuxConfig.defaults();
         private TlsOptions tls;
         private int backlog = 128;
-        private long memoryBudget = 1L << 30;
-        private int maxPending = 1024;
-        private int maxPendingPerSource = 8;
+        private ListenerLimits.Builder limits = ListenerLimits.builder();
         private int sourcePrefixV4 = io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V4;
         private int sourcePrefixV6 = io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V6;
-        private int maxPendingPerSession = 4;
-        private Duration firstRecordTimeout = DEFAULT_FIRST_RECORD_TIMEOUT;
         private byte[] instanceId = new byte[0];
-        private int maxSuspended = 1024;
         private BiConsumer<Long, Long> memoryPressureListener;
         private Admission admission;
         private Admission.Fallback fallback;
@@ -245,27 +236,20 @@ public final class ListenerConfig {
             backlog = n; return this;
         }
 
-        public Builder memoryBudget(long n) {
-            if (n < 0) throw new IllegalArgumentException("negative memoryBudget");
-            memoryBudget = n; return this;
-        }
+        /** The listener's memory budget ({@link ListenerConfig#memoryBudget()}), default 1 GiB; not negative. */
+        public Builder memoryBudget(long n) { limits.memoryBudget(n); return this; }
 
         /** An unlimited memory budget. */
-        public Builder noMemoryBudget() { memoryBudget = NO_BUDGET; return this; }
+        public Builder noMemoryBudget() { limits.noMemoryBudget(); return this; }
 
         /** The bound of the listener's carriers before a session ({@link ListenerConfig#maxPending()}), default 1024; at least 1. */
-        public Builder maxPending(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPending below 1");
-            maxPending = n; return this;
-        }
+        public Builder maxPending(int n) { limits.maxPending(n); return this; }
 
         /** No bound of the listener's carriers before a session; the per-source bound still applies. */
-        public Builder noMaxPending() { maxPending = NO_MAX_PENDING; return this; }
+        public Builder noMaxPending() { limits.noMaxPending(); return this; }
 
-        public Builder maxPendingPerSource(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPendingPerSource below 1");
-            maxPendingPerSource = n; return this;
-        }
+        /** Carriers of one source before a session ({@link ListenerConfig#maxPendingPerSource()}), default 8; at least 1. */
+        public Builder maxPendingPerSource(int n) { limits.maxPendingPerSource(n); return this; }
 
         /** The IPv4 source prefix ({@link ListenerConfig#sourcePrefixV4()}), default 32; from 1 to 32. */
         public Builder sourcePrefixV4(int bits) {
@@ -280,15 +264,10 @@ public final class ListenerConfig {
         }
 
         /** The Unconfirmed join carriers one session keeps, default 4; at least 1. */
-        public Builder maxPendingPerSession(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPendingPerSession below 1");
-            maxPendingPerSession = n; return this;
-        }
+        public Builder maxPendingPerSession(int n) { limits.maxPendingPerSession(n); return this; }
 
-        public Builder firstRecordTimeout(Duration d) {
-            if (d.isNegative() || d.isZero()) throw new IllegalArgumentException("firstRecordTimeout must be positive");
-            firstRecordTimeout = d; return this;
-        }
+        /** How long a new carrier may take to send its first record, default {@link #DEFAULT_FIRST_RECORD_TIMEOUT}; positive. */
+        public Builder firstRecordTimeout(Duration d) { limits.firstRecordTimeout(d); return this; }
 
         /** At most {@link #MAX_INSTANCE_ID} bytes. */
         public Builder instanceId(byte[] id) {
@@ -297,10 +276,11 @@ public final class ListenerConfig {
             instanceId = v; return this;
         }
 
-        public Builder maxSuspended(int n) {
-            if (n < 0) throw new IllegalArgumentException("negative maxSuspended");
-            maxSuspended = n; return this;
-        }
+        /** The suspended session bound, default 1024; zero permits none. */
+        public Builder maxSuspended(int n) { limits.maxSuspended(n); return this; }
+
+        /** All the bounds {@link ListenerLimits} holds at once, replacing those set before. */
+        public Builder limits(ListenerLimits l) { limits = l.toBuilder(); return this; }
 
         public Builder memoryPressureListener(BiConsumer<Long, Long> listener) { memoryPressureListener = listener; return this; }
 

@@ -466,7 +466,7 @@ final class TraceRunner {
 
     // ---- listener carriers  ----
 
-    final CarrierAdmission admission = new CarrierAdmission(0, 0, 0, 0, 0);
+    final CarrierAdmission admission = new CarrierAdmission(0, 0, 0, 0);
     final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing();
 
     void listenerUp(Map<String, Object> st) {
@@ -503,7 +503,7 @@ final class TraceRunner {
                 return;
             }
             c.source = a;
-            c.deadline = admission.deadline(now);
+            c.deadline = Time.add(now, io.zmux.ListenerConfig.DEFAULT_FIRST_RECORD_TIMEOUT.toNanos());
         }
     }
 

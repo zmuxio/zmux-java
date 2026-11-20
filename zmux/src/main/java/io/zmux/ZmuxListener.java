@@ -55,7 +55,9 @@ public final class ZmuxListener implements AutoCloseable {
     private final MemoryBudget budget;
     final ListenerHub hub;
     private final Admission admission;
-    private final java.time.Duration firstRecordTimeout;
+    /** The limits in effect; written only under {@link #limitsLock}, which orders each write with the hub's copy. */
+    private volatile ListenerLimits limits;
+    private final Object limitsLock = new Object();
     private final Thread acceptor;
     /** Accept is closed: by {@link #shutdown} or {@link #close}. */
     private volatile boolean closed;
@@ -80,7 +82,6 @@ public final class ZmuxListener implements AutoCloseable {
     private ZmuxListener(ServerSocketChannel server, ListenerConfig o) {
         this.server = server;
         this.cfg = o.session();
-        this.firstRecordTimeout = o.firstRecordTimeout();
         // The whole configuration is checked here, never first on a carrier: what does not depend on the carrier.
         cfg.toCore(CoreConfig.Role.RESPONDER, CoreConfig.Role.RESPONDER);
         InetSocketAddress local = null;
@@ -138,7 +139,7 @@ public final class ZmuxListener implements AutoCloseable {
         }
         hub.inbound(o.inboundTransform());
         hub.onReject(o.onReject());
-        hub.maxPendingPerSession(o.maxPendingPerSession());
+        setLimits(o.limits());
         this.acceptor = server == null ? null : Thread.ofVirtual().name("zmux-acceptor").start(this::acceptLoop);
     }
 
@@ -164,7 +165,7 @@ public final class ZmuxListener implements AutoCloseable {
         }
         @Override public AdapterPorts.Carrier refused(PipeIo io) { return ZmuxListener.refused(io, admission); }
         @Override public void countSetupFailure() { hub.counts().setupFailed(); }
-        @Override public Duration firstRecordTimeout() { return firstRecordTimeout; }
+        @Override public Duration firstRecordTimeout() { return limits.firstRecordTimeout(); }
         @Override public long memoryUsed() { return budget.used(); }
     };
 
@@ -262,6 +263,31 @@ public final class ZmuxListener implements AutoCloseable {
 
     /** The configuration of this listener's sessions ({@link ListenerConfig#session()}), which its dialers also use. */
     public ZmuxConfig config() { return cfg; }
+
+    /** The limits in effect: {@link ListenerConfig#limits()} until {@link #setLimits} replaces them. */
+    public ListenerLimits limits() { return limits; }
+
+    /**
+     * Replaces the listener's limits ({@link ListenerLimits}, valid by construction); new
+     * carriers and the next decisions on held ones use them at once. Lowered pending bounds
+     * refuse or displace new carriers until the count is below them, but close no carrier
+     * already held; a lowered {@link ListenerLimits#maxPendingPerSession()} applies to the next
+     * join of a session; a lowered {@link ListenerLimits#maxSuspended()} closes the
+     * longest-suspended sessions beyond it with ZMUX_RESUME_TIMEOUT: their close is queued on
+     * each one's loop before this returns; a changed {@link ListenerLimits#firstRecordTimeout()} applies to carriers that
+     * arrive after the call; a changed {@link ListenerLimits#memoryBudget()} starts or ends memory
+     * pressure at once, as if the charged sum had crossed the new bounds (the memory-pressure
+     * listener is called, suspended sessions are closed the largest first). Any thread; it does not block.
+     */
+    public void setLimits(ListenerLimits l) {
+        java.util.Objects.requireNonNull(l, "limits");
+        synchronized (limitsLock) {
+            limits = l;
+            budget.limit(l.memoryBudget().orElse(io.zmux.internal.core.CoreConfig.UNLIMITED));
+            hub.limits(l.maxPending().orElse(-1), l.maxPendingPerSource(), l.maxPendingPerSession(), l.maxSuspended(),
+                    ZmuxConfig.nanos(l.firstRecordTimeout()));
+        }
+    }
 
     /** Dials a session whose peer can join new carriers through this listener; presents {@link ZmuxConfig#carrierCredential()}. */
     public ZmuxSession connect(InetSocketAddress address) throws IOException {

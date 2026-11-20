@@ -13,7 +13,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * hand the work to a serial context).
  */
 public final class MemoryBudget implements SharedMemory {
-    private final long limit;
+    /** Changed by {@link #limit(long)}; every reader reads it here. */
+    private volatile long limit;
     private final AtomicLong used = new AtomicLong();
     private final AtomicBoolean over = new AtomicBoolean();
     private final Runnable onChange;
@@ -47,6 +48,15 @@ public final class MemoryBudget implements SharedMemory {
 
     @Override public long limit() { return limit; }
 
+    /**
+     * Replaces the limit ({@link io.zmux.internal.core.CoreConfig#UNLIMITED} = unlimited) and
+     * starts or ends pressure at once, as if the charged sum had crossed the new bounds.
+     */
+    public void limit(long limit) {
+        this.limit = limit;
+        add(0);
+    }
+
     @Override public long used() { return Math.max(used.get(), 0); }
 
     @Override public boolean pressure() { return over.get(); }
@@ -54,7 +64,11 @@ public final class MemoryBudget implements SharedMemory {
     @Override
     public void add(long d) {
         long u = used.addAndGet(d);
-        if (limit == io.zmux.internal.core.CoreConfig.UNLIMITED) return;
+        long limit = this.limit;
+        if (limit == io.zmux.internal.core.CoreConfig.UNLIMITED) {
+            if (over.get() && over.compareAndSet(true, false) && onChange != null) onChange.run();
+            return;
+        }
         if (u >= limit && !over.get()) {
             if (over.compareAndSet(false, true) && onChange != null) onChange.run();
         } else if (u < limit / 4 * 3 && over.get()) {
