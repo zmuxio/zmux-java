@@ -153,6 +153,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         Step body = Objects.requireNonNull(step, "a lane operation is never attempted on the loop");
         Object r;
         try {
+            driver.core.setNow(Clock.now()); // what the attempt queues or takes is timed now (datagram sojourns)
             r = body.attempt(this);
         } catch (CoreException e) {
             r = e;

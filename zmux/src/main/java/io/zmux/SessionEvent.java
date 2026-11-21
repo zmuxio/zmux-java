@@ -14,7 +14,7 @@ package io.zmux;
  *     {@link PipePriorityChanged} and {@link PipeQualityChanged} by pipe, {@link TierSaturation} by
  *     priority, {@link CarrierCandidate} by carrier kind and variant, and by kind alone
  *     {@link CapacityBelow}, {@link CapacityRestored}, {@link EpochCommitted}, {@link EpochDeleted},
- *     {@link CarrierChosen}, {@link SessionSuspended}, {@link SessionResumed}, {@link ResumeUnattended}
+ *     {@link CarrierChosen}, {@link DatagramPathChanged}, {@link SessionSuspended}, {@link SessionResumed}, {@link ResumeUnattended}
  *     (a {@link SessionResumed} removes an unread one) and {@link GoAwayReceived};
  * <li>counted: {@link JoinAuthFailed} by reason;
  * <li>accumulated: {@link PipesRetired}; a retired pipe's unread events leave the queue and are
@@ -113,6 +113,13 @@ public sealed interface SessionEvent {
 
     /** A join ended the suspension. */
     record SessionResumed() implements SessionEvent {}
+
+    /**
+     * A new {@link ConnectionInfo#pathDatagramPayload()} (datagramPayload): the carrier's datagram size changed (path
+     * MTU discovery), another pipe carries the datagrams, or they moved between the carrier's datagrams and records.
+     * It is noticed when the session sends or its pipes change.
+     */
+    record DatagramPathChanged(int datagramPayload) implements SessionEvent {}
 
     /** The session committed a session epoch: its secret is derived, and joins of it are accepted. */
     record EpochCommitted(long epoch) implements SessionEvent {}

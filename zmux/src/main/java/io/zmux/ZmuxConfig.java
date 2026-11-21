@@ -69,6 +69,7 @@ public final class ZmuxConfig {
     final int datagramSendQueue, datagramReceiveQueue, datagramStreamQueue;
     final long datagramReceiveBytes;
     final long datagramStreamBytes; // -1: no byte bound
+    final long datagramQueueDelay; // nanoseconds, 0: off
     final long sendBuffer, sendBufferMax; // sendBufferMax 0: auto
     final EarlyData earlyData;
     final boolean holdFirstFlight;
@@ -104,7 +105,7 @@ public final class ZmuxConfig {
         maxIncomingStreams = b.maxIncomingStreams; maxIncomingUniStreams = b.maxIncomingUniStreams; maxLanes = b.maxLanes;
         datagramSendQueue = b.datagramSendQueue; datagramReceiveQueue = b.datagramReceiveQueue;
         datagramStreamQueue = b.datagramStreamQueue; datagramReceiveBytes = b.datagramReceiveBytes;
-        datagramStreamBytes = b.datagramStreamBytes;
+        datagramStreamBytes = b.datagramStreamBytes; datagramQueueDelay = b.datagramQueueDelay;
         sendBuffer = b.sendBuffer; sendBufferMax = b.sendBufferMax;
         datagrams = b.datagrams; earlyData = b.earlyData; holdFirstFlight = b.holdFirstFlight; alpn = List.copyOf(b.alpn); eventLoops = b.eventLoops;
         shapingLimits = b.shapingLimits;
@@ -168,7 +169,7 @@ public final class ZmuxConfig {
         maxIncomingStreams = o.maxIncomingStreams; maxIncomingUniStreams = o.maxIncomingUniStreams; maxLanes = o.maxLanes;
         datagramSendQueue = o.datagramSendQueue; datagramReceiveQueue = o.datagramReceiveQueue;
         datagramStreamQueue = o.datagramStreamQueue; datagramReceiveBytes = o.datagramReceiveBytes;
-        datagramStreamBytes = o.datagramStreamBytes;
+        datagramStreamBytes = o.datagramStreamBytes; datagramQueueDelay = o.datagramQueueDelay;
         sendBuffer = o.sendBuffer; sendBufferMax = o.sendBufferMax;
         datagrams = o.datagrams; this.earlyData = earlyData; holdFirstFlight = false; alpn = o.alpn; eventLoops = o.eventLoops;
         shapingLimits = o.shapingLimits; shapingBudget = o.shapingBudget; shaper = o.shaper; carrierCredential = o.carrierCredential; hooks = o.hooks; joinEarlyHello = o.joinEarlyHello;
@@ -210,6 +211,8 @@ public final class ZmuxConfig {
     public long datagramReceiveBytes() { return datagramReceiveBytes; }
     /** The payload bytes queued per stream and direction; empty: no byte bound. */
     public OptionalLong datagramStreamBytes() { return datagramStreamBytes < 0 ? OptionalLong.empty() : OptionalLong.of(datagramStreamBytes); }
+    /** The target queueing delay of every datagram queue; empty: no delay bound. */
+    public Optional<Duration> datagramQueueDelay() { return datagramQueueDelay == 0 ? Optional.empty() : Optional.of(Duration.ofNanos(datagramQueueDelay)); }
     public long sendBuffer() { return sendBuffer; }
     /** The fixed maximum the send buffer grows to in multipath sessions; empty: automatic. */
     public OptionalLong sendBufferMax() { return sendBufferMax == 0 ? OptionalLong.empty() : OptionalLong.of(sendBufferMax); }
@@ -419,6 +422,7 @@ public final class ZmuxConfig {
             c.datagramStreamQueue(datagramStreamQueue);
             c.datagramReceiveBytes(datagramReceiveBytes);
             c.datagramStreamBytes(datagramStreamBytes);
+            c.datagramQueueDelay(datagramQueueDelay);
         }
         p.maxLanes = maxLanes;
         System.arraycopy(randomBytes(16), 0, p.laneKey, 0, 16);
@@ -505,6 +509,7 @@ public final class ZmuxConfig {
         private int datagramSendQueue = 64, datagramReceiveQueue = 128, datagramStreamQueue = 32;
         private long datagramReceiveBytes = 1 << 20;
         private long datagramStreamBytes = io.zmux.internal.core.CoreConfig.DEFAULT_DATAGRAM_STREAM_BYTES;
+        private long datagramQueueDelay = io.zmux.internal.core.CoreConfig.DEFAULT_DATAGRAM_QUEUE_DELAY;
         private long sendBuffer = DEFAULT_SEND_BUFFER, sendBufferMax;
         private EarlyData earlyData = EarlyData.OFF;
         private boolean holdFirstFlight;
@@ -690,6 +695,21 @@ public final class ZmuxConfig {
 
         /** No byte bound on a stream's datagram queue: {@link #datagramStreamQueue()} alone bounds it. */
         public Builder noDatagramStreamBytes() { datagramStreamBytes = -1; return this; }
+
+        /**
+         * The target queueing delay of every datagram queue (the send queue, the session receive queue and each
+         * stream's), default 20 ms, positive: once the datagrams leaving a queue have waited longer than it for
+         * 100 ms, CoDel (RFC 8289) drops some of them as they leave, more the longer the standing delay lasts, each
+         * counted as dropped; a datagram alone in its queue is never dropped for its delay. The count and byte
+         * bounds stay as memory bounds. A packet forwarder sets it near the delay its traffic tolerates (20 to 50 ms
+         * for interactive traffic).
+         */
+        public Builder datagramQueueDelay(Duration d) {
+            datagramQueueDelay = nanos(positive(d, "datagramQueueDelay")); return this;
+        }
+
+        /** No delay bound on the datagram queues: only their count and byte bounds apply. */
+        public Builder noDatagramQueueDelay() { datagramQueueDelay = 0; return this; }
 
         /**
          * The initial written-but-unreleased budget, default 4 MiB, at least 1; multipath grows it up

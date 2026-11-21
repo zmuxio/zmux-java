@@ -6,7 +6,8 @@ package io.zmux.internal.core;
  * @param dir {@link Action#DIR_IN} or {@link Action#DIR_OUT}, for PIPE_STATE and the application's pipe kinds;
  *     {@link Action#DIR_BIDI} for the retirement
  * @param code the epoch (EPOCH_*), GOAWAY code, tier priority (TIER_SATURATION) or effective priority (PIPE_PRIORITY)
- * @param count the weight (PIPE_PRIORITY); the failures of the reason (JOIN_AUTH_FAILED), 1 as the core emits it
+ * @param count the weight (PIPE_PRIORITY); the failures of the reason (JOIN_AUTH_FAILED), 1 as the core emits it;
+ *     the payload (DATAGRAM_PATH)
  * @param frame the Locator (LOCATOR_*)
  * @param flag saturated (TIER_SATURATION), standby (PIPE_PRIORITY), or failed (the retirement: an outbound
  *     direction FAILED)
@@ -32,7 +33,9 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
         /** A session epoch (code) was committed or deleted. */
         EPOCH_COMMITTED, EPOCH_DELETED,
         /** A local Locator (frame) joins may now name, or no longer name; not an application event. */
-        LOCATOR_ADDED, LOCATOR_REMOVED
+        LOCATOR_ADDED, LOCATOR_REMOVED,
+        /** The path datagram payload of a session datagram (count) changed. */
+        DATAGRAM_PATH
     }
 
     static Event simple(Kind k) {
@@ -76,6 +79,11 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
 
     static Event joinAuthFailed(String reason) {
         return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null);
+    }
+
+    /** A new path datagram payload of a session datagram. */
+    static Event datagramPath(int payload) {
+        return new Event(Kind.DATAGRAM_PATH, 0, 0, null, null, 0, 0, 0, payload, null, null, null, false, false, 0, 0, null);
     }
 
     static Event epoch(Kind k, long n) {

@@ -558,6 +558,16 @@ larger than the byte bound is kept alone. `datagramReceiveBytes` bounds the
 session queue and the datagrams held for streams not opened yet; stream queues
 do not count against it.
 
+Every datagram queue, the send queue included, also bounds how long its
+datagrams wait (`datagramQueueDelay`, default 20 ms; `noDatagramQueueDelay()`
+turns it off): once the datagrams leaving a queue have waited longer for
+100 ms, CoDel drops some as they leave, counted, so a slow reader gets fresh
+datagrams instead of stale ones. `ConnectionInfo.pathDatagramPayload()` (and
+`ZmuxStream.pathDatagramPayload(context)`) is the largest payload that leaves
+as one carrier datagram, a QUIC DATAGRAM as path MTU discovery sizes it,
+instead of in a record; `SessionEvent.DatagramPathChanged` reports changes. A
+packet forwarder uses it as its MTU.
+
 `Zmux.MAX_STREAM_CREDIT` (2^60) is the largest stream credit, the value that
 grants the peer as many streams as the protocol can count, for
 `maxIncomingStreams`, `maxIncomingUniStreams` and `raiseIncomingStreams`; a larger

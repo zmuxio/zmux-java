@@ -62,7 +62,7 @@ final class EventQueue {
             case PIPE_QUALITY, PIPE_PRIORITY -> put(new Key(kind, e.pipe(), 0, null), e, Rule.REPLACE);
             case TIER_SATURATION -> put(new Key(kind, -1, 0, e.code()), e, Rule.REPLACE);
             // Suspended and Resumed are two keys, so an interruption is never swallowed by the resumption after it.
-            case CAPACITY_BELOW, CAPACITY_RESTORED, SUSPENDED, RESUME_UNATTENDED, GOAWAY_RECEIVED, EPOCH_COMMITTED, EPOCH_DELETED ->
+            case CAPACITY_BELOW, CAPACITY_RESTORED, SUSPENDED, RESUME_UNATTENDED, GOAWAY_RECEIVED, EPOCH_COMMITTED, EPOCH_DELETED, DATAGRAM_PATH ->
                     put(new Key(kind, -1, 0, null), e, Rule.REPLACE);
             case RESUMED -> {
                 // A resumption makes the unread "nothing will dial" report stale.

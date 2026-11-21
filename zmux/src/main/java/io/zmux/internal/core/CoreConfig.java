@@ -37,6 +37,7 @@ public record CoreConfig(
         int datagramStreamQueue,
         long datagramReceiveBytes,
         long datagramStreamBytes,
+        long datagramQueueDelay,
         boolean datagramReceiveLimited,
         int maxPipes,
         int headroom,
@@ -64,6 +65,8 @@ public record CoreConfig(
         TestHooks test) {
     /** The per-stream datagram byte bound by default: 32 datagrams of 9000 bytes fit. */
     public static final long DEFAULT_DATAGRAM_STREAM_BYTES = 512 << 10;
+    /** The CoDel target of every datagram queue by default. */
+    public static final long DEFAULT_DATAGRAM_QUEUE_DELAY = 20 * Time.MILLISECOND;
 
 
     /**
@@ -204,6 +207,7 @@ public record CoreConfig(
         b.datagramStreamQueue = datagramStreamQueue;
         b.datagramReceiveBytes = datagramReceiveBytes;
         b.datagramStreamBytes = datagramStreamBytes;
+        b.datagramQueueDelay = datagramQueueDelay;
         b.datagramReceiveLimited = datagramReceiveLimited;
         b.maxPipes = maxPipes;
         b.headroom = headroom;
@@ -279,6 +283,7 @@ public record CoreConfig(
         private int datagramStreamQueue = 32;
         private long datagramReceiveBytes = 1L << 20;
         private long datagramStreamBytes = DEFAULT_DATAGRAM_STREAM_BYTES;
+        private long datagramQueueDelay = DEFAULT_DATAGRAM_QUEUE_DELAY;
         private boolean datagramReceiveLimited;
         private int maxPipes = 1;
         private int headroom = 8;
@@ -312,7 +317,7 @@ public record CoreConfig(
         private Builder() { }
 
         public CoreConfig build() {
-            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
+            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramQueueDelay, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
         }
 
         public Builder role(Role v) { role = v; return this; }
@@ -385,6 +390,9 @@ public record CoreConfig(
 
         /** Payload bytes queued per stream and direction; -1: no byte bound. */
         public Builder datagramStreamBytes(long v) { datagramStreamBytes = v; return this; }
+
+        /** The CoDel target of every datagram queue (RFC 8289), in nanoseconds; 0: no delay bound. */
+        public Builder datagramQueueDelay(long v) { datagramQueueDelay = v; return this; }
 
         /** Received datagrams wait for the driver's receive limiter before they are queued. */
         public Builder datagramReceiveLimited(boolean v) { datagramReceiveLimited = v; return this; }

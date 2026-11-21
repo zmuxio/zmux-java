@@ -539,10 +539,26 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
      * As of the loop's last round; no I/O.
      */
     public int maxDatagramPayload(long context) {
-        if (!session.driver.info().datagramFlows()) return 0;
+        var i = session.driver.info();
+        return flowPayload(i, i.datagramLimit(), context);
+    }
+
+    /**
+     * The largest payload of a datagram of this stream's flow with the given context that leaves as one datagram of
+     * the carrier instead of in a record ({@link ConnectionInfo#pathDatagramPayload()}), 0 when the peer accepts none
+     * on this stream. As of the loop's last round; no I/O.
+     */
+    public int pathDatagramPayload(long context) {
+        var i = session.driver.info();
+        return flowPayload(i, i.datagramPathLimit(), context);
+    }
+
+    /** What a limit before the flow prefix leaves for a datagram of this stream's flow with context, 0 without flows. */
+    private int flowPayload(io.zmux.internal.loop.SessionRuntime.SessionInfo i, int limit, long context) {
+        if (!i.datagramFlows()) return 0;
         // The flow prefix: the stream's flow (its ID + 1) and the context, as variable-length integers.
         int flow = st.idSet() ? io.zmux.internal.wire.VarInt.length(st.id() + 1) : 8;
-        return Math.max(0, session.datagramLimit() - flow - io.zmux.internal.wire.VarInt.length(context));
+        return Math.max(0, limit - flow - io.zmux.internal.wire.VarInt.length(context));
     }
 
     /**

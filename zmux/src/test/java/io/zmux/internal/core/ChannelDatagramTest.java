@@ -230,6 +230,44 @@ class ChannelDatagramTest {
         assertEquals(1200, p.fromA.get(0).length);
     }
 
+    /** The path datagram payloads a reported, in order. */
+    static List<Long> pathEvents(Session s) {
+        List<Long> got = new ArrayList<>();
+        for (Event e; (e = s.outbox().pollEvent()) != null; ) if (e.kind() == Event.Kind.DATAGRAM_PATH) got.add(e.count());
+        return got;
+    }
+
+    /**
+     * The path datagram payload is what fits one channel datagram: a datagram of it goes on the channel, one byte more
+     * in a record; a smaller channel lowers it and DATAGRAM_PATH reports it once.
+     */
+    @Test void pathPayloadIsWhatOneChannelDatagramTakes() throws Exception {
+        Pair p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
+        p.pump();
+        int path = p.a.datagrams().pathPayload(1);
+        assertEquals(1200 - 3, path); // Pipe Stream ID, type and flow 0
+        assertTrue(path < p.a.datagrams().maxPayload(1));
+        assertEquals(List.of((long) path), pathEvents(p.a));
+        p.a.sendDatagram(null, 0, bytes(path, 1));
+        p.recordsA.clear();
+        p.pump();
+        assertEquals(1, p.fromA.size());
+        assertFalse(datagramInRecords(p.recordsA));
+        p.fromA.clear();
+        p.a.sendDatagram(null, 0, bytes(path + 1, 2));
+        p.pump();
+        assertTrue(p.fromA.isEmpty());
+        assertTrue(datagramInRecords(p.recordsA));
+        p.ca.max = 800;
+        p.pump();
+        assertEquals(800 - 3, p.a.datagrams().pathPayload(1));
+        assertEquals(List.of(800L - 3), pathEvents(p.a));
+        p.ca.max = 0; // the carrier takes no datagrams now: they ride the records
+        p.pump();
+        assertEquals(p.a.datagrams().maxPayload(1), p.a.datagrams().pathPayload(1));
+        assertEquals(List.of((long) p.a.datagrams().maxPayload(1)), pathEvents(p.a));
+    }
+
     // ---- receiving ----
 
     @Test void malformedChannelDatagramIsAProtocolViolation() throws Exception {
@@ -395,7 +433,7 @@ class ChannelDatagramTest {
         m.openedOn(opening);
         assertSame(opening, m.openingPipe());
 
-        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), new SessionStats(), new Outbox());
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), new SessionStats(), new Outbox(), () -> 0L);
         dg.recordCaps(() -> 65535, () -> 65535);
         dg.peer(65535, 65535, true);
         dg.channels(new Datagrams.Channels() {

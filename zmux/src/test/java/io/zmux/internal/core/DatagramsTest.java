@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 class DatagramsTest {
     @Test void pendingLimiterTokensStayInTheDatagramBudgetAndCannotResurrect() {
         CoreConfig config = CoreConfig.builder().datagrams(true).datagramReceiveLimited(true).datagramReceiveBytes(4).build();
-        Datagrams dg = new Datagrams(config, new SessionStats(), new Outbox());
+        Datagrams dg = new Datagrams(config, new SessionStats(), new Outbox(), () -> 0L);
         dg.received(null, new byte[] {1, 1});
         Datagrams.Limited oldest = dg.pollLimited();
         dg.received(null, new byte[] {2, 2});
@@ -45,7 +45,7 @@ class DatagramsTest {
     @Test void aDatagramThatOnlyALargerPipeHoldsIsNoInterestOfTheSmallOne() throws Exception {
         int[] caps = {65535, 65535}; // the smallest and the largest record cap of the usable pipes
         SessionStats stats = new SessionStats();
-        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox());
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox(), () -> 0L);
         dg.recordCaps(() -> caps[0], () -> caps[1]);
         dg.peer(65535, 65535, false);
         dg.send(null, 0, new byte[3000], false);
@@ -68,7 +68,7 @@ class DatagramsTest {
     @Test void aDatagramNoUsablePipeHoldsIsDroppedPromptly() throws Exception {
         int[] caps = {65535, 65535};
         SessionStats stats = new SessionStats();
-        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox());
+        Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox(), () -> 0L);
         dg.recordCaps(() -> caps[0], () -> caps[1]);
         dg.peer(65535, 65535, false);
         dg.send(null, 0, new byte[3000], false);

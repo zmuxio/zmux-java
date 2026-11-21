@@ -85,7 +85,7 @@ public final class Session {
         this.shapingBudget = cfg.shapingBudget();
         this.now = now;
         this.start = now;
-        dg = new Datagrams(cfg, stats, outbox);
+        dg = new Datagrams(cfg, stats, outbox, this::now);
         TransportParams l = cfg.local();
         if (l.maxRecordSize == 0) l.maxRecordSize = TransportParams.DEFAULT_MAX_RECORD_SIZE;
         conn = new ConnFlow(l.initialMaxData, this::maxDataDue);
@@ -291,6 +291,7 @@ public final class Session {
         life.established();
         ka.start(idleTimeout(), now);
         emit(Event.established(feat, role == Role.INITIATOR));
+        noteDatagramPath();
         estW.wakeAll(outbox);
         pipes.wakeWriters();
         streams.wakeOpeners();
@@ -902,6 +903,19 @@ public final class Session {
             if (state == SessionState.CLOSING) wakeHandOff();
         }
         outbox.event(e);
+        if (e.kind() == Event.Kind.PIPE_STATE) noteDatagramPath(); // the datagram pipe may have changed
+    }
+
+    /** The path datagram payload of a session datagram last reported (DATAGRAM_PATH). */
+    private int datagramPath;
+
+    /** Reports a change of a session datagram's path datagram payload. */
+    private void noteDatagramPath() {
+        if (!cfg.datagrams() || !peerSeen) return;
+        int v = dg.pathPayload(1);
+        if (v == datagramPath) return;
+        datagramPath = v;
+        emit(Event.datagramPath(v));
     }
 
 
@@ -1868,6 +1882,7 @@ public final class Session {
     public void pollChannel(long pipeId, List<byte[]> dst, List<Datagrams.ChannelSent> sent, long t) {
         setNow(t);
         if (!peerSeen || isClosing()) return;
+        noteDatagramPath(); // the channel's room as read now
         Pipe p = pipes.get(pipeId);
         if (p == null || p != datagramPipe()) return;
         dg.pollChannel(channelOf(p), dst, sent);

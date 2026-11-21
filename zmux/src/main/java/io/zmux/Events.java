@@ -28,6 +28,7 @@ final class Events {
             case CAPACITY_RESTORED -> new SessionEvent.CapacityRestored((long) e.rate());
             case EPOCH_COMMITTED -> new SessionEvent.EpochCommitted(e.code());
             case EPOCH_DELETED -> new SessionEvent.EpochDeleted(e.code());
+            case DATAGRAM_PATH -> new SessionEvent.DatagramPathChanged((int) e.count());
             default -> null;
         };
     }

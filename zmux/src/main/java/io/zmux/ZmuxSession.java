@@ -1405,11 +1405,6 @@ public final class ZmuxSession implements AutoCloseable {
         return e == null ? Optional.empty() : Optional.of(Errors.session(e));
     }
 
-    /** The largest datagram payload the peer accepts before a flow prefix, as of the loop's last round. */
-    int datagramLimit() {
-        return driver.info().datagramLimit();
-    }
-
     /** The session's identity in this process, the one {@link Tracer} callbacks carry. */
     public SessionId id() { return driver.id(); }
 
@@ -1423,6 +1418,7 @@ public final class ZmuxSession implements AutoCloseable {
                 i.joinSecurityUnavailable(), i.joinPending(), i.suspended(),
                 g == null ? Optional.empty() : Optional.of(new ConnectionInfo.GoAway(g[0], g[1], g[2])),
                 Math.max(0, i.datagramLimit() - (i.datagramFlows() ? 1 : 0)),
+                Math.max(0, i.datagramPathLimit() - (i.datagramFlows() ? 1 : 0)),
                 i.preamble(), i.priority(), i.datagramFlows(), i.lanesToPeer());
     }
 

@@ -1196,12 +1196,13 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
      * What the session negotiated, as of the loop's last round.
      *
      * @param datagramLimit the largest datagram payload the peer accepts now before a flow prefix, 0 when none
+     * @param datagramPathLimit of those, the largest that leaves as one carrier-channel datagram before a flow prefix
      * @param goAway the received GOAWAY watermarks [maxBidi, maxUni, code], null while none was received
      */
     public record SessionInfo(boolean established, boolean initiator, boolean peerIsZmux, boolean preamble,
                        boolean priority, boolean datagramFlows, boolean pipeAck, boolean multipath, boolean resume,
                        boolean lanesToPeer, boolean localDatagrams, boolean peerDatagrams, boolean localResetStreamAt,
-                       boolean peerResetStreamAt, int datagramLimit, boolean joinPending, boolean joinSecurityUnavailable,
+                       boolean peerResetStreamAt, int datagramLimit, int datagramPathLimit, boolean joinPending, boolean joinSecurityUnavailable,
                        boolean suspended, long[] goAway) {}
 
     private volatile io.zmux.internal.core.SessionStats.Snapshot stats;
@@ -1209,7 +1210,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
     // Loop only: what the published snapshots were made from.
     private long statsVersion = -1, statsBudget = -1;
     private boolean infoEstablished, infoSuspended, infoSecretPending;
-    private int infoMaxDatagram;
+    private int infoMaxDatagram, infoPathDatagram;
     private long[] infoGoAway;
 
     /** Set by the first read: the loop then also republishes when only a gauge changed. */
@@ -1315,14 +1316,15 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
         boolean est = core.established(), pending = core.joinPending(), suspended = core.state() == SessionState.SUSPENDED;
         long[] away = core.peerGoAway();
         // The pipes' record caps move it as pipes join and leave.
-        int maxDatagram = core.datagrams().maxPayload(0);
-        if (info == null || est != infoEstablished || maxDatagram != infoMaxDatagram || !java.util.Arrays.equals(away, infoGoAway) || pending != infoSecretPending
+        int maxDatagram = core.datagrams().maxPayload(0), pathDatagram = core.datagrams().pathPayload(0);
+        if (info == null || est != infoEstablished || maxDatagram != infoMaxDatagram || pathDatagram != infoPathDatagram || !java.util.Arrays.equals(away, infoGoAway) || pending != infoSecretPending
                 || suspended != infoSuspended) {
             infoSecretPending = pending;
             infoEstablished = est;
             infoGoAway = away;
             infoSuspended = suspended;
             infoMaxDatagram = maxDatagram;
+            infoPathDatagram = pathDatagram;
             var p = core.peerParams();
             var local = core.config().local();
             info = new SessionInfo(est, core.initiator(), p != null && p.isZmux(), f.preamble(), f.priority(), f.flows(),
@@ -1330,7 +1332,7 @@ public final class SessionRuntime implements SessionHost.RoundEnd {
                     p != null && p.has(io.zmux.internal.wire.TransportParams.DATAGRAM) && p.maxDatagramFrameSize > 0,
                     local.has(io.zmux.internal.wire.TransportParams.RESET_AT),
                     p != null && p.has(io.zmux.internal.wire.TransportParams.RESET_AT),
-                    maxDatagram, pending, f.joinSecurityUnavailable(), suspended, away);
+                    maxDatagram, pathDatagram, pending, f.joinSecurityUnavailable(), suspended, away);
         }
     }
 

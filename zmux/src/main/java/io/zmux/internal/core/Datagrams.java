@@ -15,6 +15,8 @@ import java.util.LinkedHashMap;
  * Datagram queues of one session: the send queue, the session and
  * per-stream receive queues, the receive byte budget and the receive-limiter tokens. Owned by
  * the session's loop; the session resolves flows to streams and supplies the peer's limits.
+ * Every queue bounds its datagrams' sojourn with its own {@link CoDel} state
+ * ({@link CoreConfig#datagramQueueDelay()}), decided as each datagram leaves it at the session clock.
  */
 public final class Datagrams {
     /** Resolves a received datagram flow to its stream. */
@@ -98,15 +100,20 @@ public final class Datagrams {
         }
     }
 
-    /** A queued datagram: its encoding (flow prefix included), stream and payload length. */
-    private record Out(byte[] data, Stream st, int payload) {
+    /** A queued datagram: its encoding (flow prefix included), stream, payload length and when it was queued. */
+    private record Out(byte[] data, Stream st, int payload, long at) {
         boolean ready() { return st == null || st.tab.opened(); }
         boolean dead() { return st != null && !st.tab.opened() && st.snd.cancelled(); }
     }
 
+    /** A received datagram in a receive queue and when it was queued. */
+    private record Queued(byte[] e, long at) {}
+
     /** One stream's receive queue and its waiters. */
     private static final class PerStream {
-        final ArrayDeque<byte[]> q = new ArrayDeque<>(2);
+        final ArrayDeque<Queued> q = new ArrayDeque<>(2);
+        /** The queue's sojourn bound. */
+        final CoDel codel = new CoDel();
         /** The payload bytes of this stream's datagrams the core holds (queued and awaiting the limiter). */
         private long bytes;
         /** Under a receive limiter: this stream's datagrams the core holds (awaiting the limiter and queued), oldest first. */
@@ -120,7 +127,9 @@ public final class Datagrams {
     private final Outbox outbox;
 
     private final ArrayDeque<Out> send = new ArrayDeque<>(0);
-    private final ArrayDeque<byte[]> recv = new ArrayDeque<>(0);
+    private final ArrayDeque<Queued> recv = new ArrayDeque<>(0);
+    private final CoDel recvCodel = new CoDel();
+    private final CoDel sendCodel = new CoDel();
     private final WaitList recvW = new WaitList();
     private final WaitList sendW = new WaitList();
     private final IdentityHashMap<Stream, PerStream> streams = new IdentityHashMap<>(4);
@@ -147,10 +156,14 @@ public final class Datagrams {
     /** The largest record cap of the usable pipes' carriers: a datagram beyond it fits on no pipe now. */
     private java.util.function.IntSupplier largestRecordCap = () -> Integer.MAX_VALUE;
 
-    Datagrams(CoreConfig cfg, SessionStats stats, Outbox outbox) {
+    /** The session clock: when a datagram is queued and when it leaves. */
+    private final java.util.function.LongSupplier clock;
+
+    Datagrams(CoreConfig cfg, SessionStats stats, Outbox outbox, java.util.function.LongSupplier clock) {
         this.cfg = cfg;
         this.stats = stats;
         this.outbox = outbox;
+        this.clock = clock;
     }
 
     /** Sets the session's view of the datagram pipe and its channel. */
@@ -192,6 +205,21 @@ public final class Datagrams {
         return Math.max(0, d);
     }
 
+    /**
+     * The largest datagram payload, after a flow prefix of flowLen bytes, that leaves as one datagram of the datagram
+     * pipe's carrier channel, its room as the channel last reported it; where datagrams ride records (no channel, or
+     * none now) {@link #maxPayload}. 0 when the peer accepts none. A larger datagram goes in a record.
+     */
+    public int pathPayload(int flowLen) {
+        int m = maxPayload(flowLen);
+        if (m == 0) return 0;
+        ChannelUse ch = channels.of(channels.datagramPipe());
+        if (ch.room() == 0) return m;
+        int c = ch.room() - ChannelDatagram.length(ch.id(), 0);
+        if (flows) c -= flowLen;
+        return Math.clamp(c, 0, m);
+    }
+
     /** Bytes of received datagrams the core holds (memory accounting). */
     long receivedBytes() {
         return receivedBytes + heldBytes + streamBytes;
@@ -224,7 +252,7 @@ public final class Datagrams {
             send.poll();
             stats.datagramDroppedSend();
         }
-        send.add(new Out(data, st, payload.length));
+        send.add(new Out(data, st, payload.length, clock.getAsLong()));
     }
 
     /** A send limiter refused a datagram before queueing it. */
@@ -307,9 +335,9 @@ public final class Datagrams {
         while (!send.isEmpty()) {
             Out o = send.peek();
             Fate f = fate(o, p, ch, dch, limit, largest);
-            if (f == Fate.DROP) {
+            if (f == Fate.DROP || (f == Fate.SEND && sojournDrop(o, send.size() - 1))) {
                 send.poll();
-                stats.datagramDroppedSend();
+                droppedSend();
                 continue;
             }
             if (f == Fate.HOLD) {
@@ -329,6 +357,19 @@ public final class Datagrams {
             send.clear();
             send.addAll(kept);
         }
+        if (send.isEmpty()) sendCodel.idle();
+    }
+
+    /** Whether o, leaving the send queue with rest datagrams queued after it, is dropped for its sojourn. */
+    private boolean sojournDrop(Out o, int rest) {
+        return sendCodel.drop(o.at(), clock.getAsLong(), cfg.datagramQueueDelay(), rest == 0);
+    }
+
+    /** A queued datagram dropped before it was sent: counted, and its room goes to a waiting sender. */
+    private void droppedSend() {
+        stats.datagramDroppedSend();
+        Waiter sw = sendW.poll();
+        if (sw != null) outbox.wake(sw);
     }
 
     /**
@@ -337,16 +378,21 @@ public final class Datagrams {
      */
     int pollChannel(ChannelUse ch, java.util.List<byte[]> dst, java.util.List<ChannelSent> sent) {
         if (!peerKnown || send.isEmpty() || ch.room() == 0) return 0;
-        int n = 0;
+        int n = 0, rest = send.size();
         for (var it = send.iterator(); it.hasNext(); ) {
             Out o = it.next();
+            rest--;
             if (o.dead() || o.data().length > maxData(peerMax)) {
                 it.remove();
-                stats.datagramDroppedSend();
+                droppedSend();
                 continue;
             }
             if (!o.ready() || !ch.takes(o.data().length)) continue;
             it.remove();
+            if (sojournDrop(o, rest)) {
+                droppedSend();
+                continue;
+            }
             dst.add(ChannelDatagram.encode(ch.id(), o.data()));
             sent.add(new ChannelSent(o.st(), o.payload()));
             stats.datagramSentChannel();
@@ -355,6 +401,7 @@ public final class Datagrams {
             Waiter sw = sendW.poll();
             if (sw != null) outbox.wake(sw);
         }
+        if (send.isEmpty()) sendCodel.idle();
         return n;
     }
 
@@ -536,7 +583,7 @@ public final class Datagrams {
             }
             PerStream ps = streams.computeIfAbsent(st, k -> new PerStream());
             if (ps.q.size() >= cfg.datagramStreamQueue()) dropStreamHead(st, ps);
-            ps.q.add(e);
+            ps.q.add(new Queued(e, clock.getAsLong()));
             st.counters.datagramQueued();
             track(st, e);
             // The count first, then the bytes, oldest first; a single datagram above the bound stays alone.
@@ -547,10 +594,10 @@ public final class Datagrams {
             return;
         }
         if (recv.size() >= cfg.datagramReceiveQueue()) {
-            untrack(recv.poll());
+            untrack(recv.remove().e());
             dropReceived();
         }
-        recv.add(e);
+        recv.add(new Queued(e, clock.getAsLong()));
         track(null, e);
         trimBytes();
         recvW.wakeFirst(outbox);
@@ -562,7 +609,7 @@ public final class Datagrams {
 
     /** Drops the oldest datagram of st's queue, counted for the session and the stream. */
     private void dropStreamHead(Stream st, PerStream ps) {
-        untrack(ps.q.poll());
+        untrack(ps.q.remove().e());
         dropReceived();
         st.counters.datagramDropped();
     }
@@ -605,10 +652,10 @@ public final class Datagrams {
     private void evict(byte[] bytes, Stream stream) {
         if (!pending.containsKey(bytes)) {
             if (stream == null) {
-                recv.remove(bytes);
+                recv.removeIf(q -> q.e() == bytes);
             } else {
                 PerStream ps = streams.get(stream);
-                if (ps != null) ps.q.remove(bytes);
+                if (ps != null) ps.q.removeIf(q -> q.e() == bytes);
             }
         }
         untrack(bytes);
@@ -654,17 +701,25 @@ public final class Datagrams {
         while (receivedBytes > cfg.datagramReceiveBytes()) {
             byte[] oldest = null;
             // Without the limiter every session datagram is in recv, oldest first.
-            if (!cfg.datagramReceiveLimited()) oldest = recv.peek();
+            if (!cfg.datagramReceiveLimited()) oldest = recv.isEmpty() ? null : recv.peek().e();
             else for (var entry : received.entrySet()) if (entry.getValue() == null) { oldest = entry.getKey(); break; }
             if (oldest == null) return;
             evict(oldest, null);
         }
     }
 
-    /** Pops a session datagram, or null. */
+    /** Pops a session datagram, or null; those queued longer than the queue delay allows are dropped on the way, counted. */
     public byte[] receive() {
-        byte[] e = recv.poll();
-        if (e == null) return null;
+        long now = clock.getAsLong(), target = cfg.datagramQueueDelay();
+        while (!recv.isEmpty() && recvCodel.drop(recv.peek().at(), now, target, recv.size() == 1)) {
+            untrack(recv.remove().e());
+            dropReceived();
+        }
+        if (recv.isEmpty()) {
+            recvCodel.idle();
+            return null;
+        }
+        byte[] e = recv.remove().e();
         untrack(e);
         // One waiter is woken per datagram; several queued at once each pass one on.
         if (!recv.isEmpty()) recvW.wakeFirst(outbox);
@@ -680,11 +735,17 @@ public final class Datagrams {
         recvW.remove(w);
     }
 
-    /** Pops a stream datagram, or null. */
+    /** Pops a stream datagram, or null; those queued longer than the queue delay allows are dropped on the way, counted. */
     public StreamDatagram receive(Stream st) {
         PerStream ps = streams.get(st);
-        if (ps == null || ps.q.isEmpty()) return null;
-        byte[] e = ps.q.poll();
+        if (ps == null) return null;
+        long now = clock.getAsLong(), target = cfg.datagramQueueDelay();
+        while (!ps.q.isEmpty() && ps.codel.drop(ps.q.peek().at(), now, target, ps.q.size() == 1)) dropStreamHead(st, ps);
+        if (ps.q.isEmpty()) {
+            ps.codel.idle();
+            return null;
+        }
+        byte[] e = ps.q.remove().e();
         untrack(e);
         if (!ps.q.isEmpty()) ps.waiters.wakeFirst(outbox);
         ByteBuffer b = ByteBuffer.wrap(e);
@@ -730,7 +791,7 @@ public final class Datagrams {
     /** A released stream: its queued and limiter-held datagrams go. */
     void dropStream(Stream st) {
         PerStream ps = streams.remove(st);
-        if (ps != null) for (byte[] e : ps.q) untrack(e);
+        if (ps != null) for (Queued q : ps.q) untrack(q.e());
         for (var entry : new ArrayList<>(received.entrySet())) {
             if (entry.getValue() == st) evict(entry.getKey(), st);
         }
