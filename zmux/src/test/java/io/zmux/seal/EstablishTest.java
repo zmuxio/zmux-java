@@ -182,8 +182,9 @@ class EstablishTest {
         var j = replied(sKey, null).client().verify(in -> new VerifyVerdict(new Principal(5, new byte[] {1}), null, mine), null, false);
         assertEquals(mine, j.verdict().value());
         // A Reply without a proof: a verdict that names a proof key fails the handshake.
-        assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
+        var failed = assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
                 .verify(in -> new VerifyVerdict(new Principal(5, new byte[0]), new byte[KeyId.LEN], null), null, false));
+        assertEquals(CredentialsFailedException.Detail.PROOF, failed.detail());
         assertThrows(IllegalArgumentException.class, () -> new VerifyVerdict(new Principal(5, new byte[0]), new byte[3], null));
     }
 
@@ -194,8 +195,9 @@ class EstablishTest {
         assertFalse(j.pqAuthenticated());
         assertEquals(Principal.NODE_KEY, j.verdict().principal().type());
         assertArrayEquals(KeyId.staticKeyId(sKey.publicKey()), j.verdict().principal().bytes());
-        assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
+        var failed = assertThrows(CredentialsFailedException.class, () -> replied(sKey, null).client()
                 .verify(new PinAnchor(KeyId.staticKeyId(sKey.publicKey())), null, true));
+        assertEquals(CredentialsFailedException.Detail.PQ_AUTH_REQUIRED, failed.detail());
     }
 
     @Test

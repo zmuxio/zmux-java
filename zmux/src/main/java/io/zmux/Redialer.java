@@ -78,7 +78,7 @@ final class Redialer {
                 try {
                     PipeIo io = hook.dial(need, attempt);
                     if (io == null) throw new IOException("the redial hook returned no pipe input");
-                    if (!outcome.complete(io)) Bootstrap.discard(io, new java.net.SocketTimeoutException("redial attempt abandoned"));
+                    if (!outcome.complete(io)) discardLate(io, outcome.exceptionNow());
                 } catch (InterruptedException abandoned) {
                     // The attempt was abandoned or the session closed: the thread ends here.
                     outcome.completeExceptionally(abandoned);
@@ -94,10 +94,17 @@ final class Redialer {
             return settle(outcome, f -> f.get(session.core.joinDeadline(), TimeUnit.NANOSECONDS), () -> {
                 attempt.cancel();
                 dial.interrupt();
-            });
+            }, this::discardLate);
         } finally {
             closing.close();
         }
+    }
+
+    /** A hook delivered a carrier after its join was abandoned. It still gets one outcome. */
+    private void discardLate(PipeIo io, Throwable cause) {
+        Throwable error = cause instanceof InterruptedIOException && !(cause instanceof java.net.SocketTimeoutException)
+                ? session.error().<Throwable>map(SessionClosedException::new).orElse(cause) : cause;
+        try { Bootstrap.discard(io, error); } finally { session.driver.failedJoin(error).report(error); }
     }
 
     /** How {@link #settle} waits for an attempt's outcome: bounded, it throws TimeoutException at its deadline. */
@@ -114,29 +121,29 @@ final class Redialer {
      * completed it first, the input it delivered is closed here, since nobody else will see it,
      * and an input delivered later meets the claim and is closed by that thread.
      */
-    static PipeIo settle(CompletableFuture<PipeIo> outcome, Wait wait, Runnable abandon)
+    static PipeIo settle(CompletableFuture<PipeIo> outcome, Wait wait, Runnable abandon, java.util.function.BiConsumer<PipeIo, Throwable> discard)
             throws IOException, InterruptedException {
-        boolean handedOff = false;
         try {
-            PipeIo io = wait.await(outcome);
-            handedOff = true;
-            return io;
+            return wait.await(outcome);
         } catch (TimeoutException late) {
-            throw new java.net.SocketTimeoutException("redial attempt outlived the join deadline");
+            var error = new JoinTimeoutException();
+            withdraw(outcome, error, discard, abandon);
+            throw error;
+        } catch (InterruptedException interrupted) {
+            withdraw(outcome, new InterruptedIOException("redial interrupted"), discard, abandon);
+            throw interrupted;
         } catch (ExecutionException failed) {
             Throwable cause = failed.getCause();
             if (cause instanceof IOException io) throw io;
             throw new CallbackFailedException("redial hook failed", cause);
-        } finally {
-            if (!handedOff) {
-                var abandoned = new java.net.SocketTimeoutException("redial attempt abandoned");
-                // Lost the claim to a result: nobody returns it, so it is closed here.
-                if (!outcome.completeExceptionally(abandoned) && !outcome.isCompletedExceptionally()) {
-                    Bootstrap.discard(outcome.join(), abandoned);
-                }
-                abandon.run();
-            }
         }
+    }
+
+    private static void withdraw(CompletableFuture<PipeIo> outcome, IOException error,
+                                 java.util.function.BiConsumer<PipeIo, Throwable> discard, Runnable abandon) {
+        try {
+            if (!outcome.completeExceptionally(error) && !outcome.isCompletedExceptionally()) discard.accept(outcome.join(), error);
+        } finally { abandon.run(); }
     }
 
     private void run() {

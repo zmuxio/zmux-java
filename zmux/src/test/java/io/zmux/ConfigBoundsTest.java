@@ -2,8 +2,13 @@ package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.zmux.internal.core.CoreConfig;
+import io.zmux.internal.core.Time;
+import io.zmux.internal.wire.TransportParams;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.shaping.RecordPlan;
 import io.zmux.shaping.WireAccount;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
@@ -24,6 +29,48 @@ class ConfigBoundsTest {
         assertThrows(IllegalArgumentException.class, () -> m.probeInterval(Duration.ZERO));
         assertDoesNotThrow(() -> m.noProbeInterval());
         assertDoesNotThrow(() -> m.probeInterval(Duration.ofSeconds(1)));
+    }
+
+    @Test void wireDeadlinesRoundUpAndPreserveLocalPrecision() throws Exception {
+        var d = Duration.ofMillis(1).plusNanos(1);
+        assertDeadlines(d, 2, d.toNanos());
+        var subMillisecond = Duration.ofNanos(999_999);
+        var builder = ZmuxConfig.builder();
+        assertThrows(IllegalArgumentException.class, () -> builder.maxIdleTimeout(subMillisecond));
+        assertThrows(IllegalArgumentException.class, () -> builder.resumeTimeout(subMillisecond));
+    }
+
+    @Test void wireDeadlineSaturationAndLocalClockOverflowAreIndependent() throws Exception {
+        assertDeadlines(Duration.ofMillis(VarInt.MAX - 1).plusNanos(1), VarInt.MAX, Time.NEVER);
+        assertDeadlines(Duration.ofMillis(VarInt.MAX).plusNanos(1), VarInt.MAX, Time.NEVER);
+        assertDeadlines(Duration.ofSeconds(Long.MAX_VALUE), VarInt.MAX, Time.NEVER);
+        // This value fits on the wire but the configured duration alone already exceeds the clock.
+        var aboveClock = Duration.ofNanos(Long.MAX_VALUE).plusNanos(1);
+        assertDeadlines(aboveClock, Long.MAX_VALUE / Time.MILLISECOND + 1, Time.NEVER);
+        assertEquals(Time.NEVER, Time.add(5, Time.NEVER));
+        assertEquals(Time.NEVER, Time.add(5, Long.MAX_VALUE - 4));
+    }
+
+    private static void assertDeadlines(Duration d, long wireMillis, long localNanos) throws Exception {
+        var config = ZmuxConfig.builder().maxIdleTimeout(d).resumeTimeout(d).pipeAuth(PipeAuth.psk(new byte[32])).build();
+        var core = config.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR).toBuilder().build();
+        var wire = ByteBuffer.allocate(4096);
+        core.local().encode(wire);
+        var decoded = TransportParams.decode(wire, 0, wire.position());
+        assertEquals(wireMillis, decoded.maxIdleTimeoutMillis);
+        assertEquals(wireMillis, decoded.resumeGraceMillis);
+        assertEquals(localNanos, core.localIdleTimeout());
+        assertEquals(localNanos, core.resume());
+        assertEquals(d, config.maxIdleTimeout().orElseThrow());
+        assertEquals(d, config.resumeTimeout().orElseThrow());
+    }
+
+    @Test void spreadChunkAcceptsTheFullPositiveIntRange() {
+        var builder = ZmuxConfig.builder();
+        assertEquals(1, builder.spreadChunk(1).build().spreadChunk());
+        assertEquals(Integer.MAX_VALUE, builder.spreadChunk(Integer.MAX_VALUE).build().spreadChunk());
+        assertThrows(IllegalArgumentException.class, () -> builder.spreadChunk(0));
+        assertThrows(IllegalArgumentException.class, () -> builder.spreadChunk(Integer.MIN_VALUE));
     }
 
     @Test void exportedDefaults() {

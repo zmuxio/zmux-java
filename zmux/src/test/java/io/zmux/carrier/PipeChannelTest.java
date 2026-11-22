@@ -14,6 +14,42 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(30)
 class PipeChannelTest {
+    @Test void closingAWriterIncludesItsActiveWorkerCallback() throws Exception {
+        var channels = java.nio.channels.Pipe.open();
+        try (var source = channels.source(); var selectable = channels.sink();
+             var blocking = java.nio.channels.Channels.newChannel(new java.io.ByteArrayOutputStream())) {
+            assertTrue(source.isOpen());
+            for (var output : java.util.List.of(selectable, blocking)) {
+                var halves = PipeChannel.pipe(null, output, Framing.BYTE_STREAM, 1);
+                var entered = new java.util.concurrent.CountDownLatch(1);
+                var release = new CompletableFuture<Void>();
+                var retired = io.zmux.internal.spi.AdapterPorts.released(halves);
+                halves.writer().write(OutboundBatch.of(ByteBuffer.allocate(1)), new PipeWriter.Completion() {
+                    @Override public void completed() { entered.countDown(); release.join(); }
+                    @Override public void failed(Throwable cause) { fail(cause); }
+                });
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    halves.writer().close();
+                    assertFalse(retired.isDone());
+                } finally { release.complete(null); }
+                retired.get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test void unstartedBlockingHalvesRetireAndCannotStartARead() throws Exception {
+        var channels = java.nio.channels.Pipe.open();
+        try (var source = channels.source(); var sink = channels.sink()) {
+            var halves = PipeChannel.pipe(source, sink, Framing.BYTE_STREAM, 1);
+            var released = io.zmux.internal.spi.AdapterPorts.released(halves);
+            halves.reader().close();
+            halves.writer().close();
+            released.get(5, TimeUnit.SECONDS);
+            assertThrows(IllegalStateException.class, () -> halves.reader().start(null));
+        }
+    }
+
     /**
      * A socket's halves never wait on the virtual-thread poller: on Windows (JDK 25 and later) a
      * virtual thread waiting to write is not woken while another one waits to read the same

@@ -8,6 +8,8 @@
  <dependencies>
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux</artifactId><version>${project.version}</version></dependency>
   <dependency><groupId>io.netty</groupId><artifactId>netty-codec-classes-quic</artifactId><version>${netty.version}</version></dependency>
+  <!-- Wire prototype: Netty mainline HTTP/3 and native QUIC use the same pinned 4.2 release. -->
+  <dependency><groupId>io.netty</groupId><artifactId>netty-codec-http3</artifactId><version>${netty.version}</version><scope>test</scope></dependency>
   <dependency><groupId>io.netty</groupId><artifactId>netty-codec-native-quic</artifactId><version>${netty.version}</version><classifier>${os.detected.name}-${os.detected.arch}</classifier><scope>test</scope></dependency>
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux-shaping</artifactId><version>${project.version}</version><scope>test</scope></dependency>
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux-netty-test</artifactId><version>${project.version}</version><scope>test</scope></dependency>

@@ -7,6 +7,12 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class ConnectionsTest {
+    @Test void http12ClasspathHasNoQuicOrHttp3Codec() {
+        var loader = HttpCarrierClient.class.getClassLoader();
+        assertNull(loader.getResource("io/netty/handler/codec/quic/QuicChannel.class"));
+        assertNull(loader.getResource("io/netty/handler/codec/http3/Http3.class"));
+    }
+
     @Test void afterCloseAConnectionIsClosedInsteadOfPooled() {
         var conns = new Connections(null, null, null, Connections.Version.HTTP_1_1, Duration.ofSeconds(1));
         URI u = URI.create("http://localhost:1/z");

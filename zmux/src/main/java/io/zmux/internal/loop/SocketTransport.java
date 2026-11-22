@@ -24,6 +24,8 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
     private int endPending;
     private boolean shutAfterWrite;
     private boolean closed;
+    private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+    @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return released.minimalCompletionStage(); }
 
     /** The NIO loop whose selector serves the channel. */
     private final EventLoop nio;
@@ -33,6 +35,11 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         nio = loop;
         this.ch = ch;
     }
+
+    @Override
+    public boolean resumesAfterPeekTimeout() { return true; }
+
+    @Override public Object carrierIdentity() { return ch; }
 
     @Override
     public TransportInfo info() {
@@ -71,12 +78,14 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         replay(reader);
     }
 
+    boolean canDetach() { return !closed && !writing(); }
+
     /**
      * On the loop, nothing written: gives the channel up, off the selector and in blocking mode, without closing it;
      * the transport is closed from now on. Null when it cannot be (closed, writing, the mode refused), the channel then closed.
      */
-    java.nio.channels.SocketChannel detach() {
-        if (closed || writing()) return null;
+    java.nio.channels.SocketChannel detachPhysical(CarrierSetup.Bound.Permit permit) {
+        java.util.Objects.requireNonNull(permit);
         closed = true;
         if (reader != null) reader.release();
         try {
@@ -86,11 +95,12 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         } catch (IOException | RuntimeException e) {
             try { ch.close(); } catch (IOException ignored) { /* Gone. */ }
             return null;
-        }
+        } finally { released.complete(null); }
     }
 
     @Override
-    public Transport moveTo(SessionHost host) {
+    Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost host) {
+        java.util.Objects.requireNonNull(permit);
         if (closed) return null;
         if (!(host instanceof EventLoop to)) return bridge(host);
         closed = true;
@@ -98,6 +108,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         n.key = handOver(key, nio, to, n);
         n.prefix(unread(reader));
         if (reader != null) reader.release();
+        released.complete(null); // This view returned its selector and input to the new owner.
         return n;
     }
 
@@ -119,7 +130,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         if (writing()) { clearOut(); writeDone(t); }
         // An unexpected failure leaves the channel in an unknown state: cancel its key so the
         // selector stops reporting it, and close it; later writes fail through write().
-        close(t);
+        CarrierSetup.connectionLost(this, t);
     }
 
     /** At most one read per readiness, into at most one pool buffer: a busy socket cannot starve the loop. */
@@ -261,7 +272,8 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
     }
 
     @Override
-    public void close(Throwable cause) {
+    void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
+        java.util.Objects.requireNonNull(permit);
         if (closed) return;
         closed = true;
         if (key != null) key.cancel();
@@ -277,5 +289,7 @@ final class SocketTransport extends AbstractTransport implements EventLoop.IoHan
         if (reader != null) reader.release();
         clearOut();
         dropWrite();
+        released.complete(null);
+        setup().transportClosed(this);
     }
 }

@@ -1,12 +1,19 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
+import io.zmux.carrier.Framing;
+import io.zmux.carrier.MemoryPipe;
+import io.zmux.carrier.OutboundBatch;
+import io.zmux.carrier.PipeReader;
+import io.zmux.carrier.PipeWriter;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -56,6 +63,65 @@ class CloseDeliveryTest {
             var why = assertInstanceOf(SessionError.ApplicationClosed.class, server.closed().get(5, TimeUnit.SECONDS));
             assertEquals(new SessionError.ApplicationClosed(code, reason, true), why);
             assertTrue(Arrays.equals(data, read.get(5, TimeUnit.SECONDS)), "the peer read the whole 1 MiB in order");
+        }
+    }
+
+    @Test void peerCloseSurvivesALocalWriteFailure() throws Exception {
+        var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+        var armed = new AtomicBoolean();
+        var firstFailure = new CompletableFuture<Void>();
+        var inboundHeld = new CompletableFuture<Void>();
+        PipeReader reader = new PipeReader() {
+            @Override public void start(Sink sink) {
+                pair[0].reader().start(new Sink() {
+                    private CompletableFuture<Void> reads = firstFailure;
+
+                    private void deliver(Runnable read) {
+                        if (armed.get()) {
+                            reads = reads.thenRun(read);
+                            inboundHeld.complete(null);
+                        } else {
+                            read.run();
+                        }
+                    }
+
+                    @Override public void onChunk(Chunk chunk, Runnable consumed) {
+                        deliver(() -> sink.onChunk(chunk, consumed));
+                    }
+                    @Override public void onEnd() { deliver(sink::onEnd); }
+                    @Override public void onError(Throwable cause) { deliver(() -> sink.onError(cause)); }
+                });
+            }
+            @Override public void close() { pair[0].reader().close(); }
+        };
+        PipeWriter writer = new PipeWriter() {
+            @Override public void write(OutboundBatch batch, Completion done) {
+                if (armed.get()) {
+                    done.failed(new IOException("armed write failure"));
+                    firstFailure.complete(null);
+                } else {
+                    pair[0].writer().write(batch, done);
+                }
+            }
+            @Override public void close() { pair[0].writer().close(); }
+        };
+
+        try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var dial = workers.submit(() -> Zmux.open(pair[0].withHalves(reader, writer), Role.CLIENT, cfg));
+            try (var peer = Zmux.open(pair[1], Role.SERVER, cfg);
+                 var local = dial.get(5, TimeUnit.SECONDS)) {
+                armed.set(true);
+                var closing = workers.submit(() -> peer.close(9, ""));
+                try {
+                    inboundHeld.get(5, TimeUnit.SECONDS);
+                    local.openStream().write(new byte[] {1});
+                    assertEquals(new SessionError.ApplicationClosed(9, "", true), local.closed().get(5, TimeUnit.SECONDS));
+                    closing.get(5, TimeUnit.SECONDS);
+                } finally {
+                    firstFailure.complete(null);
+                }
+            }
         }
     }
 

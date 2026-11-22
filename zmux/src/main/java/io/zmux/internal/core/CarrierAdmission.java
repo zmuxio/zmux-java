@@ -196,53 +196,53 @@ public final class CarrierAdmission {
      * Pairs the two unidirectional carriers of a split bootstrap by their token. A waiting half
      * holds its slots of the listener ({@link #take}); the pairing adds no bound of its own.
      */
-    public static final class SplitPairing {
-        /** The outcome of offering a carrier: wait for the partner, paired (partner given), or close (a reused token or a second half of the same direction). */
-        public enum Result { WAIT, DONE, REJECT }
+    public static final class SplitPairing<T> {
+        private final Map<String, Token<T>> active = new HashMap<>();
 
-        private record Waiting(boolean up, Object carrier) {}
+        /** The sole reservation for a generation of this token. Its holder retires it after cleanup. */
+        public static final class Token<T> implements AutoCloseable {
+            private final SplitPairing<T> table;
+            private final String key;
+            private final boolean up;
+            private T waiting;
 
-        private final Map<String, Waiting> wait = new HashMap<>();
-        private final java.util.Set<String> used = new java.util.HashSet<>();
-        private Object partner;
-
-        private static String key(byte[] token) {
-            return java.util.HexFormat.of().formatHex(token);
-        }
-
-        /** Offers a carrier (up: the initiator writes on it); on DONE, {@link #partner()} is the other carrier. */
-        public Result offer(byte[] token, boolean up, Object carrier) {
-            String k = key(token);
-            partner = null;
-            if (used.contains(k)) return Result.REJECT;
-            Waiting w = wait.get(k);
-            if (w != null) {
-                if (w.up() == up) return Result.REJECT;
-                wait.remove(k);
-                used.add(k);
-                partner = w.carrier();
-                return Result.DONE;
+            private Token(SplitPairing<T> table, String key, boolean up, T first) {
+                this.table = table;
+                this.key = key;
+                this.up = up;
+                waiting = first;
             }
-            wait.put(k, new Waiting(up, carrier));
-            return Result.WAIT;
+
+            /** Stop matching. The reservation remains live through physical cleanup. */
+            public void seal() { waiting = null; }
+
+            @Override public void close() {
+                waiting = null;
+                table.active.remove(key, this);
+            }
         }
 
-        public Object partner() {
-            return partner;
+        /** A live token and, on a match, the other arrival. */
+        public record Offer<T>(Token<T> reservation, T partner) {}
+
+        /** Null refuses the arrival. A fresh reservation waits, a matched one carries its partner. */
+        public Offer<T> offer(byte[] token, boolean up, T carrier) {
+            return offer(token, up, carrier, waiting -> true);
         }
 
-        /** Removes a held carrier that gave up; false when a partner already took it. */
-        public boolean withdraw(byte[] token, Object carrier) {
-            String k = key(token);
-            Waiting w = wait.get(k);
-            if (w == null || w.carrier() != carrier) return false;
-            wait.remove(k);
-            return true;
-        }
-
-        /** Releases a used token when its session ends. */
-        public void forget(byte[] token) {
-            used.remove(key(token));
+        /** Consume the waiting generation only after both owners have admitted the match. */
+        public Offer<T> offer(byte[] token, boolean up, T carrier, java.util.function.Predicate<T> match) {
+            String key = java.util.HexFormat.of().formatHex(token);
+            Token<T> slot = active.get(key);
+            if (slot == null) {
+                slot = new Token<>(this, key, up, carrier);
+                active.put(key, slot);
+                return new Offer<>(slot, null);
+            }
+            if (slot.waiting == null || slot.up == up || !match.test(slot.waiting)) return null;
+            T partner = slot.waiting;
+            slot.waiting = null;
+            return new Offer<>(slot, partner);
         }
     }
 }

@@ -15,7 +15,8 @@ import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -168,17 +169,22 @@ public final class PipeChannel implements ByteChannel {
         Objects.requireNonNull(framing, "framing");
         if (readSize < 1) throw new IllegalArgumentException("readSize below 1");
         Shared shared = in != null && in == out ? new Shared(in) : null;
-        PipeReader r = in == null ? null : new PipeReader() {
-            private final AtomicBoolean once = new AtomicBoolean();
+        class Reader implements PipeReader, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+            private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+            private boolean claimed;
+            private final ReadableByteChannel source;
+            Reader(ReadableByteChannel source) { this.source = source; }
+            @Override public java.util.concurrent.CompletionStage<Void> released() { return released.minimalCompletionStage(); }
             // The read thread ends on any failure, an interrupt included, and reports it to the sink.
             @SuppressWarnings("InterruptedExceptionSwallowed")
-            @Override public void start(Sink sink) {
-                if (!once.compareAndSet(false, true)) throw new IllegalStateException("reader already started");
-                threads(in).name("zmux-pipe-channel-read").start(() -> {
+            @Override public synchronized void start(Sink sink) {
+                if (claimed) throw new IllegalStateException("reader already started");
+                claimed = true;
+                threads(source).name("zmux-pipe-channel-read").start(() -> {
                     try {
                         while (true) {
                             ByteBuffer b = ByteBuffer.allocate(readSize);
-                            int n = in.read(b);
+                            int n = source.read(b);
                             if (n < 0) { sink.onEnd(); return; }
                             if (n == 0) continue;
                             var consumed = new java.util.concurrent.CountDownLatch(1);
@@ -186,16 +192,24 @@ public final class PipeChannel implements ByteChannel {
                             consumed.await(); // the backpressure
                         }
                     } catch (Throwable e) {
-                        if (in.isOpen()) sink.onError(e); else sink.onEnd();
-                    }
+                        if (source.isOpen()) sink.onError(e); else sink.onEnd();
+                    } finally { released.complete(null); }
                 });
             }
-            @Override public void close() { if (shared != null) shared.closeHalf(false); else closeQuietly(in); }
-        };
-        PipeWriter w = out == null ? null : new PipeWriter() {
-            private final Executor run = out instanceof SelectableChannel ? new WriteThread() : t -> Thread.ofVirtual().name("zmux-pipe-channel-write").start(t);
+            @Override public void close() {
+                boolean unused;
+                synchronized (this) { unused = !claimed; claimed = true; }
+                if (shared != null) shared.closeHalf(false); else closeQuietly(source);
+                if (unused) released.complete(null);
+            }
+        }
+        class Writer implements PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+            private final WriteThread run = new WriteThread(threads(out));
+            @Override public java.util.concurrent.CompletionStage<Void> released() {
+                return run.released.minimalCompletionStage();
+            }
             @Override public void write(OutboundBatch batch, Completion done) {
-                run.execute(() -> {
+                if (!run.offer(() -> {
                     try {
                         if (framing == Framing.MESSAGES) {
                             for (int m = 0, from = 0; m < batch.messageCount(); m++) {
@@ -214,18 +228,18 @@ public final class PipeChannel implements ByteChannel {
                     } catch (Throwable e) {
                         done.failed(e);
                     }
-                });
+                })) done.failed(new java.nio.channels.ClosedChannelException());
             }
             @Override public void close() {
                 if (shared != null) shared.closeHalf(true); else closeQuietly(out);
-                if (run instanceof WriteThread t) t.stop();
+                run.stop();
             }
             @Override public void abort(Throwable cause) {
                 closeQuietly(out);
-                if (run instanceof WriteThread t) t.stop();
+                run.stop();
             }
-        };
-        return new PipeIo(r, w, framing, null, null);
+        }
+        return new PipeIo(in == null ? null : new Reader(in), out == null ? null : new Writer(), framing, null, null);
     }
 
     /**
@@ -252,29 +266,46 @@ public final class PipeChannel implements ByteChannel {
         return c instanceof SelectableChannel ? Thread.ofPlatform().daemon(true) : Thread.ofVirtual();
     }
 
-    /**
-     * The platform thread of a selectable sending half, started with its first write. A writer
-     * has at most one write in flight, so the queue holds at most that one and a stop.
-     */
-    private static final class WriteThread implements Executor {
+    /** At most one write is submitted at a time. The same lazy worker drains it through close. */
+    private static final class WriteThread {
         private static final Runnable STOP = () -> {};
-        private final java.util.concurrent.LinkedBlockingQueue<Runnable> queue = new java.util.concurrent.LinkedBlockingQueue<>();
-        private final AtomicBoolean started = new AtomicBoolean();
+        private final AtomicReference<Runnable> next = new AtomicReference<>();
+        private final AtomicBoolean launched = new AtomicBoolean();
+        private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+        private final Thread worker;
+        private volatile boolean closing;
 
-        @Override public void execute(Runnable task) {
-            queue.add(task);
-            if (started.compareAndSet(false, true)) Thread.ofPlatform().daemon(true).name("zmux-pipe-channel-write").start(this::run);
+        WriteThread(Thread.Builder threads) {
+            worker = threads.name("zmux-pipe-channel-write").unstarted(this::run);
         }
 
-        /** Ends the thread after the write in flight, which the closed channel fails. */
-        void stop() { queue.add(STOP); }
+        boolean offer(Runnable write) {
+            if (!next.compareAndSet(null, write)) return false;
+            if (!launched.get() && launched.compareAndSet(false, true)) worker.start();
+            else LockSupport.unpark(worker);
+            return true;
+        }
+
+        void stop() {
+            closing = true;
+            if (next.compareAndSet(null, STOP) && launched.compareAndSet(false, true)) released.complete(null);
+            else LockSupport.unpark(worker);
+        }
 
         private void run() {
             try {
-                for (Runnable t; (t = queue.take()) != STOP; ) t.run();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+                while (true) {
+                    Runnable work = next.get();
+                    if (work == STOP) return;
+                    if (work != null) {
+                        if (next.compareAndSet(work, null)) work.run();
+                    } else if (closing && next.compareAndSet(null, STOP)) {
+                        return;
+                    } else {
+                        LockSupport.park(this);
+                    }
+                }
+            } finally { released.complete(null); }
         }
     }
 

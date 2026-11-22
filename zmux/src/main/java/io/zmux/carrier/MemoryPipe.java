@@ -58,7 +58,9 @@ public final class MemoryPipe {
     }
 
     /** The sending end: copies each write to the peer, one copy per message (or per write of a byte stream). */
-    private static final class Out implements PipeWriter {
+    private static final class Out implements PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+        private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+        @Override public java.util.concurrent.CompletionStage<Void> released() { return released.minimalCompletionStage(); }
         private final End peer;
         private final Framing framing;
         private boolean done;
@@ -106,14 +108,14 @@ public final class MemoryPipe {
         public synchronized void close() {
             if (done) return;
             done = true;
-            peer.push(EOF);
+            try { peer.push(EOF); } finally { released.complete(null); }
         }
 
         @Override
         public synchronized void abort(Throwable cause) {
             if (done) return;
             done = true;
-            peer.push(cause == null ? new java.io.IOException("aborted") : cause);
+            try { peer.push(cause == null ? new java.io.IOException("aborted") : cause); } finally { released.complete(null); }
         }
     }
 }

@@ -1,5 +1,7 @@
 package io.zmux.http;
 
+import io.zmux.http.internal.HttpTransport;
+
 import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -13,7 +15,6 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
-import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.zmux.Admission;
 import io.zmux.CarrierKind;
 import io.zmux.CarrierCredential;
@@ -54,6 +55,8 @@ final class StreamingRequest {
     private URI url;
     private int hops;
     private BodyCarrier current;
+    /** Installed only while a session tracks this outbound request as a carrier. */
+    private List<Runnable> carrierWatchers;
     /** The connection whose TLS a bidirectional carrier reports; null for a split half. */
     private Channel boundConn;
     /** Increases with every request: a write's failure on an earlier one is not the carrier's. */
@@ -85,6 +88,29 @@ final class StreamingRequest {
         if (!writes) kept = null;
     }
 
+    private Runnable watchCarrier(Runnable watcher) {
+        synchronized (this) {
+            if (carrierWatchers == null) carrierWatchers = new ArrayList<>();
+            carrierWatchers.add(watcher);
+        }
+        return () -> {
+            synchronized (this) {
+                if (carrierWatchers == null) return;
+                carrierWatchers.removeIf(registered -> registered == watcher);
+                if (carrierWatchers.isEmpty()) carrierWatchers = null;
+            }
+        };
+    }
+
+    private void carrierChanged() {
+        List<Runnable> watchers;
+        synchronized (this) {
+            if (carrierWatchers == null) return;
+            watchers = List.copyOf(carrierWatchers);
+        }
+        for (var watcher : watchers) watcher.run();
+    }
+
     /** Opens the carrier at url (target's URL when there is a target). */
     static PipeIo open(HttpCarrierClient client, URI url, Map<String, List<String>> headers, PipeOptions.Direction dir,
                        CarrierCredential credential, HttpTarget target) throws IOException {
@@ -105,14 +131,20 @@ final class StreamingRequest {
         }
         PipeIo io = new PipeIo(r.reads ? r.new Reader() : null, r.writes ? r.new Writer() : null, Framing.BYTE_STREAM, "http " + dir,
                 Requests.connection(ch));
-        if (dir != PipeOptions.Direction.BIDIRECTIONAL) return io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY).withCarrier(CarrierKind.SPLIT);
-        return Requests.pipe(io, ch).withCarrier(CarrierKind.STREAMING);
+        boolean h3 = Requests.h3(ch);
+        if (dir != PipeOptions.Direction.BIDIRECTIONAL) {
+            return (h3 ? Requests.pipe(io, ch) : io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY)).withCarrier(CarrierKind.SPLIT);
+        }
+        return Requests.pipe(io, ch).withCarrier(h3 ? CarrierKind.HTTP3 : CarrierKind.STREAMING);
     }
 
     /** Sends the request head on ch, then the credential's prefix and replay, and returns its carrier. */
     private BodyCarrier request(Channel ch, URI u, List<ByteBuf> replay) throws IOException {
-        var info = new Admission.CarrierInfo(Connections.address(u), Connections.address(u), "", "", null, RequestHead.of(Map.of()))
-                .at(get ? Admission.Stage.HEAD : Admission.Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
+        boolean h3 = Requests.h3(ch);
+        var address = Connections.address(u);
+        var info = new Admission.CarrierInfo(address, address, "", h3 ? u.getHost() : "",
+                h3 ? Requests.exporter(ch) : null, RequestHead.of(Map.of()))
+                .at(get ? Admission.Stage.HEAD : Admission.Stage.CARRIER, Framing.BYTE_STREAM, false);
         byte[] prefix = null;
         CarrierCredential.HeaderField field = null;
         if (credential != null) {
@@ -120,7 +152,7 @@ final class StreamingRequest {
             if (get) field = credential.header(info);
             else prefix = credential.prefix(info);
         }
-        boolean h1 = !(ch instanceof Http2StreamChannel);
+        boolean h1 = !Requests.multiplexed(ch);
         HttpRequest req = get ? new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, HttpCarrierClient.target(u), Unpooled.EMPTY_BUFFER)
                 : new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, HttpCarrierClient.target(u));
         req.headers().set(HttpHeaderNames.HOST, HttpCarrierClient.authority(u));
@@ -135,14 +167,20 @@ final class StreamingRequest {
         BodyCarrier c = new BodyCarrier(ch, Framing.BYTE_STREAM, reads, writes, new BodyCarrier.Out() {
             @Override public Object content(ByteBuf data) { return new DefaultHttpContent(data); }
             @Override public Object end() { return new DefaultLastHttpContent(); }
-        }, ch::close, cause -> { ch.close(); return null; });
+        }, ch::close, cause -> { HttpTransport.abort(ch); return null; });
         int gen;
         synchronized (this) { gen = generation; }
         ch.pipeline().addLast(new HttpCarrierClient.ResponseReader(c, reads, new HttpCarrierClient.ResponseHook() {
             @Override public boolean redirect(int status, String location) { return StreamingRequest.this.redirect(gen, c, status, location); }
             @Override public void response(boolean ok) { settle(gen, ok); }
         }));
-        ch.write(req);
+        var head = ch.write(req);
+        if (h3) head.addListener(done -> {
+            if (!done.isSuccess()) {
+                c.lost(done.cause());
+                HttpTransport.abort(ch);
+            }
+        });
         if (prefix != null && prefix.length > 0) ch.write(new DefaultHttpContent(Unpooled.wrappedBuffer(prefix)));
         for (ByteBuf b : replay) ch.write(new DefaultHttpContent(b.retainedDuplicate()));
         ch.flush();
@@ -196,13 +234,14 @@ final class StreamingRequest {
                 url = next;
             }
         }
+        carrierChanged();
         if (refused != null) {
             c.lost(refused); // the carrier's error, outside the lock
             return true;
         }
         // The old request goes without a word to zmux: its bytes are replayed.
         c.detach();
-        c.ch.close();
+        HttpTransport.abort(c.ch);
         URI u = next;
         client.conns.open(u, false, false).whenComplete((ch, err) -> {
             if (err != null) {
@@ -246,6 +285,7 @@ final class StreamingRequest {
                     fail(why);
                     return;
                 }
+                carrierChanged();
                 boolean gone;
                 synchronized (this) { gone = failed; }
                 if (gone) {
@@ -289,6 +329,7 @@ final class StreamingRequest {
             done = new ArrayList<>(deferred);
             deferred.clear();
         }
+        carrierChanged();
         for (PipeWriter.Completion d : done) d.failed(cause);
         if (s != null) s.onError(cause);
     }
@@ -314,7 +355,15 @@ final class StreamingRequest {
         }
     }
 
-    private final class Writer implements PipeWriter {
+    private final class Writer implements Requests.CarrierWriter {
+        @Override public Runnable watchCarrier(Runnable watcher) { return StreamingRequest.this.watchCarrier(watcher); }
+
+        @Override public Channel carrierRequest() {
+            synchronized (StreamingRequest.this) {
+                return redirecting || failed || current == null ? null : current.ch;
+            }
+        }
+
         @Override public void write(OutboundBatch batch, Completion done) {
             BodyCarrier c;
             int gen;

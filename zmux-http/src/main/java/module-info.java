@@ -1,4 +1,5 @@
 /** HTTP carriers: streaming requests, the exchange carrier and WebSockets, on Netty. */
+@SuppressWarnings("module") // Qualified exports name the sibling compiled next.
 module io.zmux.http {
     requires transitive io.zmux;
     requires transitive io.netty.transport;
@@ -9,4 +10,5 @@ module io.zmux.http {
     requires transitive io.netty.handler;
     requires io.netty.codec;
     exports io.zmux.http;
+    exports io.zmux.http.internal to io.zmux.http3;
 }

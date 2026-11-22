@@ -74,9 +74,14 @@ class NonBlockingCallsTest {
         volatile Throwable aborted;
         volatile boolean writerClosed;
 
+        private interface ObservedWriter extends PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {}
+
         PipeIo wrap(PipeIo io) {
             PipeWriter w = io.writer();
-            return io.withHalves(io.reader(), new PipeWriter() {
+            return io.withHalves(io.reader(), new ObservedWriter() {
+                @Override public java.util.concurrent.CompletionStage<Void> released() {
+                    return ((io.zmux.internal.spi.AdapterPorts.ReleasingHalf) w).released();
+                }
                 @Override public void write(OutboundBatch batch, Completion done) {
                     w.write(batch, new Completion() {
                         @Override public void completed() {
@@ -89,7 +94,6 @@ class NonBlockingCallsTest {
                     });
                 }
                 @Override public OptionalLong unsent() { return w.unsent(); }
-                @Override public OptionalLong retransmitted() { return w.retransmitted(); }
                 @Override public void close() { writerClosed = true; w.close(); }
                 @Override public void abort(Throwable cause) { aborted = cause; w.abort(cause); }
             });

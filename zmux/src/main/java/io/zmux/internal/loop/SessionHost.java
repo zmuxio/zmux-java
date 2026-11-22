@@ -30,6 +30,7 @@ public abstract class SessionHost implements Executor {
     private final ArrayList<RoundEnd> dirty = new ArrayList<>();
     private final ArrayList<RoundEnd> dirtyRun = new ArrayList<>();
     private final IdentityHashMap<RoundEnd, Boolean> dirtySet = new IdentityHashMap<>();
+    private boolean shuttingDown;
     private final ArrayList<Runnable> shutdownHooks = new ArrayList<>();
     final BufferPool pool;
     private boolean ending;
@@ -108,6 +109,9 @@ public abstract class SessionHost implements Executor {
         if (dirty.size() == 1 && !ending) requestRoundEnd();
     }
 
+    /** The monotonic time base used by this host to fire its timer heap. */
+    protected long timerNow() { return Clock.now(); }
+
     final void schedule(TimerHeap.Timer t, long deadline) {
         timers.schedule(t, deadline);
         long e = timers.earliest();
@@ -126,12 +130,24 @@ public abstract class SessionHost implements Executor {
         shutdownHooks.remove(r);
     }
 
+    final boolean stopping() { return shuttingDown; }
+
     final int timerCount() {
         return timers.size();
     }
 
     protected final long earliestTimer() {
         return timers.earliest();
+    }
+
+    /** Runs one synthetic timer turn on an isolated test fixture's owner. */
+    public final java.util.concurrent.CompletableFuture<Void> advanceTimersForTests(long elapsedNanos) {
+        var done = new java.util.concurrent.CompletableFuture<Void>();
+        if (!tryExecute(() -> {
+            runTimers(Time.add(timerNow(), elapsedNanos));
+            done.complete(null);
+        })) done.completeExceptionally(new IllegalStateException("test owner is closed"));
+        return done;
     }
 
     /** Fires the timers due at now, then arms the wake-up for the next one. */
@@ -171,11 +187,27 @@ public abstract class SessionHost implements Executor {
         return !dirty.isEmpty();
     }
 
+    private final java.util.concurrent.CompletableFuture<Void> stopped = new java.util.concurrent.CompletableFuture<>();
+
+    /** A consumed close right must still run when ordinary submission races host shutdown. */
+    final void release(Runnable cleanup) {
+        if (inLoop()) cleanup.run();
+        else enqueueRelease(cleanup);
+    }
+
+    /** Terminal session work runs after the current protocol round, including during shutdown. */
+    final void enqueueRelease(Runnable cleanup) {
+        if (!tryExecute(cleanup)) stopped.thenRun(cleanup);
+    }
+
     /** On the host thread as it closes: runs the shutdown hooks and the round ends they cause. */
     protected final void runShutdownHooks() {
-        for (Runnable h : new ArrayList<>(shutdownHooks)) safe(h);
-        shutdownHooks.clear();
-        while (!dirty.isEmpty()) endRound();
+        shuttingDown = true;
+        try {
+            for (Runnable h : new ArrayList<>(shutdownHooks)) safe(h);
+            shutdownHooks.clear();
+            while (!dirty.isEmpty()) endRound();
+        } finally { stopped.complete(null); }
     }
 
     protected static void safe(Runnable r) {

@@ -52,6 +52,7 @@
         <module>zmux-quic</module>
         <module>zmux-shaping</module>
         <module>zmux-http</module>
+        <module>zmux-http3</module>
         <module>zmux-bench</module>
     </modules>
 
@@ -59,6 +60,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <maven.compiler.release>25</maven.compiler.release>
+        <!-- Latest stable Netty 4.2 on 2026-11-22. HTTP codecs and native QUIC share this version. -->
         <netty.version>4.2.21.Final</netty.version>
         <junit.version>6.1.3</junit.version>
         <maven.surefire.version>3.6.1</maven.surefire.version>
@@ -114,7 +116,7 @@
                  off are listed below with their reasons. -->
             <id>errorprone</id>
             <properties>
-                <errorprone.version>2.52.0</errorprone.version>
+                <errorprone.version>2.53.0</errorprone.version>
                 <!--
                     Checks turned off for all sources.
                     Deliberate design:

@@ -9,6 +9,7 @@ Published coordinates:
 - `io.github.zmuxio:zmux`
 - `io.github.zmuxio:zmux-quic`
 - `io.github.zmuxio:zmux-http`
+- `io.github.zmuxio:zmux-http3`
 - `io.github.zmuxio:zmux-shaping`
 
 ## Model
@@ -64,7 +65,7 @@ updates:
 
 ```bash
 git status --short --branch
-git add pom.xml zmux/pom.xml zmux-quic/pom.xml zmux-http/pom.xml zmux-shaping/pom.xml RELEASING.md README.md
+git add pom.xml zmux/pom.xml zmux-quic/pom.xml zmux-http/pom.xml zmux-http3/pom.xml zmux-shaping/pom.xml RELEASING.md README.md
 git commit -m "release: prepare vX.Y.Z"
 git push origin main
 ```

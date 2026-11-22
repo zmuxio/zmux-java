@@ -79,27 +79,46 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
      * cancelled or completed from outside is discarded.
      */
     static <T> ZmuxFuture<T> onThread(String name, Blocking<T> body) {
-        Thread[] runner = new Thread[1];
-        ZmuxFuture<T> f = new ZmuxFuture<>(() -> {
-            Thread t = runner[0];
-            if (t != null) t.interrupt();
+        return onThread(name, body, new WorkerStop());
+    }
+
+    /** A worker receives an interrupt as its wake-up and retains the caller's actual failure. */
+    static final class WorkerStop implements BooleanSupplier {
+        private final java.util.concurrent.atomic.AtomicReference<Throwable> cause = new java.util.concurrent.atomic.AtomicReference<>();
+        private Thread runner;
+
+        Throwable reason(Throwable error) {
+            Throwable original = cause.get();
+            return original != null && error instanceof java.io.InterruptedIOException
+                    && !(error instanceof java.net.SocketTimeoutException) ? original : error;
+        }
+
+        boolean stop(Throwable why) {
+            if (!cause.compareAndSet(null, why)) return false;
+            runner.interrupt();
             return true;
-        });
-        runner[0] = Thread.ofVirtual().name(name).unstarted(() -> {
+        }
+
+        @Override public boolean getAsBoolean() { return stop(new CancellationException("worker stopped")); }
+    }
+
+    static <T> ZmuxFuture<T> onThread(String name, Blocking<T> body, WorkerStop stop) {
+        ZmuxFuture<T> f = new ZmuxFuture<>(stop);
+        stop.runner = Thread.ofVirtual().name(name).unstarted(() -> {
             try {
-                f.publishOrDiscard(body.call());
-            } catch (Throwable e) {
-                f.publishFailure(e);
+                T value = body.call();
+                if (stop.cause.get() == null) f.publishOrDiscard(value); else discard(value);
+            } catch (Throwable error) {
+                if (stop.cause.get() == null) f.publishFailure(error);
             }
         });
-        runner[0].start();
+        stop.runner.start();
         return f;
     }
 
-    /** Cancels the operation before a completion from outside; whether it was still running does not matter. */
-    @SuppressWarnings("ReturnValueIgnored")
-    private void stopOperation() {
-        operation.getAsBoolean();
+    /** Preserve a worker's cause before waking it. Other operations settle their own cancellation. */
+    private boolean stopOperation(Throwable cause) {
+        return (cause != null && operation instanceof WorkerStop worker) ? worker.stop(cause) : operation.getAsBoolean();
     }
 
     /**
@@ -143,33 +162,34 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
         if (isDone()) return isCancelled();
-        if (!operation.getAsBoolean()) return false;
-        return super.completeExceptionally(new CancellationException("operation cancelled")) || isCancelled();
+        var error = new CancellationException("operation cancelled");
+        if (!stopOperation(error)) return false;
+        return super.completeExceptionally(error) || isCancelled();
     }
 
     @Override
     public boolean complete(T value) {
         if (isDone()) return false;
-        stopOperation();
+        stopOperation(null);
         return super.complete(value);
     }
 
     @Override
     public boolean completeExceptionally(Throwable error) {
         if (isDone()) return false;
-        stopOperation();
+        stopOperation(error);
         return super.completeExceptionally(error);
     }
 
     @Override
     public void obtrudeValue(T value) {
-        stopOperation();
+        stopOperation(null);
         super.obtrudeValue(value);
     }
 
     @Override
     public void obtrudeException(Throwable error) {
-        stopOperation();
+        stopOperation(error);
         super.obtrudeException(error);
     }
 

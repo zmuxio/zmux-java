@@ -14,6 +14,7 @@ import javax.net.ssl.TrustManagerFactory;
 /** A self-signed localhost certificate made with the JDK's keytool in the build directory. */
 final class TestTls {
     private static final char[] PASS = "changeit".toCharArray();
+    private static javax.net.ssl.KeyManager[] keys;
     private static SSLContext server;
     private static SSLContext client;
 
@@ -43,7 +44,8 @@ final class TestTls {
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(store);
         server = SSLContext.getInstance("TLSv1.3");
-        server.init(kmf.getKeyManagers(), null, null);
+        keys = kmf.getKeyManagers();
+        server.init(keys, null, null);
         client = SSLContext.getInstance("TLSv1.3");
         client.init(null, tmf.getTrustManagers(), null);
     }
@@ -51,6 +53,11 @@ final class TestTls {
     static SSLContext server() throws Exception {
         init();
         return server;
+    }
+
+    static void initializeServer(SSLContext context) throws Exception {
+        init();
+        context.init(keys, null, null);
     }
 
     static SSLContext client() throws Exception {

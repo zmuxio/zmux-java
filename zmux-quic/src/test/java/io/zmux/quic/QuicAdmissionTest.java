@@ -19,6 +19,14 @@ class QuicAdmissionTest {
                 .admission(Admission.builder(4, Admission.Decider.immediate(decider)).peekTimeout(Duration.ofSeconds(2)).build()).build();
     }
 
+    @Test void existingConnectionsUseTheListenersSoleFallbackTarget() throws Exception {
+        var serve = QuicServer.class.getMethod("serve", io.netty.handler.codec.quic.QuicChannel.class,
+                QuicOptions.class, ZmuxListener.class);
+        assertEquals(ZmuxFuture.class, serve.getReturnType());
+        assertEquals(1, java.util.Arrays.stream(QuicServer.class.getMethods()).filter(m -> m.getName().equals("serve")).count());
+        assertFalse(java.util.Arrays.stream(QuicServer.class.getDeclaredClasses()).anyMatch(c -> c.getSimpleName().equals("Fallback")));
+    }
+
     @Test void anAcceptedFirstStreamOpensTheConnectionToTheListener() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
@@ -49,7 +57,9 @@ class QuicAdmissionTest {
      * connection through zmux-quic; the connection's streams reach no session, and zmux closes the
      * connection once the fallback is done.
      */
-    @Test void aConnectionThatIsNotAcceptedGoesToTheListenersFallbackAsATakeover() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aConnectionThatIsNotAcceptedGoesToTheListenersFallbackAsATakeover(boolean takeover) throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
@@ -81,7 +91,7 @@ class QuicAdmissionTest {
                         byte[] b = new byte[prefix.remaining()];
                         prefix.duplicate().get(b);
                         decided.complete(b);
-                        return Admission.Decision.FALLBACK;
+                        return takeover ? Admission.Decision.takeover(null) : Admission.Decision.FALLBACK;
                     })).peekTimeout(Duration.ofSeconds(2)).build()).build();
             try (var listener = Zmux.listener(lc);
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
@@ -94,7 +104,8 @@ class QuicAdmissionTest {
                 var quic = connection.get(5, TimeUnit.SECONDS);
                 assertTrue(quic.isActive(), "the connection is the host's during the takeover");
                 assertThrows(java.net.SocketTimeoutException.class, () -> listener.accept(Duration.ofMillis(200)));
-                assertEquals(1, listener.stats().admission().fallback());
+                assertEquals(takeover ? 0 : 1, listener.stats().admission().fallback());
+                assertEquals(takeover ? 1 : 0, listener.stats().admission().takeover());
                 release.complete(null);
                 quic.closeFuture().get(10, TimeUnit.SECONDS);
                 assertThrows(Exception.class, () -> connecting.get(10, TimeUnit.SECONDS));

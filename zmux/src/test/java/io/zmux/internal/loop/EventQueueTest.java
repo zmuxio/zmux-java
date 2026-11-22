@@ -32,6 +32,21 @@ class EventQueueTest {
         return out;
     }
 
+    @Test void holdsArePerPipeAndRetirementWaitsForItsLastPublication() {
+        var q = new EventQueue();
+        q.hold(1);
+        q.hold(1);
+        q.add(ev(JOINED, 1, OUT));
+        var unrelated = ev(JOINED, 2, OUT);
+        q.add(unrelated);
+        assertEquals(List.of(unrelated), drain(q));
+        q.add(retire(1, true));
+        q.release(1);
+        assertTrue(drain(q).isEmpty());
+        q.release(1);
+        assertEquals(List.of(new SessionRuntime.RetiredPipes(1, 1, 0, List.of(1L))), drain(q));
+    }
+
     @Test void aFlappingPipeKeepsEachStateOnceAtItsLatestPlace() {
         var q = new EventQueue();
         for (int i = 0; i < 1000; i++) {

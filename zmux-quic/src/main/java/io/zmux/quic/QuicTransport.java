@@ -5,9 +5,12 @@ import io.netty.buffer.Unpooled;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.internal.loop.AbstractTransport;
+import io.zmux.internal.loop.CarrierSetup;
 import io.zmux.internal.loop.SessionHost;
 import io.zmux.internal.loop.Transport;
 import io.zmux.internal.loop.TransportInfo;
+import io.zmux.internal.spi.CarrierProvider;
+import io.zmux.quic.internal.QuicCarrierStats;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
@@ -17,9 +20,9 @@ import java.util.ArrayDeque;
  * where Netty put them (a session keeps references to the read buffers instead of copying
  * stream data; only a record cut at a read's end is copied), and a batch is written as a
  * wrapped buffer of its segments. A session on another host gets the stream through its
- * pipe-input halves instead ({@link #moveTo}).
+ * pipe-input halves instead ({@link #moveNative}).
  */
-final class QuicTransport extends AbstractTransport {
+final class QuicTransport extends AbstractTransport.Native {
     private final StreamCarrier carrier;
     private final TransportInfo info;
     /** The properties as the pipe input declared them, without the channel. */
@@ -47,6 +50,7 @@ final class QuicTransport extends AbstractTransport {
         this.lanes = lanes;
     }
 
+    @Override public boolean resumesAfterPeekTimeout() { return true; }
     @Override public TransportInfo info() { return info; }
     @Override public io.zmux.internal.loop.CarrierChannel channel() { return channel; }
     @Override public boolean isClosed() { return closed; }
@@ -70,9 +74,10 @@ final class QuicTransport extends AbstractTransport {
         return ((carrier.receives() ? IN : 0) | (carrier.sends() ? OUT : 0)) & mask();
     }
 
-    @Override public long retransmitted() {
-        var n = carrier.retransmitted();
-        return n.isPresent() ? n.getAsLong() : -1;
+    @Override public Object carrierIdentity() { return carrier.connectionChannel(); }
+    @Override public CarrierProvider.Query carrierQuery(Object identity) {
+        var connection = carrier.connectionChannel();
+        return connection != null && connection == identity ? QuicCarrierStats.query(connection) : null;
     }
 
     @Override public boolean writable() { return super.writable() && carrier.sends() && !closed; }
@@ -87,9 +92,8 @@ final class QuicTransport extends AbstractTransport {
     @Override protected boolean accepting() { return started() && !closed && !inEnded && !paused; }
 
     @Override
-    protected void inputFailed(IOException cause) {
+    protected void nativeInputFailed() {
         endInput(false);
-        close(cause);
     }
 
     // ---- input, on the loop ----
@@ -186,13 +190,22 @@ final class QuicTransport extends AbstractTransport {
     }
 
     // ---- output ----
+    private java.util.concurrent.CompletableFuture<Void> closingWrite;
+
+    @Override public java.util.concurrent.CompletionStage<Void> writesReleased() {
+        return closingWrite == null ? Transport.RELEASED : closingWrite.minimalCompletionStage();
+    }
 
     @Override
     protected void send(OutboundBatch b) {
         if (closed) { writeDone(new IOException("carrier closed")); return; }
         // The batch stays referenced until Netty reports the write: only then is it released.
         carrier.write(b, cause -> {
-            if (closed) { dropWrite(); return; }
+            if (closed) {
+                dropWrite();
+                if (closingWrite != null) closingWrite.complete(null);
+                return;
+            }
             writeDone(cause);
             if (shutAfterWrite) shutdownOutput();
         });
@@ -216,15 +229,18 @@ final class QuicTransport extends AbstractTransport {
         carrier.closeInput();
     }
 
-    @Override public boolean abortable() { return true; }
+
 
     /** A graceful close whose stream is still open is ended by closing the stream. */
-    @Override public void abort(Throwable cause) { carrier.abortOpen(); }
+    @Override protected java.util.function.Consumer<Throwable> closeEscalation() { return ignored -> carrier.abortOpen(); }
 
     @Override
-    public void close(Throwable cause) {
+    protected void closeNative(CarrierSetup.Bound.Permit permit, Throwable cause) {
+        java.util.Objects.requireNonNull(permit);
         if (closed) return;
         closed = true;
+        setup().transportClosed(this);
+        if (writing()) closingWrite = new java.util.concurrent.CompletableFuture<>();
         carrier.taken.decide(false); // Not taken before: the listener refused it.
         if (carrier.receives()) {
             inEnded = true;
@@ -245,8 +261,9 @@ final class QuicTransport extends AbstractTransport {
      * unread input goes first to whichever takes the stream.
      */
     @Override
-    public Transport moveTo(SessionHost to) {
-        if (closed || writing()) { close(null); return null; }
+    protected Transport moveNative(CarrierSetup.Bound.Permit permit, SessionHost to) {
+        java.util.Objects.requireNonNull(permit);
+        if (closed || writing()) return null;
         closed = true;
         if (started()) {
             byte[] unread = takeUnread();

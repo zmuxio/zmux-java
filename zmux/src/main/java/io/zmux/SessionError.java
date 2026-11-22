@@ -23,6 +23,9 @@ public sealed interface SessionError {
      */
     record TransportClosed(long code, String name, long frameType, String reason, String details, boolean remote)
             implements SessionError {
+        /** The listener refused this new session in the protocol. */
+        public boolean isConnectionRefused() { return remote && code == io.zmux.internal.wire.TransportError.CONNECTION_REFUSED; }
+
         @Override public String message() {
             return "transport close (" + (remote ? "remote" : "local") + ") " + name + (reason.isEmpty() ? "" : ": " + reason);
         }
@@ -51,9 +54,14 @@ public sealed interface SessionError {
      * Resume could not continue safely: the data in flight is in an unknown state
      * (CONNECTION_CLOSE with ZMUX_RESUME_FAILED); local or remote.
      */
-    record ResumeFailed(boolean remote) implements SessionError {
+    record ResumeFailed(String reason, boolean remote) implements SessionError {
+        public ResumeFailed(boolean remote) {
+            this("", remote);
+        }
+
         @Override public String message() {
-            return "resume failed (" + (remote ? "remote" : "local") + ")";
+            return "resume failed (" + (remote ? "remote" : "local") + ")"
+                    + (reason.isEmpty() ? "" : ": " + reason);
         }
     }
 

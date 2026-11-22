@@ -5,21 +5,29 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
+import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
+import io.zmux.carrier.PipeWriter;
+import io.zmux.internal.spi.CarrierProvider;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Optional;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -41,7 +49,10 @@ class StatsTest {
                 assertEquals("memory-a", bootstrap.label());
                 assertTrue(bootstrap.local(), "the dialer joined the bootstrap pipe");
                 assertEquals(PipeState.Outbound.ACTIVE, bootstrap.outbound());
+                assertTrue(bootstrap.carrierSample().isEmpty(), "the memory carrier has no connection identity");
+                assertTrue(c.pipes().getFirst().stats().orElseThrow().carrierSample().isEmpty());
                 assertTrue(bootstrap.lanes().isEmpty(), "a pipe without lanes has no lane positions");
+                assertEquals(Optional.empty(), new ZmuxPipe(c, 2).stats(), "a missing pipe has no snapshot");
                 Thread.sleep(150);
                 assertTrue(c.pipeStats().getFirst().attachedFor().minus(bootstrap.attachedFor()).toMillis() >= 50,
                         "an idle session's pipe statistics are of the current time");
@@ -121,6 +132,126 @@ class StatsTest {
             }
             Leaks.none(loops);
         }
+    }
+
+    @Test
+    void nativeTcpIdentifiesConnectionsWithUnknownCounts() throws Exception {
+        try (var loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                 var first = Zmux.connect(listener.localAddress(), cfg);
+                 var firstPeer = listener.accept(Duration.ofSeconds(5));
+                 var second = Zmux.connect(listener.localAddress(), cfg);
+                 var secondPeer = listener.accept(Duration.ofSeconds(5))) {
+                var firstSample = tcpSample(first);
+                var secondSample = tcpSample(second);
+                assertFalse(firstSample.carrierId().equals(secondSample.carrierId()));
+                assertFalse(firstSample.carrierId().equals(tcpSample(firstPeer).carrierId()));
+                assertFalse(secondSample.carrierId().equals(tcpSample(secondPeer).carrierId()));
+            }
+        }
+    }
+
+    @Test
+    void receiveOnlyPipeHasNoSampleEvenWithAConnectionIdentity() throws Exception {
+        try (var loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
+            var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+            f.listener.adapter().handle(pair[1].withCarrierConn(new Object()),
+                    JoinHint.inBand(TestAddr.peer("receive-only-stats"))).closed();
+            var sender = f.client.addPipe(pair[0].withCarrierConn(new Object()),
+                    PipeOptions.builder().direction(PipeOptions.Direction.SEND_ONLY).build());
+            sender.awaitAttached(Duration.ofSeconds(5));
+            assertTrue(sender.stats().orElseThrow().carrierSample().isPresent());
+            var receiver = f.server.pipes().stream().filter(p -> p.id().equals(sender.id())).findFirst().orElseThrow();
+            var snapshot = receiver.stats().orElseThrow();
+            assertNull(snapshot.outbound());
+            assertTrue(snapshot.carrierSample().isEmpty());
+            assertTrue(f.server.pipeStats().stream().filter(p -> p.pipe().equals(sender.id())).findFirst()
+                    .orElseThrow().carrierSample().isEmpty());
+        }
+    }
+
+    private static CarrierSample tcpSample(ZmuxSession session) throws Exception {
+        PipePoolTest.await(() -> session.pipeStats().getFirst().carrierSample().isPresent());
+        CarrierSample sample = session.pipeStats().getFirst().carrierSample().orElseThrow();
+        assertEquals(CarrierSource.UNKNOWN, sample.source());
+        assertEquals(Direction.OUTBOUND, sample.direction());
+        assertEquals(0, sample.generation());
+        assertTrue(sample.counts().isEmpty());
+        return sample;
+    }
+
+    @Test
+    void bothStatsEntriesReturnTheCachedSampleDuringAStalledRefresh() throws Exception {
+        try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+            var writer = new PausedCarrierWriter(pair[0].writer());
+            var io = new PipeIo(pair[0].reader(), writer, pair[0].framing(), "sampled-memory", writer);
+            var accepting = workers.submit(() -> Zmux.open(pair[1], Role.SERVER, cfg));
+            try (var client = Zmux.open(io, Role.CLIENT, cfg); var _ = accepting.get(5, TimeUnit.SECONDS)) {
+                try {
+                    assertTrue(writer.firstPublished.await(5, TimeUnit.SECONDS));
+                    var pipe = client.pipes().getFirst();
+                    assertEquals(1, writer.queries.get(), "enumerating pipes does not request fresh statistics");
+                    var stale = workers.submit(() -> client.pipeStats().getFirst().carrierSample().orElseThrow())
+                            .get(5, TimeUnit.SECONDS);
+                    assertTrue(writer.refreshEntered.await(5, TimeUnit.SECONDS));
+                    assertEquals(new QuicCounters(0, 0), stale.counts().orElseThrow());
+
+                    var reads = new ArrayList<Future<CarrierSample>>();
+                    for (int index = 0; index < 32; index++) {
+                        boolean single = (index & 1) == 0;
+                        reads.add(workers.submit(() -> (single ? pipe.stats().orElseThrow() : client.pipeStats().getFirst())
+                                .carrierSample().orElseThrow()));
+                    }
+                    for (var read : reads) assertSame(stale, read.get(5, TimeUnit.SECONDS));
+                    assertEquals(2, writer.queries.get(), "only the attachment and one demanded refresh queried the provider");
+                    assertFalse(writer.sampledOnSessionLoop.get());
+                } finally {
+                    writer.releaseRefresh.countDown();
+                }
+            }
+        }
+    }
+
+    private static final class PausedCarrierWriter implements PipeWriter, CarrierProvider {
+        private final PipeWriter delegate;
+        private final AtomicInteger queries = new AtomicInteger();
+        private final CountDownLatch firstPublished = new CountDownLatch(1);
+        private final CountDownLatch refreshEntered = new CountDownLatch(1);
+        private final CountDownLatch releaseRefresh = new CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicBoolean sampledOnSessionLoop = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private PausedCarrierWriter(PipeWriter delegate) { this.delegate = delegate; }
+
+        @Override public Object carrierIdentity() { return this; }
+
+        @Override public Query carrierQuery(Object identity) {
+            // Capture the actual owner and test whether it ran the provider work itself.
+            var attachingThread = Thread.currentThread();
+            return new Query(CarrierSource.NETTY_QUIC, complete -> {
+                if (Thread.currentThread() == attachingThread) sampledOnSessionLoop.set(true);
+                int count = queries.incrementAndGet();
+                if (count == 1) {
+                    complete.accept(System.nanoTime() - TimeUnit.SECONDS.toNanos(2), new QuicCounters(0, 0));
+                    firstPublished.countDown();
+                } else {
+                    refreshEntered.countDown();
+                    try {
+                        assertTrue(releaseRefresh.await(15, TimeUnit.SECONDS));
+                        complete.accept(System.nanoTime(), new QuicCounters(1, 0));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        complete.accept(System.nanoTime(), null);
+                    }
+                }
+            });
+        }
+
+        @Override public void write(OutboundBatch batch, PipeWriter.Completion done) { delegate.write(batch, done); }
+        @Override public void close() { delegate.close(); }
+        @Override public void abort(Throwable cause) { delegate.abort(cause); }
     }
 
     private static ZmuxConfig.Builder multipath(EventLoops loops, byte[] psk) {

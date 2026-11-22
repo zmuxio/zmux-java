@@ -106,6 +106,43 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSED, b.state(), "unread data holds only after the peer's close");
     }
 
+    private static void failWrite(Session s, Stream outbound, Throwable cause) throws Exception {
+        s.sending().write(outbound, ByteBuffer.wrap(new byte[] {1}), false);
+        Batch batch = new Batch();
+        assertTrue(s.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, 0));
+        s.writeDone(batch, cause, 0);
+    }
+
+    @Test void aLaneZeroWriteFailureLetsThePeerCloseThrough() throws Exception {
+        Session a = a(), b = b();
+        Stream outbound = setUp(b, a, 1, true)[0];
+        a.close(9, new byte[0]);
+        failWrite(b, outbound, new java.io.IOException("write failed"));
+        // Deliver the peer's queued close only after the local write has failed.
+        HeldControlTest.pump(a, b);
+        assertEquals(SessionError.application(9, "", true), b.error());
+    }
+
+    @Test void aLaneZeroWriteFailureFallsBackToTheOriginalCause() throws Exception {
+        for (boolean eof : new boolean[] {false, true}) {
+            Session a = a(), b = b();
+            Stream outbound = setUp(b, a, 1, true)[0];
+            var cause = new java.io.IOException("write failed");
+            failWrite(b, outbound, cause);
+            assertNull(b.error());
+            assertFalse(b.pollTransmit(0, 0, new Batch(), Session.DEFAULT_BATCH, 0));
+            long deadline = b.lingerTimeout();
+            assertEquals(deadline, b.nextTimeout());
+            b.handleTimeout(deadline - 1);
+            assertNull(b.error());
+            if (eof) b.pipeEnded(0, 0, true, false, null, deadline - 1);
+            else b.handleTimeout(deadline);
+            assertEquals(SessionState.CLOSED, b.state());
+            assertEquals(SessionError.Kind.PIPES_LOST, b.error().kind());
+            assertSame(cause, b.error().cause());
+        }
+    }
+
     /** Without a live outbound pipe the peer's close still drains, lingering from its processing. */
     @Test void aPeersCloseWithoutAnOutboundPipeStillDrains() throws Exception {
         Session a = a(), b = b();

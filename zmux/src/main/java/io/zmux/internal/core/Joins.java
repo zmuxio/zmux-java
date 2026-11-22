@@ -499,6 +499,7 @@ public final class Joins {
         int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, Sealer.MESSAGE_FLOOR - j.helloLength(bare));
         byte[] hello = j.writeHello(new HelloPayload(pipe, batch, Tlv.paddingField(item)));
         if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
+        a.joining.joinedEpoch = e.n;
         a.joiner(j, framing);
         return hello;
     }
@@ -515,7 +516,9 @@ public final class Joins {
     public enum Step { MORE, PROVEN, DECLINED, FAILED }
 
     /** One result of {@link #verifyReply}: bytes consumed and the total length that can progress. */
-    public record JoinStep(Step status, int consumed, int need) {}
+    public record JoinStep(Step status, int consumed, int need, SecureCarrierException failure) {
+        JoinStep(Step status, int consumed, int need) { this(status, consumed, need, null); }
+    }
 
     /** What {@link #joinFinish} made: the confirmation to write and the record keys. */
     public record Finished(byte[] confirm, Result result) {}
@@ -571,7 +574,7 @@ public final class Joins {
      * The verified join goes active: its confirmation, its record keys and the Reply's frames. Null when the pipe failed meanwhile.
      * overhead: what the carrier adds to a write.
      */
-    Finished joinFinish(Pipe p, UnitPlan plan, int overhead) {
+    Finished joinFinish(Pipe p, UnitPlan plan, int overhead) throws SecureCarrierException {
         Attach a = p == null ? null : p.mp();
         if (a == null || !a.joining() || a.verified() == null) return null;
         ReplyPayload reply = a.verified();
@@ -585,7 +588,7 @@ public final class Joins {
             result = j.finish();
         } catch (SecureCarrierException e) {
             failedStep(p, e);
-            return null;
+            throw e;
         }
         a.endHandshake();
         port.proven(p);
@@ -595,7 +598,7 @@ public final class Joins {
 
     private JoinStep failedStep(Pipe p, SecureCarrierException cause) {
         port.failPipe(p, TransportError.PIPE_FAILED, cause);
-        return new JoinStep(Step.FAILED, 0, 0);
+        return new JoinStep(Step.FAILED, 0, 0, cause);
     }
 
     private static boolean startsWithParameters(byte[] b, int off, int len) {
@@ -617,12 +620,14 @@ public final class Joins {
         private final Mode mode;
         private final Acceptor acceptor;
         private final HelloPayload payload;
+        private final long epoch;
 
-        private PeerJoin(JoinPipe pipe, Mode mode, Acceptor acceptor, HelloPayload payload) {
+        private PeerJoin(JoinPipe pipe, Mode mode, Acceptor acceptor, HelloPayload payload, long epoch) {
             this.pipe = pipe;
             this.mode = mode;
             this.acceptor = acceptor;
             this.payload = payload;
+            this.epoch = epoch;
         }
 
         //noinspection ClassEscapesItsScope
@@ -684,7 +689,7 @@ public final class Joins {
             stats.joinReplay();
             return new Opened(JoinResult.CLOSE, null);
         }
-        return new Opened(JoinResult.ACCEPTED, new PeerJoin(payload.pipe(), h.mode(), acceptor, payload));
+        return new Opened(JoinResult.ACCEPTED, new PeerJoin(payload.pipe(), h.mode(), acceptor, payload, e == null ? -1 : e.n));
     }
 
     /**
@@ -763,6 +768,7 @@ public final class Joins {
         }
         Attach a = new Attach(false, j.direction(), j.fateGroup(), 0, 0, -1, Double.NaN, needOut ? Attach.OUT_ACTIVE : Attach.OUT_NONE,
                 needIn ? Attach.IN_OPEN : Attach.IN_NONE, needOut, port.now());
+        a.joining.joinedEpoch = pj.epoch;
         a.mode(pj.mode);
         a.ownFailure((c.hasOut() && c.out().ownFailure()) || (c.hasIn() && c.in().ownFailure()));
         a.usedGroup(pj.acceptor.joinerShare().group().id());
@@ -1326,6 +1332,8 @@ public final class Joins {
     /** The join state of one attachment. */
     static final class Slot {
         private final long attachedAt;
+        /** The epoch selected for the Hello, or -1 while it is unset. */
+        private long joinedEpoch = -1;
         private boolean held;
         /** No other pipe was usable when the Hello was prepared. */
         private boolean early;
@@ -1336,6 +1344,8 @@ public final class Joins {
         Slot(long now) {
             attachedAt = now;
         }
+
+        long joinedEpoch() { return joinedEpoch; }
 
         long attachedAt() {
             return attachedAt;

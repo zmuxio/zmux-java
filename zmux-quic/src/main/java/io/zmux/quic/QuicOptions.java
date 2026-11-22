@@ -69,7 +69,8 @@ public final class QuicOptions {
     /** Enough connection credit for all configured receive streams to fill their own windows. */
     public long connectionWindow() { return streamWindow * (bidirectionalStreams + lanes); }
 
-    <B extends QuicCodecBuilder<B>> B apply(B builder) {
+    /** Applies the transport limits to a Netty QUIC endpoint builder. */
+    public <B extends QuicCodecBuilder<B>> B apply(B builder) {
         long millis;
         try { millis = idleTimeout.toMillis(); } catch (ArithmeticException e) { millis = Long.MAX_VALUE; }
         builder.maxIdleTimeout(millis, TimeUnit.MILLISECONDS).initialMaxData(connectionWindow())

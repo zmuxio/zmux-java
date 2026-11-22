@@ -1,0 +1,23 @@
+# Inserted as a workspace member into a temporary copy of zmux-rs by build.sh.
+[package]
+name = "zmux-java-h3-wire-peer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "zmux-java-h3-wire-peer"
+path = "main.rs"
+
+[dependencies]
+bytes = "1"
+h3 = "=0.0.8"
+h3-quinn = "=0.0.10"
+http = "1"
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+zmux-h3 = { path = "../../adapter/h3" }
+zmux-webtransport = { path = "../../adapter/webtransport" }
+
+[lints]
+workspace = true

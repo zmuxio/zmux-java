@@ -13,6 +13,20 @@ public final class Time {
 
     private Time() {}
 
+    /** Monotonic deadline for a timeout, or NEVER beyond the clock's supported range. */
+    public static long deadline(java.time.Duration timeout) {
+        java.util.Objects.requireNonNull(timeout, "timeout");
+        long now = System.nanoTime();
+        if (timeout.isNegative() || timeout.isZero()) return now;
+        long nanos;
+        try {
+            nanos = timeout.toNanos();
+        } catch (ArithmeticException e) {
+            return NEVER;
+        }
+        return nanos >= Long.MAX_VALUE / 2 ? NEVER : now + nanos;
+    }
+
     /** t + d, saturating: an overflow is NEVER. */
     public static long add(long t, long d) {
         if (t == NEVER) return NEVER;

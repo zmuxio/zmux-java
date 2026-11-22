@@ -16,4 +16,16 @@ public interface Upgrade {
      * waiting it cancels the stage ({@code toCompletableFuture().cancel(false)}) and closes the carrier.
      */
     CompletionStage<?> open();
+
+    /**
+     * Completion of the actual opening write, including asynchronous cleanup. Called once before
+     * open. Its signal must also settle if open fails before submission. Cancelling the stage
+     * returned by open must not complete this signal while the adapter still owns the write.
+     * With this signal the attachment waits for actual release. A signal still pending one linger
+     * after opening emits a debug diagnostic through the listener's logger.
+     * Return null when no such acknowledgment is available. An accepted upgrade holds a share
+     * for at most one linger from opening. For a withdrawn admission step the linger starts at
+     * cancellation. Both methods must return without blocking.
+     */
+    default CompletionStage<?> released() { return null; }
 }

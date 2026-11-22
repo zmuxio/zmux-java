@@ -164,8 +164,8 @@ closes neither the connection nor its sessions. Netty offers no query for
 whether a connection used 0-RTT, so a host whose listener has an admission
 refuses early data in its TLS configuration.
 
-A connection whose first stream the admission gives back goes, with that
-stream, to the listener's `ListenerConfig.fallback` as a `Takeover`: its pipe
+Both `FALLBACK` and `TAKEOVER` hand the connection and its first stream
+to the listener's `ListenerConfig.fallback` as a `Takeover`: its pipe
 replays the bytes read, and `QuicTakeover.connection(takeover)` gives the QUIC
 connection. Its other streams are closed, and the connection closes once the
 fallback is done with the stream.

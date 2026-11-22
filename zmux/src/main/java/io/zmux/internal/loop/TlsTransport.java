@@ -46,8 +46,10 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     private boolean shutAfterWrite;
     private boolean closeNotifyPending;
     private boolean closed;
+    private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+    @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return released.minimalCompletionStage(); }
 
-    private TlsTransport(EventLoop loop, SocketChannel ch, SSLEngine engine) {
+    TlsTransport(EventLoop loop, SocketChannel ch, SSLEngine engine) {
         super(loop);
         nio = loop;
         this.ch = ch;
@@ -63,31 +65,39 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     /** Runs the handshake of engine over ch on loop; done receives the carrier or the failure, on the loop. */
     static Runnable handshake(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout, boolean secure,
                           BiConsumer<TlsTransport, Throwable> done) {
-        TlsTransport c = new TlsTransport(loop, ch, engine);
-        c.declaredSecure = secure;
-        c.onHandshake = done;
-        if (!loop.tryExecute(() -> {
+        return new TlsTransport(loop, ch, engine).handshake(timeout, secure, done);
+    }
+
+    Runnable handshake(long timeout, boolean secure, BiConsumer<TlsTransport, Throwable> done) {
+        declaredSecure = secure;
+        onHandshake = done;
+        if (!nio.tryExecute(() -> {
             try {
-                loop.onShutdown(c.handshakeShutdown);
-                loop.schedule(c.handshakeTimer, io.zmux.internal.core.Time.add(Clock.now(), timeout));
+                nio.onShutdown(handshakeShutdown);
+                nio.schedule(handshakeTimer, io.zmux.internal.core.Time.add(Clock.now(), timeout));
                 ch.configureBlocking(false);
-                c.key = loop.register(ch, true, c);
+                key = nio.register(ch, true, this);
                 engine.beginHandshake();
-                c.step();
+                step();
             } catch (IOException | RuntimeException e) {
-                c.handshakeFailed(e);
+                handshakeFailed(e);
             }
         })) {
-            c.close(null); done.accept(null, new IOException("event loop closed"));
+            CarrierSetup.connectionLost(this, null); done.accept(null, new IOException("event loop closed"));
         }
-        return () -> loop.tryExecute(() -> {
-            if (c.handshaking && !c.closed) c.handshakeFailed(new java.io.InterruptedIOException("TLS handshake cancelled"));
+        return () -> nio.tryExecute(() -> {
+            if (handshaking && !closed) handshakeFailed(new java.io.InterruptedIOException("TLS handshake cancelled"));
         });
     }
 
     private final Runnable handshakeShutdown = () -> {
         if (handshaking && !closed) handshakeFailed(new IOException("event loop closed"));
     };
+
+    @Override
+    public boolean resumesAfterPeekTimeout() { return true; }
+
+    @Override public Object carrierIdentity() { return ch; }
 
     @Override
     public TransportInfo info() {
@@ -175,9 +185,10 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    public Transport moveTo(SessionHost host) {
+    Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost host) {
+        java.util.Objects.requireNonNull(permit);
         if (closed || handshaking) {
-            close(null);
+            CarrierSetup.connectionLost(this, null);
             return null;
         }
         if (!(host instanceof EventLoop to)) return bridge(host);
@@ -193,6 +204,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         n.netOut.compact();
         n.netOut.put(netOut);
         n.netOut.flip();
+        released.complete(null); // This view returned its selector and input to the new owner.
         return n;
     }
 
@@ -258,7 +270,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         loop.schedule(handshakeTimer, io.zmux.internal.core.Time.NEVER);
         BiConsumer<TlsTransport, Throwable> d = onHandshake;
         onHandshake = null;
-        close(e);
+        CarrierSetup.connectionLost(this, e);
         if (d != null) d.accept(null, e);
     }
 
@@ -546,7 +558,8 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    public void close(Throwable cause) {
+    void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
+        java.util.Objects.requireNonNull(permit);
         if (closed) return;
         closed = true;
         if (key != null) key.cancel();
@@ -558,5 +571,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         reader.release();
         clearSrcs();
         dropWrite();
+        released.complete(null);
+        setup().transportClosed(this);
     }
 }

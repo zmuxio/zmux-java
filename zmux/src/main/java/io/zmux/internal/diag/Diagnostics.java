@@ -23,6 +23,11 @@ public final class Diagnostics {
         io.zmux.internal.core.Session.lingerForTests = d.toNanos();
     }
 
+    /** Runs one synthetic timer turn in an isolated, single-owner test group. */
+    public static java.util.concurrent.CompletableFuture<Void> advanceTimersForTests(EventLoops loops, long elapsedNanos) {
+        return groups.apply(loops).next().advanceTimersForTests(elapsedNanos);
+    }
+
     /** Read buffers taken from the loops' pools and not yet returned. */
     public static int outstandingBuffers(EventLoops loops) {
         return groups.apply(loops).outstandingBuffers();

@@ -430,13 +430,54 @@ class JoinAttackTest {
         }
     }
 
+    @SuppressWarnings("try") // Stop the listener while the authorized reply is held.
+    @Test void stopBeforeARefusalReplyWritesNothingAndPublishesNoPipe() throws Exception {
+        // HS-04.
+        var arm = new java.util.concurrent.atomic.AtomicBoolean();
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CompletableFuture<Void>();
+        var outcomes = new java.util.concurrent.LinkedBlockingQueue<Throwable>();
+        try (var loops = EventLoops.create(2)) {
+            var cfg = config(loops).maxPipes(2).joinOutcome((session, id, error) -> {
+                if (id.value() == 20) outcomes.add(error);
+            }).handshakeShaper(view -> {
+                if (arm.get() && view.message().equals("reply")) { entered.countDown(); release.join(); }
+                return null;
+            }).build();
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT);
+                 var near = SocketChannel.open(l.localAddress())) {
+                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                assertEquals(2, s.pipes().size());
+                arm.set(true);
+                near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
+                try {
+                    assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                    l.close();
+                } finally { release.complete(null); }
+                assertEquals(-1, near.read(ByteBuffer.allocate(256)));
+                assertInstanceOf(ListenerClosedException.class, outcomes.poll(5, java.util.concurrent.TimeUnit.SECONDS));
+                var marker = new SessionEvent.CapacityRestored(23);
+                s.driver.executeCarrier(() -> s.driver.addApplicationEvent(marker, marker));
+                SessionEvent event;
+                while ((event = s.nextEvent(WAIT)) != marker) {
+                    if (event instanceof SessionEvent.PipeAdded added) assertNotEquals(20, added.pipe().value());
+                    if (event instanceof SessionEvent.PipeJoined joined) assertNotEquals(20, joined.pipe().value());
+                }
+                assertTrue(outcomes.isEmpty());
+            }
+        } finally { release.complete(null); }
+    }
+
     /** Closing the session or the listener ends an Unconfirmed carrier at once, and rejects nobody. */
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void closingEndsAnUnconfirmedCarrier() throws Exception {
+        // HS-24.
         for (String what : List.of("session", "listener")) {
             try (EventLoops loops = EventLoops.create(2)) {
                 java.util.concurrent.atomic.AtomicInteger rejects = new java.util.concurrent.atomic.AtomicInteger();
-                ZmuxConfig cfg = config(loops).build();
+                var ended = new java.util.concurrent.CompletableFuture<Throwable>();
+                ZmuxConfig cfg = config(loops).joinOutcome((session, id, failure) -> ended.complete(failure)).build();
                 var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejects.incrementAndGet(); return RejectInfo.Action.CLOSE; }).build();
                 try (var l = Zmux.listen(NetworkTest.any(), lc);
                      var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT);
@@ -445,6 +486,9 @@ class JoinAttackTest {
                     assertTrue(near.read(ByteBuffer.allocate(4096)) > 0, "a Reply");
                     long rejected = l.stats().rejected(), started = System.nanoTime();
                     if (what.equals("session")) s.close(); else l.close();
+                    Throwable reason = ended.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (what.equals("session")) assertInstanceOf(SessionClosedException.class, reason);
+                    else assertInstanceOf(ListenerClosedException.class, reason);
                     assertEquals(-1, near.read(ByteBuffer.allocate(64)), what);
                     assertTrue(System.nanoTime() - started < 5_000_000_000L, what);
                     ListenerResourcesTest.until(() -> l.stats().refused() > 0);
@@ -486,8 +530,9 @@ class JoinAttackTest {
     /** The acceptor's deadline runs from the slot: the delay of its own Reply is inside it. */
     @Test void theAcceptorsDeadlineRunsFromItsSlot() throws Exception {
         long timeout = 1500, delay = 1000;
+        var outcome = new java.util.concurrent.CompletableFuture<Throwable>();
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig server = config(loops).joinTimeout(Duration.ofMillis(timeout))
+            ZmuxConfig server = config(loops).joinOutcome((s, id, e) -> outcome.complete(e)).joinTimeout(Duration.ofMillis(timeout))
                     .handshakeShaper(v -> v.message().equals("reply") ? new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofMillis(delay)) : null).build();
             ZmuxConfig client = config(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
@@ -504,6 +549,7 @@ class JoinAttackTest {
                 assertTrue(took >= delay, "the Reply's delay ran: " + took);
                 assertTrue(took < timeout + delay - 200, "from the slot, not from the Reply: " + took);
                 ListenerResourcesTest.until(() -> l.stats().timedOut() > timedOut);
+                assertInstanceOf(JoinTimeoutException.class, outcome.get(5, java.util.concurrent.TimeUnit.SECONDS));
             }
         }
     }
@@ -996,11 +1042,15 @@ class JoinAttackTest {
 
     /** The listener's maxPendingPerSession bounds a session's Unconfirmed carriers: one more closes the oldest. */
     @Test void maxPendingPerSessionEvictsTheOldestUnconfirmed() throws Exception {
+        // HS-24.
         assertEquals(4, ListenerConfig.defaults().maxPendingPerSession());
         assertThrows(IllegalArgumentException.class, () -> ListenerConfig.builder().maxPendingPerSession(0));
         assertThrows(IllegalArgumentException.class, () -> ListenerConfig.builder().maxPendingPerSession(-1));
         try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = config(loops).build();
+            var evicted = new java.util.concurrent.CompletableFuture<PipeId>();
+            ZmuxConfig cfg = config(loops).joinOutcome((session, id, error) -> {
+                if (error instanceof JoinEvictedException) evicted.complete(id);
+            }).build();
             var lc = ListenerConfig.builder().session(cfg).maxPendingPerSession(2).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
@@ -1011,6 +1061,7 @@ class JoinAttackTest {
                         held[i].write(ByteBuffer.wrap(helloFor(c, 20 + 2L * i, Mode.SEALED, new byte[0], null)));
                         assertTrue(held[i].read(ByteBuffer.allocate(4096)) > 0, "a Reply");
                     }
+                    assertEquals(PipeId.of(20), evicted.get(5, java.util.concurrent.TimeUnit.SECONDS));
                     assertEquals(-1, held[0].read(ByteBuffer.allocate(64)), "the oldest is evicted");
                     // A session limit, not an unexplained rejection: counted refused only.
                     until("the eviction is counted", () -> l.stats().refused() == 1);
@@ -1026,44 +1077,36 @@ class JoinAttackTest {
         }
     }
 
-    /** A Confirm whose write reports after the joiner's deadline leaves the Proven attachment alone. */
-    @Test void aConfirmWrittenAfterTheDeadlineKeepsTheAttachment() throws Exception {
-        java.util.concurrent.ScheduledExecutorService timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-        try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig server = config(loops).build();
-            ZmuxConfig client = config(loops).joinTimeout(Duration.ofMillis(400)).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
-                 var c = Zmux.connect(l.localAddress(), client); var s = l.accept(WAIT)) {
-                PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                l.adapter().handle(pair[1], JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                PipeWriter w = pair[0].writer();
+    /** Hold the Confirm write report until the local deadline has conclusively won. */
+    @Test void lateConfirmWriteCannotReviveAnExpiredJoin() throws Exception {
+        var held = new java.util.concurrent.CompletableFuture<PipeWriter.Completion>();
+        var observed = new java.util.concurrent.LinkedBlockingQueue<Throwable>();
+        try (EventLoops loops = EventLoops.create(2); var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var server = config(loops).build();
+            var client = config(loops).joinTimeout(Duration.ofMillis(500))
+                    .joinOutcome((session, pipe, error) -> observed.add(error)).build();
+            try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(server));
+                 var c = Zmux.connect(listener.localAddress(), client); var s = listener.accept(WAIT)) {
+                var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                listener.adapter().handle(pair[1], JoinHint.inBand(null));
                 var writes = new java.util.concurrent.atomic.AtomicInteger();
                 PipeWriter late = new PipeWriter() {
-                    @Override public void write(OutboundBatch b, Completion d) {
-                        if (writes.incrementAndGet() != 2) { w.write(b, d); return; } // the Hello, then the Confirm
-                        w.write(b, new Completion() {
-                            @Override public void completed() { timer.schedule(d::completed, 1000, java.util.concurrent.TimeUnit.MILLISECONDS); }
-                            @Override public void failed(Throwable t) { d.failed(t); }
-                        });
+                    @Override public void write(OutboundBatch b, Completion done) {
+                        if (writes.incrementAndGet() == 2) held.complete(done);
+                        else pair[0].writer().write(b, done);
                     }
-                    @Override public void close() { w.close(); }
-                    @Override public void abort(Throwable t) { w.abort(t); }
+                    @Override public void close() { pair[0].writer().close(); }
                 };
-                // Not waiting for the peer's attachment: its proof (an acknowledged record on the
-                // pipe) can only follow the Confirm's late report, after the join deadline.
-                ZmuxPipe p = c.addPipe(new PipeIo(pair[0].reader(), late, Framing.BYTE_STREAM, "late", null),
-                        PipeOptions.builder().recordMode(RecordMode.SEALED).returnOnReply(true).build());
-                assertTrue(p.id().value() > 0);
-                Thread.sleep(300);
-                assertEquals(0, c.stats().pipeFailures(), "joiner");
-                assertEquals(2, c.pipes().size());
-                until("acceptor", () -> s.pipes().size() == 2);
-                p.awaitAttached(Duration.ofSeconds(5));
-                assertEquals(0, c.stats().pipeFailures(), "joiner after the report");
+                var adding = workers.submit(() -> c.addPipe(PipeIo.of(pair[0].reader(), late), PeerAttachedTest.NO_WAIT));
+                var completion = held.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                try {
+                    var pipe = adding.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    var failure = assertThrows(JoinTimeoutException.class, pipe::awaitAttached);
+                    assertSame(failure, observed.poll(5, java.util.concurrent.TimeUnit.SECONDS));
+                } finally { completion.completed(); }
                 alive(c, s);
+                assertTrue(observed.isEmpty());
             }
-        } finally {
-            timer.shutdownNow();
         }
     }
 }

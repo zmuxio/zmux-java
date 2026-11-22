@@ -329,19 +329,20 @@ class SealTest {
             ZmuxConfig cfg = sessions(loops).build();
             Credential mine = new Credential(9, new byte[] {4, 2});
             for (String verdict : List.of("pass", "reject", "unavailable")) {
-                List<String> reasons = new CopyOnWriteArrayList<>();
+                List<RejectInfo> reasons = new CopyOnWriteArrayList<>();
                 List<VerifyInput> seen = new CopyOnWriteArrayList<>();
+                var refusal = new VerifyRejectedException("unknown client");
                 Anchor anchor = in -> {
                     seen.add(in);
                     return switch (verdict) {
-                        case "reject" -> throw new VerifyRejectedException("unknown client");
+                        case "reject" -> throw refusal;
                         case "unavailable" -> throw new VerifyUnavailableException("store down", null);
                         default -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()));
                     };
                 };
                 var sc = ServerConfig.builder(gate(null), NODE).anchor(anchor).localContext("edge").build();
                 var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
-                        .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
+                        .onReject(i -> { reasons.add(i); return RejectInfo.Action.CLOSE; }).build();
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                     var f = Seal.establish(tcp(l.localAddress()), client().credential(mine).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                     PipeIo p = f.get(10, TimeUnit.SECONDS); // the client is done after message 3
@@ -354,7 +355,12 @@ class SealTest {
                         while (seen.isEmpty() && System.nanoTime() < until) Thread.sleep(2);
                         if (verdict.equals("reject")) {
                             while (reasons.isEmpty() && System.nanoTime() < until) Thread.sleep(2);
-                            assertEquals(List.of("credentials_failed"), reasons);
+                            assertEquals(1, reasons.size());
+                            RejectInfo info = reasons.getFirst();
+                            assertEquals("credentials_failed", info.reason());
+                            var failed = assertInstanceOf(CredentialsFailedException.class, info.error().getCause());
+                            assertEquals(CredentialsFailedException.Detail.VERIFIER, failed.detail());
+                            assertSame(refusal, failed.getCause());
                         }
                         assertEquals(0, l.stats().sessions());
                     }
@@ -404,21 +410,51 @@ class SealTest {
     @Test void aFailingGateIsAGateError() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
-            List<String> reasons = new CopyOnWriteArrayList<>();
+            List<RejectInfo> reasons = new CopyOnWriteArrayList<>();
+            var failure = new Exception("down");
             Gate gate = new Gate() {
-                @Override public byte[] resolve(byte[] h, SocketAddress src) throws Exception { throw new Exception("down"); }
+                @Override public byte[] resolve(byte[] h, SocketAddress src) throws Exception { throw failure; }
                 @Override public Credential credential(byte[] h, Profile p, SocketAddress src) { return null; }
                 @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "ok"; }
             };
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; })
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i); return RejectInfo.Action.CLOSE; })
                     .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var f = Seal.establish(tcp(l.localAddress()), client().handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                 assertInstanceOf(NoReplyException.class, assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS)).getCause());
                 for (long end = System.nanoTime() + 5_000_000_000L; reasons.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
-                assertEquals(List.of("gate_error"), reasons);
+                assertEquals(1, reasons.size());
+                assertEquals("gate_error", reasons.getFirst().reason());
+                assertSame(failure, reasons.getFirst().error().getCause());
             }
         }
+    }
+
+    @Test void oversizedHandshakeTimeoutStillTransfersCarrierOwnership() throws Exception {
+        var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+        var started = new java.util.concurrent.CompletableFuture<Void>();
+        var closed = new java.util.concurrent.CompletableFuture<Void>();
+        var reader = new io.zmux.carrier.PipeReader() {
+            @Override public void start(Sink sink) {
+                pair[0].reader().start(sink);
+                started.complete(null);
+            }
+
+            @Override public void close() {
+                pair[0].reader().close();
+                closed.complete(null);
+            }
+        };
+        var io = new PipeIo(reader, pair[0].writer(), Framing.BYTE_STREAM, "memory", null);
+        var handshake = Seal.establish(io, client().handshakeTimeout(Duration.ofSeconds(Long.MAX_VALUE)).build())
+                .toCompletableFuture();
+        try {
+            started.get(5, TimeUnit.SECONDS);
+            assertFalse(handshake.isDone());
+        } finally {
+            handshake.cancel(true);
+        }
+        closed.get(5, TimeUnit.SECONDS);
     }
 
     @Test void aHandleWithoutAKeyIsNamed() throws Exception {

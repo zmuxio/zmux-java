@@ -17,5 +17,5 @@ module io.zmux {
     exports io.zmux.internal.diag to io.zmux.http, io.zmux.quic;
     exports io.zmux.internal.loop to io.zmux.quic;
     exports io.zmux.internal.wire to io.zmux.quic;
-    exports io.zmux.internal.spi to io.zmux.http, io.zmux.quic;
+    exports io.zmux.internal.spi to io.zmux.http, io.zmux.http3, io.zmux.quic;
 }

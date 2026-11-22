@@ -283,11 +283,12 @@ class CarrierHooksTest {
     /** An admission over byte streams: more prefix on request, variants counted. */
     @Test void admissionAsksForMoreAndCountsVariants() throws Exception {
         var seen = new CopyOnWriteArrayList<Integer>();
+        var more = new java.util.concurrent.CompletableFuture<Void>();
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var adm = Admission.builder(2, Admission.Decider.immediate((info, prefix) -> {
                 seen.add(prefix.remaining());
-                if (prefix.remaining() == 2) return Admission.Decision.more(6);
+                if (prefix.remaining() == 2) { more.complete(null); return Admission.Decision.more(6); }
                 if (prefix.remaining() == 6) return new Admission.Decision(AdmissionVerdict.ACCEPT, 6, "v", 0, "x");
                 return Admission.Decision.CLOSE;
             })).maxPeek(16).peekTimeout(WAIT).build();
@@ -298,7 +299,7 @@ class CarrierHooksTest {
                 // The carrier starts with six bytes the accept skips, a byte at a time for the first.
                 write(p[0], new byte[] {1});
                 write(p[0], new byte[] {2});
-                Thread.sleep(50);
+                more.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 write(p[0], new byte[] {3, 4, 5, 6});
                 try (var _ = Zmux.open(p[0], Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                     assertNotNull(s);
@@ -367,6 +368,77 @@ class CarrierHooksTest {
         }
     }
 
+    @Test void thePositivePeekBoundsMessagesBeforeCallingTheHost() throws Exception {
+        for (int max : new int[] {0, 8}) {
+            var calls = new AtomicInteger();
+            int limit = Math.max(4, max);
+            var adm = Admission.builder(4, Admission.Decider.immediate((i, prefix) -> {
+                assertEquals(limit, prefix.remaining());
+                calls.incrementAndGet();
+                return Admission.Decision.FALLBACK;
+            })).maxPeek(max).build();
+            assertThrows(IllegalArgumentException.class, () -> Admission.builder(4, adm.decider()).maxPeek(3));
+            try (var loops = EventLoops.create(1);
+                 var l = Zmux.listener(ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
+                         .admission(adm).fallback(t -> null).build())) {
+                for (int n : new int[] {limit + 1, limit}) {
+                    var pair = MemoryPipe.pair(Framing.MESSAGES);
+                    var h = l.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("messages")));
+                    write(pair[0], new byte[n]);
+                    h.closed().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                assertEquals(1, calls.get());
+                assertEquals(1, l.stats().admission().closed());
+                assertEquals(0, l.stats().admission().tooLarge());
+                assertEquals(1, l.stats().admission().fallback());
+            }
+        }
+    }
+
+    @Test void aTransformCanReplaceOrInheritTheAdmissionVariantOnTheSameCarrier() throws Exception {
+        try (var loops = EventLoops.create(1)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var admission = Admission.builder(0, Admission.Decider.immediate((i, p) ->
+                    new Admission.Decision(AdmissionVerdict.ACCEPT, 0, null, 0, "admitted"))).build();
+            for (String result : List.of("", "wrapped")) {
+                try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(admission)
+                        .inboundTransform((pipe, ctx) -> {
+                            assertEquals("admitted", pipe.variant());
+                            return java.util.concurrent.CompletableFuture.completedFuture(pipe.withVariant(result));
+                        }).build())) {
+                    var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    l.adapter().handle(pair[1].withVariant("arrival"), JoinHint.inBand(TestAddr.peer("label")));
+                    try (var _ = Zmux.open(pair[0], Role.CLIENT, cfg); var server = l.accept(WAIT)) {
+                        assertEquals(result.isEmpty() ? "admitted" : result, server.pipes().getFirst().stats().orElseThrow().variant());
+                        assertEquals("admitted", l.variantStats().getFirst().name());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test void variantsAreSortedAndExcessLabelsShareOnlyTheOverflowBucket() throws Exception {
+        var label = new AtomicInteger(Admission.MAX_VARIANTS);
+        var admission = Admission.builder(0, Admission.Decider.immediate((i, p) ->
+                new Admission.Decision(AdmissionVerdict.CLOSE, 0, null, 0, Integer.toString(label.getAndDecrement())))).build();
+        try (var loops = EventLoops.create(1);
+             var l = Zmux.listener(ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
+                     .admission(admission).build())) {
+            for (int i = 0; i < Admission.MAX_VARIANTS + 2; i++) {
+                var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                l.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("label"))).closed().get(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            var snapshot = l.variantStats();
+            assertEquals(Admission.MAX_VARIANTS + 1, snapshot.size());
+            var names = snapshot.stream().filter(v -> !v.overflow()).map(Admission.VariantStat::name).toList();
+            assertEquals(names.stream().sorted().toList(), names);
+            assertTrue(snapshot.getLast().overflow());
+            assertEquals(2, snapshot.getLast().closed());
+            assertTrue(snapshot.stream().filter(v -> !v.overflow()).allMatch(v -> v.closed() == 1));
+            assertEquals(snapshot.stream().mapToLong(Admission.VariantStat::closed).sum(), l.stats().admission().closed());
+        }
+    }
+
     /** A size past the largest record size cannot begin a first record. */
     @Test void firstBytesSizeBound() {
         assertEquals(FirstBytes.Kind.OTHER, FirstBytes.classify(new byte[] {(byte) 0x80, 0, 1, 0, 0}, Framing.BYTE_STREAM).kind());
@@ -413,14 +485,14 @@ class CarrierHooksTest {
     @Test void aFirstMessageAboveTheLimitIsClosed() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).maxMessage(4).peekTimeout(WAIT).build();
+            var adm = Admission.builder(1, Admission.Decider.immediate((i, b) -> Admission.Decision.accept(0))).maxPeek(8).maxMessage(4).peekTimeout(WAIT).build();
             try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).admission(adm).build())) {
                 var p = MemoryPipe.pair(Framing.MESSAGES);
                 var h = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("peer")));
                 write(p[0], new byte[32]);
                 h.closed().toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
-                assertEquals(1, l.stats().admission().tooLarge(), "closed without a decision, counted as too large");
-                assertEquals(0, l.stats().admission().closed());
+                assertEquals(0, l.stats().admission().tooLarge());
+                assertEquals(1, l.stats().admission().closed(), "the known length exceeds both the protocol and adapter limits");
             }
         }
     }

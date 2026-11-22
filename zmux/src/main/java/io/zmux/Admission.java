@@ -42,12 +42,13 @@ public final class Admission {
 
     /**
      * An admission that reads peek bytes (0: none), at most {@link #MAX_PEEK}, of a byte stream before it asks decider;
-     * fewer when the carrier ends or the peek timeout passes first; a carrier without a receiving half, or one decided
+     * fewer when the carrier ends first; a carrier without a receiving half, or one decided
      * on its HTTP request head, is decided at once. On a message-framed carrier any peek above 0, and every decision
-     * deferred from an upgrade's head, reads the first message whole as the prefix, of at most {@link #maxMessage()}
-     * bytes: a longer one is closed without a decision ({@link AdmissionStats#tooLarge()}), and so is a carrier that
-     * ends, fails or sends a message that is not binary first ({@link AdmissionStats#closed()}); skip is then 0
-     * (replayed) or its length.
+     * deferred from an upgrade's head, reads the first message whole as the prefix, bounded by {@link #maxMessage()}
+     * and, for a positive peek, the larger of peek and maxPeek. An oversized message counts in
+     * {@link AdmissionStats#tooLarge()} after deferral or when only the smaller adapter limit
+     * is known to be exceeded. Exceeding the prefix bound in ordinary admission counts in
+     * {@link AdmissionStats#closed()}. On acceptance, skip is 0 (replayed) or the message length.
      */
     public static Builder builder(int peek, Decider decider) {
         Objects.requireNonNull(decider, "decider");
@@ -91,10 +92,10 @@ public final class Admission {
 
         /**
          * Bounds {@link Decision#need()} on a byte stream, at most {@link #MAX_PEEK}; not called: peek, so that MORE
-         * is invalid. It does not bound a first message ({@link #maxMessage(int)}).
+         * is invalid. For a positive peek this also bounds the first message together with {@link #maxMessage(int)}.
          */
         public Builder maxPeek(int n) {
-            if (n < 0 || n > MAX_PEEK) throw new IllegalArgumentException("maxPeek outside [0, " + MAX_PEEK + "]");
+            if (n != 0 && (n < peek || n > MAX_PEEK)) throw new IllegalArgumentException("maxPeek must be zero or between peek and " + MAX_PEEK);
             maxPeek = n;
             return this;
         }
@@ -102,7 +103,7 @@ public final class Admission {
         /**
          * Bounds the first message of a message-framed carrier (WebSocket), the prefix of its decision, at most
          * {@link #MAX_MESSAGE}; 0 or not called: {@link #MAX_MESSAGE}. A longer first message closes the carrier
-         * without a decision, counted in {@link AdmissionStats#tooLarge()}.
+         * without a decision. See the counting rules in {@link Admission#builder(int, Decider)}.
          */
         public Builder maxMessage(int n) {
             if (n < 0 || n > MAX_MESSAGE) throw new IllegalArgumentException("maxMessage outside [0, " + MAX_MESSAGE + "]");
@@ -123,8 +124,9 @@ public final class Admission {
         /**
          * A byte-stream carrier whose prefix has not arrived when the peek timeout ends, in the first read or in a
          * {@link AdmissionVerdict#MORE} round, takes {@link AdmissionVerdict#FALLBACK} with every byte read replayed
-         * instead of being closed (without a fallback target it is stalled), counted in both the peek-timeout and
-         * fallback counters; a message-framed carrier and an HTTP request carrier are closed as before, and so is a
+         * instead of being closed. It counts once according to the fallback path's outcome, including Stall or
+         * Stall overflow without a target. Native TCP, TLS and QUIC streams can resume the read. An external
+         * reader without read deadlines, a message or request carrier closes at expiry, as does a
          * carrier whose decider has not returned in time. Default false.
          */
         public Builder fallbackOnPeekTimeout(boolean on) {
@@ -201,6 +203,7 @@ public final class Admission {
      *     variant unless a transform's result has its own
      */
     public record Decision(AdmissionVerdict verdict, int skip, Object value, int need, String variant) {
+        public static final Decision TAKEOVER = new Decision(AdmissionVerdict.TAKEOVER, 0, null);
         public static final Decision FALLBACK = new Decision(AdmissionVerdict.FALLBACK, 0, null);
         public static final Decision STALL = new Decision(AdmissionVerdict.STALL, 0, null);
         public static final Decision CLOSE = new Decision(AdmissionVerdict.CLOSE, 0, null);
@@ -215,7 +218,8 @@ public final class Admission {
         public static Decision accept(int skip) { return new Decision(AdmissionVerdict.ACCEPT, skip, null); }
         /** An accept carrying the host's value (null: none). */
         public static Decision accept(int skip, Object value) { return new Decision(AdmissionVerdict.ACCEPT, skip, value); }
-        /** A fallback carrying the host's value ({@link Takeover#value()}; null: none). */
+        /** Hands the carrier and the routing value to the listener's byte-stream handler. */
+        public static Decision takeover(Object value) { return new Decision(AdmissionVerdict.TAKEOVER, 0, value); }
         public static Decision fallback(Object value) { return new Decision(AdmissionVerdict.FALLBACK, 0, value); }
         /** Asks for a prefix of need bytes. */
         public static Decision more(int need) { return new Decision(AdmissionVerdict.MORE, 0, null, need, ""); }
@@ -224,26 +228,25 @@ public final class Admission {
     }
 
     /** The counts of one {@link Decision#variant()} ({@link ZmuxListener#variantStats()}). */
-    public record VariantStat(String name, boolean overflow, long accepted, long fallback, long stalled, long closed) {}
+    public record VariantStat(String name, boolean overflow, long accepted, long fallback, long takeover, long stalled, long closed) {
+        /** A variant snapshot with no carrier takeovers. */
+        public VariantStat(String name, boolean overflow, long accepted, long fallback, long stalled, long closed) {
+            this(name, overflow, accepted, fallback, 0, stalled, closed);
+        }
+    }
 
     /** How many labels are counted apart; further ones share one bucket, listed last. */
     public static final int MAX_VARIANTS = 64;
 
     /**
-     * The host's target of the carriers the admission hands back ({@link AdmissionVerdict#FALLBACK}, a prefix
-     * {@link Builder#fallbackOnPeekTimeout} gave up on): {@link ListenerConfig#fallback()} takes every such carrier,
-     * byte streams of the listener's sockets and of other entries, message-framed carriers (WebSocket after a
-     * deferred decision), QUIC streams and HTTP request carriers decided on the start of their body alike. serve runs
-     * off the event loops, once per carrier, and returns at once with a stage: the carrier is the host's until that
-     * stage completes (null: until serve returns), then zmux closes it unless the host called {@link Takeover#detach()}.
-     * A serve that throws, and a stage that fails, close the carrier at once unless it was detached; neither reaches
-     * the listener. That scope is the same at every entry point; nothing else cancels the stage. What an HTTP request
-     * is depends on the stage it is decided at: on its head ({@link Stage#HEAD}: an upgrade's head, an exchange
-     * request, a request without a body) it is a request, answered by its HTTP adapter (see {@link
-     * io.zmux.adapter.ListenerAdapter#handleRequest}); on the start of its body (a streaming or uplink request
-     * carrier) it is a carrier, taken over here as the full-duplex byte stream of its request body (in) and response
-     * body (out), the response head written by the adapter (its adapter answers it as a request only when the
-     * listener has no fallback).
+     * The host's byte-stream handler. TAKEOVER selects this handler for every carrier kind.
+     * FALLBACK selects the normal handler of its transport, including the HTTP request handler
+     * for HTTP before an upgrade. A streaming HTTP takeover first sends the acceptance response
+     * head. Its request and response bodies become the two carrier halves.
+     *
+     * <p>Runs off the event loops. Normal completion (including a null stage) succeeds and
+     * closes the carrier unless detached. Failure and withdrawal also reclaim an undetached
+     * carrier. Withdrawal leaves the host's stage running.
      */
     @FunctionalInterface
     public interface Fallback {

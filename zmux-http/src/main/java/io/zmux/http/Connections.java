@@ -8,6 +8,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.zmux.http.internal.HttpTransport;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
@@ -15,7 +16,6 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
-import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.handler.ssl.ApplicationProtocolNames;
@@ -28,24 +28,26 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * The client's HTTP connections: a channel for one request at a time, with an HTTP object codec
  * in its pipeline: an HTTP/1.1 connection (fresh, or idle from a pool for bounded requests) or a
- * stream of a shared HTTP/2 connection. Safe for concurrent use.
+ * stream of a shared HTTP/2 or HTTP/3 connection. Safe for concurrent use.
  */
 final class Connections {
     /** The HTTP versions a client uses. */
-    enum Version { HTTP_1_1, HTTP_2, AUTO }
+    enum Version { HTTP_1_1, HTTP_2, HTTP_3, AUTO }
 
     private final EventLoopGroup group;
     private final SslContext ssl, ssl1;
     private final Version version;
     private final Duration connectTimeout;
-    /** Shared HTTP/2 connections by origin. */
-    private final Map<String, CompletableFuture<Channel>> h2 = new HashMap<>();
+    private final HttpTransport.Client h3;
+    /** Shared HTTP/2 or HTTP/3 connections by origin, according to the client version. */
+    private final Map<String, CompletableFuture<Channel>> shared = new HashMap<>();
     /** Idle HTTP/1.1 connections by origin. */
     private final Map<String, ArrayDeque<Channel>> idle = new HashMap<>();
     /** Every connection opened and not yet closed, those still connecting too: {@link #close} closes them all. */
@@ -55,11 +57,25 @@ final class Connections {
 
     /** ssl offers h2 and http/1.1, ssl1 http/1.1 only. */
     Connections(EventLoopGroup group, SslContext ssl, SslContext ssl1, Version version, Duration connectTimeout) {
+        this(group, ssl, ssl1, version, connectTimeout, null);
+    }
+
+    Connections(EventLoopGroup group, SslContext ssl, SslContext ssl1, Version version, Duration connectTimeout,
+                HttpTransport.Client h3) {
+        this.h3 = h3;
         this.group = group;
         this.ssl = ssl;
         this.ssl1 = ssl1;
         this.version = version;
         this.connectTimeout = connectTimeout;
+    }
+
+    boolean http3() { return version == Version.HTTP_3; }
+
+    void requireRequestScheme(URI u) {
+        if (http3() && (!"https".equalsIgnoreCase(u.getScheme()) || u.getHost() == null)) {
+            throw new IllegalArgumentException("HTTP/3 requires an HTTPS URL");
+        }
     }
 
     static boolean secure(URI u) {
@@ -91,16 +107,17 @@ final class Connections {
         }
         String o = origin(u);
         boolean wantH2 = !http1 && (version == Version.HTTP_2 || (version == Version.AUTO && secure(u)));
-        if (wantH2) {
-            CompletableFuture<Channel> conn;
-            synchronized (this) {
-                if (closed) return CompletableFuture.failedFuture(HttpCarrierClient.closedFailure());
-                conn = h2.get(o);
-                if (conn == null || conn.isCompletedExceptionally() || (conn.isDone() && !conn.join().isActive())) {
-                    conn = connect(u, false);
-                    h2.put(o, conn);
-                }
+        boolean wantH3 = !http1 && http3();
+        if (wantH3) {
+            try {
+                requireRequestScheme(u);
+            } catch (IllegalArgumentException failure) {
+                return CompletableFuture.failedFuture(failure);
             }
+            return openH3(u, o, true);
+        }
+        if (wantH2) {
+            var conn = shared(u, o, false);
             return conn.thenCompose(c -> c.pipeline().get(Http2MultiplexHandler.class) == null
                     ? CompletableFuture.completedFuture(c) // ALPN chose HTTP/1.1
                     : stream(c));
@@ -117,9 +134,35 @@ final class Connections {
         return connect(u, true);
     }
 
+    // The HTTP/3 transport comes from the zmux-http3 module, outside this module's analysis.
+    @SuppressWarnings("ConstantValue")
+    private CompletableFuture<Channel> openH3(URI u, String origin, boolean mayRetry) {
+        return shared(u, origin, true).thenCompose(c -> {
+            // Leave part of the caller's opening budget for one replacement after credit expires.
+            var request = h3.stream(c, connectTimeout.dividedBy(2));
+            if (!mayRetry) return request;
+            return request.exceptionallyCompose(failure -> failure instanceof HttpTransport.RetryOpen
+                    ? openH3(u, origin, false) : CompletableFuture.failedFuture(failure));
+        });
+    }
+
+    private synchronized CompletableFuture<Channel> shared(URI u, String origin, boolean h3) {
+        if (closed) return CompletableFuture.failedFuture(HttpCarrierClient.closedFailure());
+        var conn = shared.get(origin);
+        if (conn == null || conn.isCompletedExceptionally() || (conn.isDone() && !reusable(conn.join(), h3))) {
+            try {
+                conn = h3 ? this.h3.connect(group, u, connectTimeout, this::track) : connect(u, false);
+            } catch (RuntimeException failure) {
+                return CompletableFuture.failedFuture(failure);
+            }
+            shared.put(origin, conn);
+        }
+        return conn;
+    }
+
     /** Gives an HTTP/1.1 connection back after a complete exchange; one that cannot be reused is closed. */
     void release(URI u, Channel c, boolean reusable) {
-        if (c instanceof Http2StreamChannel) { c.close(); return; }
+        if (Requests.multiplexed(c)) { c.close(); return; }
         if (!reusable || !c.isActive()) { c.close(); return; }
         synchronized (this) {
             if (!closed) {
@@ -128,6 +171,10 @@ final class Connections {
             }
         }
         c.close();
+    }
+
+    private boolean reusable(Channel c, boolean h3) {
+        return h3 ? this.h3.reusable(c) : c.isActive();
     }
 
     private static CompletableFuture<Channel> stream(Channel conn) {
@@ -174,15 +221,18 @@ final class Connections {
                     }
                 });
         ChannelFuture cf = b.connect(new InetSocketAddress(u.getHost(), port(u)));
-        // Tracked before closed is read, and close sets closed before it closes the group: a
-        // connection that races close is closed by one of the two.
-        channels.add(cf.channel());
-        if (closed) cf.channel().close();
+        track(cf.channel());
         cf.addListener(r -> {
             if (!r.isSuccess()) f.completeExceptionally(r.cause());
             else if (!tls) f.complete(cf.channel());
         });
         return f;
+    }
+
+    private void track(Channel channel) {
+        // Adding before reading closed means a racing close is handled by one of the two.
+        channels.add(channel);
+        if (closed) channel.close();
     }
 
     private static void h2(Channel ch) {
@@ -195,11 +245,14 @@ final class Connections {
      * connecting. Complete once they are closed.
      */
     ChannelGroupFuture close() {
+        List<CompletableFuture<Channel>> quic;
         synchronized (this) {
             closed = true;
             idle.clear();
-            h2.clear();
+            quic = http3() ? List.copyOf(shared.values()) : List.of();
+            shared.clear();
         }
+        for (var opening : quic) opening.completeExceptionally(HttpCarrierClient.closedFailure());
         return channels.close();
     }
 

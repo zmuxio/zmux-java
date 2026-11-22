@@ -110,9 +110,13 @@ class PipePoolTest {
      * and delivers it delay later, as a socket does with bytes still in flight.
      */
     static final class LateConfirm implements io.zmux.carrier.PipeWriter {
-        final io.zmux.carrier.PipeWriter delegate; final long delay; final AtomicInteger writes = new AtomicInteger();
+        final io.zmux.carrier.PipeWriter delegate; final java.util.concurrent.Executor delivery; final AtomicInteger writes = new AtomicInteger();
         final CompletableFuture<Void> delivered = new CompletableFuture<>();
-        LateConfirm(io.zmux.carrier.PipeWriter delegate, long delay) { this.delegate = delegate; this.delay = delay; }
+        LateConfirm(io.zmux.carrier.PipeWriter delegate, long delay) { this(delegate, CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS)); }
+        LateConfirm(io.zmux.carrier.PipeWriter delegate, java.util.concurrent.Executor delivery) {
+            this.delegate = delegate;
+            this.delivery = delivery;
+        }
         @Override public void write(io.zmux.carrier.OutboundBatch batch, Completion done) {
             int n = writes.incrementAndGet();
             if (n != 2) {
@@ -123,7 +127,7 @@ class PipePoolTest {
             var copy = java.nio.ByteBuffer.allocate(batch.bytes());
             for (int i = 0; i < batch.segmentCount(); i++) copy.put(batch.segment(i).duplicate());
             done.completed();
-            CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(() -> delegate.write(io.zmux.carrier.OutboundBatch.of(copy.flip()), new Completion() {
+            delivery.execute(() -> delegate.write(io.zmux.carrier.OutboundBatch.of(copy.flip()), new Completion() {
                 @Override public void completed() { delivered.complete(null); }
                 @Override public void failed(Throwable cause) { delivered.complete(null); }
             }));

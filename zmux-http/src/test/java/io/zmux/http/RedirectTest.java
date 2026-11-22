@@ -11,6 +11,7 @@ import io.zmux.HttpRedirectException;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
 import io.zmux.Zmux;
+import io.zmux.internal.spi.CarrierProvider;
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
@@ -183,6 +184,11 @@ class RedirectTest {
             var second = all.next();
             second.execute(() -> { try { hold.await(); } catch (InterruptedException ignored) { } });
             var pipe = c.pipe(front.base, Map.of(), PipeOptions.Direction.SEND_ONLY, null);
+            var provider = assertInstanceOf(CarrierProvider.class, pipe.writer());
+            Object original = provider.carrierIdentity();
+            assertNotNull(original);
+            var changes = new java.util.concurrent.atomic.AtomicInteger();
+            var unwatch = provider.watchCarrier(changes::incrementAndGet);
             write(pipe, "before ");
             // The front answers once it read the head; the redirect's new connection then waits
             // for the held loop to register it.
@@ -191,10 +197,16 @@ class RedirectTest {
                 assertTrue(System.nanoTime() < deadline, "no redirect");
                 Thread.sleep(1);
             }
+            assertNull(provider.carrierIdentity());
+            assertEquals(1, changes.get());
             var during = new java.util.concurrent.CompletableFuture<Void>();
             pipe.writer().write(io.zmux.carrier.OutboundBatch.of(java.nio.ByteBuffer.wrap("during".getBytes(UTF_8))), completion(during));
             hold.countDown();
             during.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertNotNull(provider.carrierIdentity());
+            assertNotSame(original, provider.carrierIdentity());
+            assertEquals(2, changes.get());
+            unwatch.run();
             String want = "before during";
             synchronized (body) {
                 while (body.size() < want.length() && System.nanoTime() < deadline) body.wait(100);

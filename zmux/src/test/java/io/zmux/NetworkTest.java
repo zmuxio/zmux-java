@@ -69,6 +69,28 @@ class NetworkTest {
         }
     }
 
+    @Test void failedEngineFactoryClosesOnlyItsArrival() throws Exception {
+        // HS-08.
+        var context = javax.net.ssl.SSLContext.getInstance("TLSv1.3");
+        try (var loops = EventLoops.create(1)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            try (var listener = Zmux.listen(any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(1)
+                    .tls(TlsOptions.server(context)).build())) {
+                try (var socket = new java.net.Socket()) {
+                    socket.connect(listener.localAddress(), 5000);
+                    socket.setSoTimeout(5000);
+                    assertEquals(-1, socket.getInputStream().read());
+                }
+                TestTls.initializeServer(context);
+                try (var client = Zmux.connectTls(listener.localAddress(), TlsOptions.client(TestTls.client(), "localhost"), cfg);
+                     var server = listener.accept(java.time.Duration.ofSeconds(5))) {
+                    org.junit.jupiter.api.Assertions.assertNotNull(server);
+                    assertEquals(1, client.pipes().size());
+                }
+            }
+        }
+    }
+
     @Test
     void tcp() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {

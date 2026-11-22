@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * A snapshot of a session, as of its loop's last round. Counts only
+ * A snapshot of a session, as of its loop's last round. Cumulative counts only
  * increase; gauges are current values; RTTs are null before the first sample.
  *
  * @param carrier the carrier kind a carrier choice chose (the latest, after a switch); null for a
@@ -30,7 +30,7 @@ import java.util.List;
  * @param datagramsDroppedRecv received datagrams dropped: a full queue, an unknown or closed stream, the byte limit
  * @param datagramsDroppedLimit datagrams dropped by a datagram limiter, sent or received
  * @param noEffectBudget gauge: the current tokens of the no-effect budget
- * @param joinFailures join attempts failed in a row since the last verified Reply
+ * @param joinFailures gauge: consecutive failed join attempts, reset by a Proven join
  * @param joinBatchDropped frames of a Hello's or a Reply's first batch dropped
  * @param logLinesDropped log lines not delivered because a logger queue or hand-off was full; always 0 here: the
  *     {@link System.Logger} of {@link ZmuxConfig.Builder#logger} is called directly, never through a queue

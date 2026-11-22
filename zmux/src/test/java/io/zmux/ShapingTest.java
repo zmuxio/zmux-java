@@ -41,6 +41,10 @@ class ShapingTest {
         @Override public void abort(Throwable cause) { inner.abort(cause); }
         /** Whether a record of the BYTE_STREAM bytes carries a PIPE_ACK frame. */
         static boolean carriesPipeAck(byte[] b) {
+            return carriesPipeAck(b, entry -> true);
+        }
+
+        static boolean carriesPipeAck(byte[] b, java.util.function.Predicate<io.zmux.internal.wire.Frame.AckEntries> matches) {
             var buf = ByteBuffer.wrap(b);
             var dec = new io.zmux.internal.wire.FrameDecoder();
             var f = new io.zmux.internal.wire.Frame();
@@ -52,7 +56,10 @@ class ShapingTest {
                     int pos = i + len, end = (int) (pos + v);
                     while (pos < end) {
                         int n = dec.decode(buf, pos, end, f);
-                        if (f.type == io.zmux.internal.wire.FrameType.PIPE_ACK) return true;
+                        if (f.type == io.zmux.internal.wire.FrameType.PIPE_ACK) {
+                            var entries = f.entries(new io.zmux.internal.wire.Frame.AckEntries());
+                            while (entries.next()) if (matches.test(entries)) return true;
+                        }
                         pos += n;
                     }
                     i = end;

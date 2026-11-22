@@ -443,7 +443,7 @@ public final class Session {
     }
 
     /** A verified join goes active; null when the session or the pipe ended since its Reply. */
-    public Joins.Finished joinFinish(long id, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t) {
+    public Joins.Finished joinFinish(long id, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t) throws io.zmux.seal.SecureCarrierException {
         setNow(t);
         if (isClosing() || !(path instanceof PathSession mp)) return null;
         return mp.joins.joinFinish(pipes.get(id), plan, overhead);
@@ -703,7 +703,7 @@ public final class Session {
      * this long only to cover a loop that lags.
      */
     public static long closeCeiling() {
-        return Math.max(2 * Time.SECOND, lingerForTests) + closeLimit;
+        return Math.max(MAX_LINGER, lingerForTests) + closeLimit;
     }
 
     /**
@@ -736,11 +736,10 @@ public final class Session {
 
     /** The negotiated idle timeout, 0 when none. */
     private long idleTimeout() {
-        long a = cfg.local().maxIdleTimeoutMillis, b = peer.maxIdleTimeoutMillis;
-        if (a == 0 && b == 0) return 0;
-        if (a == 0) return Time.millis(b);
-        if (b == 0 || a < b) return Time.millis(a);
-        return Time.millis(b);
+        long a = cfg.localIdleTimeout(), b = Time.millis(peer.maxIdleTimeoutMillis);
+        if (a == 0) return b;
+        if (b == 0) return a;
+        return Math.min(a, b);
     }
 
     /** The session SRTT: the smoothed RTT over its pipes. */
@@ -754,6 +753,8 @@ public final class Session {
         return 333 * Time.MILLISECOND;
     }
 
+    public static final long MAX_LINGER = 2 * Time.SECOND;
+
     /** A fixed linger timeout in nanoseconds for tests (0: none); set through Diagnostics. */
     public static volatile long lingerForTests;
 
@@ -761,10 +762,13 @@ public final class Session {
     public long lingerTimeout() {
         long fixed = lingerForTests;
         if (fixed > 0) return fixed;
-        return Math.clamp(Time.mul(srtt(), 3), 250 * Time.MILLISECOND, 2 * Time.SECOND);
+        return Math.clamp(Time.mul(srtt(), 3), 250 * Time.MILLISECOND, MAX_LINGER);
     }
 
     // ---- closing ----
+
+    /** A lane 0 write failure awaiting the peer's close on the surviving inbound lane. */
+    private SessionError pendingWriteFailure;
 
     /**
      * Enters CLOSING and queues CONNECTION_CLOSE fr on every live outbound pipe; with fr
@@ -773,6 +777,7 @@ public final class Session {
      */
     void closeWith(SessionError e, CloseFrame fr) {
         if (isClosing()) return;
+        pendingWriteFailure = null;
         err = e;
         state = SessionState.CLOSING;
         failAllStreams();
@@ -851,6 +856,7 @@ public final class Session {
     /** Closes without CONNECTION_CLOSE; graceful shuts down the write sides and lingers. */
     void closeSilently(SessionError e, boolean graceful) {
         if (isClosing()) return;
+        pendingWriteFailure = null;
         err = e;
         state = SessionState.CLOSING;
         failAllStreams();
@@ -1126,6 +1132,10 @@ public final class Session {
             checkLingerDone();
             return;
         }
+        if (lane == 0 && pendingWriteFailure != null) {
+            closeWith(pendingWriteFailure, null);
+            return;
+        }
         path.inboundEnded(p, failed, allEnded, cause);
     }
 
@@ -1164,6 +1174,18 @@ public final class Session {
                     lanes.refused(p, ol);
                     return;
                 }
+            }
+        }
+        if (lane == 0 && peerSeen && !feat.multipath()) {
+            Pipe p = pipes.get(pipeId);
+            if (p != null && p.out() != null && p.in() != null && !p.in().first().rx.ended()) {
+                if (pendingWriteFailure == null) {
+                    p.out().fail();
+                    pipes.changed();
+                    pendingWriteFailure = SessionError.pipesLost(cause);
+                    life.linger(Time.add(now, lingerTimeout()));
+                }
+                return;
             }
         }
         path.outboundFailed(pipeId, cause);
@@ -1219,24 +1241,6 @@ public final class Session {
         java.math.BigInteger q = java.math.BigInteger.valueOf(lost).multiply(java.math.BigInteger.valueOf(records))
                 .add(java.math.BigInteger.valueOf(sent - 1)).divide(java.math.BigInteger.valueOf(sent));
         return q.bitLength() < 64 ? q.longValue() : Long.MAX_VALUE;
-    }
-
-    /** The shortest time between two samples of a pipe's smoothed loss rate. */
-    static final long LOSS_SAMPLE_GAP = Time.SECOND;
-
-    /** Whether pipe's carrier retransmission count is due for a query (at most once per {@link #LOSS_SAMPLE_GAP}). */
-    public boolean retransmittedDue(long pipeId, long t) {
-        Pipe p = pipes.get(pipeId);
-        return p != null && p.out() != null && p.out().retransmittedDue(t, LOSS_SAMPLE_GAP);
-    }
-
-    /**
-     * Records the bytes the carrier of a pipe retransmitted, as its adapter reports them (-1:
-     * it reports none), and samples the pipe's smoothed loss rate (PipeStats.lossRate).
-     */
-    public void retransmittedReported(long pipeId, long n, long t) {
-        Pipe p = pipes.get(pipeId);
-        if (p != null && p.out() != null) p.out().retransmitted(n, t, LOSS_SAMPLE_GAP);
     }
 
     /** Starts the linger timer once CONNECTION_CLOSE was handed to every live outbound pipe. */
@@ -1384,9 +1388,8 @@ public final class Session {
         double rate = 0;
         long unsent = -1;
         boolean writable = false;
-        int lanesOut = 0, lanesIn = 0;
+        long lanesOut = 0, lanesIn = 0;
         long lanesRefused = 0;
-        var lanes = new java.util.ArrayList<io.zmux.PipeStats.LaneStats>(0);
         if (p.out() != null) {
             for (Pipe.OutLane l : p.out().lanes) {
                 sent += l.tx.pos();
@@ -1406,16 +1409,7 @@ public final class Session {
             for (Pipe.InLane l : p.in().lanes) { received += l.rx.pos(); recordsIn += l.rx.recs(); }
             lanesIn = p.in().lanes.size();
         }
-        if (lanesOut > 1 || lanesIn > 1) {
-            for (int i = 0; i < Math.max(lanesOut, lanesIn); i++) {
-                Pipe.OutLane ol = p.out() != null ? p.out().lane(i) : null;
-                Pipe.InLane il = p.in() != null && i < p.in().lanes.size() ? p.in().lanes.get(i) : null;
-                lanes.add(new io.zmux.PipeStats.LaneStats(i,
-                        ol == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(ol.tx.pos()),
-                        ol == null || !acks ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(ol.ack.acked()),
-                        il == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(il.rx.pos())));
-            }
-        }
+        var lanes = lanesOut > 1 || lanesIn > 1 ? laneStats(p, acks) : java.util.List.<io.zmux.PipeStats.LaneStats>of();
         var src = new io.zmux.PipeStats.RttSource[1];
         long[] rtt = rttOf(p, src);
         boolean eligible = false, saturated = false;
@@ -1433,10 +1427,17 @@ public final class Session {
         boolean peerRequest = peer != null;
         boolean outLive = acks && p.out() != null;
         boolean live = state.out() == PipeInfo.Out.ACTIVE || state.out() == PipeInfo.Out.SUSPECT || state.in() == PipeInfo.In.OPEN;
+        long attachedAt = a == null ? start : a.joining.attachedAt();
+        long epoch = id == 0 ? 0 : a == null ? -1 : a.joining.joinedEpoch();
+        // The policy allows two epoch periods for an attachment before replacement.
+        long replaceBy = a == null || epoch < 0 ? Time.NEVER : Time.add(attachedAt, Time.mul(cfg.epochs().period(), 2));
         return new io.zmux.PipeStats(io.zmux.PipeId.of(id), io.zmux.internal.join.Mode.record(pipeMode(id)), a == null ? initiator() : a.joinerLocal,
                 a == null ? 0 : a.fate, p.label(), p.carrier(), p.variant(),
                 state.out().toPublic(), state.in().toPublic(),
-                nanos(a == null ? Time.sub(snapshotTime, start) : Time.sub(snapshotTime, a.joining.attachedAt())),
+                nanos(Time.sub(snapshotTime, attachedAt)),
+                epoch < 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(epoch),
+                replaceBy == Time.NEVER ? java.util.OptionalLong.empty()
+                        : java.util.OptionalLong.of(nanoTime + Time.sub(replaceBy, snapshotTime)),
                 path.peerAttached(p),
                 a == null ? 0 : a.health.suspects(), a == null ? 0 : a.health.failures(),
                 a == null || a.health.failCode() < 0 ? null : new io.zmux.PipeStats.Failure(a.health.failCode(), a.health.failCause()),
@@ -1460,8 +1461,7 @@ public final class Session {
                 a == null ? 0 : a.ret.reinjectedBytes(),
                 outLive ? java.util.OptionalLong.of(lost) : java.util.OptionalLong.empty(),
                 outLive ? java.util.OptionalLong.of(sent == 0 ? 0 : lostRecords(lost, recordsOut, sent)) : java.util.OptionalLong.empty(),
-                p.out() == null || p.out().retransmitted() < 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(p.out().retransmitted()),
-                p.out() == null || !p.out().lossKnown() ? java.util.OptionalDouble.empty() : java.util.OptionalDouble.of(p.out().lossRate()),
+                java.util.Optional.empty(),
                 a == null ? 0 : a.ret.oppBytes(), a == null ? 0 : a.ret.redundantBytes(),
                 a == null ? 0 : a.ret.duplicateBytes(), a == null ? 0 : a.health.pingsSent(), a == null ? 0 : a.health.pingsAnswered(),
                 a == null || p.out() == null ? null : nanos(Time.sub(snapshotTime, a.link.lastAdvance())),
@@ -1470,12 +1470,37 @@ public final class Session {
                 lanesOut, lanesIn, lanesRefused, lanes);
     }
 
+    /** Per-lane statistics of a pipe with more than one lane in either direction, ordered by lane number. */
+    private static java.util.List<io.zmux.PipeStats.LaneStats> laneStats(Pipe p, boolean acks) {
+        var lanes = new java.util.ArrayList<io.zmux.PipeStats.LaneStats>();
+        if (p.out() != null) {
+            for (Pipe.OutLane ol : p.out().lanes) {
+                Pipe.InLane il = p.in() == null ? null : p.in().lane(ol.lane);
+                lanes.add(new io.zmux.PipeStats.LaneStats(ol.lane, java.util.OptionalLong.of(ol.tx.pos()),
+                        acks ? java.util.OptionalLong.of(ol.ack.acked()) : java.util.OptionalLong.empty(),
+                        il == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(il.rx.pos())));
+            }
+        }
+        if (p.in() != null) {
+            for (Pipe.InLane il : p.in().lanes) {
+                if (p.out() == null || p.out().lane(il.lane) == null) {
+                    lanes.add(new io.zmux.PipeStats.LaneStats(il.lane, java.util.OptionalLong.empty(),
+                            java.util.OptionalLong.empty(), java.util.OptionalLong.of(il.rx.pos())));
+                }
+            }
+            // Inbound lanes can arrive out of order or have nonconsecutive numbers.
+            lanes.sort(java.util.Comparator.comparingLong(io.zmux.PipeStats.LaneStats::lane));
+        }
+        return lanes;
+    }
+
     // ---- timers ----
 
     /** The earliest deadline, {@link Time#NEVER} when none (every deadline source is here). */
     public long nextTimeout() {
         if (state == SessionState.CLOSED) return Time.NEVER;
         long t = life.deadline();
+        if (pendingWriteFailure != null) return t;
         if (isClosing()) return life.closeWait() ? Math.min(t, closeWaitDeadline()) : t;
         t = Math.min(t, lanes.deadline());
         if (state == SessionState.SUSPENDED) t = Math.min(t, grace);
@@ -1506,6 +1531,10 @@ public final class Session {
         setNow(t);
         path.pickInput();
         if (state == SessionState.CLOSED) return;
+        if (pendingWriteFailure != null) {
+            if (life.lingerDue(t)) closeWith(pendingWriteFailure, null);
+            return;
+        }
         if (life.firstFlightDue(t) && releaseFirstFlight(t)) stats.firstFlightTimeout();
         if (life.handshakeDue(t)) {
             if (!peerSeen) {
@@ -1528,7 +1557,7 @@ public final class Session {
             return;
         }
         lanes.onTimeout(t);
-        if (state == SessionState.SUSPENDED && t >= grace) {
+        if (state == SessionState.SUSPENDED && grace != Time.NEVER && t >= grace) {
             // Grace expiry: CONNECTION_CLOSE on any live outbound pipe, otherwise a local close.
             grace = Time.NEVER;
             closeWith(new SessionError(SessionError.Kind.RESUME_TIMEOUT, TransportError.RESUME_TIMEOUT, 0, "", "",

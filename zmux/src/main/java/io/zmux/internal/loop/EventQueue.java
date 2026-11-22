@@ -45,6 +45,23 @@ final class EventQueue {
     /** The live pipes of which the application has read a PipeFailed or PipeClosed (bounded by the pipes the session holds). */
     private final java.util.Set<Long> terminalRead = new java.util.HashSet<>();
     private boolean frozen;
+    private static final class Hold {
+        int count;
+        Boolean retired;
+    }
+    private final java.util.Map<Long, Hold> holds = new java.util.HashMap<>();
+
+    void hold(long pipe) { holds.computeIfAbsent(pipe, ignored -> new Hold()).count++; }
+
+    void release(long pipe) {
+        Hold hold = holds.get(pipe);
+        if (--hold.count != 0) return;
+        holds.remove(pipe);
+        if (hold.retired != null) retire(pipe, hold.retired);
+        wakeFirst();
+    }
+
+    boolean holding() { return !holds.isEmpty(); }
 
     /** Queues e (CLOSED and the internal kinds are not application events). */
     void add(Event e) {
@@ -109,6 +126,8 @@ final class EventQueue {
      * counts in neither.
      */
     private void retire(long pipe, boolean failed) {
+        Hold hold = holds.get(pipe);
+        if (hold != null) { hold.retired = failed; return; }
         boolean read = terminalRead.remove(pipe);
         for (Event.Kind kind : PIPE_DIRECTED) {
             for (int dir : DIRECTIONS) pending.remove(new Key(kind, pipe, dir, null));
@@ -128,17 +147,18 @@ final class EventQueue {
     @SuppressWarnings("ReferenceEquality") // SUMMARY is a sentinel key
     Object poll(Waiter waiter) {
         var it = pending.entrySet().iterator();
-        if (!it.hasNext()) {
-            if (!waiters.contains(waiter)) waiters.add(waiter);
-            return null;
+        while (it.hasNext()) {
+            var first = it.next();
+            if (!holds.isEmpty() && holds.containsKey(first.getKey().pipe)) continue;
+            it.remove();
+            if (first.getKey() == SUMMARY) summary = null;
+            else if (first.getValue() instanceof Event ev && ev.pipeTerminal()) terminalRead.add(ev.pipe());
+            waiters.remove(waiter);
+            if (!pending.isEmpty()) wakeFirst();
+            return first.getValue();
         }
-        var first = it.next();
-        it.remove();
-        if (first.getKey() == SUMMARY) summary = null;
-        else if (first.getValue() instanceof Event ev && ev.pipeTerminal()) terminalRead.add(ev.pipe());
-        waiters.remove(waiter);
-        if (!pending.isEmpty() && !waiters.isEmpty()) waiters.getFirst().wake();
-        return first.getValue();
+        if (!waiters.contains(waiter)) waiters.add(waiter);
+        return null;
     }
 
     /** The number of unread events (one per key). */
@@ -155,8 +175,9 @@ final class EventQueue {
         if (!pending.isEmpty() && !waiters.isEmpty()) waiters.getFirst().wake();
     }
 
-    /** The session ended: every waiter re-polls and then sees the end. */
-    void wakeAll() {
+    /** The mailbox has closed. No consumer can begin another poll. */
+    void end() {
+        holds.clear();
         for (Waiter w : new ArrayList<>(waiters)) w.wake();
         waiters.clear();
     }

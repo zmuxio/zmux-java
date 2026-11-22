@@ -2,11 +2,12 @@ package io.zmux;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.OptionalDouble;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 /**
- * A snapshot of one attachment, taken on the session's loop. A field that
+ * A snapshot of one attachment. Pipe fields are taken on the session's loop, and the
+ * carrier observation is read from the shared connection cache. A field that
  * can be absent is null (objects and durations) or an empty {@link OptionalLong} (counts,
  * positions, IDs, rates and points in time). Rates are bytes per second; {@link #deliveryRate()} is a sender
  * estimate, not guaranteed bandwidth. Points in time are {@link System#nanoTime()} values. The
@@ -22,7 +23,9 @@ import java.util.OptionalLong;
  *     it ({@link io.zmux.carrier.PipeIo#withVariant}); "" without one
  * @param outbound the outbound direction's state, or null without one
  * @param inbound the inbound direction's state, or null without one
- * @param attachedFor time since the attachment was made
+ * @param attachedFor gauge: time since the attachment was made
+ * @param epoch the epoch used when joining; 0 for pipe 0, otherwise empty before an epoch is known
+ * @param replaceBy the epoch policy's replacement deadline, empty without a representable deadline
  * @param peerAttached the peer has attached it; always true for pipe 0
  *     and for pipes the peer joined
  * @param suspectCount times the outbound pipe became suspect
@@ -36,7 +39,7 @@ import java.util.OptionalLong;
  * @param receiveStandby the standby flag requested of the peer
  * @param requestSeq the sequence number of the last PIPE_STATUS request sent
  * @param peerRequest the peer's latest request for the outbound direction, or null before one
- * @param weight the outbound direction's weight
+ * @param weight gauge: the outbound direction's weight
  * @param probationUntil the end of the outbound pipe's probation; empty outside probation or when it never ends
  * @param inProbation whether the outbound pipe is in probation now
  * @param revalidating awaiting revalidation
@@ -65,20 +68,17 @@ import java.util.OptionalLong;
  *     counts this pipe's carrier bytes, frame overhead included
  * @param recordsLost bytesLost in records, estimated as bytesLost &times; recordsSent / bytesSent rounded up; empty
  *     without acknowledgements
- * @param bytesRetransmitted the bytes the carrier itself retransmitted, as its adapter reports them
- *     ({@link io.zmux.carrier.PipeWriter#retransmitted()}); pipes that share one carrier connection report that
- *     connection's count; empty where the adapter reports none
- * @param lossRate the carrier's smoothed loss rate: an EWMA (gain 1/8) of the bytes retransmitted per byte sent
- *     between samples at least 1 s apart; empty without a retransmission count and before the first sample
+ * @param carrierSample the cached observation of the outbound connection, empty before the first observation
+ *     or when there is no identifiable outbound carrier
  * @param bytesOpportunistic opportunistic copies sent on the outbound pipe
  * @param bytesRedundant redundant copies sent on the outbound pipe
  * @param bytesDuplicateReceived duplicate stream bytes received on the inbound pipe
  * @param pingsSent PIPE_PING frames sent
  * @param pingsAnswered of these, those answered by an acknowledgement
- * @param sinceLastAck time since the acknowledged position last advanced; null without an
+ * @param sinceLastAck gauge: time since the acknowledged position last advanced; null without an
  *     outbound direction or acknowledgements
- * @param sinceLastReceive time since the inbound pipe last completed a record; null without one
- * @param sinceLastTraffic time since a record carrying a traffic frame (STREAM, RESET_STREAM,
+ * @param sinceLastReceive gauge: time since the inbound pipe last completed a record; null without one
+ * @param sinceLastTraffic gauge: time since a record carrying a traffic frame (STREAM, RESET_STREAM,
  *     RESET_STREAM_AT, STOP_SENDING or DATAGRAM) was sent or completely received on the pipe, or
  *     since it became live; null while neither direction is live
  * @param lanesOut gauge: the lanes of the outbound direction, lane 0 included
@@ -88,7 +88,8 @@ import java.util.OptionalLong;
  */
 public record PipeStats(PipeId pipe, RecordMode recordMode, boolean local, long fateGroup, String label, CarrierKind carrier,
                         String variant, PipeState.Outbound outbound, PipeState.Inbound inbound, Duration attachedFor,
-                        boolean peerAttached, long suspectCount, long failureCount, Failure failure,
+                        OptionalLong epoch, OptionalLong replaceBy, boolean peerAttached, long suspectCount,
+                        long failureCount, Failure failure,
                         long sendPriority, SettingSource sendPrioritySource, boolean standby, SettingSource standbySource,
                         long receivePriority, boolean receiveStandby, long requestSeq, PeerRequest peerRequest, long weight,
                         OptionalLong probationUntil, boolean inProbation, boolean revalidating, boolean eligible,
@@ -96,10 +97,10 @@ public record PipeStats(PipeId pipe, RecordMode recordMode, boolean local, long 
                         Duration rttvar, Duration oneWayDelay, OptionalLong deliveryRate, OptionalLong queuedBytes,
                         Duration queueDelay, OptionalLong bytesInFlight, long bytesSent, long bytesReceived,
                         OptionalLong bytesAcked, long recordsSent, long recordsReceived, long bytesReinjected,
-                        OptionalLong bytesLost, OptionalLong recordsLost, OptionalLong bytesRetransmitted, OptionalDouble lossRate,
+                        OptionalLong bytesLost, OptionalLong recordsLost, Optional<CarrierSample> carrierSample,
                         long bytesOpportunistic, long bytesRedundant, long bytesDuplicateReceived, long pingsSent,
                         long pingsAnswered, Duration sinceLastAck, Duration sinceLastReceive, Duration sinceLastTraffic,
-                        int lanesOut, int lanesIn, long lanesRefused, List<LaneStats> lanes) {
+                        long lanesOut, long lanesIn, long lanesRefused, List<LaneStats> lanes) {
     public PipeStats {
         lanes = List.copyOf(lanes);
     }
@@ -126,7 +127,7 @@ public record PipeStats(PipeId pipe, RecordMode recordMode, boolean local, long 
      *
      * @param lane its number
      * @param positionSent bytes written on the outbound lane, its first record included
-     * @param positionAcked the position the peer acknowledged on it
+     * @param positionAcked the position the peer acknowledged on it, empty without acknowledgements
      * @param positionReceived the position of the inbound lane
      */
     public record LaneStats(long lane, OptionalLong positionSent, OptionalLong positionAcked, OptionalLong positionReceived) {}

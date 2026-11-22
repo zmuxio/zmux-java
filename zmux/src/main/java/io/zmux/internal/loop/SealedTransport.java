@@ -17,12 +17,12 @@ import java.nio.ByteBuffer;
  * Establish. A failed authentication is permanent and closes the carrier abortively; a cut record is a
  * carrier failure.
  */
-public final class SealedTransport implements Transport, Inbound {
+public final class SealedTransport extends PhysicalTransport implements Inbound {
     /** The largest plaintext of a sealed record. */
     public static final int MAX_RECORD = 65519;
     private static final int LEN = 2;
 
-    private final Transport lower;
+    private final PhysicalTransport lower;
     private final RecordProtection records;
     private final io.zmux.carrier.PipeIo.Exporter exporter;
     private byte[] firstBytes;
@@ -48,7 +48,7 @@ public final class SealedTransport implements Transport, Inbound {
 
     /** One record per message of the carrier's records; exporter is what this carrier exports. */
     public SealedTransport(Transport lower, RecordProtection records, io.zmux.carrier.PipeIo.Exporter exporter) {
-        this.lower = lower;
+        this.lower = (PhysicalTransport) lower;
         this.records = records;
         this.exporter = exporter;
         firstBytes = records.firstBytes();
@@ -70,6 +70,14 @@ public final class SealedTransport implements Transport, Inbound {
     }
 
     @Override public TransportInfo info() { return info; }
+    @Override public Object carrierIdentity() { return lower.carrierIdentity(); }
+    @Override public Runnable watchCarrier(Runnable changed) {
+        return lower.watchCarrier(changed);
+    }
+
+    @Override public Query carrierQuery(Object identity) {
+        return lower.carrierQuery(identity);
+    }
     @Override public SessionHost loop() { return lower.loop(); }
     @Override public void start(Inbound in) {
         upper = in;
@@ -82,7 +90,10 @@ public final class SealedTransport implements Transport, Inbound {
     @Override public void rebind(Inbound in) { upper = in; lower.rebind(this); }
     @Override public Inbound inbound() { return upper; }
     @Override public Throwable inputError() { return openFailure != null ? openFailure : lower.inputError(); }
+    @Override public boolean resumesAfterPeekTimeout() { return lower.resumesAfterPeekTimeout(); }
     @Override public int directions() { return lower.directions(); }
+    @Override public CarrierSetup setup() { return lower.setup(); }
+    @Override CarrierSetup.Bound closeRight() { return lower.closeRight().as(this); }
     @Override public void restrict(int required) { lower.restrict(required); }
     @Override public boolean writable() { return upperBatch == null && lower.writable(); }
     @Override public void pauseInput() { lower.pauseInput(); }
@@ -90,11 +101,15 @@ public final class SealedTransport implements Transport, Inbound {
     @Override public void redeliver() { lower.redeliver(); }
     @Override public void shutdownOutput() { lower.shutdownOutput(); }
     @Override public void shutdownInput() { lower.shutdownInput(); }
-    @Override public void close(Throwable cause) { lower.close(cause); }
-    @Override public boolean abortable() { return lower.abortable(); }
-    @Override public void abort(Throwable cause) { lower.abort(cause); }
+    @Override void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
+        lower.closePhysical(permit, cause);
+    }
+    @Override protected java.util.function.Consumer<Throwable> closeEscalation() { return lower.closeEscalation(); }
     @Override public boolean isClosed() { return lower.isClosed(); }
-    @Override public Transport moveTo(SessionHost to) { lower.close(null); return null; }
+    @Override Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost to) {
+        java.util.Objects.requireNonNull(permit);
+        return null;
+    }
     @Override public boolean exporterPresent() { return true; }
     @Override public boolean isSecure() { return lower.isSecure(); }
     @Override public io.zmux.RecordMode firstPipeMode() { return lower.firstPipeMode(); }
@@ -102,6 +117,7 @@ public final class SealedTransport implements Transport, Inbound {
     @Override public long handshakePadding() { return lower.handshakePadding(); }
     @Override public boolean ownsHalf(Object half) { return lower.ownsHalf(half); }
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return lower.whenClosed(); }
+    @Override public java.util.concurrent.CompletionStage<Void> writesReleased() { return lower.writesReleased(); }
     @Override public void taken() { lower.taken(); }
     @Override public java.util.concurrent.CompletionStage<Boolean> whenTaken() { return lower.whenTaken(); }
 
@@ -138,7 +154,7 @@ public final class SealedTransport implements Transport, Inbound {
                 out.wrap(OutboundBatch.of(msgs));
             }
         } catch (SecureCarrierException e) {
-            lower.close(e);
+            CarrierSetup.connectionLost(this, e);
             upperBatch = null;
             upper.written(this, b, e);
             return;
@@ -210,7 +226,7 @@ public final class SealedTransport implements Transport, Inbound {
      */
     private void openFailed(SecureCarrierException e) {
         openFailure = e;
-        lower.close(e);
+        CarrierSetup.connectionLost(this, e);
         ended(this, false, false);
     }
 

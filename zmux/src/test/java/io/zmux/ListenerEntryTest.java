@@ -136,7 +136,7 @@ class ListenerEntryTest {
             var f = pending.poll(5, TimeUnit.SECONDS);
             l.close();
             ended.get(5, TimeUnit.SECONDS);
-            assertTrue(f.isCancelled());
+            assertThrows(java.util.concurrent.CancellationException.class, () -> f.get(3, TimeUnit.SECONDS));
             assertEquals(new AdmissionStats(0, 0, 0, 1, 0, 0, 0, 0), l.stats().admission());
         }
     }
@@ -189,13 +189,21 @@ class ListenerEntryTest {
                 assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.CLOSE).verdict().toCompletableFuture().join());
                 assertEquals(AdmissionVerdict.CLOSE, carrier.apply(null).verdict().toCompletableFuture().join()); // a decider that throws closes
                 assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.accept(5)).verdict().toCompletableFuture().join()); // a skip outside the prefix closes
-                assertEquals(AdmissionVerdict.FALLBACK, carrier.apply(Admission.Decision.FALLBACK).verdict().toCompletableFuture().join());
-                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
-                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
+                var fallback = carrier.apply(Admission.Decision.FALLBACK.withVariant("host"));
+                assertEquals(AdmissionVerdict.FALLBACK, fallback.verdict().join());
+                fallback.awaitSetup();
+                assertEquals(java.util.List.of(new Admission.VariantStat("host", false, 0, 1, 0, 0, 0)), l.variantStats());
+                var takeover = carrier.apply(Admission.Decision.takeover(null).withVariant("host"));
+                assertEquals(AdmissionVerdict.TAKEOVER, takeover.verdict().join());
+                takeover.awaitSetup();
+                assertEquals(java.util.List.of(new Admission.VariantStat("host", false, 0, 1, 1, 0, 0)), l.variantStats());
+                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL.withVariant("host")).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.STALL, carrier.apply(Admission.Decision.STALL.withVariant("host")).verdict().toCompletableFuture().join());
                 // Two stalls hold two of the source's three slots: a third stall is closed at once.
-                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.STALL).verdict().toCompletableFuture().join());
+                assertEquals(AdmissionVerdict.CLOSE, carrier.apply(Admission.Decision.STALL.withVariant("host")).verdict().toCompletableFuture().join());
                 await(() -> l.stats().admission().stallOverflow() == 1);
-                assertEquals(new AdmissionStats(0, 1, 2, 3, 1, 0, 0, 0), l.stats().admission());
+                assertEquals(java.util.List.of(new Admission.VariantStat("host", false, 0, 1, 1, 3, 0)), l.variantStats());
+                assertEquals(new AdmissionStats(0, 1, 1, 2, 3, 1, 0, 0, 0), l.stats().admission());
                 assertEquals(0, l.stats().rejected(), "an admission's decision is not a rejection");
             }
         }
@@ -241,6 +249,7 @@ class ListenerEntryTest {
     }
 
     @Test void aShutdownTakesNoNewSessionButJoinsUntilItsSessionsEnd() throws Exception {
+        // HS-31.
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             var l = Zmux.listener(ListenerConfig.of(cfg));

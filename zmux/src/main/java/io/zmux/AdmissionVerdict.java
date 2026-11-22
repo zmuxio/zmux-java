@@ -6,13 +6,15 @@ public enum AdmissionVerdict {
     ACCEPT,
     /**
      * The carrier goes, with every byte or message read replayed, to {@link ListenerConfig#fallback()} as a
-     * {@link Takeover}, whatever entry took it; without a fallback it is stalled (counted as a fallback). An HTTP
+     * {@link Takeover}, whatever entry took it; without a fallback it is counted as a stall or stall overflow. An HTTP
      * request that is itself the carrier, decided on its head or body, and an upgrade refused on its head, are
      * requests rather than carriers to take over: their HTTP adapter answers them ({@link
      * io.zmux.adapter.ListenerAdapter#handleRequest}). The carrier of an upgrade decided after a {@link #DEFER}
      * is a carrier: it goes to the listener's fallback.
      */
     FALLBACK,
+    /** Hands the carrier itself to the listener fallback, after any response head or upgrade. */
+    TAKEOVER,
     /**
      * Reads and discards what arrives, sends nothing, and closes the carrier gracefully when
      * the peer ends it or after a duration that depends on its source alone. A stalled carrier

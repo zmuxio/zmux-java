@@ -7,6 +7,11 @@ public final class Clock {
     private Clock() {}
 
     public static long now() {
-        return System.nanoTime() - ORIGIN;
+        return fromNanoTime(System.nanoTime());
+    }
+
+    /** Converts the reading of an already sampled monotonic clock. */
+    static long fromNanoTime(long reading) {
+        return reading - ORIGIN;
     }
 }

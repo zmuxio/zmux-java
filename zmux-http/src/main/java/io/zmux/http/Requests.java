@@ -9,6 +9,9 @@ import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.ssl.SslHandler;
 import io.zmux.RequestHead;
 import io.zmux.carrier.PipeIo;
+import io.zmux.carrier.PipeWriter;
+import io.zmux.http.internal.HttpTransport;
+import io.zmux.internal.spi.CarrierProvider;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,16 +20,47 @@ import java.util.Map;
 import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.SSLEngine;
 
-/** What the HTTP adapters read off a request and its connection. */
+/**
+ * What the HTTP adapters read off a request and its connection. Transport streams are attached
+ * by the zmux-http3 module, so analysis of this module alone sees them as always absent.
+ */
+@SuppressWarnings("ConstantValue")
 final class Requests {
     private Requests() {}
 
-    /** The connection carrying ch: ch itself, or the connection of an HTTP/2 stream. */
+    static boolean h3(Channel ch) { return HttpTransport.stream(ch) != null; }
+
+    static boolean multiplexed(Channel ch) {
+        return ch instanceof Http2StreamChannel || h3(ch);
+    }
+
+    /** The physical HTTP connection carrying this request. */
     static Channel connection(Channel ch) {
+        var stream = HttpTransport.stream(ch);
+        if (stream != null) return stream.connection();
         return ch instanceof Http2StreamChannel && ch.parent() != null ? ch.parent() : ch;
     }
 
+    /** The sending half reports the connection of its request rather than the pipe's combined identity. */
+    interface CarrierWriter extends PipeWriter, CarrierProvider {
+        Channel carrierRequest();
+
+        @Override default Object carrierIdentity() {
+            Channel request = carrierRequest();
+            if (request == null) return null;
+            var stream = HttpTransport.stream(request);
+            return stream == null ? connection(request) : stream.carrierIdentity();
+        }
+
+        @Override default CarrierProvider.Query carrierQuery(Object identity) {
+            Channel request = carrierRequest();
+            var stream = request == null ? null : HttpTransport.stream(request);
+            return stream == null ? null : stream.carrierQuery(identity);
+        }
+    }
+
     static int version(Channel ch, HttpRequest r) {
+        if (h3(ch)) return 3;
         return ch instanceof Http2StreamChannel ? 2 : r.protocolVersion().majorVersion();
     }
 
@@ -46,13 +80,16 @@ final class Requests {
             // HEADERS ended its stream (the codec makes it a full request).
             if ((version == 1 && !chunked) || full) cl = 0;
         }
-        String protocol = r.headers().get(":protocol", "");
+        String protocol = h3(ch) ? HttpTransport.protocol(ch) : r.headers().get(":protocol", "");
         return new HttpClass.Head(r.method().name(), version, protocol, cl, RequestHead.of(fields(r.headers())));
     }
 
     /** The address ch's connection arrived from directly; null when unknown. */
     static InetSocketAddress peer(Channel ch) {
-        return connection(ch).remoteAddress() instanceof InetSocketAddress a ? a : null;
+        var stream = HttpTransport.stream(ch);
+        if (stream != null) return stream.peer();
+        var address = connection(ch).remoteAddress();
+        return address instanceof InetSocketAddress peer ? peer : null;
     }
 
     /**
@@ -71,6 +108,8 @@ final class Requests {
 
     /** The TLS engine of ch's connection, or null. */
     static SSLEngine tls(Channel ch) {
+        var stream = HttpTransport.stream(ch);
+        if (stream != null) return stream.tls();
         SslHandler h = connection(ch).pipeline().get(SslHandler.class);
         return h == null ? null : h.engine();
     }
@@ -85,7 +124,7 @@ final class Requests {
         io = io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY);
         SSLEngine e = tls(ch);
         if (e == null) return io;
-        PipeIo.Exporter x = exporter(e);
+        PipeIo.Exporter x = exporter(ch, e);
         String sni = "";
         if (e.getSession() instanceof ExtendedSSLSession s) {
             for (var n : s.getRequestedServerNames()) if (n instanceof javax.net.ssl.SNIHostName h) { sni = h.getAsciiName(); break; }
@@ -95,6 +134,16 @@ final class Requests {
         if (sni.isEmpty() && e.getUseClientMode() && e.getPeerHost() != null) sni = e.getPeerHost();
         io = io.withExporter(x).withServerName(sni).withTerminatedTls(complete);
         return complete && e.getSession().getProtocol().equals("TLSv1.3") ? io.withCarrierSecure() : io;
+    }
+
+    static PipeIo.Exporter exporter(Channel ch) {
+        SSLEngine engine = tls(ch);
+        return engine == null ? null : exporter(ch, engine);
+    }
+
+    private static PipeIo.Exporter exporter(Channel ch, SSLEngine engine) {
+        var stream = HttpTransport.stream(ch);
+        return stream == null ? exporter(engine) : stream.exporter();
     }
 
     /** The keying material exporter of a TLS connection (RFC 5705). */

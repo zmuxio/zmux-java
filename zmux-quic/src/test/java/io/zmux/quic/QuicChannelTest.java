@@ -3,7 +3,11 @@ package io.zmux.quic;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.quic.QuicChannel;
 import io.zmux.*;
 import java.io.IOException;
@@ -12,6 +16,7 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -283,6 +288,41 @@ class QuicChannelTest {
         }
     }
 
+    /** Model a successful local DATAGRAM write lost before delivery. Stream writes use child channels. */
+    private static CompletableFuture<Void> loseNextDatagram(QuicChannel connection) throws Exception {
+        var lost = new CompletableFuture<Void>();
+        connection.eventLoop().submit(() -> connection.pipeline().addLast(new ChannelOutboundHandlerAdapter() {
+            @Override public void write(ChannelHandlerContext ctx, Object message, ChannelPromise result) {
+                if (message instanceof ByteBuf datagram) {
+                    ctx.pipeline().remove(this);
+                    datagram.release();
+                    result.setSuccess();
+                    lost.complete(null);
+                } else {
+                    ctx.write(message, result);
+                }
+            }
+        })).get(5, TimeUnit.SECONDS);
+        return lost;
+    }
+
+    private record Route(ZmuxSession sender, ZmuxSession receiver, String marker, java.util.Set<String> outstanding) {
+        Route(ZmuxSession sender, ZmuxSession receiver, String marker) {
+            this(sender, receiver, marker, new java.util.HashSet<>());
+        }
+
+        void probe(int round) throws java.io.IOException {
+            String payload = marker + "/" + round;
+            assertTrue(outstanding.add(payload));
+            sender.datagrams().send(ByteBuffer.wrap(payload.getBytes(UTF_8)));
+        }
+
+        void receive(Duration wait) throws java.io.IOException {
+            String received = new String(receiver.datagrams().receive(wait), UTF_8);
+            assertTrue(outstanding.remove(received), () -> marker + " received a foreign or duplicate probe: " + received);
+        }
+    }
+
     /** One connection carries the pipes of two sessions; its channel routes each datagram to its own. */
     @Test void sessionsShareTheConnectionsChannel() throws Exception {
         try (var loops = EventLoops.create(2)) {
@@ -295,32 +335,54 @@ class QuicChannelTest {
                 var p1 = pool.openPipeAsync().get(10, TimeUnit.SECONDS);
                 var p2 = pool.openPipeAsync().get(10, TimeUnit.SECONDS);
                 assertSame(p1.carrierConn(), p2.carrierConn());
-                ZmuxSession c1 = Zmux.open(p1, Role.CLIENT, config), c2 = Zmux.open(p2, Role.CLIENT, config);
-                ZmuxSession s1 = remote.accept(Duration.ofSeconds(10)), s2 = remote.accept(Duration.ofSeconds(10));
+                ZmuxSession c1 = Zmux.open(p1, Role.CLIENT, config);
+                ZmuxSession s1 = remote.accept(Duration.ofSeconds(10));
                 assertNotNull(s1);
+                ZmuxSession c2 = Zmux.open(p2, Role.CLIENT, config);
+                ZmuxSession s2 = remote.accept(Duration.ofSeconds(10));
                 assertNotNull(s2);
                 try {
-                    // Which accepted session belongs to which client session is learnt from a datagram.
-                    c1.datagrams().send(ByteBuffer.wrap(new byte[] {1}));
-                    byte[] first = s1.datagrams().receive(Duration.ofSeconds(5));
-                    if (first[0] != 1) { var t = s1; s1 = s2; s2 = t; assertArrayEquals(new byte[] {1}, s1.datagrams().receive(Duration.ofSeconds(5))); }
-                    for (int i = 0; i < 20; i++) {
-                        c1.datagrams().send(ByteBuffer.wrap(("one " + i).getBytes(UTF_8)));
-                        c2.datagrams().send(ByteBuffer.wrap(("two " + i).getBytes(UTF_8)));
-                        s1.datagrams().send(ByteBuffer.wrap(("back one " + i).getBytes(UTF_8)));
-                        s2.datagrams().send(ByteBuffer.wrap(("back two " + i).getBytes(UTF_8)));
+                    var allRoutes = List.of(new Route(c1, s1, "one"), new Route(c2, s2, "two"),
+                            new Route(s1, c1, "back one"), new Route(s2, c2, "back two"));
+                    var routes = new ArrayList<>(allRoutes);
+                    var lost = loseNextDatagram(endpoint.connections().getFirst());
+                    for (int round = 0; round < 5 && !routes.isEmpty(); round++) {
+                        for (Route route : routes) {
+                            route.probe(round);
+                            if (round == 0 && route.sender == c1) lost.get(5, TimeUnit.SECONDS);
+                        }
+                        for (var it = routes.iterator(); it.hasNext(); ) {
+                            Route route = it.next();
+                            try {
+                                route.receive(Duration.ofMillis(500));
+                                it.remove();
+                            } catch (SocketTimeoutException timeout) {
+                                // A lost probe can be sent again. A probe from another session fails above.
+                            }
+                        }
                     }
-                    for (int i = 0; i < 20; i++) {
-                        assertTrue(new String(s1.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("one "));
-                        assertTrue(new String(s2.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("two "));
-                        assertTrue(new String(c1.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("back one "));
-                        assertTrue(new String(c2.datagrams().receive(Duration.ofSeconds(5)), UTF_8).startsWith("back two "));
+                    assertTrue(routes.isEmpty(), () -> "Undelivered QUIC routes: " + routes.stream()
+                            .map(route -> route.marker + " sent=" + route.sender.stats().datagramsSentChannel()
+                                    + " received=" + route.receiver.stats().datagramsReceivedChannel()).toList());
+                    assertTrue(c1.stats().datagramsSentChannel() >= 2, "the lost probe had to be sent again");
+                    long totalSent = 0, totalReceived = 0;
+                    for (var route : allRoutes) {
+                        try {
+                            while (true) route.receive(Duration.ofMillis(50));
+                        } catch (SocketTimeoutException drained) { /* End of this receiver's probe queue. */ }
+                        long sent = route.sender.stats().datagramsSentChannel();
+                        long received = route.receiver.stats().datagramsReceivedChannel();
+                        assertTrue(received <= sent, route.marker);
+                        totalSent += sent;
+                        totalReceived += received;
                     }
-                    assertEquals(21, c1.stats().datagramsSentChannel());
-                    assertEquals(20, c2.stats().datagramsSentChannel());
-                    assertEquals(20, c1.stats().datagramsReceivedChannel());
-                    assertEquals(21, s1.stats().datagramsReceivedChannel());
-                    assertEquals(20, s2.stats().datagramsReceivedChannel());
+                    assertTrue(totalReceived <= totalSent - 1, "the injected loss cannot be delivered");
+                    for (var session : List.of(c1, c2, s1, s2)) {
+                        var stats = session.stats();
+                        assertEquals(stats.datagramsSent(), stats.datagramsSentChannel());
+                        assertEquals(stats.datagramsReceived(), stats.datagramsReceivedChannel());
+                        assertTrue(stats.datagramsReceivedChannel() > 0);
+                    }
                 } finally {
                     c1.close(); c2.close(); s1.close(); s2.close();
                     c1.awaitClosed(); c2.awaitClosed(); s1.awaitClosed(); s2.awaitClosed();

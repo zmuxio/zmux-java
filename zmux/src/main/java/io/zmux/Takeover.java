@@ -9,17 +9,15 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * A carrier the admission hands to the host ({@link ListenerConfig#fallback()}): on {@link AdmissionVerdict#FALLBACK},
+ * A carrier the admission hands to the host ({@link ListenerConfig#fallback()}): on {@link AdmissionVerdict#TAKEOVER}, on byte-stream {@link AdmissionVerdict#FALLBACK},
  * or on a prefix {@link Admission.Builder#fallbackOnPeekTimeout} gave up on. What was read of it is replayed: the
  * bytes of a byte stream, the first message of a message-framed carrier (always a whole, non-empty binary message: a
  * carrier whose first read fails or returns an empty message is closed without a decision).
  *
- * <p>The carrier is the host's for the call of {@link Admission.Fallback#serve}, which lasts until the stage it
- * returned completes (until it returns, for a null stage), at every entry point alike: zmux neither cancels that
- * stage nor ends the carrier while it runs, except when the event loop the carrier runs on shuts down. When the stage
- * completes zmux closes the carrier, unless the host called {@link #detach()} during the call: the carrier, and what
- * an adapter runs it on (the QUIC connection of a stream, the HTTP request of a request carrier), is then the host's
- * for good, to serve on any thread after the stage completed and to close once done.
+ * <p>The host may use the carrier until its fallback stage completes (or {@link Admission.Fallback#serve}
+ * returns a null stage). Withdrawal during setup or shutdown of the carrier’s event loop can close it earlier.
+ * Withdrawal leaves the host’s stage running. Calling {@link #detach()} before completion or withdrawal gives the
+ * host ownership of the carrier and its adapter’s QUIC connection or HTTP request, to close once done.
  *
  * <p>Two views share one replay, and the host uses one of them: {@link #pipe()} for every carrier (with
  * {@link #messages()} as its typed form on a message-framed carrier), {@link #socket()} for a plain TCP carrier. Once
@@ -48,7 +46,7 @@ public interface Takeover {
      * and must not block. It carries the carrier's own properties: its label, kind, variant, the identity of its
      * multi-stream connection ({@link PipeIo#carrierConn()}, a QUIC connection), and every capability of
      * {@link PipeIo.Capabilities} but the lane opener (lanes run zmux sessions); its writer reports the carrier's
-     * {@link PipeWriter#unsent()} and {@link PipeWriter#retransmitted()}. The same view on every call.
+     * {@link PipeWriter#unsent()}. The same view on every call.
      */
     PipeIo pipe();
 
@@ -75,7 +73,7 @@ public interface Takeover {
      *
      * @return true when the carrier is the host's; false when the host already closed it (every half of the pipe view,
      *     or the socket view's channel), so there is nothing to detach
-     * @throws IllegalStateException after the fallback's stage completed without a detach: zmux has closed the carrier
+     * @throws IllegalStateException once zmux reclaimed the carrier on withdrawal or fallback completion
      */
     boolean detach();
 

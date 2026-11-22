@@ -124,8 +124,11 @@ final class Pipe {
             add(first);
         }
 
+        /** Lane 0, present from construction on. */
+        InLane first() { return lanes.getFirst(); }
+
         InLane lane(long l) {
-            if (l == 0) return lanes.isEmpty() ? null : lanes.getFirst();
+            if (l == 0) return first();
             return byLane == null ? null : byLane.get(l);
         }
 
@@ -181,13 +184,6 @@ final class Pipe {
         private long lanesRefused;
         /** Bytes sent and not acknowledged when the pipe failed. */
         private long bytesLost;
-        /** The carrier's retransmitted bytes, as its adapter last reported them; -1: never. */
-        private long retransmitted = -1;
-        /** The last loss-rate sample: its time (MIN_VALUE: none), the bytes sent and retransmitted then. */
-        private long lossAt = Long.MIN_VALUE, lossSent, lossRetrans;
-        private double lossRate;
-        private boolean lossKnown;
-
         /** The bytes sent over all lanes. */
         long sent() {
             long n = 0;
@@ -199,33 +195,6 @@ final class Pipe {
 
         /** The pipe failed: what was sent and not acknowledged is lost. */
         void lost() { long s = sent(); bytesLost = s - Math.min(s, snd.cum()); }
-
-        long retransmitted() { return retransmitted; }
-
-        boolean lossKnown() { return lossKnown; }
-
-        double lossRate() { return lossRate; }
-
-        /** Whether the retransmission count is due for a query (at most once per gap). */
-        boolean retransmittedDue(long t, long gap) { return lossAt == Long.MIN_VALUE || Time.sub(t, lossAt) >= gap; }
-
-        /**
-         * The carrier reported n retransmitted bytes (-1: it reports none) at t: an EWMA with gain
-         * 1/8 of the bytes retransmitted per byte sent between samples at least gap apart; a
-         * count that moves back counts as no retransmission.
-         */
-        void retransmitted(long n, long t, long gap) {
-            if (n < 0) { lossAt = t; return; } // no count: asked again after the gap
-            long sent = sent();
-            boolean first = retransmitted < 0;
-            retransmitted = n;
-            if (first) { lossAt = t; lossSent = sent; lossRetrans = n; return; }
-            if (Time.sub(t, lossAt) < gap || sent <= lossSent) return;
-            double x = (double) (n - Math.min(n, lossRetrans)) / (sent - lossSent);
-            if (lossKnown) lossRate += (x - lossRate) / 8;
-            else { lossRate = x; lossKnown = true; }
-            lossAt = t; lossSent = sent; lossRetrans = n;
-        }
 
         void laneRefused() {
             lanesRefused++;

@@ -5,18 +5,25 @@ package io.zmux;
  * is an unsigned 62-bit value; it is its own type, never mixed with stream IDs, epochs or counts,
  * and offers no arithmetic.
  *
- * @param value the ID, from 0 to 2<sup>62</sup> - 1
+ * @param value a wire ID from 0 to 2<sup>62</sup> - 1, or 2<sup>62</sup> for {@link #UNASSIGNED}
  */
 public record PipeId(long value) {
+    private static final long WIRE_LIMIT = 1L << 62;
+    /** A join failed before it received a pipe ID. This value cannot occur on the wire. */
+    public static final PipeId UNASSIGNED = new PipeId(WIRE_LIMIT);
+
     /** The bootstrap pipe's ID. */
     public static final PipeId BOOTSTRAP = new PipeId(0);
 
     public PipeId {
-        if (value < 0 || value > (1L << 62) - 1) throw new IllegalArgumentException("pipe ID " + value + " outside 0 to 2^62 - 1");
+        if (value < 0 || value > WIRE_LIMIT) throw new IllegalArgumentException("pipe ID " + value + " outside 0 to 2^62");
     }
 
-    /** The ID of value; the bootstrap pipe's shared instance for 0. */
-    public static PipeId of(long value) { return value == 0 ? BOOTSTRAP : new PipeId(value); }
+    /** The ID for a wire value or the unassigned sentinel. */
+    public static PipeId of(long value) {
+        if (value == WIRE_LIMIT) return UNASSIGNED;
+        return value == 0 ? BOOTSTRAP : new PipeId(value);
+    }
 
     @Override public String toString() { return Long.toString(value); }
 }

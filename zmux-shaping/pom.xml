@@ -9,4 +9,28 @@
   <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux</artifactId><version>${project.version}</version></dependency>
   <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>${junit.version}</version><scope>test</scope></dependency>
  </dependencies>
+ <build>
+  <plugins>
+   <plugin>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <executions>
+     <execution>
+      <id>default-testCompile</id>
+      <configuration>
+       <!-- Drive the session core with an explicit clock in the bundle parity test. -->
+       <compilerArgs combine.children="append">
+        <arg>--add-exports=io.zmux/io.zmux.internal.core=io.zmux.shaping.machine</arg>
+       </compilerArgs>
+      </configuration>
+     </execution>
+    </executions>
+   </plugin>
+   <plugin>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <configuration>
+     <argLine>--add-exports=io.zmux/io.zmux.internal.core=io.zmux.shaping.machine</argLine>
+    </configuration>
+   </plugin>
+  </plugins>
+ </build>
 </project>

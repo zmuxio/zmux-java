@@ -264,12 +264,16 @@ final class Shaping {
             return;
         }
         boolean sizeField = w.framing() == Framing.BYTES;
-        int over = writeOverhead(ps.p);
-        int n = Math.max(WireLength.framesOf(len, sizeField, over), 1);
+        int n = len;
+        if (n > w.recMax()) {
+            n = w.recMax();
+            clamped++;
+        }
         int m = w.padRoom();
         if (n > m) {
-            if (n <= w.recMax() && !w.batchEmpty()) { // the next batch takes it whole
+            if (!w.batchEmpty()) { // the next batch takes it whole
                 ps.injDue = true;
+                ps.injLen = n;
                 ps.injDeferred = true;
                 return;
             }
@@ -407,7 +411,7 @@ final class Shaping {
         /** A writer waits for hold or tokens. */
         private boolean wake;
         private long injAt = Time.NEVER;
-        private int injLen;
+        private int injLen; // frame bytes, zero when no injection is pending
         private boolean injDue;
         /** The due injection waits for the next batch. */
         private boolean injDeferred;
@@ -478,7 +482,10 @@ final class Shaping {
             if (e.isInjectSet()) {
                 injLen = 0; injAt = Time.NEVER; injDue = injDeferred = false;
                 if (!e.isInjectNone()) {
-                    injLen = Math.max(e.injectLength(), 1);
+                    var out = p.out();
+                    boolean framed = out != null && !out.lanes.isEmpty()
+                            && out.lanes.getFirst().st.info().framing() == Framing.BYTES;
+                    injLen = Math.max(WireLength.framesOf(e.injectLength(), framed, writeOverhead(p)), 1);
                     injAt = e.injectAtNanos();
                 }
             }

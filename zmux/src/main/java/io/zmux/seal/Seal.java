@@ -79,8 +79,10 @@ public final class Seal {
             }
         });
         cfg.handshakeTimeout().ifPresent(limit -> {
+            long due = io.zmux.internal.core.Time.deadline(limit);
+            if (due == io.zmux.internal.core.Time.NEVER) return;
             // The timer goes when the handshake ends first (completing it cancels the timer).
-            CompletableFuture<Boolean> timer = new CompletableFuture<Boolean>().completeOnTimeout(true, limit.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS);
+            CompletableFuture<Boolean> timer = new CompletableFuture<Boolean>().completeOnTimeout(true, Math.max(0, due - System.nanoTime()), java.util.concurrent.TimeUnit.NANOSECONDS);
             timer.thenAccept(expired -> {
                 if (!expired) return;
                 var timeout = new java.net.SocketTimeoutException("handshake timeout " + limit);
@@ -215,7 +217,7 @@ public final class Seal {
                     j = hs.verify(c.anchor(), c.localContext(), c.isRequirePqAuth());
                 } catch (VerifyUnavailableException e) {
                     // The client judged the server and could not decide: its establishment fails as credentials failed.
-                    throw new CredentialsFailedException("the verifier is unavailable", e);
+                    throw new CredentialsFailedException(CredentialsFailedException.Detail.VERIFIER_UNAVAILABLE, "the verifier is unavailable", e);
                 }
                 verdict = j.verdict();
                 pqAuth = j.pqAuthenticated();

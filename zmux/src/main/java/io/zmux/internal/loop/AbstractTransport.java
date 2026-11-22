@@ -13,8 +13,12 @@ import java.nio.ByteBuffer;
  * input read before a move. Host thread only. A transport of another module (one living on
  * the thread of its own event loop) extends it through the protected members.
  */
-public abstract class AbstractTransport implements Transport {
+public abstract non-sealed class AbstractTransport extends PhysicalTransport {
     final SessionHost loop;
+    private final CarrierSetup.CloseRight right = new CarrierSetup.CloseRight();
+    @Override final CarrierSetup.Bound closeRight() { return right.original(this); }
+    @Override public final CarrierSetup setup() { return right.owner; }
+
     private Inbound in;
     private boolean started;
     private int directionMask = Action.DIR_BIDI;
@@ -31,6 +35,26 @@ public abstract class AbstractTransport implements Transport {
 
     protected AbstractTransport(SessionHost loop) {
         this.loop = loop;
+    }
+
+    /** Adapter modules implement these protected hooks. The owner supplies the capability on both paths. */
+    public abstract static class Native extends AbstractTransport {
+        protected Native(SessionHost loop) { super(loop); }
+
+        @Override final void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
+            closeNative(permit, cause);
+        }
+        @Override final Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost target) {
+            return moveNative(permit, target);
+        }
+
+        @Override protected final void inputFailed(java.io.IOException cause) {
+            try { nativeInputFailed(); } finally { CarrierSetup.connectionLost(this, cause); }
+        }
+        protected abstract void nativeInputFailed();
+
+        protected abstract void closeNative(CarrierSetup.Bound.Permit permit, Throwable cause);
+        protected abstract Transport moveNative(CarrierSetup.Bound.Permit permit, SessionHost target);
     }
 
     @Override public final SessionHost loop() { return loop; }
@@ -104,8 +128,8 @@ public abstract class AbstractTransport implements Transport {
     @Override public void redeliver() {}
 
     @Override
-    public Transport moveTo(SessionHost to) {
-        close(null);
+    Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost to) {
+        java.util.Objects.requireNonNull(permit);
         return null;
     }
 

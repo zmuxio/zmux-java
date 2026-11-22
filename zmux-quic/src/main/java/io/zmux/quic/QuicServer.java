@@ -108,8 +108,10 @@ public final class QuicServer implements AutoCloseable {
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
         //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(connection.eventLoop(), connection.eventLoop().inEventLoop(), add, () -> result.complete(null));
-        result.whenComplete((v, e) -> { if (result.isCancelled()) carrier.stop(); });
-        return QuicClient.future(result);
+        return io.zmux.internal.spi.Spi.future(result, () -> {
+            carrier.stop(connection);
+            result.cancel(false);
+        });
     }
 
     /**
