@@ -1,5 +1,7 @@
 package io.zmux.http;
 
+import io.zmux.http.internal.HttpTransport;
+
 import io.zmux.internal.spi.LentInput;
 import io.zmux.internal.spi.Loops;
 import io.zmux.ReplayVerdict;
@@ -17,9 +19,13 @@ import java.util.concurrent.ScheduledFuture;
 import io.zmux.CarrierKind;
 import io.zmux.Chunk;
 import io.zmux.JoinHint;
+import io.zmux.RequestHead;
+import io.zmux.AdmissionVerdict;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.spi.AdapterPorts;
+import io.zmux.internal.spi.AttachmentRelease;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.ReplayFilter;
@@ -327,13 +333,55 @@ final class ExchangeServer {
         PipeIo io = new PipeIo(nc.new Reader(), nc.new Writer(), Framing.BYTE_STREAM, "http exchange", nc)
                 .withReceiveMemory(cfg.upStoreLimit()).withCarrier(CarrierKind.EXCHANGE);
         // Ended before a session took it while the listener closed: the listener closed before the carrier was established.
-        slot.handle(io, JoinHint.inBand(slot.peer())).taken().thenAccept(t -> {
+        var hint = new JoinHint("", false, slot.source(), slot.peer(), RequestHead.of(Requests.fields(c.req.headers())));
+        boolean decide = ep.listener.admission() != null;
+        nc.admitting = decide;
+        var handled = decide ? slot.handleRequest(io, hint, c.router.requestFallback(handoff -> {
+            var given = new java.util.concurrent.CompletableFuture<Void>();
+            Loops.run(nc.loop, () -> {
+                try {
+                    if (!ctx.channel().isActive() || !handoff.getAsBoolean()) {
+                        given.completeExceptionally(new ClosedChannelException());
+                        return;
+                    }
+                    c.router.toHost(c.req, List.of(Unpooled.wrappedBuffer(c.body.duplicate().flip())), true);
+                    a.resumeReads();
+                    given.complete(null);
+                } catch (RuntimeException failure) { given.completeExceptionally(failure); }
+            }, () -> given.completeExceptionally(new ClosedChannelException()));
+            return given;
+        }), new ResponseHead(head -> Loops.run(nc.loop, () -> {
+            if (head.cancelled()) { head.written(new ClosedChannelException()); return; }
+            a.opened = head;
+            nc.admitting = false;
+            try { nc.serve(a); }
+            catch (RuntimeException failure) { head.written(failure); }
+        }, () -> head.written(new ClosedChannelException())), () -> HttpTransport.abort(ctx.channel()))) : slot.handle(io, hint);
+        // One finite exchange request closes after its reply, even while the new carrier's
+        // setup is still observing that reply's promise.
+        c.router.trackH3Setup(handled);
+        nc.setup = AdapterPorts.setup(handled);
+        nc.setup.onFinished(() -> nc.setup = null);
+        handled.taken().thenAccept(t -> {
             if (!t && ep.listener.isClosed()) {
                 Loops.run(nc.loop, nc::refused, NOTHING); // refused: gone with its loop
             }
         });
         nc.idle();
-        serveOn(nc, a);
+        if (!decide) serveOn(nc, a);
+        else handled.verdict().thenAccept(verdict -> Loops.run(nc.loop, () -> {
+            if (verdict == AdmissionVerdict.ACCEPT) {
+                nc.admitting = false;
+                nc.serve(a);
+            } else if (verdict != AdmissionVerdict.TAKEOVER) {
+                // Nothing is sent while stalled. Its physical close (or the host handback)
+                // resolves taken even if the exchange cleanup itself still needs end().
+                handled.taken().thenRun(() -> Loops.run(nc.loop, () -> {
+                    nc.refused();
+                    if (verdict != AdmissionVerdict.FALLBACK) ctx.close();
+                }, NOTHING));
+            }
+        }, NOTHING));
     }
 
     /** Hands a to k on its loop; a carrier whose loop shut down is gone, and a gets GONE here. */
@@ -392,11 +440,19 @@ final class ExchangeServer {
         /** The request's Data, until taken. */
         private ByteBuffer hold;
         private final boolean h1;
+        private AttachmentRelease finalWrite;
+        private ResponseHead opened;
+        private void resumeReads() {
+            if (!h1) return;
+            PipelineGate gate = PipelineGate.of(ctx);
+            if (gate != null) gate.release();
+            ctx.channel().config().setAutoRead(true);
+        }
 
         Answer(ChannelHandlerContext ctx, HttpRequest req, Exchange.Key key, Exchange.Header q, ByteBuffer data) {
             this.ctx = ctx; this.req = req; this.key = key; this.q = q; this.hold = data;
             dataLength = data.remaining();
-            h1 = !(ctx.channel() instanceof io.netty.handler.codec.http2.Http2StreamChannel);
+            h1 = !Requests.multiplexed(ctx.channel());
             if (h1) {
                 ctx.channel().config().setAutoRead(false);
                 // Requests pipelined behind this one, already decoded, wait for its answer too.
@@ -433,16 +489,42 @@ final class ExchangeServer {
             HttpUtil.setContentLength(resp, body.readableBytes());
             boolean keep = HttpUtil.isKeepAlive(req);
             HttpUtil.setKeepAlive(resp, keep);
-            var f = ctx.writeAndFlush(resp);
-            if (h1) {
-                if (keep) f.addListener(x -> {
-                    PipelineGate gate = PipelineGate.of(ctx);
-                    if (gate != null) gate.release();
-                    ctx.channel().config().setAutoRead(true);
-                });
-                else f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
-            }
+            Runnable sent = !h1 ? null : keep ? this::resumeReads : ctx::close;
+            writeResponse(ctx, resp, opened, finalWrite, sent);
         }
+    }
+
+    /** The request loop owns both the write and its notification. A rejected submission still consumes the response and guard. */
+    static void writeResponse(ChannelHandlerContext ctx, FullHttpResponse response,
+                              ResponseHead opened, AttachmentRelease finalWrite, Runnable sent) {
+        var loop = ctx.executor();
+        if (!loop.inEventLoop()) {
+            Loops.run(loop, () -> writeResponse(ctx, response, opened, finalWrite, sent), () -> {
+                response.release();
+                responseWritten(opened, finalWrite, new ClosedChannelException());
+            });
+            return;
+        }
+        if (opened != null && opened.cancelled()) {
+            response.release();
+            responseWritten(opened, finalWrite, new ClosedChannelException());
+            ctx.close();
+            return;
+        }
+        var write = ctx.writeAndFlush(response);
+        if (opened == null && finalWrite == null && sent == null) return;
+        write.addListener(result -> {
+            responseWritten(opened, finalWrite, result.cause());
+            if (sent != null) {
+                if (result.isSuccess()) sent.run(); else ctx.close();
+            }
+        });
+    }
+
+    private static void responseWritten(ResponseHead opened,
+                                        AttachmentRelease finalWrite, Throwable error) {
+        if (finalWrite != null) finalWrite.close();
+        if (opened != null) opened.written(error);
     }
 
     /** An assigned downlink piece. */
@@ -460,10 +542,16 @@ final class ExchangeServer {
 
     /** One exchange carrier on the server; every field is its loop's, and its pieces are heap buffers. */
     final class Carrier {
+        private final AttachmentRelease cleanup = new AttachmentRelease();
+        private final AttachmentRelease bufferedInput = cleanup.fork();
+        /** The request currently on the carrier loop. Its response can finish after end(). */
+        private Answer serving;
+
         final EventLoop loop;
         final byte[] cid;
         final Exchange.Key key;
-        private boolean ended;
+        private boolean ended, admitting;
+        private volatile AdapterPorts.Setup setup;
         /** Ended by the listener's close before a session took it: requests are answered BUSY and nothing is remembered. */
         private boolean refused;
         private Throwable err;
@@ -540,12 +628,19 @@ final class ExchangeServer {
         void end(Throwable e) {
             if (ended) return;
             ended = true;
+            var pendingSetup = setup;
+            if (pendingSetup != null) pendingSetup.interrupt();
             err = e;
             if (idleTimer != null) idleTimer.cancel(false);
             if (coalesceTimer != null) coalesceTimer.cancel(false);
             pieces.clear();
             cur = null;
-            for (Held h : held) { if (h.timer != null) h.timer.cancel(false); h.a.send(endedFlags(), null); }
+            if (serving != null) serving.finalWrite = cleanup.fork();
+            for (Held h : held) {
+                if (h.timer != null) h.timer.cancel(false);
+                if (h.a.finalWrite == null) h.a.finalWrite = cleanup.fork();
+                h.a.send(endedFlags(), null);
+            }
             held.clear();
             loop.terminationFuture().removeListener(onTerminated);
             if (e != null) { dropUplink(); up.fail(e); }
@@ -553,6 +648,7 @@ final class ExchangeServer {
             carriers.remove(id, this);
             if (!refused) remember(id, key);
             if (blocked != null) { blocked.failed(new ClosedChannelException()); blocked = null; blockedBatch = null; }
+            cleanup.close();
         }
 
         private void dropUplink() {
@@ -568,9 +664,15 @@ final class ExchangeServer {
 
         /** Serves an authenticated request. */
         private void serve(Answer a) {
+            serving = a;
+            try { respond(a); } finally { serving = null; }
+        }
+
+        private void respond(Answer a) {
             Exchange.Header q = a.q;
             last = System.nanoTime();
             if (ended) { a.send(endedFlags(), null); return; }
+            if (admitting && q.kind() != Exchange.KIND_CLOSE) { a.send(Exchange.FLAG_BUSY, null); return; }
             if (q.ack() > ack) {
                 if (q.ack() > asgEnd) {
                     end(new IOException("exchange carrier protocol violation"));
@@ -736,21 +838,29 @@ final class ExchangeServer {
 
         private void unblock() { if (blocked != null) take(); }
 
-        final class Reader implements PipeReader {
+        private void closeInput() {
+            rclosed = true;
+            up.close();
+            dropUplink();
+            bufferedInput.close();
+        }
+
+        final class Reader implements PipeReader, AdapterPorts.ReleasingHalf {
+            @Override public java.util.concurrent.CompletionStage<Void> released() { return cleanup.completion(); }
+
             @Override public void start(Sink s) {
                 Loops.run(loop, () -> { if (!rclosed) up.start(s); }, () -> s.onError(new ClosedChannelException()));
             }
 
             @Override public void close() {
-                Loops.run(loop, () -> {
-                    rclosed = true;
-                    up.close();
-                    dropUplink();
-                }, NOTHING);
+                Loops.run(loop, Carrier.this::closeInput,
+                        () -> loop.terminationFuture().addListener(ignored -> closeInput()));
             }
         }
 
-        final class Writer implements PipeWriter {
+        final class Writer implements PipeWriter, AdapterPorts.ReleasingHalf {
+            @Override public java.util.concurrent.CompletionStage<Void> released() { return cleanup.completion(); }
+
             @Override public void write(OutboundBatch batch, Completion done) {
                 Loops.run(loop, () -> {
                     if (ended || wclosed) { done.failed(new ClosedChannelException()); return; }

@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 
 /**
- * A pipe input: at most one receiving and one sending half (at least one), each closed by zmux exactly once, with
+ * A pipe input: at most one receiving and one sending half (at least one), owned by zmux and closed under the {@link PipeWriter} linger contract, with
  * optional properties of the carrier. Immutable: each {@code with} method returns a new input.
  *
  * <p>{@link #framing()} says how records travel on the carrier. {@link #label()} is a name for statistics and logs,
@@ -50,6 +50,10 @@ public final class PipeIo {
             @Override public RecordMode recordMode(PipeIo io) { return io.recordMode; }
 
             @Override public Object carrierPeer(PipeIo io) { return io.peer; }
+
+            @Override public Object sendingConnection(PipeIo io) {
+                return io.carrierConn instanceof SplitConnection pair ? pair.outbound : io.carrierConn;
+            }
 
             @Override public RecordProtection records(PipeIo io) { return io.records; }
         });
@@ -219,6 +223,15 @@ public final class PipeIo {
                 + (variant.isEmpty() ? "" : ", " + variant) + (reader == null ? ", send only" : writer == null ? ", receive only" : "") + "]";
     }
 
+    /** Synthetic identity for charging and nesting a split across connections, with its sender identified separately. */
+    // Identity matters: two splits over the same sender are distinct connections, so this cannot be a record.
+    @SuppressWarnings("ClassCanBeRecord")
+    private static final class SplitConnection {
+        final Object outbound;
+
+        SplitConnection(Object outbound) { this.outbound = outbound; }
+    }
+
     /**
      * Whether uplink and downlink are opposite one-way halves (one only reads, the other only writes) with the same
      * framing and application protocol.
@@ -267,7 +280,7 @@ public final class PipeIo {
                 // Both halves must report it: a plain half (a raw connection) can stall silently beside one that does.
                 .reportsFailure(uc.reportsFailure() && dc.reportsFailure()).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
-                uplink.framing, uplink.label, same ? uplink.carrierConn : new Object(), caps, CarrierKind.SPLIT, uplink.variant,
+                uplink.framing, uplink.label, same ? uplink.carrierConn : new SplitConnection((upWrites ? uplink : downlink).carrierConn), caps, CarrierKind.SPLIT, uplink.variant,
                 null, null, null);
     }
 

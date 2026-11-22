@@ -224,6 +224,60 @@ class QuicTest {
         }
     }
 
+    @Test void splitKeepsTokenWhileNativeStreamCloseIsQueued() throws Exception {
+        try (var loops = EventLoops.create(1)) {
+            var config = ZmuxConfig.builder().eventLoops(loops).build();
+            var options = QuicOptions.defaults();
+            var stages = new java.util.concurrent.LinkedBlockingQueue<CompletableFuture<io.zmux.carrier.PipeIo>>();
+            try (var listener = Zmux.listener(ListenerConfig.of(config));
+                 var splits = Zmux.listener(ListenerConfig.builder().session(config).inboundTransform((io, ctx) -> {
+                     var stage = new CompletableFuture<io.zmux.carrier.PipeIo>();
+                     stages.add(stage);
+                     return stage;
+                 }).build());
+                 var server = new QuicServer(any(), TestTls.server, options, listener);
+                 var endpoint = new QuicClient(TestTls.client, options);
+                 var client = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
+                 var accepted = listener.accept(Duration.ofSeconds(5))) {
+                assertNotNull(accepted);
+                var connection = endpoint.connections().getFirst();
+                var owner = connection.pipeline().get(ConnectionCarrier.class);
+                String key = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
+                for (int i = 0; i < 2; i++) {
+                    var stream = connection.createStream(io.netty.handler.codec.quic.QuicStreamType.UNIDIRECTIONAL,
+                            new io.netty.channel.ChannelInitializer<io.netty.handler.codec.quic.QuicStreamChannel>() {
+                                @Override protected void initChannel(io.netty.handler.codec.quic.QuicStreamChannel channel) {
+                                    channel.pipeline().addLast(new StreamCarrier(channel, owner.host(), false, true));
+                                }
+                            }).sync().getNow();
+                    var down = stream.pipeline().get(StreamCarrier.class).io(owner).withProtocol("");
+                    var memory = io.zmux.carrier.MemoryPipe.pair(io.zmux.carrier.Framing.BYTE_STREAM);
+                    var writer = splits.adapter().handle(down, JoinHint.pair(key, false, null));
+                    var reader = splits.adapter().handle(memory[0].withHalves(memory[0].reader(), null), JoinHint.pair(key, true, null));
+                    var stage = stages.poll(5, TimeUnit.SECONDS);
+                    assertNotNull(stage);
+                    var resume = new CompletableFuture<Void>();
+                    var paused = new java.util.concurrent.CountDownLatch(1);
+                    stream.eventLoop().execute(() -> { paused.countDown(); resume.join(); });
+                    try {
+                        assertTrue(paused.await(5, TimeUnit.SECONDS));
+                        stage.completeExceptionally(new java.io.IOException("refused"));
+                        assertThrows(java.io.IOException.class, writer::awaitSetup);
+                        var retry = splits.adapter().handle(memory[1].withHalves(null, memory[1].writer()), JoinHint.pair(key, false, null));
+                        retry.closed().get(5, TimeUnit.SECONDS);
+                        assertThrows(java.io.IOException.class, retry::awaitSetup);
+                        assertFalse(reader.closed().isDone());
+                        assertFalse(writer.closed().isDone());
+                    } finally { resume.complete(null); }
+                    writer.closed().get(5, TimeUnit.SECONDS);
+                    reader.closed().get(5, TimeUnit.SECONDS);
+                    assertTrue(stream.closeFuture().isDone());
+                }
+                assertEquals(1, client.pipes().size());
+            }
+        }
+    }
+
     @Test void readerStartingAfterNativeStreamFailureStillReceivesTheFailure() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build(); var options = QuicOptions.defaults();

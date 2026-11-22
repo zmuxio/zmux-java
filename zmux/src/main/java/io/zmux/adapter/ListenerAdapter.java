@@ -23,6 +23,8 @@ public final class ListenerAdapter {
     static {
         AdapterPorts.install(new AdapterPorts.Views() {
             @Override public ListenerAdapter listener(AdapterPorts.Listener port) { return new ListenerAdapter(port); }
+            @Override public io.zmux.internal.loop.CarrierSetup setup(Handled handled) { return handled.setup(); }
+            @Override public AdapterPorts.Setup reservation(Slot slot) { return slot.reservation(); }
             @Override public SessionAdapter session(AdapterPorts.Session port) { return new SessionAdapter(port); }
         });
     }
@@ -66,7 +68,8 @@ public final class ListenerAdapter {
      */
     public Slot reserve(InetSocketAddress peer, InetSocketAddress source) {
         InetSocketAddress s = source == null ? peer : source;
-        return port.reserve(s) ? new Slot(port, peer, s) : null;
+        var setup = port.reserve(s);
+        return setup == null ? null : new Slot(port, peer, s, setup);
     }
 
     /**
@@ -79,18 +82,18 @@ public final class ListenerAdapter {
      * refused at its slot is closed.
      */
     public Handled handle(PipeIo io, JoinHint hint) {
-        return hand(io, hint, ListenerHub.Entry.CARRIER);
+        return hand(io, hint, ListenerHub.Entry.Stream.CARRIER);
     }
 
     /**
      * {@link #handle} for an HTTP request that is itself the carrier (its body, or nothing after its head): it is
      * decided on its head ({@link Admission.Stage#HEAD}, no prefix; a credential travels in a header field) when
-     * onHead, otherwise on the start of its body. A request the admission gives back is a request, not a carrier
-     * to take over: fallback (null: a fallback stalls) gets it, with the body bytes read replayed, to answer it at
-     * the HTTP level ({@link Admission.Fallback}, whose stage ends the carrier as for the listener's fallback).
+     * onHead, otherwise on the start of its body. FALLBACK hands the request and its replayed body to the
+     * supplied HTTP fallback. TAKEOVER waits for takeoverHead to commit the acceptance response
+     * before handing the carrier to the listener's configured fallback.
      */
-    public Handled handleRequest(PipeIo io, JoinHint hint, boolean onHead, Admission.Fallback fallback) {
-        return hand(io, hint, new ListenerHub.Entry(onHead, null, fallback));
+    public Handled handleRequest(PipeIo io, JoinHint hint, boolean onHead, Admission.Fallback fallback, Upgrade takeoverHead) {
+        return hand(io, hint, new ListenerHub.Entry.Request(onHead, fallback, takeoverHead));
     }
 
     /**
@@ -107,14 +110,35 @@ public final class ListenerAdapter {
      * headFallback (null: a fallback stalls) as a request. {@link Handled#verdict()} reports the final verdict.
      */
     public Handled admitFirst(PipeIo io, JoinHint hint, Upgrade upgrade, Admission.Fallback headFallback) {
-        Objects.requireNonNull(upgrade, "upgrade");
-        return hand(io, hint, new ListenerHub.Entry(true, upgrade, headFallback));
+        return hand(io, hint, new ListenerHub.Entry.Upgrade(upgrade, headFallback));
+    }
+
+    static void requireHint(AdapterPorts.Listener port, PipeIo io, JoinHint hint) {
+        requireEntry(port, io, hint, ListenerHub.Entry.Stream.CARRIER, null);
+    }
+
+    static void requireEntry(AdapterPorts.Listener port, PipeIo io, JoinHint hint, ListenerHub.Entry entry,
+                             io.zmux.internal.loop.CarrierSetup reservation) {
+        Objects.requireNonNull(io);
+        try {
+            Objects.requireNonNull(hint, "hint");
+            switch (entry) {
+                case ListenerHub.Entry.Request request -> Objects.requireNonNull(request.writeHead(), "writeHead");
+                case ListenerHub.Entry.Upgrade upgrade -> Objects.requireNonNull(upgrade.upgrade(), "upgrade");
+                case ListenerHub.Entry.Stream ignored -> { }
+            }
+        } catch (RuntimeException invalid) {
+            if (reservation != null) reservation.refused();
+            port.refused(io);
+            throw invalid;
+        }
     }
 
     private Handled hand(PipeIo io, JoinHint hint, ListenerHub.Entry entry) {
-        Objects.requireNonNull(io); Objects.requireNonNull(hint);
-        if (!port.reserve(hint.source())) return new Handled(port, port.refused(io));
-        return new Handled(port, port.transfer(io, hint, false, null, entry));
+        requireEntry(port, io, hint, entry, null);
+        var setup = port.reserve(hint.source());
+        if (setup == null) return new Handled(port, port.refused(io));
+        return new Handled(port, port.transfer(setup, io, hint, false, null, entry));
     }
 
     /**

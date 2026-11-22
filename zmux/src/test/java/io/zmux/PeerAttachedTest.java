@@ -60,12 +60,20 @@ class PeerAttachedTest {
     }
 
     @Test void aPipeThisEndpointAbortedReportsTheAbortInItsWait() throws Exception {
+        // HS-28.
         try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
-            ZmuxPipe p = lateJoin(f, 60_000, NO_WAIT); // joined, never attached: the Confirm is held
+            var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+            var deliver = new java.util.concurrent.CompletableFuture<Runnable>();
+            var confirm = new PipePoolTest.LateConfirm(pair[0].writer(), deliver::complete);
+            f.listener.adapter().handle(pair[1], JoinHint.inBand(null));
+            ZmuxPipe p = f.client.addPipe(PipeIo.of(pair[0].reader(), confirm), NO_WAIT);
+            var late = deliver.get(5, TimeUnit.SECONDS);
             var waiting = p.attached();
             p.abort();
             var e = assertThrows(ExecutionException.class, () -> waiting.get(5, TimeUnit.SECONDS));
             assertInstanceOf(PipeAbortedException.class, e.getCause());
+            assertInstanceOf(PipeGoneException.class, e.getCause());
+            late.run();
             assertThrows(PipeAbortedException.class, () -> p.awaitAttached(WAIT));
             // Another handle of the same pipe, while it is still on the session: the core says who aborted it.
             f.client.pipes().stream().filter(q -> q.id().value() == p.id().value()).findFirst()

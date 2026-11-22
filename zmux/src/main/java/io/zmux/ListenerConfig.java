@@ -128,9 +128,10 @@ public final class ListenerConfig {
      */
     public Admission admission() { return admission; }
     /**
-     * The target of every carrier the admission hands back ({@link Admission.Fallback}): the listener's socket and
-     * TLS carriers, the carriers of every adapter (WebSocket after a deferred decision, QUIC streams, a host's own
-     * pipe inputs); null: none (a fallback stalls).
+     * The carrier handler for every {@link AdmissionVerdict#TAKEOVER} and for
+     * {@link AdmissionVerdict#FALLBACK} on a byte stream or upgraded transport,
+     * including a WebSocket after upgrade. An HTTP request's fallback is its adapter's
+     * HTTP handler. A decision that selects a missing handler stalls the carrier.
      */
     public Admission.Fallback fallback() { return fallback; }
 
@@ -209,8 +210,8 @@ public final class ListenerConfig {
          * Locator names configures; a known Locator declined under memory pressure is refused as
          * {@code memory_pressure} and answered the same way. A stalled Establish at the handshake timeout, and never later than
          * the maximum stall duration (the admission's, or one drawn when there is none). A source
-         * already holding its maximum of stalled carriers has the carrier closed at once
-         * ({@link AdmissionStats#stallOverflow}). Null (the default): an Establish refused before
+         * already holding its maximum of stalled carriers has the carrier closed at once. This refusal
+         * is counted in {@link ListenerStats#rejected()}. Null (the default): an Establish refused before
          * authentication stalls, a Join and every other refusal closes. A failing function closes.
          * It is synchronous: it must not block, and must return well before the carrier's handshake
          * deadline, which keeps running while it does.
@@ -220,7 +221,7 @@ public final class ListenerConfig {
         /** The admission of every new carrier; null (the default): none. */
         public Builder admission(Admission a) { admission = a; return this; }
 
-        /** The target of every carrier the admission hands back ({@link #fallback()}); null (the default): a fallback stalls. */
+        /** Sets the listener's carrier handler. A decision selecting this handler stalls if it is null. */
         public Builder fallback(Admission.Fallback f) { fallback = f; return this; }
 
         public Builder session(ZmuxConfig cfg) { session = Objects.requireNonNull(cfg); return this; }

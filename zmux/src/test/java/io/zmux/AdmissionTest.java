@@ -123,9 +123,14 @@ class AdmissionTest {
 
     /** As a credential, PrefixAuth presents fresh tokens that its verifier accepts once, in either form. */
     @Test void prefixAuthIsACredential() throws Exception {
+        // HS-58.
         var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 1, 0);
         var stream = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "qmux-02", "example.com", exporting(VECTOR_BINDING), RequestHead.NONE);
         byte[] a = auth.prefix(stream), b = auth.prefix(stream);
+        var otherKey = new byte[32];
+        new java.security.SecureRandom().nextBytes(otherKey);
+        var foreign = new PrefixAuth(otherKey, Duration.ofSeconds(30), true, 1, 0).verifier();
+        assertEquals(Admission.Decision.FALLBACK, foreign.decide(stream, ByteBuffer.wrap(a)));
         assertEquals(PrefixAuth.TOKEN_LENGTH, a.length);
         assertFalse(Arrays.equals(a, b), "a fresh Nonce per carrier");
         var v = auth.verifier();
@@ -281,9 +286,8 @@ class AdmissionTest {
                 var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc);
                 try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[4]));
-                    PipePoolTest.await(() -> l.stats().admission().stalled() + l.stats().admission().fallback() == 1);
-                    // A fallback without a target stalls but counts as a fallback.
-                    assertEquals(d == Admission.Decision.STALL ? 1 : 0, l.stats().admission().stalled());
+                    PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
+                    assertEquals(0, l.stats().admission().fallback());
                     long t0 = System.nanoTime();
                     l.close();
                     raw.socket().setSoTimeout(5000);
@@ -340,14 +344,6 @@ class AdmissionTest {
                     ch.shutdownOutput();
                     assertEquals("abcdefgh", readAll(ch));
                 }
-                // Fewer bytes than the peek: decided when the peek timeout passes, on the buffered prefix.
-                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("ab".getBytes(UTF_8)));
-                    Thread.sleep(500);
-                    ch.write(ByteBuffer.wrap("cdefgh".getBytes(UTF_8)));
-                    ch.shutdownOutput();
-                    assertEquals("abcdefgh", readAll(ch));
-                }
                 // The input ends within the peek: decided at its end, the bytes still replayed.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
                     ch.write(ByteBuffer.wrap("xy".getBytes(UTF_8)));
@@ -360,23 +356,14 @@ class AdmissionTest {
         }
     }
 
-    /** Sends part, waits past the 200 ms peek timeout, sends the rest and returns what the echo fallback wrote back. */
-    private static String lateBytes(ZmuxListener l, String part, String rest) throws Exception {
+    /** Wait for the host to receive the late prefix before sending the rest. */
+    private static String afterFallback(ZmuxListener l, BlockingQueue<String> started, String part, String rest) throws Exception {
         try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
             ch.write(ByteBuffer.wrap(part.getBytes(UTF_8)));
-            Thread.sleep(500);
-            try {
-                ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
-                ch.shutdownOutput();
-                return readAll(ch);
-            } catch (java.net.SocketTimeoutException silent) {
-                throw silent;
-            } catch (IOException reset) {
-                // A close with the late bytes unread resets the connection rather than ending it: closed either way.
-                // The platform names the reset its own way (a SocketException on Linux and macOS, an aborted
-                // connection on Windows), so any failure but a timeout is the close.
-                return "";
-            }
+            assertNotNull(started.poll(5, TimeUnit.SECONDS));
+            ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
+            ch.shutdownOutput();
+            return readAll(ch);
         }
     }
 
@@ -391,12 +378,10 @@ class AdmissionTest {
             });
             var on = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
-                assertEquals("abcdefgh", lateBytes(l, "ab", "cdefgh"));
+                assertEquals("abcdefgh", afterFallback(l, sources, "ab", "cdefgh"));
                 assertEquals(0, decided.get(), "the decider never saw the late prefix");
                 var st = l.stats().admission();
-                assertEquals(1, st.peekTimedOut());
-                assertEquals(1, st.fallback());
-                assertEquals(0, st.closed());
+                assertEquals(new AdmissionStats(0, 1, 0, 0, 0, 0, 0, 0, 0), st);
             }
             // A prefix complete in time is decided as usual.
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
@@ -407,11 +392,15 @@ class AdmissionTest {
                 assertEquals(1, decided.get());
                 assertEquals(1, l.stats().admission().closed());
             }
-            // Off: the late prefix goes to the decider as it stood, which here closes.
+            // Off: expiration closes a partial prefix without asking the decider.
             var off = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(off).build())) {
-                assertEquals("", lateBytes(l, "ab", "cdefgh"));
-                assertEquals(2, decided.get());
+                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
+                    ch.write(ByteBuffer.wrap("ab".getBytes(UTF_8)));
+                    assertEquals("", readAll(ch));
+                }
+                assertEquals(1, decided.get());
+                assertEquals(1, l.stats().admission().peekTimedOut());
                 assertEquals(0, l.stats().admission().fallback());
             }
         }
@@ -422,12 +411,27 @@ class AdmissionTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var adm = Admission.builder(4,
-                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? Admission.Decision.more(8) : Admission.Decision.CLOSE))
+                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? new Admission.Decision(AdmissionVerdict.MORE, 0, null, 8, "partial") : Admission.Decision.CLOSE))
                     .maxPeek(8).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(adm).build())) {
-                assertEquals("abcdefgh", lateBytes(l, "abcd", "efgh"));
-                assertEquals(1, l.stats().admission().peekTimedOut());
-                assertEquals(1, l.stats().admission().fallback());
+                assertEquals("abcdefgh", afterFallback(l, sources, "abcd", "efgh"));
+                assertEquals(java.util.List.of(new Admission.VariantStat("partial", false, 0, 1, 0, 0, 0)), l.variantStats());
+                assertEquals(new AdmissionStats(0, 1, 0, 0, 0, 0, 0, 0, 0), l.stats().admission());
+            }
+        }
+    }
+
+    @Test void aLatePrefixWithoutATargetUsesOnlyTheStallOutcome() throws Exception {
+        try (var loops = EventLoops.create(1)) {
+            var adm = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> { throw new AssertionError("no input"); }))
+                    .peekTimeout(Duration.ofMillis(300)).fallbackOnPeekTimeout(true).build();
+            var cfg = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
+                    .admission(adm).maxPendingPerSource(1).build();
+            try (var l = Zmux.listen(NetworkTest.any(), cfg);
+                 SocketChannel ch = SocketChannel.open(l.localAddress())) {
+                assertEquals("", readAll(ch));
+                assertEquals(new AdmissionStats(0, 0, 0, 0, 0, 1, 0, 0, 0), l.stats().admission());
+                assertTrue(l.variantStats().isEmpty());
             }
         }
     }
@@ -470,19 +474,29 @@ class AdmissionTest {
         return b;
     }
 
-    @Test void anAcceptAfterThePeekTimeoutSkipsTheBufferedPrefix() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.builder(8, Admission.Decider.immediate((info, prefix) -> prefix.remaining() == 4 ? Admission.Decision.accept(4) : Admission.Decision.CLOSE))
-                            .peekTimeout(Duration.ofMillis(200)).build()).build();
-            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
-                SocketChannel ch = SocketChannel.open(l.localAddress());
-                ch.write(ByteBuffer.wrap(new byte[] {1, 2, 3, 4}));
-                Thread.sleep(400);
-                try (var _ = Zmux.open(socketPipe(ch), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
-                    assertNotNull(s, "the session starts after the skipped bytes");
+    @Test void anIncompleteExternalOrRequestReaderClosesOnPeekTimeout() throws Exception {
+        var calls = new AtomicInteger();
+        var routed = new AtomicInteger();
+        try (var loops = EventLoops.create(1)) {
+            var admission = Admission.builder(8, Admission.Decider.immediate((i, p) -> {
+                calls.incrementAndGet();
+                return Admission.Decision.accept(0);
+            })).fallbackOnPeekTimeout(true).peekTimeout(Duration.ofMillis(100)).build();
+            var cfg = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
+                    .admission(admission).fallback(t -> { routed.incrementAndGet(); return null; }).build();
+            try (var listener = Zmux.listener(cfg)) {
+                var port = listener.adapter();
+                var source = TestAddr.peer("input");
+                for (boolean request : new boolean[] {false, true}) {
+                    var pipe = io.zmux.carrier.MemoryPipe.pair(io.zmux.carrier.Framing.BYTE_STREAM)[1];
+                    var h = request ? port.handleRequest(pipe, JoinHint.of(RequestHead.of(java.util.Map.of()), false, source),
+                            false, t -> { routed.incrementAndGet(); return null; }, () -> CompletableFuture.completedFuture(null))
+                            : port.handle(pipe, JoinHint.inBand(source));
+                    h.closed().get(3, TimeUnit.SECONDS);
                 }
+                assertEquals(2, listener.stats().admission().peekTimedOut());
+                assertEquals(0, calls.get());
+                assertEquals(0, routed.get());
             }
         }
     }
@@ -732,7 +746,7 @@ class AdmissionTest {
                 var request = RequestHead.of(java.util.Map.of(header.name(), java.util.List.of(header.value()),
                         "X-App", java.util.List.of("1")));
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.adapter().handleRequest(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), true, null);
+                var admitted = l.adapter().handleRequest(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); });
                 // Decided before the client writes anything: a prefix read would wait out the peek timeout.
                 assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals("peer example.com true 0 [1]", seen.poll(1, TimeUnit.SECONDS));
@@ -741,10 +755,10 @@ class AdmissionTest {
                 }
                 // The same token again, and none at all: both stall at once.
                 var again = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), true, null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 var none = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(none[1], JoinHint.of(RequestHead.of(java.util.Map.of()), false, TestAddr.peer("peer")), true, null)
+                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(none[1], JoinHint.of(RequestHead.of(java.util.Map.of()), false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 for (var p : new PipeIo[] {again[0], none[0]}) { p.reader().close(); p.writer().abort(new IOException("done")); }
             }

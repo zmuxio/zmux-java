@@ -3,6 +3,7 @@ package io.zmux;
 import io.zmux.internal.core.CoreConfig;
 import io.zmux.internal.core.Time;
 import io.zmux.internal.wire.TransportParams;
+import io.zmux.internal.wire.VarInt;
 import java.time.Duration;
 import java.util.List;
 import java.io.IOException;
@@ -134,10 +135,14 @@ public final class ZmuxConfig {
     }
 
     private static io.zmux.internal.loop.DriverHooks.JoinPolicy joinPolicy(Builder b) {
+        JoinOutcome outcome = b.joinOutcome;
         RecordPolicy policy = b.recordPolicy;
         AllowRecordMode allow = b.allowRecordMode;
         java.util.function.BiPredicate<ZmuxSession, PipeId> authorize = b.authorizeJoin;
         return new io.zmux.internal.loop.DriverHooks.JoinPolicy() {
+            @Override public JoinOutcome outcome() { return outcome; }
+            @Override public Throwable publicError(io.zmux.internal.core.CoreException terminal) { return Errors.io(terminal); }
+
             private RecordPolicyInput carrier(io.zmux.internal.loop.Transport c) {
                 return new RecordPolicyInput(c.exporterPresent(), c.bindable(), Optional.ofNullable(c.info().carrier().label()), false);
             }
@@ -343,7 +348,7 @@ public final class ZmuxConfig {
     long joinNanos() { return nanos(joinTimeout); }
 
     /** Whole milliseconds of d, saturating. */
-    static long millis(Duration d) {
+    private static long millis(Duration d) {
         try {
             return d.toMillis();
         } catch (ArithmeticException e) {
@@ -351,10 +356,11 @@ public final class ZmuxConfig {
         }
     }
 
-    /** Whole milliseconds of d, a fraction rounded up (the unit of a transport parameter), saturating. */
-    static long millisUp(Duration d) {
+    /** Advertised deadline in milliseconds, rounded up and bounded by the wire varint range. */
+    private static long wireMillis(Duration d) {
         long m = millis(d);
-        return m == Long.MAX_VALUE || d.minusMillis(m).isZero() ? m : m + 1;
+        if (m >= VarInt.MAX) return VarInt.MAX;
+        return d.equals(Duration.ofMillis(m)) ? m : m + 1;
     }
 
     /**
@@ -396,7 +402,8 @@ public final class ZmuxConfig {
         c.redial(redial != null);
         c.keepAlive(liveness.keepAlivePeriod().map(ZmuxConfig::nanos).orElse(CoreConfig.OFF));
         TransportParams p = c.local();
-        p.maxIdleTimeoutMillis = maxIdleTimeout == null ? 0L : millisUp(maxIdleTimeout);
+        p.maxIdleTimeoutMillis = maxIdleTimeout == null ? 0L : wireMillis(maxIdleTimeout);
+        c.localIdleTimeout(maxIdleTimeout == null ? 0L : nanos(maxIdleTimeout));
         p.initialMaxData = initialConnectionReceiveWindow;
         p.maxStreamDataBidiLocal = initialStreamReceiveWindow;
         p.maxStreamDataBidiRemote = initialStreamReceiveWindow;
@@ -469,7 +476,7 @@ public final class ZmuxConfig {
             System.arraycopy(randomBytes(16), 0, p.sessionNonce, 0, 16);
             if (resumeTimeout != null) {
                 p.present |= TransportParams.RESUME;
-                p.resumeGraceMillis = millisUp(resumeTimeout);
+                p.resumeGraceMillis = wireMillis(resumeTimeout);
             }
         }
         return c.build();
@@ -525,6 +532,7 @@ public final class ZmuxConfig {
         private CarrierCredential carrierCredential;
         private RecordPolicy recordPolicy;
         private AllowRecordMode allowRecordMode;
+        private JoinOutcome joinOutcome;
         private java.util.function.BiPredicate<ZmuxSession, PipeId> authorizeJoin;
         private int joinEarlyHello = DEFAULT_JOIN_EARLY_HELLO;
         private io.zmux.carrier.HandshakeShaper handshakeShaper;
@@ -552,8 +560,11 @@ public final class ZmuxConfig {
         /** The acceptor's check of a Hello's mode; null (the default): only Sealed passes. */
         public Builder allowRecordMode(AllowRecordMode a) { allowRecordMode = a; return this; }
 
-        /** The acceptor's authorization of a join, after its mode; null (the default): none. */
+        /** Authorizes an authenticated Hello before record-mode policy. The default allows every authenticated Hello. */
         public Builder authorizeJoin(java.util.function.BiPredicate<ZmuxSession, PipeId> a) { authorizeJoin = a; return this; }
+        /** Receives each authorized inbound and each carrier-backed outbound join result. */
+        public Builder joinOutcome(JoinOutcome callback) { joinOutcome = callback; return this; }
+
 
         /** The size of a Hello's first batch while no other pipe is usable, default 8 KiB, at least 1. */
         public Builder joinEarlyHello(int bytes) {

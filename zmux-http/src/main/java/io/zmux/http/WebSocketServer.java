@@ -26,10 +26,9 @@ import java.util.concurrent.CompletableFuture;
  * The server of WebSocket carriers on HTTP/1.1: a valid upgrade request
  * that offers an accepted subprotocol passes the listener's admission on its head (a
  * prefix token in its {@code Zmux-Prefix-Auth} field), through {@link
- * io.zmux.adapter.ListenerAdapter#admitFirst}; only a head the admission accepts, or whose
- * decision it defers to the first message, is answered with 101. Any other request, and a head
- * the admission gives back, goes to the host's handler; a carrier given back after a deferred
- * decision goes to the listener's fallback. The
+ * io.zmux.adapter.ListenerAdapter#admitFirst}. ACCEPT, TAKEOVER and DEFER write the 101
+ * response. FALLBACK on the head goes to the host's HTTP handler. TAKEOVER and a FALLBACK
+ * after DEFER hand the upgraded carrier to the listener's fallback. The
  * subprotocol is chosen in the server's order of preference, each identifier also accepted as
  * its draft-01 alias, and is the carrier's application protocol.
  */
@@ -112,21 +111,18 @@ final class WebSocketServer {
                 .withProtocol(protocol).withCarrier(CarrierKind.WEBSOCKET);
         // The upgrade (the 101) goes out once the admission accepted the head or deferred its decision to the
         // first message; a head it gives back is the host's request, nothing answered yet.
-        l.adapter().admitFirst(io, hint, () -> {
-            var opened = new CompletableFuture<Void>();
-            Loops.run(ch.eventLoop(), () -> c.opened().whenComplete((v, e) -> {
-                if (e != null) opened.completeExceptionally(e); else opened.complete(null);
-            }), () -> opened.completeExceptionally(new java.nio.channels.ClosedChannelException()));
-            return opened;
-        }, t -> {
+        var handled = l.adapter().admitFirst(io, hint, c.opening(), router.requestFallback(handoff -> {
             var given = new CompletableFuture<Void>();
             Loops.run(ch.eventLoop(), () -> {
+                if (!ch.isActive() || !handoff.getAsBoolean()) { given.complete(null); return; }
                 c.detach();
                 router.toHost(r, List.of(), true);
                 given.complete(null);
             }, () -> given.complete(null));
             return given;
-        });
-        return new WebSocketFrames(c);
+        }));
+        var frames = new WebSocketFrames(c);
+        frames.withdrawOnEnd(handled);
+        return frames;
     }
 }

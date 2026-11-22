@@ -306,7 +306,10 @@ public final class KeepAlive {
     boolean onTimeout(long t, boolean live) {
         if (outstanding != 0 && t >= expires) expired();
         if (!live) return false;
-        if (idle > 0 && t >= Time.add(lastActivity, idle)) return true;
+        if (idle > 0) {
+            long idleDeadline = Time.add(lastActivity, idle);
+            if (idleDeadline != Time.NEVER && t >= idleDeadline) return true;
+        }
         if (period >= 0 && outstanding == 0 && lastKeepRef != lastActivity && t >= Time.add(lastActivity, keepWait())) {
             lastKeepRef = lastActivity;
             want = true;

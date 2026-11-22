@@ -19,6 +19,7 @@ class GlobalBoundTest {
         final CountDownLatch closed = new CountDownLatch(1);
         final AtomicInteger written = new AtomicInteger();
         final PipeIo io;
+        io.zmux.adapter.Handled handled;
 
         Fake(boolean read, boolean write) {
             PipeReader r = new PipeReader() {
@@ -44,7 +45,7 @@ class GlobalBoundTest {
 
     static Fake handle(ZmuxListener l, String source) {
         Fake f = new Fake();
-        l.adapter().handle(f.io, from(source));
+        f.handled = l.adapter().handle(f.io, from(source));
         return f;
     }
 
@@ -102,9 +103,9 @@ class GlobalBoundTest {
                     .peekTimeout(Duration.ofSeconds(30)).stall(Duration.ofSeconds(30), Duration.ofSeconds(30)).build();
             try (var l = Zmux.listener(base(loops).maxPending(4).admission(adm).build())) {
                 Fake s1 = handle(l, "s1"); s1.send((byte) 1);
-                PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
+                assertEquals(AdmissionVerdict.STALL, s1.handled.verdict().get(5, TimeUnit.SECONDS));
                 Fake s2 = handle(l, "s2"); s2.send((byte) 1);
-                PipePoolTest.await(() -> l.stats().admission().stalled() == 2);
+                assertEquals(AdmissionVerdict.STALL, s2.handled.verdict().get(5, TimeUnit.SECONDS));
                 // The third stall is beyond half of 4.
                 Fake s3 = handle(l, "s3"); s3.send((byte) 1);
                 s3.awaitClosed();
@@ -112,17 +113,16 @@ class GlobalBoundTest {
                 assertEquals(2, l.stats().admission().stalled());
                 Fake d1 = handle(l, "d1"); d1.send((byte) 0);
                 Fake d2 = handle(l, "d2"); d2.send((byte) 0);
-                Thread.sleep(50);
                 assertFalse(s1.isClosed() || s2.isClosed() || d1.isClosed() || d2.isClosed());
                 long rejected = l.stats().rejected();
                 // Every slot is taken: a new carrier closes the oldest stall and proceeds.
                 Fake d3 = handle(l, "d3");
                 s1.awaitClosed();
-                Thread.sleep(50);
+                d3.sink.get(5, TimeUnit.SECONDS);
                 assertFalse(s2.isClosed() || d3.isClosed());
                 Fake d4 = handle(l, "d4");
                 s2.awaitClosed();
-                Thread.sleep(50);
+                d4.sink.get(5, TimeUnit.SECONDS);
                 assertFalse(d4.isClosed());
                 assertEquals(rejected, l.stats().rejected(), "an evicted stall is not counted again");
                 // None stalled: the new carrier is closed at once, without a byte.
@@ -133,9 +133,9 @@ class GlobalBoundTest {
                 assertFalse(d1.isClosed() || d2.isClosed() || d3.isClosed() || d4.isClosed());
                 // A closed carrier gives its slot back: d3 ends before its prefix, and its decision closes it.
                 d3.sink.get(5, TimeUnit.SECONDS).onEnd();
-                d3.awaitClosed();
+                d3.handled.closed().get(5, TimeUnit.SECONDS);
                 Fake d6 = handle(l, "d6");
-                Thread.sleep(50);
+                d6.sink.get(5, TimeUnit.SECONDS);
                 assertFalse(d6.isClosed());
             }
         }

@@ -24,7 +24,7 @@ final class Errors {
     static SessionError session(io.zmux.internal.core.SessionError e) {
         return switch (e.kind()) {
             case APPLICATION -> new SessionError.ApplicationClosed(e.code(), e.reason(), e.remote());
-            case TRANSPORT -> e.code() == TransportError.RESUME_FAILED ? new SessionError.ResumeFailed(e.remote())
+            case TRANSPORT -> e.code() == TransportError.RESUME_FAILED ? new SessionError.ResumeFailed(e.reason(), e.remote())
                     : new SessionError.TransportClosed(e.code(), TransportError.name(e.code()), e.frameType(), e.reason(), e.details(), e.remote());
             case IDLE -> new SessionError.IdleTimeout(e.remote());
             case HANDSHAKE_TIMEOUT -> new SessionError.HandshakeTimeout();
@@ -34,9 +34,14 @@ final class Errors {
         };
     }
 
+    private static SessionClosedException closed(SessionError error) {
+        return error instanceof SessionError.TransportClosed t && t.isConnectionRefused()
+                ? new ConnectionRefusedException(t) : new SessionClosedException(error);
+    }
+
     static IOException io(CoreException e) {
         return switch (e.reason()) {
-            case SESSION -> new SessionClosedException(session(e.sessionError()));
+            case SESSION -> closed(session(e.sessionError()));
             case STREAM -> stream(e.streamError());
             case STREAM_LIMIT -> new StreamLimitException();
             case NOT_NEGOTIATED -> new NotNegotiatedException("feature");

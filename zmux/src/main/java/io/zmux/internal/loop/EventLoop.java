@@ -124,10 +124,11 @@ public final class EventLoop extends SessionHost {
             // taking the final hook snapshot, so no newly admitted carrier escapes cleanup.
             Runnable r;
             while ((r = tasks.poll()) != null) safe(r);
-            runShutdownHooks();
         } catch (Throwable t) {
             LOG.log(Level.SEVERE, "zmux event loop failed", t);
         } finally {
+            closing = true;
+            runShutdownHooks();
             terminated = true;
             try {
                 for (SelectionKey k : selector.keys()) k.channel().close();
@@ -155,14 +156,14 @@ public final class EventLoop extends SessionHost {
         } else if (deadline == Time.NEVER) {
             selector.select();
         } else {
-            long wait = deadline - Clock.now();
+            long wait = deadline - timerNow();
             if (wait <= 0) {
                 selector.selectNow();
             } else if (wait < 1_000_000) {
                 // Below the selector's millisecond: park in short slices until the deadline, so
                 // timers fire on time and I/O still ends the wait (tryExecute unparks the loop).
                 while (selector.selectNow() == 0 && tasks.isEmpty() && !closing) {
-                    long left = deadline - Clock.now();
+                    long left = deadline - timerNow();
                     if (left <= 0) break;
                     LockSupport.parkNanos(this, Math.min(left, PARK_SLICE));
                 }
@@ -195,7 +196,7 @@ public final class EventLoop extends SessionHost {
             if (r == null) break;
             safe(r);
         }
-        runTimers(Clock.now());
+        runTimers(timerNow());
         endRound();
     }
 }

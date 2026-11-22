@@ -21,12 +21,19 @@ import org.junit.jupiter.api.Timeout;
 class RedialerTest {
     /** A SocketTimeoutException (an InterruptedIOException) from the hook is a failed attempt, not the session's close. */
     @Test void aTimedOutAttemptIsRetried() throws Exception {
+        // HS-21, HS-31.
         try (EventLoops loops = EventLoops.create(2)) {
             var listenerHolder = new ZmuxListener[1];
             var calls = new AtomicInteger();
             var second = new CountDownLatch(1);
+            var joined = new CompletableFuture<PipeId>();
+            var outcomes = new AtomicInteger();
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(6).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
                     .resumeTimeout(Duration.ofSeconds(10))
+                    .joinOutcome((session, id, error) -> {
+                        outcomes.incrementAndGet();
+                        if (error != null) joined.completeExceptionally(error); else joined.complete(id);
+                    })
                     .redialBackoff(new Backoff(Duration.ofMillis(1), Duration.ofMillis(1), 0))
                     .redial((need, cancellation) -> {
                         if (calls.incrementAndGet() == 1) throw new SocketTimeoutException("connect timed out");
@@ -42,8 +49,11 @@ class RedialerTest {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
                 try (var c = Zmux.open(io[0], Role.CLIENT, cfg); var s = listener.accept(Duration.ofSeconds(5))) {
+                    listener.drain("suspended session may resume");
                     c.pipes().getFirst().abort();
                     assertTrue(second.await(20, TimeUnit.SECONDS), "the redial run stopped after a timed-out attempt");
+                    assertNotNull(joined.get(5, TimeUnit.SECONDS));
+                    assertEquals(1, outcomes.get(), "the first attempt produced no carrier");
                 }
             }
         }
@@ -57,7 +67,7 @@ class RedialerTest {
         assertThrows(SocketTimeoutException.class, () -> Redialer.settle(outcome, f -> {
             f.complete(pair[0]); // the hook's thread wins the outcome just as the wait gives up
             throw new TimeoutException();
-        }, abandoned::incrementAndGet));
+        }, abandoned::incrementAndGet, io.zmux.internal.loop.Bootstrap::discard));
         assertEquals(1, abandoned.get());
         assertClosed(pair[1]);
     }
@@ -65,7 +75,7 @@ class RedialerTest {
     /** A result delivered after the claim is closed by the attempt's own thread (its complete fails). */
     @Test void aResultAfterTheClaimIsRefused() throws Exception {
         var outcome = new CompletableFuture<PipeIo>();
-        assertThrows(SocketTimeoutException.class, () -> Redialer.settle(outcome, f -> { throw new TimeoutException(); }, () -> { }));
+        assertThrows(SocketTimeoutException.class, () -> Redialer.settle(outcome, f -> { throw new TimeoutException(); }, () -> { }, (io, error) -> fail("no carrier to discard")));
         assertFalse(outcome.complete(MemoryPipe.pair(Framing.BYTE_STREAM)[0]));
     }
 
@@ -73,7 +83,7 @@ class RedialerTest {
     @Test void aDeliveredResultIsHandedOff() throws Exception {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
         var outcome = CompletableFuture.completedFuture(pair[0]);
-        assertSame(pair[0], Redialer.settle(outcome, CompletableFuture::get, () -> fail("abandoned a delivered result")));
+        assertSame(pair[0], Redialer.settle(outcome, CompletableFuture::get, () -> fail("abandoned a delivered result"), (io, error) -> fail("discarded result")));
     }
 
     /** The input at the other end of peer was closed: its writer's abort reaches peer's reader. */

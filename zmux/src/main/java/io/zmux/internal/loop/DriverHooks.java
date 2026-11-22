@@ -38,6 +38,10 @@ public record DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth,
         //noinspection ClassEscapesItsScope
         default boolean allow(Transport c, io.zmux.internal.join.Mode mode, Object peer) { return mode == io.zmux.internal.join.Mode.SEALED; }
 
+        default io.zmux.JoinOutcome outcome() { return null; }
+
+        default Throwable publicError(io.zmux.internal.core.CoreException terminal) { return terminal; }
+
         default boolean authorize(Object host, long pipe) { return true; }
 
         /** The record mode of a carrier the local endpoint joins, when its options name none. */

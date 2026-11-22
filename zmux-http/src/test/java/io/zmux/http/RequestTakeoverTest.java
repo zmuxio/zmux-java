@@ -67,10 +67,11 @@ class RequestTakeoverTest {
     }
 
     @Test void aRequestCarrierDecidedOnItsBodyIsTakenOverFullDuplex() throws Exception {
+        // HS-15.
         var stages = new LinkedBlockingQueue<Admission.Stage>();
         Admission.Decider decider = Admission.Decider.immediate((info, prefix) -> {
             stages.add(info.stage());
-            return Admission.Decision.fallback("tunnel");
+            return Admission.Decision.takeover("tunnel");
         });
         var taken = new LinkedBlockingQueue<Takeover>();
         try (var f = new Fixture(b -> b, b -> b.admission(Admission.builder(4, decider).peekTimeout(Duration.ofSeconds(10)).build())
@@ -102,7 +103,8 @@ class RequestTakeoverTest {
                 }
             }
             var st = f.listener.stats().admission();
-            assertEquals(2, st.fallback());
+            assertEquals(0, st.fallback());
+            assertEquals(2, st.takeover());
         }
     }
 }

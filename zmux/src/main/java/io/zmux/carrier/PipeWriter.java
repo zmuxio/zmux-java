@@ -5,7 +5,9 @@ import java.util.OptionalLong;
 /**
  * The sending half of a pipe input. zmux has at most one write in flight; a write in
  * progress means "not writable". Closing or aborting must eventually complete any pending
- * write. {@link #close} or {@link #abort} is called exactly once.
+ * write. Both operations must be idempotent. A graceful {@link #close} may be followed by
+ * one {@link #abort} at the linger deadline, including after close returned. The default abort
+ * calls close again.
  */
 public interface PipeWriter {
     /** The outcome of one write. */
@@ -33,18 +35,6 @@ public interface PipeWriter {
      * must not call into the session.
      */
     default OptionalLong unsent() {
-        return OptionalLong.empty();
-    }
-
-    /**
-     * The bytes the carrier itself has retransmitted so far ({@code tcpi_bytes_retrans}, a
-     * QUIC stack's lost bytes of the connection), or empty when the carrier cannot tell; empty
-     * by default. Pipes that share one carrier connection report that connection's count. The
-     * driver calls it as it calls {@link #unsent()}, at most once a second per pipe: it must not
-     * block and must not call into the session. It feeds only the pipe's
-     * {@link io.zmux.PipeStats#bytesRetransmitted()} and {@link io.zmux.PipeStats#lossRate()}.
-     */
-    default OptionalLong retransmitted() {
         return OptionalLong.empty();
     }
 

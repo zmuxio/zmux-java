@@ -37,7 +37,6 @@ class MaxRecordTest {
                 w.write(batch, done);
             }
             @Override public OptionalLong unsent() { return w.unsent(); }
-            @Override public OptionalLong retransmitted() { return w.retransmitted(); }
             @Override public void close() { w.close(); }
             @Override public void abort(Throwable cause) { w.abort(cause); }
         });

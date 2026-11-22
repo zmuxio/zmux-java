@@ -77,11 +77,37 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
 
     /** The handshake was done before the carrier was added. */
     private boolean established;
-    /** No new stream goes to the listener any more ({@link QuicServer#serve} cancelled); loop only. */
-    private boolean stopped;
+    /** Published on the cancelling thread before the Serve future reports cancellation. */
+    private volatile boolean stopped;
+
+    private final java.util.Set<io.zmux.internal.spi.AdapterPorts.Setup> settingUp = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private void track(StreamCarrier stream, io.zmux.adapter.Handled carrier) {
+        var setup = io.zmux.internal.spi.AdapterPorts.setup(carrier);
+        settingUp.add(setup);
+        // route registered on the stream's loop before it can run the first-record task.
+        // A stop racing registration either sees this setup or is visible here.
+        if (stopped) setup.interrupt();
+        var close = stream.stream().closeFuture();
+        io.netty.channel.ChannelFutureListener withdrawn = ignored -> setup.interrupt();
+        close.addListener(withdrawn);
+        setup.onFinished(() -> {
+            close.removeListener(withdrawn);
+            settingUp.remove(setup);
+        });
+    }
 
     /** Stops handing the connection's new streams to the listener; they are closed. Any thread. */
-    void stop() { Loops.run(channel.eventLoop(), () -> stopped = true, () -> {}); } // a refused stop: the loop closes the connection
+    void stop(QuicChannel connection) {
+        stopSetups();
+        Loops.run(connection.eventLoop(), () -> {
+            if (slot != null) { slot.release(); slot = null; }
+            for (var stream : held) stream.dispose();
+            held.clear();
+            for (var stream : pending) stream.dispose();
+            pending.clear();
+        }, () -> {}); // A stopped loop closes its channels.
+    }
 
     /** A client connection's carrier: its first bidirectional stream starts with credential's prefix (null: none). */
     ConnectionCarrier(QuicOptions options, ZmuxListener listener, NettyHost host,
@@ -103,14 +129,34 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
     @Override public void handlerAdded(ChannelHandlerContext context) {
         channel = (QuicChannel) context.channel(); channel.attr(KEY).set(this);
         if (disposed.get()) { channel.close(); return; }
-        if (server && listener != null) {
+        if (server && listener != null && !stopped) {
             // A server connection: its source's slot comes first, before the handshake.
             var peer = (java.net.InetSocketAddress) channel.remoteSocketAddress();
             slot = listener.adapter().reserve(peer, null);
             if (slot == null) { channel.close(); return; }
+            awaitFirstStream(slot);
         }
         if (established) { handshake = true; routePending(); }
     }
+    /** A reservation belongs to this connection only until it supplies the first admission stream. */
+    private void awaitFirstStream(io.zmux.adapter.Slot reserved) {
+        java.time.Duration limit = listener.adapter().firstRecordTimeout();
+        var handshake = listener.config().handshakeTimeout();
+        if (handshake.isPresent() && handshake.get().compareTo(limit) < 0) limit = handshake.get();
+        //noinspection resource: borrowed: the channel owns its event loop
+        var timer = channel.eventLoop().schedule(() -> {
+            if (slot == reserved) {
+                handshakeFailed();
+                channel.close();
+            }
+        }, limit.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS);
+        io.zmux.internal.spi.AdapterPorts.reservation(reserved).onFinished(() ->
+                Loops.run(channel.eventLoop(), () -> {
+                    timer.cancel(false);
+                    if (slot == reserved) channel.close();
+                }, () -> timer.cancel(false)));
+    }
+
     @Override public void userEventTriggered(ChannelHandlerContext context, Object event) {
         if (event instanceof QuicDatagramExtensionEvent datagrams && options.isDatagrams()) maxDatagram = Math.max(0, datagrams.maxLength());
         if (event instanceof SslHandshakeCompletionEvent completed) {
@@ -119,7 +165,13 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         }
         context.fireUserEventTriggered(event);
     }
+    private void stopSetups() {
+        stopped = true;
+        for (var setup : settingUp) setup.interrupt();
+    }
+
     @Override public void channelInactive(ChannelHandlerContext context) {
+        stopSetups();
         if (!handshake) handshakeFailed();
         else if (slot != null) { slot.release(); slot = null; } // no first stream came: the slot goes
         for (StreamCarrier stream : pending) stream.dispose();
@@ -149,26 +201,6 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         } finally {
             datagram.release();
         }
-    }
-
-    /** The connection's lost bytes as last collected (-1: not yet), and when a collection was last asked for. */
-    private volatile long lostBytes = -1;
-    private final java.util.concurrent.atomic.AtomicLong lostAskedAt = new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
-
-    /**
-     * The connection's lost bytes (the QUIC stack's retransmission count), as last collected,
-     * -1 before the first; asks for a fresh count at most once a second, without waiting.
-     */
-    long lostBytes() {
-        QuicChannel current = channel;
-        long now = System.nanoTime(), at = lostAskedAt.get();
-        if (current != null && current.isActive() && (at == Long.MIN_VALUE || now - at >= 1_000_000_000L)
-                && lostAskedAt.compareAndSet(at, now)) {
-            current.collectStats().addListener(done -> {
-                if (done.isSuccess()) lostBytes = ((QuicConnectionStats) done.getNow()).lostBytes();
-            });
-        }
-        return lostBytes;
     }
 
     /** The largest channel datagram the connection sends now, 0 while datagrams are not negotiated both ways. */
@@ -267,7 +299,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             return;
         }
         switch (admission) {
-            case ACCEPTED -> first.sibling(carrier.io(this), io.zmux.JoinHint.inBand(peer()));
+            case ACCEPTED -> track(carrier, first.sibling(carrier.io(this), io.zmux.JoinHint.inBand(peer())));
             case REFUSED -> carrier.dispose();
             case UNDECIDED -> {
                 // The admission reads the peer's first bidirectional stream (ID 0 from a client, 1 from a
@@ -301,9 +333,11 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
         var admitted = s != null ? s.handle(first.io(this), io.zmux.JoinHint.inBand(s.peer()))
                 : listener.adapter().handle(first.io(this), io.zmux.JoinHint.inBand(peer()));
         this.first = admitted;
+        track(first, admitted);
         var decision = admitted.verdict();
         // A loop that refuses the verdict closes the connection and its held streams as it shuts down.
         decision.whenComplete((verdict, error) -> Loops.run(connection.eventLoop(), () -> {
+            if (stopped) return;
             if (verdict == io.zmux.AdmissionVerdict.ACCEPT) {
                 admission = ACCEPTED;
                 var waiting = new ArrayList<>(held);
@@ -317,7 +351,7 @@ final class ConnectionCarrier extends ChannelInboundHandlerAdapter {
             // A connection that carried no session closes with code 0.
             // A stalled stream, and one taken over, end before the connection does; a stream the host detached
             // leaves its connection to the host.
-            if (verdict == io.zmux.AdmissionVerdict.STALL || verdict == io.zmux.AdmissionVerdict.FALLBACK)
+            if (verdict == io.zmux.AdmissionVerdict.STALL || verdict == io.zmux.AdmissionVerdict.FALLBACK || verdict == io.zmux.AdmissionVerdict.TAKEOVER)
                 admitted.closed().whenComplete((v, e) -> { if (!admitted.detached()) close(connection); });
             else close(connection);
         }, () -> {}));

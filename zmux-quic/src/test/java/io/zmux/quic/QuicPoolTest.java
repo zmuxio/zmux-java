@@ -280,6 +280,14 @@ class QuicPoolTest {
             var c=f.local.open(second, Role.CLIENT);var d=f.remote.accept(Duration.ofSeconds(5));assertNotNull(d);
             try {
                 assertEquals(1,pool.connections().size());assertEquals(2,pool.connections().getFirst().active());
+                until(() -> a.pipeStats().getFirst().carrierSample().isPresent()
+                        && c.pipeStats().getFirst().carrierSample().isPresent());
+                var sample = a.pipeStats().getFirst().carrierSample().orElseThrow();
+                assertEquals(sample.carrierId(), c.pipeStats().getFirst().carrierSample().orElseThrow().carrierId());
+                assertEquals(io.zmux.CarrierSource.NETTY_QUIC, sample.source());
+                assertEquals(0, sample.generation());
+                var counts = assertInstanceOf(io.zmux.QuicCounters.class, sample.counts().orElseThrow());
+                assertTrue(counts.packetsSent() > 0);
                 QuicEndpointTest.closed(a,b);until(() -> pool.connections().getFirst().active()==1);
                 QuicTest.transfer(workers,c,d,2,128<<10);
                 var third=pool.openPipeAsync().get(5,TimeUnit.SECONDS);assertSame(second.carrierConn(),third.carrierConn());release(third);

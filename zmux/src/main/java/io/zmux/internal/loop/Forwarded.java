@@ -26,7 +26,7 @@ final class Forwarded implements Inbound {
     /** Unreleased input bytes beyond which reading pauses. */
     static final long AHEAD = BufferPool.SIZE;
 
-    private final Transport carrier;
+    private final CarrierSetup.Bound binding;
     /** The batch of the target's write, reused. */
     private final Batch batch = new Batch();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -55,7 +55,7 @@ final class Forwarded implements Inbound {
     /** As above; messages: the carrier is a message carrier, its pipe input of message framing. */
     Forwarded(Transport c, byte[] replay, boolean ended, boolean graceful, boolean messages) {
         this.messages = messages;
-        carrier = c;
+        binding = CarrierSetup.binding(c);
         this.replay = replay;
         this.ended = ended;
         this.graceful = graceful;
@@ -74,35 +74,45 @@ final class Forwarded implements Inbound {
 
     /** {@link #pipe(io.zmux.Admission.CarrierInfo, Object)} with the handshake's metadata given apart. */
     PipeIo pipe(PipeIo.Exporter exporter, String protocol, String serverName, boolean terminatedTls, Object conn) {
-        boolean in = (carrier.directions() & io.zmux.internal.core.Action.DIR_IN) != 0;
-        boolean out = (carrier.directions() & io.zmux.internal.core.Action.DIR_OUT) != 0;
+        boolean in = (binding.carrier.directions() & io.zmux.internal.core.Action.DIR_IN) != 0;
+        boolean out = (binding.carrier.directions() & io.zmux.internal.core.Action.DIR_OUT) != 0;
         if (!in) { readerClosed = true; readerCalled = true; }
         if (!out) { writerClosed = true; writerCalled = true; }
         PipeReader reader = !in ? null : new PipeReader() {
             @Override public void start(Sink s) {
                 if (!started.compareAndSet(false, true)) throw new IllegalStateException("reader already started");
-                if (!carrier.loop().tryExecute(() -> begin(s))) s.onError(new IOException("event loop closed"));
+                if (!binding.carrier.loop().tryExecute(() -> begin(s))) s.onError(new IOException("event loop closed"));
             }
 
-            @Override public void close() { readerCalled = true; carrier.loop().tryExecute(Forwarded.this::closeReader); }
+            @Override public void close() { readerCalled = true; binding.carrier.loop().tryExecute(Forwarded.this::closeReader); }
         };
-        PipeWriter writer = !out ? null : new PipeWriter() {
-            @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
-                if (!carrier.loop().tryExecute(() -> write0(data, done))) done.failed(new IOException("event loop closed"));
-            }
-
-            @Override public java.util.OptionalLong unsent() { return count(carrier.unsent()); }
-
-            @Override public java.util.OptionalLong retransmitted() { return count(carrier.retransmitted()); }
-
-            @Override public void close() { writerCalled = true; carrier.loop().tryExecute(Forwarded.this::closeWriter); }
-
-            @Override public void abort(Throwable cause) { writerCalled = true; Forwarded.this.abort(cause); }
-        };
-        io.zmux.internal.core.CarrierInfo c = carrier.info().carrier();
+        PipeWriter writer = out ? new Writer() : null;
+        io.zmux.internal.core.CarrierInfo c = binding.carrier.info().carrier();
         return PipeIo.of(reader, writer).withFraming(messages ? io.zmux.carrier.Framing.MESSAGES : io.zmux.carrier.Framing.BYTE_STREAM)
                 .withLabel(c.label()).withCarrier(c.kind()).withVariant(c.variant()).withCarrierConn(conn)
-                .withCapabilities(capabilities(carrier, exporter, protocol, serverName, terminatedTls));
+                .withCapabilities(capabilities(binding.carrier, exporter, protocol, serverName, terminatedTls));
+    }
+
+    private final class Writer implements PipeWriter, io.zmux.internal.spi.CarrierProvider {
+        @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
+            if (!binding.carrier.loop().tryExecute(() -> write0(data, done))) done.failed(new IOException("event loop closed"));
+        }
+
+        @Override public java.util.OptionalLong unsent() { return count(binding.carrier.unsent()); }
+
+        @Override public Object carrierIdentity() { return binding.carrier.carrierIdentity(); }
+
+        @Override public Runnable watchCarrier(Runnable changed) {
+            return binding.carrier.watchCarrier(changed);
+        }
+
+        @Override public Query carrierQuery(Object identity) {
+            return binding.carrier.carrierQuery(identity);
+        }
+
+        @Override public void close() { writerCalled = true; binding.carrier.loop().tryExecute(Forwarded.this::closeWriter); }
+
+        @Override public void abort(Throwable cause) { writerCalled = true; Forwarded.this.abort(cause); }
     }
 
     /**
@@ -147,8 +157,8 @@ final class Forwarded implements Inbound {
             end();
             return;
         }
-        carrier.start(this);
-        if (!creditPaused) carrier.resumeInput();
+        binding.carrier.start(this);
+        if (!creditPaused) binding.carrier.resumeInput();
     }
 
     @Override
@@ -182,12 +192,12 @@ final class Forwarded implements Inbound {
         int n = b.length;
         if (ahead.addAndGet(n) > AHEAD && !creditPaused) {
             creditPaused = true;
-            carrier.pauseInput();
+            binding.carrier.pauseInput();
         }
         AtomicBoolean once = new AtomicBoolean();
         try {
             sink.onChunk(io.zmux.Chunk.of(ByteBuffer.wrap(b)), () -> { // b is a fresh copy: no second one
-                if (once.compareAndSet(false, true) && ahead.addAndGet(-n) <= AHEAD) carrier.loop().tryExecute(this::credit);
+                if (once.compareAndSet(false, true) && ahead.addAndGet(-n) <= AHEAD) binding.carrier.loop().tryExecute(this::credit);
             });
         } catch (RuntimeException e) {
             abort(e);
@@ -198,7 +208,7 @@ final class Forwarded implements Inbound {
     private void credit() {
         if (!creditPaused || ahead.get() > AHEAD || closed) return;
         creditPaused = false;
-        if (sink != null && !ended && !readerClosed) carrier.resumeInput();
+        if (sink != null && !ended && !readerClosed) binding.carrier.resumeInput();
     }
 
     @Override
@@ -232,7 +242,7 @@ final class Forwarded implements Inbound {
         pending = done;
         wrote = true;
         batch.wrap(data);
-        carrier.write(batch);
+        binding.carrier.write(batch);
     }
 
     /** The carrier's write completion, on its loop. */
@@ -255,14 +265,14 @@ final class Forwarded implements Inbound {
     private void closeReader() {
         if (readerClosed) return;
         readerClosed = true;
-        if (!ended && !closed) carrier.shutdownInput();
+        if (!ended && !closed) binding.carrier.shutdownInput();
         if (writerClosed) finish(null);
     }
 
     private void closeWriter() {
         if (writerClosed) return;
         writerClosed = true;
-        if (!closed) carrier.shutdownOutput();
+        if (!closed) binding.carrier.shutdownOutput();
         if (readerClosed) finish(null);
     }
 
@@ -271,21 +281,21 @@ final class Forwarded implements Inbound {
      * when it is a plain TCP carrier and neither half was used; the halves fail from now on. Null otherwise.
      */
     io.zmux.Takeover.Socket detachSocket() {
-        if (closed || started.get() || wrote || pending != null || readerClosed || writerClosed || !(carrier instanceof SocketTransport st)) return null;
+        if (closed || started.get() || wrote || pending != null || readerClosed || writerClosed || !(binding.carrier instanceof SocketTransport st)) return null;
         byte[] r = replay != null ? replay : st.takeUnread();
-        java.nio.channels.SocketChannel ch = st.detach();
+        java.nio.channels.SocketChannel ch = binding.detachSocket();
         if (ch == null) return null;
         closed = true;
         replay = null;
-        carrier.loop().removeShutdownHook(shutdown);
+        binding.carrier.loop().removeShutdownHook(shutdown);
         return new io.zmux.Takeover.Socket(ch, ByteBuffer.wrap(r == null ? new byte[0] : r));
     }
 
     /** From any thread: closes both halves gracefully, once a write in flight completed. */
     void closeBoth() {
         Runnable r = () -> { closeReader(); closeWriter(); };
-        if (carrier.loop().inLoop()) r.run();
-        else if (!carrier.loop().tryExecute(r)) carrier.close(null);
+        if (binding.carrier.loop().inLoop()) r.run();
+        else binding.carrier.loop().tryExecute(r); // Its shutdown hook owns a closing loop.
     }
 
     /** Whether the target has not started reading and no input was set aside (the input is all in the read buffer). */
@@ -294,7 +304,7 @@ final class Forwarded implements Inbound {
     /** On the loop, untouched: gives the carrier back without closing it; the caller rebinds it. */
     void release() {
         closed = true;
-        carrier.loop().removeShutdownHook(shutdown);
+        binding.carrier.loop().removeShutdownHook(shutdown);
     }
 
     /** Ends the carrier abortively; the sink, if reading, sees a failure. From any thread. */
@@ -309,8 +319,8 @@ final class Forwarded implements Inbound {
             finish(cause);
         };
         // A loop that is gone has closed the carrier through the shutdown hook.
-        if (carrier.loop().inLoop()) r.run();
-        else carrier.loop().tryExecute(r);
+        if (binding.carrier.loop().inLoop()) r.run();
+        else binding.carrier.loop().tryExecute(r);
     }
 
     /** Closes the carrier once no write is in flight (abortive with a cause). */
@@ -318,10 +328,10 @@ final class Forwarded implements Inbound {
         if (closed || (cause == null && pending != null)) return;
         closed = true;
         finished = true;
-        carrier.loop().removeShutdownHook(shutdown);
+        binding.carrier.loop().removeShutdownHook(shutdown);
         PipeWriter.Completion done = pending;
         pending = null;
-        carrier.close(cause);
+        binding.close(cause);
         if (done != null) {
             try { done.failed(cause != null ? cause : new IOException("carrier closed")); } catch (RuntimeException ignored) { /* Closed. */ }
         }

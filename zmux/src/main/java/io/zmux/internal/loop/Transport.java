@@ -1,5 +1,8 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.spi.AttachmentRelease;
+import io.zmux.internal.spi.CarrierProvider;
+
 import io.zmux.internal.core.Batch;
 
 /**
@@ -11,11 +14,21 @@ import io.zmux.internal.core.Batch;
  * inside one (the delivery then reports {@link Inbound#GONE} when the transport left).
  * Each half is closed exactly once; failures abort.
  */
-public interface Transport {
+public sealed interface Transport extends AttachmentRelease.Resource, CarrierProvider permits PhysicalTransport {
     /** Immutable properties: framing, connection identity, budget, protocol. */
     TransportInfo info();
 
+    @Override default Object carrierIdentity() { return info().connection(); }
+
     SessionHost loop();
+
+    /** Close a carrier still in admission. Session and outbound transports have their own owner. */
+    default void reject(Throwable cause) {
+        CarrierSetup owner = setup();
+        owner.reject(this, cause);
+    }
+
+    CarrierSetup setup();
 
     /** Binds in and starts reading the first time; later calls only rebind. */
     void start(Inbound in);
@@ -51,12 +64,6 @@ public interface Transport {
      */
     default long unsent() { return -1; }
 
-    /**
-     * The bytes the carrier retransmitted so far, or -1 when it cannot tell (the socket
-     * transports: the JDK has no query for the kernel's count). On the loop, outside the core.
-     */
-    default long retransmitted() { return -1; }
-
     /** Stops reading until {@link #resumeInput}; what was read stays buffered. */
     void pauseInput();
 
@@ -72,27 +79,8 @@ public interface Transport {
     /** Stops only the input half. */
     void shutdownInput();
 
-    /** Closes both halves; abortive when cause is not null. Idempotent. */
-    void close(Throwable cause);
-
-    /**
-     * Whether a graceful {@link #close} can leave work running that {@link #abort} ends (a carrier whose halves
-     * close in the host's code); the session then bounds that close by the linger timeout (SPEC 6.5 step 4).
-     */
-    default boolean abortable() { return false; }
-
-    /** Aborts what a graceful close left running; a no-op where it ended. Only for an {@link #abortable} transport; any thread. */
-    default void abort(Throwable cause) { }
-
     /** Whether the transport is closed (or moved away). */
     boolean isClosed();
-
-    /**
-     * Leaves this loop without closing the connection: the returned transport, not yet
-     * started, owns it on to with the unread input; this one becomes inert. Only for an idle
-     * gated transport (nothing written). Null when it cannot move (it is closed then).
-     */
-    Transport moveTo(SessionHost to);
 
     /** The exporter of this carrier's innermost end-to-end handshake, read now; null without one or while it is incomplete. Any thread. */
     default byte[] export(String label, byte[] context, int length) { return null; }
@@ -118,6 +106,9 @@ public interface Transport {
     /** The TLS session of the handshake this process ran for the carrier; null without one. */
     default javax.net.ssl.SSLSession tlsSession() { return null; }
 
+    /** Whether a prefix read can continue after its admission deadline without closing the input. */
+    default boolean resumesAfterPeekTimeout() { return false; }
+
     /** The admission's bound of a first message ({@link io.zmux.carrier.PipeReader#limitFirstMessage}), before it starts. */
     default void limitFirstMessage(int limit) {}
 
@@ -134,9 +125,12 @@ public interface Transport {
      * Completes once the carrier is released (both halves closed, their tasks ended); at once for
      * a transport that releases its carrier when it closes.
      */
-    default java.util.concurrent.CompletionStage<Void> whenClosed() {
+    @Override default java.util.concurrent.CompletionStage<Void> whenClosed() {
         return RELEASED;
     }
+
+    /** After close, the pending write's release if its completion still owns a carrier batch. */
+    @Override default java.util.concurrent.CompletionStage<Void> writesReleased() { return RELEASED; }
 
     /** The release of a transport that releases its carrier as it closes. */
     java.util.concurrent.CompletionStage<Void> RELEASED = java.util.concurrent.CompletableFuture.completedStage(null);
@@ -168,27 +162,23 @@ public interface Transport {
      * {@link ExternalTransport} on host. Null when the native carrier closed meanwhile.
      */
     static Transport of(SessionHost host, io.zmux.carrier.PipeIo io) {
+        return of(host, io, null);
+    }
+
+    /** Register the transport before sealing can fail and close the returned wrapper. */
+    static Transport of(SessionHost host, io.zmux.carrier.PipeIo io, AttachmentRelease attachment) {
         Transport t = claim(io);
         if (t == null) t = new ExternalTransport(host, io);
-        else if (t.loop() != host) t = t.moveTo(host);
-        return sealed(t, io);
+        else if (t.loop() != host) t = CarrierSetup.moveUnowned(t, host);
+        if (t != null && attachment != null) attachment.track(t);
+        if (t == null) return null;
+        try { return seal(t, io); }
+        catch (IllegalArgumentException belowFloor) { t.reject(belowFloor); throw belowFloor; }
     }
 
-    /** As {@link #of}, on the input's own host when it has one (a native carrier), else on fallback. */
-    static Transport onOwnHost(io.zmux.carrier.PipeIo io, SessionHost fallback) {
-        Transport t = claim(io);
-        return sealed(t != null ? t : new ExternalTransport(fallback, io), io);
-    }
-
-    private static Transport sealed(Transport t, io.zmux.carrier.PipeIo io) {
+    static Transport seal(Transport carrier, io.zmux.carrier.PipeIo io) {
         var records = PipeIoAccess.get().records(io);
-        if (t == null || records == null) return t;
-        try {
-            return new SealedTransport(t, records, io.capabilities().exporter());
-        } catch (IllegalArgumentException belowFloor) {
-            t.close(belowFloor);
-            throw belowFloor;
-        }
+        return records == null ? carrier : new SealedTransport(carrier, records, io.capabilities().exporter());
     }
 
     /** The input's own transport (on its own host, not started), or null. */

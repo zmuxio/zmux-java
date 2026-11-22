@@ -32,7 +32,7 @@ class ExternalTransportTest {
                 var batch = new io.zmux.internal.core.Batch();
                 var payload = loop.pool.take();
                 BatchFixture.pin(batch, payload); payload.unref();
-                carrier.write(batch); carrier.close(null);
+                carrier.write(batch); carrier.reject(null);
                 assertEquals(1, loop.pool.outstanding(), "writer still owns the referenced output");
             });
             loop.close();
@@ -57,14 +57,14 @@ class ExternalTransportTest {
                 ExternalTransport carrier = new ExternalTransport(source, PipeIo.of(reader, null));
                 carrier.start(new Inbound() {
                     @Override public int bytes(Transport c, io.zmux.internal.core.ReadBuf b, ByteBuffer data, int pos, int lim) {
-                        Transport moved = c.moveTo(target);
+                        Transport moved = CarrierSetup.moveUnowned(c, target);
                         Inbound next = new Inbound() {
                             @Override public int bytes(Transport n, io.zmux.internal.core.ReadBuf rb, ByteBuffer bytes, int from, int to) {
                                 for (int i=from; i<to; i++) assertEquals((byte) (count.getAndIncrement() % 251), bytes.get(i));
                                 if (count.get() == size) received.complete(null);
                                 return to-from;
                             }
-                            @Override public void ended(Transport n, boolean graceful, boolean partial) { n.close(null); }
+                            @Override public void ended(Transport n, boolean graceful, boolean partial) { n.reject(null); }
                         };
                         target.execute(() -> moved.start(next));
                         // The reader's end arrives now, while the carrier is between its loops and the rest of
@@ -73,7 +73,7 @@ class ExternalTransportTest {
                         sink.get().onEnd();
                         return Inbound.GONE;
                     }
-                    @Override public void ended(Transport c, boolean graceful, boolean partial) { c.close(null); }
+                    @Override public void ended(Transport c, boolean graceful, boolean partial) { c.reject(null); }
                 });
             });
             ByteBuffer input = ByteBuffer.allocate(size);
@@ -99,18 +99,18 @@ class ExternalTransportTest {
             var hub = new ListenerHub(new ListenerHub.Owner() {
                 @Override public io.zmux.internal.core.CoreConfig config() { return io.zmux.internal.core.CoreConfig.defaults(); }
                 @Override public DriverHooks hooks() { return DriverHooks.NONE; }
-                @Override public void started(SessionRuntime driver, String protocol, io.zmux.CarrierCredential credential) { fail("incomplete first record started a session"); }
+                @Override public void started(SessionRuntime driver, String protocol, io.zmux.CarrierCredential credential, CarrierSetup setup) { fail("incomplete first record started a session"); }
             }, null, new byte[0], 8, 0, 0, 0, 0, 0);
             try {
                 if (knownLane) ListenerHub.laneInput(loop, PipeIo.of(reader, null));
-                else { hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.CARRIER, null); }
+                else { hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.Stream.CARRIER, null, PairingShutdownTest.reserved(hub)); }
                 run(loop, () -> {});
                 sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
                 loop.close();
                 // A half's close runs off the loop.
                 awaitCount(closed, 1); assertEquals(0, loop.pool.outstanding());
-                hub.reserve(null); hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.CARRIER, null);
+                hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.Stream.CARRIER, null, PairingShutdownTest.reserved(hub));
                 awaitCount(closed, 2);
             } finally { hub.close(); loop.close(); }
         }

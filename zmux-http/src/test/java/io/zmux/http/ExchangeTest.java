@@ -96,6 +96,22 @@ class ExchangeTest {
 
     static final byte[] NONE = new byte[0];
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void carrierEndWithdrawsUnreadTransformAfterItsOpeningPostEnded(boolean peerClose) throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var pending = new java.util.concurrent.CompletableFuture<io.zmux.carrier.PipeIo>();
+        try (var f = new Fixture(b -> b.noHandshakeTimeout(), b -> b.maxPendingPerSource(2)
+                .inboundTransform((io, ctx) -> { entered.countDown(); return pending; }), b -> b.exchange(cfg().idleTimeout(Duration.ofMillis(peerClose ? 5000 : 500)).build()), false, null)) {
+            Raw raw = new Raw(f.base, PSK);
+            assertEquals(0, raw.flags(Exchange.KIND_UP, 0, 0, 0, new byte[]{1}));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(pending.isDone());
+            if (peerClose) assertEquals(0, raw.flags(Exchange.KIND_CLOSE, 0, 0, 0, NONE));
+            assertThrows(java.util.concurrent.CancellationException.class, () -> pending.get(5, TimeUnit.SECONDS));
+        }
+    }
+
     @Test void vectorsThroughTheServer() throws Exception {
         String[][] vecs = {
             {"", ExchangeWireTest.UP_PLAIN, ExchangeWireTest.UP_RESP_PLAIN},
@@ -247,6 +263,39 @@ class ExchangeTest {
         }
     }
 
+    @Test void authenticatedExchangeRoutesFallbackAsHttpAndTakeoverAsItsStream() throws Exception {
+        // HS-15.
+        var seen = new java.util.concurrent.LinkedBlockingQueue<HostHandler.Seen>();
+        var taken = new java.util.concurrent.LinkedBlockingQueue<io.zmux.Takeover>();
+        var verdict = new java.util.concurrent.atomic.AtomicReference<>(io.zmux.Admission.Decision.FALLBACK);
+        var adm = io.zmux.Admission.builder(16, io.zmux.Admission.Decider.immediate((info, prefix) -> {
+            assertEquals(io.zmux.Admission.Stage.HEAD, info.stage());
+            assertFalse(prefix.hasRemaining());
+            return verdict.get();
+        })).build();
+        try (var f = new Fixture(b -> b, b -> b.admission(adm).fallback(t -> {
+            t.detach();
+            taken.add(t);
+            return null;
+        }), b -> b.exchange(cfg().build()), false, () -> new HostHandler(seen))) {
+            byte[] q = fresh(newCid(), Exchange.KIND_UP, 0, new byte[]{1, 2, 3});
+            assertEquals("host", new String(post(f.base, q).body, StandardCharsets.US_ASCII));
+            assertArrayEquals(q, seen.take().body());
+            assertTrue(taken.isEmpty());
+            verdict.set(io.zmux.Admission.Decision.TAKEOVER);
+            var raw = new Raw(f.base, PSK);
+            assertEquals(0, raw.flags(Exchange.KIND_UP, 0, 0, 0, new byte[]{'u', 'p'}));
+            var t = taken.poll(5, TimeUnit.SECONDS);
+            assertNotNull(t);
+            var input = RequestTakeoverTest.reading(t.pipe().reader());
+            assertEquals("up", RequestTakeoverTest.take(input, 2));
+            t.pipe().reader().close();
+            t.pipe().writer().close();
+            assertEquals(0, raw.flags(Exchange.KIND_CLOSE, 0, 0, 0, NONE));
+            assertTrue(seen.isEmpty());
+        }
+    }
+
     @Test void theAdmissionValueReachesTheCarriersSession() throws Exception {
         var c = cfg().holdTime(Duration.ofSeconds(2)).build();
         var adm = io.zmux.Admission.builder(0, io.zmux.Admission.Decider.immediate((info, prefix) -> io.zmux.Admission.Decision.accept(0, "tenant-7"))).build();
@@ -368,6 +417,71 @@ class ExchangeTest {
                 assertEquals(200, first.status(), "the held DOWN answers first");
                 assertNotEquals(200, TestProxy.head(in).status());
             }
+        }
+    }
+
+    @Test void withdrawingAnExchangeHeadWaitsForTheActualRequestWrite() throws Exception {
+        // HS-16, HS-16a.
+        for (boolean before : new boolean[]{true, false}) {
+            var intercepted = new CompletableFuture<io.netty.channel.ChannelPromise>();
+            var channel = new io.netty.channel.embedded.EmbeddedChannel(new io.netty.channel.ChannelOutboundHandlerAdapter() {
+                @Override public void write(io.netty.channel.ChannelHandlerContext context, Object msg, io.netty.channel.ChannelPromise promise) {
+                    io.netty.util.ReferenceCountUtil.release(msg);
+                    intercepted.complete(promise);
+                }
+            }, new io.netty.channel.ChannelInboundHandlerAdapter());
+            try {
+                var ctx = channel.pipeline().lastContext();
+                var head = new ResponseHead(_ -> {}, ctx::close);
+                var opened = head.open();
+                var release = new io.zmux.internal.spi.AttachmentRelease();
+                if (before) opened.cancel(false);
+                var response = new io.netty.handler.codec.http.DefaultFullHttpResponse(io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
+                        io.netty.handler.codec.http.HttpResponseStatus.OK, io.netty.buffer.Unpooled.buffer().writeByte(1));
+                ExchangeServer.writeResponse(ctx, response, head, release,
+                        () -> fail("withdrawn request resumed"));
+                if (before) assertFalse(intercepted.isDone());
+                else {
+                    var actual = intercepted.get(3, TimeUnit.SECONDS);
+                    assertFalse(release.completion().isDone());
+                    opened.cancel(false);
+                    channel.runPendingTasks();
+                    assertFalse(head.released().toCompletableFuture().isDone());
+                    actual.setFailure(new java.nio.channels.ClosedChannelException());
+                }
+                release.completion().get(3, TimeUnit.SECONDS);
+                assertEquals(0, response.refCnt());
+                assertFalse(channel.isActive());
+            } finally { channel.finishAndReleaseAll(); }
+        }
+    }
+
+    @Test void terminatedRequestLoopSettlesTheTakeoverHeadAndReleasesTheFinalWrite() throws Exception {
+        // HS-16.
+        var context = new CompletableFuture<io.netty.channel.ChannelHandlerContext>();
+        var carrierGroup = new io.netty.channel.MultiThreadIoEventLoopGroup(1, io.netty.channel.nio.NioIoHandler.newFactory());
+        try (var f = Fixture.plain(b -> b.exchange(cfg().build()))) {
+            try {
+                new io.netty.bootstrap.Bootstrap().group(carrierGroup).channel(io.netty.channel.socket.nio.NioSocketChannel.class)
+                        .handler(new io.netty.channel.ChannelInboundHandlerAdapter() {
+                            @Override public void channelActive(io.netty.channel.ChannelHandlerContext ctx) { context.complete(ctx); }
+                        }).connect(f.server.localAddress()).sync();
+                var ctx = context.get(3, TimeUnit.SECONDS);
+                carrierGroup.shutdownGracefully(0, 0, TimeUnit.SECONDS).sync();
+                var head = new ResponseHead(_ -> {}, ctx::close);
+                var opened = head.open();
+                var attachment = new io.zmux.internal.spi.AttachmentRelease();
+                var last = attachment.fork();
+                attachment.close();
+                var response = new io.netty.handler.codec.http.DefaultFullHttpResponse(
+                        io.netty.handler.codec.http.HttpVersion.HTTP_1_1, io.netty.handler.codec.http.HttpResponseStatus.OK,
+                        io.netty.buffer.Unpooled.buffer().writeByte(1));
+                ExchangeServer.writeResponse(ctx, response, head, last, () -> fail("terminated request resumed"));
+                var error = assertThrows(java.util.concurrent.ExecutionException.class, () -> opened.get(3, TimeUnit.SECONDS));
+                assertInstanceOf(java.nio.channels.ClosedChannelException.class, error.getCause());
+                attachment.completion().get(3, TimeUnit.SECONDS);
+                assertEquals(0, response.refCnt());
+            } finally { carrierGroup.shutdownGracefully(0, 0, TimeUnit.SECONDS).sync(); }
         }
     }
 

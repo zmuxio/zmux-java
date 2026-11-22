@@ -1,7 +1,10 @@
 package io.zmux.internal.core;
 
 import static org.junit.jupiter.api.Assertions.*;
+import io.zmux.PipeStats.LaneStats;
 import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.OptionalLong;
 import org.junit.jupiter.api.Test;
 
 class LaneOwnershipTest {
@@ -29,6 +32,35 @@ class LaneOwnershipTest {
             assertTrue(st.snd.bind().laneEnd() > p.out().lanes.get(1).ack.acked());
             assertSame(p.out().lanes.get(1), s.lanes.laneFor(p, st), "old lane must cover the batch before switching");
         } finally { b.discard(); s.streams.release(st); }
+    }
+
+    @Test void snapshotPreservesMissingDirectionsZeroPositionsAndWideLaneIds() {
+        Session s = new Session(CoreConfig.defaults(), 0);
+        var info = new CarrierInfo(Framing.BYTES, false, false, true, false);
+        s.pipes().attachBootstrap(info, info, null);
+        Pipe p = s.pipes.get(0);
+        p.out().add(new Pipe.OutLane(1, info, true));
+        long wide = 1L << 33;
+        var wideInbound = new Pipe.InLane(wide, false, false);
+        Poke.set(wideInbound.rx, "pos", wide + 3);
+        p.in().add(wideInbound);
+        p.in().add(new Pipe.InLane(2, false, false));
+
+        var stats = s.pipeStats(0, 0, 0);
+        var zero = OptionalLong.of(0);
+        var absent = OptionalLong.empty();
+        assertEquals(2L, stats.lanesOut());
+        assertEquals(3L, stats.lanesIn());
+        assertEquals(zero, stats.epoch());
+        assertEquals(absent, stats.replaceBy());
+        assertEquals(List.of(
+                new LaneStats(0, zero, absent, zero),
+                new LaneStats(1, zero, absent, absent),
+                new LaneStats(2, absent, absent, zero),
+                new LaneStats(wide, absent, absent, OptionalLong.of(wide + 3))), stats.lanes());
+
+        Poke.set(s, "feat", new Features(false, false, false, false, false, false, true, false, true, true, false, false));
+        assertEquals(zero, s.pipeStats(0, 0, 0).lanes().get(1).positionAcked());
     }
 
     @Test void releasingAnUnopenedStreamNeverQueuesControlForAnUnassignedId() throws Exception {

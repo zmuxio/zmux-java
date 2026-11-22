@@ -90,7 +90,7 @@ public final class Bootstrap {
                                                     Prefix prefix) {
         CompletableFuture<Started> f = new CompletableFuture<>();
         java.util.function.Consumer<Throwable> fail = e -> {
-            c.close(e);
+            c.reject(e);
             Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(e));
         };
         Runnable session = () -> {
@@ -105,14 +105,14 @@ public final class Bootstrap {
             } catch (RuntimeException e) {
                 unregister.run();
                 if (driver != null) driver.failInternalNow(e);
-                c.close(e);
+                c.reject(e);
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(e));
             }
         };
         Runnable r = prefix == null ? session : () -> present(c, prefix, session, fail);
         if (loop.inLoop()) r.run();
         else if (!loop.tryExecute(r)) {
-            c.close(null); f.completeExceptionally(new IllegalStateException("event loop closed"));
+            c.reject(null); f.completeExceptionally(new IllegalStateException("event loop closed"));
         }
         return f;
     }
@@ -124,9 +124,13 @@ public final class Bootstrap {
     public static void discard(PipeIo io, Throwable cause) {
         if (io == null) return;
         try { if (io.reader() != null) io.reader().close(); }
-        catch (RuntimeException ignored) { /* Closing anyway. */ }
+        catch (RuntimeException error) { if (cause != null && cause != error) cause.addSuppressed(error); }
         finally {
-            try { if (io.writer() != null) io.writer().abort(cause); } catch (RuntimeException ignored) { /* Closed anyway. */ }
+            try {
+                if (io.writer() != null) {
+                    if (cause == null) io.writer().close(); else io.writer().abort(cause);
+                }
+            } catch (RuntimeException error) { if (cause != null && cause != error) cause.addSuppressed(error); }
         }
     }
 
@@ -143,23 +147,23 @@ public final class Bootstrap {
         TransportParams l = cfg.local();
         if (first != null) {
             if (l.secretFlags != 0) {
-                c.close(null);
+                c.reject(null);
                 throw new IllegalArgumentException("a pre-shared key or the exporter in PipeAuth on a secure first pipe, whose Establish is the session secret's only source: leave PipeAuth unset or with withEndToEnd() only");
             }
             l.secretFlags = TransportParams.SECRET_EXPORTER;
-            return cfg.toBuilder().secureFirstPipe(first).exporter(() -> c.export(Kdf.EXPORTER_SESSION, null, 32)).build();
+            return cfg.toBuilder().secureFirstPipe(first).exporter(() -> c.setup().host(() -> c.export(Kdf.EXPORTER_SESSION, null, 32))).build();
         }
         if (l.has(TransportParams.MULTIPATH) && l.secretFlags == 0) {
-            c.close(null);
+            c.reject(null);
             throw new IllegalArgumentException("multipath (maxPipes above 1) or resume without a secret source: set PipeAuth with a pre-shared key"
                     + " (static or deferred) or the exporter, or use the secure carrier for the first pipe; withEndToEnd() alone is no source");
         }
         if ((l.secretFlags & TransportParams.SECRET_EXPORTER) == 0) return cfg;
         if (!c.exporterPresent()) {
-            c.close(null);
+            c.reject(null);
             throw new IllegalArgumentException("PipeAuth.exporter() on a carrier without an exporter");
         }
-        return cfg.toBuilder().exporter(() -> c.export(Kdf.EXPORTER_SESSION, null, 32)).build();
+        return cfg.toBuilder().exporter(() -> c.setup().host(() -> c.export(Kdf.EXPORTER_SESSION, null, 32))).build();
     }
 
     /** Runs the TLS handshake of engine over ch; f gets the connection as a pipe input. */
@@ -169,7 +173,7 @@ public final class Bootstrap {
             else {
                 PipeIo io = c.asPipe();
                 // A dial cancelled meanwhile has nobody to take the connection: close it.
-                Callbacks.EXECUTOR.execute(() -> { if (!f.complete(io)) c.close(null); });
+                Callbacks.EXECUTOR.execute(() -> { if (!f.complete(io)) c.reject(null); });
             }
         });
     }
@@ -204,7 +208,7 @@ public final class Bootstrap {
         try {
             if (records != null) carrier = new SealedTransport(carrier, records, io.capabilities().exporter());
         } catch (IllegalArgumentException belowFloor) {
-            carrier.close(belowFloor); // The carrier owns io now: the caller must not close io again.
+            carrier.reject(belowFloor); // The carrier owns io now: the caller must not close io again.
             return CompletableFuture.failedFuture(belowFloor);
         }
         try {
@@ -250,7 +254,7 @@ public final class Bootstrap {
             String alpn = c.info().applicationProtocol();
             if (engine.getUseClientMode() && alpn.isEmpty()) {
                 c.shutdownOutput();
-                c.close(null);
+                c.reject(null);
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(
                         new javax.net.ssl.SSLHandshakeException("no application protocol negotiated")));
                 return;

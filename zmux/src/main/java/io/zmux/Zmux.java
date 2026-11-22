@@ -59,7 +59,8 @@ public final class Zmux {
      * reads the lane header, routes the stream by its Lane Key over the sessions of the process, checks the
      * connection and closes a stream that names no session or pipe (MULTIPATH.md 5.8). It is one process-wide entry,
      * not a method of a session, since the stream names its session only through the Lane Key; a listener's
-     * {@link io.zmux.adapter.ListenerAdapter#handle} routes the same way. The header is the carrier's first record:
+     * {@link io.zmux.adapter.ListenerAdapter#handle} accepts only lanes of its own sessions. A session with a
+     * listener also follows that listener's stop when a lane arrives through this process-wide entry. The header is the carrier's first record:
      * it has {@link ListenerConfig#DEFAULT_FIRST_RECORD_TIMEOUT} to deliver it, else the carrier is closed as one
      * naming no pipe. The built-in QUIC adapter calls it itself.
      */

@@ -322,7 +322,7 @@ final class PathHealth {
                 // from JOINING, a join the cap or the backoff holds included.
                 if (a.joining() && at(Time.add(a.joining.attachedAt(), cfg.joinDeadline())) && apply) {
                     a.health.aborted = true;
-                    failPipe(p, TransportError.PIPE_FAILED, null);
+                    failPipe(p, TransportError.PIPE_FAILED, new io.zmux.JoinTimeoutException());
                 }
                 continue;
             }
@@ -458,7 +458,7 @@ final class PathHealth {
         }
         if (a.health.failCause == null) a.health.failCause = cause;
         ka.pipeFailed(p.id);
-        outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
+        outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI, cause));
         if (!a.health.abandonSent && !a.health.abandonQueued) {
             a.health.abandonQueued = true;
             a.health.abandonCode = code;

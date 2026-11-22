@@ -34,11 +34,24 @@ public final class Handled {
 
     public ZmuxFuture<Boolean> taken() { return Spi.future(carrier.taken(), null); }
 
+    io.zmux.internal.loop.CarrierSetup setup() { return carrier.setup; }
+
+    /** Waits only for setup. Interruption withdraws this request before handoff. */
+    public void awaitSetup() throws java.io.IOException {
+        if (io.zmux.internal.loop.SessionHost.onHostThread()) throw new IllegalStateException("setup wait on owner loop");
+        carrier.setup.await();
+    }
+
+    /**
+     * Both handles of a paired request await retirement of the whole attachment. Its token is reusable
+     * on completion. A writer without a release acknowledgement can delay this notification by up to
+     * one linger interval while zmux waits to escalate its graceful close.
+     */
     public ZmuxFuture<Void> closed() { return Spi.future(carrier.closed(), null); }
 
     /**
      * Whether the listener's fallback ({@link io.zmux.ListenerConfig#fallback()}) took the carrier over as a
-     * {@link io.zmux.Takeover}, once {@link #verdict()} completed with {@link AdmissionVerdict#FALLBACK}; false for a
+     * {@link io.zmux.Takeover}, once {@link #verdict()} completed with {@link AdmissionVerdict#TAKEOVER} or byte-stream {@link AdmissionVerdict#FALLBACK}; false for a
      * request given back to its adapter's own fallback.
      */
     public boolean takenOver() { return carrier.takenOver(); }
@@ -59,10 +72,14 @@ public final class Handled {
      * @throws IllegalStateException when this carrier was not accepted
      */
     public Handled sibling(PipeIo io, JoinHint hint) {
-        if (carrier.decided() != AdmissionVerdict.ACCEPT)
+        Objects.requireNonNull(io);
+        if (carrier.decided() != AdmissionVerdict.ACCEPT) {
+            port.refused(io);
             throw new IllegalStateException("the carrier was not accepted");
-        Objects.requireNonNull(io); Objects.requireNonNull(hint);
-        if (!port.reserve(hint.source())) return new Handled(port, port.refused(io));
-        return new Handled(port, port.transfer(io, hint, true, carrier.value(), ListenerHub.Entry.CARRIER));
+        }
+        ListenerAdapter.requireHint(port, io, hint);
+        var setup = port.reserve(hint.source());
+        if (setup == null) return new Handled(port, port.refused(io));
+        return new Handled(port, port.transfer(setup, io, hint, true, carrier.value(), ListenerHub.Entry.Stream.CARRIER));
     }
 }

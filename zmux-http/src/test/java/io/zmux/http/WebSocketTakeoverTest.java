@@ -110,6 +110,24 @@ class WebSocketTakeoverTest {
         }
     }
 
+    @Test void takeoverOnTheHeadUpgradesAndServesTheFirstMessage() throws Exception {
+        var got = new LinkedBlockingQueue<String>();
+        var taken = new LinkedBlockingQueue<Takeover>();
+        var admission = Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.takeover("tunnel"))).build();
+        try (var f = new Fixture(b -> b, b -> b.admission(admission).fallback(echo(got, taken)), b -> b.webSocket(), false, null)) {
+            var client = Client.open(WebSocketTest.ws(f.base)); // Waits for the 101 response.
+            try (var _ = client.socket()) {
+                var carrier = taken.poll(5, TimeUnit.SECONDS);
+                assertNotNull(carrier);
+                assertEquals(Admission.Stage.HEAD, carrier.info().stage());
+                assertEquals("tunnel", carrier.value());
+                assertEquals("echo:first", client.send("first"));
+                client.sendOnly("bye");
+                assertEquals("close", client.receive());
+            }
+        }
+    }
+
     @Test void deferredDecisionsAcceptSessionsAndHandTunnelsToTheFallback() throws Exception {
         var perSource = new ConcurrentHashMap<String, AtomicInteger>();
         var stages = new LinkedBlockingQueue<String>();
@@ -158,8 +176,30 @@ class WebSocketTakeoverTest {
             var st = f.listener.stats().admission();
             assertEquals(1, st.accepted());
             assertEquals(1, st.fallback());
-            assertEquals(2, st.accepted() + st.fallback() + st.stalled() + st.closed() + st.stallOverflow() + st.tooLarge()
+            assertEquals(2, st.accepted() + st.fallback() + st.takeover() + st.stalled() + st.closed() + st.stallOverflow() + st.tooLarge()
                     + st.peekTimedOut() + st.handshakeFailed());
+        }
+    }
+
+    @Test void deferredFallbackWithNoTargetCountsAsStall() throws Exception {
+        var admission = Admission.builder(0, Admission.Decider.immediate((info, prefix) ->
+                info.stage() == Admission.Stage.HEAD ? new Admission.Decision(AdmissionVerdict.DEFER, 0)
+                        : Admission.Decision.FALLBACK.withVariant("missing-target"))).build();
+        try (var f = new Fixture(b -> b, b -> b.admission(admission), b -> b.webSocket(), false, null)) {
+            var client = Client.open(WebSocketTest.ws(f.base));
+            try (var _ = client.socket()) {
+                client.sendOnly("first");
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (f.listener.stats().admission().stalled() == 0 && System.nanoTime() - deadline < 0) {
+                    Thread.sleep(10);
+                }
+                var stats = f.listener.stats().admission();
+                assertEquals(1, stats.stalled());
+                assertEquals(0, stats.fallback());
+                var variant = f.listener.variantStats().getFirst();
+                assertEquals(1, variant.stalled());
+                assertEquals(0, variant.fallback());
+            }
         }
     }
 

@@ -1,21 +1,16 @@
 package io.zmux.http;
 
+import io.zmux.http.internal.HttpTransport;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import io.netty.handler.codec.http.DefaultFullHttpResponse;
-import io.netty.handler.codec.http.HttpContent;
-import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpRequest;
-import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
-import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
@@ -23,7 +18,6 @@ import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
 import io.netty.handler.ssl.SslContext;
-import io.netty.util.ReferenceCountUtil;
 import io.zmux.ZmuxListener;
 import java.net.InetSocketAddress;
 import java.util.List;
@@ -35,24 +29,20 @@ import java.util.function.Supplier;
  * ({@link HttpClass#classify}) and served by the adapter of its class: streaming carriers
  * (downlinks, uplinks, bidirectional requests), the exchange carrier, WebSockets. Each adapter
  * is enabled on its own; an endpoint with one enabled is that adapter alone. A request of a class
- * without an adapter, a request that is not a carrier, and one that its carrier's admission does
- * not accept goes on to the host's handler, with every body byte read replayed.
+ * without an adapter and any request that fails carrier classification go to the host's handler.
  *
- * <p>What a {@link io.zmux.AdmissionVerdict#FALLBACK} hands on depends on the stage it is decided at. On a request's
- * head ({@link io.zmux.Admission.Stage#HEAD}: a WebSocket upgrade's head, an exchange request, a request carrier
- * without a body) it is a request, which goes to the host's handler. On the start of a streaming or uplink request
- * carrier's body it is a carrier: the listener's {@link io.zmux.ListenerConfig#fallback()} takes it over as a
- * {@link io.zmux.Takeover} whose pipe is the full-duplex byte stream of the request body (in, the bytes read
- * replayed) and the response body (out), the response head ({@code 200}, as for an accepted carrier) written by the
- * adapter; closing its sending half ends the response while the request body reads on, and the request ends once
- * both halves are closed, by the host or, without a detach, by zmux. Only a listener without a fallback hands such a
- * request to the host's handler. The exchange carrier is decided on each request's head, so a fallback of it is
- * always a request.
+ * <p>{@link io.zmux.AdmissionVerdict#FALLBACK} passes an HTTP request to that handler with every
+ * body byte read replayed. After a WebSocket upgrade, fallback passes the upgraded carrier to
+ * {@link io.zmux.ListenerConfig#fallback()}. {@link io.zmux.AdmissionVerdict#TAKEOVER} selects
+ * the listener's fallback for every carrier. The adapter writes its acceptance response head
+ * or completes its upgrade before the host receives the carrier. For a streaming request the
+ * host reads its request body, including the prefix, and writes its response body. Closing the
+ * sending half ends the response. Closing both halves ends the request.
  *
- * <p>Every streaming and WebSocket carrier passes the listener's admission
- * ({@link ZmuxListener#admission()}); nothing is written before it is accepted. An exchange
- * carrier is authenticated per request by its {@link ExchangeConfig} PSK instead (the session's
- * credential is not presented on it): its authentication header within the listener's
+ * <p>Streaming and WebSocket carriers pass the listener's admission
+ * ({@link ZmuxListener#admission()}). Each exchange request is authenticated with the
+ * {@link ExchangeConfig} PSK. A new exchange passes admission on the initial authenticated
+ * request head. The peer must send the authentication header within the listener's
  * {@link io.zmux.adapter.ListenerAdapter#firstRecordTimeout()}, before the rest of its body is read. A request that
  * is not authenticated goes to the host's handler with the bytes read replayed; one that finds no
  * slot of the listener for it is answered 503 without a body. A request that an intermediary forwarded from TLS early data
@@ -115,7 +105,7 @@ public final class HttpEndpoint implements AutoCloseable {
      * stream (null: a 404 response to every request that reaches it).
      */
     public ChannelInitializer<Channel> initializer(SslContext ssl, Supplier<ChannelHandler> host) {
-        Supplier<ChannelHandler> h = host == null ? NotFound::new : host;
+        Supplier<ChannelHandler> h = host == null ? HttpTransport::notFound : host;
         return new ChannelInitializer<>() {
             @Override protected void initChannel(Channel ch) {
                 ChannelPipeline p = ch.pipeline();
@@ -179,21 +169,6 @@ public final class HttpEndpoint implements AutoCloseable {
         @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             if (cause instanceof java.io.IOException) ctx.close(); // a reset before the first request: nobody else is told
             else ctx.fireExceptionCaught(cause);
-        }
-    }
-
-    /** The host's handler when none is given: 404 to every request. */
-    @ChannelHandler.Sharable
-    static final class NotFound extends ChannelInboundHandlerAdapter {
-        @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
-            if (msg instanceof HttpRequest r) {
-                var resp = new DefaultFullHttpResponse(r.protocolVersion(), HttpResponseStatus.NOT_FOUND);
-                HttpUtil.setContentLength(resp, 0);
-                if (!HttpUtil.isKeepAlive(r)) resp.headers().set(HttpHeaderNames.CONNECTION, "close");
-                ctx.writeAndFlush(resp);
-            }
-            if (msg instanceof HttpContent || msg instanceof HttpRequest) ReferenceCountUtil.release(msg); // LastHttpContent is an HttpContent
-            else ctx.fireChannelRead(msg);
         }
     }
 

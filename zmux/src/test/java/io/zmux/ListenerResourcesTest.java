@@ -33,6 +33,34 @@ class ListenerResourcesTest {
         }
     }
 
+    // Capture the real eviction task while suspended and dispatch it only after a successful resume.
+    @Test void recoveredEvictionCandidateSurvivesPressure() throws Exception {
+        // HS-31, HS-56.
+        try (var loops = EventLoops.create(2)) {
+            var cfg = config(loops);
+            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).noMemoryBudget().build());
+                 var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(); var writer = c.openStream()) {
+                writer.write(new byte[8192]);
+                try (var held = s.acceptStream()) {
+                    assertEquals(writer.id(), held.id());
+                    c.pipes().getFirst().abort();
+                    while (!(s.nextEvent(Duration.ofSeconds(5)) instanceof SessionEvent.SessionSuspended)) { /* event barrier */ }
+                    var evict = io.zmux.internal.loop.CarrierActionsTest.selectedEviction(l.hub, s.driver);
+                    l.drain("resume allowed");
+                    c.addPipe(l.localAddress(), PipeOptions.defaults());
+                    while (!(s.nextEvent(Duration.ofSeconds(5)) instanceof SessionEvent.SessionResumed)) { /* event barrier */ }
+                    assertTrue(l.adapter().memoryUsed() > 1);
+                    l.setLimits(l.limits().toBuilder().memoryBudget(1).build());
+                    var checked = new CompletableFuture<Void>();
+                    s.driver.executeCarrier(() -> { evict.run(); checked.complete(null); });
+                    checked.get(5, TimeUnit.SECONDS);
+                    assertNotNull(s.ping());
+                    l.setLimits(l.limits().toBuilder().noMemoryBudget().build());
+                }
+            }
+        }
+    }
+
     @Test void pressureEvictsSuspendedBuffersAndReportsRecoveryOffLoop() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = config(loops);

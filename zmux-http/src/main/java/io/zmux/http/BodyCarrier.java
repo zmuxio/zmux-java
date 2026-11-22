@@ -98,7 +98,18 @@ final class BodyCarrier {
         ch.closeFuture().addListener(f -> {
             if (loop.isShuttingDown()) input.fail(new ClosedChannelException());
             lost(new ClosedChannelException());
+            channelEnded = true;
+            if (loop.isShuttingDown()) { input.close(); inClosed = true; }
+            checkRelease();
         });
+    }
+
+    /** Real completion of this HTTP stream, including the last write and input-buffer cleanup. */
+    private final java.util.concurrent.CompletableFuture<Void> release = new java.util.concurrent.CompletableFuture<>();
+    private boolean channelEnded;
+
+    private void checkRelease() {
+        if (channelEnded && inClosed) afterWrites(() -> release.complete(null));
     }
 
     PipeReader reader() { return inHalf ? new Reader() : null; }
@@ -128,6 +139,7 @@ final class BodyCarrier {
         input.close();
         List<ByteBuf> r = log == null ? List.of() : log;
         log = null;
+        release.complete(null); // Buffer ownership passed to the host.
         return r;
     }
 
@@ -174,7 +186,8 @@ final class BodyCarrier {
     /** Bounds a first message, for a carrier of messages (its frames set it). */
     java.util.function.IntConsumer firstLimit = n -> {};
 
-    private final class Reader implements PipeReader {
+    private final class Reader implements PipeReader, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+        @Override public java.util.concurrent.CompletionStage<Void> released() { return release.minimalCompletionStage(); }
         @Override public void limitFirstMessage(int limit) { firstLimit.accept(limit); }
 
         @Override public void start(Sink s) {
@@ -190,7 +203,16 @@ final class BodyCarrier {
                 inClosed = true;
                 input.close(); // reading goes on, and what follows is discarded
                 check();
-            }, NOTHING);
+                checkRelease();
+            }, () -> {
+                // The channel may have closed before its loop started shutting down.
+                // After termination the final cleanup has exclusive access to queued input.
+                loop.terminationFuture().addListener(f -> {
+                    input.close();
+                    inClosed = true;
+                    checkRelease();
+                });
+            });
         }
     }
 
@@ -199,7 +221,14 @@ final class BodyCarrier {
     /** Writes the head now, if not yet (an uplink's empty response, an accepted carrier's header). */
     void start() {
         if (started || starting) return;
-        ChannelFuture f = out.head();
+        ChannelFuture f;
+        try {
+            f = aborted || detached ? null : out.head();
+        } catch (RuntimeException failure) {
+            started = true;
+            fail(failure);
+            return;
+        }
         if (f == null) {
             started = true;
             return;
@@ -222,16 +251,13 @@ final class BodyCarrier {
      * {@link #start}, then a stage that completes once the head went out, failed when it could
      * not; on the channel's loop.
      */
-    java.util.concurrent.CompletableFuture<Void> opened() {
-        var done = new java.util.concurrent.CompletableFuture<Void>();
-        Runnable report = () -> {
-            if (aborted || detached) done.completeExceptionally(lostCause != null ? lostCause : new ClosedChannelException());
-            else done.complete(null);
-        };
-        start();
-        if (started) report.run();
-        else pending.add(report);
-        return done;
+    ResponseHead opening() {
+        return new ResponseHead(head -> run(() -> {
+            if (head.cancelled()) { head.written(new ClosedChannelException()); return; }
+            afterHead(() -> head.written(aborted || detached
+                    ? lostCause != null ? lostCause : new ClosedChannelException() : null));
+        }, () -> head.written(new ClosedChannelException())),
+                () -> run(() -> fail(new ClosedChannelException()), NOTHING));
     }
 
     /**
@@ -253,11 +279,14 @@ final class BodyCarrier {
     private void fail(Throwable cause) {
         if (aborted || detached) return;
         aborted = true;
+        lostCause = cause;
         kill.apply(cause);
         inFail(cause);
     }
 
-    private final class Writer implements PipeWriter {
+    private final class Writer implements Requests.CarrierWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+        @Override public Channel carrierRequest() { return ch; }
+        @Override public java.util.concurrent.CompletionStage<Void> released() { return release.minimalCompletionStage(); }
         @Override public void write(OutboundBatch batch, Completion c) {
             ByteBuffer[] segs = batch.segments(null);
             run(() -> {

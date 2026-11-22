@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.internal.spi.AdapterPorts;
 import io.zmux.internal.spi.Loops;
 import io.zmux.AdmissionVerdict;
 import io.netty.buffer.ByteBuf;
@@ -19,7 +20,7 @@ import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.LastHttpContent;
-import io.netty.handler.codec.http2.Http2StreamChannel;
+import io.zmux.http.internal.HttpTransport;
 import io.netty.util.ReferenceCountUtil;
 import io.zmux.CarrierKind;
 import io.zmux.Admission;
@@ -37,7 +38,7 @@ import java.util.List;
  * the adapter of its class, or passes it on, every byte of it, to the handler after it (the
  * host's). State is the channel's event loop's.
  */
-final class Router extends ChannelInboundHandlerAdapter {
+final class Router extends ChannelInboundHandlerAdapter implements HttpTransport.Route {
     private static final Runnable NOTHING = () -> {};
     private enum Mode { IDLE, HOST, DISCARD, CARRIER, COLLECT, FRAMES }
 
@@ -50,8 +51,14 @@ final class Router extends ChannelInboundHandlerAdapter {
     private WebSocketFrames frames;
     /** The exchange request being collected in COLLECT mode. */
     private ExchangeServer.Collect collect;
+    private io.zmux.adapter.Handled h3Setup;
     /** The request's body ended (CARRIER mode). */
     private boolean requestEnded;
+    private io.netty.handler.codec.http.HttpHeaders trailers;
+    /** Keeps a replayed request under its original setup until the host receives the last content. */
+    private record HostBody(BodyCarrier source, java.util.concurrent.CompletableFuture<Void> read) {}
+    private HostBody hostBody;
+
     /** The verdict on the carrier of the request; null while pending. */
     private AdmissionVerdict verdict;
 
@@ -88,6 +95,7 @@ final class Router extends ChannelInboundHandlerAdapter {
     }
 
     private void begin(HttpRequest r, boolean full) {
+        trailers = null;
         HttpClass cls = HttpClass.classify(Requests.head(ctx.channel(), r, full), ep.pairField);
         boolean served = switch (cls) {
             case DOWNLINK, UPLINK, BIDIRECTIONAL -> ep.streaming;
@@ -131,13 +139,19 @@ final class Router extends ChannelInboundHandlerAdapter {
         boolean last = c instanceof LastHttpContent;
         switch (mode) {
             case HOST -> {
+                var body = hostBody;
+                if (last) { mode = Mode.IDLE; hostBody = null; }
                 ctx.fireChannelRead(c);
-                if (last) mode = Mode.IDLE;
+                if (last && body != null) body.read.complete(null);
                 return;
             }
             case CARRIER -> {
                 carrier.in(c.content().retain());
-                if (last) { requestEnded = true; carrier.inEnd(); }
+                if (c instanceof LastHttpContent tail) {
+                    if (!tail.trailingHeaders().isEmpty()) trailers = tail.trailingHeaders().copy();
+                    requestEnded = true;
+                    carrier.inEnd();
+                }
             }
             case COLLECT -> collect.add(c.content(), last);
             default -> { }
@@ -150,7 +164,7 @@ final class Router extends ChannelInboundHandlerAdapter {
 
     private void stream(HttpRequest r, HttpClass cls) {
         var ch = ctx.channel();
-        boolean h1 = !(ch instanceof Http2StreamChannel);
+        boolean h1 = !Requests.multiplexed(ch);
         boolean down = cls != HttpClass.UPLINK, up = cls != HttpClass.DOWNLINK;
         ZmuxListener l = ep.listener;
         Admission adm = l.admission();
@@ -178,7 +192,7 @@ final class Router extends ChannelInboundHandlerAdapter {
         // A loop that refuses a task below is shutting down: it closes the channel, whose loss
         // releases what the carrier keeps; a refused fallback closes the pipe it was given.
         BodyCarrier c = new BodyCarrier(ch, Framing.BYTE_STREAM, up, down, out, () -> refused.whenComplete((no, e) ->
-                Loops.run(ch.eventLoop(), () -> end(self[0], r, down, Boolean.TRUE.equals(no)), NOTHING)), cause -> { ch.close(); return null; });
+                Loops.run(ch.eventLoop(), () -> end(self[0], r, down, Boolean.TRUE.equals(no)), NOTHING)), cause -> { HttpTransport.abort(ch); return null; });
         self[0] = c;
         carrier = c;
         mode = Mode.CARRIER;
@@ -190,9 +204,16 @@ final class Router extends ChannelInboundHandlerAdapter {
         JoinHint hint = JoinHint.of(RequestHead.of(Requests.fields(r.headers())), ep.pairField, cls == HttpClass.UPLINK, Requests.peer(ch))
                 .withSource(Requests.source(ch, r, ep.trusted));
         PipeIo io = Requests.pipe(new PipeIo(c.reader(), c.writer(), Framing.BYTE_STREAM, "http " + cls, Requests.connection(ch)), ch)
-                .withCarrier(cls == HttpClass.BIDIRECTIONAL ? CarrierKind.STREAMING : CarrierKind.SPLIT);
+                .withCarrier(cls == HttpClass.BIDIRECTIONAL
+                        ? (Requests.h3(ch) ? CarrierKind.HTTP3 : CarrierKind.STREAMING)
+                        : CarrierKind.SPLIT);
         // A request the admission gives back is a request: the host's handler answers it, with the body bytes read.
-        io.zmux.adapter.Handled a = l.adapter().handleRequest(io, hint, headOnly, t -> toHostLater(c, r));
+        io.zmux.adapter.Handled a = l.adapter().handleRequest(io, hint, headOnly, requestFallback(handoff -> toHostLater(c, r, handoff)), c.opening());
+        withdrawOnClose(ch, a);
+        trackH3Setup(a);
+        AdapterPorts.setup(a).onFinished(() -> Loops.run(ch.eventLoop(), () -> {
+            if (hostBody != null && hostBody.source == c) ch.close();
+        }, NOTHING));
         // The verdict and the taken flag come from the listener adapter in another module; the analyzer takes the result for a constant.
         //noinspection ConstantValue
         a.verdict().thenCombine(a.taken(), (v, taken) -> v == AdmissionVerdict.ACCEPT && !taken)
@@ -203,9 +224,8 @@ final class Router extends ChannelInboundHandlerAdapter {
             verdict = v == null ? AdmissionVerdict.CLOSE : v;
             if (v != AdmissionVerdict.ACCEPT) c.keepNoMore();
             // Taken over by the listener's fallback: the response head goes out, and the request and response bodies
-            // are the host's full-duplex byte stream until it closes both halves (detached or not).
-            if (v == AdmissionVerdict.FALLBACK) c.start();
-            else if (v == AdmissionVerdict.ACCEPT && adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
+            // are the host's full-duplex byte stream until it closes both halves (detached or not); nothing starts here.
+            if (v == AdmissionVerdict.ACCEPT && adm != null) { c.keepNoMore(); c.start(); } // admitted: the header goes out now
         }, NOTHING));
         a.taken().whenComplete((taken, e) -> Loops.run(ch.eventLoop(), () -> {
             if (c.detached() || !Boolean.TRUE.equals(taken)) return;
@@ -229,9 +249,9 @@ final class Router extends ChannelInboundHandlerAdapter {
             toHost(r, replay, requestEnded);
             return;
         }
-        if (verdict != AdmissionVerdict.ACCEPT && verdict != AdmissionVerdict.FALLBACK) {
+        if (verdict != AdmissionVerdict.ACCEPT && verdict != AdmissionVerdict.TAKEOVER && verdict != AdmissionVerdict.FALLBACK) {
             // Stalled, closed or not decided: the request ends without a response.
-            ch.close();
+            HttpTransport.abort(ch);
             return;
         }
         if (!down || c.endedUnstarted()) {
@@ -247,7 +267,7 @@ final class Router extends ChannelInboundHandlerAdapter {
         var ch = ctx.channel();
         if (!c.started()) {
             // Nothing was answered: the request ends without a response.
-            ch.close();
+            HttpTransport.abort(ch);
             return;
         }
         c.afterWrites(ch::close);
@@ -262,21 +282,37 @@ final class Router extends ChannelInboundHandlerAdapter {
 
     /**
      * The admission gave c's request back: on the channel's loop it goes to the host's handler,
-     * with what was kept of its body; the stage completes then, and zmux closes its view of the
-     * carrier, which no longer reaches the request.
+     * with the buffered prefix and any trailers. The stage lasts through the last body event so
+     * listener stop also interrupts a host waiting for the rest of the request.
      */
-    java.util.concurrent.CompletionStage<Void> toHostLater(BodyCarrier c, HttpRequest r) {
+    Admission.Fallback requestFallback(
+            java.util.function.Function<java.util.function.BooleanSupplier, java.util.concurrent.CompletionStage<Void>> dispatch) {
+        return HttpTransport.requestFallback(ctx, dispatch);
+    }
+
+    private java.util.concurrent.CompletionStage<Void> toHostLater(BodyCarrier c, HttpRequest r, java.util.function.BooleanSupplier handoff) {
         var given = new java.util.concurrent.CompletableFuture<Void>();
-        Loops.run(ctx.channel().eventLoop(), () -> { fallback(c, r); given.complete(null); }, () -> given.complete(null));
+        Loops.run(ctx.channel().eventLoop(), () -> {
+            if (!ctx.channel().isActive() || !handoff.getAsBoolean()) { given.completeExceptionally(new ClosedChannelException()); return; }
+            boolean complete = requestEnded;
+            if (!complete) hostBody = new HostBody(c, given);
+            fallback(c, r);
+            if (complete) given.complete(null);
+        }, () -> given.completeExceptionally(new ClosedChannelException()));
         return given;
     }
 
     /** The exchange or WebSocket adapter gives the request to the host after all, with what it read. */
     void toHost(HttpRequest r, List<ByteBuf> read, boolean ended) {
+        h3Setup = null; // Host replay has begun. The host owns this request now.
         mode = ended ? Mode.IDLE : Mode.HOST;
         ctx.fireChannelRead(r);
         for (ByteBuf b : read) ctx.fireChannelRead(new DefaultHttpContent(b));
-        if (ended) ctx.fireChannelRead(new DefaultLastHttpContent());
+        if (ended) {
+            var last = new DefaultLastHttpContent();
+            if (trailers != null) { last.trailingHeaders().set(trailers); trailers = null; }
+            ctx.fireChannelRead(last);
+        }
     }
 
     /** Answers r with status and no body, without reading the body, which is discarded. */
@@ -299,7 +335,44 @@ final class Router extends ChannelInboundHandlerAdapter {
 
     ChannelHandlerContext context() { return ctx; }
 
+    void trackH3Setup(io.zmux.adapter.Handled handled) {
+        if (Requests.h3(ctx.channel())) {
+            var setup = AdapterPorts.setup(handled);
+            h3Setup = handled;
+            setup.onFinished(() -> Loops.run(ctx.channel().eventLoop(), () -> {
+                if (h3Setup == handled) h3Setup = null;
+            }, NOTHING));
+        }
+    }
+
+    @Override public void afterSetup(Runnable done) {
+        if (h3Setup == null) done.run();
+        else AdapterPorts.setup(h3Setup).onFinished(() -> Loops.run(ctx.channel().eventLoop(), done, NOTHING));
+    }
+
+    @Override public void stop() {
+        var pending = h3Setup;
+        if (pending != null && !pending.detached()) AdapterPorts.setup(pending).interrupt();
+        if (collect != null) {
+            collect.abandon();
+            collect = null;
+            HttpTransport.abort(ctx.channel());
+        }
+    }
+
+    static void withdrawOnClose(io.netty.channel.Channel ch, io.zmux.adapter.Handled a) {
+        var setup = AdapterPorts.setup(a);
+        io.netty.channel.ChannelFutureListener withdrawn = ignored -> setup.interrupt();
+        ch.closeFuture().addListener(withdrawn);
+        setup.onFinished(() -> ch.closeFuture().removeListener(withdrawn));
+    }
+
     @Override public void channelInactive(ChannelHandlerContext ctx) {
+        if (hostBody != null) {
+            var body = hostBody;
+            hostBody = null;
+            body.read.completeExceptionally(new ClosedChannelException());
+        }
         if (carrier != null) carrier.lost(new ClosedChannelException());
         if (frames != null) frames.closed();
         if (collect != null) { collect.abandon(); collect = null; }
@@ -307,6 +380,7 @@ final class Router extends ChannelInboundHandlerAdapter {
     }
 
     @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (h3Setup != null) AdapterPorts.setup(h3Setup).interrupt();
         if (carrier != null || collect != null) {
             if (carrier != null) carrier.lost(cause);
             ctx.close();

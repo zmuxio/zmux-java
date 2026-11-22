@@ -42,6 +42,30 @@ public final class Benchmark {
         samples.put("control_p50_ns", ns[count / 2]);
         samples.put("control_p99_ns", ns[(count * 99) / 100]);
     }
+    private static void carrierStats(ZmuxSession session) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (session.pipeStats().getFirst().carrierSample().isEmpty()) {
+            if (System.nanoTime() - deadline >= 0) throw new IllegalStateException("no TCP carrier observation");
+            // The first carrier sample has no completion signal; this bounded setup poll waits for it.
+            //noinspection BusyWait
+            Thread.sleep(10);
+        }
+        int warmup = quick ? 2000 : 20000;
+        int count = quick ? 5000 : 50000;
+        for (int i = 0; i < warmup; i++) {
+            if (session.pipeStats().getFirst().carrierSample().isEmpty()) throw new IllegalStateException("TCP carrier observation disappeared");
+        }
+        long[] ns = new long[count];
+        for (int i = 0; i < count; i++) {
+            long start = System.nanoTime();
+            if (session.pipeStats().getFirst().carrierSample().isEmpty()) throw new IllegalStateException("TCP carrier observation disappeared");
+            ns[i] = System.nanoTime() - start;
+        }
+        Arrays.sort(ns);
+        samples.put("tcp_carrier_stats_samples", count);
+        samples.put("tcp_carrier_stats_p50_ns", ns[count / 2]);
+        samples.put("tcp_carrier_stats_p99_ns", ns[count * 99 / 100]);
+    }
     private static long transfer(Pair pair, ExecutorService workers, int chunk, long bytes, boolean owned) throws Exception {
         var received = workers.submit(() -> {
             try (var stream = pair.server.acceptStream(Duration.ofSeconds(10))) {
@@ -70,6 +94,7 @@ public final class Benchmark {
         var config = ZmuxConfig.builder().eventLoops(loops).build();
         try (var listener = Zmux.listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), ListenerConfig.of(config));
              var pair = new Pair(Zmux.connect(listener.localAddress(), config), listener.accept(Duration.ofSeconds(10)))) {
+            carrierStats(pair.client);
             for (int chunk : new int[] {4096, 65536, 1048576}) {
                 for (boolean owned : new boolean[] {false, true}) {
                     transfer(pair, workers, chunk, 4L << 20, owned);

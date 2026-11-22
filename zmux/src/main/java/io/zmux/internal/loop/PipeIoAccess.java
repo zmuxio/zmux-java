@@ -28,6 +28,9 @@ public final class PipeIoAccess {
         /** The session's host value an Establish gave io; null without one. */
         Object carrierPeer(PipeIo io);
 
+        /** The outbound connection identity, even when a split has two different connections. */
+        Object sendingConnection(PipeIo io);
+
         /** The record protection of a Sealed io; null otherwise. */
         RecordProtection records(PipeIo io);
     }

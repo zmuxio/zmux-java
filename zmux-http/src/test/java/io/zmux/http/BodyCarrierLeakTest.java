@@ -1,18 +1,31 @@
 package io.zmux.http;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
 import io.zmux.Chunk;
+import io.zmux.JoinHint;
 import io.zmux.carrier.Framing;
+import io.zmux.carrier.MemoryPipe;
+import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class BodyCarrierLeakTest {
     private static BodyCarrier carrier(io.netty.channel.Channel ch) {
@@ -20,6 +33,99 @@ class BodyCarrierLeakTest {
             @Override public Object content(ByteBuf data) { return data; }
             @Override public Object end() { return null; }
         }, () -> {}, e -> null);
+    }
+
+    @Test void takeoverOpeningObservesTheActualNettyHeadWrite() throws Exception {
+        // HS-15, HS-16, HS-16a.
+        for (String ending : List.of("commit", "fail", "throw", "withdraw")) {
+            var intercepted = new CompletableFuture<ChannelPromise>();
+            var failure = new IllegalStateException("head write failed");
+            var ch = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+                @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                    io.netty.util.ReferenceCountUtil.release(msg);
+                    intercepted.complete(promise);
+                }
+            });
+            try {
+                var c = new BodyCarrier(ch, Framing.BYTE_STREAM, true, true, new BodyCarrier.Out() {
+                    @Override public io.netty.channel.ChannelFuture head() {
+                        if (ending.equals("throw")) throw failure;
+                        return ch.writeAndFlush(new io.netty.handler.codec.http.DefaultHttpResponse(
+                                io.netty.handler.codec.http.HttpVersion.HTTP_1_1, io.netty.handler.codec.http.HttpResponseStatus.OK));
+                    }
+                    @Override public Object content(ByteBuf data) { return data; }
+                    @Override public Object end() { return null; }
+                }, () -> {}, cause -> null);
+                var head = c.opening();
+                var opened = head.open();
+                if (!ending.equals("throw")) {
+                    var promise = intercepted.get(3, TimeUnit.SECONDS);
+                    assertFalse(opened.isDone());
+                    if (ending.equals("withdraw")) {
+                        assertTrue(opened.cancel(false));
+                        ch.runPendingTasks();
+                        assertFalse(head.released().toCompletableFuture().isDone());
+                        promise.setFailure(failure);
+                    } else if (ending.equals("commit")) promise.setSuccess();
+                    else promise.setFailure(failure);
+                    ch.runPendingTasks();
+                }
+                head.released().toCompletableFuture().get(3, TimeUnit.SECONDS);
+                if (ending.equals("withdraw")) assertTrue(opened.isCancelled());
+                else if (ending.equals("commit")) opened.get(3, TimeUnit.SECONDS);
+                else org.junit.jupiter.api.Assertions.assertSame(failure, assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> opened.get(3, TimeUnit.SECONDS)).getCause());
+            } finally { ch.finishAndReleaseAll(); }
+        }
+    }
+
+    @Timeout(25)
+    @Test void splitHandlesWaitForTheHttpResponseTailBeforeReusingTheToken() throws Exception {
+        // HS-44.
+        String token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[16]);
+        try (var f = new Fixture(b -> b.noHandshakeTimeout(), b -> b.inboundTransform((io, ctx) ->
+                CompletableFuture.completedFuture(io)), b -> b.streaming(), false, null)) {
+            for (int use = 0; use < 2; use++) {
+                var tail = new CompletableFuture<ChannelPromise>();
+                var ch = new Bootstrap().group(f.group).channel(NioSocketChannel.class)
+                        .handler(new ChannelOutboundHandlerAdapter() {
+                            @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise done) {
+                                io.netty.util.ReferenceCountUtil.release(msg);
+                                tail.complete(done);
+                            }
+                        }).connect(f.server.localAddress()).sync().channel();
+                try {
+                    var downBody = ch.eventLoop().submit(() -> {
+                        BodyCarrier[] self = new BodyCarrier[1];
+                        self[0] = new BodyCarrier(ch, Framing.BYTE_STREAM, false, true, new BodyCarrier.Out() {
+                            @Override public Object content(ByteBuf bytes) { return bytes; }
+                            @Override public Object end() { return new io.netty.handler.codec.http.DefaultLastHttpContent(); }
+                        }, () -> self[0].afterWrites(ch::close), error -> { ch.close(); return null; });
+                        return self[0];
+                    }).get(5, TimeUnit.SECONDS);
+                    var started = new CompletableFuture<PipeReader.Sink>();
+                    PipeReader reader = new PipeReader() {
+                        @Override public void start(Sink sink) { started.complete(sink); }
+                        @Override public void close() {}
+                    };
+                    var up = f.listener.adapter().handle(PipeIo.of(reader, null), JoinHint.pair(token, true, null));
+                    var down = f.listener.adapter().handle(PipeIo.of(null, downBody.writer()), JoinHint.pair(token, false, null));
+                    started.get(5, TimeUnit.SECONDS).onLent(java.nio.ByteBuffer.wrap(new byte[]{0}), () -> {});
+                    var write = tail.get(5, TimeUnit.SECONDS);
+                    try {
+                        assertThrows(java.io.IOException.class, up::awaitSetup);
+                        var spare = MemoryPipe.pair(Framing.BYTE_STREAM)[1];
+                        var replay = f.listener.adapter().handle(PipeIo.of(null, spare.writer()), JoinHint.pair(token, false, null));
+                        replay.closed().get(5, TimeUnit.SECONDS);
+                        assertThrows(java.io.IOException.class, replay::awaitSetup);
+                        assertFalse(up.closed().isDone());
+                        assertFalse(down.closed().isDone());
+                    } finally { write.trySuccess(); }
+                    up.closed().get(5, TimeUnit.SECONDS);
+                    down.closed().get(5, TimeUnit.SECONDS);
+                } finally { ch.close().sync(); }
+            }
+        }
     }
 
     /** A carrier kept for a replay is lost before zmux started its reader: nothing stays referenced. */

@@ -317,6 +317,7 @@ public final class ZmuxSession implements AutoCloseable {
         // Closed by the try-with-resources inside the lambda; the future callback only cancels it.
         //noinspection resource
         Cancellation cancel = new Cancellation();
+        var stop = new ZmuxFuture.WorkerStop();
         ZmuxFuture<Void> f = ZmuxFuture.onThread("zmux-replace-pipes", () -> {
             List<ZmuxPipe> old = pipes();
             long next = epoch() + 1;
@@ -334,12 +335,14 @@ public final class ZmuxSession implements AutoCloseable {
                     } catch (InterruptedException e) {
                         throw new java.io.InterruptedIOException("replacePipes interrupted");
                     }
-                    addPipe(io, PipeOptions.builder().direction(dir).build(), until);
+                    PipeOptions options = PipeOptions.builder().direction(dir).build();
+                    long deadline = joinDeadline();
+                    joinCarrier(driver.addPipe(io, options.join()), options, deadline, stop);
                     p.close();
                 }
             }
             return null;
-        });
+        }, stop);
         f.whenComplete((v, e) -> cancel.cancel());
         return f;
     }
@@ -359,16 +362,7 @@ public final class ZmuxSession implements AutoCloseable {
      * elapsed (the wait only takes what is ready, else times out); a bound too far to represent: none.
      */
     static long deadline(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long now = System.nanoTime();
-        if (timeout.isNegative() || timeout.isZero()) return now;
-        long nanos;
-        try {
-            nanos = timeout.toNanos();
-        } catch (ArithmeticException e) {
-            return Long.MAX_VALUE;
-        }
-        return nanos >= Long.MAX_VALUE / 2 ? Long.MAX_VALUE : now + nanos;
+        return io.zmux.internal.core.Time.deadline(timeout);
     }
 
     /** Runs step on the loop and waits at most until deadline for its outcome. */
@@ -708,8 +702,13 @@ public final class ZmuxSession implements AutoCloseable {
         driver.checkBlocking();
         long deadline = joinDeadline();
         SocketChannel ch = Zmux.dial(address, remaining(deadline));
-        Zmux.present(ch, credential, address);
-        return attached(joined(driver.addPipe(ch, o.join()), deadline), o, deadline);
+        try {
+            Zmux.present(ch, credential, address);
+        } catch (IOException | RuntimeException failure) {
+            driver.failedJoin(failure).report(failure);
+            throw failure;
+        }
+        return joinCarrier(driver.addPipe(ch, o.join()), o, deadline, null);
     }
 
     /**
@@ -726,11 +725,11 @@ public final class ZmuxSession implements AutoCloseable {
         try {
             engine = tls.clientEngine(address.getPort(), List.of(alpn));
         } catch (RuntimeException e) {
+            driver.failedJoin(e).report(e);
             ch.close();
             throw e;
         }
-        return attached(joined(driver.addPipe(ch, engine, remaining(deadline), tls.secure(), o.join(), Zmux.presenter(credential, address)), deadline),
-                o, deadline);
+        return joinCarrier(driver.addPipe(ch, engine, remaining(deadline), tls.secure(), o.join(), Zmux.presenter(credential, address)), o, deadline, null);
     }
 
     /**
@@ -739,21 +738,47 @@ public final class ZmuxSession implements AutoCloseable {
      * on every failure, the caller never does.
      */
     public ZmuxPipe addPipe(PipeIo io, PipeOptions o) throws IOException {
+        long deadline = joinDeadline();
         try {
             driver.checkBlocking();
         } catch (RuntimeException e) {
             Bootstrap.discard(io, e);
+            driver.failedJoin(e).report(e);
             throw e;
         }
-        long deadline = joinDeadline();
-        return attached(joined(driver.addPipe(io, o.join()), deadline), o, deadline);
+        return joinCarrier(driver.addPipe(io, o.join()), o, deadline, null);
     }
 
-    /** {@link #addPipe(PipeIo, PipeOptions)} bounded by deadline (System.nanoTime) as well. */
-    private ZmuxPipe addPipe(PipeIo io, PipeOptions o, long until) throws IOException {
-        long join = joinDeadline();
-        if (join != Long.MAX_VALUE && until - join >= 0) return attached(joined(driver.addPipe(io, o.join()), join), o, join);
-        return attached(joined(driver.addPipe(io, o.join()), until, until), o, until);
+    private ZmuxPipe joinCarrier(SessionRuntime.JoinAttempt attempt, PipeOptions options, long deadline, ZmuxFuture.WorkerStop stop) throws IOException {
+        return joinCarrier(attempt, options, deadline, stop, System::nanoTime);
+    }
+
+    ZmuxPipe joinCarrier(SessionRuntime.JoinAttempt attempt, PipeOptions options, long deadline, ZmuxFuture.WorkerStop stop,
+                         java.util.function.LongSupplier proofTime) throws IOException {
+        ZmuxPipe pipe;
+        try {
+            pipe = joined(attempt, deadline, stop);
+            configureJoined(pipe, options);
+        } catch (IOException | RuntimeException failed) {
+            Throwable original = stop == null ? failed : stop.reason(failed);
+            Throwable winner = attempt.report(original).join();
+            if (winner == original) throw failed;
+            throw Errors.failure(winner);
+        }
+        var proof = pipe.attachedStep();
+        var wait = new Operation<>(driver, op -> {
+            if (deadline != Long.MAX_VALUE && proofTime.getAsLong() - deadline >= 0)
+                return new SocketTimeoutException("join deadline expired");
+            return proof.attempt(op);
+        }, core::cancelPeerAttachedWait, null, deadline).submit();
+        if (options.returnOnReply) {
+            Runnable report = () -> settleAttachment(attempt, pipe, wait.outcome(), stop);
+            if (!wait.onDoneIndependent(report)) report.run();
+        } else {
+            Throwable failure = settleAttachment(attempt, pipe, wait.await(deadline), stop).join();
+            if (failure != null) throw Errors.failure(failure);
+        }
+        return pipe;
     }
 
     /** The nanoseconds left until deadline (System.nanoTime), at least 1. */
@@ -767,41 +792,33 @@ public final class ZmuxSession implements AutoCloseable {
         return d < t ? Long.MAX_VALUE : d;
     }
 
-    /**
-     * Waits until the peer attached a joined pipe, unless o says not to, within the
-     * call's deadline. A pipe still unattached at the deadline, or when the wait is interrupted,
-     * is aborted (PIPE_ABANDON(ZMUX_PIPE_FAILED)); one that fails or is removed first fails the
-     * call with {@link PipeGoneException}, the session's end with the session's exception.
-     */
-    private ZmuxPipe attached(ZmuxPipe p, PipeOptions o, long deadline) throws IOException {
-        p.hold(o);
-        if (o.settings.qualityBand == PipeUpdate.Change.SET) {
-            try {
+    private CompletableFuture<Throwable> settleAttachment(SessionRuntime.JoinAttempt attempt, ZmuxPipe pipe, Object outcome, ZmuxFuture.WorkerStop stop) {
+        Throwable error = switch (outcome) {
+            case SocketTimeoutException ignored -> new JoinTimeoutException();
+            case CoreException e -> Errors.io(e);
+            case Throwable e -> e;
+            default -> outcome == ZmuxPipe.MISSING ? pipe.gone() : null;
+        };
+        Throwable reason = stop == null ? error : stop.reason(error);
+        return attempt.report(reason, reason == null ? null : () -> cancelJoinedPipe(pipe.rawId()));
+    }
+
+    private void configureJoined(ZmuxPipe p, PipeOptions o) throws IOException {
+        try {
+            p.hold(o);
+            if (o.settings.qualityBand == PipeUpdate.Change.SET) {
                 var band = o.settings.qualityBandValue;
                 p.update((band == null ? PipeUpdate.builder().noQualityBand() : PipeUpdate.builder().qualityBand(band)).build());
-            } catch (IOException | RuntimeException e) {
-                cancelJoinedPipe(p.rawId());
-                throw e;
             }
-        }
-        if (o.returnOnReply) return p;
-        Object r = new Operation<>(driver, p.attachedStep(), core::cancelPeerAttachedWait, null, deadline).submit().await(deadline);
-        // The core fails a join still unattached at the join deadline, which runs from JOINING,
-        // after this call's deadline: past it, the pipe is gone because the wait timed out.
-        if (r == ZmuxPipe.MISSING && deadline != Long.MAX_VALUE && System.nanoTime() - deadline >= 0) r = new SocketTimeoutException();
-        if (r == ZmuxPipe.MISSING) throw new PipeGoneException(p.id());
-        if (r instanceof SocketTimeoutException) {
+        } catch (IOException | RuntimeException e) {
             cancelJoinedPipe(p.rawId());
-            throw new SocketTimeoutException("pipe " + p.id() + " not attached by the peer within the join deadline");
+            throw e;
         }
-        if (r instanceof InterruptedIOException) cancelJoinedPipe(p.rawId());
-        Errors.check(r);
-        return p;
     }
 
     /** Ends a join setup its caller gave up on, waiting for the attempt to resolve; a pipe it created is cancelled. */
-    private void abandonJoinSetup(CompletableFuture<Long> f) {
-        driver.cancelJoinSetup(f);
+    private void abandonJoinSetup(CompletableFuture<Long> f, Throwable cause) {
+        driver.cancelJoinSetup(f, cause);
         Long created = null;
         boolean resolved = false;
         boolean interrupted = false;
@@ -814,26 +831,21 @@ public final class ZmuxSession implements AutoCloseable {
         if (interrupted) Thread.currentThread().interrupt();
     }
 
-    ZmuxPipe joined(CompletableFuture<Long> f, long deadline) throws IOException {
-        return joined(f, deadline, Long.MAX_VALUE);
-    }
+    ZmuxPipe joined(CompletableFuture<Long> f, long deadline) throws IOException { return joined(f, deadline, null); }
 
-    /**
-     * {@link #joined(CompletableFuture, long)} with the setup bounded by setupDeadline as well; the
-     * join timeout alone bounds it otherwise, since a late-reporting setup may still succeed.
-     */
-    private ZmuxPipe joined(CompletableFuture<Long> f, long deadline, long setupDeadline) throws IOException {
+    private ZmuxPipe joined(CompletableFuture<Long> f, long deadline, ZmuxFuture.WorkerStop stop) throws IOException {
         long id;
         try {
-            id = setupDeadline == Long.MAX_VALUE ? f.get() : f.get(remaining(setupDeadline), TimeUnit.NANOSECONDS);
+            id = deadline == Long.MAX_VALUE ? f.get() : f.get(remaining(deadline), TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             // The exception cleared the flag, so the cleanup waits below block; it is restored after them.
-            try { abandonJoinSetup(f); } finally { Thread.currentThread().interrupt(); }
-            throw new InterruptedIOException("interrupted");
+            var interrupted = new InterruptedIOException("interrupted");
+            try { abandonJoinSetup(f, stop == null ? interrupted : stop.reason(interrupted)); } finally { Thread.currentThread().interrupt(); }
+            throw interrupted;
         } catch (TimeoutException e) {
-            // A deadline shorter than the join timeout (replacePipes') passed during the setup.
-            abandonJoinSetup(f);
-            throw new SocketTimeoutException("join not set up within the call's deadline");
+            var expired = new JoinTimeoutException();
+            abandonJoinSetup(f, expired);
+            throw expired;
         } catch (ExecutionException e) {
             throw Errors.failure(e.getCause());
         }
@@ -851,10 +863,12 @@ public final class ZmuxSession implements AutoCloseable {
         }, driver::cancelPipeWait, null, deadline).submit().await(deadline);
         if (r instanceof Throwable) {
             cancelJoinedPipe(id);
+            if (r instanceof SocketTimeoutException) throw new JoinTimeoutException();
             Errors.check(r);
         }
         if (!Boolean.TRUE.equals(r)) throw new PipeGoneException(PipeId.of(id));
-        return new ZmuxPipe(this, id);
+        return f instanceof SessionRuntime.JoinAttempt attempt
+                ? new ZmuxPipe(this, id, attempt.confirmation()) : new ZmuxPipe(this, id);
     }
 
     /**
@@ -981,7 +995,7 @@ public final class ZmuxSession implements AutoCloseable {
 
     /** Snapshots as of the loop's last round, including pipe 0. */
     public List<PipeStats> pipeStats() {
-        return driver.pipeSnapshot();
+        return driver.pipeStatsSnapshot();
     }
 
     /** Sets the default quality event band of outbound pipes; a pipe's own band ({@link PipeUpdate}) wins. */
@@ -1103,7 +1117,7 @@ public final class ZmuxSession implements AutoCloseable {
                         : ev instanceof SessionEvent application ? application : Events.publicEvent((Event) ev);
                 if (event != null) { driver.cancelEventWait(op); return event; }
             }
-            if (core.state() == SessionState.CLOSED) {
+            if (core.state() == SessionState.CLOSED && !driver.holdingJoinEvents()) {
                 driver.cancelEventWait(op);
                 throw CoreException.session(core.error());
             }

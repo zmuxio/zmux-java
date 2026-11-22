@@ -467,7 +467,7 @@ final class TraceRunner {
     // ---- listener carriers  ----
 
     final CarrierAdmission admission = new CarrierAdmission(0, 0, 0, 0);
-    final CarrierAdmission.SplitPairing pairing = new CarrierAdmission.SplitPairing();
+    final CarrierAdmission.SplitPairing<RCarrier> pairing = new CarrierAdmission.SplitPairing<>();
 
     void listenerUp(Map<String, Object> st) {
         RCarrier c = new RCarrier();
@@ -479,11 +479,11 @@ final class TraceRunner {
         if (st.get("conn") instanceof String cn) c.conn = cn.intern();
         if (st.get("pairing") instanceof String tok) {
             boolean up = "in".equals(c.dir);
-            CarrierAdmission.SplitPairing.Result res = pairing.offer(hex(tok), up, c);
-            if (res == CarrierAdmission.SplitPairing.Result.REJECT) {
+            var res = pairing.offer(hex(tok), up, c);
+            if (res == null) {
                 c.rejected = true;
-            } else if (res == CarrierAdmission.SplitPairing.Result.DONE) {
-                RCarrier o = (RCarrier) pairing.partner();
+            } else if (res.partner() != null) {
+                RCarrier o = res.partner();
                 c.attached = o.attached = true;
                 c.pipe = o.pipe = 0;
                 RPipe p = new RPipe(0);
@@ -975,7 +975,10 @@ final class TraceRunner {
         p.replyIn = in;
         while (p.joining) {
             Joins.JoinStep step = s.verifyReply(p.id, p.replyIn, 0, p.replyIn.length, now);
-            Joins.Finished finished = step.status() == Joins.Step.PROVEN ? s.joinFinish(p.id, io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, now) : null;
+            Joins.Finished finished;
+            try {
+                finished = step.status() == Joins.Step.PROVEN ? s.joinFinish(p.id, io.zmux.carrier.HandshakeShaper.UnitPlan.NONE, 0, now) : null;
+            } catch (SecureCarrierException failure) { throw fail("pipe " + p.id + ": confirmation: " + failure); }
             drainEvents();
             p.replyIn = java.util.Arrays.copyOfRange(p.replyIn, step.consumed(), p.replyIn.length);
             switch (step.status()) {

@@ -3,14 +3,10 @@ package io.zmux;
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.MemoryPipe;
-import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
-import io.zmux.carrier.PipeWriter;
 import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -39,15 +35,6 @@ class InboundTransformTest {
     }
 
     /** A carrier whose sending half counts its writes and reports a retransmission count. */
-    static PipeIo counted(PipeIo io, List<Integer> writes, long retransmitted) {
-        PipeWriter w = io.writer();
-        return io.withHalves(io.reader(), new PipeWriter() {
-            @Override public void write(OutboundBatch batch, Completion done) { writes.add(batch.bytes()); w.write(batch, done); }
-            @Override public OptionalLong retransmitted() { return retransmitted < 0 ? OptionalLong.empty() : OptionalLong.of(retransmitted); }
-            @Override public void close() { w.close(); }
-            @Override public void abort(Throwable cause) { w.abort(cause); }
-        });
-    }
 
     @Test void theTransformSeesTheAdmissionValueAndItsLayerCarriesTheSession() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
@@ -178,27 +165,26 @@ class InboundTransformTest {
         }
     }
 
-    @Test void pipeStatsReportLossAndTheCarriersRetransmissions() throws Exception {
+    @Test void pipeStatsReportLossAndUnknownCarrierCounts() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = config(loops);
             try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("c")));
-                var writes = java.util.Collections.synchronizedList(new ArrayList<Integer>());
-                try (var c = Zmux.open(counted(boot[0], writes, 1234), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
+                try (var c = Zmux.open(boot[0].withCarrierConn(new Object()), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     var st = c.openStream();
                     st.write(new byte[1000]);
                     st.finish();
                     readAll(s.acceptStream());
-                    ListenerEntryTest.await(() -> {
-                        try { return c.pipeStats().getFirst().bytesRetransmitted().isPresent(); } catch (Exception e) { return false; }
-                    });
+                    ListenerEntryTest.await(() -> c.pipeStats().getFirst().carrierSample().isPresent());
                     var p = c.pipeStats().getFirst();
-                    assertEquals(1234, p.bytesRetransmitted().getAsLong());
+                    CarrierSample sample = p.carrierSample().orElseThrow();
+                    assertEquals(CarrierSource.UNKNOWN, sample.source());
+                    assertEquals(Direction.OUTBOUND, sample.direction());
+                    assertTrue(sample.counts().isEmpty());
+                    assertTrue(s.pipeStats().getFirst().carrierSample().isEmpty(), "the connection is unidentified");
                     assertEquals(OptionalLong.of(0), p.bytesLost(), "nothing lost before a failure");
                     assertEquals(OptionalLong.of(0), p.recordsLost());
-                    assertTrue(p.lossRate().isEmpty(), "no sample a second apart yet");
-                    assertTrue(s.pipeStats().getFirst().bytesRetransmitted().isEmpty(), "the adapter reports none");
                 }
             }
         }

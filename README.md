@@ -36,7 +36,8 @@ Maven:
 Gradle: `implementation("io.github.zmuxio:zmux:VERSION")`. The optional
 modules are separate artifacts of the same version: `zmux-quic` (QUIC
 carriers on Netty, see [`zmux-quic/README.md`](zmux-quic/README.md)),
-`zmux-http` (HTTP and WebSocket carriers on Netty) and `zmux-shaping` (shaping
+`zmux-http` (HTTP/1.1, HTTP/2 and WebSocket carriers), `zmux-http3` (optional
+HTTP/3 over QUIC) and `zmux-shaping` (shaping
 hooks read from JSON).
 
 ## Sessions and streams
@@ -324,8 +325,23 @@ records with the keys of the Join handshake; `BOUND` leaves them to a carrier th
 declares the contract (`PipeIo.withCarrierSecure()`, and a TLS 1.3 connection this process terminates) and binds
 its exporter into the handshake; `TRUSTED` leaves them to the deployment.
 `ZmuxConfig.Builder.recordPolicy` or `PipeOptions.Builder.recordMode` chooses the mode of a
-local join; `allowRecordMode` is the acceptor's check and when unset only Sealed passes;
-`authorizeJoin` may refuse a join after it. `session.weakestRecordMode()` and
+local join. The acceptor first calls `authorizeJoin` for the authenticated Hello.
+Its `allowRecordMode` policy then checks the mode and defaults to Sealed. `ZmuxConfig.Builder.joinOutcome`
+receives one result for each authorized incoming join and each carrier supplied
+to an outgoing join (including redial and pool joins). Its arguments are the
+session, the pipe ID (`PipeId.UNASSIGNED`, 2⁶², before allocation), and the failure (null on
+attachment). A dial that supplies no carrier produces no callback. A successful
+callback holds that pipe's event keys through its return, including retirement.
+Callbacks run independently of the session's completion workers and can wait for
+the session to close. Calls for one session can overlap. Each outgoing join
+retains its confirmation result on its pipe handles. A late Confirm or ACK
+cannot change a join that timed out. A timeout on a single
+`awaitAttached(Duration)` withdraws just that wait.
+`returnOnReply(true)` lets the caller return before the peer confirms
+attachment. Timeout, refusal, eviction, interruption, listener stop, pipe
+loss and session termination have distinct exception types. A local abort before confirmation
+reports `PipeAbortedException`, a subtype of `PipeGoneException`. Catch the specific
+type first when handling them separately. `session.weakestRecordMode()` and
 `PipeStats.recordMode()` report the result, and `joinEarlyHello` sizes the first batch
 a Hello carries while no other pipe is usable (default 8 KiB; `noJoinEarlyHello()` turns it
 off). A join exchanges its keys in a key group, 1 or 2 (`PipeOptions.Builder.keyGroup`; by
@@ -387,7 +403,7 @@ The halves must be confidential end to end and use matching framing/ALPN;
 the token is a bearer secret and must never be placed in a URL. With exporter
 authentication the split helper binds **both** handshakes, in that order.
 Pairing limits and timeouts apply before a session exists, and the token
-stays used until that session ends. Waiters hold one parsed first record and
+is reserved until the paired attachment releases its carrier, lanes and workers. Waiters hold one parsed first record and
 bounded unparsed read-batch input, releasing both halves on failure or timeout.
 
 The built-in `Scheduler` constants are `AFFINITY`, `SESSION_AFFINITY`,
@@ -411,11 +427,17 @@ in-flight bytes, delivery rate), traffic and reinjection counters, and
 datagram frames crossed the pipe; probes, acknowledgements and padding do not
 count). Loss is reported as `bytesLost` (sent but unacknowledged when the pipe
 failed), `recordsLost` (that in records, estimated from the pipe's mean record
-size), `bytesRetransmitted` (the carrier's own retransmissions, where its
-`PipeWriter.retransmitted()` reports them, as QUIC does) and `lossRate`
-(smoothed, after the first samples a second apart); each is empty where it
-cannot be known. Durations use `Duration`, rates bytes/s. Estimates
-are observations, not guaranteed bandwidth. Quality bands and capacity floors
+size). `carrierSample()` is an optional, cached observation of the local sender
+on the underlying connection. Pipes and sessions on the same connection share
+its identity and sample. Netty QUIC reports its native sent and lost packet
+counts. Java TCP reports unknown counts. An HTTP Exchange can send through
+multiple physical connections and also reports unknown counts. An unknown pair
+is empty, while a measured zero is present. Samples use the `System.nanoTime()`
+time domain. Attachment starts acquisition and the native sample becomes available
+when that query completes. A stats read returns the cached
+sample immediately and requests a background refresh when it is a second old.
+Durations use `Duration`, rates bytes/s. Estimates are observations,
+not guaranteed bandwidth. Quality bands and capacity floors
 are opt-in through `session.setQualityBand` (a pipe's own band through
 `PipeUpdate.qualityBand`) and `setCapacityFloor`, and off again through
 `clearQualityBand` and `clearCapacityFloor`. A band is built with
@@ -631,25 +653,28 @@ reach the listener without a new decision), joins and resumptions included.
 A carrier first takes a slot of its source (`maxPendingPerSource`, counted by
 its source prefix) and one of the listener (`maxPending`), then completes its TLS handshake, then the
 decider gets up to `peek` bytes of a byte stream, or the whole first message of a
-message-framed carrier (WebSocket; at most `maxMessage` bytes, by default the
-largest record), and the carrier's `Admission.CarrierInfo`, immutable and its own
-per call: its source and the peer it arrived from, the negotiated application
+message-framed carrier (WebSocket). A positive peek bounds that message by
+`max(peek, maxPeek)`. The separate `maxMessage` limit also applies. Each call receives the carrier's
+immutable `Admission.CarrierInfo` with its source, the peer it arrived from, the negotiated application
 protocol, the server name (SNI) the client sent, the TLS exporter, its `stage`
 (`CARRIER`, the carrier's start, or `HEAD`, an HTTP request head), its `framing`,
 whether it is an HTTP `upgrade`, and for HTTP carriers the request's header
 fields (`info.header(name)`, case-insensitive). It returns a `CompletionStage`
 of a decision whose `AdmissionVerdict` is `ACCEPT` (skipping a prefix),
-`FALLBACK`, `STALL`, `CLOSE`, `MORE` (a longer prefix of a byte stream, at most
+`FALLBACK`, `TAKEOVER`, `STALL`, `CLOSE`, `MORE` (a longer prefix of a byte stream, at most
 `maxPeek`) or `DEFER` (on an upgrade's head only: complete the upgrade and
 decide again on the carrier's first message), due within the peek timeout
 (`Admission.Deadline`); a stage still pending then, or when the listener closes,
 is cancelled and the carrier closed. `MORE` on a head or a message carrier, and
-`DEFER` anywhere but an upgrade's head, close the carrier. A first message above
-`maxMessage` closes the carrier without a decision (`tooLarge`), and so does one
+`DEFER` anywhere but an upgrade's head, close the carrier. Exceeding the prefix bound counts as `closed`. Exceeding a tighter
+`maxMessage` limit counts as `tooLarge`. The carrier also closes on a first message
 that fails, is not a binary message or is empty (`closed`).
 `Admission.Decider.immediate(...)` wraps a decision taken at once, and
 `PrefixAuth` provides a token decider. `listener.stats().admission()` counts
-the outcomes.
+the outcomes. All `MORE` rounds use the first deadline. If a byte-stream prefix
+is still short at expiry, native TCP, TLS and QUIC can replay it to the listener
+fallback when `fallbackOnPeekTimeout(true)` is set. A late More round keeps its
+variant. Other inputs and outstanding decisions close on expiry.
 
 ```java
 var auth = new PrefixAuth(key, Duration.ofSeconds(30), true, 1, 0);
@@ -659,26 +684,26 @@ var config = ListenerConfig.builder()
         .build();
 ```
 
-`ListenerConfig.fallback` receives every carrier the admission gives back,
-whatever entry took it: TCP and TLS carriers, WebSocket carriers decided after
-a `DEFER`, QUIC streams (`QuicTakeover.connection(t)` in zmux-quic gives the
-connection), HTTP request carriers decided on their body and a host's own pipe
-inputs. The `Takeover` has the carrier's `info()`, `value()` (the value of
-`Decision.fallback(value)`: one fallback per listener, the value routes the
-carrier to the host's service) and `pipe()`, a `PipeIo` with what was read
+`Decision.takeover(value)` gives the carrier itself to `ListenerConfig.fallback`.
+`Decision.fallback(value)` selects the normal host service for the carrier.
+For TCP, TLS, an upgraded WebSocket, QUIC or an application-provided stream,
+that service is also `ListenerConfig.fallback`. For an HTTP request or an upgrade
+decided on its request head, the HTTP handler behind `HttpEndpoint` receives
+the request with all body bytes replayed. The `Takeover` has the carrier's
+`info()`, the decision's `value()`, and `pipe()`, a `PipeIo` with what was read
 replayed in front (the first message whole, then the following ones, on a
 message carrier, whose halves `messages()` also gives typed); the view keeps
 every property of the carrier (label, kind, variant, connection, the
-`PipeIo.Capabilities` but the lane opener, `unsent()`/`retransmitted()`). A
+`PipeIo.Capabilities` but the lane opener, `unsent()`). A
 plain TCP carrier also offers `socket()`, its blocking `SocketChannel` with the
-bytes read, as long as the pipe view is unused. The carrier is the host's until
-the stage `serve` returned completes (null: when `serve` returns), at every
-entry point alike; zmux then closes it, at once when `serve` throws or the
-stage fails, unless the host called `detach()` during the call: the carrier is
-then the host's for good, served after the stage completed and closed by the
-host (an adapter leaves its QUIC connection or HTTP request to the host too).
-Each half closes once, whoever closes it; `detach()` returns false for a
-carrier the host already closed and throws after the stage completed.
+bytes read, as long as the pipe view is unused. The host can use the carrier while its fallback stage runs.
+Completion (including failure, a throw, or a null stage) closes an attached
+takeover. Withdrawal during setup or shutdown of the carrier’s event loop can
+close it earlier. Withdrawal leaves the host’s stage running. A host that calls
+`detach()` before withdrawal or completion takes responsibility for closure,
+including the QUIC connection or HTTP request a carrier adapter gives it.
+Each half closes once. `detach()` returns false for a carrier already closed
+by the host and throws once zmux has reclaimed it.
 
 ```java
 .fallback(t -> {
@@ -695,14 +720,16 @@ Without a fallback a
 carrier given back stalls: nothing is sent, input is discarded, and the carrier
 closes after a duration that depends on its source alone and keeps its slot
 until then, or when the listener closes; a source keeps one slot free of
-stalls. What an HTTP request is depends on the stage it is decided at: on its
-head (an upgrade's head, an exchange request, a request without a body) it is
-a request, answered by its HTTP adapter (`handleRequest` below); on the start
-of its body (a streaming or uplink request carrier) it is a carrier, taken over
-by `ListenerConfig.fallback` as the full-duplex byte stream of its request body
-and response body, the response head written by the adapter (closing the
-pipe's writer ends the response while the request body reads on); only a
-listener without a fallback hands it to the HTTP adapter's host handler.
+stalls. For `TAKEOVER` on a streaming HTTP request, the adapter writes its
+acceptance response head before calling the host. The host reads the request
+body (including any prefix) and writes the response body. A WebSocket
+takeover completes the upgrade first. The initial authenticated request of
+an HTTP exchange can go to the HTTP handler on `FALLBACK`; `TAKEOVER` hands
+the host the exchange's logical byte stream. The listener and per-variant
+statistics count `fallback()` or `takeover()` when the handback starts.
+Withdrawal before the host starts counts as `closed()`. A missing target
+counts as a stall or stall overflow. A failed acceptance head counts in `handshakeFailed()`,
+and expiry of its admission deadline counts in `peekTimedOut()`.
 
 `Admission.Decision.accept(skip, value)` attaches a host value to the carrier:
 `session.admitted()` returns the value of the carrier the session started on
@@ -740,20 +767,56 @@ must not block and must return well before the carrier's handshake deadline, whi
 keeps running while they do. Slow decisions belong in the asynchronous
 `Admission.decide`, which is given its deadline.
 
+### Handing a carrier to a listener
+
+Call `listener.handlePipe(io, hint)` from an application thread. Ownership
+passes on entry, including on failure. The call succeeds when a bootstrap is
+queued for accept, a join is confirmed, or a lane is attached. Refusal throws
+`IOException`. A fallback that completes normally succeeds, including when the host
+detached the carrier. A failed stage reports its error. Cleanup may still be running. Thread interruption
+withdraws the request if it wins the handoff decision. If publication already owns
+the result, the caller receives that result with its interrupt status restored. The session owns the carrier and its
+bounded close flush after handoff. Stopping Serve leaves attached pipes usable.
+
+For an arrival with a reserved slot, use `slot.handle(io, hint).awaitSetup()`.
+An adapter can observe admission and permission to write earlier, via
+`Handled.verdict()` and `taken()`. Explicitly waiting on `Handled.closed()`
+waits for actual carrier and worker release. A removed lane completes its own
+handle while the main pipe continues serving streams. The main pipe waits for
+each child lane, including its transform and adapter cleanup. A pipe handle’s `closed()` also waits
+for protocol retirement. For a paired split, either half’s notification means
+the attachment has released its transformed carrier, all lanes and workers,
+and the token can be reused. Withdrawal before a match prevents a later
+complementary half from reviving the request. Once matched, either request
+can sustain the combined setup. HTTP split requests also wait for buffered input
+and the final response write to be released. Blocking channel halves include
+their workers, and QUIC halves include cleanup on the stream event loop. The streaming HTTP adapter keeps its request alive
+internally. Java's process-wide `Zmux.handleLane` dispatches asynchronously.
+
 ### Carriers from an HTTP server
 
 An application that runs its own HTTP server gives each request whose body (or
 nothing after its head) is the carrier to
-`listener.adapter().handleRequest(io, hint, onHead, fallback)`: decided on its
+`listener.adapter().handleRequest(io, hint, onHead, fallback, writeHead)`: decided on its
 head (`Stage.HEAD`, no prefix) or on its body's start, and a request given back
 goes to that fallback, with the body bytes read replayed, for an HTTP answer.
+The required `writeHead` operation commits the acceptance response for `TAKEOVER`.
+A null step closes the supplied halves and throws `NullPointerException` before
+admission. An asynchronous step can implement `Upgrade.released()` to report
+when the actual write has finished. After withdrawal the source slot and
+`Handled.closed()` wait for that signal. For steps without one, the wait is
+bounded by one linger interval. For an accepted upgrade without a release signal,
+that bound starts when the adapter opens the carrier. A pending explicit signal
+logs once at DEBUG after one linger and continues to hold the attachment until
+the write is released.
+Its stage completes after the head write and flush succeed.
 An upgrade (WebSocket) goes to `listener.adapter().admitFirst(io, hint,
 upgrade, headFallback)` before it is answered: the head is decided first; on
 `ACCEPT` the listener runs `upgrade` (the 101) and takes the carrier, on `DEFER`
 it runs `upgrade`, waits for it and for the first message within the rest of
 the peek timeout and while the listener runs (`peekTimedOut`, `closed`,
 `handshakeFailed` otherwise), and decides again; a head given back goes to
-`headFallback`. Other carriers go to `listener.adapter().handle(io, hint)`.
+`headFallback`. On `TAKEOVER`, the adapter completes the upgrade before the listener hands the carrier to its fallback. Other carriers go to `listener.adapter().handle(io, hint)`.
 `Handled` has the final verdict and whether a session took the carrier
 (`taken()`: false when the listener refused it, having written nothing);
 `takenOver()` and `detached()` say whether the listener's fallback took it over
@@ -775,7 +838,15 @@ host resolved itself (the peer otherwise); with `HttpEndpoint`, a host sets
 capabilities supply the TLS metadata of the connection that carries the
 request: `withExporter`, `withProtocol` and `withServerName`.
 
-`listener.shutdown(code, reason)` refuses new sessions at once
+`listener.drain(reason)` refuses new sessions after the zmux handshake with
+`CONNECTION_REFUSED` and the supplied reason, including split bootstraps once
+paired. The dialer can inspect `ConnectionRefusedException.reason()`, or
+`SessionError.TransportClosed.isConnectionRefused()` and `reason()` if it
+already received its session. Existing joins, lanes and resumptions continue.
+`undrain()` reopens new-session admission. A later `drain` replaces the reason.
+Changes take effect at bootstrap classification and return immediately.
+
+`listener.shutdown(code, reason)` drains permanently with its reason
 (`accept()` throws `ListenerClosedException`), shuts every session of the
 listener down with code and reason, and lets them join and resume until they
 have all ended; then the listener closes. `shutdown(code, reason, Duration)`
@@ -909,6 +980,22 @@ candidate for `Zmux.dial` (`streamingCandidate`, `splitCandidate`,
 pipe pair 0 only, so `addPipe` refuses it (`IllegalArgumentException`);
 `splitJoin(session, url, headers, credential, options)` joins a split carrier as
 one further pipe: one Join across a paired POST and GET.
+
+For HTTP/3, add the optional `io.github.zmuxio:zmux-http3` artifact and use
+`io.zmux.http3.Http3Server`. Bind UDP with
+`Http3Server.bind(address, quicTls, quicOptions, endpoint, hostHandlerFactory)`.
+The server owns its UDP socket and QUIC connections. It uses the same endpoint
+for streaming, Split, Exchange and HTTP fallback. Applications with their own
+QUIC server can install `Http3Server.initializer` before the first stream, or
+use `Http3Server.requestInitializer` with their own HTTP/3 connection handler.
+Configure the host's QUIC TLS with ALPN `h3`, early data disabled and
+`QuicExporter.KEYLOG` when channel-bound credentials are required.
+
+Select HTTPS over HTTP/3 with `io.zmux.http3.Http3Client.builder()`. For custom
+trust or transport limits use `Http3Client.builder(clientQuicTls, quicOptions)`. The existing
+request-carrier and Exchange methods use this transport on the client.
+Include Netty's `netty-codec-native-quic` for your operating system and
+architecture at runtime, at the same version as the Netty HTTP/3 codec.
 
 Streaming, split and WebSocket carriers follow redirects of their requests on
 the same host name only (another path, or a scheme upgrade from http to https,
@@ -1149,7 +1236,7 @@ listener installs the join locator before the first transport parameters are
 sent, registers join/lane routing, and applies its shared memory and suspension
 policies to these sessions too. Its `accept()` queue contains only sessions
 started by incoming bootstrap carriers. An externally supplied adapter forwards
-new incoming carriers to the same `endpoint.handle` entry. Authentication, replay and attachment admission are shared
+new incoming carriers through `endpoint.adapter().handle`. Authentication, replay and attachment admission are shared
 with accepted sessions.
 
 Ordinary `Zmux.open` or `Zmux.connect` sessions remain suitable when only that

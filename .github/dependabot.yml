@@ -5,6 +5,7 @@ updates:
       - /
       - /zmux
       - /zmux-http
+      - /zmux-http3
       - /zmux-quic
       - /zmux-shaping
       - /zmux-netty-test

@@ -81,6 +81,18 @@
     </Or>
   </Match>
 
+  <!-- Localhost certificate fixture in the test-only Netty support artifact. -->
+  <Match>
+    <Class name="io.zmux.nettytest.TestTls"/>
+    <Bug pattern="COMMAND_INJECTION, HARD_CODE_PASSWORD"/>
+  </Match>
+
+  <!-- The H3 connection loop serializes allocation, credit events, and request close callbacks. -->
+  <Match>
+    <Class name="io.zmux.http3.Http3ClientTransport$State"/>
+    <Bug pattern="AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE, AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+  </Match>
+
   <!-- Zero-copy handoff. The internal.* packages (exported only to the sibling modules) pass byte arrays,
        buffers and live objects between the core, the loop and the carriers without copying: a defensive copy on
        these hot paths would add an allocation and a copy per frame. The ownership of each array is documented where
@@ -102,6 +114,7 @@
       <Class name="~io\.zmux\.PipeMaintenance\$Result"/>
       <Class name="~io\.zmux\.PipePool\$Attempt"/>
       <Class name="~io\.zmux\.PipeStats\$Failure"/>
+      <Class name="~io\.zmux\.RejectInfo"/>
       <Class name="~io\.zmux\.SessionError\$(PipesLost|ResumeTimeout)"/>
       <Class name="~io\.zmux\.SessionEvent\$PipesRetired"/>
       <Class name="~io\.zmux\.StreamDatagram"/>
@@ -235,11 +248,23 @@
     </Or>
   </Match>
 
+  <!-- CarrierSample defines a typed direction and publishes only the local sender in this release. -->
+  <Match>
+    <Bug pattern="ENMI_ONE_ENUM_VALUE"/>
+    <Class name="io.zmux.Direction"/>
+  </Match>
+
   <!-- Locals javac synthesises for record patterns in a switch, and collections handed to a constructor that the
        detector does not follow. -->
   <Match>
     <Bug pattern="DLS_DEAD_LOCAL_STORE"/>
-    <Class name="io.zmux.CarrierCache$Snapshot"/>
+    <Or>
+      <Class name="io.zmux.CarrierCache$Snapshot"/>
+      <And>
+        <Class name="io.zmux.internal.loop.CarrierSampler"/>
+        <Method name="reset"/>
+      </And>
+    </Or>
   </Match>
   <Match>
     <Bug pattern="WOC_WRITE_ONLY_COLLECTION_LOCAL"/>

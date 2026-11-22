@@ -334,6 +334,13 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         return LISTENER.compareAndSet(this, null, listener);
     }
 
+    private record Independent(Runnable action) {}
+
+    /** Observes the same decision independently of the session's serial completion thread. */
+    public boolean onDoneIndependent(Runnable action) {
+        return LISTENER.compareAndSet(this, null, new Independent(action));
+    }
+
     /** Between reading the state and claiming the decision; a test interleaves a competing decision here. */
     void deciding() {}
 
@@ -343,6 +350,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         if (laneTimer != null) driver.post(this::disarm);
         Object l = LISTENER.getAndSet(this, RELEASED);
         if (l instanceof Runnable r) driver.completions().execute(r);
+        else if (l instanceof Independent(Runnable action)) Callbacks.EXECUTOR.execute(action);
     }
 
     /**

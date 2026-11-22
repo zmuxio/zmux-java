@@ -6,6 +6,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
+import io.netty.handler.codec.quic.QuicChannel;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.zmux.CarrierKind;
 import io.zmux.carrier.OutboundBatch;
@@ -16,6 +17,8 @@ import io.zmux.internal.loop.CarrierChannel;
 import io.zmux.internal.loop.NativePipe;
 import io.zmux.internal.loop.Transport;
 import io.zmux.internal.loop.TransportInfo;
+import io.zmux.internal.spi.CarrierProvider;
+import io.zmux.quic.internal.QuicCarrierStats;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
@@ -48,6 +51,8 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     private Throwable inputFailure;
     private boolean inputClosed;
     private boolean outputClosed;
+    private final java.util.concurrent.CompletableFuture<Void> inputReleased = new java.util.concurrent.CompletableFuture<>();
+    private final java.util.concurrent.CompletableFuture<Void> outputReleased = new java.util.concurrent.CompletableFuture<>();
     private boolean inputDone, outputDone;
     private final AtomicBoolean halvesStarted = new AtomicBoolean();
     private PipeReader reader;
@@ -63,7 +68,14 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         if (stream.type() == io.netty.handler.codec.quic.QuicStreamType.BIDIRECTIONAL) stream.config().setAllowHalfClosure(true);
         // Netty completes the close future on the loop as the stream closes, before any later
         // task; channelInactive is such a task, which a terminating loop may never run.
-        stream.closeFuture().addListener(f -> gone());
+        //noinspection resource: borrowed: the stream owns its event loop
+        var termination = stream.eventLoop().terminationFuture();
+        io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<Object>> terminated = f -> gone();
+        termination.addListener(terminated);
+        stream.closeFuture().addListener(f -> {
+            gone();
+            termination.removeListener(terminated);
+        });
     }
 
     boolean unidirectional() { return stream.type() == io.netty.handler.codec.quic.QuicStreamType.UNIDIRECTIONAL; }
@@ -121,7 +133,19 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         return new QuicTransport(host, this, TransportInfo.of(io), io.capabilities().laneOpener());
     }
 
-    private final class NativeReader implements PipeReader, NativePipe {
+    private interface ReaderHalf extends PipeReader, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {}
+    private interface WriterHalf extends PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf, CarrierProvider {
+        QuicChannel connection();
+
+        @Override default Object carrierIdentity() { return connection(); }
+        @Override default CarrierProvider.Query carrierQuery(Object identity) {
+            var connection = connection();
+            return connection != null && connection == identity ? QuicCarrierStats.query(connection) : null;
+        }
+    }
+
+    private final class NativeReader implements ReaderHalf, NativePipe {
+        @Override public java.util.concurrent.CompletionStage<Void> released() { return inputReleased.minimalCompletionStage(); }
         @Override public Transport claim(PipeIo io) { return StreamCarrier.this.claim(io); }
         @Override public void start(PipeReader.Sink target) {
             if (!use.compareAndSet(FRESH, HALVES) && use.get() != HALVES) throw new IllegalStateException("carrier taken over");
@@ -130,44 +154,42 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         @Override public void close() { closeHalvesInput(); }
     }
 
-    private final class NativeWriter implements PipeWriter, NativePipe {
+    private final class NativeWriter implements WriterHalf, NativePipe {
+        @Override public QuicChannel connection() { return connectionChannel(); }
+        @Override public java.util.concurrent.CompletionStage<Void> released() { return outputReleased.minimalCompletionStage(); }
         @Override public Transport claim(PipeIo io) { return StreamCarrier.this.claim(io); }
         @Override public void write(OutboundBatch batch, Completion done) {
             if (use.get() == CLAIMED) { done.failed(new IllegalStateException("carrier taken over")); return; }
             use.compareAndSet(FRESH, HALVES);
             writeHalves(batch, done);
         }
-        @Override public java.util.OptionalLong retransmitted() { return StreamCarrier.this.retransmitted(); }
         @Override public void close() { closeOutput(false); }
         @Override public void abort(Throwable cause) { closeOutput(true); }
     }
 
-    /** The lost bytes of the stream's connection, as last collected; empty before the first collection. */
-    java.util.OptionalLong retransmitted() {
-        ConnectionCarrier c = connection;
-        long n = c == null ? -1 : c.lostBytes();
-        return n < 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(n);
-    }
+    QuicChannel connectionChannel() { return stream.parent(); }
 
     /**
      * The stream as a pipe input whose halves serve a session on another host, after a
      * transport took it over and moved (its unread input is in {@link #early}).
      */
     PipeIo adapter(TransportInfo info, PipeIo.LaneOpener lanes) {
-        PipeReader r = !receive ? null : new PipeReader() {
+        PipeReader r = !receive ? null : new ReaderHalf() {
+            @Override public java.util.concurrent.CompletionStage<Void> released() { return inputReleased.minimalCompletionStage(); }
             @Override public void start(PipeReader.Sink target) { startHalves(target); }
             @Override public void close() { closeHalvesInput(); }
         };
-        PipeWriter w = !send ? null : new PipeWriter() {
+        PipeWriter w = !send ? null : new WriterHalf() {
+            @Override public QuicChannel connection() { return connectionChannel(); }
+            @Override public java.util.concurrent.CompletionStage<Void> released() { return outputReleased.minimalCompletionStage(); }
             @Override public void write(OutboundBatch batch, Completion done) { writeHalves(batch, done); }
-            @Override public java.util.OptionalLong retransmitted() { return StreamCarrier.this.retransmitted(); }
             @Override public void close() { closeOutput(false); }
             @Override public void abort(Throwable cause) { closeOutput(true); }
         };
         PipeIo io = PipeIo.of(r, w).withTerminatedTls(true).withCarrierConn(info.connection()).withReceiveMemory(info.receiveMemory())
                 .withProtocol(info.applicationProtocol()).withFateGroup(info.fateGroup())
                 .withCarrier(CarrierKind.QUIC);
-        io = io.withExporter(connection::export).withCarrierSecure();
+        io = io.withExporter(this::export).withCarrierSecure();
         return lanes == null ? io : io.withLaneOpener(lanes);
     }
 
@@ -187,7 +209,7 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     }
 
     private void closeHalvesInput() {
-        dispatch(this::closeInput);
+        dispatch(this::closeInput, () -> released.thenRun(() -> inputReleased.complete(null)));
     }
 
     private void writeHalves(OutboundBatch batch, PipeWriter.Completion done) {
@@ -257,16 +279,26 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         inputClosed = true;
         for (ByteBuf b; (b = early.poll()) != null; ) b.release();
         if (lent != null) lent.close();
-        stream.shutdownInput(PipeIo.CARRIER_FAILED).addListener(done -> { inputDone = true; closeIfReleased(); });
+        stream.shutdownInput(PipeIo.CARRIER_FAILED).addListener(done -> { inputDone = true; finishHalf(inputReleased); });
     }
 
     void closeOutput(boolean abort) {
         dispatch(() -> {
             if (outputClosed) return;
             outputClosed = true;
-            var shut = abort ? stream.shutdownOutput(PipeIo.CARRIER_FAILED) : stream.shutdownOutput();
-            shut.addListener(done -> { outputDone = true; closeIfReleased(); });
-        });
+            if (abort) {
+                stream.shutdownOutput(PipeIo.CARRIER_FAILED).addListener(done -> { outputDone = true; finishHalf(outputReleased); });
+                return;
+            }
+            // quiche 0.30.0 (Netty 4.2.21) drops a zero-length FIN when the ACK for the stream's
+            // last data is processed after the FIN is queued but before it is sent (quiche #2525,
+            // fixed in 0.30.1). Inside a read batch Netty sends only at the batch end, so a FIN
+            // queued there can lose that race to an ACK later in the batch. Queue it after the
+            // iteration instead, where Netty sends it at once. Drop this once Netty bundles 0.30.1.
+            Loops.run(NettyHost.afterIteration(stream.eventLoop()),
+                    () -> stream.shutdownOutput().addListener(done -> { outputDone = true; finishHalf(outputReleased); }),
+                    () -> released.thenRun(() -> outputReleased.complete(null)));
+        }, () -> released.thenRun(() -> outputReleased.complete(null)));
     }
 
     /** Closes the stream if a graceful close left it open (a peer that never finishes its side). */
@@ -277,15 +309,18 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
     /** Whether a session took the stream (Transport#whenTaken), across the transports that move it. */
     final io.zmux.internal.loop.TakenSignal taken = new io.zmux.internal.loop.TakenSignal();
 
-    java.util.concurrent.CompletionStage<Void> whenClosed() {
-        var f = new java.util.concurrent.CompletableFuture<Void>();
-        stream.closeFuture().addListener(done -> f.complete(null));
-        return f;
-    }
+    private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+
+    java.util.concurrent.CompletionStage<Void> whenClosed() { return released.minimalCompletionStage(); }
 
     /** STOP/RESET need not produce peer FIN; once both owned halves finish, release the local channel explicitly. */
-    private void closeIfReleased() {
-        if ((!receive || (inputClosed && inputDone)) && (!send || (outputClosed && outputDone))) stream.close();
+    private void finishHalf(java.util.concurrent.CompletableFuture<Void> half) {
+        if ((!receive || inputDone) && (!send || outputDone)) {
+            released.thenRun(() -> half.complete(null));
+            stream.close();
+        } else {
+            half.complete(null);
+        }
     }
 
     private void dispatch(Runnable action) { dispatch(action, () -> {}); }
@@ -353,5 +388,6 @@ final class StreamCarrier extends ChannelInboundHandlerAdapter {
         if (receive && !inputClosed) ended(new IOException("QUIC stream ended without FIN"));
         for (ByteBuf b; (b = early.poll()) != null; ) b.release();
         if (transport != null) transport.inactive();
+        released.complete(null);
     }
 }

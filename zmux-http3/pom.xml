@@ -1,0 +1,23 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent><groupId>io.github.zmuxio</groupId><artifactId>zmux-parent</artifactId><version>1.2.5</version></parent>
+ <artifactId>zmux-http3</artifactId><name>zmux-http3</name>
+ <description>HTTP/3 request carriers on QUIC.</description>
+ <url>https://github.com/zmuxio/zmux-java/tree/main/zmux-http3</url>
+ <dependencies>
+  <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux-http</artifactId><version>${project.version}</version></dependency>
+  <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux-quic</artifactId><version>${project.version}</version></dependency>
+  <dependency><groupId>io.netty</groupId><artifactId>netty-codec-http3</artifactId><version>${netty.version}</version></dependency>
+  <dependency><groupId>io.netty</groupId><artifactId>netty-codec-native-quic</artifactId><version>${netty.version}</version><classifier>${os.detected.name}-${os.detected.arch}</classifier><scope>test</scope></dependency>
+  <dependency><groupId>io.github.zmuxio</groupId><artifactId>zmux-netty-test</artifactId><version>${project.version}</version><scope>test</scope></dependency>
+  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>${junit.version}</version><scope>test</scope></dependency>
+ </dependencies>
+ <build>
+  <extensions><extension><groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version></extension></extensions>
+  <plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId>
+   <configuration><!-- Classpath: JUnit finds the leak check (zmux-netty-test) by ServiceLoader, which a named module does not allow; the main code still compiles as a module, which checks the qualified exports. -->
+   <useModulePath>false</useModulePath><argLine>--enable-native-access=ALL-UNNAMED</argLine><systemPropertyVariables><java.io.tmpdir>${project.build.directory}</java.io.tmpdir><io.netty.leakDetection.level>paranoid</io.netty.leakDetection.level><zmux.leakDetection>paranoid</zmux.leakDetection></systemPropertyVariables></configuration>
+  </plugin></plugins>
+ </build>
+</project>

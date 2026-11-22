@@ -39,6 +39,7 @@ class QuicCapacityProbe {
         System.out.printf("CAPACITY_ENV,java=%s,os=%s,arch=%s,transport=loopback,native=Netty%n",
                 System.getProperty("java.version"), System.getProperty("os.name"), System.getProperty("os.arch"));
         System.out.println("CAPACITY_HEADER,round,mode,direction,pipes,connections,application_bytes,elapsed_ns,goodput_Bps,mean_estimate_Bps,max_estimate_Bps,samples,acknowledged_delta");
+        System.out.println("NATIVE_STATS_HEADER,round,mode,direction,role,collected,skipped,packets_sent,packets_lost,collection_ns");
         if (link != null) System.out.printf("CAPACITY_LINK,bytes_per_second=%d,one_way_delay_ns=%d,queue_bytes=%d%n",
                 link.bytesPerSecond(), link.oneWayDelay().toNanos(), link.queueBytes());
         results.forEach(System.out::println);
@@ -282,21 +283,23 @@ class QuicCapacityProbe {
     /** Cumulative native counters, sampled outside the timed transfer; includes an idle bootstrap if still live. */
     private static String nativeStats(int round, String mode, int direction, String role,
                                List<io.netty.handler.codec.quic.QuicChannel> channels) throws Exception {
-        long sent = 0, lost = 0, lostBytes = 0, retransmitted = 0;
+        long sent = 0, lost = 0, collectionNanos = 0;
         int collected = 0, skipped = 0;
         for (var channel : channels) {
             if (!channel.isActive()) { skipped++; continue; }
             io.netty.handler.codec.quic.QuicConnectionStats stats;
+            long started = System.nanoTime();
             try { stats = channel.collectStats().get(5, TimeUnit.SECONDS); }
             catch (ExecutionException error) {
                 if (!channel.isActive()) { skipped++; continue; }
                 throw error;
             }
+            collectionNanos += System.nanoTime() - started;
             collected++; sent += stats.sent(); lost += stats.lost();
-            lostBytes += stats.lostBytes(); retransmitted += stats.streamRetransBytes();
         }
-        return String.format(Locale.ROOT, "NATIVE_STATS,%d,%s,%s,%s,%d,%d,%d,%d,%d,%d", round, mode,
-                direction == 0 ? "forward" : "reverse", role, collected, skipped, sent, lost, lostBytes, retransmitted);
+        // Final column is the sum of successful collectStats round trips, in nanoseconds.
+        return String.format(Locale.ROOT, "NATIVE_STATS,%d,%s,%s,%s,%d,%d,%d,%d,%d", round, mode,
+                direction == 0 ? "forward" : "reverse", role, collected, skipped, sent, lost, collectionNanos);
     }
 
     private static long acknowledged(ZmuxSession session) throws Exception {

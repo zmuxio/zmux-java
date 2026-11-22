@@ -56,6 +56,25 @@ class WebSocketHandshakeOrderTest {
 
     @AfterEach void clear() { WebSocketClient.connectedForTests = null; }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void closingUpgradedRequestCancelsUnreadTransform(boolean closeFrame) throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var handshake = new java.util.concurrent.CompletableFuture<io.zmux.carrier.PipeIo>();
+        var channel = new java.util.concurrent.CompletableFuture<Channel>();
+        WebSocketClient.connectedForTests = channel::complete;
+        try (var f = new Fixture(b -> b.noHandshakeTimeout(), b -> b.maxPendingPerSource(1)
+                .inboundTransform((io, context) -> { entered.countDown(); return handshake; }), b -> b.webSocket(), false, null);
+             var c = f.client(b -> b)) {
+            c.webSocketPipe(WebSocketTest.ws(f.base), Map.of(), List.of(), null);
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            var ws = channel.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (closeFrame) ws.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame()).sync();
+            else ws.close().sync();
+            assertThrows(java.util.concurrent.CancellationException.class, () -> handshake.get(5, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
     @Test void writesAfterAnUpgradeWhoseRequestWriteCompletesLateStillGoThroughTheEncoder() throws Exception {
         try (var f = new Fixture(b -> b, b -> b, b -> b.webSocket(), false, null); var c = f.client(b -> b)) {
             WebSocketClient.connectedForTests = (Channel ch) -> ch.pipeline().addFirst("late-write", new LateWriteCompletion(false));

@@ -16,12 +16,8 @@ import io.zmux.ListenerConfig;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxListener;
 import io.zmux.ZmuxSession;
-import java.io.FileInputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.KeyStore;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -127,37 +123,6 @@ final class Fixture implements AutoCloseable {
         loops.close();
     }
 
-    private static final char[] PASS = "changeit".toCharArray();
-    private static KeyStore store;
-
-    static synchronized KeyStore store() throws Exception {
-        if (store != null) return store;
-        Path dir = Path.of("target", "tls");
-        Files.createDirectories(dir);
-        Path ks = dir.resolve("localhost.p12");
-        if (!Files.exists(ks)) {
-            Path keytool = Path.of(System.getProperty("java.home"), "bin", "keytool");
-            Process p = new ProcessBuilder(keytool.toString(), "-genkeypair", "-alias", "localhost", "-keyalg", "EC",
-                    "-groupname", "secp256r1", "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1",
-                    "-startdate", "-1H", "-validity", "3650", "-storetype", "PKCS12", "-keystore", ks.toString(), "-storepass", "changeit",
-                    "-keypass", "changeit").redirectErrorStream(true).start();
-            if (!p.waitFor(60, TimeUnit.SECONDS) || p.exitValue() != 0) throw new IllegalStateException("keytool failed");
-        }
-        KeyStore s = KeyStore.getInstance("PKCS12");
-        try (FileInputStream in = new FileInputStream(ks.toFile())) { s.load(in, PASS); }
-        store = s;
-        return s;
-    }
-
-    static KeyManagerFactory kmf() throws Exception {
-        var k = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        k.init(store(), PASS);
-        return k;
-    }
-
-    static TrustManagerFactory tmf() throws Exception {
-        var t = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        t.init(store());
-        return t;
-    }
+    static KeyManagerFactory kmf() throws Exception { return io.zmux.nettytest.TestTls.kmf(); }
+    static TrustManagerFactory tmf() throws Exception { return io.zmux.nettytest.TestTls.tmf(); }
 }

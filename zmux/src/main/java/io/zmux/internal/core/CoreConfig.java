@@ -17,6 +17,7 @@ public record CoreConfig(
         Role transportRole,
         TransportParams local,
         RandomGenerator random,
+        long localIdleTimeout,
         long handshakeTimeout,
         long joinTimeout,
         boolean redial,
@@ -169,6 +170,11 @@ public record CoreConfig(
         return builder().build();
     }
 
+    /** The local idle timeout in nanoseconds, with the advertised value as a fallback for core callers. */
+    @Override public long localIdleTimeout() {
+        return localIdleTimeout < 0 ? Time.millis(local.maxIdleTimeoutMillis) : localIdleTimeout;
+    }
+
     /** A builder holding the defaults. */
     public static Builder builder() {
         return new Builder();
@@ -181,6 +187,7 @@ public record CoreConfig(
         b.transportRole = transportRole;
         b.local = local;
         b.random = random;
+        b.localIdleTimeout = localIdleTimeout;
         b.handshakeTimeout = handshakeTimeout;
         b.joinTimeout = joinTimeout;
         b.epochs = epochs;
@@ -267,6 +274,8 @@ public record CoreConfig(
         private boolean redial;
         private long keepAlive = OFF;
         private boolean stagedUni = true;
+        // Trace profiles can supply the deadline through the transport parameters alone.
+        private long localIdleTimeout = -1;
         private long uniTarget = 256;
         private long streamWindowCap;
         private long connWindowCap;
@@ -317,8 +326,10 @@ public record CoreConfig(
         private Builder() { }
 
         public CoreConfig build() {
-            return new CoreConfig(role, transportRole, local, random, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramQueueDelay, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
+            return new CoreConfig(role, transportRole, local, random, localIdleTimeout, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramQueueDelay, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
         }
+
+        public Builder localIdleTimeout(long v) { localIdleTimeout = v; return this; }
 
         public Builder role(Role v) { role = v; return this; }
 

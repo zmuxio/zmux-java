@@ -27,7 +27,7 @@ final class ExternalTransport extends AbstractTransport {
     private boolean inherited;
     private volatile boolean ready;
     private boolean inEnded;
-    private boolean writerDone;
+    private final WriterClose writerClose = new WriterClose();
     private boolean readerClosed;
     private boolean shutAfterWrite;
     private volatile boolean closed;
@@ -59,6 +59,19 @@ final class ExternalTransport extends AbstractTransport {
     @Override public void taken() { inbox.taken.decide(true); }
 
     @Override public TransportInfo info() { return info; }
+
+    @Override public Object carrierIdentity() {
+        return pio.writer() instanceof io.zmux.internal.spi.CarrierProvider provider
+                ? provider.carrierIdentity() : PipeIoAccess.get().sendingConnection(pio);
+    }
+
+    @Override public Runnable watchCarrier(Runnable changed) {
+        return pio.writer() instanceof io.zmux.internal.spi.CarrierProvider provider ? provider.watchCarrier(changed) : null;
+    }
+
+    @Override public Query carrierQuery(Object identity) {
+        return pio.writer() instanceof io.zmux.internal.spi.CarrierProvider provider ? provider.carrierQuery(identity) : null;
+    }
     @Override public boolean isClosed() { return closed; }
     @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() {
         var opener = pio.capabilities().laneOpener();
@@ -96,6 +109,7 @@ final class ExternalTransport extends AbstractTransport {
         final java.util.concurrent.CompletableFuture<Void> closed = new java.util.concurrent.CompletableFuture<>();
         /** Whether a session took the carrier before it closed. */
         final TakenSignal taken = new TakenSignal();
+        final java.util.concurrent.CompletableFuture<Void> writesReleased = new java.util.concurrent.CompletableFuture<>();
         final ConcurrentLinkedDeque<Input> queue = new ConcurrentLinkedDeque<>();
         final AtomicBoolean scheduled = new AtomicBoolean();
         volatile ExternalTransport owner;
@@ -127,7 +141,7 @@ final class ExternalTransport extends AbstractTransport {
                 if (!current.loop.inLoop()) { failOwner(); return; }
                 if (current.closed) return;
                 current.inputEnded(false, true);
-                current.close(new java.io.IOException("pending carrier input budget exceeded"));
+                CarrierSetup.connectionLost(current, new java.io.IOException("pending carrier input budget exceeded"));
             });
         }
         void schedule() {
@@ -178,7 +192,12 @@ final class ExternalTransport extends AbstractTransport {
         openReader();
         ready = true;
         if (!replay(reader)) return;
-        if (!inherited && !readerClosed && pio.reader() != null) pio.reader().start(new PipeReader.Sink() {
+        if (!inherited && !readerClosed && pio.reader() != null) startReader();
+        inbox.schedule();
+    }
+
+    private void startReader() {
+        var sink = new PipeReader.Sink() {
             @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
                 ByteBuffer bytes = chunk.buffer();
                 inbox.offer(new Input(bytes, consumed, new OwnedInput(loop, bytes, chunk::close), false, null));
@@ -187,8 +206,9 @@ final class ExternalTransport extends AbstractTransport {
             @Override public void onError(Throwable cause) {
                 inbox.offer(new Input(null, null, null, true, cause == null ? new java.io.IOException("carrier failed") : cause));
             }
-        });
-        inbox.schedule();
+        };
+        try { setup().host(() -> { pio.reader().start(sink); return null; }); }
+        catch (RuntimeException failure) { sink.onError(failure); }
     }
 
     /** One input batch: owned (a chunk the session may keep, retained) or lent (retained null). */
@@ -232,7 +252,7 @@ final class ExternalTransport extends AbstractTransport {
 
     @Override protected void inputFailed(java.io.IOException cause) {
         ended(cause);
-        close(cause);
+        CarrierSetup.connectionLost(this, cause);
     }
 
     /** The input ended: gracefully without an error. */
@@ -270,6 +290,7 @@ final class ExternalTransport extends AbstractTransport {
         if (reader != null) reader.release();
         closed = true; outgoing.closed = true;
         next.whenClosed().whenComplete((value, error) -> outgoing.inbox.closed.complete(null));
+        next.writesReleased().whenComplete((value, error) -> outgoing.inbox.writesReleased.complete(null));
         next.whenTaken().whenComplete((value, error) -> outgoing.inbox.taken.decide(Boolean.TRUE.equals(value)));
         return next;
     }
@@ -277,8 +298,9 @@ final class ExternalTransport extends AbstractTransport {
     /** Whether a session owns this carrier. */
     private boolean attached() { return inbound() != null && inbound().session(); }
 
-    @Override public Transport moveTo(SessionHost to) {
-        if (closed || writing() || attached()) { close(null); return null; }
+    @Override Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost to) {
+        java.util.Objects.requireNonNull(permit);
+        if (closed || writing() || attached()) { CarrierSetup.connectionLost(this, null); return null; }
         byte[] prefix = unread(reader);
         ExternalTransport next = new ExternalTransport(to, pio, inbox);
         next.inherited = reader != null;
@@ -298,17 +320,6 @@ final class ExternalTransport extends AbstractTransport {
         }
     }
 
-    @Override public long retransmitted() {
-        io.zmux.carrier.PipeWriter w = pio.writer();
-        if (w == null || closed) return -1;
-        try {
-            java.util.OptionalLong n = w.retransmitted();
-            return n.isPresent() ? Math.max(0, n.getAsLong()) : -1;
-        } catch (RuntimeException e) {
-            return -1;
-        }
-    }
-
     @Override protected void send(OutboundBatch batch) {
         AtomicBoolean reported = new AtomicBoolean();
         PipeWriter.Completion completion = new PipeWriter.Completion() {
@@ -318,7 +329,7 @@ final class ExternalTransport extends AbstractTransport {
                 // socket's is; the writer may still reference the batch until it reports, so it
                 // is released only then, also after the owning loop has stopped.
                 if (loop.inLoop()) done(cause);
-                else if (!loop.tryExecute(() -> done(cause))) dropWrite(); // The loop stopped: nothing else will.
+                else if (!loop.tryExecute(() -> done(cause))) releaseFinalWrite(); // The loop stopped: nothing else will.
             }
             @Override public void completed() { report(null); }
             @Override public void failed(Throwable cause) {
@@ -329,9 +340,14 @@ final class ExternalTransport extends AbstractTransport {
         catch (RuntimeException failure) { completion.failed(failure); }
     }
 
+    private void releaseFinalWrite() {
+        dropWrite();
+        inbox.writesReleased.complete(null);
+    }
+
     private void done(Throwable cause) {
         if (!writing()) return;
-        if (closed) { dropWrite(); return; }
+        if (closed) { releaseFinalWrite(); return; }
         writeDone(cause);
         if (shutAfterWrite) shutdownOutput();
     }
@@ -342,20 +358,67 @@ final class ExternalTransport extends AbstractTransport {
     }
     /** A half's close is the host's code: it never runs on the loop, where it could hold up every session there. */
     private void closeWriter(Throwable cause) {
-        if (writerDone || pio.writer() == null) return;
-        writerDone = true;
-        PipeWriter w = pio.writer();
-        writerClosing = java.util.concurrent.CompletableFuture.runAsync(() -> {
-            try { if (cause != null) w.abort(cause); else w.close(); }
-            catch (RuntimeException ignored) { /* Already closing. */ }
-        }, Callbacks.EXECUTOR);
-        // A graceful close ends the writer's direction once its close returned.
-        if (cause == null) writerClosing.thenRun(() -> loop.tryExecute(() -> { if (!closed) outputShutDone(); }));
+        if (pio.writer() == null) return;
+        writerClose.start(cause);
+    }
+
+    /** The writer can keep flushing after its graceful close call returns. */
+    private final class WriterClose {
+        private Thread graceful;
+        private java.util.concurrent.CompletableFuture<Void> flushBound = DONE;
+
+        private boolean started, aborted;
+        private final java.util.concurrent.CompletableFuture<Void> finished = new java.util.concurrent.CompletableFuture<>();
+        private java.util.concurrent.CompletableFuture<Void> escalation = DONE;
+
+        /** A public writer cannot acknowledge that a flush outliving close() ended. */
+        synchronized java.util.function.Consumer<Throwable> arm() {
+            if (pio.writer() == null) return null;
+            if (!(pio.writer() instanceof io.zmux.internal.spi.AdapterPorts.ReleasingHalf))
+                flushBound = new java.util.concurrent.CompletableFuture<>();
+            return this::escalate;
+        }
+
+        synchronized void start(Throwable cause) {
+            if (started) {
+                if (cause != null) escalate(cause);
+                return;
+            }
+            started = true;
+            aborted = cause != null;
+            var writer = pio.writer();
+            Thread thread = Thread.ofVirtual().name("zmux-close-writer").unstarted(() -> {
+                try {
+                    if (cause == null) writer.close(); else writer.abort(cause);
+                } catch (RuntimeException ignored) {
+                    // The release notification still owns any asynchronous flush.
+                } finally {
+                    synchronized (this) { graceful = null; }
+                    if (cause == null) loop.tryExecute(() -> { if (!closed) outputShutDone(); });
+                    try { io.zmux.internal.spi.AdapterPorts.releasedHalf(writer).whenComplete((v, e) -> returned()); }
+                    catch (RuntimeException failed) { returned(); }
+                }
+            });
+            if (cause == null) graceful = thread;
+            thread.start();
+        }
+
+        synchronized void escalate(Throwable cause) {
+            if (!started || aborted || (pio.writer() instanceof io.zmux.internal.spi.AdapterPorts.ReleasingHalf && finished.isDone())) return;
+            aborted = true;
+            if (graceful != null) graceful.interrupt();
+            escalation = java.util.concurrent.CompletableFuture.runAsync(() -> pio.writer().abort(cause), Callbacks.EXECUTOR);
+            escalation.whenComplete((v, e) -> flushBound.complete(null));
+        }
+
+        private synchronized void returned() {
+            escalation.whenComplete((v, e) -> finished.complete(null));
+        }
     }
 
     private static final java.util.concurrent.CompletableFuture<Void> DONE = java.util.concurrent.CompletableFuture.completedFuture(null);
 
-    private java.util.concurrent.CompletableFuture<Void> readerClosing = DONE, writerClosing = DONE;
+    private java.util.concurrent.CompletableFuture<Void> readerClosing = DONE;
 
     @Override public void shutdownInput() {
         if (readerClosed) return;
@@ -370,24 +433,26 @@ final class ExternalTransport extends AbstractTransport {
         inbox.discard();
         if (reader != null) reader.release();
     }
-    @Override public boolean abortable() { return true; }
+    @Override protected java.util.function.Consumer<Throwable> closeEscalation() { return writerClose.arm(); }
 
-    /** The halves' close is the host's code and may leave work running: abort ends it (a no-op for a half that ended). */
-    @Override public void abort(Throwable cause) {
-        PipeWriter w = pio.writer();
-        if (w == null) return;
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
-            try { w.abort(cause); } catch (RuntimeException ignored) { /* Already ended. */ }
-        }, Callbacks.EXECUTOR);
+    @Override public java.util.concurrent.CompletionStage<Void> writesReleased() {
+        return inbox.writesReleased.minimalCompletionStage();
     }
 
-    @Override public void close(Throwable cause) {
-        if (closed) return;
-        closed = true;
+    @Override void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
+        java.util.Objects.requireNonNull(permit);
+        // An unsubmitted transport can be returned on the submitting thread.
+        // Only the winner releases halves and input. Registered transports close on their owner.
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+        }
+        setup().transportClosed(this);
+        if (!writing()) inbox.writesReleased.complete(null);
         inbox.taken.decide(false); // Not taken before: the listener refused it.
         shutdownInput();
         closeWriter(cause);
-        java.util.concurrent.CompletableFuture.allOf(readerClosing, writerClosing).whenCompleteAsync((v, e) -> inbox.closed.complete(null), Callbacks.EXECUTOR);
+        java.util.concurrent.CompletableFuture.allOf(readerClosing, writerClose.flushBound, pio.writer() == null ? DONE : writerClose.finished, io.zmux.internal.spi.AdapterPorts.releasedHalf(pio.reader())).whenCompleteAsync((v, e) -> inbox.closed.complete(null), Callbacks.EXECUTOR);
         // An in-flight batch belongs to its completion, even after the carrier closes.
     }
 }

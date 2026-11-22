@@ -29,9 +29,8 @@ else
   echo "notice: zmux-rs has no interop/datagram-peer; the Rust QuicChannelInteropTest cases are skipped" >&2
 fi
 (cd "$repo_root/interop/qmux-go-peer" && timeout --kill-after=5s 180s go build -o "$repo_root/target/interop/qmux-go-peer" .)
-# The Establish peer builds against the zmux-go checkout itself, through a workspace (v1.5.0 or later).
-printf 'go 1.27\n\nuse (\n\t%s\n\t%s\n\t%s\n)\n' "$repo_root/interop/seal-go-peer" "$ZMUX_GO_ROOT" "$ZMUX_GO_ROOT/seal" > "$repo_root/target/interop/go.work"
-(cd "$repo_root/interop/seal-go-peer" && GOWORK="$repo_root/target/interop/go.work" timeout --kill-after=5s 180s go build -o "$repo_root/target/interop/seal-go-peer" .)
+# Use the standalone peer lock to exercise the published Go Establish implementation.
+(cd "$repo_root/interop/seal-go-peer" && GOWORK=off timeout --kill-after=5s 180s go build -mod=readonly -o "$repo_root/target/interop/seal-go-peer" .)
 export ZMUX_INTEROP_PEER="$CARGO_TARGET_DIR/release/zmux-interop-peer"
 export ZMUX_QMUX_RS_PEER="$CARGO_TARGET_DIR/release/qmux-peer"
 export ZMUX_QMUX_GO_PEER="$repo_root/target/interop/qmux-go-peer"

@@ -11,8 +11,8 @@ import java.util.concurrent.CompletionStage;
  * returns the pipe input the listener continues with, a layer over it or the carrier itself.
  *
  * <p>It is called once for every carrier, whatever entry fed it (the listener's sockets, {@link
- * io.zmux.adapter.ListenerAdapter#handle}, the HTTP, WebSocket, exchange and QUIC carriers), each one-way half of a
- * split bootstrap included ({@link JoinHint#pairing()} is set, the carrier has one half only),
+ * io.zmux.adapter.ListenerAdapter#handle}, the HTTP, WebSocket, exchange and QUIC carriers), a paired split carrier included
+ * ({@link JoinHint#pairing()} is set and the transform receives both halves together),
  * on the listener's event loop: it must not block, and returns a stage that completes later
  * when the layer takes time (a handshake run on a virtual thread, say). The carrier keeps its
  * slots of {@link ListenerConfig#maxPendingPerSource()} and {@link ListenerConfig#maxPending()} meanwhile, and the session's handshake
@@ -48,8 +48,8 @@ public interface InboundTransform {
     /**
      * What a transform knows of its carrier.
      *
-     * @param hint the carrier's hint: its addresses and request, and, for one half of a split
-     *     bootstrap, its pairing
+     * @param hint the carrier's hint: its addresses and request, and, for a paired split
+     *     carrier, its pairing
      * @param admitted the value of the admission that accepted the carrier ({@link
      *     Admission.Decision#value()}); empty without one
      * @param deadline when the transform is due

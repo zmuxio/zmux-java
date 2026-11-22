@@ -1,5 +1,7 @@
 package io.zmux;
 
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,10 +37,11 @@ class EpochTest {
                 ListenerEntryTest.await(() -> epoch(c) == 1 && epoch(s) == 1);
                 assertEquals(new SessionEvent.EpochCommitted(1), nextEpochEvent(c));
             }
-            var off = config(loops);
+            var off = builder(loops).epochAfterFirstPipe(false).noEpochPeriod().build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(off)); var c = Zmux.connect(l.localAddress(), off); var s = l.accept(WAIT)) {
-                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                var joined = c.addPipe(l.localAddress(), PipeOptions.defaults());
                 ListenerEntryTest.await(() -> s.pipes().size() == 2);
+                assertTrue(joined.stats().orElseThrow().replaceBy().isEmpty());
                 c.ping(WAIT); // a round trip after the join: an exchange would have started by now
                 assertEquals(0, c.epoch());
                 assertEquals(0, s.epoch());
@@ -85,15 +88,28 @@ class EpochTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops);
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
-                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                var bootstrap = c.pipes().getFirst().stats().orElseThrow();
+                assertEquals(0, bootstrap.epoch().orElseThrow());
+                var old = c.addPipe(l.localAddress(), PipeOptions.defaults());
+                long replacement = old.stats().orElseThrow().replaceBy().orElseThrow();
                 ListenerEntryTest.await(() -> s.pipes().size() == 2);
                 long before = s.stats().joinAuthFailures();
                 c.advanceEpoch();
                 ListenerEntryTest.await(() -> epoch(c) == 1 && epoch(s) == 1);
                 assertEquals(new SessionEvent.EpochCommitted(1), nextEpochEvent(c));
                 assertEquals(new SessionEvent.EpochCommitted(1), nextEpochEvent(s));
-                c.addPipe(l.localAddress(), PipeOptions.defaults());
+                long beforeJoin = System.nanoTime();
+                var joined = c.addPipe(l.localAddress(), PipeOptions.defaults());
+                long afterJoin = System.nanoTime();
                 ListenerEntryTest.await(() -> s.pipes().size() == 3);
+                var nextStats = joined.stats().orElseThrow();
+                assertEquals(1, nextStats.epoch().orElseThrow());
+                var peerStats = s.pipeStats().stream().filter(p -> p.pipe().equals(joined.id())).findFirst().orElseThrow();
+                assertEquals(1, peerStats.epoch().orElseThrow());
+                assertEquals(0, old.stats().orElseThrow().epoch().orElseThrow());
+                assertEquals(replacement, old.stats().orElseThrow().replaceBy().orElseThrow());
+                long due = nextStats.replaceBy().orElseThrow() - Duration.ofHours(2).toNanos();
+                assertTrue(due - beforeJoin >= 0 && afterJoin - due >= 0);
                 assertEquals(before, s.stats().joinAuthFailures());
                 c.advanceEpoch();
                 c.addPipe(l.localAddress(), PipeOptions.defaults());
@@ -183,11 +199,26 @@ class EpochTest {
 
     /** replacePipes' timeout bounds the joins of the replacements, not only the dials. */
     @Test void replacePipesTimeoutBoundsTheJoin() throws Exception {
+        // HS-24.
         try (EventLoops loops = EventLoops.create(2)) {
             var listener = Zmux.listener(ListenerConfig.of(config(loops)));
-            var client = builder(loops).epochAfterFirstPipe(false).joinTimeout(Duration.ofSeconds(20)).redial((need, cancellation) -> {
-                return MemoryPipe.pair(Framing.BYTE_STREAM)[0]; // nobody answers its Hello
-            }).build();
+            var sawHello = new java.util.concurrent.CompletableFuture<Void>();
+            var reason = new java.util.concurrent.CompletableFuture<Throwable>();
+            var client = builder(loops).epochAfterFirstPipe(false).joinTimeout(Duration.ofSeconds(20))
+                    .joinOutcome((session, pipe, error) -> { if (error != null) reason.complete(error); })
+                    .redial((need, cancellation) -> {
+                        var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                        pair[1].reader().start(new io.zmux.carrier.PipeReader.Sink() {
+                            @Override public void onChunk(Chunk chunk, Runnable consumed) {
+                                chunk.close();
+                                consumed.run();
+                                sawHello.complete(null);
+                            }
+                            @Override public void onEnd() {}
+                            @Override public void onError(Throwable failure) { sawHello.completeExceptionally(failure); }
+                        });
+                        return pair[0];
+                    }).build();
             try (listener) {
                 var io = MemoryPipe.pair(Framing.BYTE_STREAM);
                 listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
@@ -195,13 +226,13 @@ class EpochTest {
                     var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
                     listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
                     c.addPipe(joined[0], PipeOptions.defaults());
-                    ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    long t0 = System.nanoTime();
+                    assertEquals(2, s.pipes().size());
+                    var replacing = c.replacePipes();
+                    sawHello.get(5, java.util.concurrent.TimeUnit.SECONDS);
                     var e = assertThrows(java.util.concurrent.ExecutionException.class,
-                            () -> c.replacePipes().orTimeout(500, java.util.concurrent.TimeUnit.MILLISECONDS).get(10, java.util.concurrent.TimeUnit.SECONDS));
-                    org.junit.jupiter.api.Assertions.assertInstanceOf(java.util.concurrent.TimeoutException.class, e.getCause());
-                    long ms = (System.nanoTime() - t0) / 1_000_000;
-                    org.junit.jupiter.api.Assertions.assertTrue(ms < 3_000, "took " + ms + " ms");
+                            () -> replacing.orTimeout(1, java.util.concurrent.TimeUnit.MILLISECONDS).get(5, java.util.concurrent.TimeUnit.SECONDS));
+                    assertInstanceOf(java.util.concurrent.TimeoutException.class, e.getCause());
+                    assertSame(e.getCause(), reason.get(5, java.util.concurrent.TimeUnit.SECONDS));
                 }
             }
         }

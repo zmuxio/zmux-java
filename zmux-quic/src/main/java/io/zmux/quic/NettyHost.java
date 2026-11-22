@@ -105,12 +105,12 @@ final class NettyHost extends SessionHost {
     protected void wakeAt(long deadline) {
         if (wake != null) wake.cancel(false);
         // Refused: the loop stopped, and its termination fails the host's sessions.
-        wake = Loops.schedule(loop, timerTask, Math.max(0, deadline - io.zmux.internal.loop.Clock.now()), TimeUnit.NANOSECONDS, () -> {});
+        wake = Loops.schedule(loop, timerTask, Math.max(0, deadline - timerNow()), TimeUnit.NANOSECONDS, () -> {});
     }
 
     private void timerTask() {
         wake = null;
-        runTimers(io.zmux.internal.loop.Clock.now());
+        runTimers(timerNow());
     }
 
     /**

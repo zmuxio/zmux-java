@@ -52,7 +52,6 @@ class TakeoverTest {
             PipeWriter writer = w == null ? null : new PipeWriter() {
                 @Override public void write(OutboundBatch b, Completion c) { w.write(b, c); }
                 @Override public OptionalLong unsent() { return OptionalLong.of(7); }
-                @Override public OptionalLong retransmitted() { return OptionalLong.of(11); }
                 @Override public void close() { writerCloses.incrementAndGet(); w.close(); }
                 @Override public void abort(Throwable cause) { writerCloses.incrementAndGet(); w.abort(cause); }
             };
@@ -99,7 +98,7 @@ class TakeoverTest {
     private static void withListener(Admission.Fallback fallback, ListenerTest body) throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.fallback("route")))
+            var adm = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.fallback("route"))).maxPeek(32)
                     .peekTimeout(Duration.ofSeconds(5)).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).admission(adm).fallback(fallback).build())) {
                 body.run(l);
@@ -279,8 +278,8 @@ class TakeoverTest {
         Set<String> halves = new TreeSet<>();
         for (Method m : PipeWriter.class.getMethods()) if (m.isDefault() && m.getParameterCount() == 0) halves.add(m.getName());
         for (Method m : PipeReader.class.getMethods()) if (m.isDefault()) halves.add(m.getName());
-        // unsent and retransmitted are forwarded; a reader's first-message bound only applies before zmux starts it.
-        assertEquals(new TreeSet<>(Set.of("unsent", "retransmitted", "limitFirstMessage")), halves, "every half capability is classified");
+        // unsent is forwarded; a reader's first-message bound only applies before zmux starts it.
+        assertEquals(new TreeSet<>(Set.of("unsent", "limitFirstMessage")), halves, "every half capability is classified");
 
         byte[] key = {1, 2, 3};
         String protocol = ZmuxConfig.builder().build().alpn().getFirst();
@@ -309,7 +308,6 @@ class TakeoverTest {
             assertEquals(CarrierKind.WEBSOCKET, view.carrier());
             assertEquals("v", view.variant());
             assertEquals(OptionalLong.of(7), view.writer().unsent());
-            assertEquals(OptionalLong.of(11), view.writer().retransmitted());
         });
     }
 }

@@ -8,7 +8,8 @@ package io.zmux;
  * number of inputs handed to the listener whose outcome is known; {@code setupFailures} counts connections that
  * never became a pipe input. Read without a lock; two counts are not a consistent snapshot.
  *
- * @param sessions sessions started: bootstraps offered to {@link ZmuxListener#accept()}, a split bootstrap once
+ * @param sessions cumulative sessions started: bootstraps offered to {@link ZmuxListener#accept()}, a split
+ *     bootstrap once; a subsequent refusal leaves this count intact and is already accounted for here
  * @param joins joins accepted into existing sessions, and lanes accepted into their pipes
  * @param setupFailures connections never made a pipe input: a failed TLS handshake or its timeout (with an admission:
  *     {@link AdmissionStats#handshakeFailed()} instead), a failed HTTP or WebSocket upgrade (adapters with their own

@@ -57,6 +57,7 @@ class QuicMoveDuringDeliveryTest {
             EventLoop loop = group.next();
             ByteBuf first = read("first"), second = read("second");
             StringBuilder next = new StringBuilder();
+            var delivered = new java.util.concurrent.CompletableFuture<String>();
             AtomicReference<Transport> moved = new AtomicReference<>();
             loop.submit(() -> {
                 NettyHost host = new NettyHost(loop);
@@ -69,7 +70,12 @@ class QuicMoveDuringDeliveryTest {
                 t.start(new Inbound() {
                     // The first read makes the owner move the transport (a listener routing it): it leaves.
                     @Override public int bytes(Transport tr, ReadBuf buf, ByteBuffer data, int pos, int lim) {
-                        moved.set(tr.moveTo(host));
+                        class NativeInput implements io.zmux.internal.loop.NativePipe, io.zmux.carrier.PipeReader {
+                            @Override public Transport claim(io.zmux.carrier.PipeIo io) { return t; }
+                            @Override public void start(Sink sink) { fail("native input must be claimed"); }
+                            @Override public void close() {}
+                        }
+                        moved.set(Transport.of(new NettyHost(loop), io.zmux.carrier.PipeIo.of(new NativeInput(), null)));
                         return GONE;
                     }
                     @Override public void ended(Transport tr, boolean graceful, boolean partial) {}
@@ -79,16 +85,37 @@ class QuicMoveDuringDeliveryTest {
                         byte[] b = new byte[lim - pos];
                         data.get(pos, b);
                         next.append(new String(b, java.nio.charset.StandardCharsets.US_ASCII));
+                        if (next.length() >= 11) delivered.complete(next.toString());
                         return lim - pos;
                     }
                     @Override public void ended(Transport tr, boolean graceful, boolean partial) {}
                 });
             }).get(5, TimeUnit.SECONDS);
             assertNotNull(moved.get());
-            assertEquals("firstsecond", next.toString(), "the read in delivery and the one held at the move reach the next owner, in order");
+            assertEquals("firstsecond", delivered.get(5, TimeUnit.SECONDS), "the read in delivery and the one held at the move reach the next owner, in order");
             assertEquals(0, first.refCnt());
         } finally {
             group.shutdownGracefully(0, 0, TimeUnit.SECONDS).await(5, TimeUnit.SECONDS);
         }
     }
+
+    @Test void splitHalfRetiresWhenItsNeverActiveChannelLosesItsLoop() throws Exception {
+        // HS-53.
+        var group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        try (var loops = io.zmux.EventLoops.create(1);
+             var listener = io.zmux.Zmux.listener(io.zmux.ListenerConfig.of(io.zmux.ZmuxConfig.builder().eventLoops(loops).build()))) {
+            EventLoop loop = group.next();
+            var half = loop.submit(() -> {
+                var carrier = new StreamCarrier(stream(loop), new NettyHost(loop), false, true);
+                var info = new TransportInfo(new io.zmux.internal.core.CarrierInfo(io.zmux.internal.core.Framing.BYTES,
+                        false, false, false, false), "", null, 0, 0);
+                return carrier.adapter(info, null);
+            }).get(5, TimeUnit.SECONDS);
+            var handled = listener.adapter().handle(half, io.zmux.JoinHint.pair("AAAAAAAAAAAAAAAAAAAAAA", false, null));
+            group.shutdownGracefully(0, 0, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS);
+            io.zmux.internal.spi.AdapterPorts.setup(handled).interrupt();
+            handled.closed().get(5, TimeUnit.SECONDS);
+        } finally { group.shutdownGracefully(0, 0, TimeUnit.SECONDS).await(5, TimeUnit.SECONDS); }
+    }
+
 }

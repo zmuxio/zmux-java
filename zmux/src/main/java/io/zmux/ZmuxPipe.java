@@ -20,13 +20,19 @@ public final class ZmuxPipe {
     private final ZmuxSession session;
     private final long id;
     private final PipeId pipeId;
+    private final CompletableFuture<Void> confirmation;
     /** This handle aborted the pipe: its waits then report the abort even after the pipe's retirement. */
     private volatile boolean aborted;
 
     ZmuxPipe(ZmuxSession session, long id) {
+        this(session, id, session.driver.confirmation(id));
+    }
+
+    ZmuxPipe(ZmuxSession session, long id, CompletableFuture<Void> confirmation) {
         this.session = session;
         this.id = id;
         this.pipeId = PipeId.of(id);
+        this.confirmation = confirmation;
         this.held = session.heldOptions.get(id); // a pipe held before this handle was made keeps its options after its end
     }
 
@@ -124,10 +130,8 @@ public final class ZmuxPipe {
 
     /** A current immutable snapshot; empty once retired. */
     public Optional<PipeStats> stats() throws IOException {
-        return Optional.ofNullable((PipeStats) session.run(op -> {
-            session.driver.refreshUnsent(id);
-            return session.core.pipeStats(id, io.zmux.internal.loop.Clock.now(), System.nanoTime());
-        }));
+        var snapshot = (io.zmux.internal.loop.SessionRuntime.PipeRead) session.run(op -> session.driver.capturePipeStats(id));
+        return Optional.ofNullable(snapshot.read());
     }
 
     /** The tier settings a {@link PipeUpdate} changes, every field other than the quality band and liveness. */
@@ -225,12 +229,28 @@ public final class ZmuxPipe {
     }
 
     private void awaitAttached(long deadline) throws IOException {
+        if (confirmation != null) {
+            session.driver.checkBlocking();
+            try {
+                if (deadline == Long.MAX_VALUE) confirmation.get();
+                else confirmation.get(Math.max(0, deadline - System.nanoTime()), java.util.concurrent.TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("interrupted");
+            } catch (java.util.concurrent.TimeoutException e) {
+                throw new java.net.SocketTimeoutException("wait for attachment timed out");
+            } catch (java.util.concurrent.ExecutionException e) {
+                throw Errors.failure(e.getCause());
+            }
+            return;
+        }
         Object r = session.call(attachedStep(), session.core::cancelPeerAttachedWait, deadline);
         if (r == MISSING) throw gone();
     }
 
     /** Like {@link #awaitAttached()} without blocking; cancelling the future withdraws the wait. */
     public ZmuxFuture<Void> attached() {
+        if (confirmation != null) return ZmuxFuture.of(confirmation.whenCompleteAsync((v, e) -> {}, session.driver::publishCompletion), null);
         return session.async(attachedStep(), session.core::cancelPeerAttachedWait, null, Long.MAX_VALUE, r -> {
             if (r == MISSING) throw gone();
             return null;
@@ -238,7 +258,7 @@ public final class ZmuxPipe {
     }
 
     /** What a wait reports once the pipe is gone: the abort, when this endpoint aborted it, else the pipe's absence. */
-    private PipeException gone() {
+    PipeException gone() {
         return aborted ? new PipeAbortedException(pipeId) : new PipeGoneException(pipeId);
     }
 
@@ -302,8 +322,9 @@ public final class ZmuxPipe {
     }
 
     /**
-     * Completes when the pipe was removed, its retirement and the session's bookkeeping for it
-     * done, or, when the session ends first, at the session's whole end ({@link ZmuxSession#closed()}).
+     * Completes after protocol retirement and actual release of the attachment, including its
+     * lanes, outstanding writes and adapter cleanup. If the session ends first, the wait includes
+     * its close notification and any remaining attachment cleanup.
      * Cancelling the future withdraws only this wait.
      */
     public ZmuxFuture<Void> closed() {
@@ -312,9 +333,11 @@ public final class ZmuxPipe {
         var op = new io.zmux.internal.loop.Operation<>(session.driver, o -> core.waitPipeRemoved(id, o) ? true : io.zmux.internal.loop.Operation.PENDING, core::cancelPipeRemovedWait);
         Runnable removed = () -> { if (Boolean.TRUE.equals(op.outcome())) done.complete(null); };
         if (op.onDone(removed)) op.submit(); else removed.run();
-        session.driver.closedFuture().whenComplete((v, e) -> done.complete(null));
-        done.whenComplete((v, e) -> op.cancel());
-        return ZmuxFuture.of(done, op::cancel);
+        Runnable unsubscribe = session.driver.watchClosed(error ->
+                session.driver.closedFuture().thenRun(() -> done.complete(null)));
+        Runnable stop = () -> { unsubscribe.run(); op.cancel(); };
+        var unsubscribed = done.whenComplete((v, e) -> stop.run());
+        return ZmuxFuture.of(unsubscribed.thenCompose(v -> session.driver.attachmentClosed(id)), stop);
     }
 
     /** Waits for {@link #closed()}. */

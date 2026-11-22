@@ -105,11 +105,11 @@ class ShapingBudgetTest {
 
     @Test void aMergedInjectionIsMeteredOnce() {
         Fixed f = new Fixed(500, p -> { });
-        Session s = session(initial(1000), ShapingBudget.NONE, f);
+        Session s = session(initial(498), ShapingBudget.NONE, f);
         write(s, 50);
         assertEquals(1, f.injected);
-        assertEquals(500, s.shapingMeters().wireLeft());
-        assertEquals(500, s.shapingStats().wireSpent());
+        assertEquals(0, s.shapingMeters().wireLeft());
+        assertEquals(498, s.shapingStats().wireSpent());
     }
 
     @Test void aMergedInjectionTheAccountRefusesChangesNothing() {

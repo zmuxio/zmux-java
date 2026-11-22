@@ -173,6 +173,19 @@ class UsabilityTest {
         }
     }
 
+    @Test void resumeFailedPreservesReasonAndOrigin() {
+        for (boolean remote : new boolean[]{false, true}) {
+            var core = io.zmux.internal.core.SessionError.transport(
+                    io.zmux.internal.wire.TransportError.RESUME_FAILED, 0, "replay unavailable", "", remote);
+            var closed = assertInstanceOf(SessionClosedException.class,
+                    Errors.io(io.zmux.internal.core.CoreException.session(core)));
+            var error = assertInstanceOf(SessionError.ResumeFailed.class, closed.error());
+            assertEquals("replay unavailable", error.reason());
+            assertEquals(remote, error.remote());
+            assertTrue(closed.getMessage().contains(error.reason()));
+        }
+    }
+
     @Test void theLastPipeErrorIsTheCauseOfAResumeTimeoutOrLostPipes() {
         var last = new java.io.IOException("refused");
         assertSame(last, new SessionClosedException(new SessionError.ResumeTimeout(last)).getCause());

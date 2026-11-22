@@ -67,13 +67,20 @@ class ModePoolTest {
             try (var l = Zmux.listener(ListenerConfig.of(cfg))) {
                 var base = new AtomicInteger(); var ws = new AtomicInteger(); var ex = new AtomicInteger();
                 var cache = new CarrierCache(Duration.ofHours(1), Duration.ofMillis(100), Duration.ofSeconds(10));
+                var twoFailures = new java.util.concurrent.CountDownLatch(1);
                 var pool = PipePool.choice(CarrierChoice.auto(refused(CarrierKind.WEBSOCKET, ws), reaching(CarrierKind.EXCHANGE, l, ex)),
-                        CarrierChoicePolicy.of(cache, "k")).withBackoff(new Backoff(Duration.ofMillis(20), Duration.ofMillis(50), 0));
+                        CarrierChoicePolicy.of(cache, "k")).withBackoff(new Backoff(Duration.ofMillis(20), Duration.ofMillis(50), 0))
+                        .withPolicy(view -> {
+                            // A failed dial reaches the pool view after its outcome has been recorded in the cache.
+                            if (view.failures() >= 2) twoFailures.countDown();
+                            return PoolDecision.KEEP;
+                        });
                 try (var s = Zmux.dial(CarrierChoice.explicit(reaching(CarrierKind.STREAMING, l, base)), cfg, null);
                      var m = s.maintainPipes(pool)) {
                     await(() -> m.pipes().size() == 1, "first member");
                     List<PipeId> first = ids(m);
-                    await(() -> ws.get() >= 2, "upgrade retried after the backoff");
+                    assertTrue(twoFailures.await(5, java.util.concurrent.TimeUnit.SECONDS), "two failed upgrades recorded");
+                    assertTrue(ws.get() >= 2);
                     assertEquals(first, ids(m), "the old member stays");
                     assertEquals(1, ex.get());
                     var entry = cache.snapshot().entries().stream().filter(e -> e.kind() == CarrierKind.WEBSOCKET).findFirst().orElseThrow();

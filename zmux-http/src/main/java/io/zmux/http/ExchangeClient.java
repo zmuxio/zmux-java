@@ -1,5 +1,7 @@
 package io.zmux.http;
 
+import io.zmux.http.internal.HttpTransport;
+
 import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -123,6 +125,11 @@ final class ExchangeClient {
         String down = cfg.downUrl().isEmpty() ? url : cfg.downUrl();
         upTarget = new Target(url, cfg.nonceParam(), inst, cfg.isCacheBust() && !url.contains("{nonce}"));
         downTarget = new Target(down, cfg.nonceParam(), inst, cfg.isCacheBust() && !down.contains("{nonce}"));
+        if (http.conns.http3()) {
+            byte[] nonce = new byte[Exchange.NONCE];
+            http.conns.requireRequestScheme(upTarget.build(nonce));
+            http.conns.requireRequestScheme(downTarget.build(nonce));
+        }
         upLimit = cfg.upRequests();
         downLimit = cfg.downRequests();
         input = new LentInput(receiveMemory(), loop, loop::inEventLoop, more -> { if (more) deliver(); });
@@ -519,7 +526,7 @@ final class ExchangeClient {
             cancelled = true;
             if (timeout != null) timeout.cancel(false);
             Channel ch = channel;
-            if (ch != null) ch.close();
+            if (ch != null) HttpTransport.abort(ch);
         }
 
         /** Runs task on the loop unless the group is gone. */
@@ -539,7 +546,7 @@ final class ExchangeClient {
             finished = true;
             body = null;
             if (timeout != null) timeout.cancel(false);
-            if (r == Result.NONE) { Channel ch = channel; if (ch != null) ch.close(); }
+            if (r == Result.NONE) { Channel ch = channel; if (ch != null) HttpTransport.abort(ch); }
             inflight.remove(this);
             if (kind == Exchange.KIND_CLOSE) return;
             apply(this, r);

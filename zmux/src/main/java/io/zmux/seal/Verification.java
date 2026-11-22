@@ -31,7 +31,7 @@ final class Verification {
         }
         if (v == null) throw new CredentialsFailedException("the verifier returned no verdict");
         boolean pq = proofIsPq(v, proof);
-        if (requirePqAuth && !pq) throw new CredentialsFailedException("PQ authentication required");
+        if (requirePqAuth && !pq) throw new CredentialsFailedException(CredentialsFailedException.Detail.PQ_AUTH_REQUIRED, "PQ authentication required", null);
         return new Judged(v, pq);
     }
 
@@ -39,8 +39,8 @@ final class Verification {
     private static boolean proofIsPq(VerifyVerdict v, Proof proof) throws CredentialsFailedException {
         byte[] proofKey = v.proofKeyId();
         if (proofKey == null) return false;
-        if (proof == null) throw new CredentialsFailedException("no proof by the verdict's proof key");
-        if (!proof.verifies(proofKey)) throw new CredentialsFailedException("the proof does not verify with the verdict's proof key");
+        if (proof == null) throw new CredentialsFailedException(CredentialsFailedException.Detail.PROOF, "no proof by the verdict's proof key", null);
+        if (!proof.verifies(proofKey)) throw new CredentialsFailedException(CredentialsFailedException.Detail.PROOF, "the proof does not verify with the verdict's proof key", null);
         // A proof that verifies names a known KeyAlg (Proof.verifies).
         return java.util.Objects.requireNonNull(KeyAlg.of(proof.alg()), "a verified proof has a known KeyAlg").pq();
     }

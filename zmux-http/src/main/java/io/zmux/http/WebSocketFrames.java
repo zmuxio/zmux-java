@@ -26,11 +26,19 @@ final class WebSocketFrames {
     final BodyCarrier carrier;
     private final Channel ch;
     private CompositeByteBuf partial;
+    private volatile io.zmux.internal.spi.AdapterPorts.Setup setup;
 
     WebSocketFrames(BodyCarrier carrier) {
         this.carrier = carrier;
         ch = carrier.ch;
         carrier.firstLimit = this::limitFirstMessage;
+    }
+
+    void withdrawOnEnd(io.zmux.adapter.Handled handled) {
+        var pending = io.zmux.internal.spi.AdapterPorts.setup(handled);
+        setup = pending;
+        pending.onFinished(() -> setup = null);
+        Router.withdrawOnClose(ch, handled);
     }
 
     /** The outbound side of a WebSocket carrier: binary messages, and a close frame as the graceful end. */
@@ -44,7 +52,12 @@ final class WebSocketFrames {
             switch (msg) {
                 case BinaryWebSocketFrame f -> data(f, false);
                 case ContinuationWebSocketFrame f -> data(f, true);
-                case CloseWebSocketFrame _ -> { dropPartial(); carrier.inEnd(); }
+                case CloseWebSocketFrame _ -> {
+                    dropPartial();
+                    var pending = setup;
+                    if (pending != null) pending.interrupt();
+                    carrier.inEnd();
+                }
                 case PingWebSocketFrame f -> ch.writeAndFlush(new PongWebSocketFrame(f.content().retain()));
                 case PongWebSocketFrame _ -> { }
                 case WebSocketFrame _ -> fail("a text message on a zmux carrier");
@@ -66,14 +79,14 @@ final class WebSocketFrames {
         //noinspection resource: borrowed: the channel owns its event loop
         Loops.dispatch(ch.eventLoop(), ch.eventLoop().inEventLoop(), () -> {
             if (!firstDone) firstLimit = limit;
-            else if (firstLength > limit) tooLarge(limit);
+            else if (firstLength > limit) tooLarge(limit, firstLength);
         }, () -> {}); // refused: the channel goes with its loop
     }
 
     private void data(WebSocketFrame f, boolean continuation) {
         if (!firstDone) {
             int have = (partial == null ? 0 : partial.readableBytes()) + f.content().readableBytes();
-            if (firstLimit >= 0 && have > firstLimit) { tooLarge(firstLimit); return; }
+            if (firstLimit >= 0 && have > firstLimit) { tooLarge(firstLimit, have); return; }
             if (f.isFinalFragment()) { firstDone = true; firstLength = have; }
         }
         if (continuation == (partial == null)) { fail("an unexpected continuation frame"); return; }
@@ -99,9 +112,9 @@ final class WebSocketFrames {
         lose(new ProtocolException(why));
     }
 
-    /** A first message above the admission's bound: the carrier fails with what the admission counts as too large. */
-    private void tooLarge(int limit) {
-        lose(new io.zmux.carrier.MessageTooLargeException(limit));
+    /** Refuses a first message after observing more than the admission's bound. */
+    private void tooLarge(int limit, int observedBytes) {
+        lose(new io.zmux.carrier.MessageTooLargeException(limit, observedBytes));
     }
 
     private void lose(ProtocolException cause) {

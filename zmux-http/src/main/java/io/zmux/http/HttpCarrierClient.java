@@ -27,6 +27,7 @@ import io.zmux.ZmuxFuture;
 import io.zmux.ZmuxPipe;
 import io.zmux.ZmuxSession;
 import io.zmux.carrier.PipeIo;
+import io.zmux.http.internal.HttpTransport;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
@@ -51,12 +52,14 @@ import javax.net.ssl.TrustManagerFactory;
  * a {@link Candidate} for {@link io.zmux.Zmux#dial(io.zmux.CarrierChoice, io.zmux.ZmuxConfig, io.zmux.CarrierChoicePolicy)}.
  * HTTPS uses HTTP/2 when the server's ALPN offers it and HTTP/1.1 otherwise; cleartext HTTP uses
  * HTTP/1.1, or HTTP/2 by prior knowledge ({@link Builder#http2()}). Streaming carriers over
- * HTTP/1.1 get a connection of their own, which closes with them; over HTTP/2 they are streams
- * of one connection per server. Safe for concurrent use; {@link #close} closes every connection
+ * HTTP/1.1 get a connection of their own, which closes with them. HTTP/2 and explicit
+ * HTTP/3 (with the HTTP/3 adapter) open streams on shared connections. Safe for concurrent use; {@link #close} closes every connection
  * it opened.
  */
 public final class HttpCarrierClient implements AutoCloseable {
     private static final SecureRandom RANDOM = new SecureRandom();
+
+    static { HttpTransport.installClientBuilder(Builder::requestTransport); }
     private final EventLoopGroup group;
     private final boolean ownGroup;
     final Connections conns;
@@ -70,23 +73,23 @@ public final class HttpCarrierClient implements AutoCloseable {
 
     private HttpCarrierClient(Builder b) throws IOException {
         pairField = JoinHint.pairField(b.pairField);
+        SslContextBuilder tls = b.tls == null ? SslContextBuilder.forClient().trustManager(defaultTrust()) : b.tls;
+        SslContext both = alpn(tls, ApplicationProtocolNames.HTTP_2, ApplicationProtocolNames.HTTP_1_1);
+        SslContext h1 = alpn(tls, ApplicationProtocolNames.HTTP_1_1);
         ownGroup = b.group == null;
         group = ownGroup ? new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory()) : b.group;
-        SslContextBuilder tls = b.tls;
-        SslContext both, h1;
+        timeout = b.timeout;
+        conns = new Connections(group, both, h1, b.version, b.timeout, b.requestTransport);
+    }
+
+    private static TrustManagerFactory defaultTrust() {
         try {
-            if (tls == null) {
-                TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                tmf.init((java.security.KeyStore) null);
-                tls = SslContextBuilder.forClient().trustManager(tmf);
-            }
-            both = alpn(tls, ApplicationProtocolNames.HTTP_2, ApplicationProtocolNames.HTTP_1_1);
-            h1 = alpn(tls, ApplicationProtocolNames.HTTP_1_1);
+            var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init((java.security.KeyStore) null);
+            return tmf;
         } catch (java.security.GeneralSecurityException e) {
             throw new IllegalStateException("the default TLS trust store is unusable", e);
         }
-        timeout = b.timeout;
-        conns = new Connections(group, both, h1, b.version, b.timeout);
     }
 
     private static SslContext alpn(SslContextBuilder b, String... protocols) throws javax.net.ssl.SSLException {
@@ -155,7 +158,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      */
     public Candidate streamingCandidate(URI url, Map<String, List<String>> headers) {
         HttpTarget target = new HttpTarget(url.toString());
-        return Candidate.of(CarrierKind.STREAMING,
+        return Candidate.of(conns.http3() ? CarrierKind.HTTP3 : CarrierKind.STREAMING,
                 (cred, t) -> StreamingRequest.open(this, url, headers, PipeOptions.Direction.BIDIRECTIONAL, cred, target)).withTarget(target);
     }
 
@@ -220,7 +223,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      * Opens an exchange carrier to url, a template that may hold {instance} and {nonce} anywhere
      * in its path or query (see {@link ExchangeConfig}), and returns it as a bidirectional pipe.
      * Requests go out on pooled connections of this client: HTTP/1.1 connections kept for reuse,
-     * or streams of one HTTP/2 connection. The carrier keeps DOWN requests outstanding from the
+     * or streams of a shared HTTP/2 or HTTP/3 connection. The carrier keeps DOWN requests outstanding from the
      * start, and ends when zmux closes both halves or the carrier fails. It authenticates with
      * the config's PSK; no credential is presented.
      *
@@ -230,7 +233,7 @@ public final class HttpCarrierClient implements AutoCloseable {
      * scheme upgrade is kept for the later requests; another redirect is followed per request.
      *
      * @throws IllegalArgumentException when url (or the config's DOWN URL) is not an http or
-     *     https URL once its placeholders are replaced
+     *     https URL once its placeholders are replaced, or uses http in explicit HTTP/3 mode
      * @throws CarrierClientClosedException when the client is closed, as every dial of a closed client fails
      */
     public PipeIo exchangePipe(String url, ExchangeConfig config) throws CarrierClientClosedException {
@@ -240,7 +243,8 @@ public final class HttpCarrierClient implements AutoCloseable {
 
     /** An exchange carrier ({@link #exchangePipe}) to url as a candidate; the session's credential is not presented on it. */
     public Candidate exchangeCandidate(String url, ExchangeConfig config) {
-        new ExchangeClient.Target(url, config.nonceParam(), "", false); // a bad URL fails now, not at the dial
+        var target = new ExchangeClient.Target(url, config.nonceParam(), "", false);
+        if (conns.http3()) conns.requireRequestScheme(target.build(new byte[Exchange.NONCE]));
         return Candidate.of(CarrierKind.EXCHANGE, (cred, t) -> exchangePipe(url, config));
     }
 
@@ -399,6 +403,7 @@ public final class HttpCarrierClient implements AutoCloseable {
     public static final class Builder {
         private EventLoopGroup group;
         private SslContextBuilder tls;
+        private HttpTransport.Client requestTransport;
         private Connections.Version version = Connections.Version.AUTO;
         private Duration timeout = Duration.ofSeconds(10);
         private String pairField = "";
@@ -426,6 +431,13 @@ public final class HttpCarrierClient implements AutoCloseable {
 
         /** HTTP/2 only: over TLS by ALPN, over cleartext by prior knowledge. */
         public Builder http2() { version = Connections.Version.HTTP_2; return this; }
+
+        /** Installs the request transport of the HTTP/3 adapter. */
+        Builder requestTransport(HttpTransport.Client transport) {
+            requestTransport = Objects.requireNonNull(transport);
+            version = Connections.Version.HTTP_3;
+            return this;
+        }
 
         /** Bounds connecting and each opening (10 s). */
         public Builder timeout(Duration d) { timeout = Objects.requireNonNull(d); return this; }
