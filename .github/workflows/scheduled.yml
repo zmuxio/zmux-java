@@ -64,7 +64,18 @@ jobs:
             git ls-remote --tags --refs "https://github.com/zmuxio/$1" |
               awk '{print $2}' | sed 's#refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
           }
-          echo "go=$(latest zmux-go)" >> "${GITHUB_OUTPUT}"
+          go=$(latest zmux-go)
+          echo "go=${go}" >> "${GITHUB_OUTPUT}"
+          # A zmux-go release tags its submodules after the root, on the commit whose submodule go.mod files
+          # require the new root; check that commit out, so the root and the submodules match.
+          goref=${go}
+          for m in zmuxh3 zmuxquic seal zmuxws; do
+            if git ls-remote --exit-code --tags --refs https://github.com/zmuxio/zmux-go "refs/tags/${m}/${go}" > /dev/null; then
+              goref=${m}/${go}
+              break
+            fi
+          done
+          echo "goref=${goref}" >> "${GITHUB_OUTPUT}"
           echo "rs=$(latest zmux-rs)" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout zmux-java
@@ -83,7 +94,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zmuxio/zmux-go
-          ref: ${{ steps.peers.outputs.go }}
+          ref: ${{ steps.peers.outputs.goref }}
           path: zmux-go
 
       - name: Set up Rust
