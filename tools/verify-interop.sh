@@ -13,11 +13,13 @@ timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZM
 timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/qmux-peer/Cargo.toml"
 # The WebSocket and HTTP streaming peers: one crate with two binaries, one Go build with two commands.
 timeout --kill-after=5s 600s cargo build --release --locked --manifest-path "$ZMUX_RS_ROOT/interop/web-peer/Cargo.toml" --target-dir "$CARGO_TARGET_DIR"
-"$ZMUX_GO_ROOT/interop/webpeer/build.sh" "$repo_root/target/interop/web-go"
+# The zmux-go peer modules replace zmux-go with the checkout they live in; a released tree may
+# still require the previous release, so let go settle the requirement instead of failing.
+GOFLAGS=-mod=mod "$ZMUX_GO_ROOT/interop/webpeer/build.sh" "$repo_root/target/interop/web-go"
 # The QUIC datagram-channel peers (zmux-go interop/dgpeer, zmux-rs interop/datagram-peer); a checkout without one
 # (an older release tag) skips its QuicChannelInteropTest cases with a notice.
 if [ -f "$ZMUX_GO_ROOT/interop/dgpeer/build.sh" ]; then
-  "$ZMUX_GO_ROOT/interop/dgpeer/build.sh" "$repo_root/target/interop/dgpeer-go"
+  GOFLAGS=-mod=mod "$ZMUX_GO_ROOT/interop/dgpeer/build.sh" "$repo_root/target/interop/dgpeer-go"
   export ZMUX_GO_QUIC_CHANNEL_PEER="$repo_root/target/interop/dgpeer-go/dgpeer"
 else
   echo "notice: zmux-go has no interop/dgpeer; the Go QuicChannelInteropTest cases are skipped" >&2
