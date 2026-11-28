@@ -11,7 +11,7 @@ import java.nio.channels.SocketChannel;
 /** A TCP (or Unix-domain) transport on the loop's selector: non-blocking, writability-driven writes. */
 final class SocketTransport extends NioTransport {
     private static final TransportInfo INFO = new TransportInfo(
-            new CarrierInfo(Framing.BYTES, false, false, false, false), "", null, 0, 0);
+            new CarrierInfo(Framing.BYTES, false, false, false, false).withKind(io.zmux.CarrierKind.RAW), "", null, 0, 0);
 
     /** The write in flight: segments [outFrom, outEnd) of out still have bytes; none when outEnd is 0. */
     private ByteBuffer[] out;

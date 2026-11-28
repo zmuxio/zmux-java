@@ -83,8 +83,8 @@ class ShapedPipeTest {
         }
     }
 
-    /** A raw TCP carrier declares no kind. */
-    @Test void aRawTcpCarrierIsUndeclared() throws Exception {
+    /** A raw TCP carrier is of kind raw, on either end. */
+    @Test void aRawTcpCarrierIsOfKindRaw() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             Seen cs = new Seen(), ss = new Seen();
             var ccfg = ZmuxConfig.builder().eventLoops(loops).shaper(cs).build();
@@ -94,9 +94,9 @@ class ShapedPipeTest {
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 ShapingTest.transfer(client, server, 100);
                 cs.await(1); ss.await(1);
-                assertEquals(Collections.singleton(null), cs.kinds());
-                assertEquals(Collections.singleton(null), ss.kinds());
-                assertNull(client.pipes().getFirst().stats().orElseThrow().carrier());
+                assertEquals(Collections.singleton(CarrierKind.RAW), cs.kinds());
+                assertEquals(Collections.singleton(CarrierKind.RAW), ss.kinds());
+                assertEquals(CarrierKind.RAW, client.pipes().getFirst().stats().orElseThrow().carrier());
             }
         }
     }

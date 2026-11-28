@@ -17,8 +17,13 @@ public enum CarrierKind {
     /** A streaming request over HTTP/3, direct only. */
     HTTP3,
     /** A WebTransport stream, direct only. */
-    WEBTRANSPORT;
+    WEBTRANSPORT,
+    /**
+     * A reliable ordered byte connection that carries the records with no framing of its own: TCP, TLS, a Unix
+     * socket, a stream of another session.
+     */
+    RAW;
 
-    /** The kind's name in lower case: "websocket", "streaming", "split", "exchange", "quic", "http3" or "webtransport". */
+    /** The kind's name in lower case: "websocket", "streaming", "split", "exchange", "quic", "http3", "webtransport" or "raw". */
     @Override public String toString() { return name().toLowerCase(Locale.ROOT); }
 }

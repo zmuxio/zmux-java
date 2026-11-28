@@ -25,7 +25,7 @@ final class TlsTransport extends NioTransport {
     /** Runs the engine's delegated tasks; the common pool is borrowed, never closed. */
     private static final java.util.concurrent.Executor DELEGATED_TASKS = ForkJoinPool.commonPool();
 
-    private static final CarrierInfo INFO = new CarrierInfo(Framing.BYTES, true, false, false, false);
+    private static final CarrierInfo INFO = new CarrierInfo(Framing.BYTES, true, false, false, false).withKind(io.zmux.CarrierKind.RAW);
     private static final ByteBuffer[] NONE = new ByteBuffer[0];
 
     private final SSLEngine engine;
