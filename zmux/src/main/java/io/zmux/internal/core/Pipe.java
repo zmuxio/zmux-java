@@ -343,8 +343,9 @@ final class Pipe {
         }
     }
 
+    /** queued: sent behind unacknowledged bytes of its pipe; only such a range can be queue-proven. */
     record Sample(long end, long sent, long delivered, long deliveredAt, long firstSentAt, long epoch,
-                  boolean bubble, long queue, boolean probe) {}
+                  boolean bubble, boolean queued, long queue, boolean probe) {}
 
     /** Whether the pipe's carrier reports its own failure, as its first outbound lane says (CarrierInfo.ownFailure). */
     boolean ownFailure() {

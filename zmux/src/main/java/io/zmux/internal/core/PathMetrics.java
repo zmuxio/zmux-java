@@ -16,6 +16,8 @@ final class PathMetrics {
     private java.util.function.LongFunction<Measurement> measured;
     record Measurement(long srtt, long variation, long eta, long deviation) {}
 
+    void measurements(java.util.function.LongFunction<Measurement> source) { measured = source; }
+
     Measurement measured(Pipe p) { return measured == null ? null : measured.apply(p.id); }
 
     long srtt(Pipe p) {

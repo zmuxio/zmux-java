@@ -945,7 +945,7 @@ final class Splice {
             if (decision != null) {
                 if (decision instanceof SpliceEnd.HookFailed(var cause)) measures.cause = cause.orElse(null);
                 dispose(group, Disposition.DIRECTION_ENDED);
-                long code = decision instanceof SpliceEnd.HookReset(var hookCode) ? hookCode : TransportError.CANCELLED;
+                long code = decision instanceof SpliceEnd.HookReset reset ? reset.code() : TransportError.CANCELLED;
                 terminate(decision, code, false);
                 return;
             }
@@ -1267,7 +1267,7 @@ final class Splice {
                 writeCharge = null;
             } else if (memberCharge != null) memberChargeOffset += progressed;
             if (writeKind == Write.FALLBACK_FIRST) {
-                if (progressed == 0 && !abandoning && (result == CANCELLED || result == Boolean.FALSE)) {
+                if (progressed == 0 && !abandoning && (result == CANCELLED || Boolean.FALSE.equals(result))) {
                     closeMemberPermit();
                     discard(active, Drop.DROPPED_EXPIRED);
                     active = null;
@@ -1429,13 +1429,15 @@ final class Splice {
                     input = new SplicePayload(new SplicePayload.Budget(limits));
                     if (!input.append(chunk)) throw new SplicePayload.BudgetExceeded();
                 } finally { unref(chunk); }
-            } else if (received instanceof Datagrams.StreamDatagram(var flow, var payload, var expiresAt)) {
+            } else if (received instanceof Datagrams.StreamDatagram datagram) {
+                long flow = datagram.context();
+                byte[] payload = datagram.payload();
                 if (!controlled && hooks.isEmpty() && mirror == null && !packets) {
                     sendDatagram(flow, payload);
                     return true;
                 }
                 context = flow;
-                expiry = expiresAt;
+                expiry = datagram.expiry();
                 measures.payloadCopyBytes += payload.length;
                 input = SplicePayload.of(new SplicePayload.Budget(limits), payload);
             } else return false;

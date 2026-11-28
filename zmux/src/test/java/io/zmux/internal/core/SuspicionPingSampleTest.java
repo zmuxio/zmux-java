@@ -51,7 +51,7 @@ class SuspicionPingSampleTest {
         Poke.set(ps, "so", end);
         Field samples = AckEngine.Send.class.getDeclaredField("samples");
         samples.setAccessible(true);
-        ((ArrayList<Pipe.Sample>) samples.get(ps)).add(new Pipe.Sample(end, sent, 0, sent, sent, 0, false, 0, probe));
+        ((ArrayList<Pipe.Sample>) samples.get(ps)).add(new Pipe.Sample(end, sent, 0, sent, sent, 0, false, false, 0, probe));
         lane.segs.add(start, end, start);
     }
 

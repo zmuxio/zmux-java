@@ -18,12 +18,10 @@ final class SendBackingTest {
         return new Session(config.build(), 0);
     }
 
-    private static long noStreams() {
-        return ReceiveLayout.WORKING + ConnFlow.MIN_INITIAL_WINDOW * ConnFlow.RECEIVE_COST;
-    }
+    private static final long NO_STREAMS = ReceiveLayout.WORKING + ConnFlow.MIN_INITIAL_WINDOW * ConnFlow.RECEIVE_COST;
 
     @Test void tightAdmittedDirectionsEachWriteAndRejectTheNextBeforeAllocating() throws Exception {
-        var budget = new MemoryBudget(noStreams() + 2 * SendBacking.FLOOR, null);
+        var budget = new MemoryBudget(NO_STREAMS + 2 * SendBacking.FLOOR, null);
         var session = session(budget);
         try {
             var first = session.streams.openStream(false);
@@ -42,7 +40,7 @@ final class SendBackingTest {
     }
 
     @Test void theEntireReceiveCommitmentAndTheSendFloorCanBeInUseTogether() throws Exception {
-        long rx = noStreams();
+        long rx = NO_STREAMS;
         var budget = new MemoryBudget(rx + SendBacking.FLOOR, null);
         var session = session(budget);
         var receive = (SharedMemory.Receive) Poke.get(session.conn, "budget");
@@ -62,7 +60,7 @@ final class SendBackingTest {
     }
 
     @Test void floorRemainsCommittedWhileTheLastBatchPinsIt() throws Exception {
-        var budget = new MemoryBudget(noStreams() + SendBacking.FLOOR, null);
+        var budget = new MemoryBudget(NO_STREAMS + SendBacking.FLOOR, null);
         var session = session(budget);
         var stream = session.streams.openStream(false);
         session.send.write(stream, ByteBuffer.wrap(new byte[] {42}), false);
@@ -75,14 +73,14 @@ final class SendBackingTest {
         } finally {
             outstanding.unref();
         }
-        assertEquals(noStreams(), budget.used());
+        assertEquals(NO_STREAMS, budget.used());
         assertNotNull(session.streams.openStream(false));
         session.finishClose();
         assertEquals(0, budget.used());
     }
 
     @Test void unresolvedWriteWakesForAnotherAccountsBackingRelease() throws Exception {
-        long cap = noStreams() + SendBacking.FLOOR + SendBacking.BLOCK_CHARGE;
+        long cap = NO_STREAMS + SendBacking.FLOOR + SendBacking.BLOCK_CHARGE;
         var budget = new MemoryBudget(cap, null);
         assertTrue(budget.tryCharge(SendBacking.BLOCK_CHARGE));
         var session = session(budget);

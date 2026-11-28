@@ -632,7 +632,8 @@ class SessionControllerTest {
                 subscribed.complete(null);
             }
             @Override public void onNext(CarrierCache.CooldownEvent event) {
-                settled.complete((CarrierCache.CooldownStarted) event);
+                if (event instanceof CarrierCache.CooldownStarted started) settled.complete(started);
+                else settled.completeExceptionally(new AssertionError("unexpected cooldown event: " + event));
             }
             @Override public void onError(Throwable failure) { settled.completeExceptionally(failure); }
             @Override public void onComplete() { }

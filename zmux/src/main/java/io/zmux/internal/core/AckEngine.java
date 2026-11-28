@@ -282,7 +282,7 @@ final class AckEngine {
             ps.elicitEnd = Math.max(ps.elicitEnd, end);
             boolean bubble = ps.re.bubbleInFlight(ps.cum);
             var sample = new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt,
-                    ps.re.blockEpoch(), bubble, queue, w.suspPing());
+                    ps.re.blockEpoch(), bubble, ps.cum < so, queue, w.suspPing());
             // Reserve the oldest unacknowledged samples for stall timing. Emergency
             // control may replace the last estimator sample while data stays held.
             if (ps.samples.size() == FrameHistory.SLOTS) ps.samples.set(FrameHistory.SLOTS - 1, sample);
@@ -364,9 +364,12 @@ final class AckEngine {
             // Queue-proven: the range's adjusted RTT exceeded min_rtt by at least 4 x min_rtt, so the
             // path held it back and was busy throughout (a deep carrier or path buffer that never
             // refuses bytes). Its rate sample is a bottleneck sample, also for bytes sent before
-            // the pipe became SUSPECT; its RTT sample is skipped there all the same.
+            // the pipe became SUSPECT; its RTT sample is skipped there all the same. Only a range
+            // sent behind unacknowledged bytes of the pipe can be: a lone range has no backlog to
+            // wait behind, a rise of the propagation delay alone delays it as much, and its interval
+            // spans the idle time before it.
             long minRtt = r.min();
-            boolean proven = minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
+            boolean proven = last.queued() && minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
             boolean sampleOk = p.mp() == null || p.mp().sampleOk(last.sent());
             boolean rateOk = sampleOk || (proven && p.mp().health.out() != Attach.OUT_FAILED);
             if (!late && (sampleOk || (last.probe() && ps.paced(i, last, now)))) {

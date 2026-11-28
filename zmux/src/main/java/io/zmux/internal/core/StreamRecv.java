@@ -153,7 +153,7 @@ public final class StreamRecv {
         int dataPos = f.dataPos;
         int dataLen = f.dataLen;
         if (!st.local && feat.preamble() && !r.preDone && off == 0) {
-            Preamble pre = Preamble.parse(f.src, f.spans, dataPos, dataLen, cfg.local().maxPreambleSize);
+            Preamble pre = Preamble.parse(f.src, f.spans(), dataPos, dataLen, cfg.local().maxPreambleSize);
             effect = true;
             r.preDone = true;
             r.preSize = pre.size();
@@ -205,7 +205,7 @@ public final class StreamRecv {
     }
 
     private long insert(RecvBuffer queue, Frame frame, ReadBuf owner, long off, int pos, int length) {
-        ReceiveSpans spans = frame.spans;
+        ReceiveSpans spans = frame.spans();
         if (spans == null) return queue.insert(storage, off, frame.src, pos, length, owner);
         long stored = 0;
         while (length > 0) {

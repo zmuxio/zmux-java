@@ -15,9 +15,11 @@ import java.util.TreeMap;
  * hand the work to a serial context).
  */
 public final class MemoryBudget implements SharedMemory {
+    private final Object lock = new Object();
     /** Changed by {@link #limit(long)}; every reader reads it here. */
     private volatile long limit;
-    private long used;
+    // Writes hold the budget lock; pressure and room estimates can read without taking it.
+    private volatile long used;
     private volatile boolean over;
     private final Runnable onChange;
     private TreeMap<Long, LinkedHashSet<ReceiveAccount>> waiting;
@@ -32,7 +34,7 @@ public final class MemoryBudget implements SharedMemory {
         if (bytes < 0 || privateBytes < 0) throw new IllegalArgumentException("negative carrier capacity");
         boolean changed;
         boolean admitted;
-        synchronized (this) {
+        synchronized (lock) {
             var held = carriers.get(connection);
             long extra = Math.max(0, bytes - (held == null ? 0 : held.bytes));
             admitted = extra <= Long.MAX_VALUE - privateBytes && privateBytes + extra <= roomFor(privateBytes + extra);
@@ -53,7 +55,7 @@ public final class MemoryBudget implements SharedMemory {
         return () -> {
             if (!released.compareAndSet(false, true)) return;
             boolean returned;
-            synchronized (this) {
+            synchronized (lock) {
                 var held = carriers.get(connection);
                 used -= privateBytes;
                 if (--held.refs == 0) {
@@ -81,7 +83,7 @@ public final class MemoryBudget implements SharedMemory {
     public void limit(long limit) {
         boolean changed;
         boolean refused;
-        synchronized (this) {
+        synchronized (lock) {
             if (limit < used) reclaimViews();
             refused = limit < used;
             if (!refused) this.limit = limit;
@@ -91,7 +93,7 @@ public final class MemoryBudget implements SharedMemory {
         if (refused) throw new IllegalArgumentException("memory budget below committed backing capacity");
     }
 
-    @Override public synchronized long used() { return used; }
+    @Override public long used() { synchronized (lock) { return used; } }
 
     @Override public boolean pressure() { return over; }
 
@@ -102,7 +104,7 @@ public final class MemoryBudget implements SharedMemory {
         if (bytes == 0) return;
         if (bytes < 0) throw new IllegalArgumentException("negative release");
         boolean changed;
-        synchronized (this) {
+        synchronized (lock) {
             used -= bytes;
             changed = updatePressure();
         }
@@ -114,7 +116,7 @@ public final class MemoryBudget implements SharedMemory {
         if (wanted == 0) return 0;
         boolean changed;
         long granted;
-        synchronized (this) {
+        synchronized (lock) {
             granted = Math.min(wanted, roomFor(unitBytes(wanted, cost)) / cost);
             if (granted < minimum) granted = -1;
             else used += granted * cost;
@@ -128,7 +130,7 @@ public final class MemoryBudget implements SharedMemory {
     public Receive reserveReceive(long minimum, long wanted, long cost, long working, long loanFloor, long receive, long send) {
         long granted;
         boolean changed;
-        synchronized (this) {
+        synchronized (lock) {
             long fixed = working + receive + send;
             long room = roomFor(fixed + unitBytes(wanted, cost, Long.MAX_VALUE - fixed));
             granted = fixed > room ? -1 : Math.min(wanted, (room - fixed) / cost);
@@ -158,6 +160,7 @@ public final class MemoryBudget implements SharedMemory {
         return room();
     }
 
+    @SuppressWarnings("NonAtomicVolatileUpdate") // roomFor and limit changes hold the budget monitor
     private void reclaimViews() {
         for (var account : viewCaches) {
             long spare = account.spareViews.getAndSet(ReceiveAccount.RECLAIMING_VIEWS);
@@ -201,13 +204,13 @@ public final class MemoryBudget implements SharedMemory {
         @Override public Object domain() { return MemoryBudget.this; }
 
         @Override public long window() {
-            synchronized (MemoryBudget.this) { return credit; }
+            synchronized (lock) { return credit; }
         }
 
         @Override public long commit(long floor, long wanted) {
             long granted;
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return 0;
                 long previous = charged();
                 long excess = Math.max(0, retained - receiveStreams - working - Math.max(0, loaned - loanFloor));
@@ -226,7 +229,7 @@ public final class MemoryBudget implements SharedMemory {
         @Override public long reserveStreams(long wanted, long receive, long send) {
             long granted;
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return 0;
                 long previous = charged();
                 long unit = receive + send;
@@ -242,7 +245,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void releaseStream(long receive, long send) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return;
                 long previous = charged();
                 receiveStreams -= receive;
@@ -253,7 +256,7 @@ public final class MemoryBudget implements SharedMemory {
         }
 
         @Override public void claimSendFloor(long bytes) {
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed || bytes > sendPromised - sendLive) {
                     throw new IllegalStateException("send direction has no prepaid floor");
                 }
@@ -263,7 +266,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void returnSendFloor(long bytes) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 long previous = charged();
                 sendLive -= bytes;
                 changed = book(previous);
@@ -272,7 +275,7 @@ public final class MemoryBudget implements SharedMemory {
         }
 
         @Override public void onRoom(Runnable ready) {
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 roomReady = ready;
                 if (waitingFor != Long.MAX_VALUE) insertWaiting(this);
             }
@@ -295,7 +298,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void waitForBacking(java.util.function.LongSupplier minimum) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return;
                 backingWait = minimum.getAsLong();
                 updateWaiting();
@@ -310,7 +313,7 @@ public final class MemoryBudget implements SharedMemory {
         }
 
         @Override public long reservedBytes() {
-            synchronized (MemoryBudget.this) { return charged() + optionalPaid; }
+            synchronized (lock) { return charged() + optionalPaid; }
         }
 
         @Override public long viewRoom() {
@@ -333,7 +336,7 @@ public final class MemoryBudget implements SharedMemory {
         private boolean refillViews(long bytes) {
             boolean changed;
             boolean granted = false;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 long spare = spareViews.get();
                 if (spare == CLOSED_VIEWS) return false;
                 if (spare >= bytes) return true;
@@ -377,7 +380,7 @@ public final class MemoryBudget implements SharedMemory {
 
         private void releaseOptional(long bytes, boolean reclaim) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (reclaim && !closed) bytes += spareViews.getAndSet(0);
                 optionalPaid -= bytes;
                 used -= bytes;
@@ -389,7 +392,7 @@ public final class MemoryBudget implements SharedMemory {
         @Override public boolean reserveLoan(long bytes, long descriptor) {
             boolean changed;
             boolean granted;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return false;
                 long previous = charged();
                 long requested = bytes + descriptor;
@@ -413,7 +416,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void releaseLoan(long bytes, long descriptor) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 long previous = charged();
                 if (!closed) loaned -= bytes + descriptor;
                 retained -= descriptor;
@@ -432,13 +435,14 @@ public final class MemoryBudget implements SharedMemory {
             return Math.min(wanted, roomFor(unitBytes(wanted, unit)) / unit);
         }
 
+        @SuppressWarnings("NonAtomicVolatileUpdate") // callers hold the enclosing budget monitor
         private boolean book(long previous) {
             used += charged() - previous;
             return updatePressure();
         }
 
         @Override public boolean tryRetainReceive(long bytes) {
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed || bytes > receiveCommitted() - retained) return false;
                 retained += bytes;
                 return true;
@@ -447,7 +451,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void releaseRetainedReceive(long bytes) {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 long previous = charged();
                 retained -= bytes;
                 changed = book(previous);
@@ -457,7 +461,7 @@ public final class MemoryBudget implements SharedMemory {
 
         @Override public void close() {
             boolean changed;
-            synchronized (MemoryBudget.this) {
+            synchronized (lock) {
                 if (closed) return;
                 long previous = charged();
                 closed = true;
@@ -487,7 +491,7 @@ public final class MemoryBudget implements SharedMemory {
         if (changed && onChange != null) onChange.run();
         if (firstWaiting == Long.MAX_VALUE || room() < firstWaiting) return;
         ArrayList<Runnable> ready = new ArrayList<>();
-        synchronized (this) {
+        synchronized (lock) {
             long available = room();
             while (waiting != null && !waiting.isEmpty() && waiting.firstKey() <= available) {
                 for (ReceiveAccount account : waiting.pollFirstEntry().getValue()) {

@@ -13,7 +13,9 @@ public final class Frame {
     /** Wire frame type. */
     public long type;
     public ByteBuffer src;
-    public ReceiveSpans spans;
+    ReceiveSpans spans;
+
+    public ReceiveSpans spans() { return spans; }
 
     public byte get(int pos) {
         return ReceiveSpans.get(src, spans, pos);

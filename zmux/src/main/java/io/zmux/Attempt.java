@@ -42,7 +42,7 @@ public final class Attempt {
     private final CompletableFuture<Result> outcome = new CompletableFuture<>();
     private final CompletableFuture<List<PipeId>> replies = new CompletableFuture<>();
     private final CompletableFuture<Void> released = new CompletableFuture<>();
-    private int expectedReplies;
+    private volatile int expectedReplies;
     private final java.util.concurrent.atomic.AtomicInteger verifiedReplies = new java.util.concurrent.atomic.AtomicInteger();
     private volatile Terminal terminal;
     private volatile List<SessionRuntime.JoinAttempt> attachments = List.of();

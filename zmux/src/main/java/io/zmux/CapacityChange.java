@@ -536,9 +536,9 @@ public final class CapacityChange implements AutoCloseable {
             for (int i = 0; i < attempts.length; i++) {
                 var attempt = attempts[i];
                 if (attempt == null) continue;
-                if (!finishOnOwner(attempt, members[i], disposition, null)
-                        && attempt.result() instanceof Attempt.Result result
-                        && result.disposition() == Attempt.Disposition.CONFIRMED) {
+                if (finishOnOwner(attempt, members[i], disposition, null)) continue;
+                var result = attempt.result();
+                if (result != null && result.disposition() == Attempt.Disposition.CONFIRMED) {
                     session.core.rollbackMember(members[i].id());
                 }
             }

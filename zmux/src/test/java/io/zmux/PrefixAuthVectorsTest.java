@@ -71,6 +71,7 @@ class PrefixAuthVectorsTest {
     }
 
     private static final class FixedRandom extends SecureRandom {
+        private static final long serialVersionUID = 1L;
         private final byte[] nonce;
         FixedRandom(byte[] nonce) { this.nonce = nonce.clone(); }
         @Override public void nextBytes(byte[] bytes) {

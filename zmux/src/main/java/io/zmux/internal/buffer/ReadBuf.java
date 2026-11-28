@@ -41,7 +41,7 @@ public final class ReadBuf {
     private Consumer<ReadBuf> movedLoan;
     private volatile Account account;
     /** Set before publishing the root and kept through its final loan notification. */
-    private boolean receiveCredit;
+    private volatile boolean receiveCredit;
     /** The reference history when tracking, else null. */
     private final ConcurrentLinkedQueue<Throwable> history;
 

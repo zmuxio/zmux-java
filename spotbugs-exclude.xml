@@ -65,7 +65,7 @@
        assertion is that nothing throws, AssertionErrors thrown with a cause, fixture fields kept for the test's
        lifetime, streams owned by a child process or a pipe, and lists shared with carrier threads. -->
   <Match>
-    <Source name="~.*/src/test/java/.*"/>
+    <Source name="~.*[\\/]src[\\/]test[\\/]java[\\/].*"/>
     <Or>
       <Bug pattern="PREDICTABLE_RANDOM, DMI_RANDOM_USED_ONLY_ONCE, WEAK_TRUST_MANAGER, UNENCRYPTED_SOCKET, UNENCRYPTED_SERVER_SOCKET"/>
       <Bug pattern="COMMAND_INJECTION, HARD_CODE_PASSWORD, INFORMATION_EXPOSURE_THROUGH_AN_ERROR_MESSAGE, MDM_PROMISCUOUS_SERVERSOCKET, UNSAFE_HASH_EQUALS"/>
@@ -167,7 +167,8 @@
   <Match>
     <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE, AT_NONATOMIC_64BIT_PRIMITIVE, AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE"/>
     <Or>
-      <Class name="~io\.zmux\.internal\.core\.(Batch|Session|SendBlock)(\$.*)?"/>
+      <Class name="~io\.zmux\.internal\.core\.(Batch|ConnFlow|Session|SendBlock)(\$.*)?"/>
+      <Class name="io.zmux.SessionControl$RecoveryBatch"/>
       <Class name="~io\.zmux\.internal\.loop\.(ExternalTransport|Forwarded|Operation|RecvLane|SessionHost)(\$.*)?"/>
       <!-- Nested classes named one by one: the gates and the hello planner are timers and inbounds driven by the session's loop only. -->
       <Class name="~io\.zmux\.internal\.loop\.(SendLane|SessionRuntime)"/>
@@ -195,10 +196,89 @@
   <Match>
     <Bug pattern="USO_UNSAFE_OBJECT_SYNCHRONIZATION"/>
     <Or>
+      <Class name="io.zmux.CarrierCache$Attempt"/>
       <Class name="~io\.zmux\.internal\.loop\.ListenerHub\$.*"/>
       <Class name="~io\.zmux\.quic\.QuicPool\$Lease"/>
       <Class name="~io\.zmux\.http\.StreamingRequest\$(Reader|Writer)(\$1)?"/>
     </Or>
+  </Match>
+
+  <!-- These keyed collections are read via views, iteration, or nested owner methods. -->
+  <Match>
+    <Bug pattern="DMC_DUBIOUS_MAP_COLLECTION"/>
+    <Class name="io.zmux.CarrierCache$Entry"/>
+    <Field name="healthy"/>
+  </Match>
+  <Match>
+    <Bug pattern="WOC_WRITE_ONLY_COLLECTION_FIELD"/>
+    <Or>
+      <And><Class name="io.zmux.SessionController"/><Field name="pending"/></And>
+      <And><Class name="io.zmux.internal.core.Session"/><Field name="suspensionObservers"/></And>
+    </Or>
+  </Match>
+  <!-- Recovery plans pass their lists to the result record; each wait observes the current set of futures. -->
+  <Match>
+    <Class name="io.zmux.SessionControl"/>
+    <Or>
+      <And><Method name="recoveryPlan"/><Bug pattern="WOC_WRITE_ONLY_COLLECTION_LOCAL"/></And>
+      <And><Method name="recover"/><Bug pattern="PCAIL_POSSIBLE_CONSTANT_ALLOCATION_IN_LOOP"/></And>
+    </Or>
+  </Match>
+  <!-- The caller holds the budget monitor when it updates the waiting tree through private helpers. -->
+  <Match>
+    <Class name="io.zmux.internal.memory.MemoryBudget"/>
+    <Field name="waiting"/>
+    <Bug pattern="IS2_INCONSISTENT_SYNC"/>
+  </Match>
+  <!-- The nested generation and ticket constructors share this interval validation. -->
+  <Match>
+    <Class name="io.zmux.PrefixStore"/>
+    <Method name="requireInterval"/>
+    <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
+  </Match>
+  <!-- The public constructor accepts the randomness source by design and the MAC input shares a temporary key
+       buffer so it can be cleared immediately after provider initialization. -->
+  <Match>
+    <Class name="io.zmux.PrefixAuth"/>
+    <Method name="&lt;init&gt;"/>
+    <Field name="random"/>
+    <Bug pattern="EI_EXPOSE_REP2"/>
+  </Match>
+  <Match>
+    <Class name="io.zmux.PrefixKey$MacInput"/>
+    <Method name="getEncoded"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
+  <!-- Settlements are live views that continue to receive updates after the direction finishes. -->
+  <Match>
+    <Class name="io.zmux.SpliceDirection"/>
+    <Field name="settlement"/>
+    <Bug pattern="EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
+  </Match>
+  <!-- Publishing must not wait for the mirror consumer. Each missed publication updates the counter. -->
+  <Match>
+    <Class name="io.zmux.SpliceMirror"/>
+    <Or>
+      <And><Method name="publish"/><Bug pattern="MDM_THREAD_FAIRNESS"/></And>
+      <And><Method name="miss"/><Bug pattern="MRC_METHOD_RETURNS_CONSTANT"/></And>
+    </Or>
+  </Match>
+  <!-- A carrier failure's identity belongs to the process and is used only for in-memory correlation. -->
+  <Match>
+    <Class name="io.zmux.carrier.CarrierFaultException"/>
+    <Field name="episode"/>
+    <Bug pattern="SE_BAD_FIELD"/>
+  </Match>
+  <!-- A decoded frame borrows carrier ranges until the decoder advances. -->
+  <Match>
+    <Class name="io.zmux.internal.wire.Frame"/>
+    <Method name="spans"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
+  <!-- Inline one-off collaborators keep their implementation next to the test that uses it. -->
+  <Match>
+    <Class role="CLASS_ANONYMOUS" name="~io\.zmux\.(CarrierCacheSnapshotTest\$1|ControllerLifecycleTest\$[123]|ControllerSettlementTest\$3|SessionControllerTest\$2)"/>
+    <Bug pattern="SIC_INNER_SHOULD_BE_STATIC_ANON"/>
   </Match>
 
   <!-- Best-effort closes and a lost race with a close: the failure has no one to report to and nothing to undo. -->
@@ -231,8 +311,16 @@
        owned by the connection and disposed with it. -->
   <Match>
     <Bug pattern="RV_RETURN_VALUE_IGNORED_INFERRED"/>
-    <Class name="io.zmux.quic.ConnectionCarrier"/>
-    <Method name="route"/>
+    <Or>
+      <And><Class name="io.zmux.quic.ConnectionCarrier"/><Method name="route"/></And>
+      <And><Class name="io.zmux.http3.WebTransportRequest"/><Method name="pipe"/></And>
+    </Or>
+  </Match>
+  <!-- The internal reset event forwards the original failure to the stream owner. -->
+  <Match>
+    <Class name="io.zmux.quic.internal.QuicStreamTermination$InputReset"/>
+    <Field name="cause"/>
+    <Bug pattern="EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
   </Match>
 
   <!-- The constants are the Builtin enum values; the enum only implements the interface and reads none of

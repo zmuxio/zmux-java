@@ -69,16 +69,20 @@ public final class SessionController implements AutoCloseable {
     public record Limits(int maximumPendingOwners, int maximumOpeners, int maximumCleanupAttachments,
                          Duration attemptTimeout) {
         /** The default domain and attempt limits. */
-        public static final Limits DEFAULT = new Limits(64, 4, 8, Duration.ofSeconds(10));
+        private static final int DEFAULT_PENDING_OWNERS = 64;
+        private static final int DEFAULT_OPENERS = 4;
+        private static final int DEFAULT_CLEANUP_ATTACHMENTS = 8;
+        public static final Limits DEFAULT = new Limits(DEFAULT_PENDING_OWNERS, DEFAULT_OPENERS,
+                DEFAULT_CLEANUP_ATTACHMENTS, Duration.ofSeconds(10));
 
         public Limits {
             if (maximumPendingOwners < 0 || maximumOpeners < 0 || maximumCleanupAttachments < 0
                     || Objects.requireNonNull(attemptTimeout).isNegative() || attemptTimeout.isZero()) {
                 throw new IllegalArgumentException("invalid controller limits");
             }
-            if (maximumPendingOwners == 0) maximumPendingOwners = DEFAULT.maximumPendingOwners();
-            if (maximumOpeners == 0) maximumOpeners = DEFAULT.maximumOpeners();
-            if (maximumCleanupAttachments == 0) maximumCleanupAttachments = DEFAULT.maximumCleanupAttachments();
+            if (maximumPendingOwners == 0) maximumPendingOwners = DEFAULT_PENDING_OWNERS;
+            if (maximumOpeners == 0) maximumOpeners = DEFAULT_OPENERS;
+            if (maximumCleanupAttachments == 0) maximumCleanupAttachments = DEFAULT_CLEANUP_ATTACHMENTS;
         }
 
         /** Copies these limits with a different opener concurrency bound. */
@@ -516,8 +520,7 @@ public final class SessionController implements AutoCloseable {
 
         void inheritOpportunities(Owner previous, java.util.Set<Candidate> pending) {
             if (previous.cache() != cache) return;
-            java.util.Set<CarrierCache.Key> inherited;
-            synchronized (previous.budget()) { inherited = java.util.Set.copyOf(previous.suppressed); }
+            var inherited = previous.suppressedSnapshot();
             synchronized (budget) {
                 suppressed.addAll(inherited);
                 retainOpportunities(pending);
@@ -532,7 +535,9 @@ public final class SessionController implements AutoCloseable {
         }
 
         private CarrierCache cache() { return SessionController.this.cache; }
-        private Object budget() { return budget; }
+        private java.util.Set<CarrierCache.Key> suppressedSnapshot() {
+            synchronized (budget) { return java.util.Set.copyOf(suppressed); }
+        }
 
         private final java.util.Set<CarrierCache.Key> recovery = new java.util.HashSet<>();
 

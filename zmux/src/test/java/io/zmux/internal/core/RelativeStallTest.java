@@ -124,7 +124,11 @@ class RelativeStallTest {
     }
 
     @Test void deepBufferRateUsesTheBytePositionAndTheFullAckInterval() throws Exception {
-        for (long lag : List.of(499 * Time.MILLISECOND, 500 * Time.MILLISECOND)) {
+        for (long lag : List.of(499 * Time.MILLISECOND, 500 * Time.MILLISECOND, -500 * Time.MILLISECOND)) {
+            // A negative lag sends one range alone: nothing of the pipe ahead of it, so even five
+            // times min RTT proves no queue (a rise of the propagation delay delays it as much).
+            boolean lone = lag < 0;
+            lag = Math.abs(lag);
             Replay r = new Replay(true, 30 * Time.SECOND, false);
             r.add("bootstrap", 0, 100_000, 10_000, 60_000);
             r.prepare();
@@ -135,10 +139,13 @@ class RelativeStallTest {
             long before = send.delivered();
             long sent = r.session.now();
             r.open("s", "bootstrap", 3000, 0);
+            if (!lone) r.open("t", "bootstrap", 3000, 0); // sent behind the unacknowledged "s"
             r.session.setNow(sent + lag);
             r.ackPosition(pipe, pipe.out().lanes.getFirst().tx.pos());
-            assertTrue(send.delivered() - before >= 3000, "the cumulative advance includes the complete stream record");
-            if (lag == 500 * Time.MILLISECOND) {
+            assertTrue(send.delivered() - before >= (lone ? 3000 : 6000), "the cumulative advance includes the complete stream records");
+            if (lone) {
+                assertFalse(send.re().measured(), "a lone range proves no queue");
+            } else if (lag == 500 * Time.MILLISECOND) {
                 assertTrue(send.re().measured(), "adjusted RTT of five times min RTT proves backlog without a blocked writer");
                 assertEquals((send.delivered() - before) * 1e9 / lag, send.re().raw());
             } else {
@@ -462,7 +469,7 @@ class RelativeStallTest {
             });
             path = session.mp();
             assertEquals(resume, session.features().resume());
-            Poke.set(path.metrics, "measured", (java.util.function.LongFunction<PathMetrics.Measurement>) measurements::get);
+            path.metrics.measurements(measurements::get);
             if (managed) session.attend(1);
             session.memberFeedback(change -> {
                 if (change.failed()) faults.merge(change.id(), 1L, Long::sum);

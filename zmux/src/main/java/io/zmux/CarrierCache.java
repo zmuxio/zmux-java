@@ -889,7 +889,7 @@ public final class CarrierCache {
     }
 
     private static long integer(SnapshotJson.Value v) {
-        if (v instanceof SnapshotJson.Int(var value)) return value;
+        if (v instanceof SnapshotJson.Int integer) return integer.value();
         throw invalid(SnapshotError.FORMAT, "expected integer");
     }
 

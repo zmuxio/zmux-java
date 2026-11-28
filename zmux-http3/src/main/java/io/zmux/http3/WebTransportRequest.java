@@ -118,8 +118,8 @@ final class WebTransportRequest extends ChannelInboundHandlerAdapter implements 
         if (origins.size() != 1) return 403;
         try {
             var origin = URI.create(origins.getFirst().toString());
-            return origin.getRawPath().isEmpty() && H3Authority.origin(origin).equals(authority) ? 0 : 403;
-        } catch (IllegalArgumentException | NullPointerException invalid) { return 403; }
+            return "".equals(origin.getRawPath()) && H3Authority.origin(origin).equals(authority) ? 0 : 403;
+        } catch (IllegalArgumentException invalid) { return 403; }
     }
 
     void stopBeforeAdmission() {

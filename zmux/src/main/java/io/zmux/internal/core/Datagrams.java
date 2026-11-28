@@ -711,7 +711,7 @@ public final class Datagrams {
         int requested = switch (out.options.copies()) {
             case null -> 1;
             case DatagramSendOptions.Copies.Single ignored -> 1;
-            case DatagramSendOptions.Copies.Duplicate(int count) -> count;
+            case DatagramSendOptions.Copies.Duplicate duplicate -> duplicate.count();
             case DatagramSendOptions.Copies.Adaptive ignored -> 2;
         };
         int count = Math.min(requested, cfg.copyPolicy().maxCopies());

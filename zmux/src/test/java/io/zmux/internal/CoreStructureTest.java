@@ -46,7 +46,7 @@ class CoreStructureTest {
     private static final java.util.Set<String> QUALIFIED_CORE_VALUES = java.util.Set.of(
             "CarrierKind", "DatagramCopyPolicy", "Liveness", "PipeGoneException", "PipeState", "PipeStats",
             "SessionTarget", "StreamStats", "ZmuxConfig");
-    private static final Pattern PUBLIC_TYPE = Pattern.compile("\\bio\\.zmux\\.([A-Z][A-Za-z0-9_]*(?:\\.[A-Z][A-Za-z0-9_]*)*)");
+    private static final Pattern PUBLIC_TYPE = Pattern.compile("\\bio\\.zmux\\.([A-Z](?:[A-Za-z0-9_]|\\.[A-Z])*+)");
     private static final Pattern FORBIDDEN = Pattern.compile(
             "\\bio\\.zmux\\.internal\\.(loop|runtime|host|transport|listener)\\b"
                     + "|java\\.nio\\.channels|java\\.util\\.concurrent\\.locks|\\bsynchronized\\b|\\bnew Thread\\b");

@@ -199,7 +199,8 @@ final class WebTransportConnection {
         if (left != null && left.getValue() >= id) return;
         long first = left != null && left.getValue() == id - 4 ? left.getKey() : id;
         var right = retired.remove(id + 4);
-        retired.put(first, right == null ? id : right);
+        if (right == null) right = id;
+        retired.put(first, right);
         reorder.resolve(id, null);
     }
 

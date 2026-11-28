@@ -95,27 +95,20 @@ public final class Bundle {
         Kind compile(Sampler compile, MachineOptions o) {
             @SuppressWarnings({"IdentityHashMapUsage", "ValueClassIdentity"}) // keys are told apart by identity: equal values of different declarations are distinct; the Long values are not compared
             Map<Value, Long> kept = new java.util.IdentityHashMap<>();
-            List<Long> shared = new ArrayList<>();
             for (Unit u : units.values()) {
                 for (Value v : u.values()) {
                     if (v.scope == Scope.SHARED) {
-                        long x = compile.draw(v.segments);
-                        kept.put(v, x);
-                        shared.add(x);
+                        kept.put(v, compile.draw(v.segments));
                     }
                 }
             }
-            Machines.Compiled machineCode = null;
-            if (machines != null) {
-                machineCode = new Machines.Compiled(machines, compile, o);
-                for (long x : machineCode.shared) shared.add(x);
-            }
+            Machines.Compiled machineCode = machines == null ? null : new Machines.Compiled(machines, compile, o);
             MachinePoolPolicy policy = null;
             // Its own source for what it draws at run time: the policy and the handshake hook each hold a lock of their own.
             if (pool != null) policy = new MachinePoolPolicy(pool, compile, Sampler.of(o));
             // Its own source and lock for the draws of each session.
             Sampler session = budget == null ? null : Sampler.of(o);
-            return new Kind(this, kept, shared, machineCode, policy, compile, session);
+            return new Kind(this, kept, machineCode, policy, compile, session);
         }
     }
 
@@ -123,19 +116,29 @@ public final class Bundle {
     static final class Kind {
         private final Candidate c;
         private final Map<Value, Long> kept;
-        final List<Long> shared;
         final Machines.Compiled machines;
         final MachinePoolPolicy pool;
         private final Sampler sampler, session;
 
-        Kind(Candidate c, Map<Value, Long> kept, List<Long> shared, Machines.Compiled machines, MachinePoolPolicy pool, Sampler sampler, Sampler session) {
+        Kind(Candidate c, Map<Value, Long> kept, Machines.Compiled machines, MachinePoolPolicy pool, Sampler sampler, Sampler session) {
             this.c = c;
             this.kept = kept;
-            this.shared = shared;
             this.machines = machines;
             this.pool = pool;
             this.sampler = sampler;
             this.session = session;
+        }
+
+        List<Long> sharedInOrder() {
+            List<Long> values = new ArrayList<>();
+            for (Unit unit : c.units.values()) {
+                for (Value value : unit.values()) {
+                    if (value.scope == Scope.SHARED) values.add(kept.get(value));
+                }
+            }
+            if (machines != null) for (long value : machines.shared) values.add(value);
+            if (pool != null) values.addAll(pool.sharedInOrder());
+            return values;
         }
 
         private long val(Value v) {

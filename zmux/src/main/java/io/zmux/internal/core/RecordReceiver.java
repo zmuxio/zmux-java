@@ -240,7 +240,7 @@ final class RecordReceiver {
             try {
                 n = decoder.decode(data, spans, pos, end, f);
                 if (f.kind == FrameKind.TRANSPORT_PARAMETERS && (!first || idx != 0)) {
-                    TransportParams.decode(f.src, f.spans, f.dataPos, f.dataLen);
+                    TransportParams.decode(f.src, f.spans(), f.dataPos, f.dataLen);
                     throw new WireException(TransportError.PROTOCOL_VIOLATION, f.type, "QX_TRANSPORT_PARAMETERS out of place", "");
                 }
             } catch (WireException e) {
@@ -268,7 +268,7 @@ final class RecordReceiver {
                     return;
                 }
                 try {
-                    TransportParams tp = TransportParams.decode(f.src, f.spans, f.dataPos, f.dataLen);
+                    TransportParams tp = TransportParams.decode(f.src, f.spans(), f.dataPos, f.dataLen);
                     il.rx.expectTp = false;
                     port.peerParams(tp);
                 } catch (WireException e) {

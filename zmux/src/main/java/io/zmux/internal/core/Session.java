@@ -2429,12 +2429,12 @@ public final class Session {
         long deadline = switch (options.deadline()) {
             case null -> Time.NEVER;
             case DatagramSendOptions.Deadline.None ignored -> Time.NEVER;
-            case DatagramSendOptions.Deadline.After(var ttl) -> {
-                long end = Time.add(at, ttl.toNanos());
+            case DatagramSendOptions.Deadline.After after -> {
+                long end = Time.add(at, after.ttl().toNanos());
                 if (end == Time.NEVER) throw CoreException.of(CoreException.Reason.INVALID_DATAGRAM_OPTIONS);
                 yield end;
             }
-            case DatagramSendOptions.Deadline.At(long end) -> end;
+            case DatagramSendOptions.Deadline.At deadlineAt -> deadlineAt.nanoTime();
         };
         return new DatagramOptions(options, deadline);
     }
