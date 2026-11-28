@@ -499,7 +499,9 @@ public final class ListenerHub {
                     }
                 }
             }
-            if (refused != null) { registration.close(); setup.close(null); counts.count(refused); return false; }
+            // Counted before the close completes the carrier's closed(): a caller that waits for it
+            // sees the outcome.
+            if (refused != null) { counts.count(refused); registration.close(); setup.close(null); return false; }
             loop.onShutdown(shutdown);
             loop.schedule(expiry, Time.add(Clock.now(), owner.config().handshakeTimeout()));
             // A transform runs on the pair and reads the first bytes itself, an Establish among them.
