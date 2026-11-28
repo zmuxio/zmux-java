@@ -566,10 +566,25 @@ class AdmissionTest {
                     try (var c = dialTls(l.localAddress())) {
                         c.getOutputStream().write(x);
                         c.shutdownOutput();
-                        assertEquals(-1, c.getInputStream().read(), "a refused carrier sends nothing");
+                        assertSendsNothing(c);
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * A refused carrier is closed without a byte toward the client. The close can find bytes of the client unread
+     * (its close_notify after the prefix), and the host then resets the connection instead of ending it: either is
+     * nothing sent.
+     */
+    private static void assertSendsNothing(java.net.Socket c) {
+        try {
+            assertEquals(-1, c.getInputStream().read(), "a refused carrier sends nothing");
+        } catch (java.net.SocketException reset) {
+            // a reset carries no data either
+        } catch (java.io.IOException e) {
+            fail("a refused carrier: " + e);
         }
     }
 

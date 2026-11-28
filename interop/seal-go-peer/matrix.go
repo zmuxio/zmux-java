@@ -51,7 +51,7 @@ func multipath(sc string) bool { return sc == "join" || sc == "epoch" }
 func sessionConfig(sc string) *zmux.Config {
 	c := &zmux.Config{}
 	if multipath(sc) {
-		c.MaxPipes = 4
+		c.SessionPolicy = zmux.SessionPolicy{Limits: zmux.CapacityLimits{SteadyAttachments: 4}}
 		c.AllowRecordMode = func(zmux.RecordPolicyInput, zmux.RecordMode, any) bool { return true }
 	}
 	return c

@@ -124,18 +124,23 @@ class CloseWaitTest {
                 sink = s;
                 inner.start(new Sink() {
                     @Override
-                    public void onChunk(Chunk c, Runnable consumed) {
-                        int n = c.remaining();
+                    public void onChunk(Chunk taken, Runnable consumed) {
+                        // The link takes the bytes as a network path does: the writer completes once they are
+                        // in flight, not once they arrive. Holding the writer instead would let a held control
+                        // batch take a pipe, and whether the data fits would depend on the batching.
+                        int n = taken.remaining();
+                        Chunk c = Chunk.of(java.nio.ByteBuffer.wrap(taken.copy()));
+                        taken.close();
+                        consumed.run();
                         if (client) towardClient.addAndGet(n);
                         Runnable deliver = () -> {
                             if (client) towardClient.addAndGet(-n);
                             if (killed || ended.get()) {
                                 dropped.addAndGet(n);
                                 c.close();
-                                consumed.run();
                                 return;
                             }
-                            s.onChunk(c, consumed);
+                            s.onChunk(c, () -> {});
                         };
                         timer.schedule(() -> {
                             if (client && held) waiting.add(deliver);

@@ -296,8 +296,21 @@ class SpliceTest {
                 var stop = assertInstanceOf(StreamStoppedException.class, await(sendEnd(relay.endpoint)));
                 assertEquals(82, stop.code());
                 assertEquals(new SpliceEnd.Stopped(82), result.aToB().end());
-                assertTrue(blocked.isCancelled());
+                awaitCancelled(blocked);
             }
+        }
+    }
+
+    /**
+     * The limiter's pending acquire is cancelled once the splice drops it. The splice may end first: the acquire
+     * call runs off the owner, which learns of its future only afterwards and cancels it then.
+     */
+    private static void awaitCancelled(CompletableFuture<Long> blocked) throws Exception {
+        try {
+            blocked.get(GUARD_SECONDS, TimeUnit.SECONDS);
+            fail("the limiter's acquire completed");
+        } catch (java.util.concurrent.CancellationException expected) {
+            // cancelled
         }
     }
 
@@ -314,7 +327,7 @@ class SpliceTest {
             assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.left.client().abort(32, "gone");
             var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertEquals(new SpliceEnd.UpstreamLost(), result.aToB().end());
-            assertEquals(0, result.aToB().bytes()); assertTrue(blocked.isCancelled());
+            assertEquals(0, result.aToB().bytes()); awaitCancelled(blocked);
         }
     }
 
@@ -356,7 +369,7 @@ class SpliceTest {
             var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertEquals(new SpliceEnd.Reset(77), result.aToB().end());
             assertEquals(new SpliceEnd.Finished(), result.bToA().end());
-            assertFalse(relay.b.st.idSet()); assertEquals(0, result.aToB().bytes()); assertTrue(blocked.isCancelled());
+            assertFalse(relay.b.st.idSet()); assertEquals(0, result.aToB().bytes()); awaitCancelled(blocked);
         }
     }
 
@@ -372,7 +385,7 @@ class SpliceTest {
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.right.client().abort(31, "gone");
             var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
-            assertEquals(new SpliceEnd.DownstreamLost(), result.aToB().end()); assertTrue(blocked.isCancelled());
+            assertEquals(new SpliceEnd.DownstreamLost(), result.aToB().end()); awaitCancelled(blocked);
         }
     }
 
@@ -412,7 +425,7 @@ class SpliceTest {
             assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); loops.close();
             var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertTrue(result.aToB().end() instanceof SpliceEnd.UpstreamLost || result.aToB().end() instanceof SpliceEnd.DownstreamLost,
-                    String.valueOf(result.aToB().end())); assertTrue(blocked.isCancelled());
+                    String.valueOf(result.aToB().end())); awaitCancelled(blocked);
         }
     }
 
