@@ -7,7 +7,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
-/** Access to the vendored dev-spec fixtures (src/test/resources/spec). */
+/** Access to the vendored specification fixtures (src/test/resources/spec). */
 public final class SpecFixtures {
     private SpecFixtures() {}
 

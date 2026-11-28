@@ -1,5 +1,7 @@
 package io.zmux.quic;
 
+import io.zmux.internal.core.Time;
+
 import io.zmux.internal.spi.Loops;
 import io.netty.channel.EventLoop;
 import io.zmux.internal.loop.SessionHost;
@@ -104,13 +106,15 @@ final class NettyHost extends SessionHost {
     @Override
     protected void wakeAt(long deadline) {
         if (wake != null) wake.cancel(false);
+        wake = null;
+        if (deadline == Time.NEVER) return;
         // Refused: the loop stopped, and its termination fails the host's sessions.
         wake = Loops.schedule(loop, timerTask, Math.max(0, deadline - timerNow()), TimeUnit.NANOSECONDS, () -> {});
     }
 
     private void timerTask() {
         wake = null;
-        runTimers(timerNow());
+        nativeTimerFired(timerNow());
     }
 
     /**

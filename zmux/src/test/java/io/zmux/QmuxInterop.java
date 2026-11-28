@@ -34,7 +34,7 @@ class QmuxInterop {
         String binary = InteropProcess.required(environment);
         try (var loops = EventLoops.create(2)) {
             // Offer zmux extensions: a plain peer must disable them through negotiation.
-            var config = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).maxPipes(4).pipeAuth(PipeAuth.psk(PeerInterop.PSK).withEndToEnd()).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(PeerInterop.PSK).withEndToEnd()).build();
             try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config))
                     : Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.of(config));
                  var child = new InteropProcess(binary, initiating ? "server" : "client",

@@ -3,8 +3,7 @@ package io.zmux.internal.loop;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.internal.core.Action;
 import io.zmux.internal.core.Batch;
-import io.zmux.internal.core.ReadBuf;
-import io.zmux.internal.wire.VarInt;
+import io.zmux.internal.buffer.ReadBuf;
 import java.nio.ByteBuffer;
 
 /**
@@ -24,14 +23,13 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
     private int directionMask = Action.DIR_BIDI;
     /** The batch of the write in flight, or null. */
     private Batch inFlight;
+    private int proved;
     /** The output half is shut (or being shut after the write in flight). */
     protected boolean outputShut;
     /** Direction bits of {@link #directions()}. */
     protected static final int IN = Action.DIR_IN, OUT = Action.DIR_OUT;
     /** Unconsumed input: a partial record, or what a paused gate has not taken yet. */
     ChannelReader reader;
-    /** Input read before the transport moved to this loop, replayed first. */
-    private byte[] prefix;
 
     protected AbstractTransport(SessionHost loop) {
         this.loop = loop;
@@ -97,18 +95,36 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
     public final void write(Batch b) {
         if (inFlight != null) throw new IllegalStateException("a write is in flight");
         inFlight = b;
+        proved = 0;
         send(b);
     }
 
     /** Writes the batch in flight; reports through {@link #writeDone} (possibly at once). */
     protected abstract void send(OutboundBatch b);
 
+    protected final void writeProgress(int prefix) {
+        Batch b = inFlight;
+        if (b == null || prefix <= proved || prefix > b.bytes()) return;
+        proved = prefix;
+        in.progress(this, b, prefix);
+    }
+
     /** Reports the write in flight to the inbound. */
     protected final void writeDone(Throwable cause) {
         Batch b = inFlight;
+        if (b != null) writeDone(cause == null ? b.bytes() : 0, cause);
+    }
+
+    /** Reports the confirmed prefix at the carrier interface. */
+    protected final void writeDone(int confirmed, Throwable cause) {
+        Batch b = inFlight;
         if (b == null) return;
         inFlight = null;
-        in.written(this, b, cause);
+        if (confirmed < 0 || confirmed > b.bytes()) {
+            b.markProgressUnknown();
+            confirmed = proved;
+        }
+        in.written(this, b, Math.max(confirmed, proved), cause);
     }
 
     /** Reports to the inbound that the write side is shut (on the loop). */
@@ -116,11 +132,11 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
         if (in != null) in.outputShut(this);
     }
 
-    /** Releases the write in flight without reporting it (the transport closed). */
-    protected final void dropWrite() {
+    /** Releases the write in flight with its carrier receipt once the session's loop has stopped. */
+    protected final void dropWrite(int confirmed) {
         Batch b = inFlight;
         inFlight = null;
-        if (b != null) b.discard();
+        if (b != null) b.releaseAfterWrite(confirmed);
     }
 
     @Override public void pauseInput() {}
@@ -136,17 +152,19 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
     /**
      * Hands this transport, bound to a gate on its own loop, to a session on a host of
      * another kind: it stays where it is, exposed to that host as a byte-stream pipe input
-     * read and written by an {@link ExternalTransport} there. Input is copied once on the way.
+     * read and written by an {@link ExternalTransport} there.
      */
     final Transport bridge(SessionHost to) {
-        return new ExternalTransport(to, asPipe());
+        return bridgeWithInput(to, asPipe());
     }
 
     /** On the loop, not started: this carrier as a pipe input, its exporter and declaration kept. */
     final io.zmux.carrier.PipeIo asPipe() {
         Forwarded f = new Forwarded(this, null, false, false);
         boolean exporter = exporterPresent();
-        return f.pipe(exporter ? this::export : null, info().applicationProtocol(), "", exporter && info().carrier().tls(), null);
+        var tls = tlsSession();
+        var security = io.zmux.Admission.OuterSecurity.tls(tls == null ? null : tls.getProtocol());
+        return f.pipe(exporter ? this::export : null, info().applicationProtocol(), "", exporter && info().carrier().tls(), security, null);
     }
 
     // ---- input ----
@@ -167,6 +185,15 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
     }
 
     private Throwable inputError;
+    private int partialInputBytes;
+
+    @Override public final int partialInputBytes() { return partialInputBytes; }
+
+    final boolean dropPartialInput() {
+        partialInputBytes = reader == null ? 0 : reader.unreadBytes();
+        if (reader != null) reader.release();
+        return partialInputBytes > 0;
+    }
 
     @Override public final Throwable inputError() { return inputError; }
 
@@ -178,9 +205,7 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
 
     /** The input half ended; partial when unconsumed bytes remain (they are dropped). */
     protected final void inputEnded(boolean graceful) {
-        boolean partial = reader != null && reader.hasPartial();
-        if (reader != null) reader.release();
-        in.ended(this, graceful, partial);
+        in.ended(this, graceful, dropPartialInput());
     }
 
     protected final void writableChanged(boolean on) {
@@ -197,26 +222,20 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
         if (reader == null) reader = new ChannelReader(loop.pool);
     }
 
-    /**
-     * One input batch of a byte stream. Owned when free is not null: a session parses it in
-     * place and may keep references to it; free runs once nothing does. Lent otherwise:
-     * what is kept is copied before this returns. Stops at a pause, the end of input or a
-     * move: data's position tells what was taken.
-     */
-    protected final void input(ByteBuffer data, Runnable free) {
-        if (free == null) {
-            feed(data);
-            return;
-        }
-        OwnedInput owned = new OwnedInput(loop, data, free);
+    /** Parses one owned provider view and releases the transport's reference afterwards. */
+    protected final int input(io.zmux.Chunk chunk) {
+        var owned = ChunkAccess.take(chunk);
+        ByteBuffer data = owned.data();
+        int from = data.position();
         try {
-            input(data, owned.buf);
+            input(data, owned.buf());
+            return data.position() - from;
         } finally {
-            owned.release();
+            owned.buf().unref();
         }
     }
 
-    /** Byte-stream input; owned when retained is not null (see {@link #input(ByteBuffer, Runnable)}). */
+    /** Byte-stream input, with an owner when retained is present. */
     final void input(ByteBuffer data, ReadBuf retained) {
         if (retained == null || !in.session()) {
             feed(data);
@@ -225,6 +244,11 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
         Inbound session = in;
         while (data.hasRemaining() && accepting()) {
             if (reader.hasPartial()) {
+                if (session.segmentedInput() && !reader.compacted()) {
+                    parkOwnedInput(data, retained);
+                    redeliver(reader);
+                    return;
+                }
                 if (!complete(data)) return;
                 continue;
             }
@@ -233,23 +257,31 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
             if (consumed == Inbound.GONE) return;
             loop.inPlaceInput(consumed);
             data.position(pos + consumed);
-            if (data.hasRemaining() && !carry(data)) return;
+            if (data.hasRemaining()) {
+                if (session.segmentedInput()) {
+                    parkOwnedInput(data, retained);
+                    compactSparseCarry(reader);
+                    return;
+                }
+                if (!carry(data)) return;
+            }
         }
+    }
+
+    private void parkOwnedInput(ByteBuffer data, ReadBuf retained) {
+        reader.hold(retained, data, data.position(), data.limit());
+        loop.inPlaceInput(data.remaining());
+        data.position(data.limit());
     }
 
     /** Copies data through the read buffer into the inbound; false once the transport is gone or paused. */
     final boolean feed(ByteBuffer data) {
         while (data.hasRemaining() && accepting()) {
-            ByteBuffer room = reader.room();
+            ByteBuffer room = inputRoom(false, 1);
             int n = Math.min(room.remaining(), data.remaining());
             if (n == 0) return oversized();
-            room.put(room.position(), data, data.position(), n);
-            data.position(data.position() + n);
-            reader.lim += n;
-            loop.copiedInput(n);
-            int consumed = deliver(reader.buf, reader.buf.data(), reader.pos, reader.lim);
-            if (consumed == Inbound.GONE) return false;
-            reader.consumed(consumed);
+            copyInput(data, room, n);
+            if (!redeliver(reader)) return false;
         }
         return !data.hasRemaining();
     }
@@ -260,38 +292,30 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
      */
     private boolean complete(ByteBuffer data) {
         ByteBuffer room = reader.room();
-        int n = Math.min(Math.min(missing(), room.remaining()), data.remaining());
+        int missing = in.missingRecordBytes(room, reader.pos, reader.lim);
+        int n = Math.min(Math.min(missing, room.remaining()), data.remaining());
         if (n == 0) return oversized();
-        room.put(room.position(), data, data.position(), n);
-        data.position(data.position() + n);
-        reader.lim += n;
-        loop.copiedInput(n);
-        int consumed = deliver(reader.buf, reader.buf.data(), reader.pos, reader.lim);
-        if (consumed == Inbound.GONE) return false;
-        reader.consumed(consumed);
-        return true;
-    }
-
-    /** The bytes the first record in the read buffer still lacks (its Size first). */
-    private int missing() {
-        ByteBuffer b = reader.buf.data();
-        int have = reader.lim - reader.pos;
-        int sizeLength = VarInt.lengthOf(b.get(reader.pos));
-        if (have < sizeLength) return sizeLength - have;
-        long total = sizeLength + VarInt.get(b, reader.pos, reader.lim);
-        return Math.clamp(total - have, 1, Integer.MAX_VALUE);
+        copyInput(data, room, n);
+        return redeliver(reader);
     }
 
     /** Copies the start of a record that data ends with into the read buffer; false once the transport is gone. */
     private boolean carry(ByteBuffer data) {
         ByteBuffer room = reader.room();
         if (room.remaining() < data.remaining()) return oversized();
-        int n = data.remaining();
+        copyInput(data, room, data.remaining());
+        return true;
+    }
+
+    private void copyInput(ByteBuffer data, ByteBuffer room, int n) {
         room.put(room.position(), data, data.position(), n);
-        data.position(data.limit());
+        data.position(data.position() + n);
         reader.lim += n;
         loop.copiedInput(n);
-        return true;
+    }
+
+    final ByteBuffer inputRoom(boolean idle, int minimum) {
+        return reader.room(in.segmentedInput(), idle, minimum);
     }
 
     private boolean oversized() {
@@ -306,49 +330,47 @@ public abstract non-sealed class AbstractTransport extends PhysicalTransport {
 
     /** The unread input, for the transport that continues elsewhere (null when none); the read buffer is released. */
     protected final byte[] takeUnread() {
-        byte[] b = unread(reader);
-        if (reader != null) reader.release();
-        return b;
-    }
-
-    /** Copies the unread bytes [pos, lim) of r for the transport that continues on another loop. */
-    static byte[] unread(ChannelReader r) {
-        if (r == null || r.buf == null || r.pos >= r.lim) return null;
-        byte[] b = new byte[r.lim - r.pos];
-        r.buf.data().get(r.pos, b);
+        if (reader == null) return null;
+        byte[] b = null;
+        if (reader.hasPartial()) b = reader.copyUnread();
+        reader.release();
         return b;
     }
 
     /** Delivers the unconsumed bytes of r; false when the transport left its owner. */
     final boolean redeliver(ChannelReader r) {
         if (r == null || !r.hasPartial()) return true;
-        int c = deliver(r.buf, r.buf.data(), r.pos, r.lim);
+        int c = r.hasRanges() ? in.bytes(this, r.ranges()) : deliver(r.buf, r.buf.data(), r.pos, r.lim);
         if (c == Inbound.GONE) return false;
-        r.consumed(c);
+        boolean segmented = in.segmentedInput();
+        r.consumed(c, segmented);
+        if (segmented) compactSparseCarry(r);
         return true;
     }
 
-    /** Input read before this transport took over, delivered first when it starts (before {@link #begin}). */
-    protected final void prefix(byte[] b) {
-        prefix = b;
+    private void compactSparseCarry(ChannelReader r) {
+        int copied = r.compactSparseCarry();
+        if (copied != 0) loop.copiedInput(copied);
     }
 
-    /** Replays the input read before a move; false when the transport left again. */
-    protected final boolean replay() {
-        return replay(reader);
-    }
-
-    final boolean replay(ChannelReader r) {
-        byte[] p = prefix;
-        if (p == null) return true;
-        prefix = null;
-        ByteBuffer room = r.room();
-        room.put(p);
-        r.lim += p.length;
-        int c = deliver(r.buf, r.buf.data(), r.pos, r.lim);
-        if (c == Inbound.GONE) return false;
-        r.consumed(c);
+    /** Moves the unread range and its ownership to the next transport. */
+    protected final boolean moveInputTo(AbstractTransport next) {
+        if (reader == null) return false;
+        next.openReader();
+        reader.moveTo(next.reader);
         return true;
+    }
+
+    /** Uses a carrier's unstarted halves on another host, preserving any input already read. */
+    protected final Transport bridgeWithInput(SessionHost target, io.zmux.carrier.PipeIo halves) {
+        var next = new ExternalTransport(target, halves);
+        moveInputTo(next);
+        return next;
+    }
+
+    /** Releases the unread input without replaying it. */
+    protected final void discardBufferedInput() {
+        if (reader != null) reader.release();
     }
 
     /**

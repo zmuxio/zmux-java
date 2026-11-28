@@ -23,10 +23,13 @@ final class AckEngine {
         void activity();
 
         /** An RTT sample was taken; min is the pipe's minimum RTT. */
-        void rttSampled(long min);
+        void rttSampled(Pipe pipe, long min);
 
         /** A lane's acknowledged position advanced; cum is whether the pipe's cumulative point moved. */
         void advanced(Pipe p, Pipe.OutLane ol, boolean cum);
+
+        /** A fresh raw interval is available for classification by the session owner. */
+        default void deliverySampled(Pipe pipe, long start, long end, boolean constrained) {}
 
         /** Whether the multipath session is quiet: its RTT samples stay out of min_rtt. */
         boolean quiet();
@@ -44,6 +47,8 @@ final class AckEngine {
     // and the peer's RTT samples stay free of it.
     private boolean prompt;
     private boolean woken;
+    private final TimerHeap pending = new TimerHeap();
+    private int thresholdPipes;
     private final ArrayList<long[]> entries = new ArrayList<>(2);
 
     AckEngine(TransportParams local, TransportParams peer, List<Pipe> pipes, Pacer pacer, Port port) {
@@ -82,9 +87,13 @@ final class AckEngine {
      */
     boolean onRecord(Pipe p, Pipe.InLane il, long n, boolean elicit, boolean atOnce, long now) {
         if (elicit) {
-            if (il.ack.elicit == 0) il.ack.elicitAt = now;
+            if (il.ack.elicit == 0) pending.schedule(il.ack, Time.add(now, delay));
             il.ack.elicit += n;
             InPipeAck a = p.in().ack;
+            if (a.pending < threshold) {
+                a.pending = Math.min(threshold, a.pending + n);
+                if (a.pending == threshold) thresholdPipes++;
+            }
             if (!a.acked || Time.sub(now, a.ackedAt) >= delay) prompt = true;
         }
         if (atOnce) immediate = true;
@@ -93,31 +102,13 @@ final class AckEngine {
 
     /** Whether a PIPE_ACK must be sent now. */
     boolean due(long now) {
-        if (immediate || prompt) return true;
-        for (Pipe p : pipes) {
-            if (p.in() == null) continue;
-            long sum = 0, first = Time.NEVER;
-            for (Pipe.InLane il : p.in().lanes) {
-                if (il.ack.elicit > 0) {
-                    sum += il.ack.elicit;
-                    first = Math.min(first, il.ack.elicitAt);
-                }
-                if (il.rx.ended() && il.rx.pos() > il.ack.reported) return true;
-            }
-            if (sum >= threshold || (sum > 0 && now >= Time.add(first, delay))) return true;
-        }
-        return false;
+        long first = pending.earliest();
+        return immediate || prompt || thresholdPipes != 0 || (first != Time.NEVER && now >= first);
     }
 
     /** The earliest acknowledgement delay deadline. */
     long deadline() {
-        if (woken) return Time.NEVER;
-        long t = Time.NEVER;
-        for (Pipe p : pipes) {
-            if (p.in() == null) continue;
-            for (Pipe.InLane il : p.in().lanes) if (il.ack.elicit > 0) t = Math.min(t, Time.add(il.ack.elicitAt, delay));
-        }
-        return t;
+        return woken ? Time.NEVER : release();
     }
 
     /**
@@ -126,14 +117,24 @@ final class AckEngine {
      * {@link Time#NEVER} when none is pending.
      */
     long release() {
-        long t = Time.NEVER;
-        for (Pipe p : pipes) {
-            if (p.in() == null) continue;
-            for (Pipe.InLane il : p.in().lanes) {
-                if (il.ack.elicit > 0) t = Math.min(t, Time.add(il.ack.elicitAt, delay));
-            }
-        }
-        return t;
+        return pending.earliest();
+    }
+
+    boolean laneEnded(Pipe.InLane lane) {
+        if (lane.rx.pos() <= lane.ack.reported) return false;
+        ackNow();
+        return true;
+    }
+
+    void pipeRetired(Pipe pipe) {
+        if (pipe.in() == null) return;
+        if (pipe.in().ack.pending == threshold) thresholdPipes--;
+        pipe.in().ack.pending = 0;
+        for (Pipe.InLane lane : pipe.in().lanes) pending.remove(lane.ack);
+    }
+
+    void clearTimers() {
+        pending.clear();
     }
 
     /** Runs the delay timer; true when writers must wake to send a due PIPE_ACK. */
@@ -186,6 +187,7 @@ final class AckEngine {
             if (settles) {
                 immediate = false;
                 prompt = false;
+                woken = false;
             }
             return true;
         }
@@ -204,7 +206,7 @@ final class AckEngine {
                 k = (k + 1) / 2;
             }
             int from = i, cnt = k;
-            if (!w.frame(n, false, bb -> {
+            if (!w.controlFrame(n, false, true, bb -> {
                 FrameEncoder.pipeAckHeader(bb, cnt);
                 for (int j = from; j < from + cnt; j++) {
                     long[] e = es.get(j);
@@ -226,8 +228,11 @@ final class AckEngine {
         immediate = false;
         prompt = false;
         woken = false;
+        pending.clear();
+        thresholdPipes = 0;
         for (Pipe p : pipes) {
             if (p.in() == null) continue;
+            p.in().ack.pending = 0;
             for (Pipe.InLane il : p.in().lanes) {
                 il.ack.elicit = 0;
                 il.ack.reported = il.rx.pos();
@@ -235,6 +240,17 @@ final class AckEngine {
         }
         return true;
     }
+
+    /** Stops normal writes before the ACK history is full, leaving one progress record on lane zero. */
+    boolean historyHeld(Pipe p) {
+        if (p.out().snd.samples.size() >= FrameHistory.SLOTS - 1) return true;
+        for (Pipe.OutLane lane : p.out().lanes) {
+            if (lane.segs.size() >= FrameHistory.SLOTS - 1 || lane.activity.size() >= FrameHistory.SLOTS - 1) return true;
+        }
+        return false;
+    }
+
+    boolean canMarkActivity(Pipe.OutLane lane) { return lane.activity.size() < FrameHistory.SLOTS; }
 
     /** Records a produced batch for RTT samples and idle accounting; ahead is queue_p at its hand-over (unsent_ahead over R_p, both then). */
     void onSent(Pipe p, Pipe.OutLane ol, long startPos, RecordWriter w, long now, long queue) {
@@ -250,6 +266,13 @@ final class AckEngine {
             ol.segs.add(startPos, ol.tx.pos(), so);
         }
         ps.so += n;
+        if (p.mp() != null) {
+            for (int i = 0; i < w.deliveryEnds.size(); i++) {
+                ps.deliveryEnds.addBounded(so + w.deliveryEnds.get(i), FrameHistory.SLOTS);
+            }
+        }
+        if (p.mp() != null && (w.deliveryConstrained() || Pacer.paced(p) || ps.re.bound() > 0
+                || (p.shape() != null && p.shape().active()))) ps.constrain(so, ps.so);
         if (w.anyElicit()) {
             long end = w.framing() == Framing.RECORDS ? ps.so : so + w.elicitEnd();
             if (ps.samples.isEmpty()) {
@@ -258,7 +281,12 @@ final class AckEngine {
             }
             ps.elicitEnd = Math.max(ps.elicitEnd, end);
             boolean bubble = ps.re.bubbleInFlight(ps.cum);
-            ps.samples.add(new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt, ps.re.blockEpoch(), bubble, queue, w.suspPing()));
+            var sample = new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt,
+                    ps.re.blockEpoch(), bubble, queue, w.suspPing());
+            // Reserve the oldest unacknowledged samples for stall timing. Emergency
+            // control may replace the last estimator sample while data stays held.
+            if (ps.samples.size() == FrameHistory.SLOTS) ps.samples.set(FrameHistory.SLOTS - 1, sample);
+            else ps.samples.add(sample);
         }
     }
 
@@ -315,6 +343,12 @@ final class AckEngine {
         }
         long newly = cum - ps.cum;
         ps.cum = cum;
+        int covered = 0;
+        while (covered < ps.deliveryEnds.size() && ps.deliveryEnds.get(covered) <= cum) covered++;
+        if (covered > 0) {
+            ps.ackedElicitEnd = ps.deliveryEnds.get(covered - 1);
+            ps.deliveryEnds.removeFirst(covered);
+        }
         ps.delivered += newly;
         boolean roundEnd = ps.re.advance(cum, ps.so);
         long sampleRtt = 0, sampleSentAt = 0;
@@ -339,10 +373,20 @@ final class AckEngine {
                 sampleRtt = r.update(rtt, Math.min(ad, peerDelay), peerDelay, now, p.mp() != null && port.quiet());
                 sampleSentAt = last.sent();
                 ps.rttAt = now;
-                port.rttSampled(r.min());
+                ps.rttSampleEnd = last.end();
+                port.rttSampled(p, r.min());
             }
             long iv = Math.max(Time.sub(last.sent(), last.firstSentAt()), Time.sub(now, last.deliveredAt()));
             if (iv > 0 && rateOk) {
+                if (last.deliveredAt() < now) {
+                    ps.deliveryStart = last.deliveredAt();
+                    ps.deliveryEnd = now;
+                    ps.deliveryBytes = ps.delivered - last.delivered();
+                    ps.deliveryLoad = last.bubble() && !proven ? PathEvidence.Load.LIMITED
+                            : PathEvidence.Load.UNKNOWN;
+                    boolean constrained = ps.constrained(last.delivered(), cum);
+                    port.deliverySampled(p, ps.deliveryStart, now, constrained);
+                }
                 sampleRate = ps.re.sample((ps.delivered - last.delivered()) * 1e9 / iv, last.bubble(), last.epoch(), proven, now);
             }
             ps.firstSentAt = last.sent();
@@ -351,6 +395,8 @@ final class AckEngine {
             ps.prevOk = true;
         }
         ps.samples.subList(0, i).clear();
+        long oldest = ps.samples.isEmpty() ? ps.delivered : ps.samples.getFirst().delivered();
+        while (!ps.constrained.isEmpty() && ps.constrained.getFirst().end() <= oldest) ps.constrained.removeFirst();
         ps.deliveredAt = now;
         pacer.onAck(p, sampleRtt, sampleSentAt, sampleRate, roundEnd, now);
         port.advanced(p, ol, true);
@@ -374,9 +420,8 @@ final class AckEngine {
     }
 
     /** The acknowledgement state of one inbound lane. */
-    static final class InAck {
+    static final class InAck extends TimerHeap.Entry {
         private long elicit;
-        private long elicitAt;
         private long reported;
 
         InAck() {
@@ -384,10 +429,6 @@ final class AckEngine {
 
         long elicit() {
             return elicit;
-        }
-
-        long elicitAt() {
-            return elicitAt;
         }
 
         long reported() {
@@ -400,6 +441,7 @@ final class AckEngine {
      * ack-eliciting record after zmux_max_ack_delay without one.
      */
     static final class InPipeAck {
+        private long pending;
         private long ackedAt;
         private boolean acked;
 
@@ -411,12 +453,45 @@ final class AckEngine {
     static final class Send {
         private long so;
         private long cum;
-        private final ArrayList<Pipe.Sample> samples = new ArrayList<>(0);
+        private ArrayList<Pipe.Sample> samples = new ArrayList<>(0);
         private long delivered;
+        private record Constrained(long start, long end) {}
+        private final java.util.ArrayDeque<Constrained> constrained = new java.util.ArrayDeque<>();
+        final QualityEvidence qualityEvidence = new QualityEvidence();
+        private Session.DeliveryBacklog deliveryBacklog;
+
+        Session.DeliveryBacklog deliveryBacklog() { return deliveryBacklog; }
+        void deliveryBacklog(Session.DeliveryBacklog next) { deliveryBacklog = next; }
+        private void constrain(long start, long end) {
+            var tail = constrained.peekLast();
+            if (tail != null && tail.end() == start) {
+                constrained.removeLast();
+                start = tail.start();
+            }
+            constrained.addLast(new Constrained(start, end));
+        }
+
+        private boolean constrained(long start, long end) {
+            for (var range : constrained) {
+                if (range.start() >= end) break;
+                if (range.end() > start) return true;
+            }
+            return false;
+        }
+
+        private long deliveryStart, deliveryEnd, deliveryBytes;
+        private PathEvidence.Load deliveryLoad = PathEvidence.Load.UNKNOWN;
+
+        void backlogged() { deliveryLoad = PathEvidence.Load.BACKLOGGED; }
         private long deliveredAt;
         private long firstSentAt;
         private RttEstimator rtt = new RttEstimator();
         private final RateEstimator re = new RateEstimator();
+        private final LongList deliveryEnds = new LongList();
+        private long ackedElicitEnd, rttSampleEnd;
+        long ackedElicitEnd() { return ackedElicitEnd; }
+        long rttSampleEnd() { return rttSampleEnd; }
+
         private long rttAt;
         private long elicitEnd;
         /** The send time of the last batch an earlier advance acknowledged, and when that advance arrived (paced). */
@@ -446,12 +521,40 @@ final class AckEngine {
             return cum;
         }
 
+        void clearHistory() {
+            samples = new ArrayList<>(0);
+            deliveryEnds.release();
+        }
+
         ArrayList<Pipe.Sample> samples() {
             return samples;
         }
 
         long delivered() {
             return delivered;
+        }
+
+        PathEvidence quality(io.zmux.DirectionHealth health, long now) {
+            var since = health.stableSince();
+            if (since.isEmpty()) return new PathEvidence(health.evidenceGeneration(),
+                    java.util.Optional.empty(), java.util.Optional.empty(), java.util.Optional.empty());
+            long stableSince = since.getAsLong();
+            var current = timing(rtt.sampledAt(), rtt.smoothed(), 30 * Time.SECOND, stableSince, now);
+            var baseline = timing(rtt.minAt(), rtt.min(), 300 * Time.SECOND, stableSince, now);
+            long expires = Time.add(deliveryEnd, RateEstimator.WINDOW);
+            var delivery = deliveryStart >= stableSince && deliveryStart < deliveryEnd && now < expires
+                    ? java.util.Optional.of(new PathEvidence.Delivery(deliveryStart, deliveryEnd, deliveryBytes,
+                            deliveryBytes * 1e9 / (deliveryEnd - deliveryStart), expires,
+                            deliveryLoad))
+                    : java.util.Optional.<PathEvidence.Delivery>empty();
+            return new PathEvidence(health.evidenceGeneration(), current, baseline, delivery);
+        }
+
+        private java.util.Optional<PathEvidence.Timing> timing(long at, long value, long validity, long stableSince, long now) {
+            long expires = Time.add(at, validity);
+            return rtt.has() && at >= stableSince && now < expires
+                    ? java.util.Optional.of(new PathEvidence.Timing(at, expires, java.time.Duration.ofNanos(value)))
+                    : java.util.Optional.empty();
         }
 
         long deliveredAt() {

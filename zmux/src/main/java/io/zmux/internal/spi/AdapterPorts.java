@@ -54,6 +54,7 @@ public final class AdapterPorts {
         Duration firstRecordTimeout();
 
         long memoryUsed();
+        CarrierBudget carrierBudget();
     }
 
     /**
@@ -132,6 +133,7 @@ public final class AdapterPorts {
         SessionAdapter session(Session port);
         Setup setup(io.zmux.adapter.Handled handled);
         Setup reservation(io.zmux.adapter.Slot slot);
+        CarrierBudget carrierBudget(ListenerAdapter listener);
     }
 
     private static final java.util.concurrent.atomic.AtomicReference<Views> VIEWS = new java.util.concurrent.atomic.AtomicReference<>();
@@ -155,6 +157,8 @@ public final class AdapterPorts {
     }
 
     public static ListenerAdapter listener(Listener port) { return views().listener(port); }
+
+    public static CarrierBudget carrierBudget(ListenerAdapter listener) { return views().carrierBudget(listener); }
 
     public static Setup reservation(io.zmux.adapter.Slot slot) { return views().reservation(slot); }
 

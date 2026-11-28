@@ -78,7 +78,7 @@ public final class ExchangeConfig {
      * and Data MAC and after the body encoding (base64 or not), stay at most 1,000,000 bytes.
      */
     public static int defaultPieceSize(boolean base64) {
-        return base64 ? Exchange.BODY_MAX / 4 * 3 - Exchange.REQ_OVERHEAD : Exchange.BODY_MAX - Exchange.REQ_OVERHEAD;
+        return base64 ? Exchange.base64DecodedLimit(Exchange.BODY_MAX) - Exchange.REQ_OVERHEAD : Exchange.BODY_MAX - Exchange.REQ_OVERHEAD;
     }
 
     /**

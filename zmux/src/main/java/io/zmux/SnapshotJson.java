@@ -1,5 +1,6 @@
 package io.zmux;
 
+import io.zmux.internal.json.JsonReader;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -10,7 +11,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The JSON and RFC 3339 forms of {@link CarrierCache.Snapshot}: a strict parser that keeps what
+ * The JSON and RFC 3339 forms of {@link CarrierCache}: a strict parser that keeps what
  * the snapshot needs (integers apart from other numbers, the last of repeated members) and the
  * canonical encoding.
  */
@@ -23,7 +24,7 @@ final class SnapshotJson {
     /** An integer in the range of a long. */
     record Int(long value) implements Value {}
     /** Any other number. */
-    record Num() implements Value {}
+    record Num(double value) implements Value {}
     record Str(String value) implements Value {}
     record Arr(List<Value> values) implements Value {}
     /** Members in their order; {@link #get} takes the last of a repeated name. */
@@ -34,163 +35,34 @@ final class SnapshotJson {
         }
     }
 
-    private static final int MAX_DEPTH = 64;
+    static Value parse(String text) { return new Parser(text).read(); }
 
-    static Value parse(String text) {
-        var p = new Parser(text);
-        Value v = p.value(0);
-        p.ws();
-        if (p.i != text.length()) throw p.error("trailing data");
-        return v;
-    }
+    private static final class Parser extends JsonReader<Value> {
+        Parser(String text) { super(text, true); }
 
-    private static final class Parser {
-        private final String s;
-        private int i;
-
-        Parser(String s) { this.s = s; }
-
-        IllegalArgumentException error(String what) { return new IllegalArgumentException(what + " at " + i); }
-
-        void ws() {
-            while (i < s.length() && (s.charAt(i) == ' ' || s.charAt(i) == '\t' || s.charAt(i) == '\n' || s.charAt(i) == '\r')) i++;
-        }
-
-        Value literal(String word, Value v) {
-            if (!s.startsWith(word, i)) throw error("unexpected token");
-            i += word.length();
-            return v;
-        }
-
-        Value value(int depth) {
-            if (depth > MAX_DEPTH) throw error("nesting too deep");
-            ws();
-            if (i >= s.length()) throw error("unexpected end");
-            char c = s.charAt(i);
-            return switch (c) {
-                case 'n' -> literal("null", new Null());
-                case 't' -> literal("true", new Bool(true));
-                case 'f' -> literal("false", new Bool(false));
-                case '"' -> new Str(string());
-                case '[' -> array(depth);
-                case '{' -> object(depth);
-                default -> {
-                    if (c == '-' || (c >= '0' && c <= '9')) yield number();
-                    throw error("unexpected character");
-                }
+        @Override protected ObjectBuilder<Value> newObject() {
+            return new ObjectBuilder<>() {
+                private final List<Map.Entry<String, Value>> members = new ArrayList<>();
+                @Override public void add(String name, Value value) { members.add(Map.entry(name, value)); }
+                @Override public Value finish() { return new Obj(List.copyOf(members)); }
             };
         }
 
-        Value array(int depth) {
-            i++;
-            var a = new ArrayList<Value>();
-            ws();
-            if (i < s.length() && s.charAt(i) == ']') { i++; return new Arr(List.copyOf(a)); }
-            while (true) {
-                a.add(value(depth + 1));
-                ws();
-                if (i < s.length() && s.charAt(i) == ',') { i++; continue; }
-                if (i < s.length() && s.charAt(i) == ']') { i++; return new Arr(List.copyOf(a)); }
-                throw error("expected , or ]");
+        @Override protected Value array(List<Value> values) { return new Arr(List.copyOf(values)); }
+        @Override protected Value string(String value) { return new Str(value); }
+        @Override protected Value bool(boolean value) { return new Bool(value); }
+        @Override protected Value nil() { return new Null(); }
+
+        @Override protected Value number(String text, int start, int end, boolean integral) {
+            if (integral) {
+                try { return new Int(Long.parseLong(text, start, end, 10)); }
+                catch (NumberFormatException tooLarge) { /* Represent an integer beyond long as a floating-point number. */ }
             }
+            return new Num(Double.parseDouble(text.substring(start, end)));
         }
 
-        Value object(int depth) {
-            i++;
-            var o = new ArrayList<Map.Entry<String, Value>>();
-            ws();
-            if (i < s.length() && s.charAt(i) == '}') { i++; return new Obj(List.copyOf(o)); }
-            while (true) {
-                ws();
-                if (i >= s.length() || s.charAt(i) != '"') throw error("expected a name");
-                String k = string();
-                ws();
-                if (i >= s.length() || s.charAt(i) != ':') throw error("expected :");
-                i++;
-                o.add(Map.entry(k, value(depth + 1)));
-                ws();
-                if (i < s.length() && s.charAt(i) == ',') { i++; continue; }
-                if (i < s.length() && s.charAt(i) == '}') { i++; return new Obj(List.copyOf(o)); }
-                throw error("expected , or }");
-            }
-        }
-
-        private int digits() {
-            int start = i;
-            while (i < s.length() && s.charAt(i) >= '0' && s.charAt(i) <= '9') i++;
-            return i - start;
-        }
-
-        Value number() {
-            int start = i;
-            if (s.charAt(i) == '-') i++;
-            int first = i, n = digits();
-            if (n == 0 || (n > 1 && s.charAt(first) == '0')) throw error("bad number");
-            boolean integer = true;
-            if (i < s.length() && s.charAt(i) == '.') {
-                i++; integer = false;
-                if (digits() == 0) throw error("bad number");
-            }
-            if (i < s.length() && (s.charAt(i) == 'e' || s.charAt(i) == 'E')) {
-                i++; integer = false;
-                if (i < s.length() && (s.charAt(i) == '+' || s.charAt(i) == '-')) i++;
-                if (digits() == 0) throw error("bad number");
-            }
-            if (!integer) return new Num();
-            try {
-                return new Int(Long.parseLong(s, start, i, 10));
-            } catch (NumberFormatException outOfRange) {
-                return new Num();
-            }
-        }
-
-        private int hex4() {
-            if (i + 4 > s.length()) throw error("bad \\u escape");
-            int v = 0;
-            for (int k = 0; k < 4; k++) {
-                int d = Character.digit(s.charAt(i + k), 16);
-                if (d < 0) throw error("bad \\u escape");
-                v = v << 4 | d;
-            }
-            i += 4;
-            return v;
-        }
-
-        String string() {
-            i++;
-            var b = new StringBuilder();
-            while (true) {
-                if (i >= s.length()) throw error("unterminated string");
-                char c = s.charAt(i++);
-                if (c == '"') return b.toString();
-                if (c < 0x20) throw error("control character in a string");
-                if (c != '\\') { b.append(c); continue; }
-                if (i >= s.length()) throw error("unterminated string");
-                char e = s.charAt(i++);
-                switch (e) {
-                    case '"', '\\', '/' -> b.append(e);
-                    case 'b' -> b.append('\b');
-                    case 'f' -> b.append('\f');
-                    case 'n' -> b.append('\n');
-                    case 'r' -> b.append('\r');
-                    case 't' -> b.append('\t');
-                    case 'u' -> {
-                        int u = hex4();
-                        if (Character.isHighSurrogate((char) u)) {
-                            if (!s.startsWith("\\u", i)) throw error("lone surrogate");
-                            i += 2;
-                            int low = hex4();
-                            if (!Character.isLowSurrogate((char) low)) throw error("lone surrogate");
-                            b.append((char) u).append((char) low);
-                        } else if (Character.isLowSurrogate((char) u)) {
-                            throw error("lone surrogate");
-                        } else {
-                            b.append((char) u);
-                        }
-                    }
-                    default -> throw error("bad escape");
-                }
-            }
+        @Override protected IllegalArgumentException syntax(String message, int offset) {
+            return new IllegalArgumentException(message + " at " + offset);
         }
     }
 

@@ -11,6 +11,9 @@ final class RttEstimator {
     private long min;
     long min() { return min; }
     private long minAt;
+    long minAt() { return minAt; }
+    private long sampledAt;
+    long sampledAt() { return sampledAt; }
     private long latest;
     long latest() { return latest; }
 
@@ -26,6 +29,7 @@ final class RttEstimator {
      */
     long update(long sample, long ackDelay, long maxAckDelay, long now, boolean quiet) {
         latest = sample;
+        sampledAt = now;
         if (!has) {
             has = true;
             min = sample;

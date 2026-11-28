@@ -1,5 +1,7 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.memory.SharedMemory;
+import io.zmux.internal.core.TimerHeap;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.internal.core.CarrierInfo;
 import io.zmux.internal.core.Framing;
@@ -19,53 +21,85 @@ import javax.net.ssl.SSLException;
  * runs on the loop (delegated tasks on a pool, resumed on the loop); records are wrapped
  * from the batch's segments without flattening.
  */
-final class TlsTransport extends AbstractTransport implements EventLoop.IoHandler {
+final class TlsTransport extends NioTransport {
     /** Runs the engine's delegated tasks; the common pool is borrowed, never closed. */
     private static final java.util.concurrent.Executor DELEGATED_TASKS = ForkJoinPool.commonPool();
 
     private static final CarrierInfo INFO = new CarrierInfo(Framing.BYTES, true, false, false, false);
     private static final ByteBuffer[] NONE = new ByteBuffer[0];
 
-    private final SocketChannel ch;
     private final SSLEngine engine;
-    /** The NIO loop whose selector serves the channel. */
-    private final EventLoop nio;
-    private SelectionKey key;
+    // TLS 1.2 allows 2 KiB of expansion over a 16 KiB fragment. TLS 1.3 has a smaller bound.
+    private static final int WIRE_RECORD = 5 + (16 << 10) + (2 << 10);
+    private static final int NET_IN = 2 * WIRE_RECORD;
+    private static final int NET_OUT = 4 * WIRE_RECORD;
+    static final int RECORD_WORKSPACE = NET_IN + NET_OUT;
+
+    private final RecordWorkspace records;
     private ByteBuffer netIn;
-    private final ByteBuffer netOut;
+    private ByteBuffer netOut;
     /** The write in flight: segments [srcFrom, srcEnd) of srcs still have bytes. */
     private ByteBuffer[] srcs = NONE;
     private int srcFrom, srcEnd;
     private BiConsumer<TlsTransport, Throwable> onHandshake;
     private boolean handshaking = true;
     private TransportInfo info;
-    private boolean inEnded;
-    private boolean paused;
-    /** The input ended while paused with input still buffered: 1 gracefully, 2 not; reported on resume. */
-    private int endPending;
     private boolean shutAfterWrite;
     private boolean closeNotifyPending;
-    private boolean closed;
     private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+    @Override java.util.List<RecordWorkspace> tlsWorkspaces() { return java.util.List.of(records); }
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return released.minimalCompletionStage(); }
 
-    TlsTransport(EventLoop loop, SocketChannel ch, SSLEngine engine) {
-        super(loop);
-        nio = loop;
-        this.ch = ch;
+    static TlsTransport create(EventLoop loop, SocketChannel channel, SSLEngine engine,
+                               SharedMemory budget) {
+        var records = new RecordWorkspace();
+        if (budget != null) {
+            Runnable release = records.acquire(budget);
+            if (release == null) throw new SharedMemory.Unavailable();
+            records.releaseOnClose(release);
+        }
+        try {
+            // Socket reads land in direct memory without the JDK copying through a temporary buffer.
+            return new TlsTransport(loop, channel, engine, records, ByteBuffer.allocateDirect(NET_IN),
+                    ByteBuffer.allocateDirect(NET_OUT).flip());
+        } catch (RuntimeException | Error failed) {
+            records.closed.complete(null);
+            throw failed;
+        }
+    }
+
+    /** The ledger key and release signal survive selector and provider handoffs. */
+    static final class RecordWorkspace {
+        private final java.util.concurrent.CompletableFuture<Void> closed = new java.util.concurrent.CompletableFuture<>();
+
+        Runnable acquire(SharedMemory budget) { return budget.acquireCarrier(this, RECORD_WORKSPACE, 0); }
+
+        void releaseOnClose(Runnable lease) { closed.whenComplete((v, error) -> lease.run()); }
+    }
+
+    private TlsTransport(EventLoop loop, SocketChannel ch, SSLEngine engine, RecordWorkspace records,
+                         ByteBuffer netIn, ByteBuffer netOut) {
+        super(loop, ch);
         this.engine = engine;
-        int packet = engine.getSession().getPacketBufferSize();
-        // Direct: socket reads land without the JDK copying through a temporary direct buffer.
-        this.netIn = ByteBuffer.allocateDirect(packet * 2);
-        this.netOut = ByteBuffer.allocateDirect(packet * 4);
-        this.netOut.flip();
+        this.records = records;
+        this.netIn = netIn;
+        this.netOut = netOut;
         this.reader = new ChannelReader(loop.pool);
     }
 
     /** Runs the handshake of engine over ch on loop; done receives the carrier or the failure, on the loop. */
     static Runnable handshake(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout, boolean secure,
-                          BiConsumer<TlsTransport, Throwable> done) {
-        return new TlsTransport(loop, ch, engine).handshake(timeout, secure, done);
+                              SharedMemory budget, BiConsumer<TlsTransport, Throwable> done) {
+         TlsTransport transport;
+        try {
+            transport = create(loop, ch, engine, budget);
+        } catch (SharedMemory.Unavailable exhausted) {
+            try { ch.close(); }
+            catch (IOException failed) { exhausted.addSuppressed(failed); }
+            if (!loop.tryExecute(() -> done.accept(null, exhausted))) done.accept(null, exhausted);
+            return () -> {};
+        }
+        return transport.handshake(timeout, secure, done);
     }
 
     Runnable handshake(long timeout, boolean secure, BiConsumer<TlsTransport, Throwable> done) {
@@ -105,11 +139,6 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         return info;
     }
 
-    @Override
-    public boolean isClosed() {
-        return closed;
-    }
-
     /** The negotiated application protocol, or "" when none. */
     String applicationProtocol() {
         String p = engine.getApplicationProtocol();
@@ -144,6 +173,11 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         return v.equals("TLSv1.3") || v.equals("TLSv1.2");
     }
 
+    String handshakeProtocol() {
+        assert !handshaking : "TLS protocol requires a completed handshake";
+        return engine.getSession().getProtocol();
+    }
+
     @Override
     public javax.net.ssl.SSLSession tlsSession() {
         return handshaking ? null : engine.getSession();
@@ -167,11 +201,6 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    protected void inputFailed(IOException cause) {
-        endInput(false);
-    }
-
-    @Override
     protected void begin() {
         try {
             if (key != null) key.interestOps(inEnded || paused ? 0 : SelectionKey.OP_READ);
@@ -180,7 +209,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
             failed(e);
             return;
         }
-        if (!replay(reader)) return;
+        if (!redeliverBuffered()) return;
         processInput();
     }
 
@@ -193,17 +222,11 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         }
         if (!(host instanceof EventLoop to)) return bridge(host);
         closed = true;
-        TlsTransport n = new TlsTransport(to, ch, engine);
+        TlsTransport n = new TlsTransport(to, ch, engine, records, netIn, netOut);
+        netIn = netOut = null;
         n.key = handOver(key, nio, to, n);
         n.handshaking = false;
-        n.prefix(unread(reader));
-        reader.release();
-        netIn.flip();
-        if (n.netIn.capacity() < netIn.remaining()) n.netIn = ByteBuffer.allocateDirect(netIn.remaining());
-        n.netIn.put(netIn);
-        n.netOut.compact();
-        n.netOut.put(netOut);
-        n.netOut.flip();
+        moveInputTo(n);
         released.complete(null); // This view returned its selector and input to the new owner.
         return n;
     }
@@ -259,7 +282,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
 
     private final TimerHeap.Timer handshakeTimer = new TimerHeap.Timer() {
         @Override
-        void fire(long now) {
+        public void fire(long now) {
             if (handshaking) handshakeFailed(new java.net.SocketTimeoutException("TLS handshake timed out"));
         }
     };
@@ -283,7 +306,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         reader.lim = dst.position();
         return switch (r.getStatus()) {
             case BUFFER_UNDERFLOW -> {
-                if (!netIn.hasRemaining()) netIn = grow(netIn);
+                if (!netIn.hasRemaining()) throw new SSLException("TLS record exceeds the input workspace");
                 int n = ch.read(netIn);
                 if (n < 0) throw new IOException("connection closed during the TLS handshake");
                 yield n > 0;
@@ -291,13 +314,6 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
             case CLOSED -> throw new IOException("TLS closed during the handshake");
             default -> true;
         };
-    }
-
-    private static ByteBuffer grow(ByteBuffer b) {
-        ByteBuffer n = ByteBuffer.allocateDirect(b.capacity() * 2);
-        b.flip();
-        n.put(b);
-        return n;
     }
 
     // ---- I/O ----
@@ -332,20 +348,16 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         if (closed || !started()) return;
         // A failure of the endpoint, not of the carrier: a session closes with INTERNAL_ERROR.
         if (internalFailure(t)) return;
-        if (!inEnded) {
-            inEnded = true;
-            reader.release();
-            inputEnded(false, false);
-        }
+        discardInputOnFailure();
         if (writing()) {
             clearSrcs();
-            writeDone(t);
+            writeDone(confirmed, t);
         }
     }
 
     private void readSome() throws IOException {
         for (int i = 0; i < 4 && !inEnded && !closed && !paused; i++) {
-            if (!netIn.hasRemaining()) netIn = grow(netIn);
+            if (!netIn.hasRemaining()) throw new SSLException("TLS record exceeds the input workspace");
             int n = ch.read(netIn);
             if (n < 0) {
                 processInput();
@@ -359,25 +371,16 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     }
 
     @Override
-    public void pauseInput() {
-        paused = true;
-        if (key != null && key.isValid()) key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
+    boolean resumeBufferedInput() {
+        if (!feed() || paused || inEnded) return false;
+        // Unwrap any buffered ciphertext before reporting a pending end.
+        processInput();
+        return true;
     }
 
     @Override
-    public void resumeInput() {
-        if (!paused) return;
-        paused = false;
-        if (!started() || inEnded || closed) return;
-        if (!feed() || paused || inEnded) return;
-        // Records still held as ciphertext come before a pending end.
-        processInput();
-        if (closed || paused || inEnded) return;
-        if (endPending != 0) {
-            endInput(endPending == 1);
-            return;
-        }
-        if (key != null && key.isValid()) key.interestOps(key.interestOps() | SelectionKey.OP_READ);
+    boolean hasBufferedInput() {
+        return super.hasBufferedInput() || (netIn != null && netIn.position() > 0);
     }
 
     @Override
@@ -395,11 +398,12 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
                     netIn.compact();
                     break;
                 }
-                ByteBuffer dst = reader.room();
-                if (dst.remaining() < engine.getSession().getApplicationBufferSize()) {
+                int minimum = engine.getSession().getApplicationBufferSize();
+                ByteBuffer dst = inputRoom(false, minimum);
+                if (dst.remaining() < minimum) {
                     netIn.compact();
                     if (!feed()) return;
-                    dst = reader.room();
+                    dst = inputRoom(false, minimum);
                     netIn.flip();
                 }
                 SSLEngineResult r = engine.unwrap(netIn, dst);
@@ -426,30 +430,14 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
 
     /** Delivers the plaintext read so far; false when the carrier left its owner. */
     private boolean feed() {
-        if (reader.buf == null || reader.pos == reader.lim || inEnded) return !closed;
-        int c = deliver(reader.buf, reader.buf.data(), reader.pos, reader.lim);
-        if (c == Inbound.GONE) return false;
-        reader.consumed(c);
-        return true;
+        return !closed && (inEnded || redeliver(reader));
     }
 
-    private void endInput(boolean graceful) {
-        // Paused with plaintext or ciphertext not yet delivered: the end waits until resumeInput delivers it.
-        if (paused && (reader.hasPartial() || netIn.position() > 0)) {
-            endPending = graceful ? 1 : 2;
-            if (key != null && key.isValid()) key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
-            return;
-        }
-        if (inEnded) return;
-        inEnded = true;
-        boolean partial = reader.hasPartial();
-        reader.release();
-        if (key != null && key.isValid()) key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
-        inputEnded(graceful, partial);
-    }
+    private int confirmed, wrapped;
 
     @Override
     protected void send(OutboundBatch b) {
+        confirmed = wrapped = 0;
         if (key == null || closed) {
             writeDone(new IOException("carrier closed"));
             return;
@@ -463,7 +451,11 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
     private void continueWrite() {
         try {
             while (true) {
-                if (!flushNet()) return;
+                if (!flushNet()) {
+                    writeProgress(confirmed);
+                    return;
+                }
+                confirmed = wrapped;
                 while (srcFrom < srcEnd && !srcs[srcFrom].hasRemaining()) srcFrom++;
                 if (srcFrom == srcEnd && !closeNotifyPending) break;
                 if (closeNotifyPending && srcFrom == srcEnd) {
@@ -480,7 +472,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
             }
         } catch (IOException e) {
             clearSrcs();
-            if (writing()) writeDone(e);
+            if (writing()) writeDone(confirmed, e);
             return;
         }
         if (writing()) {
@@ -504,6 +496,7 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         } finally {
             netOut.flip();
         }
+        if (writing()) wrapped += r.bytesConsumed();
         // A closed engine takes nothing more: fail the write instead of wrapping again.
         if (r.bytesConsumed() == 0 && r.bytesProduced() == 0 && len > 0) {
             throw new SSLException("TLS output closed (" + r.getStatus() + ")");
@@ -549,14 +542,6 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         }
     }
 
-    @Override public void shutdownInput() {
-        if (inEnded || closed) return;
-        inEnded = true;
-        if (reader != null) reader.release();
-        if (key != null && key.isValid()) key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
-        try { ch.shutdownInput(); } catch (IOException ignored) { /* The input is already gone. */ }
-    }
-
     @Override
     void closePhysical(CarrierSetup.Bound.Permit permit, Throwable cause) {
         java.util.Objects.requireNonNull(permit);
@@ -570,8 +555,13 @@ final class TlsTransport extends AbstractTransport implements EventLoop.IoHandle
         }
         reader.release();
         clearSrcs();
-        dropWrite();
-        released.complete(null);
-        setup().transportClosed(this);
+        try {
+            writeDone(confirmed, cause != null ? cause : new IOException("carrier closed"));
+        } finally {
+            netIn = netOut = null;
+            records.closed.complete(null);
+            released.complete(null);
+            setup().transportClosed(this);
+        }
     }
 }

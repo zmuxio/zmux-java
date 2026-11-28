@@ -11,7 +11,7 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.codec.quic.QuicStreamChannelConfig;
 import io.netty.handler.codec.quic.QuicStreamType;
-import io.zmux.internal.core.ReadBuf;
+import io.zmux.internal.buffer.ReadBuf;
 import io.zmux.internal.loop.Inbound;
 import io.zmux.internal.loop.Transport;
 import io.zmux.internal.loop.TransportInfo;

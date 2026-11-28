@@ -22,6 +22,10 @@ public final class Transmitter {
 
         boolean established();
 
+        boolean datagramAckDue();
+
+        void writeDatagramAcks(RecordWriter writer);
+
         Features features();
 
         /** The session SRTT: the smoothed RTT over its pipes. */
@@ -55,18 +59,21 @@ public final class Transmitter {
     private final WindowTuner tuner;
     private final KeepAlive ka;
     private final Lifecycle life;
-    private final EarlyData early;
     private final Datagrams dg;
     private final Port port;
     private final RecordWriter writer = new RecordWriter();
     private final StreamScheduler.Iter schedIter = new StreamScheduler.Iter();
     private final ChunkPlan plan = new ChunkPlan();
+    void datagramPathRetired(Pipe pipe) { dg.pathRetired(pipe); }
+
+    CopyBudget copyBudget() { return dg.budget; }
+
     /** The peer's max_record_size once established. */
     private long peerMaxRecord = TransportParams.DEFAULT_MAX_RECORD_SIZE;
 
     Transmitter(CoreConfig cfg, SessionStats stats, PipeTable pipes, Lanes lanes, StreamTable streams, StreamSend send, StreamRecv recv,
                 StreamScheduler sched, ControlQueue ctl, ConnFlow conn, WindowTuner tuner, KeepAlive ka, Lifecycle life,
-                EarlyData early, Datagrams dg, Port port) {
+                Datagrams dg, Port port) {
         this.cfg = cfg;
         this.recv = recv;
         this.stats = stats;
@@ -80,7 +87,6 @@ public final class Transmitter {
         this.tuner = tuner;
         this.ka = ka;
         this.life = life;
-        this.early = early;
         this.dg = dg;
         this.port = port;
     }
@@ -95,10 +101,6 @@ public final class Transmitter {
         peerMaxRecord = v;
     }
 
-    private boolean earlyActive() {
-        return early.active() && !port.established();
-    }
-
     private PathSession mp() {
         return (PathSession) port.path();
     }
@@ -110,22 +112,17 @@ public final class Transmitter {
         return Math.min(m, carrierRecordCap(ol));
     }
 
+    int recordRoom(Pipe pipe) {
+        Pipe.OutLane lane = pipe.out().lane(0);
+        return lane == null ? 0 : recMax(lane);
+    }
+
     /** The record cap the lane's carrier sets (a TLS record, the carrier's own bound), 65535 when none. */
     private static int carrierRecordCap(Pipe.OutLane ol) {
         int m = ol.st.info().tls() ? RecordPlan.MAX_RECORD_LENGTH : 65535;
         int carrier = ol.st.info().maxRecord();
         if (carrier > 0) m = Math.min(m, carrier);
         return m;
-    }
-
-    /** The smallest carrier record cap of the usable outbound lanes, any of which may carry a datagram; 65535 when none. */
-    int smallestRecordCap() {
-        int lo = 65535;
-        for (Pipe p : pipes.all()) {
-            if (p.out() == null || p.out().failed()) continue;
-            for (Pipe.OutLane ol : p.out().lanes) if (usable(p, ol)) lo = Math.min(lo, carrierRecordCap(ol));
-        }
-        return lo;
     }
 
     /** The largest carrier record cap of the usable outbound lanes: a datagram beyond it fits on no pipe now; 0 when none. */
@@ -154,43 +151,103 @@ public final class Transmitter {
 
     // ---- interest ----
 
-    /** Whether {@link #poll} for the lane would produce bytes now (W8). */
-    public boolean wantsWrite(long pipeId, long lane) {
-        Pipe p = pipes.get(pipeId);
-        if (p == null || p.out() == null || p.out().failed()) return false;
-        Pipe.OutLane ol = p.out().lane(lane);
+    /** Claims shared work on lane owners that can actually use the pending class of work. */
+    void routeOutput(boolean nativeWork) {
         SessionState state = port.state();
-        if (ol == null || ol.st.shut() || ol.tx.closeSent || state == SessionState.CLOSED || life.holdsFirst(pipeId)) return false;
-        if (pipeId == 0 && lane == 0 && !ol.tx.tpSent) {
-            // The parameters lead the pipe: a planned delay of that first record holds them like
-            // any other record, unless CONNECTION_CLOSE is owed.
-            return life.closePending() || pipes.shaping() == null || !Shaping.delaying(p, port.now());
+        if (state == SessionState.CLOSED) return;
+        // Shared stream work gets one owner. Control and native work have their own
+        // destinations and can be granted independently during the same pass.
+        if (port.established() && !sched.isEmpty() && (state != SessionState.CLOSING || life.closeWait())) {
+            routeStreams();
         }
-        // CONNECTION_CLOSE is due: nothing else goes out. While it waits for coverage, the transport work goes on.
-        if (life.closePending() && !life.waitingLanes()) return lane == 0;
-        if (ol.st.laneFirst()) {
-            // The lane's PIPE_LANE record is a record of the pipe: a planned delay holds it too.
-            return state.compareTo(SessionState.CLOSING) < 0 && (pipes.shaping() == null || !Shaping.delaying(p, port.now()));
+        for (Pipe pipe : pipes.all()) {
+            if (pipe.out() == null || pipe.out().failed()) continue;
+            for (Pipe.OutLane lane : pipe.out().lanes) {
+                if (!lane.hasWriter() || lane.st.shut() || lane.tx.closeSent) continue;
+                if (nativeWork && lane.lane == 0) lane.grantChannel();
+                if (lane.tx.writing || lane.tx.notWritable) continue;
+                if (controlReady(pipe, lane, state)) lane.grantRecord();
+            }
         }
-        if (!ol.st.confirmed() || (state == SessionState.CLOSING && !life.closeWait())) return false;
-        if (!port.established()) return ka.wants() || (earlyActive() && dataPendingOn(null, null));
-        if (pipes.shaping() != null) {
-            if (Shaping.delaying(p, port.now())) return false;
-            if (Shaping.wants(p, lane)) return true;
-        }
-        return port.path().wantsWrite(p, ol);
     }
 
-    /** The single pipe's interest in writing on ol. */
-    boolean wantsWriteSingle(Pipe p, Pipe.OutLane ol) {
-        if (ol.lane == 0 && (controlPending() || datagramsPending(p, ol))) return true;
-        return dataPendingOn(p, ol) && !Pacer.held(p) && (pipes.shaping() == null || !Shaping.held(p, port.now()));
+    private void routeStreams() {
+        PathSession multipath = port.path() instanceof PathSession mp ? mp : null;
+        if (multipath != null) multipath.beginRoute();
+        var it = routeIter.reset(sched);
+        for (Stream stream; (stream = it.next()) != null; ) {
+            if (!canSendNow(stream)) {
+                noteCreditBlock(stream);
+                continue;
+            }
+            for (Pipe pipe : pipes.all()) {
+                if (pipe.out() == null || pipe.out().failed() || Pacer.held(pipe)
+                        || (port.ack() != null && port.ack().historyHeld(pipe))) continue;
+                Pipe.OutLane lane = lanes.laneFor(pipe, stream);
+                if (!lane.hasWriter() || !usable(pipe, lane) || lane.tx.closeSent || lane.tx.writing
+                        || lane.tx.notWritable || lane.log.room() == 0) continue;
+                if (multipath != null && !multipath.routeStream(pipe, lane, stream)) continue;
+                if (Shaping.held(pipe, lane, port.now())) continue;
+                lane.grantRecord();
+                return;
+            }
+        }
+    }
+
+    private final StreamScheduler.Iter routeIter = new StreamScheduler.Iter();
+
+    /** A lack of data credit can itself create control work. */
+    private void noteCreditBlock(Stream stream) {
+        if (!stream.tab.idSet()) {
+            int type = Stream.typeIndex(stream.bidi);
+            if (!port.established() || port.state().compareTo(SessionState.CLOSING) >= 0) return;
+            if (!streams.idAvailable(type)) streams.markStreamsBlocked(type);
+            else if (port.features().preamble() && streams.preambleAllowed(stream, send)) {
+                streams.allocId(stream);
+                blockedOn(stream, false, true);
+            }
+            return;
+        }
+        var plan = planChunk(stream, this.plan);
+        if (plan.avail > 0 || plan.preBlocked) blockedOn(stream, plan.credit == 0, plan.connCredit == 0 || plan.preBlocked);
+    }
+
+    private boolean controlReady(Pipe p, Pipe.OutLane lane, SessionState state) {
+        if (p.id == 0 && lane.lane == 0 && !lane.tx.tpSent) {
+            return life.closePending() || pipes.shaping() == null || !Shaping.delaying(p, port.now());
+        }
+        if (life.closePending() && !life.waitingLanes()) return lane.lane == 0;
+        if (lane.st.laneFirst()) {
+            return state.compareTo(SessionState.CLOSING) < 0 && (pipes.shaping() == null || !Shaping.delaying(p, port.now()));
+        }
+        if (!lane.st.confirmed() || (state == SessionState.CLOSING && !life.closeWait())) return false;
+        if (!port.established()) return ka.wants();
+        AckEngine ack = port.ack();
+        if (ack != null && ack.historyHeld(p)) {
+            if (lane.lane != 0) return false;
+            return (p.mp() == null ? ack.due(port.now()) : mp().wantsPipeControl(p, lane))
+                    || (ack.canMarkActivity(lane) && ka.wants());
+        }
+        if (pipes.shaping() != null) {
+            if (Shaping.delaying(p, port.now())) return false;
+            if (pipes.shaping().wants(p, lane.lane)) return true;
+        }
+        return port.path().wantsControl(p, lane);
+    }
+
+    private boolean outputRemains(Pipe p, Pipe.OutLane lane) {
+        if (!sched.isEmpty() || ctl.pending() || dg.queued() || ka.wants() || life.closePending()) return true;
+        Attach a = p.mp();
+        return (a != null && (lane.lane == 0 ? !a.ret.copyQ().isEmpty() : !a.ret.selfCopyQ().isEmpty()))
+                || (pipes.shaping() != null && pipes.shaping().wants(p, lane.lane));
     }
 
     /** Stream data that would go on the lane now. */
+    private final StreamScheduler.Iter interest = new StreamScheduler.Iter();
+
     boolean dataPendingOn(Pipe p, Pipe.OutLane ol) {
         if (sched.isEmpty()) return false;
-        StreamScheduler.Iter it = new StreamScheduler.Iter().reset(sched);
+        StreamScheduler.Iter it = interest.reset(sched);
         for (Stream st = it.next(); st != null; st = it.next()) {
             if (!canSendNow(st)) continue;
             if (p == null || !p.out().lo.offered()) return true;
@@ -212,17 +269,18 @@ public final class Transmitter {
             if (m == null || sp.state() == Stream.SEND_DATA_RECVD || sp.state() == Stream.SEND_RESET_RECVD) continue;
             if (m.ret.finResend() && !sp.reset() && sp.finSent()) return true;
             long end = sp.reset() ? Math.min(sp.q().end(), sp.resetRel()) : sp.q().end();
-            for (int i = 0; i < m.ret.resend().size(); i++) {
-                if (Math.max(m.ret.resend().lo(i), sp.q().base()) < Math.min(m.ret.resend().hi(i), end)) return true;
-            }
+            if (m.ret.history.nextResend(sp.q().base()) < end) return true;
         }
         return false;
     }
 
     /** Whether control frames are due. */
-    boolean controlPending() {
-        if (ctl.pending()) return true;
+    boolean controlPending() { return controlPending(true); }
+
+    boolean controlPending(boolean historyRoom) {
+        if (historyRoom && ctl.pending()) return true;
         if (ka.wants()) return true;
+        if (port.state().compareTo(SessionState.CLOSING) < 0 && port.datagramAckDue()) return true;
         AckEngine ack = port.ack();
         if (ack != null && port.path().acksInControl() && ack.due(port.now())) return true;
         return false;
@@ -236,7 +294,10 @@ public final class Transmitter {
 
     /** Writes the queued datagrams that p's records hold. */
     void writeDatagrams(RecordWriter w, Pipe p) {
-        if (port.state().compareTo(SessionState.CLOSING) < 0) dg.write(w, p);
+        if (port.state().compareTo(SessionState.CLOSING) < 0) {
+            if (sched.isEmpty()) dg.write(w, p);
+            else dg.write(w, p, 7);
+        }
     }
 
     /** Whether the stream could put a frame out now; the same plan as sendChunk, so interest never spins (W8). */
@@ -244,7 +305,7 @@ public final class Transmitter {
         if (!st.tab.idSet()) {
             if (port.state().compareTo(SessionState.CLOSING) >= 0) return false; // never opened: nothing to send again
             int t = Stream.typeIndex(st.bidi);
-            if ((!port.established() && !earlyActive()) || !streams.idAvailable(t)) return false;
+            if (!port.established() || !streams.idAvailable(t)) return false;
             long pre = port.features().preamble() ? st.preSize() : 0;
             return pre == 0 || conn.room() >= pre;
         }
@@ -274,23 +335,54 @@ public final class Transmitter {
         if (ol.tx.closeSent || (state == SessionState.CLOSING && !life.closeWait())) return;
         if (!established) {
             ka.write(w, now, port.srtt());
-            if (earlyActive()) writeEarly(w);
             return;
         }
-        if (ps != null && Shaping.deferred(ps)) pipes.shaping().inject(w);
+        AckEngine ack = port.ack();
+        if (ack != null && ack.historyHeld(p)) {
+            // Once held, only lane zero advances. Its send-order tuples coalesce,
+            // leaving an ACK path even if a thin lane filled the regular index.
+            if (lane == 0) {
+                if (p.mp() == null) ack.write(w, now, false);
+                else {
+                    w.retainFor(p, ol.log.room());
+                    mp().pipeFrames(w, p);
+                }
+                if (ack.canMarkActivity(ol)) ka.write(w, now, port.srtt());
+            }
+            return;
+        }
+        if (ps != null && Shaping.deferred(ps) && !controlPending()
+                && (!(port.path() instanceof PathSession mp) || !mp.priorityControl(p))) {
+            pipes.shaping().inject(w);
+        }
         port.path().write(w, p, ol);
         if (ps != null) pipes.shaping().inject(w);
     }
 
-    boolean poll(long pipeId, long lane, Batch b, int max, long t) {
-        b.reset(pipeId, lane);
+    boolean poll(long pipeId, long lane, Batch b, int max, int recordWorkspace, long t, java.util.function.LongSupplier unsent) {
         Pipe p = pipes.get(pipeId);
         SessionState state = port.state();
         if (p == null || p.out() == null || p.out().failed() || state == SessionState.CLOSED) return false;
         Pipe.OutLane ol = p.out().lane(lane);
-        if (ol == null || ol.st.shut() || life.holdsFirst(pipeId)) return false;
+        if (ol == null || ol.st.shut() || ol.tx.writing || ol.tx.notWritable) return false;
+        if (!b.beginEncoding(pipeId, lane)) return false;
+        try {
+            if (encode(b, max, recordWorkspace, t, unsent, p, ol, state)) return true;
+        } catch (RuntimeException | Error failure) {
+            b.discard();
+            throw failure;
+        }
+        b.discard();
+        return false;
+    }
+
+    private boolean encode(Batch b, int max, int recordWorkspace, long t, java.util.function.LongSupplier unsent,
+                           Pipe p, Pipe.OutLane ol, SessionState state) {
+        long pipeId = p.id;
+        long lane = ol.lane;
         RecordWriter w = writer;
         w.init(b, ol.st.info().framing(), recMax(ol), max);
+        w.chargeRecordWorkspace(recordWorkspace);
         AckEngine ack = port.ack();
         boolean established = port.established();
         long now = port.now();
@@ -301,7 +393,6 @@ public final class Transmitter {
         Shaping.PipeShape ps = null;
         if (pipes.shaping() != null && (ps = pipes.shaping().of(p)) != null) {
             w.shape(ps);
-            w.limitData(ps.room(w, now, w.dataRoom()));
         }
         if (pipeId == 0 && lane == 0 && !ol.tx.tpSent) {
             // A planned delay never holds CONNECTION_CLOSE, nor the parameters that lead it.
@@ -310,13 +401,16 @@ public final class Transmitter {
         }
         writeContent(w, p, ol, lane, state, established, ps, now);
         w.end();
-        if (ps != null) ps.spent(w.dataSpent());
-        if (pipes.shaping() != null) for (int i = w.pingRequests(); i > 0; i--) pipes.shaping().mark(now);
+        if (w.pingRequests() != 0) ka.markPing(now);
         if (w.dataSpent() > 0) lanes.tookTurn(p, ol);
-        if (b.n() == 0) {
-            if (ack != null && !ol.tx.notWritable) p.out().snd.re().appLimited(p.out().snd.so());
-            return false;
+        if (pipes.shaping() != null) {
+            pipes.shaping().commit(w);
+            w.committed();
         }
+        if (b.n() == 0) return false;
+        if (unsent != null) ol.tx.unsent = Math.max(-1, unsent.getAsLong());
+        if (w.dataSpent() != 0) ol.shapeDelay.reset();
+        b.committed(ol, w.framing(), ps != null && ps.wantsOutbound() ? ps : null);
         afterBatch(w, p, ol);
         if (ack != null) {
             if ((w.budget() < 1024 || w.dataRoom() == 0) && dataPendingOn(null, null)) p.out().snd.re().blocked();
@@ -325,13 +419,21 @@ public final class Transmitter {
         ol.tx.writing = true;
         ol.tx.inCall = b.bytes();
         if (!ol.tx.notWritable) ol.tx.stallAt = t;
+        if (outputRemains(p, ol)) pipes.wakeWriters();
         return true;
     }
 
     /** Own bytes sent: no padding, injections or copies. */
     private long earnBytes;
+    private long maxBidiSent = -1, maxUniSent = -1;
+    private long dataBlockedSent = -1, bidiBlockedSent = -1, uniBlockedSent = -1;
 
     long earnBytes() { return earnBytes; }
+    void earn(long n) {
+        if (n == 0) return;
+        earnBytes = WireMeter.addSat(earnBytes, n);
+        if (pipes.shaping() != null) pipes.shaping().earn(n);
+    }
 
     /** Accounts positions and statistics of a produced batch. */
     void afterBatch(RecordWriter w, Pipe p, Pipe.OutLane ol) {
@@ -346,14 +448,6 @@ public final class Transmitter {
         if (w.anyElicit()) ol.tx.elicitPos = w.framing() == Framing.RECORDS ? ol.tx.pos : startPos + w.elicitEnd();
         for (Stream st : w.touched) Lanes.boundEnd(st, ol.tx.pos);
         stats.sent(pos, w.recs());
-        // Earned are the bytes given to the carrier: a message carries no size field.
-        long given = pos;
-        if (w.framing() == Framing.RECORDS) {
-            given = 0;
-            for (int i = 0; i < b.messageCount(); i++) given += b.recordSize(i);
-        }
-        long earned = given - Math.min(given, w.notEarned());
-        earnBytes += earned;
         p.out().recordsWritten(w.recs());
         AckEngine ack = port.ack();
         long now = port.now();
@@ -378,18 +472,20 @@ public final class Transmitter {
     }
 
     /** A batch was written or failed: releases its references and the lane's writing state. */
-    void written(Batch b, boolean ok, long t) {
+    void written(Batch b, int confirmed, boolean ok, long t) {
+        b.complete(this, pipes.shaping(), confirmed);
         b.release();
         Pipe p = pipes.get(b.pipe());
         if (p != null && p.out() != null) {
             Pipe.OutLane ol = p.out().lane(b.lane());
-            if (ol != null) {
+            if (ol != null && ol == b.owner()) {
                 ol.tx.writing = false;
                 // Nothing follows CONNECTION_CLOSE on a lane and a lane has one batch in a write
                 // at a time: once it was built, this write carried it.
                 ol.tx.closeDone = ol.tx.closeSent && ok;
                 ol.tx.inCall = 0;
                 if (ol.tx.notWritable) ol.tx.stallAt = t;
+                if (ok && outputRemains(p, ol)) pipes.wakeWriters();
             }
         }
     }
@@ -408,6 +504,8 @@ public final class Transmitter {
         if (p == null || p.out() == null) return;
         Pipe.OutLane ol = p.out().lane(lane);
         if (ol == null || ol.tx.notWritable == !writable) return;
+        Shaping.PipeShape shape = p.shape();
+        if (shape != null) shape.writableChanged(ol, port.now());
         ol.tx.notWritable = !writable;
         if (!writable && !ol.tx.writing) ol.tx.stallAt = t;
         if (port.ack() != null) {
@@ -423,23 +521,16 @@ public final class Transmitter {
         byte[] block = cfg.local().toBytes();
         int n = VarInt.length(FrameType.TRANSPORT_PARAMETERS) + VarInt.length(block.length) + block.length;
         // Held by a planned delay of the first record: they still lead the pipe once it ends.
-        if (!w.frame(n, true, bb -> FrameEncoder.transportParameters(bb, block))) return;
+        if (!w.setupFrame(n, true, bb -> FrameEncoder.transportParameters(bb, block))) return;
         ol.tx.tpSent = true;
         if (!ol.st.info().minRtt() && !cfg.test().enabled()) ka.requestFirst();
-    }
-
-    /** Writes the fence and the early STREAM frames. */
-    private void writeEarly(RecordWriter w) {
-        if (!dataPendingOn(null, null)) return;
-        if (!early.writeFence(w)) return;
-        writeData(w, null, null);
     }
 
     /** The single pipe's records: control ahead of data on lane 0, data only on the other lanes. */
     void writeSingle(RecordWriter w, Pipe p, Pipe.OutLane ol) {
         boolean lane0 = ol.lane == 0;
         if (lane0) writeControl(w, p);
-        writeData(w, p, ol);
+        writeData(w, p, ol, null);
         if (lane0 && ctl.pendingAfterData()) writeControl(w, p);
     }
 
@@ -452,12 +543,18 @@ public final class Transmitter {
         long now = port.now();
         if (ack != null && path.acksInControl()) ack.write(w, now, ctl.creditPending());
         ka.writeResponse(w);
+        if (port.state().compareTo(SessionState.CLOSING) < 0) port.writeDatagramAcks(w);
+        if (!w.historyRoom()) {
+            ka.write(w, now, port.srtt());
+            writeDatagrams(w, p);
+            return;
+        }
         if (ctl.maxData()) {
             tuner.connUpdate();
             long v = conn.maxDataValue();
             if (conn.maxDataWanted(v, ctl.maxDataForced())) {
-                if (!w.frame(1 + VarInt.length(v), true, bb -> FrameEncoder.maxData(bb, v))) return;
-                w.logFrame(FrameDesc.of(FrameDesc.Kind.MAX_DATA));
+                if (!w.trackedFrame(1 + VarInt.length(v), v <= conn.advertised(),
+                        bb -> FrameEncoder.maxData(bb, v), FrameDesc.of(FrameDesc.Kind.MAX_DATA))) return;
                 ctl.forceMaxDataDone();
                 path.maxDataSent(conn.peerBlocked() || conn.received() >= conn.advertised());
                 conn.maxDataSent(v, now);
@@ -468,8 +565,10 @@ public final class Transmitter {
             if (ctl.maxStreams(t)) {
                 long v = streams.remoteLimit(t);
                 boolean bidi = t == 0;
-                if (!w.frame(1 + VarInt.length(v), true, bb -> FrameEncoder.maxStreams(bb, bidi, v))) return;
-                w.logFrame(new FrameDesc(FrameDesc.Kind.MAX_STREAMS, bidi, false, 0, 0, 0, 0));
+                if (!w.trackedFrame(1 + VarInt.length(v), v == (bidi ? maxBidiSent : maxUniSent),
+                        bb -> FrameEncoder.maxStreams(bb, bidi, v),
+                        new FrameDesc(FrameDesc.Kind.MAX_STREAMS, bidi, false, 0, 0, 0, 0))) return;
+                if (bidi) maxBidiSent = v; else maxUniSent = v;
                 ctl.maxStreamsDone(t);
             }
         }
@@ -480,16 +579,19 @@ public final class Transmitter {
         }
         if (ctl.dataBlocked() && conn.blockedAtLimit()) {
             long v = conn.sendMax();
-            if (!w.frame(1 + VarInt.length(v), true, bb -> FrameEncoder.dataBlocked(bb, v))) return;
-            w.logFrame(FrameDesc.of(FrameDesc.Kind.DATA_BLOCKED));
+            if (!w.trackedFrame(1 + VarInt.length(v), v == dataBlockedSent,
+                    bb -> FrameEncoder.dataBlocked(bb, v), FrameDesc.of(FrameDesc.Kind.DATA_BLOCKED))) return;
+            dataBlockedSent = v;
         }
         ctl.dataBlockedDone();
         for (int t = 0; t < 2; t++) {
             if (ctl.streamsBlocked(t) && streams.streamsBlockedAtLimit(t)) {
                 long v = streams.localLimit(t);
                 boolean bidi = t == 0;
-                if (!w.frame(1 + VarInt.length(v), true, bb -> FrameEncoder.streamsBlocked(bb, bidi, v))) return;
-                w.logFrame(new FrameDesc(FrameDesc.Kind.STREAMS_BLOCKED, bidi, false, 0, 0, 0, 0));
+                if (!w.trackedFrame(1 + VarInt.length(v), v == (bidi ? bidiBlockedSent : uniBlockedSent),
+                        bb -> FrameEncoder.streamsBlocked(bb, bidi, v),
+                        new FrameDesc(FrameDesc.Kind.STREAMS_BLOCKED, bidi, false, 0, 0, 0, 0))) return;
+                if (bidi) bidiBlockedSent = v; else uniBlockedSent = v;
             }
             ctl.streamsBlockedDone(t);
         }
@@ -549,7 +651,7 @@ public final class Transmitter {
         p.avail = 0;
         p.fin = p.open = p.preBlocked = p.resend = false;
         PathStreamState m = sp.mps();
-        if (m != null && (m.ret.resend().size() > 0 || m.ret.finResend()) && planResend(st, p)) return p;
+        if (m != null && (m.ret.history.resendBytes() != 0 || m.ret.finResend()) && planResend(st, p)) return p;
         // A closing session sends again what it sent before, never new data: the application's writes ended at the close.
         if (port.state().compareTo(SessionState.CLOSING) >= 0) return p;
         p.off = Math.max(sp.sent(), sp.q().base());
@@ -561,6 +663,7 @@ public final class Transmitter {
         if (p.n > MAX_STREAM_FRAME) p.n = MAX_STREAM_FRAME;
         if (p.off >= sp.sent()) {
             p.n = Math.min(p.n, port.path().retainRoom());
+            if (m != null) p.n = m.ret.history.allowed(p.off, p.n);
         }
         if (p.off == 0 && sp.preLen() > 0 && p.n < sp.preLen()) {
             p.n = 0;
@@ -582,13 +685,10 @@ public final class Transmitter {
         StreamSend.SendPart sp = st.snd;
         PathStreamState m = sp.mps();
         p.resend = true;
-        while (m.ret.resend().size() > 0) {
-            long lo = Math.max(m.ret.resend().lo(0), sp.q().base()), hi = Math.min(m.ret.resend().hi(0), sp.q().end());
-            if (sp.reset()) hi = Math.min(hi, sp.resetRel());
-            if (lo >= hi) {
-                m.ret.dropFirstResend();
-                continue;
-            }
+        long lo = m.ret.history.nextResend(sp.q().base());
+        long end = sp.reset() ? Math.min(sp.q().end(), sp.resetRel()) : sp.q().end();
+        if (lo < end) {
+            long hi = Math.min(end, m.ret.history.resendEnd(lo));
             p.off = lo;
             p.n = Math.min(hi - lo, MAX_STREAM_FRAME);
             if (lo == 0 && sp.preLen() > p.n) p.n = Math.min(sp.preLen(), sp.q().end());
@@ -606,26 +706,24 @@ public final class Transmitter {
     }
 
     /** Writes stream data in priority order; with lanes, only the directions bound to ol. */
-    void writeData(RecordWriter w, Pipe p, Pipe.OutLane ol) {
+    void writeData(RecordWriter w, Pipe p, Pipe.OutLane ol, Stream reserved) {
         Pipe lp = p != null && p.out().lo.offered() ? p : null;
         PathScheduler.Decision d = p != null && p.mp() != null ? mp().scheduler.decision() : null;
-        while (w.room() > 0 && !sched.isEmpty()) {
+        while (w.historyRoom() && w.room() > 0 && !sched.isEmpty()) {
             boolean progressed = false;
             StreamScheduler.Iter it = schedIter.reset(sched);
             for (Stream st = it.next(); st != null; st = it.next()) {
-                if (d != null && (!canSendNow(st) || !mp().scheduler.onPipe(d, st))) continue;
+                if (d != null && (!canSendNow(st) || (st != reserved && !mp().scheduler.onPipe(d, st)))) continue;
+                if (st == reserved) reserved = null;
                 if (lp != null) {
                     if (!canSendNow(st)) continue;
-                    boolean elsewhere = lanes.laneFor(lp, st) != ol;
-                    lanes.bind(lp, st);
-                    if (elsewhere) continue;
+                    if (lanes.bind(lp, st, ol) != ol) continue;
                 }
-                boolean opening = !st.tab.opened();
                 int r = sendChunk(w, st, d);
                 if (r == CHUNK_FULL) return;
                 if (r == CHUNK_SENT) {
                     // Datagrams held for the opening frame go right behind it, on lane 0 where datagrams go.
-                    if (opening && p != null && ol.lane == 0 && dg.queued()) writeDatagrams(w, p);
+                    if (p != null && ol.lane == 0 && dg.queued()) dg.write(w, p, st.tab.urgency());
                     if (lp != null) {
                         // This direction already owns bytes in the batch being built. Its
                         // final lane position is known only in afterBatch; do not rebind
@@ -644,17 +742,9 @@ public final class Transmitter {
     /** Puts the next frame of st into the record; d is the multipath decision, or null. */
     private int sendChunk(RecordWriter w, Stream st, PathScheduler.Decision d) {
         StreamSend.SendPart sp = st.snd;
-        boolean established = port.established();
         if (!st.tab.idSet()) {
             if (!canSendNow(st)) {
-                int t = Stream.typeIndex(st.bidi);
-                if (established && !streams.idAvailable(t)) streams.markStreamsBlocked(t);
-                if ((established || earlyActive()) && port.features().preamble() && streams.idAvailable(t)) {
-                    if (!streams.preambleAllowed(st, send)) return CHUNK_SKIP;
-                    // The preamble does not fit the session credit: allocate and report the block.
-                    streams.allocId(st);
-                    blockedOn(st, false, true);
-                }
+                noteCreditBlock(st);
                 return CHUNK_SKIP;
             }
             if (!streams.preambleAllowed(st, send)) return CHUNK_SKIP;
@@ -683,10 +773,6 @@ public final class Transmitter {
         }
         int head = FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) n, true);
         int fits = w.room() - head; // plans a record when shaped
-        if (off == 0 && Math.max(fits, 0) < sp.preLen() && w.waiveCutFor(head, sp.preLen())) {
-            fits = (int) sp.preLen();
-            pipes.shaping().clamp();
-        }
         int room = w.dataFit(fits);
         if (room <= 0) return CHUNK_FULL;
         if (n > room) {
@@ -698,34 +784,47 @@ public final class Transmitter {
             n = room;
             fin = false;
         }
-        long want = n;
-        boolean wantFin = fin;
-        java.nio.ByteBuffer data = null;
-        Pin pin = Pin.NONE;
-        if (n > 0) {
-            // The chunk plan only offers queued bytes, so off lies within the queue.
-            SendQueue.Peek pk = java.util.Objects.requireNonNull(sp.q().peek(off, (int) n), "chunk outside the send queue");
-            data = pk.data();
-            pin = pk.pin();
-            if (data.remaining() < n) {
-                n = data.remaining();
+        boolean trackNew = !resend && n != 0 && port.path().retainsSent();
+        if (trackNew) {
+            long paid = sp.reserveHistory(off, n);
+            if (paid < n) {
+                if (paid == 0 || (off == 0 && paid < sp.preLen())) {
+                    sp.finishHistory(sp.sent());
+                    return CHUNK_SKIP;
+                }
+                n = paid;
                 fin = false;
             }
         }
-        if (!w.stream(st.tab.id(), off, data, pin, fin)) return CHUNK_FULL;
+        long want = n;
+        boolean wantFin = fin;
+        SendQueue.Peek fragment = null;
+        if (n > 0) {
+            // The chunk plan only offers queued bytes, so off lies within the queue.
+            fragment = java.util.Objects.requireNonNull(sp.q().peek(off, (int) n), "chunk outside the send queue");
+            if (fragment.data().remaining() < n) {
+                n = fragment.data().remaining();
+                fin = false;
+            }
+        }
+        if (!w.stream(st, off, fragment, fin, !resend)) {
+            if (trackNew) sp.finishHistory(sp.sent());
+            return CHUNK_FULL;
+        }
         while (n < want) {
             SendQueue.Peek more = sp.q().peek(off + n, (int) (want - n));
             if (more == null || !more.data().hasRemaining()) break;
             boolean f2 = wantFin && n + more.data().remaining() == want;
-            if (!w.stream(st.tab.id(), off + n, more.data(), more.pin(), f2)) break;
+            if (!w.stream(st, off + n, more, f2, !resend)) break;
             n += more.data().remaining();
             fin = f2;
         }
-        w.logFrame(FrameDesc.stream(st.tab.id(), off, n, fin));
+        if (n > 0 && d != null && mp().scheduler.policyOf(st) == CoreConfig.Policy.CUSTOM) w.constrainDelivery();
+        if (trackNew) sp.finishHistory(Math.max(sp.sent(), off + n));
+        w.logFrame(trackNew ? FrameDesc.originalStream(st.tab.id(), off, n, fin) : FrameDesc.stream(st.tab.id(), off, n, fin));
         st.payloadSent(off, n);
         w.spendData(n);
         if (resend) {
-            w.copied(st.tab.id(), off, n);
             if (d != null) mp().resume.resent(d.p(), n);
             PathStreamState m = sp.mps();
             if (off == 0 && d != null) m.openedOn(d.p()); // a reinjected copy of the opening frame
@@ -736,7 +835,6 @@ public final class Transmitter {
         if (d != null && !st.tab.opened()) sp.mp().openedOn(d.p());
         send.writing(st);
         if (dg.queued()) pipes.wakeWriters();
-        if (!established) early.sent();
         if (d != null) mp().scheduler.chunkSent(d, w, st, off, n, fin);
         PathLayer path = port.path();
         long grown = send.dataWritten(st, off + n, fin);
@@ -763,7 +861,6 @@ public final class Transmitter {
     /** Queues STREAM_DATA_BLOCKED / DATA_BLOCKED once per limit. */
     private void blockedOn(Stream st, boolean stream, boolean connBlocked) {
         if (stream && send.markBlocked(st)) ctl.stream(st, ControlQueue.BLOCKED);
-        if (stream) port.path().creditBlocked(st);
         if (connBlocked && conn.markBlocked()) {
             ctl.wantDataBlocked();
         }
@@ -804,7 +901,7 @@ public final class Transmitter {
 
         /** Q_p's part of this lane: the write call in progress plus the carrier's unsent bytes. */
         long queued() {
-            return inCall + Math.max(0, unsent);
+            return Time.add(inCall, Math.max(0, unsent));
         }
 
         long pos() {

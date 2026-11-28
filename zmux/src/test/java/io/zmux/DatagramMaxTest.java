@@ -19,18 +19,18 @@ class DatagramMaxTest {
              ZmuxSession c = dial.dial(l.localAddress(), cfg); ZmuxSession s = l.accept(Duration.ofSeconds(5))) {
             int max = c.datagrams().maxPayload();
             assertTrue(max > 0);
-            assertTrue(c.datagrams().send(ByteBuffer.allocate(max)));
+            c.datagrams().send(ByteBuffer.allocate(max));
             assertEquals(max, s.datagrams().receive(Duration.ofSeconds(5)).length);
             assertThrows(DatagramTooLargeException.class, () -> c.datagrams().send(ByteBuffer.allocate(max + 1)));
 
             ZmuxStream st = c.openStream(); st.flush();
             ZmuxStream peer = s.acceptStream(Duration.ofSeconds(5));
             int smax = st.maxDatagramPayload(300);
-            assertTrue(st.sendDatagram(300, ByteBuffer.allocate(smax)));
+            st.sendDatagram(300, ByteBuffer.allocate(smax));
             StreamDatagram d = peer.receiveDatagram(Duration.ofSeconds(5));
             assertEquals(300, d.context()); assertEquals(smax, d.payload().length);
             assertThrows(DatagramTooLargeException.class, () -> st.sendDatagram(300, ByteBuffer.allocate(smax + 1)));
-            assertTrue(c.datagrams().send(ByteBuffer.allocate(1)), "nothing is stuck");
+            c.datagrams().send(ByteBuffer.allocate(1));
             assertEquals(1, s.datagrams().receive(Duration.ofSeconds(5)).length);
             st.close(); peer.close();
         }

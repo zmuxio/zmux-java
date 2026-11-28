@@ -19,8 +19,8 @@ class KeepAliveOnceTest {
             Session client = new Session(config.build(), 0);
             Session server = new Session(peer.build(), 0);
             var carrier = new CarrierInfo(Framing.BYTES, false, true, false, true);
-            client.attachBootstrap(carrier, carrier, null);
-            server.attachBootstrap(carrier, carrier, null);
+            client.attachBootstrap(carrier, carrier);
+            server.attachBootstrap(carrier, carrier);
             HeldControlTest.pump(client, server);
             client.handleTimeout(precise - 1);
             assertEquals(SessionState.ACTIVE, client.state(), () -> String.valueOf(client.error()));
@@ -31,9 +31,33 @@ class KeepAliveOnceTest {
         }
     }
 
+    @Test void idleCloseEndsAtTheHandoffDeadlineEvenWhenTheCarrierDoesNotComplete() throws Exception {
+        long idle = 10 * Time.SECOND;
+        var session = CounterSemanticsTest.established(cfg -> {
+            cfg.localIdleTimeout(idle).keepAlive(CoreConfig.OFF).probeInterval(0);
+            cfg.local().maxIdleTimeoutMillis = idle / Time.MILLISECOND;
+        });
+        session.handleTimeout(idle);
+        assertEquals(SessionError.Kind.IDLE, session.error().kind());
+        var batch = new Batch();
+        assertTrue(session.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, idle), "the idle close reached the writer");
+        try {
+            long deadline = idle + Session.closeLimit;
+            session.handleTimeout(deadline - 1);
+            assertEquals(SessionState.CLOSING, session.state());
+            session.handleTimeout(deadline);
+            assertEquals(SessionState.CLOSED, session.state());
+            assertEquals(SessionError.Kind.IDLE, session.error().kind());
+        } finally {
+            session.writeDone(batch, new java.io.IOException("scripted carrier release"), session.now());
+        }
+    }
+
     @Test void aKeepAliveIsRequestedAtMostOnceAfterEachActivity() {
         int[] writes = {0};
         KeepAlive.Port port = new KeepAlive.Port() {
+            @Override public long now() { return 0; }
+            @Override public boolean peerZmux() { return true; }
             @Override public void wantWrite() { writes[0]++; }
             @Override public void budgetExhausted() {}
             @Override public void pingMeasured(long rtt) {}

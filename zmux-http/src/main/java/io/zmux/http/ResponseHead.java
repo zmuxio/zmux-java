@@ -9,6 +9,7 @@ import java.util.function.Consumer;
 final class ResponseHead implements Upgrade {
     private final CompletableFuture<Void> opened = new CompletableFuture<>();
     private final CompletableFuture<Void> released = new CompletableFuture<>();
+    private final java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
     private final Consumer<ResponseHead> submit;
 
     ResponseHead(Consumer<ResponseHead> submit, Runnable abort) {
@@ -17,6 +18,7 @@ final class ResponseHead implements Upgrade {
     }
 
     @Override public CompletableFuture<Void> open() {
+        if (!submitted.compareAndSet(false, true)) return opened;
         try { submit.accept(this); }
         catch (RuntimeException error) { written(error); }
         return opened;

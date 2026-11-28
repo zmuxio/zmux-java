@@ -11,7 +11,7 @@ import java.util.List;
 final class SinglePath implements PathLayer {
     /** The session's single-pipe handling. */
     interface Port {
-        boolean wantsWrite(Pipe p, Pipe.OutLane ol);
+        boolean wantsControl(Pipe p, Pipe.OutLane ol);
 
         void write(RecordWriter w, Pipe p, Pipe.OutLane ol);
 
@@ -30,12 +30,11 @@ final class SinglePath implements PathLayer {
         this.port = port;
     }
 
-    @Override public boolean wantsWrite(Pipe p, Pipe.OutLane ol) { return port.wantsWrite(p, ol); }
+    @Override public boolean wantsControl(Pipe p, Pipe.OutLane ol) { return port.wantsControl(p, ol); }
     @Override public void write(RecordWriter w, Pipe p, Pipe.OutLane ol) { port.write(w, p, ol); }
     @Override public boolean acksInControl() { return true; }
     @Override public void maxDataSent(boolean peerWaiting) {}
     @Override public void maxStreamDataSent(Stream st, boolean peerWaiting) {}
-    @Override public void creditBlocked(Stream st) {}
     @Override public boolean urgentLane(Stream st) { return st.tab.urgency() <= 2; }
 
     @Override public long sendBuffer(long configured) { return configured; }
@@ -52,11 +51,10 @@ final class SinglePath implements PathLayer {
         throw WireException.protocol(f.kind + " without multipath");
     }
 
-    @Override public void onPipeAck(Frame.AckEntries it) throws WireException { port.onPipeAck(it); }
+    @Override public void onPipeAck(Pipe received, Frame.AckEntries it) throws WireException { port.onPipeAck(it); }
     @Override public void inboundEnded(Pipe p, boolean failed, boolean allEnded, Throwable cause) { port.inboundEnded(failed, allEnded, cause); }
     @Override public void outboundFailed(long pipe, Throwable cause) { port.outboundFailed(cause); }
 
-    @Override public long deadline(long now) { return Time.NEVER; }
     @Override public void onTimeout(long t) {}
 
     @Override public long srttMax() { return port.srttMax(); }

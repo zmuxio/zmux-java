@@ -5,18 +5,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 
-/** Shared localhost certificate for the HTTP adapter tests. */
+/** Shared localhost certificate for the Netty adapter tests. */
 public final class TestTls {
     private TestTls() {}
     private static final char[] PASS = "changeit".toCharArray();
+    private static final Object LOCK = new Object();
     private static final AtomicReference<KeyStore> STORE = new AtomicReference<>();
 
-    private static synchronized KeyStore store() throws IOException, GeneralSecurityException, InterruptedException {
+    private static KeyStore store() throws IOException, GeneralSecurityException, InterruptedException {
+        synchronized (LOCK) { return loadStore(); }
+    }
+
+    private static KeyStore loadStore() throws IOException, GeneralSecurityException, InterruptedException {
         KeyStore cached = STORE.get();
         if (cached != null) return cached;
         Path dir = Path.of("target", "tls");
@@ -52,5 +59,21 @@ public final class TestTls {
         var t = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         t.init(store());
         return t;
+    }
+
+    /** Exports the same certificate and key for a native interop peer. */
+    public static Path[] pem() throws IOException, GeneralSecurityException, InterruptedException {
+        synchronized (LOCK) {
+            var store = loadStore();
+            Path dir = Path.of("target", "tls");
+            String name = "localhost-" + ProcessHandle.current().pid();
+            var encoder = Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII));
+            Path cert = dir.resolve(name + ".crt"), key = dir.resolve(name + ".key");
+            Files.writeString(cert, "-----BEGIN CERTIFICATE-----\n" + encoder.encodeToString(store.getCertificate("localhost").getEncoded())
+                    + "\n-----END CERTIFICATE-----\n");
+            Files.writeString(key, "-----BEGIN PRIVATE KEY-----\n" + encoder.encodeToString(store.getKey("localhost", PASS).getEncoded())
+                    + "\n-----END PRIVATE KEY-----\n");
+            return new Path[] {cert, key};
+        }
     }
 }

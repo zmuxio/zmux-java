@@ -1,5 +1,6 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.core.TimerHeap;
 import io.zmux.internal.spi.AttachmentRelease;
 
 import io.zmux.internal.spi.AdapterPorts;
@@ -532,7 +533,7 @@ public final class CarrierSetup implements io.zmux.internal.spi.AdapterPorts.Set
     private static final class OpeningDeadline extends TimerHeap.Timer implements Runnable {
         private final CompletableFuture<Boolean> elapsed = new CompletableFuture<>();
 
-        @Override void fire(long now) { elapsed.complete(true); }
+        @Override public void fire(long now) { elapsed.complete(true); }
         @Override public void run() { elapsed.complete(false); }
 
         static void watch(SessionHost loop, CompletableFuture<Void> released, java.util.function.Consumer<Boolean> expired) {

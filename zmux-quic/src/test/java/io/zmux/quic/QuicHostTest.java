@@ -68,7 +68,7 @@ class QuicHostTest {
 
     @Test void quicPipesJoinASessionHostedOnAnotherLoop() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
+            var config = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(3))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listen(QuicTest.any(), ListenerConfig.of(config));
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);

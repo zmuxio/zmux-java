@@ -2,6 +2,8 @@ package io.zmux.seal;
 
 import io.zmux.RecordMode;
 import io.zmux.carrier.HandshakeShaper;
+import io.zmux.shaping.ProfileLimits;
+import io.zmux.shaping.ShapingBudget;
 import io.zmux.shaping.ShapingLimits;
 import java.time.Duration;
 import java.util.List;
@@ -32,6 +34,7 @@ public final class ClientConfig {
     private final HandshakeShaper shaper;
     private final Duration handshakeTimeout; // null: none
     private final ShapingLimits shapingLimits;
+    private final ProfileLimits shapingProfile;
 
     private ClientConfig(Builder b) {
         anchor = b.anchor;
@@ -54,6 +57,7 @@ public final class ClientConfig {
         shaper = b.shaper;
         handshakeTimeout = b.handshakeTimeout;
         shapingLimits = b.shapingLimits;
+        shapingProfile = b.shapingProfile;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -112,6 +116,13 @@ public final class ClientConfig {
     /** The limits on the shaper's plans. */
     public ShapingLimits shapingLimits() { return shapingLimits; }
 
+    /** The selected Establish profile. Defaults to Lightweight. */
+    public ProfileLimits shapingProfile() { return shapingProfile; }
+
+    ShapingLimits.Effective establishLimits() {
+        return shapingLimits.under(new ShapingBudget(null, shapingProfile, false));
+    }
+
     /** The stored bound on the application data of a received message: bytes, or {@link #NO_BOUND}. */
     int maxAppDataBound() { return maxAppData; }
 
@@ -140,6 +151,7 @@ public final class ClientConfig {
         private HandshakeShaper shaper;
         private Duration handshakeTimeout = DEFAULT_HANDSHAKE_TIMEOUT;
         private ShapingLimits shapingLimits = ShapingLimits.defaults();
+        private ProfileLimits shapingProfile = ProfileLimits.LIGHTWEIGHT;
 
         private Builder() {}
 
@@ -223,6 +235,12 @@ public final class ClientConfig {
 
         /** The limits on the shaper's plans; the defaults unless set. */
         public Builder shapingLimits(ShapingLimits l) { shapingLimits = Objects.requireNonNull(l, "shapingLimits"); return this; }
+
+        /** Supplies the session's selected profile before Establish writes its first message. */
+        public Builder shapingProfile(ProfileLimits profile) {
+            shapingProfile = Objects.requireNonNull(profile, "shapingProfile");
+            return this;
+        }
 
         public ClientConfig build() { return new ClientConfig(this); }
     }

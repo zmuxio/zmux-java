@@ -24,8 +24,6 @@ import io.zmux.HttpTarget;
 import io.zmux.JoinHint;
 import io.zmux.PipeOptions;
 import io.zmux.ZmuxFuture;
-import io.zmux.ZmuxPipe;
-import io.zmux.ZmuxSession;
 import io.zmux.carrier.PipeIo;
 import io.zmux.http.internal.HttpTransport;
 import java.io.IOException;
@@ -49,7 +47,7 @@ import javax.net.ssl.TrustManagerFactory;
 /**
  * Opens HTTP carriers on Netty: streaming requests ({@link #pipe}, {@link #splitPipe}), the
  * exchange carrier ({@link #exchangePipe}) and WebSockets ({@link #webSocketPipe}), each also as
- * a {@link Candidate} for {@link io.zmux.Zmux#dial(io.zmux.CarrierChoice, io.zmux.ZmuxConfig, io.zmux.CarrierChoicePolicy)}.
+ * a {@link Candidate} for {@link io.zmux.SessionController}.
  * HTTPS uses HTTP/2 when the server's ALPN offers it and HTTP/1.1 otherwise; cleartext HTTP uses
  * HTTP/1.1, or HTTP/2 by prior knowledge ({@link Builder#http2()}). Streaming carriers over
  * HTTP/1.1 get a connection of their own, which closes with them. HTTP/2 and explicit
@@ -59,7 +57,21 @@ import javax.net.ssl.TrustManagerFactory;
 public final class HttpCarrierClient implements AutoCloseable {
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    static { HttpTransport.installClientBuilder(Builder::requestTransport); }
+    static {
+        HttpTransport.installClientAccess(new HttpTransport.ClientAccess() {
+            @Override public Builder select(Builder builder, HttpTransport.Client transport) {
+                return builder.requestTransport(transport);
+            }
+
+            @Override public CompletableFuture<Channel> open(HttpCarrierClient client, URI target) {
+                return client.conns.open(target, false, false);
+            }
+
+            @Override public HttpTransport.Client transport(HttpCarrierClient client) { return client.conns.h3; }
+
+            @Override public int openConnections(HttpCarrierClient client) { return client.conns.open(); }
+        });
+    }
     private final EventLoopGroup group;
     private final boolean ownGroup;
     final Connections conns;
@@ -162,25 +174,27 @@ public final class HttpCarrierClient implements AutoCloseable {
                 (cred, t) -> StreamingRequest.open(this, url, headers, PipeOptions.Direction.BIDIRECTIONAL, cred, target)).withTarget(target);
     }
 
-    /**
-     * Joins a split carrier to session as one further pipe: one Join across a paired POST and GET
-     * ({@link #splitPipe}: one join across a paired POST and GET), presenting credential as {@link #pipe} does. A
-     * {@link io.zmux.PipePool#join pool} keeps such pipes as members:
-     * {@code PipePool.join(a -> List.of(client.splitJoin(a.session(), url, headers, cred, a.options())))}.
-     */
-    public ZmuxPipe splitJoin(ZmuxSession session, URI url, Map<String, List<String>> headers, CarrierCredential credential,
-                              PipeOptions options) throws IOException {
-        return session.addPipe(splitPipe(url, headers, credential, null), options);
+    /** Opens a paired POST and GET for either Bootstrap or Join. */
+    public io.zmux.CarrierOpener splitOpener(URI url, Map<String, List<String>> headers) {
+        HttpTarget target = new HttpTarget(url.toString());
+        return (setup, request) -> {
+            var opened = new java.util.ArrayList<PipeIo>();
+            try {
+                for (int i = 0; i < request.layout().size(); i++) {
+                    if (setup.isCancelled()) throw new java.io.InterruptedIOException("carrier setup cancelled");
+                    opened.add(splitPipe(url, headers, request.credential(), target));
+                }
+                return new io.zmux.CarrierOpener.Opened(opened);
+            } catch (IOException | RuntimeException failure) {
+                return new io.zmux.CarrierOpener.Opened(opened, failure);
+            }
+        };
     }
 
-    /**
-     * A split bootstrap ({@link #splitPipe}) to url as a candidate; as a further pipe of a session it
-     * joins with {@link #splitJoin}.
-     */
+    /** A split carrier with a shared redirect target. */
     public Candidate splitCandidate(URI url, Map<String, List<String>> headers) {
         HttpTarget target = new HttpTarget(url.toString());
-        return new Candidate(CarrierKind.SPLIT, (cred, t) -> splitPipe(url, headers, cred, target),
-                (session, options, cred, t) -> List.of(session.addPipe(splitPipe(url, headers, cred, target), options))).withTarget(target);
+        return Candidate.of(CarrierKind.SPLIT, (cred, t) -> splitPipe(url, headers, cred, target)).withTarget(target);
     }
 
     // ---- WebSocket carriers ----
@@ -258,19 +272,29 @@ public final class HttpCarrierClient implements AutoCloseable {
     }
 
     <T> T await(CompletableFuture<T> f, String what) throws IOException {
+        if (!f.isDone() && conns.onBorrowedLoop()) {
+            abandon(f);
+            throw new IllegalStateException("blocking HTTP request on the connection loop");
+        }
         try {
             return f.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            f.thenAccept(x -> { if (x instanceof Channel c) c.close(); });
+            abandon(f);
             throw new InterruptedIOException("interrupted");
         } catch (TimeoutException e) {
-            f.thenAccept(x -> { if (x instanceof Channel c) c.close(); });
+            abandon(f);
             throw new SocketTimeoutException(what + " timed out");
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException r) throw r;
             throw e.getCause() instanceof io.zmux.ZmuxException z ? z : new io.zmux.CarrierFailedException(what + " failed", e.getCause());
         }
+    }
+
+    private static void abandon(CompletableFuture<?> opening) {
+        // H3 owns and can cancel an individual request, including its pending stream-credit wait.
+        if (opening instanceof Connections.RequestOpening && opening.cancel(false)) return;
+        opening.thenAccept(value -> { if (value instanceof Channel channel) HttpTransport.abort(channel); });
     }
 
     /** What a streaming request does with the head of its response; called on the channel's loop. */
@@ -395,6 +419,7 @@ public final class HttpCarrierClient implements AutoCloseable {
 
     /** Whether the calling thread is one of the group's event loops, which must not wait for the group. */
     private boolean onGroup() {
+        if (conns.onBorrowedLoop()) return true;
         for (io.netty.util.concurrent.EventExecutor e : group) if (e.inEventLoop()) return true;
         return false;
     }

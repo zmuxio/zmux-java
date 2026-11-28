@@ -1,5 +1,7 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+
 import java.util.Locale;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -24,9 +26,9 @@ class AckSimTest {
     private static final long US = Time.MICROSECOND;
 
     /** One direction of a carrier: a serialising bottleneck of rate bytes per second, then a fixed delay. */
-    private static final class Link {
+    static final class Link {
         final double rate;
-        final long delay;
+        long delay;
         long jitter;
         long rnd;
         long free;
@@ -80,25 +82,29 @@ class AckSimTest {
     }
 
     /** One endpoint with its outbound link. */
-    private static final class End {
+    static final class End {
         final Session s;
         final Link out;
+        final Framing framing;
+        final boolean queueBound;
         int acks;
         final Batch b = new Batch();
         final List<HeldControlTest.Sent> frames = new ArrayList<>();
         final FrameDecoder dec = new FrameDecoder();
         final Frame frame = new Frame();
 
-        End(Session s, Link out) {
+        End(Session s, Link out, Framing framing, boolean queueBound) {
             this.s = s;
             this.out = out;
+            this.framing = framing;
+            this.queueBound = queueBound;
         }
 
-        void flush(long now, Cfg c) throws Exception {
+        void flush(long now) throws Exception {
             for (int i = 0; i < 1000; i++) {
-                if (c.queueBound() && out.queued(now) >= 256 << 10) return;
-                if (!s.pollTransmit(0, 0, b, Session.DEFAULT_BATCH, now)) return;
-                if (c.framing() == Framing.RECORDS) {
+                if (queueBound && out.queued(now) >= 256 << 10) return;
+                if (!s.pollReady(0, 0, b, Session.DEFAULT_BATCH, 0, now, () -> -1)) return;
+                if (framing == Framing.RECORDS) {
                     for (ByteBuffer m : BatchFixture.messages(b)) {
                         byte[] a = new byte[m.remaining()];
                         m.get(a);
@@ -130,12 +136,12 @@ class AckSimTest {
             }
         }
 
-        void deliver(long now, Link in, Cfg c) {
+        void deliver(long now, Link in) {
             while (in.head() <= now) {
                 in.at.poll();
                 byte[] m = in.data.poll();
                 ByteBuffer bb = ByteBuffer.wrap(m);
-                if (c.framing() == Framing.RECORDS) s.receiveMessage(0, 0, new ReadBuf(bb, null), bb, 0, m.length, now);
+                if (framing == Framing.RECORDS) s.receiveMessage(0, 0, new ReadBuf(bb, null), bb, 0, m.length, now);
                 else assertEquals(m.length, s.receive(0, 0, new ReadBuf(bb, null), bb, 0, m.length, now));
             }
         }
@@ -143,13 +149,13 @@ class AckSimTest {
 
     private static Session session(CoreConfig.Role role, CarrierInfo info, long t0) {
         Session s = new Session(CoreConfig.builder().role(role).transportRole(role).build(), t0);
-        s.attachBootstrap(info, info, null);
+        s.attachBootstrap(info, info);
         return s;
     }
 
     /** Sends one stream from client to server over c and reports the client's estimates. */
     static Result run(Cfg c) throws Exception {
-        CarrierInfo info = new CarrierInfo(c.framing(), false, false, false, c.queueBound(), null, null, "", 0, "", c.maxRecord(), false);
+        CarrierInfo info = new CarrierInfo(c.framing(), false, false, false, c.queueBound(), null, null, "", 0, "", c.maxRecord(), false, 0, false);
         long t0 = Time.SECOND;
         Link up = new Link(c.rate(), c.rtt() / 2), down = new Link(c.rate(), c.rtt() / 2);
         if (c.seed() != 0) {
@@ -158,8 +164,8 @@ class AckSimTest {
             down.jitter = c.jitter();
             down.rnd = c.seed() * 0xc2b2ae3d27d4eb4fL | 1;
         }
-        End cl = new End(session(CoreConfig.Role.INITIATOR, info, t0), up);
-        End sv = new End(session(CoreConfig.Role.RESPONDER, info, t0), down);
+        End cl = new End(session(CoreConfig.Role.INITIATOR, info, t0), up, c.framing(), c.queueBound());
+        End sv = new End(session(CoreConfig.Role.RESPONDER, info, t0), down, c.framing(), c.queueBound());
         ByteBuffer chunk = ByteBuffer.allocate(256 << 10);
         ByteBuffer rbuf = ByteBuffer.allocate(1 << 20);
         Stream st = null, rs = null;
@@ -171,10 +177,10 @@ class AckSimTest {
         while (now < end) {
             cl.s.setNow(now);
             sv.s.setNow(now);
-            if (cl.s.nextTimeout() <= now) cl.s.handleTimeout(now);
-            if (sv.s.nextTimeout() <= now) sv.s.handleTimeout(now);
-            cl.deliver(now, down, c);
-            sv.deliver(now, up, c);
+            if (DeadlineFixture.next(cl.s) <= now) cl.s.handleTimeout(now);
+            if (DeadlineFixture.next(sv.s) <= now) sv.s.handleTimeout(now);
+            cl.deliver(now, down);
+            sv.deliver(now, up);
             assertNull(cl.s.error());
             assertNull(sv.s.error());
             if (st == null && cl.s.established() && now >= t0 + c.start()) st = cl.s.streams().openStream(true);
@@ -191,8 +197,8 @@ class AckSimTest {
             if (rs != null) {
                 for (int n; (n = sv.s.receiving().read(rs, rbuf.clear()).n()) > 0; ) read += n;
             }
-            cl.flush(now, c);
-            sv.flush(now, c);
+            cl.flush(now);
+            sv.flush(now);
             if (!warmed && now >= warm) {
                 warmed = true;
                 readWarm = read;
@@ -200,8 +206,8 @@ class AckSimTest {
             }
             long next = now + 50 * US;
             if (c.appBytes() > 0) next = Math.min(next, nextApp);
-            next = Math.min(next, cl.s.nextTimeout());
-            next = Math.min(next, sv.s.nextTimeout());
+            next = Math.min(next, DeadlineFixture.next(cl.s));
+            next = Math.min(next, DeadlineFixture.next(sv.s));
             next = Math.min(next, up.head());
             next = Math.min(next, down.head());
             now = Math.max(next, now + 1);

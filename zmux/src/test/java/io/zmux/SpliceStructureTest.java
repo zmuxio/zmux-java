@@ -15,11 +15,15 @@ import org.junit.jupiter.api.Test;
 @org.junit.jupiter.api.Timeout(60)
 class SpliceStructureTest {
     /** The direction's plain fields, all read and written only on the splice's serial context. */
-    private static final Set<String> SERIAL = Set.of("closeRead", "closeWrite", "stage", "op", "ready", "permit", "endRead",
-            "held", "write", "writeKind", "writeLength", "resetCode", "dgStage", "dgReceive", "dgSend", "dgSending", "bytes",
-            "datagramBytes", "drops", "tooLarge", "limited", "capsuleRemaining", "converting", "targetClosed", "end",
-            "callbackFailure", "atTarget", "asCapsules",
-            "chunkPaid", "writePaid", "headerReady", "headerRead", "capsulePaid");
+    private static final Set<String> SERIAL = Set.of(
+            "closeRead", "closeWrite", "settings", "readStage", "endStage", "writeKind", "read", "write", "terminal", "dgReceive",
+            "grant", "inputPermit", "memberPermit", "writePermit", "memberCharge", "memberChargeOffset", "writeCharge",
+            "direct", "batch", "batchSettings", "directEnd", "active",
+            "dgActive", "dgSend", "collected", "compacted", "readCopy", "readingSize", "inputHooks", "inputAt", "inputStart", "inputGeneration",
+            "inputSequence", "sequence", "fifoOrder", "inputOrder", "resetCode", "protectedBytes", "targetBytes", "bytes", "datagramBytes",
+            "asCapsules", "timerAt", "stopTimer", "fin", "rawHeader", "streaming", "writingAtTarget",
+            "dgClosed", "dgInputClosed", "sourcePosition", "datagramLength", "end", "callbackFailure",
+            "writeLength", "outputGrant", "compactedPayload", "discardingCapsule", "dgRoute", "dgRouting", "capacity", "packetPending");
 
     @Test void everyPlainFieldOfADirectionIsSerialContextState() throws Exception {
         Set<String> plain = new TreeSet<>();

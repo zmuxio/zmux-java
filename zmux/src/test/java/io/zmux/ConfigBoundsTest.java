@@ -16,11 +16,11 @@ import org.junit.jupiter.api.Test;
 @org.junit.jupiter.api.Timeout(60)
 class ConfigBoundsTest {
     @Test void anAccountFieldAboveItsMaximumIsInvalid() {
-        assertDoesNotThrow(() -> new WireAccount(WireAccount.MAX_INITIAL, WireAccount.MAX_RATE, WireAccount.MAX_RATE));
-        assertThrows(IllegalArgumentException.class, () -> new WireAccount(WireAccount.MAX_INITIAL + 1, 0, 0));
-        assertThrows(IllegalArgumentException.class, () -> new WireAccount(0, WireAccount.MAX_RATE + 1, 0));
-        assertThrows(IllegalArgumentException.class, () -> new WireAccount(0, 0, WireAccount.MAX_RATE + 1));
-        assertThrows(IllegalArgumentException.class, () -> new WireAccount(-1, 0, 0));
+        assertDoesNotThrow(() -> new WireAccount(WireAccount.MAX_CEILING, 0, WireAccount.MAX_RATE, WireAccount.MAX_RATE));
+        assertThrows(IllegalArgumentException.class, () -> new WireAccount(WireAccount.MAX_CEILING + 1, 0, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new WireAccount(0, 0, WireAccount.MAX_RATE + 1, 0));
+        assertThrows(IllegalArgumentException.class, () -> new WireAccount(0, 0, 0, WireAccount.MAX_RATE + 1));
+        assertThrows(IllegalArgumentException.class, () -> new WireAccount(-1, 0, 0, 0));
     }
 
     @Test void sessionProbeIntervalBelowOneSecondIsInvalid() {
@@ -86,6 +86,5 @@ class ConfigBoundsTest {
         assertEquals(ZmuxConfig.DEFAULT_JOIN_TIMEOUT, ZmuxConfig.defaults().joinTimeout());
         assertEquals(Duration.ofSeconds(1), Backoff.defaults().min());
         assertEquals(Duration.ofSeconds(60), Backoff.defaults().max());
-        assertEquals(Backoff.defaults(), ZmuxConfig.defaults().redialBackoff());
     }
 }

@@ -113,7 +113,7 @@ public final class Hello {
         if (len < 2) throw Frames.shortInput(f, 2);
         int m = VarInt.lengthOf(b[off + 1]);
         if (len < 1 + m) throw Frames.shortInput(f, 1 + m);
-        long id = Tlv.readVarint(b, off + 1, m);
+        long id = VarInt.getKnownWidth(b, off + 1, m);
         if (VarInt.length(id) != m) throw new SecureCarrierException(MALFORMED, "suite encoding");
         Suite s = Suite.lookup(id);
         if (s == null) throw new SecureCarrierException(UNKNOWN_SUITE);

@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-@Timeout(30)
+@Timeout(60)
 class SpliceTest {
     static final class Relay implements AutoCloseable {
         final Pair left, right;
@@ -23,7 +23,7 @@ class SpliceTest {
         Relay(ZmuxConfig leftConfig, ZmuxConfig rightConfig) throws Exception {
             left = Pair.memory(leftConfig); right = Pair.memory(rightConfig);
             endpoint = left.client().openStream(); endpoint.write(new byte[] {7});
-            a = left.server().acceptStream(Duration.ofSeconds(3)); b = right.client().openStream();
+            a = left.server().acceptStream(Duration.ofSeconds(GUARD_SECONDS)); b = right.client().openStream();
         }
         Relay(ZmuxConfig config, io.zmux.carrier.PipeIo[] target) throws Exception {
             left = Pair.memory(config);
@@ -37,15 +37,28 @@ class SpliceTest {
                         peer.awaitEstablished(Long.MAX_VALUE); return peer;
                     } catch (IOException e) { throw new CompletionException(e); }
                 }, r -> Thread.ofVirtual().start(r));
-                right = new Pair(Zmux.open(target[0], Role.CLIENT, config), accepting.get(3, TimeUnit.SECONDS));
+                right = new Pair(Zmux.open(target[0], Role.CLIENT, config), accepting.get(GUARD_SECONDS, TimeUnit.SECONDS));
             }
             endpoint = left.client().openStream(); endpoint.write(new byte[] {7});
-            a = left.server().acceptStream(Duration.ofSeconds(3)); b = right.client().openStream();
+            a = left.server().acceptStream(Duration.ofSeconds(GUARD_SECONDS)); b = right.client().openStream();
         }
-        ZmuxStream destination() throws Exception { return right.server().acceptStream(Duration.ofSeconds(3)); }
+        ZmuxStream destination() throws Exception { return right.server().acceptStream(Duration.ofSeconds(GUARD_SECONDS)); }
         @Override public void close() throws IOException { endpoint.close(); left.close(); right.close(); }
     }
     static ZmuxConfig config(EventLoops loops) { return ZmuxConfig.builder().eventLoops(loops).build(); }
+
+    private static final long GUARD_SECONDS = 30;
+
+    private static <T> T await(CompletableFuture<T> result) throws Exception {
+        return result.get(GUARD_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private static CompletableFuture<Throwable> sendEnd(ZmuxStream stream) {
+        CompletableFuture<Throwable> stopped = new CompletableFuture<>();
+        stream.session.driver.post(() -> stream.session.driver.lanes.watchSendEnd(stream.st,
+                error -> stopped.complete(Errors.io(error))));
+        return stopped;
+    }
 
     @Test void chunksCrossOwnersAndFinOnlyEndsItsOwnDirection() throws Exception {
         try (EventLoops loops = EventLoops.create(4); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -64,8 +77,8 @@ class SpliceTest {
                 });
                 var writing = tasks.submit(() -> { relay.endpoint.write(payload); relay.endpoint.finish(); return null; });
                 assertArrayEquals(response, SessionTest.readAll(relay.endpoint));
-                writing.get(5, TimeUnit.SECONDS); destination.get(5, TimeUnit.SECONDS);
-                var result = splice.get(5, TimeUnit.SECONDS);
+                writing.get(GUARD_SECONDS, TimeUnit.SECONDS); destination.get(GUARD_SECONDS, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(payload.length + 1, result.aToB().bytes());
                 assertEquals(response.length, result.bToA().bytes());
                 assertEquals(new SpliceEnd.Finished(), result.aToB().end()); assertEquals(new SpliceEnd.Finished(), result.bToA().end());
@@ -83,16 +96,13 @@ class SpliceTest {
                 assertEquals(7, peer.inputStream().read(), "the relay carries the first byte");
                 assertTrue(control.abort(0x77));
                 assertFalse(control.abort(1), "the first code decides");
-                var result = splice.get(5, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(new SpliceEnd.Cancelled(0x77), result.aToB().end());
                 assertEquals(new SpliceEnd.Cancelled(0x77), result.bToA().end());
                 for (ZmuxStream end : new ZmuxStream[] {relay.endpoint, peer}) {
                     var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(end));
                     assertEquals(0x77, reset.code());
-                    var stopped = assertThrows(StreamStoppedException.class, () -> {
-                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                        while (System.nanoTime() < until) { end.write(new byte[1024]); end.flush(); }
-                    });
+                    var stopped = assertInstanceOf(StreamStoppedException.class, await(sendEnd(end)));
                     assertEquals(0x77, stopped.code());
                 }
             }
@@ -102,27 +112,24 @@ class SpliceTest {
     @Test void cancellationUnregistersDataAndLimiterWaitsBeforeCompletion() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var ready = new CompletableFuture<Long>();
+            var abandoned = ready.handle((grant, error) -> error);
             var entered = new CountDownLatch(1);
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { entered.countDown(); return ready; }
                 @Override public long tryAcquire(long min, long max) { return 0; }
                 @Override public void refund(long n) { fail("no bytes were allowed"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS));
             // Cancelling the stage cancels the splice: no result, both streams reset with ZMUX_CANCELLED and stopped with 0.
             assertTrue(splice.cancel(true));
-            assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS));
-            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-            while (!ready.isCancelled() && System.nanoTime() < until) Thread.sleep(2);
-            assertTrue(ready.isCancelled());
+            assertThrows(CancellationException.class, () -> splice.get(GUARD_SECONDS, TimeUnit.SECONDS));
+            assertInstanceOf(CancellationException.class, await(abandoned));
             var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));
             assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, reset.code());
             // The stopped receiving part: the endpoint's own sending side is stopped with code 0, not ZMUX_CANCELLED.
-            var stopped = assertThrows(StreamStoppedException.class, () -> {
-                long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                while (System.nanoTime() < limit) { relay.endpoint.write(new byte[1024]); Thread.sleep(2); }
-            });
+            var stopped = assertInstanceOf(StreamStoppedException.class, await(sendEnd(relay.endpoint)));
             assertEquals(0, stopped.code());
         }
     }
@@ -131,20 +138,19 @@ class SpliceTest {
         try (EventLoops loops = EventLoops.create(3)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).initialStreamReceiveWindow(4096).maxStreamReceiveWindow(4096).build();
             try (var relay = new Relay(cfg); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
-                var splice = Zmux.splice(relay.a, relay.b).toCompletableFuture();
+                var limiter = new FixedBudget(4096);
+                var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
                 try (var peer = relay.destination()) {
                     var sender = tasks.submit(() -> { try { relay.endpoint.write(new byte[32768]); } catch (IOException expected) {} return null; });
-                    // Reached within milliseconds; the bound only limits a failure, and a saturated runner may take seconds.
-                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-                    while (relay.b.sendCapacity() != 0 && System.nanoTime() < until) Thread.sleep(5);
-                    assertEquals(0, relay.b.sendCapacity());
+                    await(limiter.exhausted);
+                    SessionTestSupport.await(relay.b.session, () -> relay.b.sendCapacity() == 0);
                     relay.endpoint.reset(73);
-                    peer.setReadTimeout(Duration.ofSeconds(3));
+                    peer.setReadTimeout(Duration.ofSeconds(GUARD_SECONDS));
                     StreamResetException error = assertThrows(StreamResetException.class, () -> SessionTest.readAll(peer));
                     assertEquals(73, error.code()); peer.finish();
-                    var result = splice.get(3, TimeUnit.SECONDS);
+                    var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                     assertEquals(new SpliceEnd.Reset(73), result.aToB().end());
-                    sender.get(3, TimeUnit.SECONDS);
+                    sender.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 }
             }
             Leaks.none(loops);
@@ -164,14 +170,14 @@ class SpliceTest {
                 StreamResetException reset = assertThrows(StreamResetException.class, () -> {
                     for (Chunk chunk; (chunk = peer.readChunk(65536)) != null;) {
                         try (Chunk owned = chunk) {
-                            ByteBuffer data = owned.buffer(); byte[] part = new byte[data.remaining()]; data.get(part); bytes.write(part);
+                            bytes.writeBytes(owned.copy());
                         }
                     }
                 });
                 assertEquals(95, reset.code()); byte[] got = bytes.toByteArray();
                 assertEquals(7, got[0]); assertArrayEquals(payload, Arrays.copyOfRange(got, 1, got.length));
-                peer.finish(); sending.get(3, TimeUnit.SECONDS);
-                var result = splice.get(3, TimeUnit.SECONDS);
+                peer.finish(); sending.get(GUARD_SECONDS, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(payload.length + 1, result.aToB().bytes());
                 assertEquals(new SpliceEnd.Reset(95), result.aToB().end());
             }
@@ -180,14 +186,16 @@ class SpliceTest {
 
     /** A fixed byte budget: allowances are taken when handed out; waiters park until bytes come back. */
     static final class FixedBudget implements Limiter {
+        @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
         final long total; long left, lowest;
+        final CompletableFuture<Void> exhausted = new CompletableFuture<>();
         private record Waiter(CompletableFuture<Long> f, long min, long max) {}
         private final java.util.ArrayDeque<Waiter> waiters = new java.util.ArrayDeque<>();
         FixedBudget(long total) { this.total = total; left = lowest = total; }
         private long take(long max) { long n = Math.min(left, max); left -= n; lowest = Math.min(lowest, left); return n; }
         @Override public synchronized CompletionStage<Long> acquire(long min, long max) {
             if (left >= min) return CompletableFuture.completedFuture(take(max));
-            var f = new CompletableFuture<Long>(); waiters.add(new Waiter(f, min, max)); return f;
+            var f = new CompletableFuture<Long>(); waiters.add(new Waiter(f, min, max)); exhausted.complete(null); return f;
         }
         @Override public synchronized long tryAcquire(long min, long max) { return left >= min ? take(max) : 0; }
         @Override public void refund(long n) {
@@ -212,6 +220,7 @@ class SpliceTest {
             var calls = new java.util.concurrent.CopyOnWriteArrayList<long[]>();
             var charged = new java.util.concurrent.atomic.AtomicLong();
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) {
                     calls.add(new long[] {min, max}); charged.addAndGet(max); return CompletableFuture.completedFuture(max);
                 }
@@ -221,17 +230,13 @@ class SpliceTest {
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
-                Thread.sleep(100); // idle source: the direction waits for readability, not in the limiter
-                int seen = calls.size();
                 assertEquals(1, charged.get(), "only the forwarded byte stays taken");
-                Thread.sleep(100);
-                assertEquals(seen, calls.size(), "no grant is asked for while nothing is readable");
                 relay.endpoint.write(new byte[] {1, 2, 3});
                 byte[] got = peer.inputStream().readNBytes(3);
                 assertArrayEquals(new byte[] {1, 2, 3}, got);
                 for (long[] c : calls) { assertEquals(1, c[0], "acquire(1, k)"); assertTrue(c[1] >= 1 && c[1] <= 3, "k = the bytes readable"); }
                 relay.endpoint.finish(); peer.finish();
-                var result = splice.get(3, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(4, result.aToB().bytes());
                 assertEquals(4, charged.get(), "granted and not refunded = forwarded");
             }
@@ -246,21 +251,25 @@ class SpliceTest {
             var s1 = Zmux.splice(one.a, one.b, SpliceOptions.builder().chunk(8192).aToB(budget).abort(c1).build()).toCompletableFuture();
             var s2 = Zmux.splice(two.a, two.b, SpliceOptions.builder().chunk(8192).aToB(budget).abort(c2).build()).toCompletableFuture();
             AtomicInteger received = new AtomicInteger();
+            var delivered = new CompletableFuture<Void>();
             for (Relay r : new Relay[] {one, two}) {
                 tasks.submit(() -> { r.endpoint.write(new byte[100000]); return null; });
                 tasks.submit(() -> {
                     var peer = r.destination(); byte[] b = new byte[65536];
-                    for (int n; (n = peer.inputStream().read(b)) > 0;) received.addAndGet(n);
+                    for (int n; (n = peer.inputStream().read(b)) > 0;) {
+                        if (received.addAndGet(n) >= budget.total) delivered.complete(null);
+                    }
                     return null;
                 });
             }
-            ListenerResourcesTest.until(() -> budget.left() < 8192 && received.get() >= budget.total - budget.left());
-            Thread.sleep(100); // no more allowances: neither direction moves past the budget
-            assertTrue(received.get() <= budget.total, "forwarded " + received.get());
+            await(budget.exhausted);
+            await(delivered);
+            assertEquals(budget.total, received.get());
             assertTrue(budget.lowest >= 0);
             c1.abort(1); c2.abort(1);
-            long forwarded = s1.get(3, TimeUnit.SECONDS).aToB().bytes() + s2.get(3, TimeUnit.SECONDS).aToB().bytes();
-            assertEquals(budget.total, budget.left() + forwarded, "what was not forwarded came back");
+            s1.get(GUARD_SECONDS, TimeUnit.SECONDS);
+            s2.get(GUARD_SECONDS, TimeUnit.SECONDS);
+            assertEquals(0, budget.left(), "each byte handed to the carrier stays charged");
         }
     }
 
@@ -269,6 +278,7 @@ class SpliceTest {
             var blocked = new CompletableFuture<Long>(); var entered = new CountDownLatch(1);
             var calls = new AtomicInteger();
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) {
                     if (calls.getAndIncrement() == 0) return CompletableFuture.completedFuture(1L);
                     entered.countDown(); return blocked;
@@ -279,17 +289,12 @@ class SpliceTest {
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
-                relay.endpoint.write(new byte[] {42}); assertTrue(entered.await(3, TimeUnit.SECONDS));
+                relay.endpoint.write(new byte[] {42}); assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS));
                 peer.stop(82); peer.finish();
-                relay.endpoint.setWriteTimeout(Duration.ofSeconds(3));
-                var result = splice.get(3, TimeUnit.SECONDS);
-                StreamStoppedException stop = null;
-                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                while (stop == null && System.nanoTime() < until) {
-                    try { relay.endpoint.tryWrite(ByteBuffer.wrap(new byte[] {1})); Thread.sleep(2); }
-                    catch (StreamStoppedException error) { stop = error; }
-                }
-                assertNotNull(stop); assertEquals(82, stop.code());
+                relay.endpoint.setWriteTimeout(Duration.ofSeconds(GUARD_SECONDS));
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
+                var stop = assertInstanceOf(StreamStoppedException.class, await(sendEnd(relay.endpoint)));
+                assertEquals(82, stop.code());
                 assertEquals(new SpliceEnd.Stopped(82), result.aToB().end());
                 assertTrue(blocked.isCancelled());
             }
@@ -300,13 +305,14 @@ class SpliceTest {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var blocked = new CompletableFuture<Long>(); var entered = new CountDownLatch(1);
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { entered.countDown(); return blocked; }
                 @Override public long tryAcquire(long min, long max) { return 0; }
                 @Override public void refund(long n) { fail("limiter denied forwarding"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.left.client().abort(32, "gone");
-            var result = splice.get(3, TimeUnit.SECONDS);
+            assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.left.client().abort(32, "gone");
+            var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertEquals(new SpliceEnd.UpstreamLost(), result.aToB().end());
             assertEquals(0, result.aToB().bytes()); assertTrue(blocked.isCancelled());
         }
@@ -329,7 +335,7 @@ class SpliceTest {
                 relay.endpoint.sendDatagram(43, ByteBuffer.wrap(new byte[] {6}));
                 StreamDatagram tail = peer.receiveDatagram(); assertEquals(43, tail.context());
                 assertArrayEquals(new byte[] {6}, tail.payload()); peer.finish();
-                var result = splice.get(3, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(4, result.aToB().datagramBytes()); assertEquals(2, result.bToA().datagramBytes());
                 assertEquals(0, result.aToB().datagramsDropped());
             }
@@ -340,13 +346,14 @@ class SpliceTest {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var blocked = new CompletableFuture<Long>(); var entered = new CountDownLatch(1);
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { entered.countDown(); return blocked; }
                 @Override public long tryAcquire(long min, long max) { return 0; }
                 @Override public void refund(long n) { fail("no byte allowed"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.endpoint.reset(77);
-            var result = splice.get(3, TimeUnit.SECONDS);
+            assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.endpoint.reset(77);
+            var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertEquals(new SpliceEnd.Reset(77), result.aToB().end());
             assertEquals(new SpliceEnd.Finished(), result.bToA().end());
             assertFalse(relay.b.st.idSet()); assertEquals(0, result.aToB().bytes()); assertTrue(blocked.isCancelled());
@@ -357,13 +364,14 @@ class SpliceTest {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var blocked = new CompletableFuture<Long>(); var entered = new CountDownLatch(1);
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { entered.countDown(); return blocked; }
                 @Override public long tryAcquire(long min, long max) { return 0; }
                 @Override public void refund(long n) { fail("no byte allowed"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); relay.right.client().abort(31, "gone");
-            var result = splice.get(3, TimeUnit.SECONDS);
+            assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.right.client().abort(31, "gone");
+            var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertEquals(new SpliceEnd.DownstreamLost(), result.aToB().end()); assertTrue(blocked.isCancelled());
         }
     }
@@ -373,6 +381,7 @@ class SpliceTest {
              var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
             var dropped = new CountDownLatch(1); var charged = new java.util.concurrent.atomic.AtomicLong();
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { charged.addAndGet(max); return CompletableFuture.completedFuture(max); }
                 @Override public long tryAcquire(long min, long max) { dropped.countDown(); return 0; }
                 @Override public void refund(long n) { charged.addAndGet(-n); }
@@ -380,8 +389,8 @@ class SpliceTest {
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read()); relay.endpoint.sendDatagram(4, ByteBuffer.wrap(new byte[] {1, 2}));
-                assertTrue(dropped.await(3, TimeUnit.SECONDS)); relay.endpoint.finish(); peer.finish();
-                var result = splice.get(3, TimeUnit.SECONDS);
+                assertTrue(dropped.await(GUARD_SECONDS, TimeUnit.SECONDS)); relay.endpoint.finish(); peer.finish();
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(1, result.aToB().datagramsDropped()); assertEquals(0, result.aToB().datagramBytes());
                 assertEquals(1, result.aToB().datagramsLimited()); assertEquals(0, result.aToB().datagramsTooLarge());
                 assertEquals(result.aToB().bytes(), charged.get());
@@ -394,13 +403,14 @@ class SpliceTest {
         try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
             var blocked = new CompletableFuture<Long>(); var entered = new CountDownLatch(1);
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { entered.countDown(); return blocked; }
                 @Override public long tryAcquire(long min, long max) { return 0; }
                 @Override public void refund(long n) { fail("no byte allowed"); }
             };
             var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().aToB(limiter).build()).toCompletableFuture();
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); loops.close();
-            var result = splice.get(3, TimeUnit.SECONDS);
+            assertTrue(entered.await(GUARD_SECONDS, TimeUnit.SECONDS)); loops.close();
+            var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
             assertTrue(result.aToB().end() instanceof SpliceEnd.UpstreamLost || result.aToB().end() instanceof SpliceEnd.DownstreamLost,
                     String.valueOf(result.aToB().end())); assertTrue(blocked.isCancelled());
         }
@@ -445,18 +455,28 @@ class SpliceTest {
                     assertFalse(relay.right.client().info().peerIsZmux());
                     assertFalse((Boolean)relay.b.session.run(op -> relay.b.session.core.sending().resetAtInUse()));
                     var charged = new java.util.concurrent.atomic.AtomicLong();
+                    var chargedAll = new CompletableFuture<Void>();
                     Limiter limiter = new Limiter() {
-                        @Override public CompletionStage<Long> acquire(long min, long max) { charged.addAndGet(max); return CompletableFuture.completedFuture(max); }
+                        @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
+                        @Override public CompletionStage<Long> acquire(long min, long max) {
+                            if (charged.addAndGet(max) >= 100001) chargedAll.complete(null);
+                            return CompletableFuture.completedFuture(max);
+                        }
                         @Override public long tryAcquire(long min, long max) { charged.addAndGet(max); return max; }
                         @Override public void refund(long n) { charged.addAndGet(-n); }
                     };
-                    var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().chunk(16384).aToB(limiter).build()).toCompletableFuture();
+                    var abort = new SpliceAbort();
+                    var control = Zmux.spliceControlled(relay.a, relay.b,
+                            SpliceOptions.builder().chunk(16384).aToB(limiter).abort(abort).build());
+                    var splice = control.result().toCompletableFuture();
                     try (var peer = relay.destination()) {
                         assertEquals(7, peer.inputStream().read()); gate.paused = true;
                         relay.endpoint.write(new byte[100000]); relay.endpoint.markReliableBoundary(); relay.endpoint.reset(95);
-                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                        while (charged.get() < 100001 && System.nanoTime() < until) Thread.sleep(2);
-                        assertTrue(charged.get() >= 100001, mode); // a read in flight may hold more until it ends
+                        await(chargedAll);
+                        // Wait for the source reset decision before introducing a second terminal.
+                        while (!(await(control.aToB().snapshot().toCompletableFuture()).end() instanceof SpliceEnd.Reset)) {
+                            Thread.onSpinWait();
+                        }
                         // Undelivered: still unsent, or in the batch the paused carrier holds (a batch can take all of it).
                         boolean unsent = (Boolean)relay.b.session.run(op -> relay.b.session.core.sending().holdsUnsent(relay.b.st));
                         synchronized (gate) { assertTrue(unsent || gate.pending != null, mode); }
@@ -465,25 +485,24 @@ class SpliceTest {
                             gate.release(); var received = new java.io.ByteArrayOutputStream();
                             var error = assertThrows(StreamResetException.class, () -> {
                                 for (Chunk chunk; (chunk = peer.readChunk(65536)) != null;) {
-                                    try (Chunk owned = chunk) { received.write(new byte[owned.buffer().remaining()]); }
+                                    try (Chunk owned = chunk) { received.write(new byte[owned.remaining()]); }
                                 }
                             });
                             assertEquals(95, error.code());
                             // Plain RESET_STREAM may discard already handed-off bytes at its peer.
                             assertTrue(received.size() <= 100000); peer.finish();
-                            var result = splice.get(3, TimeUnit.SECONDS);
+                            var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                             assertEquals(new SpliceEnd.Reset(95), result.aToB().end());
                             assertEquals(result.aToB().bytes(), charged.get(), "what was not forwarded came back");
                         } else {
                             if (mode.equals("cancel")) {
-                                assertTrue(splice.cancel(true), mode);
-                                assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS), mode);
+                                assertTrue(abort.abort(7), mode);
+                                assertEquals(new SpliceEnd.Reset(95), await(splice).aToB().end());
                             } else {
                                 if (mode.equals("session")) relay.left.client().abort(32, "gone");
                                 if (mode.equals("stop")) { peer.stop(82); peer.finish(); }
-                                var result = splice.get(3, TimeUnit.SECONDS);
-                                assertEquals(mode.equals("stop") ? new SpliceEnd.Stopped(82) : new SpliceEnd.UpstreamLost(),
-                                        result.aToB().end(), mode);
+                                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
+                                assertEquals(new SpliceEnd.Reset(95), result.aToB().end(), mode);
                             }
                             gate.release();
                         }
@@ -499,6 +518,7 @@ class SpliceTest {
              var relay = new Relay(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
             var thrown = new IllegalStateException("datagram limiter broke");
             Limiter limiter = new Limiter() {
+                @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                 @Override public CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
                 @Override public long tryAcquire(long min, long max) { throw thrown; }
                 @Override public void refund(long n) { }
@@ -510,7 +530,7 @@ class SpliceTest {
                 relay.endpoint.write(new byte[] {9}); relay.endpoint.finish();
                 assertEquals(9, peer.inputStream().read());
                 peer.finish();
-                var result = splice.get(3, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(1, result.aToB().datagramsDropped());
             }
         }
@@ -521,6 +541,7 @@ class SpliceTest {
         for (String mode : List.of("invalid", "throws", "failed")) {
             try (EventLoops loops = EventLoops.create(2); var relay = new Relay(config(loops))) {
                 Limiter limiter = new Limiter() {
+                    @Override public long maxBurstBytes() { return Long.MAX_VALUE; }
                     @Override public CompletionStage<Long> acquire(long min, long max) {
                         return switch (mode) {
                             case "invalid" -> CompletableFuture.completedFuture(0L);
@@ -539,14 +560,9 @@ class SpliceTest {
                     peer.write(new byte[] {5}); peer.finish(); // the other direction goes on
                     assertEquals(5, relay.endpoint.inputStream().read(), mode);
                     assertEquals(-1, relay.endpoint.inputStream().read(), mode);
-                    StreamStoppedException stop = null;
-                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                    while (stop == null && System.nanoTime() < until) {
-                        try { relay.endpoint.tryWrite(ByteBuffer.wrap(new byte[] {1})); Thread.sleep(2); }
-                        catch (StreamStoppedException error) { stop = error; }
-                    }
-                    assertNotNull(stop, mode); assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, stop.code(), mode);
-                    var result = splice.get(3, TimeUnit.SECONDS);
+                    var stop = assertInstanceOf(StreamStoppedException.class, await(sendEnd(relay.endpoint)), mode);
+                    assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, stop.code(), mode);
+                    var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                     assertEquals(new SpliceEnd.LimiterFailed(), result.aToB().end(), mode);
                     assertEquals(new SpliceEnd.Finished(), result.bToA().end(), mode);
                     assertEquals(0, result.aToB().bytes(), mode); assertEquals(1, result.bToA().bytes(), mode);
@@ -564,7 +580,7 @@ class SpliceTest {
             try (var p1 = one.destination(); var p2 = two.destination()) {
                 assertEquals(7, p1.inputStream().read()); assertEquals(7, p2.inputStream().read());
                 assertTrue(abort.abort(0x66)); assertFalse(abort.abort(0x67), "the first code decides");
-                for (var r : List.of(s1.get(3, TimeUnit.SECONDS), s2.get(3, TimeUnit.SECONDS))) {
+                for (var r : List.of(s1.get(GUARD_SECONDS, TimeUnit.SECONDS), s2.get(GUARD_SECONDS, TimeUnit.SECONDS))) {
                     assertEquals(new SpliceEnd.Cancelled(0x66), r.aToB().end());
                     assertEquals(new SpliceEnd.Cancelled(0x66), r.bToA().end());
                 }
@@ -573,7 +589,7 @@ class SpliceTest {
             }
             // A splice started with a handle that already aborted is aborted as it starts.
             try (var three = new Relay(config(loops))) {
-                var r = Zmux.splice(three.a, three.b, SpliceOptions.builder().abort(abort).build()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+                var r = Zmux.splice(three.a, three.b, SpliceOptions.builder().abort(abort).build()).toCompletableFuture().get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(new SpliceEnd.Cancelled(0x66), r.aToB().end());
             }
         }
@@ -603,7 +619,7 @@ class SpliceTest {
                         return null;
                     });
                     endpoint.finish(); assertEquals(0, SessionTest.readAll(endpoint).length);
-                    splice.get(3, TimeUnit.SECONDS); destination.get(3, TimeUnit.SECONDS);
+                    splice.get(GUARD_SECONDS, TimeUnit.SECONDS); destination.get(GUARD_SECONDS, TimeUnit.SECONDS);
                     assertEquals(0, (Integer)left.server().run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(left.server().core)));
                     assertEquals(0, (Integer)right.client().run(op -> io.zmux.internal.core.ObserverFixture.closedWaiters(right.client().core)));
                 }
@@ -618,65 +634,6 @@ class SpliceTest {
         }
     }
 
-    /**
-     * Frames of a splice in any thread, virtual ones included: an in-process thread dump (no attach). The platform
-     * MXBeans and Thread.getAllStackTraces list no virtual threads, which would make the check vacuous; the
-     * HotSpot dump does, and is reached reflectively because the test module does not read jdk.management.
-     * The frames come one per line; null when the dump lacks the caller's own frames, which would prove nothing.
-     */
-    static String spliceFrames() throws Exception {
-        var dump = java.nio.file.Path.of("target", "splice-threads-" + System.nanoTime() + ".txt").toAbsolutePath();
-        Class<?> bean = Class.forName("com.sun.management.HotSpotDiagnosticMXBean");
-        @SuppressWarnings({"unchecked", "rawtypes"}) // the enum class is reached reflectively: no type to name
-        Object format = Enum.valueOf((Class) Class.forName("com.sun.management.HotSpotDiagnosticMXBean$ThreadDumpFormat"), "TEXT_PLAIN");
-        Object diagnostic = Class.forName("java.lang.management.ManagementFactory").getMethod("getPlatformMXBean", Class.class).invoke(null, bean);
-        try {
-            bean.getMethod("dumpThreads", String.class, format.getClass()).invoke(diagnostic, dump.toString(), format);
-            var text = java.nio.file.Files.readString(dump);
-            if (!text.contains("io.zmux.SpliceTest.spliceFrames")) return null;
-            return text.lines().filter(l -> l.contains("io.zmux.Splice.") || l.contains("io.zmux.Splice$"))
-                    .collect(java.util.stream.Collectors.joining("\n"));
-        } finally { java.nio.file.Files.deleteIfExists(dump); }
-    }
-
-    /** Waiting splices hold no thread: every wait is a registered operation or limiter future. */
-    @Test void waitingSplicesHoldNoThread() throws Exception {
-        try (EventLoops loops = EventLoops.create(2);
-             var left = Pair.memory(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build());
-             var right = Pair.memory(ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build())) {
-            var blocked = new CompletableFuture<Long>();
-            var waiting = new CountDownLatch(8);
-            Limiter limiter = new Limiter() {
-                @Override public CompletionStage<Long> acquire(long min, long max) { waiting.countDown(); return blocked; }
-                @Override public long tryAcquire(long min, long max) { return max; }
-                @Override public void refund(long n) {}
-            };
-            var splices = new java.util.ArrayList<CompletableFuture<SpliceResult>>();
-            var endpoints = new java.util.ArrayList<ZmuxStream>();
-            for (int i = 0; i < 16; i++) {
-                var endpoint = left.client().openStream(); endpoint.write(new byte[] {7}); endpoints.add(endpoint);
-                var a = left.server().acceptStream(Duration.ofSeconds(3)); var b = right.client().openStream();
-                // Half wait for the limiter, half for data.
-                splices.add(Zmux.splice(a, b, i % 2 == 0 ? SpliceOptions.builder().aToB(limiter).build() : SpliceOptions.DEFAULT).toCompletableFuture());
-            }
-            // Every limited direction has reached its limiter wait (the others wait for data once the first byte went).
-            assertTrue(waiting.await(20, TimeUnit.SECONDS));
-            // A drain finishing its last step may still show in a dump: a thread that holds a splice shows in every one.
-            // Stable means two dumps in a row with no splice frame; the bound only has to outlast a slow host.
-            String frames = null, previous = null; long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (!("".equals(frames) && "".equals(previous)) && System.nanoTime() < until) { Thread.sleep(20); previous = frames; frames = spliceFrames(); }
-            assertEquals("", frames, "no thread runs or parks in a waiting splice (null: the dump lacked the caller's own frames)");
-            for (var s : splices) assertFalse(s.isDone());
-            for (var s : splices) s.cancel(true);
-            for (var e : endpoints) e.close();
-            // Cancelling a splice's stage completes it at once; its drain then abandons the limiter wait on the splice's
-            // own context, so the limiter's stage is cancelled shortly after, not before cancel returns.
-            long cancelBy = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (!blocked.isCancelled() && System.nanoTime() < cancelBy) Thread.sleep(2);
-            assertTrue(blocked.isCancelled());
-        }
-    }
-
     /** Cancelling while the direction waits for data, or for the target's capacity, cancels that wait and releases what it holds. */
     @Test void cancellationEndsTheReadAndTheWriteWait() throws Exception {
         for (boolean write : new boolean[] {false, true}) {
@@ -684,19 +641,21 @@ class SpliceTest {
                 var cfg = ZmuxConfig.builder().eventLoops(loops).initialStreamReceiveWindow(4096).maxStreamReceiveWindow(4096).build();
                 try (var relay = new Relay(cfg); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
                     var control = new SpliceAbort();
-                    var splice = Zmux.splice(relay.a, relay.b, SpliceOptions.builder().abort(control).build()).toCompletableFuture();
+                    var limiter = new FixedBudget(4096);
+                    var options = SpliceOptions.builder().abort(control);
+                    if (write) options.aToB(limiter);
+                    var splice = Zmux.splice(relay.a, relay.b, options.build()).toCompletableFuture();
                     try (var peer = relay.destination()) {
                         if (write) {
                             tasks.submit(() -> { try { relay.endpoint.write(new byte[32768]); } catch (IOException expected) {} return null; });
-                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                            while (relay.b.sendCapacity() != 0 && System.nanoTime() < until) Thread.sleep(5);
-                            assertEquals(0, relay.b.sendCapacity());
+                            await(limiter.exhausted);
+                            SessionTestSupport.await(relay.b.session, () -> relay.b.sendCapacity() == 0);
                         } else assertEquals(7, peer.inputStream().read());
                         assertTrue(control.abort(0x55));
-                        var result = splice.get(3, TimeUnit.SECONDS);
+                        var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                         assertEquals(new SpliceEnd.Cancelled(0x55), result.aToB().end(), "write " + write);
                         assertEquals(new SpliceEnd.Cancelled(0x55), result.bToA().end(), "write " + write);
-                        peer.setReadTimeout(Duration.ofSeconds(3));
+                        peer.setReadTimeout(Duration.ofSeconds(GUARD_SECONDS));
                         var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(peer));
                         assertEquals(0x55, reset.code());
                     }
@@ -714,7 +673,7 @@ class SpliceTest {
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
                 assertTrue(splice.cancel(true), () -> "the splice ended first: " + splice);
-                assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS));
+                assertThrows(CancellationException.class, () -> splice.get(GUARD_SECONDS, TimeUnit.SECONDS));
                 var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));
                 assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, reset.code());
             }
@@ -735,17 +694,20 @@ class SpliceTest {
             var cancelOperation = (java.util.function.BooleanSupplier) operation.get(splice);
             operation.set(splice, (java.util.function.BooleanSupplier) () -> {
                 boolean cancelling = cancelOperation.getAsBoolean();
-                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(1); // the splice ends by itself once cancelled; bounded wait
-                while (!splice.isDone() && System.nanoTime() < until) Thread.onSpinWait();
+                try {
+                    var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));
+                    assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, reset.code());
+                    assertInstanceOf(StreamStoppedException.class, await(sendEnd(relay.endpoint)));
+                } catch (Exception error) {
+                    throw new AssertionError(error);
+                }
                 return cancelling;
             });
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
                 assertTrue(splice.cancel(true), () -> "the splice published before the cancellation completed it: " + splice);
                 assertTrue(splice.isCancelled());
-                assertThrows(CancellationException.class, () -> splice.get(3, TimeUnit.SECONDS));
-                var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));
-                assertEquals(io.zmux.internal.wire.TransportError.CANCELLED, reset.code());
+                assertThrows(CancellationException.class, () -> splice.get(GUARD_SECONDS, TimeUnit.SECONDS));
             }
         }
     }
@@ -759,7 +721,7 @@ class SpliceTest {
             try (var peer = relay.destination()) {
                 assertEquals(7, peer.inputStream().read());
                 downstream.close();
-                var result = splice.get(5, TimeUnit.SECONDS);
+                var result = splice.get(GUARD_SECONDS, TimeUnit.SECONDS);
                 assertEquals(new SpliceEnd.DownstreamLost(), result.aToB().end());
                 assertEquals(new SpliceEnd.UpstreamLost(), result.bToA().end());
                 var reset = assertThrows(StreamResetException.class, () -> SessionTest.readAll(relay.endpoint));

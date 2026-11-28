@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(120)
 class MultipathTest {
     private static ZmuxConfig.Builder mp(EventLoops loops, PipeAuth auth) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(auth);
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(auth);
     }
 
     /** Opens n streams of size bytes from c; s echoes each one's digest. during runs mid-transfer. */
@@ -70,7 +70,7 @@ class MultipathTest {
     @Test
     void joinAndSpreadOverTcp() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
-            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).build();
+            ZmuxConfig cfg = mp(loops, PipeAuth.psk(new byte[32]).withEndToEnd()).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).build();
             var lo = ListenerConfig.builder().session(cfg).instanceId(new byte[] {1, 2, 3, 4, 5, 6, 7, 8}).build();
             try (ZmuxListener l = Zmux.listen(NetworkTest.any(), lo);
                  var ex = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -170,7 +170,7 @@ class MultipathTest {
         org.junit.jupiter.api.Assertions.assertFalse(PipeAuth.none().isConfigured(), "no source is a value; a session that needs one fails to start");
         assertThrows(IllegalArgumentException.class, () -> Liveness.builder().suspectFloor(Duration.ofMillis(10)));
         assertThrows(IllegalArgumentException.class, () -> Liveness.builder().deadTimeout(Duration.ofMillis(500)));
-        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().maxPipes(0));
+        assertThrows(IllegalArgumentException.class, () -> ZmuxConfig.builder().sessionPolicy(new SessionPolicy(new CapacityLimits(-1))));
         assertThrows(IllegalArgumentException.class, () -> PipeLiveness.builder().suspectFloor(Duration.ofMillis(1)));
         assertTrue(ZmuxConfig.builder().resumeTimeout(Duration.ofSeconds(5)).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build().isMultipath());
     }

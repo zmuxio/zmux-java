@@ -29,6 +29,11 @@ import java.util.List;
  * @param datagramsDroppedSend datagrams dropped from the send queue (full, or not allowed by the peer)
  * @param datagramsDroppedRecv received datagrams dropped: a full queue, an unknown or closed stream, the byte limit
  * @param datagramsDroppedLimit datagrams dropped by a datagram limiter, sent or received
+ * @param datagramDuplicatesDropped received copies already occupying a sequence position
+ * @param datagramStaleDropped received copies outside the sequence window
+ * @param datagramDeadlineDropped datagrams discarded at the local send deadline
+ * @param datagramCopiesSent extra datagram copies dispatched
+ * @param datagramCopyBytes payload bytes of extra datagram copies dispatched
  * @param noEffectBudget gauge: the current tokens of the no-effect budget
  * @param joinFailures gauge: consecutive failed join attempts, reset by a Proven join
  * @param joinBatchDropped frames of a Hello's or a Reply's first batch dropped
@@ -59,21 +64,19 @@ import java.util.List;
  * @param suspendedTime time spent suspended, the current suspension included
  * @param schedulerAnswers custom scheduler answers applied
  * @param schedulerFallbacks custom scheduler answers replaced by the affinity choice
- * @param firstFlightTimeouts 0 or 1: 1 when the first flight {@link ZmuxConfig.Builder#holdFirstFlight(boolean)} held was
- *     released by the handshake timeout rather than by {@link ZmuxSession#releaseFirstFlight}
  */
 public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCandidates,
                            long bytesSent, long bytesReceived, long recordsSent, long recordsReceived,
                            long bytesWritten, long bytesRead, long datagramBytesSent, long datagramBytesReceived,
                            long streamsOpenedLocal, long streamsOpenedRemote, long streamsActive, long streamCreditWaits,
                            long datagramsSent, long datagramsReceived, long datagramsSentChannel, long datagramsReceivedChannel,
-                           long datagramsDroppedSend, long datagramsDroppedRecv, long datagramsDroppedLimit,
+                           long datagramsDroppedSend, long datagramsDroppedRecv, long datagramsDroppedLimit, long datagramDuplicatesDropped, long datagramStaleDropped, long datagramDeadlineDropped, long datagramCopiesSent, long datagramCopyBytes,
                            long noEffectBudget, Duration smoothedRtt, Duration minRtt, Duration latestRtt,
                            Duration meanDeviation, long bytesReinjected, long bytesOpportunistic, long penalties,
                            long reinjections, long bytesRedundant, long bytesDuplicateReceived, long sendBuffered,
                            long recvBuffered, long retained, long pipesActive, long pipesAdded, long pipeFailures,
                            long joinAuthFailures, long joinReplays, long joinPending, long joinRefusals, long suspensions,
-                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped,
+                           Duration suspendedTime, long schedulerAnswers, long schedulerFallbacks, long joinFailures, long joinBatchDropped,
                            long logLinesDropped) {
     public SessionStats {
         carrierCandidates = List.copyOf(carrierCandidates);
@@ -88,12 +91,12 @@ public record SessionStats(CarrierKind carrier, List<CandidateResult> carrierCan
                 s.appBytesWritten(), s.appBytesRead(), s.datagramBytesSent(), s.datagramBytesReceived(),
                 s.streamsOpenedLocal(), s.streamsOpenedRemote(), g.streamsActive(), s.streamCreditWaits(),
                 s.datagramsSent(), s.datagramsReceived(), s.datagramsSentChannel(), s.datagramsReceivedChannel(),
-                s.datagramsDroppedSend(), s.datagramsDroppedRecv(), s.datagramsDroppedLimit(), s.budgetTokens(),
+                s.datagramsDroppedSend(), s.datagramsDroppedRecv(), s.datagramsDroppedLimit(), s.datagramDuplicatesDropped(), s.datagramStaleDropped(), s.datagramDeadlineDropped(), s.datagramCopiesSent(), s.datagramCopyBytes(), s.budgetTokens(),
                 rtt(g.smoothedRtt()), rtt(g.minRtt()), rtt(g.latestRtt()), rtt(g.meanDeviation()),
                 s.bytesReinjected(), s.bytesOpportunistic(), s.penalties(), s.reinjections(), s.bytesRedundant(),
                 s.bytesDuplicateReceived(), g.sendBuffered(), g.recvBuffered(), g.retained(), g.pipesActive(),
                 s.pipesAdded(), s.pipeFailures(), s.joinAuthFailures(), s.joinReplays(), s.joinPending(), s.joinRefusals(), s.suspensions(),
-                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks(), s.firstFlightTimeouts(), s.joinFailures(), s.joinBatchDropped(), 0);
+                Duration.ofNanos(suspended), s.schedulerAnswers(), s.schedulerFallbacks(), s.joinFailures(), s.joinBatchDropped(), 0);
     }
 
     private static Duration rtt(long nanos) {

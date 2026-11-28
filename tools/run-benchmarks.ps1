@@ -1,4 +1,4 @@
-param([switch] $Quick, [switch] $LoadedOnly, [switch] $FootprintOnly, [string] $ResultFile = "target/benchmark.json")
+param([switch] $Quick, [switch] $LoadedOnly, [switch] $FootprintOnly, [switch] $CloseOnly, [string] $ResultFile = "target/benchmark.json")
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -11,11 +11,11 @@ function Invoke-Timed([string] $Command, [int] $Seconds) {
     }
     if ($process.ExitCode -ne 0) { throw "Benchmark command failed: $($process.ExitCode)" }
 }
-if ($LoadedOnly -and $FootprintOnly) { throw "Choose one measurement family" }
 Invoke-Timed 'mvn -B -q -pl zmux-bench -am -DskipTests package dependency:build-classpath -Dmdep.outputFile=target/bench.classpath -Dmdep.includeScope=runtime' 600
 $quickArg = if ($Quick) { ' --quick' } else { '' }
 if ($LoadedOnly) { $quickArg += ' --loaded-only' }
 if ($FootprintOnly) { $quickArg += ' --footprint-only' }
+if ($CloseOnly) { $quickArg += ' --close-only' }
 if ($ResultFile.Contains('"')) { throw "Invalid result path" }
 $classPath = 'zmux-bench/target/classes;' + (Get-Content (Join-Path $repoRoot 'zmux-bench/target/bench.classpath') -Raw).Trim()
 Invoke-Timed ('java --class-path "' + $classPath + '" io.zmux.bench.Benchmark' + $quickArg + ' --result-file "' + $ResultFile + '"') 330

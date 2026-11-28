@@ -12,7 +12,7 @@ class MultipathCloseWaitTest {
     /** A multipath session whose bootstrap pipe has written 10 unacknowledged bytes on the given lane. */
     private static Session unacked(long lane) {
         Session s = PipeTargetTest.session();
-        Poke.set(s, "feat", new Features(false, false, false, false, false, true, true, false, true, true, false, false));
+        Poke.set(s, "feat", new Features(false, false, false, false, false, true, true, false, true, true, false, false, false));
         Pipe p = s.pipes.get(0);
         Pipe.OutLane ol = lane == 0 ? p.out().lanes.get(0) : new Pipe.OutLane(lane, new CarrierInfo(Framing.BYTES, false, false, false, false), true);
         if (lane != 0) p.out().lanes.add(ol);

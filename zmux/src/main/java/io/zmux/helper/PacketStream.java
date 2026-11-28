@@ -1,6 +1,10 @@
 package io.zmux.helper;
 
 import io.zmux.Chunk;
+import io.zmux.DatagramSendOptions;
+import io.zmux.DatagramDroppedException;
+import io.zmux.internal.core.Session.DatagramAdmission;
+import io.zmux.internal.core.Session.DatagramMode;
 import io.zmux.DatagramTooLargeException;
 import io.zmux.NotNegotiatedException;
 import io.zmux.PacketErrorException;
@@ -53,7 +57,7 @@ public final class PacketStream implements AutoCloseable {
     /** ZMUX_PACKET_ERROR (EXTENSIONS.md Section 7.1): the bytes of a packet stream were malformed. */
     public static final long PACKET_ERROR = TransportError.PACKET_ERROR;
     /** The default {@link Options#maxPacket()}: 65535 payload bytes. */
-    public static final int DEFAULT_MAX_PACKET = 65535;
+    public static final int DEFAULT_MAX_PACKET = Capsule.DEFAULT_MAX_DATAGRAM_PAYLOAD;
 
     /** How a packet is sent. */
     public enum SendPolicy {
@@ -99,10 +103,7 @@ public final class PacketStream implements AutoCloseable {
      * @param capsulesSkipped received capsules of other types
      */
     public record Stats(long sentAsDatagrams, long sentAsCapsules, long droppedTooLarge, long droppedLimited,
-                        long receivedAsDatagrams, long receivedAsCapsules, long capsulesSkipped) {
-        /** All dropped packets. */
-        public long dropped() { return droppedTooLarge + droppedLimited; }
-    }
+                        long receivedAsDatagrams, long receivedAsCapsules, long capsulesSkipped, long dropped) {}
 
     private static final int QUEUE = 64;
     private static final int READ = 64 << 10;
@@ -111,6 +112,7 @@ public final class PacketStream implements AutoCloseable {
     private final ZmuxStream stream;
     private final SendPolicy policy;
     private final int maxPacket;
+    private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong sentDatagrams = new AtomicLong(), sentCapsules = new AtomicLong(), tooLarge = new AtomicLong(),
             limited = new AtomicLong(), receivedDatagrams = new AtomicLong(), receivedCapsules = new AtomicLong(), skipped = new AtomicLong();
 
@@ -167,13 +169,13 @@ public final class PacketStream implements AutoCloseable {
     // ---- sending ----
 
     /** {@link #send(long, ByteBuffer)} with context ID 0. */
-    public boolean send(ByteBuffer payload) throws IOException { return send(0, payload); }
+    public void send(ByteBuffer payload) throws IOException { send(0, payload); }
 
     /**
      * Sends the payload's remaining bytes as one packet with context, by the send policy. A
      * capsule waits for the stream's flow control (bounded by the stream's write timeout);
-     * a datagram never waits. True when the packet was queued or written; false when the
-     * session's datagram limiter dropped it. A timeout or interruption before the first byte of the
+     * a datagram never waits. A local drop throws {@link DatagramDroppedException}.
+     * A timeout or interruption before the first byte of the
      * capsule was written fails the send and the packet is never sent later, so the caller may
      * retry it without a duplicate; one after a partial write resets the stream with
      * ZMUX_CANCELLED, as the capsules after it could not be framed.
@@ -182,10 +184,24 @@ public final class PacketStream implements AutoCloseable {
      * @throws DatagramTooLargeException {@link SendPolicy#DATAGRAM_ONLY} and the packet does not fit
      * @throws NotNegotiatedException {@link SendPolicy#DATAGRAM_ONLY} without datagrams
      */
-    public boolean send(long context, ByteBuffer payload) throws IOException {
+    public void send(long context, ByteBuffer payload) throws IOException {
+        send(context, payload, DatagramSendOptions.INHERIT);
+    }
+
+    /** Submits one packet with local-hop datagram options. */
+    public void send(long context, ByteBuffer payload, DatagramSendOptions options) throws IOException {
         int n = checkSend(context, payload);
-        int sent = sendDatagram(context, payload, n);
-        if (sent != CAPSULE) return sent == SENT;
+        DatagramAdmission admission;
+        try {
+            admission = Spi.submitPacketBlocking(stream, context, payload, options, datagramMode());
+        } catch (IOException error) {
+            recordRefusal(error);
+            throw error;
+        }
+        if (admission == DatagramAdmission.QUEUED) {
+            sentDatagrams.incrementAndGet();
+            return;
+        }
         CompletableFuture<Void> turn = acquire();
         try {
             writeCapsule(context, payload, n);
@@ -193,29 +209,58 @@ public final class PacketStream implements AutoCloseable {
             release(turn);
         }
         sentCapsules.incrementAndGet();
-        return true;
     }
 
-    /**
-     * {@link #send(long, ByteBuffer)} without blocking: completes once the packet is queued or
-     * written, with the same result. Borrows payload until completion. Capsules are written in
-     * the order of the calls that send them; cancelling the future cancels a capsule none of whose
-     * bytes was written (it is never sent later), and one already partly written resets the
-     * stream with ZMUX_CANCELLED.
-     */
-    public ZmuxFuture<Boolean> sendAsync(long context, ByteBuffer payload) {
-        var outcome = new CompletableFuture<Boolean>();
+    /** Asynchronously submits a packet, borrowing its payload until completion. */
+    public ZmuxFuture<Void> sendAsync(long context, ByteBuffer payload) {
+        return sendAsync(context, payload, DatagramSendOptions.INHERIT);
+    }
+
+    /** Asynchronously submits a packet with local-hop datagram options. */
+    public ZmuxFuture<Void> sendAsync(long context, ByteBuffer payload, DatagramSendOptions options) {
         try {
-            int n = checkSend(context, payload);
-            int sent = sendDatagram(context, payload, n);
-            if (sent != CAPSULE) outcome.complete(sent == SENT);
+            checkSend(context, payload);
         } catch (IOException error) {
-            outcome.completeExceptionally(error);
+            return Spi.future(CompletableFuture.failedFuture(error), null);
         }
-        if (outcome.isDone()) return Spi.future(outcome, null);
-        var writer = new AsyncWriter(context, payload, outcome);
-        enqueue(writer);
-        return Spi.future(outcome, writer::cancel);
+        var outcome = new CompletableFuture<Void>();
+        var mode = datagramMode();
+        var writer = mode == DatagramMode.DATAGRAM_ONLY ? null : new AsyncWriter(context, payload, outcome);
+        var submitted = Spi.submitPacket(stream, context, payload, options, mode);
+        if (writer != null) enqueue(writer);
+        submitted.whenComplete((admission, failure) -> {
+            if (failure != null) {
+                Throwable cause = Spi.completionCause(failure);
+                recordRefusal(cause);
+                outcome.completeExceptionally(cause);
+            } else if (admission == DatagramAdmission.QUEUED) {
+                sentDatagrams.incrementAndGet();
+                outcome.complete(null);
+            }
+            if (writer != null) writer.capsule.complete(admission == DatagramAdmission.CAPSULE);
+        });
+        return Spi.future(outcome, () -> {
+            submitted.cancel(true);
+            if (writer != null) writer.cancel();
+        });
+    }
+
+    private DatagramMode datagramMode() {
+        return switch (policy) {
+            case DATAGRAM_ONLY -> DatagramMode.DATAGRAM_ONLY;
+            case PREFER_DATAGRAM -> DatagramMode.DATAGRAM_OR_CAPSULE;
+            case STREAM_ONLY -> DatagramMode.CAPSULE_ONLY;
+        };
+    }
+
+    private void recordRefusal(Throwable cause) {
+        if (cause instanceof DatagramTooLargeException) {
+            tooLarge.incrementAndGet();
+            dropped.incrementAndGet();
+        } else if (cause instanceof DatagramDroppedException drop) {
+            dropped.incrementAndGet();
+            if (drop.reason() == DatagramDroppedException.Reason.LIMITER) limited.incrementAndGet();
+        }
     }
 
     private int checkSend(long context, ByteBuffer payload) throws IOException {
@@ -225,28 +270,6 @@ public final class PacketStream implements AutoCloseable {
         if (n > maxPacket) throw new IllegalArgumentException("packet above maxPacket (" + maxPacket + ")");
         if (isClosed()) throw new StreamClosedException(-1, "packet stream closed");
         return n;
-    }
-
-    private static final int SENT = 1, DROPPED = 0, CAPSULE = -1;
-
-    /** The datagram path: {@link #SENT}, {@link #DROPPED} by the limiter, or {@link #CAPSULE} when the packet goes as a capsule. */
-    private int sendDatagram(long context, ByteBuffer payload, int n) throws IOException {
-        if (policy == SendPolicy.STREAM_ONLY) return CAPSULE;
-        if (policy == SendPolicy.PREFER_DATAGRAM) {
-            int max = stream.maxDatagramPayload(context);
-            if (max <= 0 || n > max) return CAPSULE;
-        }
-        int position = payload.position();
-        try {
-            if (stream.sendDatagram(context, payload)) { sentDatagrams.incrementAndGet(); return SENT; }
-            limited.incrementAndGet();
-            return DROPPED;
-        } catch (DatagramTooLargeException | NotNegotiatedException error) {
-            payload.position(position);
-            if (policy == SendPolicy.PREFER_DATAGRAM) return CAPSULE; // The limit changed since it was read.
-            if (error instanceof DatagramTooLargeException) tooLarge.incrementAndGet();
-            throw error;
-        }
     }
 
     private void writeCapsule(long context, ByteBuffer payload, int n) throws IOException {
@@ -327,11 +350,12 @@ public final class PacketStream implements AutoCloseable {
     private final class AsyncWriter implements Writer {
         private final long context;
         private final ByteBuffer payload;
-        private final CompletableFuture<Boolean> outcome;
+        private final CompletableFuture<Void> outcome;
+        private final CompletableFuture<Boolean> capsule = new CompletableFuture<>();
         private volatile CompletableFuture<?> current;
         private volatile boolean cancelled;
 
-        AsyncWriter(long context, ByteBuffer payload, CompletableFuture<Boolean> outcome) {
+        AsyncWriter(long context, ByteBuffer payload, CompletableFuture<Void> outcome) {
             this.context = context; this.payload = payload; this.outcome = outcome;
         }
 
@@ -342,6 +366,10 @@ public final class PacketStream implements AutoCloseable {
         }
 
         @Override public CompletionStage<?> start() {
+            return capsule.thenCompose(asCapsule -> asCapsule ? write() : CompletableFuture.completedFuture(null));
+        }
+
+        private CompletionStage<Void> write() {
             if (cancelled || outcome.isDone()) return CompletableFuture.completedFuture(null);
             int n = payload.remaining();
             ByteBuffer head = ByteBuffer.allocate(Capsule.datagramHeaderLength(context, n));
@@ -362,7 +390,7 @@ public final class PacketStream implements AutoCloseable {
                 if (cancelled) second.cancel(true);
                 second.whenComplete((v2, e2) -> {
                     if (e2 != null) fail(e2, true);
-                    else { sentCapsules.incrementAndGet(); outcome.complete(true); }
+                    else { sentCapsules.incrementAndGet(); outcome.complete(null); }
                     done.complete(null);
                 });
             });
@@ -371,7 +399,7 @@ public final class PacketStream implements AutoCloseable {
 
         private void fail(Throwable error, boolean started) {
             if (started) stream.reset(TransportError.CANCELLED);
-            if (error instanceof java.util.concurrent.CompletionException c && c.getCause() != null) error = c.getCause();
+            error = Spi.completionCause(error);
             outcome.completeExceptionally(error);
         }
     }
@@ -547,71 +575,40 @@ public final class PacketStream implements AutoCloseable {
         for (var w : waiting) w.complete(null);
     }
 
-    private static final int HEADER = 0, CONTEXT = 1, PAYLOAD = 2, SKIP = 3;
-
     private void readCapsules() {
-        var head = new Capsule.Header();
-        var contextField = new Capsule.Field();
-        int state = HEADER;
-        long remaining = 0, context = 0;
+        var cursor = new Capsule.Cursor(maxPacket, Math.min(maxPacket + 8, Capsule.MAX_OPAQUE_VALUE), false);
         byte[] payload = null;
-        int filled = 0;
         try {
             while (true) {
                 Chunk chunk = stream.readChunk(READ);
                 if (chunk == null) {
-                    if (state != HEADER || !head.idle()) { malformed("stream ended inside a capsule"); return; }
+                    if (!cursor.atBoundary()) { malformed("stream ended inside a capsule"); return; }
                     end(END);
                     return;
                 }
-                try (chunk) {
-                    ByteBuffer b = chunk.buffer();
-                    while (b.hasRemaining()) {
-                        switch (state) {
-                            case HEADER -> {
-                                if (!head.feed(b)) break;
-                                remaining = head.length();
-                                if (remaining > (long) maxPacket + 8) { malformed("capsule above the bound"); return; }
-                                if (head.type() == Capsule.DATAGRAM) {
-                                    if (remaining == 0) { malformed("DATAGRAM capsule without a context ID"); return; }
-                                    state = CONTEXT;
-                                } else {
-                                    skipped.incrementAndGet();
-                                    state = remaining == 0 ? HEADER : SKIP;
-                                }
-                            }
-                            case CONTEXT -> {
-                                int before = b.position();
-                                boolean done = contextField.feed(b);
-                                remaining -= b.position() - before;
-                                if (remaining < 0 || (!done && remaining == 0)) { malformed("context ID past the capsule"); return; }
-                                if (!done) break;
-                                context = contextField.value();
-                                if (remaining > maxPacket) { malformed("capsule above the bound"); return; }
-                                payload = new byte[(int) remaining];
-                                filled = 0;
-                                if (remaining == 0) {
-                                    state = HEADER;
-                                    if (!packet(context, payload)) return;
-                                } else state = PAYLOAD;
-                            }
-                            case PAYLOAD -> {
-                                int n = (int) Math.min(remaining, b.remaining());
-                                b.get(payload, filled, n);
-                                filled += n; remaining -= n;
-                                if (remaining == 0) {
-                                    state = HEADER;
-                                    if (!packet(context, payload)) return;
-                                }
-                            }
-                            default -> {
-                                int n = (int) Math.min(remaining, b.remaining());
-                                b.position(b.position() + n);
-                                remaining -= n;
-                                if (remaining == 0) state = HEADER;
-                            }
+                var owned = io.zmux.internal.loop.ChunkAccess.take(chunk);
+                try {
+                    ByteBuffer bytes = owned.data();
+                    while (bytes.hasRemaining()) {
+                        if (!cursor.headerReady()) {
+                            if (!cursor.readHeader(bytes)) { malformed("invalid capsule header or length"); return; }
+                            if (!cursor.headerReady()) continue;
+                            if (cursor.type() == Capsule.DATAGRAM) payload = new byte[cursor.remaining()];
+                            else skipped.incrementAndGet();
+                        }
+                        int n = Math.min(cursor.remaining(), bytes.remaining());
+                        if (payload != null) bytes.get(payload, payload.length - cursor.remaining(), n);
+                        else bytes.position(bytes.position() + n);
+                        cursor.readValue(n);
+                        if (cursor.remaining() == 0) {
+                            long context = cursor.context();
+                            cursor.clear();
+                            if (payload != null && !packet(context, payload)) return;
+                            payload = null;
                         }
                     }
+                } finally {
+                    owned.buf().unref();
                 }
             }
         } catch (InterruptedException interrupted) {
@@ -639,7 +636,7 @@ public final class PacketStream implements AutoCloseable {
     /** This packet stream's counters. */
     public Stats stats() {
         return new Stats(sentDatagrams.get(), sentCapsules.get(), tooLarge.get(), limited.get(),
-                receivedDatagrams.get(), receivedCapsules.get(), skipped.get());
+                receivedDatagrams.get(), receivedCapsules.get(), skipped.get(), dropped.get());
     }
 
     private boolean isClosed() {
@@ -660,7 +657,7 @@ public final class PacketStream implements AutoCloseable {
             catch (RuntimeException error) { outcome.completeExceptionally(error); return CompletableFuture.completedFuture(null); }
             return f.handle((v, e) -> {
                 if (e == null) outcome.complete(null);
-                else outcome.completeExceptionally(e instanceof java.util.concurrent.CompletionException c && c.getCause() != null ? c.getCause() : e);
+                else outcome.completeExceptionally(Spi.completionCause(e));
                 return null;
             });
         });

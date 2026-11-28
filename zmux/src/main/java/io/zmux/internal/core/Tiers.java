@@ -50,9 +50,12 @@ public final class Tiers {
     private final PipeTable pipes;
     private final PathMetrics metrics;
     private final StreamScheduler.Iter iter = new StreamScheduler.Iter();
-    private final ArrayList<long[]> tierSince = new ArrayList<>(0);
+    private TierAges tierSince = new TierAges();
+    private TierAges scratch = new TierAges();
     private final ArrayList<SatReport> satRep = new ArrayList<>(0);
     private final Gate gateBuf = new Gate();
+    private long ageAt = Time.NEVER, saturationAt = Time.NEVER;
+    private long gateBuilds;
 
     Tiers(CoreConfig cfg, ConnFlow conn, StreamScheduler sched, PipeTable pipes, PathMetrics metrics, Port port) {
         this.port = port;
@@ -136,7 +139,8 @@ public final class Tiers {
     }
 
     boolean classUsable(boolean standby, boolean probOk, Pipe p) {
-        return p.mp() != null && p.mp().effStandby() == standby && metrics.pipeUsable(p, probOk);
+        return p.mp() != null && p.mp().effStandby() == standby && (probOk || !p.mp().projection.outboundHeld())
+                && metrics.pipeUsable(p, probOk);
     }
 
     private boolean hasClass(boolean standby, boolean probOk) {
@@ -154,10 +158,12 @@ public final class Tiers {
     }
 
     /** Works out the gate now; null when no pipe is usable. */
-    Gate buildGate() {
+    Gate buildGate() { return buildGate(gateBuf); }
+
+    Gate buildGate(Gate g) {
+        if (cfg.test().enabled()) gateBuilds++;
         int c = usableClass();
         if ((c & 4) == 0) return null;
-        Gate g = gateBuf;
         g.clear();
         g.standby = (c & 1) != 0;
         g.probOk = (c & 2) != 0;
@@ -239,25 +245,54 @@ public final class Tiers {
     }
 
     long eligibleSince(long prio) {
-        for (long[] t : tierSince) if (t[0] == prio) return t[1];
+        for (int i = 0; i < tierSince.size; i++) {
+            if (tierSince.priorities[i] == prio) return tierSince.since[i];
+        }
         return Long.MIN_VALUE;
     }
 
+    private static final class TierAges {
+        private long[] priorities = new long[0], since = new long[0];
+        private int size;
+
+        void add(long priority, long at) {
+            if (size == priorities.length) {
+                int capacity = Math.max(2, size * 2);
+                priorities = java.util.Arrays.copyOf(priorities, capacity);
+                since = java.util.Arrays.copyOf(since, capacity);
+            }
+            priorities[size] = priority;
+            since[size++] = at;
+        }
+    }
+
     /** Records since when each eligible tier is eligible and reports saturation changes. */
-    void refreshTiers() {
-        Gate g = buildGate();
-        ArrayList<long[]> keep = new ArrayList<>(2);
+    void refreshTiers(Gate g) {
+        long now = port.now();
+        scratch.size = 0;
         if (g != null) {
             for (int i = 0; i <= g.last; i++) {
                 long pr = g.tiers.get(i).prio;
                 long since = eligibleSince(pr);
-                keep.add(new long[] {pr, since == Long.MIN_VALUE ? port.now() : since});
+                scratch.add(pr, since == Long.MIN_VALUE ? now : since);
             }
         }
-        tierSince.clear();
-        tierSince.addAll(keep);
+        TierAges previous = tierSince;
+        tierSince = scratch;
+        scratch = previous;
         reportSaturation(g);
-        checkTakeover();
+        ageAt = Time.NEVER;
+        if (g != null && g.tiers.size() > 1 && wdHas) {
+            long delay = cfg.overflowDelay();
+            ageAt = future(ageAt, Time.add(wdOldest, delay), now);
+            for (int i = 0; i < tierSince.size; i++) {
+                ageAt = future(ageAt, Time.add(Math.max(wdOldest, tierSince.since[i]), delay), now);
+            }
+        }
+        saturationAt = Time.NEVER;
+        for (SatReport report : satRep) {
+            saturationAt = future(saturationAt, Time.add(report.at, SATURATION_EVERY), now);
+        }
     }
 
     void reportSaturation(Gate g) {
@@ -290,19 +325,23 @@ public final class Tiers {
         }
     }
 
-    /** The next moment the age test can change a decision. */
-    long tierDeadline() {
-        if (tierSince.isEmpty() && satRep.isEmpty()) return Time.NEVER;
-        long next = Time.NEVER;
-        waitingData();
-        if (wdHas) {
-            long d = cfg.overflowDelay();
-            next = Math.min(next, Time.add(wdOldest, d));
-            for (long[] t : tierSince) next = Math.min(next, Time.add(Math.max(wdOldest, t[1]), d));
-        }
-        for (SatReport r : satRep) next = Math.min(next, Time.add(r.at, SATURATION_EVERY));
-        return next <= port.now() ? Time.NEVER : next;
+    private static long future(long current, long candidate, long now) {
+        return candidate > now ? Math.min(current, candidate) : current;
     }
+
+    /** The next eligibility transition or end of a saturation report's coalescing interval. */
+    long tierDeadline() {
+        return sched.isEmpty() ? saturationAt : Math.min(ageAt, saturationAt);
+    }
+
+    boolean onTimeout(long now) {
+        long deadline = tierDeadline();
+        if (deadline == Time.NEVER || deadline > now) return false;
+        refreshTiers(buildGate());
+        return !sched.isEmpty() && tierSince.size > 1;
+    }
+
+    long gateBuilds() { return gateBuilds; }
 
     private long wdX;
 
@@ -317,9 +356,10 @@ public final class Tiers {
         StreamScheduler.Iter it = iter.reset(sched);
         for (Stream st = it.next(); st != null; st = it.next()) {
             StreamSend.SendPart sp = st.snd;
-            if (sp.mps() != null) for (int i = 0; i < sp.mps().ret.resend().size(); i++) lost += sp.mps().ret.resend().hi(i) - sp.mps().ret.resend().lo(i);
+            long resend = sp.mps() == null ? 0 : sp.mps().ret.history.resendBytes();
+            lost += resend;
             long r = metrics.readyBytes(st);
-            if (r == 0 && (sp.mps() == null || sp.mps().ret.resend().size() == 0)) continue;
+            if (r == 0 && resend == 0) continue;
             fresh += r;
             long w = sp.waitAt();
             if (sp.wwait() && sp.wwaitAt() < w) w = sp.wwaitAt();
@@ -495,8 +535,9 @@ public final class Tiers {
             long[] r = qa.tier.statusQ.getFirst();
             long id = q.id, seq = r[0], st = r[1], prio = r[2];
             int n = 4 + VarInt.length(id) + VarInt.length(seq) + VarInt.length(st) + VarInt.length(prio);
-            if (!w.frame(n, true, bb -> FrameEncoder.pipeStatus(bb, id, seq, st, prio))) return false;
-            w.logFrame(new FrameDesc(FrameDesc.Kind.STATUS, false, false, id, 0, 0, seq));
+            if (!w.trackedFrame(n, seq <= qa.tier.statusWritten, bb -> FrameEncoder.pipeStatus(bb, id, seq, st, prio),
+                    new FrameDesc(FrameDesc.Kind.STATUS, false, false, id, 0, 0, seq))) return false;
+            qa.tier.statusWritten = Math.max(qa.tier.statusWritten, seq);
             qa.tier.statusQ.removeFirst();
         }
         qa.tier.statusHeld = false;
@@ -508,11 +549,6 @@ public final class Tiers {
         Attach qa = q.mp();
         return qa != null && !qa.tier.statusQ.isEmpty() && !qa.health.retired() && q.in() != null && qa.health.in() == Attach.IN_OPEN
                 && !qa.handshaking() && (!qa.tier.statusHeld || q == p);
-    }
-
-    /** The number of tiers currently eligible. */
-    int eligibleTiers() {
-        return tierSince.size();
     }
 
     /** The tier options of a local join. */
@@ -541,7 +577,7 @@ public final class Tiers {
         private long peerSeq;
         private long recvPrio;
         private boolean recvStandby;
-        private long statusSeq;
+        private long statusSeq, statusWritten;
         private final ArrayList<long[]> statusQ = new ArrayList<>(0);
         private boolean statusHeld;
         private long weight = 1;

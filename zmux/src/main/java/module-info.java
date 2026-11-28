@@ -12,10 +12,14 @@ module io.zmux {
     exports io.zmux.shaping;
     // The transport SPI the QUIC carrier implements (internal.loop) names core and wire types
     // in its signatures; they are exported to it so the SPI is well-formed, not for direct use.
+    exports io.zmux.internal.buffer to io.zmux.quic;
     exports io.zmux.internal.core to io.zmux.quic;
     exports io.zmux.internal.join to io.zmux.quic;
     exports io.zmux.internal.diag to io.zmux.http, io.zmux.quic;
+    exports io.zmux.internal.exchange to io.zmux.http;
     exports io.zmux.internal.loop to io.zmux.quic;
+    exports io.zmux.internal.memory to io.zmux.quic;
     exports io.zmux.internal.wire to io.zmux.quic;
     exports io.zmux.internal.spi to io.zmux.http, io.zmux.http3, io.zmux.quic;
+    exports io.zmux.internal.json to io.zmux.shaping.machine;
 }

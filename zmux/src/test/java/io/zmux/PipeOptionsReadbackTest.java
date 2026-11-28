@@ -27,7 +27,7 @@ class PipeOptionsReadbackTest {
     }
 
     @Test void theOptionsAddedWithReadBackOnEveryHandle() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             var given = PipeOptions.builder().weight(3).sendPriority(2).receiveStandby(true).fateGroup(9).noProbation()
                     .liveness(PipeLiveness.builder().deadTimeout(Duration.ofSeconds(7)).build())
                     .qualityBand(QualityBand.builder().rtt(Duration.ofMillis(40)).build()).clearSendStandby().build();
@@ -47,7 +47,7 @@ class PipeOptionsReadbackTest {
     }
 
     @Test void anUpdateReadsBackExactlyWhatItSetOrCleared() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 0, PipeOptions.builder().weight(3).sendPriority(2).build());
             p.awaitAttached(WAIT);
             var liveness = PipeLiveness.builder().deadTimeout(Duration.ofSeconds(9)).build();
@@ -66,7 +66,7 @@ class PipeOptionsReadbackTest {
     }
 
     @Test void theLastOptionsAreAnsweredAfterThePipeEnded() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             var given = PipeOptions.builder().weight(4).build();
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 0, given);
             p.awaitAttached(WAIT);
@@ -79,7 +79,7 @@ class PipeOptionsReadbackTest {
 
     /** The options read after the end are the last held, updates included, on the handle that updated and on one made before the end. */
     @Test void theLastUpdatedOptionsAreAnsweredAfterTheEndAndNothingIsHeldAgain() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 0, PipeOptions.builder().weight(4).build());
             p.awaitAttached(WAIT);
             var other = f.client.pipes().stream().filter(q -> q.id().value() == p.id().value()).findFirst().orElseThrow();
@@ -100,7 +100,7 @@ class PipeOptionsReadbackTest {
     }
 
     @Test void whatTheJoinFixedReadsAsActualOnBothEnds() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             var given = PipeOptions.builder().direction(PipeOptions.Direction.SEND_ONLY).fateGroup(9).returnOnReply(true).build();
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 0, given);
             var joiner = p.options();
@@ -120,7 +120,7 @@ class PipeOptionsReadbackTest {
     }
 
     @Test void optionsReadFromAPipeAddAnEquivalentPipe() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             ZmuxPipe p = PeerAttachedTest.lateJoin(f, 0, PipeOptions.builder().weight(2).build());
             p.awaitAttached(WAIT);
             var read = p.options();

@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(30)
 class PipeEventsTest {
     private static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(3))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
                 .noProbation().build();
     }
 

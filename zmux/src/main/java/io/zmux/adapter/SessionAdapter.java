@@ -18,8 +18,7 @@ public final class SessionAdapter {
 
     /**
      * Whether a local join may start now: the attachments this endpoint joined that have neither
-     * failed nor been retired are below maxPipes, the join keys are in place and no join backoff
-     * runs; only once the unretired attachments it joined reach maxPipes + pipeHeadroom, the
+     * failed nor been retired are below the steady attachment limit, the Join keys are in place and no Join backoff runs; only once the unretired attachments it joined reach the attachment limit including Join headroom, the
      * session must also be suspended with an attachment the cap may displace for a join that fills
      * a missing direction.
      */

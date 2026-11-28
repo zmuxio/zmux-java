@@ -38,6 +38,9 @@ import java.util.concurrent.CompletableFuture;
  * stream of a shared HTTP/2 or HTTP/3 connection. Safe for concurrent use.
  */
 final class Connections {
+    /** A request-only operation that can be cancelled without affecting a shared connection. */
+    static final class RequestOpening extends CompletableFuture<Channel> {}
+
     /** The HTTP versions a client uses. */
     enum Version { HTTP_1_1, HTTP_2, HTTP_3, AUTO }
 
@@ -45,7 +48,7 @@ final class Connections {
     private final SslContext ssl, ssl1;
     private final Version version;
     private final Duration connectTimeout;
-    private final HttpTransport.Client h3;
+    final HttpTransport.Client h3;
     /** Shared HTTP/2 or HTTP/3 connections by origin, according to the client version. */
     private final Map<String, CompletableFuture<Channel>> shared = new HashMap<>();
     /** Idle HTTP/1.1 connections by origin. */
@@ -71,6 +74,7 @@ final class Connections {
     }
 
     boolean http3() { return version == Version.HTTP_3; }
+    boolean onBorrowedLoop() { return http3() && h3.onBorrowedLoop(); }
 
     void requireRequestScheme(URI u) {
         if (http3() && (!"https".equalsIgnoreCase(u.getScheme()) || u.getHost() == null)) {
@@ -108,13 +112,18 @@ final class Connections {
         String o = origin(u);
         boolean wantH2 = !http1 && (version == Version.HTTP_2 || (version == Version.AUTO && secure(u)));
         boolean wantH3 = !http1 && http3();
+        if (http1 && http3() && h3.borrowsConnection()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("the client is bound to an HTTP/3 connection"));
+        }
         if (wantH3) {
             try {
                 requireRequestScheme(u);
             } catch (IllegalArgumentException failure) {
                 return CompletableFuture.failedFuture(failure);
             }
-            return openH3(u, o, true);
+            var opened = new RequestOpening();
+            openH3(u, o, opened, !h3.borrowsConnection());
+            return opened;
         }
         if (wantH2) {
             var conn = shared(u, o, false);
@@ -136,13 +145,23 @@ final class Connections {
 
     // The HTTP/3 transport comes from the zmux-http3 module, outside this module's analysis.
     @SuppressWarnings("ConstantValue")
-    private CompletableFuture<Channel> openH3(URI u, String origin, boolean mayRetry) {
-        return shared(u, origin, true).thenCompose(c -> {
+    private void openH3(URI u, String origin, CompletableFuture<Channel> opened, boolean mayRetry) {
+        shared(u, origin, true).whenComplete((connection, failure) -> {
+            if (opened.isDone()) return;
+            if (failure != null) { opened.completeExceptionally(failure); return; }
             // Leave part of the caller's opening budget for one replacement after credit expires.
-            var request = h3.stream(c, connectTimeout.dividedBy(2));
-            if (!mayRetry) return request;
-            return request.exceptionallyCompose(failure -> failure instanceof HttpTransport.RetryOpen
-                    ? openH3(u, origin, false) : CompletableFuture.failedFuture(failure));
+            var request = h3.stream(connection, h3.borrowsConnection() ? connectTimeout : connectTimeout.dividedBy(2));
+            opened.whenComplete((channel, error) -> { if (opened.isCancelled()) request.cancel(false); });
+            request.whenComplete((channel, error) -> {
+                if (error instanceof HttpTransport.RetryOpen && mayRetry && !opened.isDone()) {
+                    openH3(u, origin, opened, false);
+                } else if (error != null) {
+                    opened.completeExceptionally(error);
+                } else {
+                    if (h3.borrowsConnection()) track(channel);
+                    if (!opened.complete(channel)) HttpTransport.abort(channel);
+                }
+            });
         });
     }
 

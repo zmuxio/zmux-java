@@ -68,7 +68,7 @@ public final class Liveness {
     public boolean isNoDeadTimeout() { return noDeadTimeout; }
 
     /** The dead timeout for the core: 0 derived, -1 off, else nanoseconds (saturating). */
-    long deadTimeoutNanos() { return noDeadTimeout ? -1 : deadTimeout == null ? 0 : ZmuxConfig.nanos(deadTimeout); }
+    long deadTimeoutNanos() { return deadTimeoutNanos(deadTimeout, noDeadTimeout); }
 
     /** The busy-session probe interval of standby and less-preferred pipes; empty: off. */
     public Optional<Duration> standbyProbe() { return Optional.ofNullable(standbyProbe); }
@@ -112,7 +112,7 @@ public final class Liveness {
         public Builder noKeepAlivePeriod() { keepAlivePeriod = null; return this; }
 
         /** The floor of failure suspicion, default 250 ms, at least 50 ms. */
-        public Builder suspectFloor(Duration d) { suspectFloor = atLeast(d, Duration.ofMillis(50), "suspectFloor"); return this; }
+        public Builder suspectFloor(Duration d) { suspectFloor = checkSuspectFloor(d); return this; }
 
         /**
          * How long a suspect pipe stays suspect before it fails, at least 1 s; not calling it: derived from the RTT and
@@ -120,7 +120,7 @@ public final class Liveness {
          * ({@link io.zmux.carrier.PipeIo#withReportsFailure}) has stall-based failure off unless its own
          * {@link PipeLiveness.Builder#deadTimeout} is set.
          */
-        public Builder deadTimeout(Duration d) { deadTimeout = atLeast(d, Duration.ofSeconds(1), "deadTimeout"); noDeadTimeout = false; return this; }
+        public Builder deadTimeout(Duration d) { deadTimeout = checkDeadTimeout(d); noDeadTimeout = false; return this; }
 
         /**
          * Stall-based pipe failure off: a stalled pipe still turns suspect, is avoided by the scheduler, has its data
@@ -136,7 +136,7 @@ public final class Liveness {
         public Builder noStandbyProbe() { standbyProbe = null; return this; }
 
         /** The idle probe interval of pipe pairs, measured to the carrier, default 15 s, at least 1 s. */
-        public Builder probeInterval(Duration d) { probeInterval = atLeast(d, Duration.ofSeconds(1), "probeInterval"); return this; }
+        public Builder probeInterval(Duration d) { probeInterval = checkProbeInterval(d); return this; }
 
         /**
          * The idle probes of pipe pairs off; answers to the peer's probes, standby probes and the
@@ -151,6 +151,16 @@ public final class Liveness {
         public Builder probeJitter(double j) { probeJitter = jitter(j, "probeJitter"); return this; }
 
         public Liveness build() { return new Liveness(this); }
+    }
+
+    static Duration checkSuspectFloor(Duration d) { return atLeast(d, Duration.ofMillis(50), "suspectFloor"); }
+
+    static Duration checkDeadTimeout(Duration d) { return atLeast(d, Duration.ofSeconds(1), "deadTimeout"); }
+
+    static Duration checkProbeInterval(Duration d) { return atLeast(d, Duration.ofSeconds(1), "probeInterval"); }
+
+    static long deadTimeoutNanos(Duration timeout, boolean disabled) {
+        return disabled ? -1 : timeout == null ? 0 : ZmuxConfig.nanos(timeout);
     }
 
     static Duration atLeast(Duration d, Duration min, String what) {

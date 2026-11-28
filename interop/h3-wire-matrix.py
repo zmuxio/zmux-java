@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Java H3 / WebTransport wire peer in both roles against each peer."""
+"""Run H3 and WebTransport over every pair of supplied wire peers."""
 
 import argparse
 import itertools
@@ -13,6 +13,10 @@ from pathlib import Path
 
 def stop(process):
     if process is None or process.poll() is not None:
+        return
+    if os.name == "nt":
+        process.kill()
+        process.wait(timeout=5)
         return
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -46,10 +50,11 @@ def wait_for_line(server, stdout, deadline, prefix, offset=0):
     raise TimeoutError(f"deadline waiting for {prefix.strip()}")
 
 
-def run_case(server_path, client_path, protocol, cert, key, timeout):
+def run_case(server_path, client_path, protocol, cert, key, timeout, *, dedicated_server=False):
     deadline = time.monotonic() + timeout
     server = client = None
     offset = 0
+    client_env = dict(os.environ, ZMUX_WT_DEDICATED_SERVER="1" if dedicated_server else "0")
     with (
         tempfile.TemporaryDirectory(prefix="cell-") as directory,
         tempfile.TemporaryFile() as server_log,
@@ -62,7 +67,7 @@ def run_case(server_path, client_path, protocol, cert, key, timeout):
                     [server_path, "server", protocol, "0", cert, key],
                     stdout=output,
                     stderr=server_log,
-                    start_new_session=True,
+                    start_new_session=os.name != "nt",
                 )
             ready, offset = wait_for_line(server, stdout, deadline, "READY ")
             port = int(ready.removeprefix("READY "))
@@ -72,7 +77,8 @@ def run_case(server_path, client_path, protocol, cert, key, timeout):
                 [client_path, "client", protocol, str(port), cert, key],
                 stdout=client_log,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                env=client_env,
+                start_new_session=os.name != "nt",
             )
             result = client.wait(timeout=max(0, deadline - time.monotonic()))
             if result:
@@ -128,10 +134,7 @@ def main():
             peers[name] = path.resolve()
 
     directions = [("java", "java")]
-    for name in peers:
-        if name == "java":
-            continue
-        directions.extend([("java", name), (name, "java")])
+    directions.extend(itertools.permutations(peers, 2))
 
     failures = []
     with tempfile.TemporaryDirectory(prefix="zmux-h3-wire-") as directory:
@@ -168,7 +171,8 @@ def main():
             cell = f"{protocol} {client} client -> {server} server"
             print(cell, flush=True)
             passed = run_case(
-                peers[server], peers[client], protocol, cert, key, args.timeout
+                peers[server], peers[client], protocol, cert, key, args.timeout,
+                dedicated_server=server == "rust",
             )
             print(f"  {'PASS' if passed else 'FAIL'}", flush=True)
             if not passed:

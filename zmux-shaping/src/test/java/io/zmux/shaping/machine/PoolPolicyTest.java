@@ -74,8 +74,8 @@ class PoolPolicyTest {
     @Test void decisionMapsToThePool() throws Exception {
         var p = policy("{\"count\":2,\"dial_after\":[250000],\"retire\":[{\"metric\":\"bytes\",\"above\":10}]}");
         var d = p.decide(new PoolView(List.of(
-                new PoolMember(io.zmux.PipeId.of(4), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false),
-                new PoolMember(io.zmux.PipeId.of(5), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false)), 0, java.util.Optional.empty(), 0));
+                new PoolMember(io.zmux.PipeId.of(4), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 6, 5, true, false, java.util.List.of()),
+                new PoolMember(io.zmux.PipeId.of(5), 0, Duration.ofSeconds(1), Duration.ZERO, 1, 10, 0, true, false, java.util.List.of())), 0, java.util.Optional.empty(), 0));
         assertEquals(PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(250)).withRetirePipes(Set.of(io.zmux.PipeId.of(4))), d);
     }
 

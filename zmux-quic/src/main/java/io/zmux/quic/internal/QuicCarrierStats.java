@@ -12,7 +12,8 @@ import io.zmux.internal.spi.Loops;
 public final class QuicCarrierStats {
     private QuicCarrierStats() {}
 
-    public static CarrierProvider.Query query(QuicChannel connection) {
+    public static CarrierProvider.Query query(QuicChannel connection, Object identity) {
+        if (connection == null || connection != identity) return null;
         return new CarrierProvider.Query(CarrierSource.NETTY_QUIC, completion -> collect(connection, completion));
     }
 
@@ -34,13 +35,15 @@ public final class QuicCarrierStats {
                 return;
             }
             // Netty's quiche implementation completes inline on the connection loop.
-            if (stats.isDone()) complete(stats, sampledAt, completion);
-            else stats.addListener(done -> complete(stats, sampledAt, completion));
+            if (stats.isDone()) complete(connection, stats, sampledAt, completion);
+            else stats.addListener(done -> complete(connection, stats, sampledAt, completion));
         }, () -> completion.accept(System.nanoTime(), null));
     }
 
-    private static void complete(Future<QuicConnectionStats> stats, long sampledAt, CarrierProvider.SampleCompletion completion) {
-        var pair = stats.isSuccess() ? stats.getNow() : null;
-        completion.accept(sampledAt, pair == null ? null : new QuicCounters(pair.sent(), pair.lost()));
+    private static void complete(QuicChannel connection, Future<QuicConnectionStats> stats, long sampledAt,
+                                 CarrierProvider.SampleCompletion completion) {
+        var pair = connection.isActive() && stats.isSuccess() ? stats.getNow() : null;
+        completion.accept(sampledAt, pair == null || pair.sent() == -1 || pair.lost() == -1
+                ? null : new QuicCounters(pair.sent(), pair.lost()));
     }
 }

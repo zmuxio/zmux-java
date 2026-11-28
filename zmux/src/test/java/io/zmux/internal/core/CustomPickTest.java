@@ -12,7 +12,7 @@ class CustomPickTest {
         Batch b = new Batch(); RecordWriter w = new RecordWriter();
         try {
             w.init(b, Framing.BYTES, 65536, 65536);
-            w.retainFor(p);
+            w.retainFor(p, p.out().lanes.getFirst().log.room());
             s.mp().write(w, p, p.out().lanes.getFirst()); w.end();
             s.tx.afterBatch(w, p, p.out().lanes.getFirst());
         } finally { b.release(); }

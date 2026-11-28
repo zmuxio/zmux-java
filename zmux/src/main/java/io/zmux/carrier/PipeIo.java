@@ -3,6 +3,7 @@ package io.zmux.carrier;
 import io.zmux.CarrierKind;
 import io.zmux.RecordMode;
 import io.zmux.internal.join.RecordProtection;
+import io.zmux.internal.spi.CarrierBudget;
 import io.zmux.internal.loop.PipeIoAccess;
 import io.zmux.internal.wire.VarInt;
 import java.util.Arrays;
@@ -53,6 +54,14 @@ public final class PipeIo {
 
             @Override public Object sendingConnection(PipeIo io) {
                 return io.carrierConn instanceof SplitConnection pair ? pair.outbound : io.carrierConn;
+            }
+
+            @Override public java.util.List<Object> physicalConnections(PipeIo io) {
+                return switch (io.carrierConn) {
+                    case SplitConnection pair -> pair.physicalConnections();
+                    case null -> java.util.List.of();
+                    default -> java.util.List.of(CarrierBudget.physical(io.carrierConn));
+                };
             }
 
             @Override public RecordProtection records(PipeIo io) { return io.records; }
@@ -197,6 +206,11 @@ public final class PipeIo {
      */
     public PipeIo withTerminatedTls(boolean terminated) { return withCapabilities(capabilities.toBuilder().terminatedTls(terminated).build()); }
 
+    /** The actual outer transport of a prefix presentation. */
+    public PipeIo withOuterSecurity(io.zmux.Admission.OuterSecurity security) {
+        return withCapabilities(capabilities.toBuilder().outerSecurity(security).build());
+    }
+
     /**
      * Whether this carrier meets the Bound contract, record confidentiality and integrity included; an exporter alone
      * is no such declaration.
@@ -214,8 +228,20 @@ public final class PipeIo {
      */
     public PipeIo withReportsFailure() { return withCapabilities(capabilities.toBuilder().reportsFailure(true).build()); }
 
-    /** The padding bytes a handshake run on the carrier before this input added; the session meters them. */
-    public PipeIo withHandshakePadding(long bytes) { return withCapabilities(capabilities.toBuilder().handshakePadding(bytes).build()); }
+    /** Declares a datagram channel on this pipe alongside its reliable halves. */
+    public PipeIo withDatagramChannel(CarrierChannel channel) {
+        return withCapabilities(capabilities.toBuilder().datagramChannel(channel).build());
+    }
+
+    /** Identifies the physical source of each half for local accounting. */
+    public PipeIo withAccountingSources(CarrierHalfSource receive, CarrierHalfSource send) {
+        return withCapabilities(capabilities.toBuilder().accountingSources(receive, send).build());
+    }
+
+    /** The cost of an earlier handshake on this carrier. */
+    public PipeIo withHandshakeCost(HandshakeCost cost) {
+        return withCapabilities(capabilities.toBuilder().handshakeCost(cost).build());
+    }
 
     @Override
     public String toString() {
@@ -228,8 +254,18 @@ public final class PipeIo {
     @SuppressWarnings("ClassCanBeRecord")
     private static final class SplitConnection {
         final Object outbound;
+        private final Object incomingResource, outgoingResource;
 
-        SplitConnection(Object outbound) { this.outbound = outbound; }
+        SplitConnection(PipeIo inbound, PipeIo outbound) {
+            this.outbound = outbound.carrierConn;
+            incomingResource = inbound.carrierConn == null ? inbound.reader : inbound.carrierConn;
+            outgoingResource = outbound.carrierConn == null ? outbound.writer : outbound.carrierConn;
+        }
+
+        java.util.List<Object> physicalConnections() {
+            return incomingResource == outgoingResource ? java.util.List.of(incomingResource)
+                    : java.util.List.of(incomingResource, outgoingResource);
+        }
     }
 
     /**
@@ -278,9 +314,12 @@ public final class PipeIo {
                 .terminatedTls(uc.isTerminatedTls() && dc.isTerminatedTls())
                 .carrierSecure(uc.isCarrierSecure() && dc.isCarrierSecure() && up != null && down != null)
                 // Both halves must report it: a plain half (a raw connection) can stall silently beside one that does.
-                .reportsFailure(uc.reportsFailure() && dc.reportsFailure()).build();
+                .reportsFailure(uc.reportsFailure() && dc.reportsFailure())
+                .handshakeCost(uc.handshakeCost().plus(dc.handshakeCost()))
+                .accountingSources((upReads ? uc : dc).receiveSource(), (upWrites ? uc : dc).sendSource()).build();
         return new PipeIo(upReads ? uplink.reader : downlink.reader, upWrites ? uplink.writer : downlink.writer,
-                uplink.framing, uplink.label, same ? uplink.carrierConn : new SplitConnection((upWrites ? uplink : downlink).carrierConn), caps, CarrierKind.SPLIT, uplink.variant,
+                uplink.framing, uplink.label, same && uplink.carrierConn != null ? uplink.carrierConn
+                        : new SplitConnection(upReads ? uplink : downlink, upWrites ? uplink : downlink), caps, CarrierKind.SPLIT, uplink.variant,
                 null, null, null);
     }
 
@@ -320,9 +359,12 @@ public final class PipeIo {
         private final int writeOverhead;
         private final int maxRecord;
         private final boolean terminatedTls;
+        private final io.zmux.Admission.OuterSecurity outerSecurity;
         private final boolean secure;
         private final boolean reportsFailure;
-        private final long handshakePadding;
+        private final HandshakeCost handshakeCost;
+        private final CarrierChannel datagramChannel;
+        private final CarrierHalfSource receiveSource, sendSource;
 
         private Capabilities(Builder b) {
             laneOpener = b.laneOpener;
@@ -334,9 +376,13 @@ public final class PipeIo {
             writeOverhead = b.writeOverhead;
             maxRecord = b.maxRecord;
             terminatedTls = b.terminatedTls;
+            outerSecurity = b.outerSecurity;
             secure = b.secure;
             reportsFailure = b.reportsFailure;
-            handshakePadding = b.handshakePadding;
+            handshakeCost = b.handshakeCost;
+            datagramChannel = b.datagramChannel;
+            receiveSource = b.receiveSource;
+            sendSource = b.sendSource;
         }
 
         public static Builder builder() { return new Builder(); }
@@ -353,9 +399,13 @@ public final class PipeIo {
             b.writeOverhead = writeOverhead;
             b.maxRecord = maxRecord;
             b.terminatedTls = terminatedTls;
+            b.outerSecurity = outerSecurity;
             b.secure = secure;
             b.reportsFailure = reportsFailure;
-            b.handshakePadding = handshakePadding;
+            b.handshakeCost = handshakeCost;
+            b.datagramChannel = datagramChannel;
+            b.receiveSource = receiveSource;
+            b.sendSource = sendSource;
             return b;
         }
 
@@ -389,14 +439,21 @@ public final class PipeIo {
         /** See {@link PipeIo#withTerminatedTls}. */
         public boolean isTerminatedTls() { return terminatedTls; }
 
+        /** See {@link PipeIo#withOuterSecurity}. */
+        public io.zmux.Admission.OuterSecurity outerSecurity() { return outerSecurity; }
+
         /** See {@link PipeIo#withCarrierSecure}. */
         public boolean isCarrierSecure() { return secure; }
 
         /** See {@link PipeIo#withReportsFailure}. */
         public boolean reportsFailure() { return reportsFailure; }
 
-        /** The padding bytes a handshake run on the carrier before this input added, which the session meters. */
-        public long handshakePadding() { return handshakePadding; }
+        public HandshakeCost handshakeCost() { return handshakeCost; }
+
+        public CarrierChannel datagramChannel() { return datagramChannel; }
+
+        public CarrierHalfSource receiveSource() { return receiveSource; }
+        public CarrierHalfSource sendSource() { return sendSource; }
 
         /** Builds {@link Capabilities}; every setting starts at none. */
         public static final class Builder {
@@ -409,9 +466,18 @@ public final class PipeIo {
             private int writeOverhead;
             private int maxRecord;
             private boolean terminatedTls;
+            private io.zmux.Admission.OuterSecurity outerSecurity = io.zmux.Admission.OuterSecurity.CLEAR;
             private boolean secure;
             private boolean reportsFailure;
-            private long handshakePadding;
+            private HandshakeCost handshakeCost = HandshakeCost.ZERO;
+            private CarrierChannel datagramChannel;
+            private CarrierHalfSource receiveSource, sendSource;
+
+            public Builder accountingSources(CarrierHalfSource receive, CarrierHalfSource send) {
+                receiveSource = receive;
+                sendSource = send;
+                return this;
+            }
 
             private Builder() {}
 
@@ -471,6 +537,11 @@ public final class PipeIo {
 
             public Builder terminatedTls(boolean on) { terminatedTls = on; return this; }
 
+            public Builder outerSecurity(io.zmux.Admission.OuterSecurity security) {
+                outerSecurity = Objects.requireNonNull(security, "outerSecurity");
+                return this;
+            }
+
             public Builder carrierSecure(boolean on) { secure = on; return this; }
 
             public Builder reportsFailure(boolean on) { reportsFailure = on; return this; }
@@ -480,11 +551,12 @@ public final class PipeIo {
              *
              * @throws IllegalArgumentException when negative
              */
-            public Builder handshakePadding(long bytes) {
-                if (bytes < 0) throw new IllegalArgumentException("negative handshakePadding");
-                handshakePadding = bytes;
+            public Builder handshakeCost(HandshakeCost cost) {
+                handshakeCost = Objects.requireNonNull(cost, "cost");
                 return this;
             }
+
+            public Builder datagramChannel(CarrierChannel channel) { datagramChannel = channel; return this; }
 
             public Capabilities build() { return new Capabilities(this); }
         }

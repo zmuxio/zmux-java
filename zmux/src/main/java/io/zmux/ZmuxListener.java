@@ -4,7 +4,7 @@ import io.zmux.adapter.ListenerAdapter;
 import io.zmux.carrier.PipeIo;
 import io.zmux.internal.core.CoreConfig;
 import io.zmux.internal.core.Event;
-import io.zmux.internal.loop.MemoryBudget;
+import io.zmux.internal.memory.MemoryBudget;
 import io.zmux.internal.loop.Bootstrap;
 import io.zmux.internal.loop.ListenerHub;
 import io.zmux.internal.loop.CarrierSetup;
@@ -125,8 +125,7 @@ public final class ZmuxListener implements AutoCloseable {
             public void started(SessionRuntime d, String alpn, CarrierCredential credential, io.zmux.internal.loop.CarrierSetup setup) {
                 offerWhenEstablished(d, new ZmuxSession(d, d.core(), alpn, credential), setup);
             }
-        }, budget, o.instanceId(), o.maxPendingPerSource(), o.maxPending().orElse(-1), ZmuxConfig.nanos(o.firstRecordTimeout()), o.maxSuspended(),
-                o.sourcePrefixV4(), o.sourcePrefixV6());
+        }, budget, o.instanceId(), o.limits(), o.sourcePrefixV4(), o.sourcePrefixV6());
         Admission adm = o.admission();
         admission = adm;
         // A refused Establish stalls at most this long, with or without an admission.
@@ -138,11 +137,11 @@ public final class ZmuxListener implements AutoCloseable {
         hub.rejectStallMax(stallMax);
         if (adm != null) {
             long peekTimeout = adm.peekTimeout().isZero() ? draw(5_000_000_000L, 30_000_000_000L) : ZmuxConfig.nanos(adm.peekTimeout());
-            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), adm.maxMessage(), peekTimeout, adm.isFallbackOnPeekTimeout(), stallMin, stallMax, o.fallback());
+            hub.admission(adm.decider(), adm.peek(), adm.maxPeek(), adm.maxMessage(), peekTimeout, adm.isFallbackOnPeekTimeout(), adm.refusal(), stallMin, stallMax, o.fallback());
         }
         hub.inbound(o.inboundTransform());
-        hub.onReject(o.onReject());
-        setLimits(o.limits());
+        hub.rejection(o.rejection(), o.onReject());
+        limits = o.limits();
         this.acceptor = server == null ? null : Thread.ofVirtual().name("zmux-acceptor").start(this::acceptLoop);
     }
 
@@ -168,6 +167,7 @@ public final class ZmuxListener implements AutoCloseable {
         @Override public AdapterPorts.Carrier refused(PipeIo io) { return ZmuxListener.refused(io, admission); }
         @Override public void countSetupFailure() { hub.counts().setupFailed(); }
         @Override public Duration firstRecordTimeout() { return limits.firstRecordTimeout(); }
+        @Override public io.zmux.internal.spi.CarrierBudget carrierBudget() { return budget::acquireCarrier; }
         @Override public long memoryUsed() { return budget.used(); }
     };
 
@@ -270,21 +270,21 @@ public final class ZmuxListener implements AutoCloseable {
      * Replaces the listener's limits ({@link ListenerLimits}, valid by construction); new
      * carriers and the next decisions on held ones use them at once. Lowered pending bounds
      * refuse or displace new carriers until the count is below them, but close no carrier
-     * already held; a lowered {@link ListenerLimits#maxPendingPerSession()} applies to the next
-     * join of a session; a lowered {@link ListenerLimits#maxSuspended()} closes the
+     * already held. A lowered {@link ListenerLimits#maxSuspended()} closes the
      * longest-suspended sessions beyond it with ZMUX_RESUME_TIMEOUT: their close is queued on
      * each one's loop before this returns; a changed {@link ListenerLimits#firstRecordTimeout()} applies to carriers that
-     * arrive after the call; a changed {@link ListenerLimits#memoryBudget()} starts or ends memory
-     * pressure at once, as if the charged sum had crossed the new bounds (the memory-pressure
-     * listener is called, suspended sessions are closed the largest first). Any thread; it does not block.
+     * arrive after the call. A changed {@link ListenerLimits#memoryBudget()} updates memory
+     * pressure at once. Any thread.
+     *
+     * @throws IllegalArgumentException if the new memory budget is below committed backing
+     *         capacity. All limits stay in effect in that case.
      */
     public void setLimits(ListenerLimits l) {
         java.util.Objects.requireNonNull(l, "limits");
         synchronized (limitsLock) {
-            limits = l;
             budget.limit(l.memoryBudget().orElse(io.zmux.internal.core.CoreConfig.UNLIMITED));
-            hub.limits(l.maxPending().orElse(-1), l.maxPendingPerSource(), l.maxPendingPerSession(), l.maxSuspended(),
-                    ZmuxConfig.nanos(l.firstRecordTimeout()));
+            limits = l;
+            hub.limits(l);
         }
     }
 
@@ -517,8 +517,8 @@ public final class ZmuxListener implements AutoCloseable {
      * any caller's future (or timeout) closes the listener.
      */
     public ZmuxFuture<Void> shutdownAsync(long code, String reason) {
-        if (code < 0 || code > (1L << 62) - 1) throw new IllegalArgumentException("application error code outside 0 to 2^62 - 1");
-        byte[] r = io.zmux.internal.wire.Utf8.truncate(Objects.requireNonNull(reason, "reason"), ZmuxSession.MAX_REASON_BYTES);
+        ZmuxSession.checkCode(code);
+        byte[] r = ZmuxSession.reasonBytes(reason);
         if (stopped.get()) return ZmuxFuture.of(terminated, null);
         Runnable bound = boundOf(code, r);
         Runnable running = shutdownBound.compareAndExchange(null, bound);

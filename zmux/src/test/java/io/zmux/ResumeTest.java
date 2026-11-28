@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Random;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
@@ -17,15 +18,24 @@ class ResumeTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void tcpSessionResumesTheSameLogicalStreamAfterLosingEveryCarrier() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).noProbation().build();
+            var clock = new SpliceHooksTest.ManualClock();
+            var domain = new ClockDomain(new ClockDomain.Source() {
+                @Override public long nanoTime() { return clock.now(); }
+                @Override public Instant wallTime() { return Instant.EPOCH.plusNanos(clock.now()); }
+                @Override public Runnable schedule(long delay, Runnable task) {
+                    return clock.schedule(Math.addExact(clock.now(), delay), task);
+                }
+            });
+            var config = ZmuxConfig.builder().eventLoops(loops).clockDomain(domain).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).resumeTimeout(Duration.ofSeconds(10)).noProbation().build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
                 assertEquals(1, client.stats().pipesAdded());
                 assertEquals(0, client.stats().suspensions());
                 assertEquals(Duration.ZERO, client.stats().suspendedTime());
-                byte[] bytes = new byte[512 << 10]; new Random(93).nextBytes(bytes);
-                var sender = client.openStream(); sender.write(bytes, 0, 128 << 10);
+                byte[] bytes = new byte[8 << 10]; new Random(93).nextBytes(bytes);
+                int beforeSuspension = 2 << 10;
+                var sender = client.openStream(); sender.write(bytes, 0, beforeSuspension);
                 var receiver = server.acceptStream();
                 ByteArrayOutputStream received = new ByteArrayOutputStream();
                 ByteBuffer first = ByteBuffer.allocate(16384); assertTrue(receiver.read(first) > 0);
@@ -34,23 +44,24 @@ class ResumeTest {
                 var serverSuspended = workers.submit(() -> { event(server, SessionEvent.SessionSuspended.class); return null; });
                 client.pipes().getFirst().abort();
                 clientSuspended.get(5, TimeUnit.SECONDS); serverSuspended.get(5, TimeUnit.SECONDS);
-                PipePoolTest.await(() -> client.stats().suspensions() == 1 && client.stats().pipesActive() == 0);
-                Duration early = client.stats().suspendedTime();
-                Thread.sleep(60);
-                assertTrue(client.stats().suspendedTime().compareTo(early) > 0, "the current suspension counts");
-                sender.write(bytes, 128 << 10, bytes.length - (128 << 10)); sender.finish();
+                assertEquals(1, client.stats().suspensions());
+                assertEquals(0, client.stats().pipesActive());
+                var suspended = Duration.ofMillis(60);
+                clock.advance(suspended);
+                assertEquals(suspended, client.stats().suspendedTime(), "the current suspension counts");
+                sender.write(bytes, beforeSuspension, bytes.length - beforeSuspension); sender.finish();
                 var resumed = workers.submit(() -> { event(server, SessionEvent.SessionResumed.class); return null; });
                 var pipe = client.addPipe(listener.localAddress(), PipeOptions.builder().noProbation().build());
                 assertTrue(pipe.id().value() > 0); resumed.get(5, TimeUnit.SECONDS);
-                PipePoolTest.await(() -> client.stats().pipesAdded() == 2 && client.stats().pipesActive() == 1);
-                Duration total = client.stats().suspendedTime();
-                assertTrue(total.toMillis() >= 20);
-                Thread.sleep(20);
-                assertEquals(total, client.stats().suspendedTime(), "a resumed session's suspended time stays");
+                event(client, SessionEvent.SessionResumed.class);
+                assertEquals(2, client.stats().pipesAdded());
+                assertEquals(1, client.stats().pipesActive());
+                clock.advance(Duration.ofMillis(20));
+                assertEquals(suspended, client.stats().suspendedTime(), "a resumed session's suspended time stays");
                 assertEquals(1, listener.stats().sessions());
-                PipePoolTest.await(() -> listener.stats().joins() == 1);
+                assertEquals(1, listener.stats().joins());
                 for (Chunk chunk; (chunk = receiver.readChunk(65536)) != null;) {
-                    try (Chunk owned = chunk) { ByteBuffer data = owned.buffer(); byte[] part = new byte[data.remaining()]; data.get(part); received.write(part); }
+                    try (Chunk owned = chunk) { received.writeBytes(owned.copy()); }
                 }
                 assertArrayEquals(bytes, received.toByteArray());
                 receiver.write(new byte[] {1}); receiver.finish();

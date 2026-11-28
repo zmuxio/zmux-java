@@ -1,6 +1,8 @@
 package io.zmux.quic;
 
 import io.netty.handler.codec.quic.QuicCodecBuilder;
+import io.zmux.Zmux;
+import io.zmux.internal.wire.VarInt;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -10,7 +12,6 @@ import java.util.concurrent.TimeUnit;
  * zmux stream limits. Immutable; built by {@link #builder()}, {@link #defaults()} the defaults.
  */
 public final class QuicOptions {
-    private static final long MAX = (1L << 62) - 1;
     /** Datagrams the QUIC connection queues in each direction. */
     static final int DATAGRAM_QUEUE = 1024;
     /** The default receive window of each stream, in bytes. */
@@ -32,7 +33,7 @@ public final class QuicOptions {
         streamWindow = b.streamWindow; bidirectionalStreams = b.bidirectionalStreams; lanes = b.lanes;
         idleTimeout = b.idleTimeout; datagrams = b.datagrams;
         // Both counts are at most 2^60 (checked by the builder), so their sum cannot overflow.
-        if (streamWindow > MAX / (bidirectionalStreams + lanes)) {
+        if (streamWindow > VarInt.MAX / (bidirectionalStreams + lanes)) {
             throw new IllegalArgumentException("connection receive window exceeds varint62");
         }
     }
@@ -71,12 +72,26 @@ public final class QuicOptions {
 
     /** Applies the transport limits to a Netty QUIC endpoint builder. */
     public <B extends QuicCodecBuilder<B>> B apply(B builder) {
+        return apply(builder, 0, 0);
+    }
+
+    /** Applies the limits with extra unidirectional credit for the application protocol's control streams. */
+    public <B extends QuicCodecBuilder<B>> B apply(B builder, long minimumUniStreams, long minimumUniWindow) {
+        if (minimumUniStreams < 0 || minimumUniStreams > Zmux.MAX_STREAM_CREDIT
+                || minimumUniWindow < 0 || minimumUniWindow > VarInt.MAX) {
+            throw new IllegalArgumentException("unidirectional credit outside QUIC limits");
+        }
+        long uniStreams = Math.max(lanes, minimumUniStreams);
+        long uniWindow = Math.max(streamWindow, minimumUniWindow);
+        long bidiCredit = streamWindow * bidirectionalStreams;
+        long connectionCredit = uniStreams > (VarInt.MAX - bidiCredit) / uniWindow
+                ? VarInt.MAX : bidiCredit + uniStreams * uniWindow;
         long millis;
         try { millis = idleTimeout.toMillis(); } catch (ArithmeticException e) { millis = Long.MAX_VALUE; }
-        builder.maxIdleTimeout(millis, TimeUnit.MILLISECONDS).initialMaxData(connectionWindow())
+        builder.maxIdleTimeout(millis, TimeUnit.MILLISECONDS).initialMaxData(connectionCredit)
                 .initialMaxStreamDataBidirectionalLocal(streamWindow).initialMaxStreamDataBidirectionalRemote(streamWindow)
-                .initialMaxStreamDataUnidirectional(streamWindow).initialMaxStreamsBidirectional(bidirectionalStreams)
-                .initialMaxStreamsUnidirectional(lanes);
+                .initialMaxStreamDataUnidirectional(uniWindow).initialMaxStreamsBidirectional(bidirectionalStreams)
+                .initialMaxStreamsUnidirectional(uniStreams);
         if (datagrams) builder.datagram(DATAGRAM_QUEUE, DATAGRAM_QUEUE);
         return builder;
     }
@@ -106,21 +121,21 @@ public final class QuicOptions {
 
         /** The receive window of each stream, from 1 to 2^62 - 1 bytes; default {@link #DEFAULT_STREAM_WINDOW}. */
         public Builder streamWindow(long bytes) {
-            if (bytes < 1 || bytes > MAX) throw new IllegalArgumentException("streamWindow outside 1 to 2^62 - 1");
+            if (bytes < 1 || bytes > VarInt.MAX) throw new IllegalArgumentException("streamWindow outside 1 to 2^62 - 1");
             streamWindow = bytes;
             return this;
         }
 
         /** The bidirectional streams the peer may open, from 1 to 2^60; default {@link #DEFAULT_BIDIRECTIONAL_STREAMS}. */
         public Builder bidirectionalStreams(long n) {
-            if (n < 1 || n > (1L << 60)) throw new IllegalArgumentException("bidirectionalStreams outside 1 to 2^60");
+            if (n < 1 || n > Zmux.MAX_STREAM_CREDIT) throw new IllegalArgumentException("bidirectionalStreams outside 1 to 2^60");
             bidirectionalStreams = n;
             return this;
         }
 
         /** The unidirectional lanes the peer may open, from 0 to 2^60; default {@link #DEFAULT_LANES}. */
         public Builder lanes(long n) {
-            if (n < 0 || n > (1L << 60)) throw new IllegalArgumentException("lanes outside 0 to 2^60");
+            if (n < 0 || n > Zmux.MAX_STREAM_CREDIT) throw new IllegalArgumentException("lanes outside 0 to 2^60");
             lanes = n;
             return this;
         }

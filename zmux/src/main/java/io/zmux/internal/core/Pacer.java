@@ -1,7 +1,5 @@
 package io.zmux.internal.core;
 
-import java.util.List;
-
 /**
  * Pacing of the outbound pipes of a session with acknowledgement:
  * one {@link Limiter} per pipe whose carrier is not queue-bound. Owned by the session's loop;
@@ -18,12 +16,11 @@ final class Pacer {
     }
 
     private final Port port;
-    private final List<Pipe> pipes;
+    private final TimerHeap releases = new TimerHeap();
     private final Limiter.Params params;
 
-    Pacer(CoreConfig cfg, long peerThreshold, long peerDelay, List<Pipe> pipes, Port port) {
+    Pacer(CoreConfig cfg, long peerThreshold, long peerDelay, Port port) {
         this.port = port;
-        this.pipes = pipes;
         this.params = new Limiter.Params(cfg.latencyBudget(), peerThreshold, peerDelay, cfg.spreadChunk());
     }
 
@@ -32,7 +29,7 @@ final class Pacer {
         return p.out() != null && p.out().pace.lim != null && p.out().pace.lim.held();
     }
 
-    private static boolean paced(Pipe p) {
+    static boolean paced(Pipe p) {
         return p.out() != null && !p.out().lanes.getFirst().st.info().queueBound();
     }
 
@@ -68,6 +65,7 @@ final class Pacer {
 
     private static Limiter limiterOf(Pipe p, long now) {
         if (!paced(p)) {
+            p.out().pace.cancel();
             p.out().pace.lim = null;
             return null;
         }
@@ -94,6 +92,7 @@ final class Pacer {
         var ev = new Limiter.Ack(rtt, rttSentAt, rate, roundEnd, ps.cum(), Math.max(ps.elicitEnd(), ps.cum()), l.leftOut(held));
         boolean was = l.held();
         l.onAck(now, ev, ps.re(), srttOf(p), params);
+        schedule(p, l);
         if (was && !l.held()) port.wakeAllWriters();
     }
 
@@ -105,6 +104,7 @@ final class Pacer {
         double rate = p.out().snd.re().value();
         l.settle(now, bytes, rate, srtt, params);
         l.refresh(now, inFlight(p), rate, srtt, params);
+        schedule(p, l);
     }
 
     /** A QX_PING measured rtt before the bootstrap pipe has an acknowledgement sample. */
@@ -116,39 +116,60 @@ final class Pacer {
 
     /** The earliest moment a held pipe may send again; dataPending is whether any stream data waits. */
     long deadline(boolean dataPending) {
-        if (!dataPending) return Time.NEVER;
-        long t = Time.NEVER;
-        for (Pipe p : pipes) {
-            if (p.out() != null && p.out().pace.lim != null && p.out().pace.lim.held()) {
-                t = Math.min(t, p.out().pace.lim.release());
-            }
-        }
-        return t;
+        return dataPending ? releases.earliest() : Time.NEVER;
     }
 
     /** Releases the pipes whose hold ends at t. */
     void onTimeout(long t) {
-        for (Pipe p : pipes) {
-            if (p.out() == null) continue;
-            Limiter l = p.out().pace.lim;
-            if (l == null || !l.held() || l.release() > t) continue;
-            l.refresh(t, inFlight(p), p.out().snd.re().value(), srttOf(p), params);
+        releases.fireDue(t);
+    }
+
+    private void schedule(Pipe p, Limiter l) {
+        Slot slot = p.out().pace;
+        long at = p.out().failed() ? Time.NEVER : l.release();
+        if (slot.release == null) {
+            if (at == Time.NEVER) return;
+            slot.release = new Release(p);
+        }
+        if (slot.release.deadline() != at) releases.schedule(slot.release, at);
+    }
+
+    void closeTimers() { releases.clear(); }
+
+    private final class Release extends TimerHeap.Timer {
+        private final Pipe pipe;
+
+        Release(Pipe pipe) { this.pipe = pipe; }
+
+        @Override public void fire(long now) {
+            Limiter l = pipe.out().pace.lim;
+            l.refresh(now, inFlight(pipe), pipe.out().snd.re().value(), srttOf(pipe), params);
+            schedule(pipe, l);
             if (!l.held()) {
-                port.wakePipe(p);
+                port.wakePipe(pipe);
                 port.wakeAllWriters();
             }
         }
+
+        void cancel() { releases.remove(this); }
     }
 
     /** The pacing limiter of an outbound pipe; null while none applies. */
     static final class Slot {
         private Limiter lim;
+        private Release release;
 
         Slot() {
         }
 
         Limiter lim() {
             return lim;
+        }
+
+        void cancel() {
+            if (release == null) return;
+            release.cancel();
+            release = null;
         }
     }
 }

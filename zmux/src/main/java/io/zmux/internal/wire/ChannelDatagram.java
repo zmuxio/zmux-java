@@ -13,6 +13,8 @@ public final class ChannelDatagram {
     /** No Pipe Stream ID: the channel belongs to the pipe. */
     public static final long NO_ID = -1;
 
+    public static final int MAX_PADDED_FRAME = 65535;
+
     private static final String NOT_ONE_FRAME = "channel datagram is not one DATAGRAM frame without Length";
 
     private ChannelDatagram() {}
@@ -24,11 +26,22 @@ public final class ChannelDatagram {
 
     /** A channel datagram: the Pipe Stream ID id unless {@link #NO_ID}, then a DATAGRAM frame of data without Length. */
     public static byte[] encode(long id, byte[] data) {
-        byte[] b = new byte[length(id, data.length)];
-        int i = id == NO_ID ? 0 : VarInt.put(b, 0, id);
-        b[i++] = (byte) FrameType.DATAGRAM;
-        System.arraycopy(data, 0, b, i, data.length);
+        return encode(id, data, 0);
+    }
+
+    /** Encodes negotiated padding before the frame, after any Pipe Stream ID. */
+    public static byte[] encode(long id, byte[] data, int padding) {
+        byte[] b = new byte[length(id, data.length) + padding];
+        System.arraycopy(data, 0, b, writeHeader(b, id, padding), data.length);
         return b;
+    }
+
+    /** Writes the stream ID and frame type around the zero-filled prefix. */
+    public static int writeHeader(byte[] b, long id, int padding) {
+        int i = id == NO_ID ? 0 : VarInt.put(b, 0, id);
+        i += padding;
+        b[i++] = (byte) FrameType.DATAGRAM;
+        return i;
     }
 
     /** The Pipe Stream ID at the start of b[pos, end), or -1 when it is truncated; the frame follows its {@link VarInt#lengthOf} bytes. */
@@ -42,6 +55,14 @@ public final class ChannelDatagram {
      * of b.
      */
     public static void decodeFrame(FrameDecoder decoder, ByteBuffer b, int pos, int end, Frame f) throws WireException {
+        decodeFrame(decoder, b, pos, end, f, false);
+    }
+
+    public static void decodeFrame(FrameDecoder decoder, ByteBuffer b, int pos, int end, Frame f, boolean padding) throws WireException {
+        if (pos < end && padding && b.get(pos) == 0) {
+            if (end - pos > MAX_PADDED_FRAME) throw WireException.protocol(NOT_ONE_FRAME);
+            do { pos++; } while (pos < end && b.get(pos) == 0);
+        }
         if (pos >= end || (b.get(pos) & 0xff) != FrameType.DATAGRAM) throw WireException.protocol(NOT_ONE_FRAME);
         int n;
         try {

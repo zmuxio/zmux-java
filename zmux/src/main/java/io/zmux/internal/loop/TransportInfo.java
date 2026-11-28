@@ -1,5 +1,7 @@
 package io.zmux.internal.loop;
 
+import io.zmux.carrier.CarrierChannel;
+
 import io.zmux.internal.core.CarrierInfo;
 
 /**
@@ -16,9 +18,11 @@ public record TransportInfo(CarrierInfo carrier, String applicationProtocol, Obj
 
     /** These properties with the carrier's datagram channel ch, which the core sees through them. */
     public TransportInfo withChannel(CarrierChannel ch) {
+        if (ch == null) return this;
         var view = new io.zmux.internal.core.DatagramChannel() {
             @Override public long channelStreamId() { return ch.channelStreamId(); }
             @Override public int maxChannelDatagram() { return ch.maxChannelDatagram(); }
+            @Override public int channelDatagramLimit(int room) { return ch.channelDatagramLimit(room); }
         };
         return new TransportInfo(carrier.withChannel(view), applicationProtocol, connection, receiveMemory, fateGroup);
     }

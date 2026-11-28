@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * Configuration of a {@link ZmuxListener}, immutable; {@link #defaults()}, {@link #of(ZmuxConfig)}
@@ -32,7 +33,8 @@ public final class ListenerConfig {
     private final Admission admission;
     private final Admission.Fallback fallback;
     private final InboundTransform inboundTransform;
-    private final java.util.function.Function<RejectInfo, RejectInfo.Action> onReject;
+    private final Consumer<RejectInfo> onReject;
+    private final RejectInfo.Action rejection;
     private final SessionConfigs sessionConfigs;
     private final System.Logger logger;
 
@@ -42,7 +44,8 @@ public final class ListenerConfig {
         sourcePrefixV4 = b.sourcePrefixV4; sourcePrefixV6 = b.sourcePrefixV6;
         instanceId = b.instanceId.clone(); memoryPressureListener = b.memoryPressureListener;
         admission = b.admission; fallback = b.fallback;
-        inboundTransform = b.inboundTransform; onReject = b.onReject; sessionConfigs = b.sessionConfigs; logger = b.logger;
+        inboundTransform = b.inboundTransform; onReject = b.onReject; rejection = b.rejection;
+        sessionConfigs = b.sessionConfigs; logger = b.logger;
     }
 
     public static ListenerConfig defaults() { return DEFAULTS; }
@@ -60,7 +63,8 @@ public final class ListenerConfig {
         b.sourcePrefixV4 = sourcePrefixV4; b.sourcePrefixV6 = sourcePrefixV6;
         b.instanceId = instanceId.clone(); b.memoryPressureListener = memoryPressureListener;
         b.admission = admission; b.fallback = fallback;
-        b.inboundTransform = inboundTransform; b.onReject = onReject; b.sessionConfigs = sessionConfigs; b.logger = logger;
+        b.inboundTransform = inboundTransform; b.onReject = onReject; b.rejection = rejection;
+        b.sessionConfigs = sessionConfigs; b.logger = logger;
         return b;
     }
 
@@ -71,9 +75,9 @@ public final class ListenerConfig {
     /** Sessions waiting for {@link ZmuxListener#accept()}; later ones are refused. */
     public int backlog() { return backlog; }
     /**
-     * The bound of the sum over the listener's sessions of buffered, retained and
-     * window-growth bytes, default 1 GiB; empty ({@link Builder#noMemoryBudget()}) is unlimited. It replaces
-     * the sessions' own budget.
+     * The listener's shared budget for buffered and retained memory and advertised
+     * receive-window reservations. The default is 1 GiB. The empty value
+     * ({@link Builder#noMemoryBudget()}) means unlimited. This replaces each session's own budget.
      */
     public OptionalLong memoryBudget() { return limits.memoryBudget(); }
     /**
@@ -104,11 +108,6 @@ public final class ListenerConfig {
     public int sourcePrefixV4() { return sourcePrefixV4; }
     /** The leading bits of an IPv6 source address that name its client, 1 to 128, default 64; as {@link #sourcePrefixV4()}. */
     public int sourcePrefixV6() { return sourcePrefixV6; }
-    /**
-     * The Unconfirmed join carriers one session keeps (authenticated Hellos whose Confirm has not
-     * arrived): one more evicts the session's oldest.
-     */
-    public int maxPendingPerSession() { return limits.maxPendingPerSession(); }
     /** How long a new carrier may take to send its first record; default {@link #DEFAULT_FIRST_RECORD_TIMEOUT}. */
     public Duration firstRecordTimeout() { return limits.firstRecordTimeout(); }
     /** The leading bytes of every 16-byte session locator; random bytes fill the rest. */
@@ -137,12 +136,11 @@ public final class ListenerConfig {
 
     /** The transform of every carrier after its admission; null: none. */
     public InboundTransform inboundTransform() { return inboundTransform; }
-    /**
-     * The answer to an unauthenticated carrier the listener refused (a Join, an unknown Locator
-     * included, or an Establish a carrier transform refused); null: the default, which stalls an
-     * Establish refused before authentication and closes everything else.
-     */
-    public java.util.function.Function<RejectInfo, RejectInfo.Action> onReject() { return onReject; }
+    /** Observes local rejection diagnostics. */
+    public Consumer<RejectInfo> onReject() { return onReject; }
+
+    /** The silent refusal policy for an unauthenticated Establish or Join. */
+    public RejectInfo.Action rejection() { return rejection; }
 
     /** The chooser of each new session's configuration; null: {@link #session()} for all. */
     public SessionConfigs sessionConfigs() { return sessionConfigs; }
@@ -185,7 +183,8 @@ public final class ListenerConfig {
         private Admission admission;
         private Admission.Fallback fallback;
         private InboundTransform inboundTransform;
-        private java.util.function.Function<RejectInfo, RejectInfo.Action> onReject;
+        private Consumer<RejectInfo> onReject;
+        private RejectInfo.Action rejection = RejectInfo.Action.CLOSE;
         private SessionConfigs sessionConfigs;
         private System.Logger logger;
 
@@ -205,18 +204,20 @@ public final class ListenerConfig {
         public Builder inboundTransform(InboundTransform t) { inboundTransform = t; return this; }
 
         /**
-         * Answers a refused unauthenticated carrier, nothing written either way. A stalled Join
-         * ends one join timeout of {@link #session()} after the refusal, whatever the session its
-         * Locator names configures; a known Locator declined under memory pressure is refused as
-         * {@code memory_pressure} and answered the same way. A stalled Establish at the handshake timeout, and never later than
-         * the maximum stall duration (the admission's, or one drawn when there is none). A source
-         * already holding its maximum of stalled carriers has the carrier closed at once. This refusal
-         * is counted in {@link ListenerStats#rejected()}. Null (the default): an Establish refused before
-         * authentication stalls, a Join and every other refusal closes. A failing function closes.
-         * It is synchronous: it must not block, and must return well before the carrier's handshake
-         * deadline, which keeps running while it does.
+         * Observes local first-message rejections. The callback runs outside every zmux lock
+         * and must return promptly. {@link #rejection} selects the same outcome for all reasons.
          */
-        public Builder onReject(java.util.function.Function<RejectInfo, RejectInfo.Action> f) { onReject = f; return this; }
+        public Builder onReject(Consumer<RejectInfo> observer) { onReject = observer; return this; }
+
+        /**
+         * Selects the entry's silent close or stall for Establish and Join refusals.
+         * CLOSE is the default. A stall uses the stage's handshake deadline and the
+         * listener's existing stall bounds and source limits.
+         */
+        public Builder rejection(RejectInfo.Action action) {
+            rejection = Objects.requireNonNull(action);
+            return this;
+        }
 
         /** The admission of every new carrier; null (the default): none. */
         public Builder admission(Admission a) { admission = a; return this; }
@@ -249,7 +250,7 @@ public final class ListenerConfig {
         /** No bound of the listener's carriers before a session; the per-source bound still applies. */
         public Builder noMaxPending() { limits.noMaxPending(); return this; }
 
-        /** Carriers of one source before a session ({@link ListenerConfig#maxPendingPerSource()}), default 8; at least 1. */
+        /** Carriers of one source before a session ({@link ListenerConfig#maxPendingPerSource()}), default 8; at least 2. */
         public Builder maxPendingPerSource(int n) { limits.maxPendingPerSource(n); return this; }
 
         /** The IPv4 source prefix ({@link ListenerConfig#sourcePrefixV4()}), default 32; from 1 to 32. */
@@ -264,8 +265,6 @@ public final class ListenerConfig {
             sourcePrefixV6 = bits; return this;
         }
 
-        /** The Unconfirmed join carriers one session keeps, default 4; at least 1. */
-        public Builder maxPendingPerSession(int n) { limits.maxPendingPerSession(n); return this; }
 
         /** How long a new carrier may take to send its first record, default {@link #DEFAULT_FIRST_RECORD_TIMEOUT}; positive. */
         public Builder firstRecordTimeout(Duration d) { limits.firstRecordTimeout(d); return this; }

@@ -8,7 +8,6 @@
 
 [![zmux-quic](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-quic?label=zmux-quic)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-quic)
 [![zmux-http](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-http?label=zmux-http)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-http)
-[![zmux-shaping](https://img.shields.io/maven-central/v/io.github.zmuxio/zmux-shaping?label=zmux-shaping)](https://central.sonatype.com/artifact/io.github.zmuxio/zmux-shaping)
 
 Java 25 stream and datagram multiplexing over reliable carriers, compatible
 with QMux draft-02. The core has no runtime dependencies. A shared NIO event
@@ -17,7 +16,7 @@ Virtual threads are a good fit. Calls that would block an event loop or the
 same session's hook context fail with `IllegalStateException`.
 
 The core module is `io.zmux`, exporting `io.zmux`, `io.zmux.carrier`,
-`io.zmux.helper`, `io.zmux.seal` and `io.zmux.shaping`.
+`io.zmux.helper` and `io.zmux.seal`.
 
 ## Installation
 
@@ -37,8 +36,7 @@ Gradle: `implementation("io.github.zmuxio:zmux:VERSION")`. The optional
 modules are separate artifacts of the same version: `zmux-quic` (QUIC
 carriers on Netty, see [`zmux-quic/README.md`](zmux-quic/README.md)),
 `zmux-http` (HTTP/1.1, HTTP/2 and WebSocket carriers), `zmux-http3` (optional
-HTTP/3 over QUIC) and `zmux-shaping` (shaping
-hooks read from JSON).
+HTTP/3 over QUIC).
 
 ## Sessions and streams
 
@@ -154,11 +152,12 @@ takes ownership of the buffer's remaining bytes; do not mutate them afterwards.
 A chunk held by the application remains valid after the source session closes.
 `Chunk.of(buffer, release)` supports pooled buffers; release is resource cleanup
 and must not block, as the last reference may be dropped on an event loop.
-A chunk that is neither closed nor transferred keeps its buffer until it is.
-As a safety net one chunk in 128 is watched: when the garbage collector finds a
-watched chunk dropped, zmux logs a warning and releases it.
-`-Dzmux.leakDetection=paranoid` watches every chunk, with the stack that created
-it; `=off` watches none.
+Use `Chunk.withBuffer(action)` for scoped NIO access. Keep the view and any
+derived slices inside the action.
+Close or transfer every chunk to return its storage. When a new backing or lease
+would exceed the session's chunk allowance, the read throws `ChunkBudgetException`
+before consuming bytes. Release held chunks and retry, or use a normal read.
+The default allowance covers 8 MiB of distinct backings and up to 32,768 live leases.
 
 `session.openPipeStream(info, tlvs)` (OPEN_INFO and application TLVs, both optional) opens a bidirectional stream marked as
 PIPE_CARRIER (when the preamble extension is in use) and returns it as a
@@ -177,7 +176,7 @@ Multipath and resume are settings of `ZmuxConfig.Builder` like any other:
 
 ```java
 ZmuxConfig config = ZmuxConfig.builder()
-        .maxPipes(4)                                         // multipath: up to 4 pipes of our own
+        .sessionPolicy(new SessionPolicy(new CapacityLimits(4)))            // four steady local attachments
         .pipeAuth(PipeAuth.psk(secret).withEndToEnd())       // the join secret, and pipe 0 is end to end
         .build();
 ZmuxSession session = Zmux.connect(serverAddress, config);   // the server: Zmux.listen(address, ListenerConfig.of(config))
@@ -200,7 +199,7 @@ pipe is end to end: `PipeAuth.withEndToEnd()` when known before it starts, else
 `JoinPendingException`, whose message names what is missing (the declaration,
 the deferred PSK or both), and the peer's are held. A server session needs a
 listener for either feature: `Zmux.open(io, Role.SERVER, config)` with
-`maxPipes` above 1 or a `resumeTimeout` is a configuration error.
+a steady attachment limit above 1 or a `resumeTimeout` is a configuration error.
 
 The secure carrier (`io.zmux.seal`) runs an Establish on a session's first
 carrier. The server installs it as the listener's inbound transform; the client
@@ -246,8 +245,7 @@ weight, probation, `PipeLiveness` and the pipe's own `QualityBand`; a setting is
 kept when its methods are not called, set with `x(value)` or cleared with
 `clearX()`. `update` is the only way to change them; `PipeOptions.Builder` takes
 the same settings with the same methods when the pipe is added, where keeping
-and clearing both mean the default. `pipe.setShaper(shaper)` replaces the
-pipe's own shaper. A pipe can also revalidate, retire gracefully (`close()`) or
+and clearing both mean the default. A pipe can also revalidate, retire gracefully (`close()`) or
 `abort()`; `closed()` (a `ZmuxFuture`) and `awaitClosed()` wait until its
 removal finished. Lower priority numbers are preferred. The local outbound override takes precedence over the
 peer's request; clearing it follows the peer again. Standby means failover,
@@ -259,42 +257,15 @@ epoch every hour or every 65536 joins (`ZmuxConfig.Builder.epochPeriod`,
 `session.advanceEpoch()` asks; a session whose secret comes from a pre-shared
 key or an exporter also advances once when its first Sealed or Bound pipe exists
 (`epochAfterFirstPipe(boolean)`, on by default). `EpochCommitted` and
-`EpochDeleted` report it, and `session.replacePipes()` also replaces every
-carrier through the redial hook, make before break; `orTimeout` on its future
-bounds it.
+`EpochDeleted` report the exchange and retirement of epoch keys.
 
 ### Resume after a lost connection
 
-`resumeTimeout(d)` keeps a session through the loss of all its pipes for the
-grace period `d`. Something has to dial a new pipe in that time: a `redial`
-hook for a session that runs on one pipe at a time, or a pool
-(`session.maintainPipes`, below) for one that keeps several.
-
-```java
-ZmuxConfig config = ZmuxConfig.builder()
-        .pipeAuth(PipeAuth.psk(secret).withEndToEnd())
-        .resumeTimeout(Duration.ofSeconds(30))
-        .redial((need, cancellation) -> {                    // any PipeIo; zmux owns it
-            SocketChannel ch = SocketChannel.open(serverAddress);
-            return PipeChannel.pipe(ch, ch, Framing.BYTE_STREAM, 1 << 16);
-        })
-        .build();
-try (ZmuxSession session = Zmux.connect(serverAddress, config)) {
-    // Streams survive a lost connection: writes buffer and block, reads wait, until a redial resumes it.
-}
-```
-
-The hook is called as soon as the session suspends or lacks a direction, and
-again after a failure with an exponential backoff (`redialBackoff(Backoff)`,
-by default from 1 s to 60 s with jitter 0.2), measured from the start of the
-previous attempt; a join refused by the peer also waits for the refusal
-backoff, so a dial waits for the longer of the two. The server needs a
-listener (`Zmux.listen`), which holds the suspended session. `nextEvent()`
-reports `SessionSuspended` and `SessionResumed`; a session that can rejoin and
-suspends with neither a hook nor a running pool also reports
-`ResumeUnattended` (and logs a warning through `ZmuxConfig.Builder.logger`, a
-`System.Logger`), since nothing will dial for it unless the application calls
-`addPipe` itself.
+`resumeTimeout(d)` keeps a suspended session available for a later Join for
+the grace period `d`. A `SessionController` can maintain a target on the
+dialing side. The listener holds the suspended session on the receiving side.
+`SessionSuspended` and `SessionResumed` report the resulting state, and
+`ResumeUnattended` indicates that the application must supply a carrier.
 
 ### Telling session ends apart
 
@@ -315,7 +286,7 @@ try {
 ```
 
 `SessionError` is sealed: `ApplicationClosed`, `TransportClosed`,
-`IdleTimeout`, `HandshakeTimeout`, `EarlyDataRejected`, `ResumeTimeout`,
+`IdleTimeout`, `HandshakeTimeout`, `ResumeTimeout`,
 `ResumeFailed` and `PipesLost`. For `ResumeTimeout` and `PipesLost` the
 exception's cause is the error of the last pipe lost, for example a join the
 peer refused while the session tried to resume.
@@ -325,27 +296,17 @@ records with the keys of the Join handshake; `BOUND` leaves them to a carrier th
 declares the contract (`PipeIo.withCarrierSecure()`, and a TLS 1.3 connection this process terminates) and binds
 its exporter into the handshake; `TRUSTED` leaves them to the deployment.
 `ZmuxConfig.Builder.recordPolicy` or `PipeOptions.Builder.recordMode` chooses the mode of a
-local join. The acceptor first calls `authorizeJoin` for the authenticated Hello.
-Its `allowRecordMode` policy then checks the mode and defaults to Sealed. `ZmuxConfig.Builder.joinOutcome`
-receives one result for each authorized incoming join and each carrier supplied
-to an outgoing join (including redial and pool joins). Its arguments are the
-session, the pipe ID (`PipeId.UNASSIGNED`, 2⁶², before allocation), and the failure (null on
-attachment). A dial that supplies no carrier produces no callback. A successful
-callback holds that pipe's event keys through its return, including retirement.
-Callbacks run independently of the session's completion workers and can wait for
-the session to close. Calls for one session can overlap. Each outgoing join
-retains its confirmation result on its pipe handles. A late Confirm or ACK
-cannot change a join that timed out. A timeout on a single
-`awaitAttached(Duration)` withdraws just that wait.
-`returnOnReply(true)` lets the caller return before the peer confirms
-attachment. Timeout, refusal, eviction, interruption, listener stop, pipe
-loss and session termination have distinct exception types. A local abort before confirmation
-reports `PipeAbortedException`, a subtype of `PipeGoneException`. Catch the specific
-type first when handling them separately. `session.weakestRecordMode()` and
-`PipeStats.recordMode()` report the result, and `joinEarlyHello` sizes the first batch
-a Hello carries while no other pipe is usable (default 8 KiB; `noJoinEarlyHello()` turns it
-off). A join exchanges its keys in a key group, 1 or 2 (`PipeOptions.Builder.keyGroup`; by
-default 1 when the session can use it).
+local join. The acceptor first calls the authorizer from its session policy for the authenticated Hello.
+Publish changes with the session's
+`setSessionPolicy` method. Increase both the policy revision and the authorization
+generation when permissions change. A Join authorized under an older generation
+is rejected if the change commits before its attachment does.
+
+Its `allowRecordMode` policy checks the mode and defaults to Sealed. An outgoing
+Join returns a pipe or an error. When returning on Reply, call `pipe.attached()`
+to observe confirmation. A capacity change exposes Reply, confirmation and
+resource release through its `Attempt`. For a carrier accepted by an adapter,
+`Handled.awaitSetup()` reports the setup result.
 
 The optional `zmux-http` module provides HTTP and WebSocket carriers (see
 [HTTP carriers](#http-carriers)). Other integrations (an HTTP stack of the
@@ -380,11 +341,11 @@ zmux copies it before the call returns (the reader may reuse the buffer at once)
 and runs `consumed` once it parsed the copy, as for `onChunk`: that is the
 carrier's backpressure. A reader delivers more before earlier batches are
 consumed only within the `receiveMemory` it declares
-in `PipeIo.Capabilities` (`Capabilities.builder().receiveMemory(bytes)`, or
-`PipeIo.withReceiveMemory`; charged to the memory budget); a reader that queues
-beyond that fails its carrier. `onChunk` transfers owned buffers: zmux parses
-them in place, keeps payload references instead of copying, and copies only the
-part of a record cut at the chunk's end.
+in `PipeIo.Capabilities` (`Capabilities.builder().receiveMemory(bytes)` or
+`PipeIo.withReceiveMemory`). Queue occupancy includes each distinct retained
+backing allocation and each delivery's bookkeeping. `onChunk` transfers
+ownership, so zmux can parse in place and retain payload views. A reader that
+exceeds its queue limit fails its carrier.
 An HTTP implementation must support
 concurrent reads and writes (or use split requests), forward cancellation and
 failure, and keep response/request bodies alive for the pipe lifetime.
@@ -472,9 +433,9 @@ pipe's own dead timeout (a value or off) overrides that, and the
 carrier's report overrides the session's. Any large `deadTimeout` is safe.
 
 The idle probe interval (`probeInterval`, default 15 s, at least 1 s) is measured
-to the carrier: each probe waits a uniform draw from [k_eff(1 - j), k_eff] with
-k_eff = max(1 s, k - the pipe's longest shaping hold) and j the probe jitter
-(`probeJitter`, default 0.25), and a bootstrap pipe's first wait from [0, k_eff];
+to the carrier: each probe waits a uniform draw from `[k_eff(1 - j), k_eff]` with
+k_eff derived from the configured interval and j the probe jitter
+(`probeJitter`, default 0.25), and a bootstrap pipe's first wait from `[0, k_eff]`;
 j = 0 gives a fixed schedule. A probe is answered on its own pipe pair (in a
 quiet session only there), with a probe of the answering end once its pipe has
 been idle for max(1 s, T_suspect). `noProbeInterval()` turns off only the idle
@@ -511,19 +472,13 @@ no room from the 256. An application that must not lose events reads
 by `allowConnectionWindowIncrease`; the predicate runs off-loop and stale or
 now-unaffordable answers cannot increase credit.
 
-`session.setShaper(factory)` and `ZmuxConfig.Builder.shaper(factory)` install a
-`ShaperFactory`, within `ZmuxConfig.Builder.shapingLimits` and `shapingBudget`.
-`ShapingLimits` bounds what a shaper may do: its maximum delay
-(`withMaxDelay`, or `withNoMaxDelay()` for none) and whether it may pad
-(`withPadding`), pause (`withPause`) or inject records (`withInjection`).
-
 `PipeIo.carrier` (set with `withCarrier`) is the single declaration of a pipe's
 carrier kind. The bundled adapters fill it on both sides: HTTP streaming
 requests are `STREAMING`, both halves of a split bootstrap or a joined half are
 `SPLIT`, the exchange carrier is `EXCHANGE`, WebSocket is `WEBSOCKET` and QUIC
 streams are `QUIC`; a `Candidate`'s carriers take the candidate's kind. Raw TCP
 and TLS carriers, and pipe inputs that leave it unset, have none (null). The
-kind is reported in `ShapedPipe`, `PipeStats.carrier` and the pipe events
+kind is reported in `PipeStats.carrier` and the pipe events
 (`PipeAdded`, `PipeJoined`, `PipeSuspect`, `PipeRecovered`, `PipeFailed`, `PipeClosed`,
 each with the direction it is about, `PipePriorityChanged`, with the source of the
 change, and `PipeQualityChanged`). Dropped datagrams are counted in the statistics,
@@ -585,20 +540,22 @@ datagrams wait (`datagramQueueDelay`, default 20 ms; `noDatagramQueueDelay()`
 turns it off): once the datagrams leaving a queue have waited longer for
 100 ms, CoDel drops some as they leave, counted, so a slow reader gets fresh
 datagrams instead of stale ones. `ConnectionInfo.pathDatagramPayload()` (and
-`ZmuxStream.pathDatagramPayload(context)`) is the largest payload that leaves
-as one carrier datagram, a QUIC DATAGRAM as path MTU discovery sizes it,
-instead of in a record; `SessionEvent.DatagramPathChanged` reports changes. A
-packet forwarder uses it as its MTU.
+`ZmuxStream.pathDatagramPayload(context)`) reports the largest payload on
+eligible record and native paths. `nativeDatagramPayload()` narrows the snapshot
+to native channels. Check `nativeDatagramAvailable()` to distinguish an empty
+datagram that fits from an unavailable channel. `SessionEvent.DatagramPathChanged`
+reports changes to the session snapshot.
 
 `Zmux.MAX_STREAM_CREDIT` (2^60) is the largest stream credit, the value that
 grants the peer as many streams as the protocol can count, for
 `maxIncomingStreams`, `maxIncomingUniStreams` and `raiseIncomingStreams`; a larger
 value is a configuration error.
 
-`session.datagrams().send(payload)` does not wait for send-queue space and
-returns false when the datagram limiter dropped the payload; `send(payload, timeout)` can wait
-for that space with a deadline, but never waits for limiter tokens. Enable
-datagrams in both peers' configurations before using them.
+`session.datagrams().send(payload)` queues a datagram, evicting the oldest one
+when the send queue is full. `sendWait(payload, timeout)` waits for space.
+Both report local drops with `DatagramDroppedException`, whose `reason()`
+identifies deadline, no native path, limiter, queue overflow or sequence
+exhaustion. Enable datagrams on both peers before using them.
 
 `io.zmux.helper.PacketStream` carries packets (a context ID and a payload) on
 a bidirectional stream, each as a datagram of the stream's flow or as an
@@ -612,8 +569,11 @@ packets.close();
 ```
 
 `Options` choose `PREFER_DATAGRAM` (the default), `STREAM_ONLY` or
-`DATAGRAM_ONLY`, and the largest accepted capsule payload (65535 by default); a
-larger capsule, or a stream ending inside one, resets and stops the stream
+`DATAGRAM_ONLY`, and the largest accepted capsule payload (65535 by default).
+`PREFER_DATAGRAM` uses a capsule when the negotiated datagram representations
+cannot carry the packet. `STREAM_ONLY` paired with effective `REQUIRE_NATIVE`
+is an invalid configuration. A larger received capsule, or a stream ending
+inside one, resets and stops the stream
 with `PacketStream.PACKET_ERROR`. `finishAsync()` sends the FIN after the queued
 capsules and keeps receiving; `close()` releases the stream. `Zmux.splicePackets(a, b)` relays two packet
 streams like `Zmux.splice`, writing a datagram the next hop cannot take as a
@@ -670,19 +630,37 @@ is cancelled and the carrier closed. `MORE` on a head or a message carrier, and
 `maxMessage` limit counts as `tooLarge`. The carrier also closes on a first message
 that fails, is not a binary message or is empty (`closed`).
 `Admission.Decider.immediate(...)` wraps a decision taken at once, and
-`PrefixAuth` provides a token decider. `listener.stats().admission()` counts
-the outcomes. All `MORE` rounds use the first deadline. If a byte-stream prefix
-is still short at expiry, native TCP, TLS and QUIC can replay it to the listener
-fallback when `fallbackOnPeekTimeout(true)` is set. A late More round keeps its
-variant. Other inputs and outstanding decisions close on expiry.
+`PrefixAuth.Verifier` accepts a 64-byte ticket presentation. Use one
+`PrefixStore` for every entry in the same admission domain. The store owns
+outer-key generations, ticket versions, the rollback floor, nonce redemption
+and single-use tickets. A `MemoryPrefixStore` keeps this state in one process
+and bounds both the ticket IDs and the live nonce records. Ticket ID tombstones
+remain for the lifetime of the store, so the ticket limit covers every distinct
+ID installed or revoked. A reusable ticket holder can fill the shared nonce
+capacity with valid presentations in the skew window. New presentations are
+then refused until nonce claims expire. A durable host store can preserve the
+domain's state across processes and restarts.
 
 ```java
-var auth = new PrefixAuth(key, Duration.ofSeconds(30), true, 1, 0);
-var config = ListenerConfig.builder()
-        .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).build())
-        .fallback(takeover -> serveOtherProtocol(takeover)) // a CompletionStage: done when it completes
-        .build();
+var slot = Duration.ofSeconds(30);
+var carrierForm = new PrefixAuth.CarrierOptions(true, false);
+var generation = new PrefixStore.Generation(outerKey, 0, -1L);
+var id = PrefixStore.Id.of(ticketId);
+var store = new MemoryPrefixStore(new PrefixStore.Window(slot, 1), List.of(generation));
+store.addTicket(new PrefixStore.Ticket(id, ticketKey, 1, firstSlot, lastSlot, true));
+
+var verifier = new PrefixAuth.Verifier(carrierForm, store);
+var config = ListenerConfig.builder().admission(verifier.admission().build()).build();
+var auth = new PrefixAuth(carrierForm, slot, id, ticketKey, List.of(generation));
 ```
+
+Use independent random 32-byte keys for the domain generation and each ticket,
+and a fresh random 16-byte ID for each ticket. Slot ranges are inclusive unsigned
+64-bit integers. A scheduled rotation ends the old interval just before the new
+one begins. The listener defaults to silent close on prefix refusal. Use
+`verifier.admission().refusal(AdmissionVerdict.FALLBACK)` to hand a supported
+request or byte stream back to its host with the original input. Admission
+outcomes are counted by `listener.stats().admission()`.
 
 `Decision.takeover(value)` gives the carrier itself to `ListenerConfig.fallback`.
 `Decision.fallback(value)` selects the normal host service for the carrier.
@@ -749,23 +727,14 @@ and a layer maps each of its writes to exactly one carrier write.
 `io.zmux.carrier.PipeChannel` presents a pipe input as blocking channels and
 `PipeChannel.pipe(in, out, framing, readSize)` turns channels back into a
 `PipeIo`, both one write per write. `PipeIo.withWriteOverhead(bytes)` declares
-what a layer adds to each carrier write (at most 65535); `ShapedPipe` reports
-it, and the session counts it in the record lengths a shaper plans, which are
-lengths on the carrier.
+what a layer adds to each carrier write (at most 65535).
 
-`ListenerConfig.Builder.onReject` answers a rejected Hello (`RejectInfo`: its mode and
-a local reason: `malformed`, `pending_limit` (the source is over its bound of carriers
-waiting to authenticate), `unknown_locator`, `unknown_suite` (not usable in the found
-session), `binding_unavailable`, `memory_pressure` or `auth`) with `RejectInfo.Action.CLOSE`, the default, or
-`STALL`, which holds the carrier silently; nothing is written either way. Every
-refusal before authentication gets this one answer, so the response and the way the
-carrier ends are the same whatever the reason; the time spent before the refusal may
-differ.
-
-`onReject` and `ListenerConfig.Builder.sessionConfigs` are synchronous hooks: they
-must not block and must return well before the carrier's handshake deadline, which
-keeps running while they do. Slow decisions belong in the asynchronous
-`Admission.decide`, which is given its deadline.
+`ListenerConfig.Builder.rejection` selects one silent outcome for unauthenticated
+Establish and Join refusals. `RejectInfo.Action.CLOSE` is the default. `STALL` uses
+the configured handshake or Join timeout and the listener's stall limits.
+`ListenerConfig.Builder.onReject` observes local reasons independently of the
+wire outcome. The observer and session configuration callback must return
+promptly. The asynchronous admission decision receives its deadline.
 
 ### Handing a carrier to a listener
 
@@ -855,18 +824,28 @@ closes the sessions still running when its bound passes, and
 that bound. `close()` stops the listener at once and leaves started sessions
 running, without new pipes from it.
 
-On a carrier decided on its head, `PrefixAuth`'s verifier takes the token
-from the request field `Zmux-Prefix-Auth` (`PrefixAuth.withHeaderField` agrees
-on another name), 43 characters of base64url without padding; a missing,
-repeated or malformed field fails like a wrong token, and the token is bound
-to the exporter of the connection carrying the request.
+On an encrypted request-head entry, the verifier reads one `Zmux-Prefix-Auth`
+field containing 86 characters of canonical unpadded base64url. Set the agreed
+field name in `PrefixAuth.CarrierOptions`. On a byte stream the ticket occupies
+the first 64 bytes, and on a binary message carrier it fills the first message.
+An authenticated exchange uses its own request envelope. A QUIC host that
+buffers streams before adapting them calls `QuicStreamPipe.observe` at stream
+arrival to retain the original handshake state. For WebTransport CONNECT, pass
+the credential to `Http3Client.openWebTransportAsync` and configure admission
+on the listener. Both sides use the actual QUIC connection.
 
 ### Client credentials
 
 A `CarrierCredential` is what a client presents to a server's admission: the bytes a
 carrier starts with (`prefix(info)`), or the request header field of a carrier
-decided on its head (`header(info)`). `PrefixAuth` is one; it presents a fresh
-token on every carrier, bound to the carrier's TLS exporter with `bindTls`.
+decided on its head (`header(info)`). `PrefixAuth` presents a fresh ticket
+token for every independent admission. Choose the bound form for TLS 1.3 or
+QUIC with the actual connection's completed handshake exporter. Unbound
+presentations on cleartext byte or message carriers require explicit bearer
+opt-in. Header admission always requires encryption. Early data is refused.
+`PrefixAuth.boundPrincipal(session)` returns a verified bound ticket ID after
+the listener delivers the session. An inner Establish independently verifies
+its own peer.
 
 ```java
 var client = ZmuxConfig.builder().carrierCredential(auth).build();
@@ -887,35 +866,45 @@ dials itself (`Zmux.open`, `listener.open`, `addPipe(io, ...)`) presents
 its credential where it is dialed: the prefix written first, or
 `credential.header(info)` in its HTTP request.
 
-## Carrier selection
+## Session controller
 
-`Zmux.dial(choice, config, policy)` dials a client session over the carrier a
-`CarrierChoice` selects. Each adapter offers a `Candidate` of its kind (`CarrierKind`:
-websocket, streaming, split, exchange, quic, http3, webtransport) wrapping its
-own dialer. `CarrierChoice.explicit(candidate)` uses that kind only and reports
-a failure as a `CarrierChoiceException`, never replacing it. `CarrierChoice.auto(...)`
-chooses among candidates in order of preference: without early data and
-without racing, skipping kinds the `CarrierCache` holds as failed. A candidate
-is usable when the peer's parameters arrive within its timer; one that misses
-it is closed without CONNECTION_CLOSE. When the configuration allows more
-than one pipe and the peer offers multipath, the session is established on
-the most robust candidate (a kind remembered as usable, else the exchange
-carrier, else the last) and a pool of one member over the same choice
-(`PipePool.choice`) takes the bootstrap pipe: it upgrades to a preferred kind
-make before break, retiring the old member once the new one has settled, and
-replaces a lost one. `PipePool.choice(choice, policy)` serves further pools the
-same way; pools may share a cache. `Candidate.wrapDial` wraps a candidate's
-carriers. `CarrierChoicePolicy`
-holds the cache and its key (server and local network), the timer
-(`clamp(3 x open RTT, 1 s, 3 s)`), the settle time (1 s), the drop window
-(30 s) and whether the session joins further pipes (`withJoin(boolean)`); `CarrierCache` keeps a usable kind for 6 h and backs a
-failed one off from 1 min to 6 h. `cache.snapshot()` and `cache.restore(...)`
-carry it across runs (`CarrierCache.Snapshot.toJson()`/`fromJson`, the JSON
-form every zmux implementation shares); a restore merges, keeping the newer
-entry per key and kind. Every try is reported as a
-`SessionEvent.CarrierCandidate` (usable, timed_out, refused, failed), the
-choice as a `SessionEvent.CarrierChosen`, and both in `SessionStats.carrier()`
-and `carrierCandidates()`.
+A `SessionController` opens and maintains sessions in one host isolation
+domain. Register each candidate with a stable ID, a cache key and its exact
+Join layout. An opener receives the layout, credential and cancellation signal
+and gives the controller the carriers it has opened. The session performs the
+Join and owns confirmed attachments.
+
+```java
+var layout = List.of(new AttachmentSpec(Directions.BOTH, PipeOptions.defaults()));
+var route = new SessionController.Candidate("primary", "region-a", CarrierKind.STREAMING,
+        "", 0, false, true, layout, (setup, request) ->
+                new CarrierOpener.Opened(List.of(http.pipe(url, headers, PipeOptions.Direction.BIDIRECTIONAL,
+                        request.credential()))));
+var target = new SessionTarget(1, List.of(new SessionTarget.Group("online", List.of(
+        new SessionTarget.Quota("primary", 1, Directions.BOTH, List.of("primary"))), SessionTarget.Rotation.NONE)), List.of());
+var limits = SessionController.Limits.DEFAULT.withAttemptTimeout(Duration.ofSeconds(30));
+var options = new SessionController.Options("tenant-a", List.of(route),
+        SessionController.Choice.STATIC, SessionController.Limits.DEFAULT.withMaximumOpeners(limits), null, null, java.util.Map.of());
+try (var controller = new SessionController(options)) {
+    var opened = controller.open(config, target);
+    try (var session = opened.session()) {
+        // Use session and update the target through opened.control().
+    }
+}
+```
+
+Use `manage(session, target)` to bind an existing multipath session. With
+`manage(session, target, "primary")`, the confirmed bootstrap member on pipe 0
+counts toward a matching quota for the registered candidate `primary`. Its
+carrier kind and variant must match the registration. The member keeps its
+identity, directions, and accounting source.
+
+A `SessionTarget` specifies member quotas and optional member
+replacements with a minimum Join epoch. Update it with `control.setTarget`
+and an increased revision. Each batch handles one logical member, and the
+controller rotates among ready groups. The controller can rank candidates by registration
+order or by the `CarrierCache` score within the candidate's tier and
+standby level. The cache supports v2 export and import.
 
 ## HTTP carriers
 
@@ -975,11 +964,10 @@ listener) goes to the host's handler with its body replayed.
 `HttpCarrierClient` dials them: `pipe(url, headers, direction, credential)`,
 `splitPipe(url, headers, credential)`, `exchangePipe(urlTemplate, config)` and
 `webSocketPipe(url, headers, protocols, credential)`, each also as a
-candidate for `Zmux.dial` (`streamingCandidate`, `splitCandidate`,
-`exchangeCandidate`, `webSocketCandidate`). A split bootstrap's pairing makes
-pipe pair 0 only, so `addPipe` refuses it (`IllegalArgumentException`);
-`splitJoin(session, url, headers, credential, options)` joins a split carrier as
-one further pipe: one Join across a paired POST and GET.
+adapter candidate (`streamingCandidate`, `splitCandidate`,
+`exchangeCandidate`, `webSocketCandidate`). Use `splitOpener(url, headers)`
+to open the paired POST/GET carriers for a controller or a manual capacity
+change. Each pair carries one Join.
 
 For HTTP/3, add the optional `io.github.zmuxio:zmux-http3` artifact and use
 `io.zmux.http3.Http3Server`. Bind UDP with
@@ -997,12 +985,35 @@ request-carrier and Exchange methods use this transport on the client.
 Include Netty's `netty-codec-native-quic` for your operating system and
 architecture at runtime, at the same version as the Netty HTTP/3 codec.
 
+For draft-16 WebTransport, build an HTTP/3 client and call
+`Http3Client.openWebTransportAsync(client, target, headers, credential, timeout)`.
+The returned `WebTransportSession` owns the CONNECT. Its `openPipeAsync()`
+opens a bidirectional data stream for `Zmux.open` or a subsequent pipe.
+Use `draining()` to observe DRAIN or connection GOAWAY, `drainAsync()`
+to signal DRAIN, and `closeAsync(code, reason)` to close the session.
+`closed()` reports the unsigned 32-bit code, UTF-8 reason and initiating side.
+
+On the server, enable `HttpEndpoint.builder(listener).webTransport()` and use
+`Http3Server.bind` or the connection-level initializer. The listener decides
+admission on the CONNECT, including any channel-bound ticket, before the 200
+response. The connection must negotiate QUIC and HTTP/3 datagrams. With the bundled
+Netty transport, one WT session can be active per connection. QUIC limits apply
+to its streams. A stream closed normally delivers FIN. Cancelling a stream can
+discard its header before the peer opens a pipe. After the header arrives, a
+reset fails the corresponding stream. Stream cancellation codes outside the
+transport's range use H3_REQUEST_CANCELLED and the mapping is logged. A peer
+that requires partial delivery on reset can refuse the connection. For a
+host-managed connection, pass the QUIC receive options used by the host to the
+connection-level builder, initializer or `serve` overload. For an already active
+connection, install `QuicServer.observeDatagramCapacity(connection)` in its QUIC
+initializer before activation.
+
 Streaming, split and WebSocket carriers follow redirects of their requests on
 the same host name only (another path, or a scheme upgrade from http to https,
 ws to wss), at most 5 hops (`Redirects.DEFAULT_MAX`); a redirect to another
 host, a downgrade, another port without an upgrade, or a POST a 301, 302 or 303
 would turn into a GET fails the carrier with `HttpRedirectException`, which a
-`CarrierChoice` counts as refused. A streaming request is repeated whole at the new
+the session controller counts as refused. A streaming request is repeated whole at the new
 URL with a fresh credential and the uplink bytes sent so far, kept up to 64 KiB
 (`Redirects.MAX_REPLAY`) until the first response that is not a redirect. A
 candidate's carriers start at the URL redirects last led it to (`HttpTarget`),
@@ -1076,7 +1087,7 @@ binding are unavailable in this adapter; see its setup and ownership rules.
 With datagrams enabled on both sides, a datagram that fits the QUIC
 connection's datagrams (RFC 9221) goes there instead of in a record, named by
 its pipe's stream ID, so that a lost packet loses that datagram instead of
-delaying every later one; larger datagrams, shaped pipes and peers without
+delaying every later one; larger datagrams and peers without
 the channel use records. Several sessions may share a connection's
 datagrams. A QUIC connection always offers its datagrams; the session's
 `enableDatagrams` is the one switch. `SessionStats` counts the
@@ -1105,118 +1116,88 @@ and returns a `ZmuxFuture<SpliceResult>`. Prepare the outbound preamble
 first, copying or adjusting application TLVs and PIPE_CARRIER as appropriate.
 After transfer, let the relay own stream I/O and release both streams.
 
-Each direction waits for downstream capacity, and with a limiter waits until
-its source is readable without consuming anything, then acquires `(1, k)` with
-k the bytes readable (at most the chunk size), reads at most the grant without
-blocking, forwards it and refunds the unused rest; an idle source holds no
-grant. `Zmux.splicePackets` acquires `(n, n)` for each whole capsule (holding
-only its few header bytes while it waits) and polices each datagram it
-forwards with `tryAcquire(n, n)`, dropping and counting it on 0. It holds at most one chunk (64 KiB by default), forwards its
-buffer ownership, and preserves independent FIN, RESET and STOP behavior.
-Reliable reset tails keep their error code and boundary; a plain QMux peer
-receives RESET_STREAM after the forwarded tail has reached the carrier.
-Session failure interrupts capacity and limiter waits.
+Each direction preserves its own FIN, RESET and STOP. Reliable data and
+injected capsules share one writer. Stream datagrams use the next hop's
+Flow with their Context ID intact. A packet splice can insert a datagram as
+a reliable capsule when the peer lacks stream datagram support or a payload
+exceeds the hop's negotiated datagram limit. A reliable
+reset retains its code and the last complete output boundary. Without
+RESET_STREAM_AT, the relay drains the protected prefix before sending RESET_STREAM.
 
-`SpliceOptions.builder().chunk(n).aToB(l).bToA(l).abort(a).build()` supplies
-the chunk size, the two direction limiters and an optional `SpliceAbort`
-(`SpliceOptions.DEFAULT` sets none of them). Cancelling the returned
-future, or completing it from outside (`orTimeout`), cancels the relay: both
-streams are reset with ZMUX_CANCELLED and stopped with code 0, and there is no
-result. `SpliceAbort.abort(code)` ends every splice the handle serves with that
-code instead (the first code decides), and the result reports
-`SpliceEnd.Cancelled(code)`. Otherwise the future completes after all relay
-workers, limiter waits, chunks and owner-loop registrations have been cleaned
-up, with a `SpliceResult(aToB, bToA)` of two `SpliceDirection`s: `bytes`,
-`datagramBytes`, `datagramsDropped`, `datagramsTooLarge`, `datagramsLimited`,
-`datagramsAsCapsules` (packet relays only) and `end`, a sealed `SpliceEnd`:
-`Finished`, `Reset(code)`, `Stopped(code)`, `UpstreamLost`, `DownstreamLost`,
-`Cancelled(code)` or `LimiterFailed`. A limiter that fails in `acquire` ends
-its direction `LimiterFailed` (the downstream stream is reset and the upstream
-stream stopped with ZMUX_CANCELLED) while the other direction goes on.
-
-Stream datagrams preserve context IDs and use the sessions' existing bounded
-queues. They remain eligible after a reliable half-close until the association
-ends. A direction limiter's whole-payload rejection (`tryAcquire(n, n)` returning 0) is counted as a drop;
-accepted datagram bytes count local queue admission, not peer delivery. Shared
-limiters must safely support concurrent byte and datagram calls. Helper work uses
-virtual threads outside the owner loops, while the existing core remains the
-only authority for credit, buffered bytes, stream state and errors.
-
-## Pipe maintenance
-
-A pool maintains pipes for one route without taking ownership of the session.
-Use the existing join operations through the attempt scope:
+Set direction-specific chains with `SpliceOptions.Builder.hooksAToB` and
+`hooksBToA`. A chain can handle bytes on `splice`, reliable capsules on
+`splicePackets`, and stream datagrams on either entry. Each callback runs once
+per admitted unit and sees its metadata and the current ordered outputs. It can
+pass the group through, replace it with outputs from `item.slice` or
+`unit.allocate`, drop it, or reset the direction with an application code.
+Only copy payloads that need to outlive the callback.
 
 ```java
-PipePool route = PipePool.of(attempt -> attempt.join(remoteAddress))
-    .withCount(2)
-    .withOptions(PipeOptions.defaults())
-    .withRotate(new PipePool.Rotation(512L * 1024 * 1024,
-                                       Duration.ofMinutes(30), 0.2));
-PipeMaintenance maintenance = session.maintainPipes(route);
-// Later: stop creation and rotation, then wait for all attempt cleanup.
-maintenance.close();
-PipeMaintenance.Result result = maintenance.completion().join();
+SpliceHooks hooks = new SpliceHooks(List.of(unit -> {
+    var input = unit.item(0);
+    if (input.get(0) == 0) return new SpliceHook.Drop();
+    return new SpliceHook.Pass();
+}), List.of(), List.of());
+SpliceOptions options = SpliceOptions.builder().hooksAToB(hooks).build();
+SpliceController relay = Zmux.spliceControlled(inbound, outbound, options);
 ```
 
-Multipath must be negotiated. `count` includes only this pool's members, not the
-bootstrap or other callers' pipes. The session's `maxPipes` target and admission
-limits still apply; leave room for replacements if rotation is enabled.
-Probationary members occupy a slot. Recovery takes precedence over rotation,
-and the old pipe drains only after its replacement becomes usable.
+A controlled splice exposes `replaceHooks`, `pause`, `resume`, and typed
+injection on each direction. A replacement applies at the next unit boundary.
+A pause acknowledges when the current reliable write reaches a safe boundary.
+An injection reports admission and local disposition separately, passes through
+the installed chain, and is refused once the direction observes upstream FIN.
+`SpliceWait` holds a group until its delay and resume signals are satisfied
+or its deadline expires. `SpliceLimits` bounds the number of members, payload
+segments, distinct backing bytes and queued items. The total wait defaults to
+30 seconds. A negative duration disables this cap. A paused direction leaves
+new datagrams in the source Flow, where `datagramReceiveLifetime` bounds their
+age. An optional `SpliceMirror` copies samples or shares independent immutable
+ranges under its own byte and item limits.
 
-`withPolicy(PoolPolicy)` is asked at each look with a `PoolView`: the members
-(`PoolMember`: age, idle time as `sinceLastTraffic`, byte counts, usability),
-consecutive dial failures and the time since the last dial (`sinceLastDial`,
-empty before the first). A pool looks at once when a pipe changes state or the
-session is suspended or resumed, after each dial attempt, no later than the
-last decision's recheck, and every 100 ms. The `PoolDecision` it returns can
-replace `count` (members beyond it close gracefully, retired ones first, then
-the longest idle), replace the backoff by `dialAfter` (bounded only by the
-backoff maximum), retire members (`withRetirePipes`; replaced make before
-break), ask again no later than `withRecheck` (positive, at least
-`PoolDecision.MIN_RECHECK` in effect), and set a `PipeLiveness` for the pipes
-dialled after it (`withLiveness`). Backoff and `dialAfter` run from the
-previous dial attempt. The pool acts on pipe failures and session suspension
-as they happen, and keeps dialling while the session is suspended. Each item
-is unset in `PoolDecision.KEEP` (the pool's own behaviour) and set with a
-`with` method, which throws for a value out of range
-(`KEEP.withCount(2).withLiveness(PipeLiveness.builder().noProbeInterval().build())`
-turns the idle probes of those pipes off); `count()` reads back as an
-`OptionalInt`, `dialAfter()` and `recheck()` as `Optional<Duration>`. A policy
-that throws (a `VirtualMachineError` excepted) or returns null is rejected: the pool applies `KEEP` for that look,
-hands the error to `withDecisionRejected(Consumer<Throwable>)` or, without one,
-logs it through the session's logger, and goes on. `QuicPool` takes the same
-policy for its connections (see `zmux-quic`).
+A direction limiter must declare its maximum burst through `maxBurstBytes()`
+before installation. A transformed datagram group reserves all payload bytes
+for direct datagrams or all encoded bytes for capsule fallback. The fallback
+deadline applies until the first byte commits to the target writer. A direction's
+`settlement().snapshot()` continues to report pending handoffs and final
+refunds after `finished()`.
+`SpliceResult` reports local submission counters and one end reason per direction,
+including `HookReset`, `HookFailed`, `PacketError` and `WaitTimeout`.
+`SpliceAbort.abort(code)` or `relay.abort(code)` propagates a chosen code.
+Cancelling the result future resets both sends with ZMUX_CANCELLED and sends
+STOP with code 0. Application hooks and limiter callbacks run outside the
+session event loops and must return promptly.
 
-Module `zmux-shaping` reads such hooks from JSON (`Machines`, `Bundle`).
+## Capacity changes
 
-The dial callback runs off the session loop and creates exactly one pipe through
-its `Attempt`: `join` or `joinTls`. Return that pipe. The scope reclaims an uncommitted creation
-on failure or cancellation without touching unrelated callers' pipes.
-`PipePool.carriers` adapts a raw `PipeIo` factory for joins. `PipePool.join(join)` keeps members that are
-groups of pipes, such as
-`PipePool.join(a -> List.of(client.splitJoin(a.session(), url, headers, cred, a.options())))`:
-a member is usable while all its pipes are, counts once, and is redialled,
-rotated (make before break) and retired whole. The backoff, or a policy's
-`dialAfter` (at most the backoff maximum), runs from the start of the previous
-dial attempt, or of the pool; pipe failures, lost directions and suspension make
-the pool decide again at once. Preserve the supplied pipe options and use
-`attempt.cancellation()` for application connection setup. Callbacks must
-cooperate with cancellation and thread interruption: completion waits for their
-exit, so a callback that ignores both can delay it indefinitely.
+A host can add or drain members explicitly. Start from `session.capacity()`
+and pass its policy revision and observation watermark in a `ChangeRequest`.
+`session.beginChange(request)` reserves the requested attachments. Use
+`change.startMember(index, opener)` for each addition, then
+`change.commit()` to validate and drain the whole batch together. A replacement
+waits for confirmation and stability. The remaining members must preserve
+direction coverage before any planned drain starts.
 
-Rotation (`withRotate`) is disabled by default. Byte and age thresholds,
-downward jitter and the retry backoff are configurable; the backoff defaults to
-1–60 seconds with 20% jitter. The pool sets no deadline of its own on a dial:
-the dial callback bounds its attempt, and the session's join timeout bounds the
-join. `pipes()` publishes
-an immutable membership snapshot including pending replacements; its handles
-still query the core for current state. Completion reports joins, committed
-rotations, failures and retained handles. Closing maintenance or cancelling its
-optional `Cancellation` stops background work; committed pipes remain usable
-and owned by the session. Session termination also stops maintenance. The stage
-completes after the dial worker and removable subscriptions have been cleaned up.
+`Attempt.completion()` observes one attempt. Cancel the attempt explicitly to
+stop its setup or cancel the change to discard uncommitted work. Closing the
+optional controller stops its work while the session continues to own attached
+members. Quotas for the physical QUIC connection pool remain in
+[zmux-quic](zmux-quic/README.md#connection-pools).
+
+A target group can set `SessionTarget.Rotation` limits for member age, sent bytes
+and received bytes. A replacement confirms and settles in every expected direction
+before the old member drains. A quota can override each candidate's local send
+preference and the tier and standby state it requests for local receive.
+
+A `SessionPolicy` topology entry restricts the directions a named candidate may
+serve. Raising the Join authorization generation drains older peer-joined
+attachments. A controller, its cache, and each managed session share a
+`ClockDomain`; the process clock is used by default.
+
+To collect completed record counts by physical carrier half, enable `AccountingPolicy`
+on the session config and set the half identities with `PipeIo.withAccountingSources`.
+Keep the `PipeAccounting.Ticket` from `pipe.accounting()` to read totals after the
+attachment and its lane I/O are released.
 
 ## Sessions that can receive joins
 
@@ -1284,24 +1265,17 @@ The survivor accepts new work normally. Same-session, same-dialler, unknown,
 equal or incomparable inputs throw `DuplicateUndecidedException` without
 changing either session.
 
-`options.withRejoin(route)` optionally makes one best-effort join through a
-`PipePool` dial policy, only when this endpoint dialled the loser and the
-survivor has negotiated multipath with admission room. The losing carrier is
-never reused. `result.rejoinStarted()` reports a started worker, not a completed
-join; `result.rejoin()` is its nullable `PipeMaintenance` handle. Inspect its
-completion result, close it or supply `withCancellation` to stop the attempt.
-It performs no redial after failure and no rotation. A race for admission can
-skip the dial, and any skipped, failed or cancelled rejoin leaves the original
-resolution in effect. The same scoped ownership and cooperative cancellation
-rules as pipe maintenance apply. A successful joined pipe remains owned by the
-survivor after the one-shot worker ends.
+`options.withRejoin(member, opener)` optionally starts a capacity change
+on the multipath survivor when this endpoint dialed the loser. Use
+`result.rejoin()` to observe or cancel the one-shot attempt when it starts.
+The duplicate resolution takes effect independently of that attempt.
 
 ## Asynchronous application operations
 
 Every blocking call has an asynchronous twin returning `ZmuxFuture`:
 `ZmuxSession` provides `openStreamAsync`, `openSendStreamAsync`,
 `acceptStreamAsync`, `acceptReceiveStreamAsync`, `pingAsync`,
-`nextEventAsync`, `shutdownAsync` and `replacePipes`;
+`nextEventAsync` and `shutdownAsync`;
 `Zmux`, `ZmuxListener` and `ZmuxPipe` provide `connectAsync`, `connectTlsAsync`,
 `dialTlsPipeAsync`, `acceptAsync`, `shutdownAsync` and `attached`; streams provide
 `readAsync(ByteBuffer)`, `readChunkAsync(max)`, `writeAsync(ByteBuffer)`,
@@ -1312,8 +1286,8 @@ socket's are, by `setReadTimeout(Duration)` and `setWriteTimeout(Duration)`
 (positive; `clearReadTimeout()`/`clearWriteTimeout()` for no bound, the
 default; read back as `readTimeout()`/`writeTimeout()`). An asynchronous form takes no timeout:
 `orTimeout` (or `completeOnTimeout`) on its future bounds it and withdraws the
-wait. Splice, the secure carrier's `Seal.establish`, pool maintenance's
-`completion()` and the adapter's `Handled` return `ZmuxFuture` too; only code the
+wait. Splice, the secure carrier's `Seal.establish`
+and the adapter's `Handled` return `ZmuxFuture` too; only code the
 application supplies (an admission `Decider`, a `LaneOpener`) returns a
 `CompletionStage`. Submission never waits for network I/O and
 is safe on an event-loop thread; pending operations do not hold a thread. An

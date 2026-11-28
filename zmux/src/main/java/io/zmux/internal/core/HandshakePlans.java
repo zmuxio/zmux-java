@@ -23,24 +23,29 @@ public final class HandshakePlans {
         }
     }
 
+    /** Remaining room under the handshake message floor, including existing unit framing. */
+    public static int structuralRoom(int encodedLength) {
+        return Math.max(0, io.zmux.internal.join.Sealer.MESSAGE_FLOOR - encodedLength);
+    }
+
     /** The length of a unit of n bytes under p. */
     public static int padFor(UnitPlan p, int n) {
-        long t = Math.max(n, p.padTo());
-        int multiple = p.padMultiple();
-        if (multiple > 0 && t % multiple != 0) t += multiple - t % multiple;
-        return (int) Math.min(t + Math.max(p.pad(), 0), Integer.MAX_VALUE);
+        return io.zmux.shaping.UnitPlan.target(n, p.padTo(), p.padMultiple(), p.pad());
     }
 
     /** p under limits: no padding clears the lengths, no pause the delay, and the bound on one wait bounds the delay. */
     public static UnitPlan limited(UnitPlan p, ShapingLimits limits) {
+        return limited(p, limits.under(io.zmux.shaping.ShapingBudget.NONE));
+    }
+
+    public static UnitPlan limited(UnitPlan p, ShapingLimits.Effective limits) {
         int to = p.padTo(), multiple = p.padMultiple(), add = p.pad();
         Duration d = p.delay();
         if (!limits.padding()) to = multiple = add = 0;
         if (!limits.pause()) {
             d = null;
         } else if (d != null) {
-            Duration m = limits.maxDelay();
-            if (m != null && d.compareTo(m) > 0) d = m;
+            if (d.compareTo(limits.maxAddedDelay()) > 0) d = limits.maxAddedDelay();
         }
         return new UnitPlan(to, multiple, add, d);
     }
@@ -49,12 +54,20 @@ public final class HandshakePlans {
     public static long delayNanos(UnitPlan p) {
         Duration d = p.delay();
         if (d == null || !d.isPositive()) return 0;
-        try { return d.toNanos(); } catch (ArithmeticException e) { return Long.MAX_VALUE; }
+        return Time.nanos(d);
     }
 
-    /** The value length of the padding item that takes a unit of wire bytes to its planned length under p, or {@link #NO_ITEM}. */
-    public static int item(UnitPlan p, int wire, int room) {
-        return itemFor(padFor(p, wire) - wire, room);
+    /** Structural padding occupies one contiguous span in the encoded handshake. */
+    public record Padding(int offset, int length) {
+        public static final Padding NONE = new Padding(0, 0);
+        public Padding {
+            if (offset < 0 || length < 0) throw new IllegalArgumentException("negative handshake span");
+        }
+    }
+
+    /** A representable TLV at or below both the sampled target and the protocol room. */
+    public static int item(UnitPlan plan, int baseline, int room) {
+        return fit(fill(plan, baseline, room));
     }
 
     /** The zero bytes that take a unit of wire bytes to its planned length under p, at most room. */
@@ -67,6 +80,7 @@ public final class HandshakePlans {
     /** The smallest value length whose item reaches gap, cut to fit room; {@link #NO_ITEM} when none is due or none fits. */
     public static int itemFor(int gap, int room) {
         if (gap <= 0) return NO_ITEM;
+        if (gap > room) return fit(room);
         int v = Math.max(gap - 2, 0);
         while (v > 0 && itemSize(v - 1) >= gap) v--;
         while (itemSize(v) < gap) v++;

@@ -65,13 +65,13 @@ class Http3StreamCreditTest {
             // The submitted barrier runs after enqueueing the second request on this connection's loop.
             first.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
             assertFalse(opening.isDone());
-            assertEquals(1, H3TestSupport.openConnections(fixture.client));
+            assertEquals(1, HttpTransport.openConnections(fixture.client));
 
             respond(firstServerStream, "one");
             assertEquals("one", firstReply.get(5, TimeUnit.SECONDS));
             Channel second = opening.get(5, TimeUnit.SECONDS);
             assertSame(first.parent(), second.parent());
-            assertEquals(1, H3TestSupport.openConnections(fixture.client));
+            assertEquals(1, HttpTransport.openConnections(fixture.client));
             var secondReply = fixture.request(second, "second");
             respond(fixture.arrived(), "two");
             assertEquals("two", secondReply.get(5, TimeUnit.SECONDS));
@@ -101,7 +101,7 @@ class Http3StreamCreditTest {
             assertNotSame(old, newStream.parent());
             assertNotSame(oldSocket, newStream.parent().parent());
             assertTrue(old.isActive());
-            assertEquals(2, H3TestSupport.openConnections(fixture.client));
+            assertEquals(2, HttpTransport.openConnections(fixture.client));
             var newReply = fixture.request(newStream, "new");
             respond(fixture.arrived(), "new");
             assertEquals("new", newReply.get(5, TimeUnit.SECONDS));
@@ -111,14 +111,14 @@ class Http3StreamCreditTest {
             first.closeFuture().get(5, TimeUnit.SECONDS);
             old.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
             assertTrue(old.isActive(), "a second request still uses the draining connection");
-            assertEquals(2, H3TestSupport.openConnections(fixture.client));
+            assertEquals(2, HttpTransport.openConnections(fixture.client));
 
             respond(lastServerStream, "last");
             assertEquals("last", lastReply.get(5, TimeUnit.SECONDS));
             old.closeFuture().get(5, TimeUnit.SECONDS);
             oldSocket.closeFuture().get(5, TimeUnit.SECONDS);
             oldSocket.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals(1, H3TestSupport.openConnections(fixture.client));
+            assertEquals(1, HttpTransport.openConnections(fixture.client));
             assertTrue(newStream.parent().isActive());
         }
     }
@@ -198,7 +198,7 @@ class Http3StreamCreditTest {
         }
 
         CompletableFuture<Channel> open() throws ReflectiveOperationException {
-            return H3TestSupport.open(client, uri);
+            return HttpTransport.openRequest(client, uri);
         }
 
         QuicStreamChannel arrived() throws InterruptedException {

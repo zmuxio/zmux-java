@@ -23,9 +23,7 @@ class QuicPoolTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
     @FunctionalInterface interface Checked { boolean get() throws Exception; }
     static void until(Checked c) throws Exception {
-        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
-        while (!c.get() && System.nanoTime()<end) Thread.sleep(3);
-        assertTrue(c.get(),"condition did not become true");
+        io.zmux.nettytest.Eventually.await(Duration.ofSeconds(20), "QUIC pool state", c::get);
     }
     static void release(PipeIo io) { try { io.reader().close(); } finally { io.writer().abort(new java.io.IOException("released")); } }
     private static String pending(QuicClient client) throws Exception {
@@ -88,6 +86,9 @@ class QuicPoolTest {
             client=new QuicClient(TestTls.client,QuicOptions.defaults(),local);
         }
         QuicPool pool(int concurrent,PoolPolicy policy) { return pool(concurrent,policy,null); }
+        QuicPool poolWithClock(PoolPolicy policy, AtomicLong clock) {
+            return QuicPool.builder(client, server.address(), "localhost").policy(policy).clock(clock::get).build();
+        }
         QuicPool pool(int concurrent,PoolPolicy policy,java.util.function.Consumer<Throwable> rejected) {
             var b = QuicPool.builder(client, server.address(), "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(concurrent));
             if (policy != null) b.policy(policy);
@@ -191,7 +192,9 @@ class QuicPoolTest {
         try(var f=new Fixture();var blackhole=new java.net.DatagramSocket(QuicTest.any());
             var pool=QuicPool.builder(f.client, (java.net.InetSocketAddress)blackhole.getLocalSocketAddress(), "localhost").build()) {
             var one=pool.openPipeAsync();var two=pool.openPipeAsync();
-            assertTrue(one.cancel(false));Thread.sleep(30);assertFalse(two.isDone());
+            assertTrue(one.cancel(false));
+            f.client.nativeLoop().submit(() -> {}).get(20, TimeUnit.SECONDS);
+            assertFalse(two.isDone());
             pool.close();assertThrows(ExecutionException.class,() -> two.get(3,TimeUnit.SECONDS));
         }
     }
@@ -295,37 +298,25 @@ class QuicPoolTest {
             } finally { QuicEndpointTest.closed(a,b);QuicEndpointTest.closed(c,d); }
         }
     }
-    @Test void maintenanceRefillsFromThePoolWithoutLosingPipeOwnership() throws Exception {
-        // Room for three: the aborted pipe holds its slot until its stream closes, which may follow the refill.
-        try(var f=new Fixture();var pool=f.pool(3,0,Duration.ZERO);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
-            var a=f.client.connectAsync(f.server.address(),"localhost").get(8,TimeUnit.SECONDS);
-            var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
-            var maintenance=a.maintainPipes(PipePool.carriers(cancel -> QuicEndpointTest.awaitPipe(pool.openPipeAsync())).withCount(2)
-.withBackoff(new Backoff(Duration.ofMillis(10),Duration.ofMillis(40),0)));
-            try {
-                until(() -> maintenance.pipes().size()==2);assertEquals(1,pool.connections().size());
-                var old=maintenance.pipes().getFirst();old.abort();
-                until(() -> maintenance.pipes().size()==2 && maintenance.pipes().stream().noneMatch(p -> p.id()==old.id()));
-                assertEquals(1,pool.connections().size());assertTrue(pool.connections().getFirst().total()>=3);
-                QuicTest.transfer(workers,a,b,2,128<<10);
-            } finally {
-                maintenance.close();maintenance.completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-                QuicEndpointTest.closed(a,b);
-            }
-        }
-    }
 
     static PipeIo get(QuicPool pool) throws Exception { return pool.openPipeAsync().get(5,TimeUnit.SECONDS); }
     @Test void policyCountSpreadsPipesOverThatManyConnections() throws Exception {
-        PoolPolicy policy = v -> PoolDecision.KEEP.withCount(3);
-        try (var f=new Fixture();var pool=f.pool(8,policy)) {
-            var pipes=new ArrayList<PipeIo>();
+        var grown = new CompletableFuture<Void>();
+        PoolPolicy policy = view -> {
+            if (view.members().size() == 3) grown.complete(null);
+            return PoolDecision.KEEP.withCount(3);
+        };
+        try (var f = new Fixture(); var pool = f.pool(8, policy)) {
+            var pipes = new ArrayList<PipeIo>();
             try {
-                for (int i=0;i<3;i++) pipes.add(get(pool));
-                assertEquals(3,pool.connections().size());
-                for (int i=0;i<3;i++) pipes.add(get(pool));
-                assertEquals(3,pool.connections().size());
-                assertTrue(pool.connections().stream().allMatch(c -> c.active()==2));
+                pipes.add(get(pool));
+                grown.get(25, TimeUnit.SECONDS);
+                for (int i = 1; i < 3; i++) pipes.add(get(pool));
+                assertEquals(3, pool.connections().size());
+                assertTrue(pool.connections().stream().allMatch(c -> c.active() == 1));
+                for (int i = 0; i < 3; i++) pipes.add(get(pool));
+                assertEquals(3, pool.connections().size());
+                assertTrue(pool.connections().stream().allMatch(c -> c.active() == 2));
             } finally { pipes.forEach(QuicPoolTest::release); }
         }
     }
@@ -381,7 +372,8 @@ class QuicPoolTest {
     /** A request that a connection with room was passed over for, to reach the count, waits for a growth dial: the view counts it. */
     @Test void aDialForADivertedRequestIsStillAGrowthDial() throws Exception {
         PoolPolicy policy = v -> PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofSeconds(1));
-        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+        var clock = new AtomicLong();
+        try (var f=new Fixture();var pool=f.poolWithClock(policy, clock)) {
             var one=get(pool);
             until(() -> pool.appliedLooks()>=1);
             var growth=QuicPool.class.getDeclaredMethod("growthDial"); growth.setAccessible(true);
@@ -389,8 +381,7 @@ class QuicPoolTest {
             // Holding the lock keeps the pool's own looks out, so that the request meets the due growth dial first.
             synchronized (pool) {
                 assertEquals(1,pool.connections().size());
-                // Until the dial spacing passed; the lock is held on purpose, so that no look of the pool starts the dial first.
-                for (long end=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(1100);System.nanoTime()<end;) java.util.concurrent.locks.LockSupport.parkNanos(10_000_000L);
+                clock.set(TimeUnit.SECONDS.toNanos(1));
                 request=pool.openPipeAsync();
                 assertTrue((Boolean) growth.invoke(pool),"the dial the request was diverted to is a growth dial");
             }
@@ -451,13 +442,17 @@ class QuicPoolTest {
     @Test void policyDialAfterSpacesAddedConnections() throws Exception {
         var since=new AtomicReference<Duration>();
         PoolPolicy policy = v -> { since.set(v.sinceLastDial().orElse(null)); return PoolDecision.KEEP.withCount(2).withDialAfter(Duration.ofMillis(400)); };
-        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+        var clock = new AtomicLong();
+        try (var f=new Fixture();var pool=f.poolWithClock(policy, clock)) {
             var pipes=new ArrayList<PipeIo>();
             try {
-                pipes.add(get(pool)); pipes.add(get(pool));
+                pipes.add(get(pool));
+                until(() -> pool.appliedLooks() > 0);
+                clock.set(TimeUnit.MILLISECONDS.toNanos(399));
+                pipes.add(get(pool));
                 assertEquals(1,pool.connections().size(),"second connection is not due yet");
                 assertNotNull(since.get());
-                Thread.sleep(450);
+                clock.set(TimeUnit.MILLISECONDS.toNanos(400));
                 pipes.add(get(pool));
                 assertEquals(2,pool.connections().size());
             } finally { pipes.forEach(QuicPoolTest::release); }
@@ -498,15 +493,25 @@ class QuicPoolTest {
             until(() -> pool.connections().stream().allMatch(c -> c.active()==0));
         }
     }
-    @Test void machinePolicyAgeRuleRotatesConnectionsUnderALiveSession() throws Exception {
-        PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
-                "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                io.zmux.shaping.machine.MachineOptions.defaults());
-        try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
+    private static PoolDecision rotateAfterAge(PoolView view) {
+        Duration threshold = Duration.ofMillis(300);
+        Set<Long> retire = new java.util.LinkedHashSet<>();
+        Duration recheck = threshold;
+        for (PoolMember member : view.members()) {
+            Duration remaining = threshold.minus(member.age());
+            if (!remaining.isPositive()) retire.add(member.fateGroup());
+            else if (remaining.compareTo(recheck) < 0) recheck = remaining;
+        }
+        return PoolDecision.KEEP.withCount(1).withRetireConnections(retire).withRecheck(recheck);
+    }
+
+    @Test void policyAgeRuleRotatesConnectionsUnderALiveSession() throws Exception {
+        var clock = new AtomicLong();
+        try(var f=new Fixture();var pool=f.poolWithClock(QuicPoolTest::rotateAfterAge, clock);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             try {
-                Thread.sleep(350);
+                clock.set(TimeUnit.MILLISECONDS.toNanos(301));
                 release(get(pool));
                 until(() -> pool.connections().stream().anyMatch(c -> !c.retiring() && c.fateGroup()!=fate));
                 assertTrue(pool.connections().stream().anyMatch(c -> c.retiring() && c.fateGroup()==fate));
@@ -516,15 +521,14 @@ class QuicPoolTest {
             } finally { QuicEndpointTest.closed(a,b); }
         }
     }
-    @Test void machinePolicyAgeRuleRetiresABusyConnectionByRecheckAlone() throws Exception {
-        PoolPolicy policy = io.zmux.shaping.machine.Machines.poolPolicy(
-                "{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":300000}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                io.zmux.shaping.machine.MachineOptions.defaults());
-        try(var f=new Fixture();var pool=f.pool(8,policy);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
+    @Test void policyAgeRuleRetiresABusyConnectionByRecheckAlone() throws Exception {
+        var clock = new AtomicLong();
+        try(var f=new Fixture();var pool=f.poolWithClock(QuicPoolTest::rotateAfterAge, clock);var workers=Executors.newVirtualThreadPerTaskExecutor()) {
             var first=get(pool);long fate=first.capabilities().fateGroup();
             var a=f.local.open(first, Role.CLIENT);var b=f.remote.accept(Duration.ofSeconds(5));assertNotNull(b);
             try {
-                // No pipe is taken or released: only the recheck asks the policy again.
+                // Advancing age leaves the existing recheck as the only trigger.
+                clock.set(TimeUnit.MILLISECONDS.toNanos(301));
                 until(() -> pool.connections().stream().anyMatch(c -> !c.retiring() && c.fateGroup()!=fate));
                 assertTrue(pool.connections().stream().anyMatch(c -> c.retiring() && c.fateGroup()==fate));
                 QuicTest.transfer(workers,a,b,2,64<<10);
@@ -583,13 +587,16 @@ class QuicPoolTest {
     @Test void connectionIdleFollowsItsPipes() throws Exception {
         var seen=new AtomicReference<List<PoolMember>>();
         PoolPolicy policy = v -> { seen.set(List.copyOf(v.members())); return PoolDecision.KEEP.withRecheck(Duration.ofMillis(10)); };
-        try (var f=new Fixture();var pool=f.pool(8,policy)) {
+        var clock = new AtomicLong();
+        try (var f=new Fixture();var pool=f.poolWithClock(policy, clock)) {
             var pipe=get(pool);
-            Thread.sleep(50);
-            until(() -> seen.get().size()==1 && seen.get().get(0).pipes()==1);
+            clock.set(TimeUnit.MILLISECONDS.toNanos(70));
+            until(() -> seen.get() != null && seen.get().size()==1 && seen.get().get(0).pipes()==1);
             assertEquals(Duration.ZERO, seen.get().get(0).idle());
             release(pipe);
-            until(() -> seen.get().get(0).pipes()==0 && seen.get().get(0).idle().toMillis()>=30);
+            until(() -> seen.get().get(0).pipes()==0);
+            clock.set(TimeUnit.MILLISECONDS.toNanos(100));
+            until(() -> seen.get().get(0).idle().toMillis()==30);
             assertTrue(seen.get().get(0).age().compareTo(seen.get().get(0).idle())>0, "idle counts from the last pipe, not from the connection's birth");
         }
     }

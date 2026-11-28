@@ -203,7 +203,7 @@ public final class PipeUpdate {
         public PipeUpdate build() { return new PipeUpdate(this); }
 
         private static long tier(long t) {
-            if (t < 0 || t > (1L << 62) - 1) throw new IllegalArgumentException("tier outside 0 to 2^62 - 1");
+            if (t < 0 || t > io.zmux.internal.wire.VarInt.MAX) throw new IllegalArgumentException("tier outside 0 to 2^62 - 1");
             return t;
         }
     }

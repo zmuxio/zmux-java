@@ -16,6 +16,7 @@ h3-quinn = "=0.0.10"
 http = "1"
 quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+zmux = { path = "../.." }
 zmux-h3 = { path = "../../adapter/h3" }
 zmux-webtransport = { path = "../../adapter/webtransport" }
 

@@ -4,6 +4,7 @@ import io.zmux.JoinHint;
 import io.zmux.ListenerConfig;
 import io.zmux.carrier.PipeIo;
 import io.zmux.internal.loop.ListenerHub;
+import io.zmux.internal.exchange.ExchangeAccess;
 import io.zmux.internal.spi.AdapterPorts;
 import java.net.InetSocketAddress;
 import io.zmux.internal.loop.CarrierSetup;
@@ -17,6 +18,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@link #release()}.
  */
 public final class Slot {
+    static { ExchangeAccess.installSlot(Slot::handleExchange); }
+
     private final AdapterPorts.Listener port;
     private final InetSocketAddress peer, source;
     private final AtomicReference<CarrierSetup> reservation;
@@ -44,9 +47,14 @@ public final class Slot {
         return hand(io, hint, ListenerHub.Entry.Stream.CARRIER);
     }
 
-    /** Uses this reservation for a new carrier classified on its authenticated HTTP request head. */
+    /** Uses this reservation for a new carrier classified on its HTTP request head. */
     public Handled handleRequest(PipeIo io, JoinHint hint, io.zmux.Admission.Fallback fallback, Upgrade takeoverHead) {
         return hand(io, hint, new ListenerHub.Entry.Request(true, fallback, takeoverHead));
+    }
+
+    private Handled handleExchange(PipeIo io, JoinHint hint, io.zmux.Admission.Fallback fallback,
+                                   Upgrade takeoverHead, ExchangeAccess.Proof proof) {
+        return hand(io, hint, new ListenerHub.Entry.Request(true, fallback, takeoverHead, proof));
     }
 
     private Handled hand(PipeIo io, JoinHint hint, ListenerHub.Entry entry) {

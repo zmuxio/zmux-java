@@ -75,7 +75,7 @@ public final class PipeLiveness {
     long suspectFloorNanos() { return suspectFloor == null ? 0 : ZmuxConfig.nanos(suspectFloor); }
 
     /** The dead timeout in nanoseconds (saturating); 0: the carrier's, then the session's; -1: off. */
-    long deadTimeoutNanos() { return noDeadTimeout ? -1 : deadTimeout == null ? 0 : ZmuxConfig.nanos(deadTimeout); }
+    long deadTimeoutNanos() { return Liveness.deadTimeoutNanos(deadTimeout, noDeadTimeout); }
 
     /** The probe interval in nanoseconds; 0: off, -1: the session's. */
     long probeIntervalNanos() { return noProbeInterval ? 0 : probeInterval == null ? -1 : ZmuxConfig.nanos(probeInterval); }
@@ -104,13 +104,13 @@ public final class PipeLiveness {
         private Builder() {}
 
         /** The pipe's suspicion floor, at least 50 ms. */
-        public Builder suspectFloor(Duration d) { suspectFloor = Liveness.atLeast(d, Duration.ofMillis(50), "suspectFloor"); return this; }
+        public Builder suspectFloor(Duration d) { suspectFloor = Liveness.checkSuspectFloor(d); return this; }
 
         /**
          * The pipe's dead timeout, at least 1 s (any larger value is safe); it overrides the carrier's default and the
          * session's.
          */
-        public Builder deadTimeout(Duration d) { deadTimeout = Liveness.atLeast(d, Duration.ofSeconds(1), "deadTimeout"); noDeadTimeout = false; return this; }
+        public Builder deadTimeout(Duration d) { deadTimeout = Liveness.checkDeadTimeout(d); noDeadTimeout = false; return this; }
 
         /**
          * The pipe's stall-based failure off, as {@link Liveness.Builder#noDeadTimeout()}, whatever the carrier and the
@@ -123,7 +123,7 @@ public final class PipeLiveness {
          * direction at the peer at most 15 s takes effect.
          */
         public Builder probeInterval(Duration d) {
-            probeInterval = Liveness.atLeast(d, Duration.ofSeconds(1), "probeInterval");
+            probeInterval = Liveness.checkProbeInterval(d);
             noProbeInterval = false;
             return this;
         }

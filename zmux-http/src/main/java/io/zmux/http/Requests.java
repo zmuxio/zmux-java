@@ -41,8 +41,8 @@ final class Requests {
         return ch instanceof Http2StreamChannel && ch.parent() != null ? ch.parent() : ch;
     }
 
-    /** The sending half reports the connection of its request rather than the pipe's combined identity. */
-    interface CarrierWriter extends PipeWriter, CarrierProvider {
+    /** Each half reports the connection of its actual request. */
+    interface CarrierHalf extends CarrierProvider {
         Channel carrierRequest();
 
         @Override default Object carrierIdentity() {
@@ -58,6 +58,8 @@ final class Requests {
             return stream == null ? null : stream.carrierQuery(identity);
         }
     }
+
+    interface CarrierWriter extends PipeWriter, CarrierHalf {}
 
     static int version(Channel ch, HttpRequest r) {
         if (h3(ch)) return 3;
@@ -122,6 +124,12 @@ final class Requests {
      */
     static PipeIo pipe(PipeIo io, Channel ch) {
         io = io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY);
+        var stream = HttpTransport.stream(ch);
+        if (stream != null && io.reader() != null && io.writer() != null) io = io.withDatagramChannel(stream.datagrams());
+        return tlsPipe(io, ch);
+    }
+
+    static PipeIo tlsPipe(PipeIo io, Channel ch) {
         SSLEngine e = tls(ch);
         if (e == null) return io;
         PipeIo.Exporter x = exporter(ch, e);
@@ -129,11 +137,22 @@ final class Requests {
         if (e.getSession() instanceof ExtendedSSLSession s) {
             for (var n : s.getRequestedServerNames()) if (n instanceof javax.net.ssl.SNIHostName h) { sni = h.getAsciiName(); break; }
         }
-        // A connection whose handshake has not completed counts as without TLS; the exporter reads it late.
-        boolean complete = e.getHandshakeStatus() == javax.net.ssl.SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING;
+        // Use the request's evidence, including for an HTTP/3 request buffered during the handshake.
+        var security = outerSecurity(ch);
         if (sni.isEmpty() && e.getUseClientMode() && e.getPeerHost() != null) sni = e.getPeerHost();
-        io = io.withExporter(x).withServerName(sni).withTerminatedTls(complete);
-        return complete && e.getSession().getProtocol().equals("TLSv1.3") ? io.withCarrierSecure() : io;
+        io = io.withExporter(x).withServerName(sni).withOuterSecurity(security).withTerminatedTls(security.encrypted());
+        return security.permitsBinding() ? io.withCarrierSecure() : io;
+    }
+
+    static io.zmux.Admission.OuterSecurity outerSecurity(Channel ch) {
+        var stream = HttpTransport.stream(ch);
+        if (stream != null) return stream.outerSecurity();
+        var engine = tls(ch);
+        if (engine == null) return io.zmux.Admission.OuterSecurity.CLEAR;
+        if (engine.getHandshakeStatus() != javax.net.ssl.SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
+            return io.zmux.Admission.OuterSecurity.EARLY_DATA;
+        }
+        return io.zmux.Admission.OuterSecurity.tls(engine.getSession().getProtocol());
     }
 
     static PipeIo.Exporter exporter(Channel ch) {

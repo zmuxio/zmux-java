@@ -1,10 +1,11 @@
 package io.zmux.internal.loop;
 
+import io.zmux.carrier.CarrierChannel;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import io.zmux.carrier.OutboundBatch;
-import io.zmux.internal.core.ReadBuf;
+import io.zmux.internal.buffer.ReadBuf;
 import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -15,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * callbacks reach the loop through one ordered inbox, which also carries callback ownership
  * along when a listener routes the transport to another loop.
  *
- * <p>Input: a session parses lent chunks in place ({@link PipeReader.Sink#onChunk}); only a
+ * <p>Input: a session parses owned chunks in place ({@link PipeReader.Sink#onChunk}); only a
  * record cut by the chunk's end is carried, and the next chunk first completes that record
  * and is then parsed in place again. Output: the writer gets the session's batch itself.
  */
@@ -23,6 +24,7 @@ final class ExternalTransport extends AbstractTransport {
     private final PipeIo pio;
     private final boolean messages;
     private final TransportInfo info;
+    private final CarrierChannel channel;
     private final Inbox inbox;
     private boolean inherited;
     private volatile boolean ready;
@@ -38,7 +40,9 @@ final class ExternalTransport extends AbstractTransport {
         super(loop);
         pio = pipeIo; this.inbox = inbox;
         messages = pio.framing() == io.zmux.carrier.Framing.MESSAGES;
-        info = TransportInfo.of(pio);
+        var raw = pio.capabilities().datagramChannel();
+        channel = raw == null ? null : new ChannelBridge(raw);
+        info = TransportInfo.of(pio).withChannel(channel);
         loop.externalTransport();
         inbox.owner = this;
         if (inbox.limit == 0) inbox.limit = admittedLimit();
@@ -49,9 +53,15 @@ final class ExternalTransport extends AbstractTransport {
      * which is charged to the memory budget, plus one reader batch. Beyond it the reader
      * ignored the consumed backpressure of {@link PipeReader.Sink#onChunk} and {@link PipeReader.Sink#onLent}.
      */
+    @Override public long inputQueueCapacity() { return admittedLimit(); }
+
+    @Override java.util.List<TlsTransport.RecordWorkspace> tlsWorkspaces() {
+        return Forwarded.tlsWorkspaces(pio);
+    }
+
     private long admittedLimit() {
         long declared = pio.capabilities().receiveMemory();
-        return declared > Long.MAX_VALUE - BufferPool.SIZE ? Long.MAX_VALUE : declared + BufferPool.SIZE;
+        return declared > Long.MAX_VALUE - InputCharge.BATCH ? Long.MAX_VALUE : declared + InputCharge.BATCH;
     }
 
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return inbox.closed.minimalCompletionStage(); }
@@ -59,6 +69,65 @@ final class ExternalTransport extends AbstractTransport {
     @Override public void taken() { inbox.taken.decide(true); }
 
     @Override public TransportInfo info() { return info; }
+    @Override public io.zmux.carrier.CarrierHalfSource receiveSource() { return pio.capabilities().receiveSource(); }
+    @Override public io.zmux.carrier.CarrierHalfSource sendSource() { return pio.capabilities().sendSource(); }
+
+    @Override public CarrierChannel channel() { return channel; }
+
+    private final class ChannelBridge implements CarrierChannel {
+        private final CarrierChannel lower;
+        private final java.util.concurrent.atomic.AtomicLong queued = new java.util.concurrent.atomic.AtomicLong();
+
+        ChannelBridge(CarrierChannel lower) { this.lower = lower; }
+        @Override public long channelStreamId() { return lower.channelStreamId(); }
+        @Override public int maxChannelDatagram() {
+            return !closed && (directions() & io.zmux.internal.core.Action.DIR_OUT) != 0 ? lower.maxChannelDatagram() : 0;
+        }
+
+        @Override public int channelDatagramLimit(int room) {
+            return !closed && (directions() & io.zmux.internal.core.Action.DIR_OUT) != 0 ? lower.channelDatagramLimit(room) : 0;
+        }
+
+        @Override public void send(byte[] bytes, long expiry, java.util.function.Consumer<Outcome> completion) {
+            lower.send(bytes, expiry, completion);
+        }
+
+        @Override public Runnable receive(Sink sink) {
+            return lower.receive((bytes, from, to) -> {
+                if (loop.inLoop()) {
+                    sink.datagram(bytes, from, to);
+                    return;
+                }
+                int length = to - from;
+                int charge = Math.max(length, 1);
+                long held = queued.addAndGet(charge);
+                if (held > admittedLimit()) {
+                    queued.addAndGet(-charge);
+                    return;
+                }
+                byte[] copy = new byte[length];
+                bytes.get(from, copy);
+                if (!loop.tryExecute(() -> {
+                    queued.addAndGet(-charge);
+                    sink.datagram(ByteBuffer.wrap(copy), 0, copy.length);
+                })) queued.addAndGet(-charge);
+            });
+        }
+
+        @Override public Runnable watch(Runnable changed) {
+            return lower.watch(() -> onOwner(changed));
+        }
+
+        private void onOwner(Runnable event) {
+            if (loop.inLoop()) event.run();
+            else loop.tryExecute(event);
+        }
+    }
+
+    @Override public java.util.List<Object> physicalConnections() {
+        var connections = PipeIoAccess.get().physicalConnections(pio);
+        return connections.isEmpty() ? java.util.List.of(this) : connections;
+    }
 
     @Override public Object carrierIdentity() {
         return pio.writer() instanceof io.zmux.internal.spi.CarrierProvider provider
@@ -91,17 +160,14 @@ final class ExternalTransport extends AbstractTransport {
     @Override public boolean ownsHalf(Object half) { return half != null && (half == pio.reader() || half == pio.writer()); }
 
     /** One pending first record plus the existing bounded carrier read batch, including queue metadata. */
-    void boundPendingInput(long recordBytes) { inbox.strict = true; inbox.limit = recordBytes + BufferPool.SIZE; }
+    void boundPendingInput(long recordBytes) { inbox.strict = true; inbox.limit = recordBytes + InputCharge.BATCH; }
     /** Admission done: the reader's declared receive memory bounds its queue from now on. */
     void unboundPendingInput() { inbox.limit = admittedLimit(); inbox.strict = false; }
 
     @Override public boolean writable() { return super.writable() && (directions() & io.zmux.internal.core.Action.DIR_OUT) != 0; }
 
-    private record Input(ByteBuffer data, Runnable release, OwnedInput owned, boolean end, Throwable error, long cost) {
-        Input(ByteBuffer data, Runnable release, OwnedInput owned, boolean end, Throwable error) {
-            this(data, release, owned, end, error, 0);
-        }
-        void discard() { if (owned != null) owned.release(); if (release != null) release.run(); }
+    private record Input(ByteBuffer data, Runnable release, ReadBuf owned, boolean end, Throwable error) {
+        void consumed() { if (release != null) release.run(); }
     }
 
     /** One drain owns the queue even across loop migration, so new callbacks cannot overtake old ones. */
@@ -116,23 +182,94 @@ final class ExternalTransport extends AbstractTransport {
         /** Queue bound in bytes (set by the first owner); strict while a first record is pending. */
         volatile long limit;
         volatile boolean strict;
-        final java.util.concurrent.atomic.AtomicLong held = new java.util.concurrent.atomic.AtomicLong();
+        private final InputCharge charge = new InputCharge();
+        private boolean terminal;
+        private boolean stopped;
+        final java.util.concurrent.CompletableFuture<Void> inputReleased = new java.util.concurrent.CompletableFuture<>();
         final AtomicBoolean overflow = new AtomicBoolean();
 
         void offer(Input input) {
-            // The end or failure of a half is one terminal signal, no payload: it is never charged, so it can
-            // neither fail the carrier behind a batch still queued nor be lost, and it stays ordered after it.
-            if (input.data == null) { queue.add(input); schedule(); return; }
-            long bytes = input.data.remaining() + 128L; // Payload plus queue metadata.
-            long total = held.addAndGet(bytes);
-            // After admission a batch is always taken while nothing else is queued: a reader
-            // that waits for its releases never fails, whatever its batch size.
-            if (total < 0 || (total > limit && (strict || total != bytes))) {
-                held.addAndGet(-bytes); input.discard();
-                if (overflow.compareAndSet(false, true)) failOwner();
+            if (input.end) {
+                synchronized (this) {
+                    if (terminal || stopped) return;
+                    terminal = true;
+                }
+                enqueue(input);
                 return;
             }
-            queue.add(new Input(input.data, input.release, input.owned, input.end, input.error, bytes)); schedule();
+            if (!reserve(input.owned, 0)) {
+                overflow(() -> {
+                    try { input.owned.unref(); } finally { input.consumed(); }
+                });
+                return;
+            }
+            enqueue(input);
+        }
+
+        void lend(ByteBuffer data, Runnable consumed) {
+            int bytes = data.remaining();
+            if (!reserve(null, bytes)) {
+                overflow(consumed);
+                return;
+            }
+            ReadBuf copy;
+            try {
+                copy = new ReadBuf(ByteBuffer.allocate(bytes).put(data).flip(), null);
+            } catch (RuntimeException | Error failure) {
+                unreserve(null, bytes);
+                if (consumed != null) consumed.run();
+                throw failure;
+            }
+            synchronized (this) { charge.adoptCopy(copy); }
+            enqueue(new Input(copy.data(), consumed, copy, false, null));
+        }
+
+        private synchronized boolean reserve(ReadBuf owner, int copyBytes) {
+            return !stopped && !terminal && !overflow.get() && charge.reserve(owner, copyBytes, limit);
+        }
+
+        private void enqueue(Input input) {
+            // The terminal signal stays in order behind any input still owned by the inbox.
+            queue.add(input);
+            schedule();
+        }
+
+        private void overflow(Runnable release) {
+            boolean first = overflow.compareAndSet(false, true);
+            try {
+                if (release != null) release.run();
+            } finally {
+                if (first) failOwner();
+            }
+        }
+
+        private void release(Input input) {
+            try {
+                if (input.owned != null) {
+                    try { input.owned.unref(); } finally { unreserve(input.owned, 0); }
+                }
+            } finally {
+                input.consumed();
+            }
+        }
+
+        private void unreserve(ReadBuf owner, int copyBytes) {
+            boolean drained;
+            synchronized (this) {
+                charge.release(owner, copyBytes);
+                drained = stopped && charge.bytes() == 0;
+            }
+            if (drained) inputReleased.complete(null);
+        }
+
+        void stop() {
+            boolean drained;
+            synchronized (this) {
+                stopped = true;
+                drained = charge.bytes() == 0;
+            }
+            discard();
+            if (drained) inputReleased.complete(null);
         }
         void failOwner() {
             ExternalTransport target = owner;
@@ -151,7 +288,7 @@ final class ExternalTransport extends AbstractTransport {
             if (!c.loop.tryExecute(this::drain)) { scheduled.set(false); discard(); }
         }
         void discard() {
-            for (Input in; (in = queue.poll()) != null;) { if (in.cost() != 0) held.addAndGet(-in.cost()); in.discard(); }
+            for (Input in; (in = queue.poll()) != null;) release(in);
         }
         void drain() {
             while (true) {
@@ -168,21 +305,20 @@ final class ExternalTransport extends AbstractTransport {
                     return;
                 }
                 boolean transferred = false;
-                long cost = input.cost();
                 try {
                     if (!c.closed) {
                         if (input.end) c.ended(input.error);
-                        else if (input.data != null) c.received(input.data, input.owned == null ? null : input.owned.buf);
+                        else if (input.data != null) c.received(input.data, input.owned);
                     }
                     // After admission what was taken goes back to the reader even in a pause: a carrier whose write reports
                     // when its peer read it would otherwise wait on this side's pause, while this side waits on that write.
                     boolean keep = input.data != null && (!c.closed || owner != c) && (input.data.hasRemaining() ? !c.ready || owner != c : !c.ready && strict);
                     if (keep) {
-                        Input rest = input.data.hasRemaining() ? input : new Input(null, input.release, input.owned, false, null, cost);
+                        Input rest = input.data.hasRemaining() ? input : new Input(null, input.release, input.owned, false, null);
                         queue.addFirst(rest); transferred = true;
                     }
                 } finally {
-                    if (!transferred) { if (cost != 0) held.addAndGet(-cost); input.discard(); }
+                    if (!transferred) release(input);
                 }
             }
         }
@@ -191,7 +327,7 @@ final class ExternalTransport extends AbstractTransport {
     @Override protected void begin() {
         openReader();
         ready = true;
-        if (!replay(reader)) return;
+        if (!redeliverBuffered()) return;
         if (!inherited && !readerClosed && pio.reader() != null) startReader();
         inbox.schedule();
     }
@@ -199,9 +335,10 @@ final class ExternalTransport extends AbstractTransport {
     private void startReader() {
         var sink = new PipeReader.Sink() {
             @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
-                ByteBuffer bytes = chunk.buffer();
-                inbox.offer(new Input(bytes, consumed, new OwnedInput(loop, bytes, chunk::close), false, null));
+                var owned = ChunkAccess.take(chunk);
+                inbox.offer(new Input(owned.data(), consumed, owned.buf(), false, null));
             }
+            @Override public void onLent(ByteBuffer data, Runnable consumed) { inbox.lend(data, consumed); }
             @Override public void onEnd() { inbox.offer(new Input(null, null, null, true, null)); }
             @Override public void onError(Throwable cause) {
                 inbox.offer(new Input(null, null, null, true, cause == null ? new java.io.IOException("carrier failed") : cause));
@@ -211,7 +348,7 @@ final class ExternalTransport extends AbstractTransport {
         catch (RuntimeException failure) { sink.onError(failure); }
     }
 
-    /** One input batch: owned (a chunk the session may keep, retained) or lent (retained null). */
+    /** A batch owned by the inbox until dispatch finishes. */
     private void received(ByteBuffer data, ReadBuf retained) {
         if (closed || inEnded) return;
         Inbound in = inbound();
@@ -220,7 +357,7 @@ final class ExternalTransport extends AbstractTransport {
             return;
         }
         if (in.session()) {
-            // Lent or owned, parsed where it is: the session copies what it keeps of a lent one.
+            // The inbox holds the owner throughout dispatch.
             in.message(this, retained, data, data.position(), data.limit());
             loop.inPlaceInput(data.remaining());
             data.position(data.limit());
@@ -242,7 +379,7 @@ final class ExternalTransport extends AbstractTransport {
     @Override public io.zmux.RecordMode firstPipeMode() { return PipeIoAccess.get().recordMode(pio); }
 
     @Override public Object carrierPeer() { return PipeIoAccess.get().carrierPeer(pio); }
-    @Override public long handshakePadding() { return pio.capabilities().handshakePadding(); }
+    @Override public io.zmux.carrier.HandshakeCost handshakeCost() { return pio.capabilities().handshakeCost(); }
 
     @Override public void limitFirstMessage(int limit) {
         if (messages && pio.reader() != null) pio.reader().limitFirstMessage(limit);
@@ -259,7 +396,7 @@ final class ExternalTransport extends AbstractTransport {
     private void ended(Throwable error) {
         if (closed || inEnded) return;
         inEnded = true;
-        boolean partial = reader.hasPartial(); reader.release();
+        boolean partial = dropPartialInput();
         if (error == null) inputEnded(true, partial);
         else inputEnded(partial, error);
     }
@@ -286,8 +423,7 @@ final class ExternalTransport extends AbstractTransport {
         try { combined = PipeIo.split(pio, outgoing.pio); }
         catch (IllegalArgumentException incompatible) { return null; }
         ExternalTransport next = new ExternalTransport(loop, combined, inbox);
-        next.inherited = reader != null; next.prefix(unread(reader));
-        if (reader != null) reader.release();
+        next.inherited = moveInputTo(next);
         closed = true; outgoing.closed = true;
         next.whenClosed().whenComplete((value, error) -> outgoing.inbox.closed.complete(null));
         next.writesReleased().whenComplete((value, error) -> outgoing.inbox.writesReleased.complete(null));
@@ -301,11 +437,9 @@ final class ExternalTransport extends AbstractTransport {
     @Override Transport movePhysical(CarrierSetup.Bound.Permit permit, SessionHost to) {
         java.util.Objects.requireNonNull(permit);
         if (closed || writing() || attached()) { CarrierSetup.connectionLost(this, null); return null; }
-        byte[] prefix = unread(reader);
         ExternalTransport next = new ExternalTransport(to, pio, inbox);
-        next.inherited = reader != null;
-        next.prefix(prefix);
-        if (reader != null) reader.release(); closed = true;
+        next.inherited = moveInputTo(next);
+        closed = true;
         return next;
     }
 
@@ -323,32 +457,70 @@ final class ExternalTransport extends AbstractTransport {
     @Override protected void send(OutboundBatch batch) {
         AtomicBoolean reported = new AtomicBoolean();
         PipeWriter.Completion completion = new PipeWriter.Completion() {
-            private void report(Throwable cause) {
+            private final java.util.concurrent.atomic.AtomicInteger prefix = new java.util.concurrent.atomic.AtomicInteger();
+            private final AtomicBoolean progressQueued = new AtomicBoolean();
+            private boolean finishedOnLoop;
+
+            @Override public void progress(int bytes) {
+                if (reported.get() || bytes <= 0 || bytes > batch.bytes()) return;
+                int before = prefix.getAndAccumulate(bytes, Math::max);
+                if (bytes <= before || !progressQueued.compareAndSet(false, true)) return;
+                Runnable update = () -> {
+                    progressQueued.set(false);
+                    if (!finishedOnLoop) writeProgress(prefix.get());
+                };
+                if (loop.inLoop()) update.run();
+                else loop.tryExecute(update);
+            }
+
+            private void report(int confirmed, Throwable cause, boolean unknown) {
                 if (!reported.compareAndSet(false, true)) return;
                 // On the loop (also from inside write) the outcome is taken at once, as a
                 // socket's is; the writer may still reference the batch until it reports, so it
                 // is released only then, also after the owning loop has stopped.
-                if (loop.inLoop()) done(cause);
-                else if (!loop.tryExecute(() -> done(cause))) releaseFinalWrite(); // The loop stopped: nothing else will.
+                Runnable finish = () -> {
+                    finishedOnLoop = true;
+                    writeProgress(prefix.get());
+                    if (unknown && batch instanceof io.zmux.internal.core.Batch b) b.markProgressUnknown();
+                    done(confirmed, cause);
+                };
+                if (loop.inLoop()) finish.run();
+                else if (!loop.tryExecute(finish)) {
+                    loop.releaseWriteWhenStopped(() -> {
+                        int proved = prefix.get();
+                        boolean valid = confirmed >= 0 && confirmed <= batch.bytes();
+                        if ((unknown || !valid) && batch instanceof io.zmux.internal.core.Batch b) b.markProgressUnknown();
+                        releaseFinalWrite(valid ? Math.max(proved, confirmed) : proved);
+                    });
+                }
             }
-            @Override public void completed() { report(null); }
+            @Override public void completed() { report(batch.bytes(), null, false); }
             @Override public void failed(Throwable cause) {
-                report(cause == null ? new java.io.IOException("write failed") : cause);
+                failed(cause, 0);
+            }
+            @Override public void failedUnknown(Throwable cause, int proved) {
+                report(proved, cause == null ? new java.io.IOException("unknown write progress") : cause, true);
+            }
+            @Override public void failed(Throwable cause, int confirmed) {
+                report(confirmed, cause == null ? new java.io.IOException("write failed") : cause, false);
             }
         };
         try { pio.writer().write(batch, completion); }
-        catch (RuntimeException failure) { completion.failed(failure); }
+        catch (RuntimeException failure) { completion.failedUnknown(failure, 0); }
     }
 
-    private void releaseFinalWrite() {
-        dropWrite();
-        inbox.writesReleased.complete(null);
+    private void releaseFinalWrite(int confirmed) {
+        try {
+            dropWrite(confirmed);
+        } finally {
+            inbox.writesReleased.complete(null);
+        }
     }
 
-    private void done(Throwable cause) {
+    private void done(int confirmed, Throwable cause) {
         if (!writing()) return;
-        if (closed) { releaseFinalWrite(); return; }
-        writeDone(cause);
+        writeDone(confirmed, cause);
+        if (closed) { inbox.writesReleased.complete(null); return; }
         if (shutAfterWrite) shutdownOutput();
     }
     @Override public void shutdownOutput() {
@@ -430,7 +602,7 @@ final class ExternalTransport extends AbstractTransport {
                 try { r.close(); } catch (RuntimeException ignored) { /* Already closing. */ }
             }, Callbacks.EXECUTOR);
         }
-        inbox.discard();
+        inbox.stop();
         if (reader != null) reader.release();
     }
     @Override protected java.util.function.Consumer<Throwable> closeEscalation() { return writerClose.arm(); }
@@ -452,7 +624,9 @@ final class ExternalTransport extends AbstractTransport {
         inbox.taken.decide(false); // Not taken before: the listener refused it.
         shutdownInput();
         closeWriter(cause);
-        java.util.concurrent.CompletableFuture.allOf(readerClosing, writerClose.flushBound, pio.writer() == null ? DONE : writerClose.finished, io.zmux.internal.spi.AdapterPorts.releasedHalf(pio.reader())).whenCompleteAsync((v, e) -> inbox.closed.complete(null), Callbacks.EXECUTOR);
+        java.util.concurrent.CompletableFuture.allOf(readerClosing, inbox.inputReleased, writerClose.flushBound,
+                pio.writer() == null ? DONE : writerClose.finished, io.zmux.internal.spi.AdapterPorts.releasedHalf(pio.reader()))
+                .whenCompleteAsync((v, e) -> inbox.closed.complete(null), Callbacks.EXECUTOR);
         // An in-flight batch belongs to its completion, even after the carrier closes.
     }
 }

@@ -2,6 +2,8 @@ package io.zmux.internal.core;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.zmux.DirectionHealth;
+import io.zmux.PipeState;
 import io.zmux.internal.loop.SealedTransport;
 import org.junit.jupiter.api.Test;
 
@@ -15,7 +17,11 @@ class StallDeathOffTest {
 
     /** A multipath session whose bootstrap pipe has had unacknowledged bytes since 1 s. */
     private static Session stalled(long sessionDead, boolean ownFailure, long pipeDead) {
-        Session s = PipeTargetTest.session(CoreConfig.builder().deadTimeout(sessionDead).resume(60 * S));
+        return stalled(CoreConfig.builder().deadTimeout(sessionDead).resume(60 * S), ownFailure, pipeDead);
+    }
+
+    private static Session stalled(CoreConfig.Builder cfg, boolean ownFailure, long pipeDead) {
+        Session s = PipeTargetTest.session(cfg);
         Pipe p = s.pipes.get(0);
         Attach a = p.mp();
         a.ownFailure(ownFailure);
@@ -48,6 +54,20 @@ class StallDeathOffTest {
         if (!fails) assertEquals(Time.NEVER, s.mp().health.pipeTimers(HOUR, false) < HOUR ? 0 : Time.NEVER, name + ": no deadline is due");
     }
 
+    @Test void aDeadTimeoutBelowTheSuspicionFailsTheLastPipeInTheSamePass() {
+        var session = stalled(CoreConfig.builder().suspectFloor(2 * S).deadTimeout(S).resume(0), false, 0);
+        var pipe = session.pipes.get(0);
+        var health = session.mp().health;
+        long after = health.tSuspect(pipe);
+        assertEquals(after, health.tDead(pipe));
+        long cut = pipe.mp().tref() + after;
+        health.pipeTimers(cut - 1, true);
+        assertEquals(Attach.OUT_ACTIVE, pipe.mp().out());
+        health.pipeTimers(cut, true);
+        assertEquals(Attach.OUT_FAILED, pipe.mp().out());
+        assertEquals(SessionError.Kind.PIPES_LOST, session.error().kind());
+    }
+
     @Test void theDefaultFailsAStalledPipe() { check("default", 0, false, 0, true); }
 
     @Test void aPipesOwnOffNeverFailsIt() { check("pipe off", 0, false, -1, false); }
@@ -61,6 +81,39 @@ class StallDeathOffTest {
     @Test void thePipesOwnDeadTimeoutOverridesTheSessionsOff() { check("session off, pipe explicit", -1, false, 20 * S, true); }
 
     @Test void aHugeDeadTimeoutIsSafe() { check("huge", 0, false, Long.MAX_VALUE, false); }
+
+    @Test void aHeldRevalidationWriteBecomesSuspectWithoutAnAcknowledgement() throws Exception {
+        Session s = CounterSemanticsTest.established();
+        Pipe replacement = PipeTargetTest.appendOut(s, false, Attach.OUT_ACTIVE, Attach.IN_OPEN);
+        s.mp().tiers.setPipe(replacement.id, Tiers.PipeSettings.builder().probation(100 * Time.MILLISECOND).build());
+        s.setNow(S);
+        s.mp().probation.startProbation(replacement, false);
+        s.revalidatePipes(replacement.id, false);
+
+        // The carrier takes the probe batch but withholds its completion, like a held writer.
+        Batch batch = new Batch();
+        try {
+            assertTrue(s.pollTransmit(replacement.id, 0, batch, Session.DEFAULT_BATCH, S));
+            assertFalse(replacement.mp().prob.revalPing(), "the held batch contains the revalidation probe");
+            long suspectAt = S + s.mp().health.tSuspect(replacement);
+            s.handleTimeout(suspectAt - 1);
+            var before = s.pipeStats(replacement.id, s.now(), s.now());
+            assertFalse(before.inProbation(), before::toString);
+            assertTrue(before.revalidating(), before::toString);
+            assertEquals(PipeState.Outbound.ACTIVE, before.outbound(), before::toString);
+
+            s.handleTimeout(suspectAt);
+            var after = s.pipeStats(replacement.id, s.now(), s.now());
+            assertFalse(after.inProbation(), after::toString);
+            assertFalse(after.revalidating(), after::toString);
+            assertEquals(PipeState.Outbound.SUSPECT, after.outbound(), after::toString);
+            assertEquals(DirectionHealth.Reason.ACK_STALL, s.pipeHealth(replacement.id).send().reason(),
+                    "the write and cumulative ACK deadlines tie");
+            assertEquals(before.bytesAcked(), after.bytesAcked());
+        } finally {
+            batch.release();
+        }
+    }
 
     /** A pipe that turned suspect under off keeps it when the settings change while it is suspect. */
     @Test void aSuspectPipeKeepsTheOffItTurnedSuspectUnder() {

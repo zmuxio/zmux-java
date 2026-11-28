@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -7,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
@@ -26,6 +28,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class BodyCarrierLeakTest {
     private static BodyCarrier carrier(io.netty.channel.Channel ch) {
@@ -134,10 +138,12 @@ class BodyCarrierLeakTest {
         BodyCarrier c = carrier(ch);
         PipeReader r = c.reader();
         c.keepForReplay();
-        ByteBuf a = Unpooled.buffer().writeBytes(new byte[] {1, 2, 3});
-        ByteBuf b = Unpooled.buffer().writeBytes(new byte[] {4});
+        ByteBuf a = PooledByteBufAllocator.DEFAULT.directBuffer(3).writeBytes(new byte[] {1, 2, 3});
+        ByteBuf b = PooledByteBufAllocator.DEFAULT.directBuffer(1).writeByte(4);
         c.in(a);
         c.in(b);
+        assertEquals(2, a.refCnt(), "the queue and the replay log both hold the buffer");
+        assertEquals(2, b.refCnt());
         c.lost(new ClosedChannelException());
         assertEquals(0, a.refCnt());
         assertEquals(0, b.refCnt());
@@ -162,12 +168,13 @@ class BodyCarrierLeakTest {
         EmbeddedChannel ch = new EmbeddedChannel();
         BodyCarrier c = carrier(ch);
         PipeReader r = c.reader();
-        ByteBuf a = Unpooled.buffer().writeBytes(new byte[] {1, 2, 3});
-        ByteBuf b = Unpooled.buffer().writeBytes(new byte[] {4});
+        ByteBuf a = PooledByteBufAllocator.DEFAULT.directBuffer(3).writeBytes(new byte[] {1, 2, 3});
+        ByteBuf b = PooledByteBufAllocator.DEFAULT.directBuffer(1).writeByte(4);
         c.in(a);
         c.in(b);
         c.inEnd();
         assertEquals(1, a.refCnt());
+        assertEquals(1, b.refCnt());
         c.lost(new ClosedChannelException());
         assertEquals(0, a.refCnt());
         assertEquals(0, b.refCnt());
@@ -180,7 +187,9 @@ class BodyCarrierLeakTest {
     }
 
     /** A reader that is taking a complete body keeps it when the carrier is lost meanwhile: the rest and the end still arrive. */
-    @Test void endedThenLostWhileReadingDeliversTheRest() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void endedThenLostWhileReadingDeliversTheRest(boolean pooled) {
         EmbeddedChannel ch = new EmbeddedChannel();
         BodyCarrier c = carrier(ch);
         List<Chunk> got = new ArrayList<>();
@@ -191,29 +200,54 @@ class BodyCarrierLeakTest {
             @Override public void onEnd() { ends.add("end"); }
             @Override public void onError(Throwable t) { ends.add("error"); }
         });
-        // Over the receive memory: the second piece waits for the first to be consumed.
-        ByteBuf a = Unpooled.buffer().writeBytes(new byte[BodyCarrier.RECEIVE_MEMORY]);
-        ByteBuf b = Unpooled.buffer().writeBytes(new byte[] {4});
-        c.in(a);
-        c.in(b);
-        c.inEnd();
-        c.lost(new ClosedChannelException());
-        assertEquals(1, got.size());
-        assertEquals(1, b.refCnt(), "the rest of a complete body stays for the reader");
-        got.getFirst().close();
-        consumed.getFirst().run();
-        assertEquals(2, got.size());
-        assertEquals(List.of("end"), ends);
-        got.get(1).close();
-        assertEquals(0, a.refCnt());
-        assertEquals(0, b.refCnt());
-        ch.finishAndReleaseAll();
+        // The first view fills the receive window. The second view waits in the carrier.
+        int firstSize = BodyCarrier.RECEIVE_MEMORY;
+        ByteBuf root = pooled ? PooledByteBufAllocator.DEFAULT.directBuffer(firstSize + 1)
+                : Unpooled.buffer(firstSize + 1);
+        root.writeZero(firstSize - 1).writeByte(3).writeByte(4);
+        try {
+            c.in(root.retainedSlice(0, firstSize));
+            c.in(root.retainedSlice(firstSize, 1));
+            if (!pooled) {
+                assertEquals(1, root.refCnt(), "only the fixture still references the source buffer");
+                root.setByte(firstSize - 1, 0).setByte(firstSize, 0);
+            }
+        } finally {
+            root.release();
+        }
+        try {
+            c.inEnd();
+            c.lost(new ClosedChannelException());
+            assertEquals(1, got.size());
+            assertTrue(ends.isEmpty());
+            // An unattested backing was replaced by exact owned storage on arrival.
+            assertEquals(pooled ? 1 : 0, root.refCnt(), "both pooled views share one retained root");
+            Chunk first = got.getFirst();
+            assertEquals(firstSize, first.remaining());
+            first.withBuffer(bytes -> assertEquals(3, bytes.get(bytes.limit() - 1)));
+            first.close();
+            assertEquals(pooled ? 1 : 0, root.refCnt(), "the undispatched view still owns its data");
+            consumed.getFirst().run();
+            assertEquals(2, got.size());
+            assertEquals(List.of("end"), ends);
+            Chunk last = got.getLast();
+            assertEquals(pooled ? 1 : 0, root.refCnt(), "the last delivered view is still live");
+            assertArrayEquals(new byte[] {4}, last.copy());
+            last.close();
+            consumed.getLast().run();
+            assertEquals(0, root.refCnt(), "closing the last view returns the pooled root");
+        } finally {
+            got.forEach(Chunk::close);
+            c.reader().close();
+            ch.finishAndReleaseAll();
+        }
     }
 
     /**
      * The loop of a carrier with queued input shuts down: closing its channel releases the
      * queue, and zmux's later calls fail what they brought at once.
      */
+    @Timeout(30)
     @Test void loopShutDownReleasesQueueAndFailsCalls() throws Exception {
         var group = new io.netty.channel.MultiThreadIoEventLoopGroup(1, io.netty.channel.nio.NioIoHandler.newFactory());
         try {
@@ -228,17 +262,17 @@ class BodyCarrierLeakTest {
                         }
                     })
                     .connect(server.localAddress()).sync().channel();
-            ByteBuf data = Unpooled.directBuffer().writeBytes(new byte[] {1, 2, 3});
+            ByteBuf data = PooledByteBufAllocator.DEFAULT.directBuffer(3).writeBytes(new byte[] {1, 2, 3});
             ch.eventLoop().submit(() -> {
                 carrier[0] = carrier(ch);
                 carrier[0].in(data);
             }).sync();
             assertEquals(1, data.refCnt(), "queued for a reader that has not started");
-            assertTrue(group.shutdownGracefully(0, 0, java.util.concurrent.TimeUnit.SECONDS).await(5, java.util.concurrent.TimeUnit.SECONDS));
+            group.shutdownGracefully(0, 0, TimeUnit.SECONDS).sync();
             assertEquals(0, data.refCnt(), "the loop closed the channel, and its loss released the queue");
             LoopShutdownTest.assertCallsFailAtOnce(new io.zmux.carrier.PipeIo(carrier[0].reader(), carrier[0].writer(), Framing.BYTE_STREAM, "test", null));
         } finally {
-            group.shutdownGracefully(0, 0, java.util.concurrent.TimeUnit.SECONDS);
+            group.shutdownGracefully(0, 0, TimeUnit.SECONDS);
         }
     }
 }

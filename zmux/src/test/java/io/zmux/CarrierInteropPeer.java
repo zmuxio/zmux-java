@@ -89,7 +89,7 @@ final class CarrierInteropPeer {
 
     /** Multipath whose join secret is the exporter; a join may be Bound. */
     private static ZmuxConfig tlsConfig(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).maxPipes(4)
+        return ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16).sessionPolicy(new SessionPolicy(new CapacityLimits(4)))
                 .pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true).build();
     }
 
@@ -250,7 +250,7 @@ final class CarrierInteropPeer {
             @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "committed"; }
         };
         Profile[] accepted = Arrays.stream(profiles.split(",")).map(p -> Profile.of(Long.parseLong(p))).toArray(Profile[]::new);
-        var server = ServerConfig.builder(gate, NODE).acceptedProfiles(accepted).build();
+        var server = ServerConfig.builder(gate, NODE).acceptedProfiles(accepted).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build();
         var lc = ListenerConfig.builder().session(sealConfig(loops)).inboundTransform(Seal.server(server)).build();
         try (var listener = Zmux.listen(address(addr), lc)) {
             var bound = listener.localAddress();

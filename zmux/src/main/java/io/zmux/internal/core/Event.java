@@ -18,13 +18,13 @@ package io.zmux.internal.core;
  */
 public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError error, long maxBidi, long maxUni,
                     long code, long count, byte[] frame, String reason, Features features, boolean initiator,
-                    boolean flag, long rtt, double rate, io.zmux.CarrierKind carrier) {
+                    boolean flag, long rtt, double rate, io.zmux.CarrierKind carrier, io.zmux.PipeHealthChange health) {
 
     /** Event kinds. */
     public enum Kind {
         ESTABLISHED, CLOSED, GOAWAY_RECEIVED,
         /** Every state of a pipe direction, for the driver and the retirement; not an application event. */
-        PIPE_STATE,
+        PIPE_STATE, PIPE_HEALTH, TARGET_CHANGED,
         /** The application's pipe events, one direction each. */
         PIPE_ADDED, PIPE_JOINED, PIPE_SUSPECT, PIPE_RECOVERED, PIPE_FAILED, PIPE_CLOSED,
         JOIN_AUTH_FAILED, SUSPENDED, RESUME_UNATTENDED, RESUMED,
@@ -35,27 +35,29 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
         /** A local Locator (frame) joins may now name, or no longer name; not an application event. */
         LOCATOR_ADDED, LOCATOR_REMOVED,
         /** The path datagram payload of a session datagram (count) changed. */
-        DATAGRAM_PATH
+        DATAGRAM_PATH,
+        /** A local deadline source stalled, logged by the driver. */
+        DEADLINE_STALLED
     }
 
     static Event simple(Kind k) {
-        return new Event(k, 0, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(k, 0, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     static Event established(Features f, boolean initiator) {
-        return new Event(Kind.ESTABLISHED, 0, 0, null, null, 0, 0, 0, 0, null, null, f, initiator, false, 0, 0, null);
+        return new Event(Kind.ESTABLISHED, 0, 0, null, null, 0, 0, 0, 0, null, null, f, initiator, false, 0, 0, null, null);
     }
 
     static Event closed(SessionError e) {
-        return new Event(Kind.CLOSED, 0, 0, null, e, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(Kind.CLOSED, 0, 0, null, e, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     static Event goAway(long maxBidi, long maxUni, long code) {
-        return new Event(Kind.GOAWAY_RECEIVED, 0, 0, null, null, maxBidi, maxUni, code, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(Kind.GOAWAY_RECEIVED, 0, 0, null, null, maxBidi, maxUni, code, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     static Event pipe(Kind k, long pipe, io.zmux.CarrierKind carrier, int dir) {
-        return new Event(k, pipe, dir, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier);
+        return new Event(k, pipe, dir, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier, null);
     }
 
     /** Whether this is an application pipe event of a terminal state (failed or closed). */
@@ -64,50 +66,65 @@ public record Event(Kind kind, long pipe, int dir, Enum<?> state, SessionError e
     }
 
     static Event pipeState(long pipe, io.zmux.CarrierKind carrier, int dir, Enum<?> state) {
-        return new Event(Kind.PIPE_STATE, pipe, dir, state, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier);
+        return new Event(Kind.PIPE_STATE, pipe, dir, state, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, carrier, null);
+    }
+
+    static Event targetChanged(long generation, long revision, boolean initial, Long predecessor) {
+        return new Event(Kind.TARGET_CHANGED, 0, 0, null, null, 0, 0, generation, revision, null, null, null,
+                initial, predecessor != null, predecessor == null ? 0 : predecessor, 0, null, null);
+    }
+
+    static Event health(io.zmux.PipeHealthChange health) {
+        return new Event(Kind.PIPE_HEALTH, health.pipe().value(), health.direction() == io.zmux.Direction.INBOUND ? Action.DIR_IN : Action.DIR_OUT,
+                null, null, 0, 0, 0, health.seq(), null, null, null, false, false, 0, 0, null, health);
     }
 
     /** The retirement of a pipe; failed: its outbound direction FAILED (else it ended cleanly). */
     static Event pipeRetired(long pipe, io.zmux.CarrierKind carrier, boolean failed) {
-        return new Event(Kind.PIPE_STATE, pipe, Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, failed, 0, 0, carrier);
+        return new Event(Kind.PIPE_STATE, pipe, Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, failed, 0, 0, carrier, null);
     }
 
     /** This event with another {@code count}. */
     public Event withCount(long n) {
-        return new Event(kind, pipe, dir, state, error, maxBidi, maxUni, code, n, frame, reason, features, initiator, flag, rtt, rate, carrier);
+        return new Event(kind, pipe, dir, state, error, maxBidi, maxUni, code, n, frame, reason, features, initiator, flag, rtt, rate, carrier, health);
+    }
+
+    static Event stalledDeadline(ProtocolTimeline.Reason reason) {
+        return new Event(Kind.DEADLINE_STALLED, 0, 0, null, null, 0, 0, 0, 0, null, reason.name(),
+                null, false, false, 0, 0, null, null);
     }
 
     static Event joinAuthFailed(String reason) {
-        return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null);
+        return new Event(Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null, null);
     }
 
     /** A new path datagram payload of a session datagram. */
-    static Event datagramPath(int payload) {
-        return new Event(Kind.DATAGRAM_PATH, 0, 0, null, null, 0, 0, 0, payload, null, null, null, false, false, 0, 0, null);
+    static Event datagramPath(int payload, int nativePayload) {
+        return new Event(Kind.DATAGRAM_PATH, 0, 0, null, null, 0, 0, nativePayload, payload, null, null, null, false, false, 0, 0, null, null);
     }
 
     static Event epoch(Kind k, long n) {
-        return new Event(k, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(k, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     static Event locator(Kind k, byte[] locator) {
-        return new Event(k, 0, 0, null, null, 0, 0, 0, 0, locator, null, null, false, false, 0, 0, null);
+        return new Event(k, 0, 0, null, null, 0, 0, 0, 0, locator, null, null, false, false, 0, 0, null, null);
     }
 
     static Event tierSaturation(long prio, boolean saturated) {
-        return new Event(Kind.TIER_SATURATION, 0, 0, null, null, 0, 0, prio, 0, null, null, null, false, saturated, 0, 0, null);
+        return new Event(Kind.TIER_SATURATION, 0, 0, null, null, 0, 0, prio, 0, null, null, null, false, saturated, 0, 0, null, null);
     }
 
     static Event pipePriority(long pipe, io.zmux.CarrierKind carrier, long prio, boolean standby, long weight, boolean peer) {
-        return new Event(Kind.PIPE_PRIORITY, pipe, 0, null, null, 0, 0, prio, weight, null, null, null, peer, standby, 0, 0, carrier);
+        return new Event(Kind.PIPE_PRIORITY, pipe, 0, null, null, 0, 0, prio, weight, null, null, null, peer, standby, 0, 0, carrier, null);
     }
 
     static Event pipeQuality(long pipe, io.zmux.CarrierKind carrier, long rtt, double rate) {
-        return new Event(Kind.PIPE_QUALITY, pipe, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, rtt, rate, carrier);
+        return new Event(Kind.PIPE_QUALITY, pipe, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, rtt, rate, carrier, null);
     }
 
     static Event capacity(boolean below, double rate) {
         return new Event(below ? Kind.CAPACITY_BELOW : Kind.CAPACITY_RESTORED, 0, 0, null, null, 0, 0, 0, 0, null, null,
-                null, false, false, 0, rate, null);
+                null, false, false, 0, rate, null, null);
     }
 }

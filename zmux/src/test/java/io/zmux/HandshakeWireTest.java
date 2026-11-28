@@ -112,8 +112,8 @@ class HandshakeWireTest {
                         assertOn(700, j[0].writes().length(0), over, what + " join/hello");
                         assertOn(800, j[1].writes().length(0), over, what + " join/reply");
                         assertEquals(300, j[0].writes().length(1) + over, what + " join/confirm");
-                        assertTrue(c.shapingStats().wireSpent() > 0, what);
-                        assertTrue(s.shapingStats().wireSpent() > 0, what);
+                        assertTrue(c.shapingStats().overhead().handshakePaddingBytes() > 0, what);
+                        assertTrue(s.shapingStats().overhead().handshakePaddingBytes() > 0, what);
                     });
                 }
             }
@@ -164,8 +164,8 @@ class HandshakeWireTest {
 
     @Test void limitsClearAPlan() {
         UnitPlan p = new UnitPlan(100, 16, 5, Duration.ofMillis(7));
-        assertEquals(new UnitPlan(0, 0, 0, Duration.ofMillis(7)), io.zmux.internal.core.HandshakePlans.limited(p, ShapingLimits.defaults().withPadding(false)));
+        assertEquals(new UnitPlan(0, 0, 0, Duration.ofMillis(2)), io.zmux.internal.core.HandshakePlans.limited(p, ShapingLimits.defaults().withPadding(false)));
         assertEquals(new UnitPlan(100, 16, 5, null), io.zmux.internal.core.HandshakePlans.limited(p, ShapingLimits.defaults().withPause(false)));
-        assertEquals(new UnitPlan(100, 16, 5, Duration.ofMillis(3)), io.zmux.internal.core.HandshakePlans.limited(p, ShapingLimits.defaults().withMaxDelay(Duration.ofMillis(3))));
+        assertEquals(new UnitPlan(100, 16, 5, Duration.ofMillis(1)), io.zmux.internal.core.HandshakePlans.limited(p, ShapingLimits.defaults().withProfile(new io.zmux.shaping.ProfileLimits(10, 0, 0, Duration.ofMillis(1)))));
     }
 }

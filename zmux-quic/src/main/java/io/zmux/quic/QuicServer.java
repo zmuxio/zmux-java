@@ -1,5 +1,7 @@
 package io.zmux.quic;
 
+import static io.zmux.quic.internal.NettyLoops.getBorrowedEventLoop;
+
 import io.zmux.internal.spi.Loops;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
@@ -28,6 +30,7 @@ public final class QuicServer implements AutoCloseable {
     private final Set<QuicChannel> connections = ConcurrentHashMap.newKeySet();
     private final Channel datagram;
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean admissionStopped = new java.util.concurrent.atomic.AtomicBoolean();
 
     /**
      * A server whose connections are admitted by their first bidirectional stream with the
@@ -42,9 +45,11 @@ public final class QuicServer implements AutoCloseable {
                     .handler(new ChannelInitializer<QuicChannel>() {
                         @Override protected void initChannel(QuicChannel channel) {
                             connections.add(channel);
-                            if (closed.get()) { connections.remove(channel); channel.close(); return; }
+                            if (closed.get() || admissionStopped.get()) { connections.remove(channel); channel.close(); return; }
                             channel.closeFuture().addListener(ignored -> connections.remove(channel));
-                            channel.pipeline().addLast(new ConnectionCarrier(options, listener, host, completions));
+                            var carrier = new ConnectionCarrier(options, listener, host, completions);
+                            channel.pipeline().addLast(carrier);
+                            if (admissionStopped.get()) carrier.stop(channel);
                         }
                     }).streamHandler(STREAMS).build();
             datagram = new Bootstrap().group(group).channel(NioDatagramChannel.class).handler(codec).bind(address).sync().channel();
@@ -61,7 +66,7 @@ public final class QuicServer implements AutoCloseable {
      */
     private static final java.util.concurrent.ConcurrentHashMap<EventLoop, NettyHost> HOSTS = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private static NettyHost hostOf(EventLoop loop) {
+    static NettyHost hostOf(EventLoop loop) {
         boolean[] made = {false};
         NettyHost host = HOSTS.computeIfAbsent(loop, l -> { made[0] = true; return new NettyHost(l); });
         // Outside the map's update: a loop already terminated runs the listener at once.
@@ -81,37 +86,43 @@ public final class QuicServer implements AutoCloseable {
      * offers no query for whether a connection used 0-RTT: a host whose listener has an
      * admission gives connections whose TLS refused early data.
      *
-     * <p>The stage completes when the connection ends; cancelling it stops handing the
-     * connection's new streams to the listener (they are closed), and neither the connection
-     * nor its sessions are closed. A connection refused at a limit (no source slot) is closed and
+     * <p>The service can stop new admission independently of lane acceptance. An explicitly
+     * stopped service leaves the external connection to its owner when it drains. A connection
+     * refused at a limit (no source slot) is closed and
      * counted, and the stage completes: the connection ended. A listener already closed closes
      * the connection, and the stage fails with {@link io.zmux.ListenerClosedException}. These
      * outcomes belong to this adapter, which hands the connection to the listener as a whole.
      */
-    public static io.zmux.ZmuxFuture<Void> serve(QuicChannel connection, QuicOptions options, ZmuxListener listener) {
+    public static QuicConnectionService serve(QuicChannel connection, QuicOptions options, ZmuxListener listener) {
         java.util.Objects.requireNonNull(connection, "connection");
         java.util.Objects.requireNonNull(options, "options");
         java.util.Objects.requireNonNull(listener, "listener");
         var result = new java.util.concurrent.CompletableFuture<Void>();
-        if (listener.isClosed()) {
-            connection.close();
-            result.completeExceptionally(new io.zmux.ListenerClosedException());
-            return QuicClient.future(result);
-        }
-        NettyHost host = hostOf(connection.eventLoop());
-        var carrier = ConnectionCarrier.established(options, listener, host, new io.zmux.internal.loop.SerialCallbacks());
+        NettyHost host = hostOf(getBorrowedEventLoop(connection));
+        var callbacks = new io.zmux.internal.loop.SerialCallbacks();
+        var carrier = ConnectionCarrier.established(options, listener, host, callbacks);
         connection.closeFuture().addListener(ignored -> result.complete(null));
         Runnable add = () -> {
             if (!connection.isActive()) { result.complete(null); return; }
+            if (connection.attr(ConnectionCarrier.KEY).get() != null || Boolean.TRUE.equals(connection.attr(ConnectionCarrier.SERVED_ONCE).get())) {
+                result.completeExceptionally(new IllegalStateException("QUIC connection already served"));
+                return;
+            }
+            if (listener.isClosed()) {
+                result.completeExceptionally(new io.zmux.ListenerClosedException());
+                connection.close();
+                return;
+            }
             connection.pipeline().addLast(carrier);
+            carrier.whenDrained().whenComplete((value, failure) -> result.complete(null));
         };
         // From the connection's loop (its handshake event, say) at once, so no stream comes first.
         //noinspection resource: borrowed: the channel owns its event loop
-        Loops.dispatch(connection.eventLoop(), connection.eventLoop().inEventLoop(), add, () -> result.complete(null));
-        return io.zmux.internal.spi.Spi.future(result, () -> {
-            carrier.stop(connection);
-            result.cancel(false);
-        });
+        Loops.dispatch(getBorrowedEventLoop(connection), getBorrowedEventLoop(connection).inEventLoop(), add, () -> result.complete(null));
+        var published = ConnectionCarrier.offLoop(result, callbacks, ignored -> {});
+        return new QuicConnectionService(() -> { if (!result.isDone()) carrier.stop(connection); },
+                () -> { if (!result.isDone()) carrier.stopLanes(connection); },
+                published.minimalCompletionStage());
     }
 
     /**
@@ -121,22 +132,55 @@ public final class QuicServer implements AutoCloseable {
      */
     public static ChannelHandler streamHandler() { return STREAMS; }
 
-    private static final ChannelHandler STREAMS = new ChannelInitializer<QuicStreamChannel>() {
-        @Override public boolean isSharable() { return true; }
-        @Override protected void initChannel(QuicStreamChannel stream) {
-            ConnectionCarrier c = stream.parent().attr(ConnectionCarrier.KEY).get();
-            if (c == null) stream.close(); else c.incoming(stream);
-        }
-    };
+    /**
+     * Observes the negotiated native datagram size of a host-owned connection. Call on its
+     * event loop from the codec's connection initializer, before Netty activates the channel.
+     */
+    public static void observeDatagramCapacity(QuicChannel connection) {
+        if (!getBorrowedEventLoop(connection).inEventLoop()) throw new IllegalStateException("QUIC connection loop required");
+        io.zmux.quic.internal.QuicDatagrams.observe(connection);
+    }
+
+    private static final ChannelHandler STREAMS = streams(null);
+
+    /** Supplies the handler for streams opened after the host detached a connection in its fallback. */
+    public static ChannelHandler streamHandler(java.util.function.Supplier<? extends ChannelHandler> handback) {
+        return streams(java.util.Objects.requireNonNull(handback, "handback"));
+    }
+
+    private static ChannelHandler streams(java.util.function.Supplier<? extends ChannelHandler> handback) {
+        return new ChannelInitializer<QuicStreamChannel>() {
+            @Override protected void initChannel(QuicStreamChannel stream) {
+                var connection = stream.parent();
+                var carrier = connection.attr(ConnectionCarrier.KEY).get();
+                if (carrier != null && !carrier.hostOwnsConnection()) {
+                    carrier.incoming(stream);
+                } else if (handback != null && Boolean.TRUE.equals(connection.attr(ConnectionCarrier.HOST_OWNED).get())) {
+                    stream.pipeline().addLast(handback.get());
+                } else {
+                    stream.close();
+                }
+            }
+        };
+    }
 
     public InetSocketAddress address() { return (InetSocketAddress) datagram.localAddress(); }
     NettyHost host() { return host; }
     /** A snapshot of this endpoint's accepted native connections. */
     public java.util.List<QuicChannel> connections() { return java.util.List.copyOf(connections); }
 
+    /** Stops new connections and pipe admission. Existing attachments drain on their connections. */
+    public void stopAdmission() {
+        if (!admissionStopped.compareAndSet(false, true)) return;
+        for (QuicChannel connection : connections) {
+            var carrier = connection.attr(ConnectionCarrier.KEY).get();
+            if (carrier != null) carrier.stop(connection);
+        }
+    }
+
     /** Opens a bidi carrier on an owned connection; cancellation returns only that stream, not the connection. */
     public io.zmux.ZmuxFuture<io.zmux.carrier.PipeIo> openPipeAsync(QuicChannel connection) {
-        if (closed.get()) return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("QUIC endpoint closed")));
+        if (closed.get() || admissionStopped.get()) return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new io.zmux.CarrierFailedException("QUIC admission stopped")));
         if (connection == null || !connections.contains(connection))
             return QuicClient.future(java.util.concurrent.CompletableFuture.failedFuture(new IllegalArgumentException("connection is not owned by this endpoint")));
         ConnectionCarrier carrier = connection.attr(ConnectionCarrier.KEY).get();
@@ -160,6 +204,6 @@ public final class QuicServer implements AutoCloseable {
         host.close();
         var termination = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
         //noinspection resource: borrowed: the group owns its event loop, shut down above
-        if (!datagram.eventLoop().inEventLoop()) termination.awaitUninterruptibly();
+        if (!getBorrowedEventLoop(datagram).inEventLoop()) termination.awaitUninterruptibly();
     }
 }

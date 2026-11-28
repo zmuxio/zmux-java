@@ -7,11 +7,17 @@ import java.util.Set;
  * its own thread; they must not block or call methods of the session. A runtime exception stops the shaping of the pipe.
  */
 public interface Shaper {
+    /** Static rate constraints to validate before installation. */
+    default GateRequirement gateRequirement() { return GateRequirement.NONE; }
+
     /** Called once, when the instance is installed. */
     Set<Capability> capabilities();
 
     /** Called before each outgoing record of the pipe ({@link Capability#PLAN}); plan is cleared. */
     void plan(RecordView view, RecordPlan plan);
+
+    /** Called for a selected native datagram when requested by the instance. */
+    default void planDatagram(DatagramView view, UnitPlan plan, Effects effects) {}
 
     /** Receives a notification; effects is cleared. Unknown kinds should be ignored. */
     void onEvent(Event event, Effects effects);

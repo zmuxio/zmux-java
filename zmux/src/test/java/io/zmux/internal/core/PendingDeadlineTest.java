@@ -1,7 +1,6 @@
 package io.zmux.internal.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -17,10 +16,10 @@ class PendingDeadlineTest {
         Pipe p = PipeTargetTest.appendOut(s, true, Attach.OUT_ACTIVE, Attach.IN_OPEN);
         Poke.set(p.mp().link, "unacked", true);
         Poke.set(p.mp().link, "oldestAt", 0L);
-        long late = 5 * Time.SECOND;
         PathHealth health = s.mp().health;
+        long late = health.tSuspect(p) + 1;
         long next = health.pipeTimers(late, false);
-        assertTrue(next <= health.tSuspect(p), "passed suspicion deadline reported as " + next);
+        assertEquals(health.tSuspect(p), next, "the elapsed suspicion deadline remains pending");
         assertEquals(Attach.OUT_ACTIVE, p.mp().health.out(), "asking changes nothing");
         health.pipeTimers(late, true);
         assertEquals(Attach.OUT_SUSPECT, p.mp().health.out());

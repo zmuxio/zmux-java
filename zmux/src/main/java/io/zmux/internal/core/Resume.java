@@ -23,7 +23,7 @@ final class Resume {
         /** The session enters SUSPENDED with the grace deadline. */
         void suspended(long graceDeadline);
 
-        /** Whether something will dial for the session: a redial hook or a running pool. */
+        /** Whether something will dial for the session: an active session controller. */
         boolean attended();
     }
 
@@ -81,13 +81,15 @@ final class Resume {
         a.res.holdUntil = Time.add(port.now(), a.rtt().smoothed());
     }
 
-    boolean reinjectRoom(Pipe p) {
+    boolean reinjectRoom(Pipe p) { return reinjectAllowance(p) > 0; }
+
+    long reinjectAllowance(Pipe p) {
         Attach a = p.mp();
         if (!a.res.held1 || port.now() >= a.res.holdUntil) {
             a.res.held1 = false;
-            return true;
+            return Long.MAX_VALUE;
         }
-        return a.res.holdSent < cfg.spreadChunk();
+        return Math.max(0, cfg.spreadChunk() - a.res.holdSent);
     }
 
     void endReinjectHolds() {

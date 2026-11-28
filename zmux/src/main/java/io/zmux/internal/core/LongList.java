@@ -24,10 +24,21 @@ final class LongList {
         a[n++] = v;
     }
 
+    /** Keeps the earliest entries and coalesces excess progress into the newest mark. */
+    void addBounded(long v, int limit) {
+        if (size() < limit) add(v);
+        else a[n - 1] = v;
+    }
+
     void removeFirst(int k) {
         head += k;
         if (head == n) head = n = 0;
     }
 
     void clear() { head = n = 0; }
+
+    void release() {
+        a = new long[0];
+        clear();
+    }
 }

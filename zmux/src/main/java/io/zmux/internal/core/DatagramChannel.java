@@ -21,4 +21,7 @@ public interface DatagramChannel {
      * takes none (the carrier did not negotiate datagrams, or not yet). Cheap, never blocks.
      */
     int maxChannelDatagram();
+
+    /** Structural limit, 0 when unavailable or -1 while unknown. */
+    default int channelDatagramLimit(int room) { return -1; }
 }

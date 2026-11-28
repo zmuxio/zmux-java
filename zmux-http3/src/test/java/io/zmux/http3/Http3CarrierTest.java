@@ -1,5 +1,8 @@
 package io.zmux.http3;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import static io.zmux.http3.H3TestSupport.reading;
 import static io.zmux.http3.H3TestSupport.take;
 import static io.zmux.http3.H3TestSupport.write;
@@ -43,13 +46,16 @@ import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxListener;
 import io.zmux.ZmuxSession;
 import io.zmux.adapter.Handled;
+import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
+import io.zmux.carrier.PipeWriter;
 import io.zmux.http.ExchangeConfig;
 import io.zmux.http.HttpCarrierClient;
 import io.zmux.http.HttpEndpoint;
 import io.zmux.http.internal.HttpTransport;
 import io.zmux.internal.spi.AdapterTestSupport;
 import io.zmux.internal.spi.AdapterPorts;
+import io.zmux.internal.spi.CarrierProvider;
 import io.zmux.quic.QuicOptions;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -59,7 +65,9 @@ import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -76,27 +84,73 @@ class Http3CarrierTest {
     static final Duration WAIT = Duration.ofSeconds(5);
     private static final Duration PEEK_TIMEOUT = Duration.ofMinutes(1);
 
-    private static CarrierSample carrierSample(ZmuxSession session) throws Exception {
-        long deadline = System.nanoTime() + WAIT.toNanos();
-        do {
-            var sample = session.pipeStats().getFirst().carrierSample();
-            if (sample.isPresent()) return sample.orElseThrow();
-            Thread.sleep(5);
-        } while (System.nanoTime() - deadline < 0);
-        throw new AssertionError("HTTP/3 carrier did not publish a sample");
+    private static CarrierSample carrierSample(ZmuxSession session, CompletableFuture<Void> published) throws Exception {
+        var sample = session.pipeStats().getFirst().carrierSample();
+        // The first read starts native collection when no sample has been published yet.
+        if (sample.isPresent()) return sample.orElseThrow();
+        published.get(30, TimeUnit.SECONDS);
+        return session.pipeStats().getFirst().carrierSample().orElseThrow();
+    }
+
+    private static PipeIo observeSample(PipeIo pipe, CompletableFuture<Void> published) {
+        PipeWriter writer = pipe.writer();
+        return pipe.withHalves(pipe.reader(), writer instanceof AdapterPorts.ReleasingHalf release
+                ? new ReleasingWriter(writer, published, release) : new ObservedWriter(writer, published));
+    }
+
+    private static class ObservedWriter implements PipeWriter, CarrierProvider {
+        private final PipeWriter writer;
+        private final CarrierProvider provider;
+        private final CompletableFuture<Void> published;
+
+        ObservedWriter(PipeWriter writer, CompletableFuture<Void> published) {
+            this.writer = writer;
+            this.provider = (CarrierProvider) writer;
+            this.published = published;
+        }
+
+        @Override public Object carrierIdentity() { return provider.carrierIdentity(); }
+        @Override public Runnable watchCarrier(Runnable changed) { return provider.watchCarrier(changed); }
+        @Override public Query carrierQuery(Object identity) {
+            var query = provider.carrierQuery(identity);
+            if (query == null || query.collect() == null) return query;
+            return new Query(query.source(), completed -> query.collect().accept((at, sample) -> {
+                completed.accept(at, sample);
+                published.complete(null);
+            }));
+        }
+
+        @Override public void write(OutboundBatch batch, Completion done) { writer.write(batch, done); }
+        @Override public OptionalLong unsent() { return writer.unsent(); }
+        @Override public void close() { writer.close(); }
+        @Override public void abort(Throwable cause) { writer.abort(cause); }
+    }
+
+    private static final class ReleasingWriter extends ObservedWriter implements AdapterPorts.ReleasingHalf {
+        private final AdapterPorts.ReleasingHalf release;
+
+        ReleasingWriter(PipeWriter writer, CompletableFuture<Void> published, AdapterPorts.ReleasingHalf release) {
+            super(writer, published);
+            this.release = release;
+        }
+
+        @Override public CompletionStage<Void> released() { return release.released(); }
     }
 
     @Test void streamingAndExchangeReachTheSameListener() throws Exception {
         var exchange = ExchangeConfig.builder(new byte[32]).holdTime(Duration.ofMillis(100)).build();
-        try (var fixture = new QuicFixture(b -> b, b -> b.streaming().exchange(exchange), null)) {
+        var clientSample = new CompletableFuture<Void>();
+        var serverSample = new CompletableFuture<Void>();
+        try (var fixture = new QuicFixture(b -> b.inboundTransform((pipe, context) -> CompletableFuture.completedFuture(
+                pipe.carrier() == CarrierKind.HTTP3 ? observeSample(pipe, serverSample) : pipe)),
+                b -> b.streaming().exchange(exchange), null)) {
             assertEquals(CarrierKind.HTTP3, fixture.client.streamingCandidate(fixture.uri, Map.of()).kind());
-            try (var client = Zmux.open(fixture.stream(), Role.CLIENT, fixture.config);
+            try (var client = Zmux.open(observeSample(fixture.stream(), clientSample), Role.CLIENT, fixture.config);
                  var accepted = fixture.listener.accept(WAIT)) {
                 assertNotNull(accepted);
                 H3TestSupport.exchange(client, accepted, 100_000);
                 H3TestSupport.exchange(accepted, client, 100_001);
-                for (var session : List.of(client, accepted)) {
-                    var sample = carrierSample(session);
+                for (var sample : List.of(carrierSample(client, clientSample), carrierSample(accepted, serverSample))) {
                     assertEquals(CarrierSource.NETTY_QUIC, sample.source());
                     var counters = assertInstanceOf(QuicCounters.class, sample.counts().orElseThrow());
                     assertTrue(counters.packetsSent() > 0);
@@ -113,7 +167,7 @@ class Http3CarrierTest {
 
     @Test void exporterAuthenticatesABoundJoinOverTheSharedConnection() throws Exception {
         try (var fixture = new QuicFixture(b -> b.pipeAuth(PipeAuth.exporter().withEndToEnd())
-                .allowRecordMode((carrier, mode, peer) -> true).maxPipes(4), b -> b, HttpEndpoint.Builder::streaming, null)) {
+                .allowRecordMode((carrier, mode, peer) -> true).sessionPolicy(new SessionPolicy(new CapacityLimits(4))), b -> b, HttpEndpoint.Builder::streaming, null)) {
             var io = fixture.stream();
             assertTrue(io.isCarrierSecure());
             assertNotNull(io.capabilities().exporter());
@@ -155,11 +209,13 @@ class Http3CarrierTest {
                     assertEquals(HttpMethod.POST, upload.method());
                     assertEquals(download.channel().parent(), upload.channel().parent());
                 }
-                try (var client = Zmux.open(PipeIo.split(up, down), Role.CLIENT, fixture.config);
+                var published = new CompletableFuture<Void>();
+                var pipe = observeSample(PipeIo.split(up, down), published);
+                try (var client = Zmux.open(pipe, Role.CLIENT, fixture.config);
                      var accepted = fixture.listener.accept(WAIT)) {
                     assertNotNull(accepted);
                     H3TestSupport.exchange(client, accepted, 8193);
-                    var sample = carrierSample(client);
+                    var sample = carrierSample(client, published);
                     assertEquals(CarrierSource.NETTY_QUIC, sample.source());
                     if (uploadId == null) uploadId = sample.carrierId();
                     else assertEquals(uploadId, sample.carrierId(), "receiving connection does not change the sender identity");
@@ -187,12 +243,12 @@ class Http3CarrierTest {
     }
 
     @Test void splitJoinAttachesBothDirectionsAsOneMember() throws Exception {
-        try (var fixture = new QuicFixture(b -> b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()),
+        try (var fixture = new QuicFixture(b -> b.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()),
                 b -> b, HttpEndpoint.Builder::streaming, null);
              var client = Zmux.open(fixture.stream(), Role.CLIENT, fixture.config);
              var accepted = fixture.listener.accept(WAIT)) {
             assertNotNull(accepted);
-            var joined = fixture.client.splitJoin(client, fixture.uri, Map.of(), null, PipeOptions.defaults());
+            var joined = client.addPipe(fixture.client.splitPipe(fixture.uri, Map.of(), null), PipeOptions.defaults());
             var stats = joined.stats().orElseThrow();
             assertNotNull(stats.inbound());
             assertNotNull(stats.outbound());
@@ -260,9 +316,23 @@ class Http3CarrierTest {
 
     @Test void expiredTakeoverRetainsSlotUntilNativeHeadSettles() throws Exception {
         unopenedTakeover((listener, head) -> {
-            AdapterTestSupport.advanceTimers(head.handled(), PEEK_TIMEOUT).get(5, TimeUnit.SECONDS);
-            awaitSetupResult(head);
-            assertThrows(SocketTimeoutException.class, head.handled()::awaitSetup);
+            var paused = new CompletableFuture<Void>();
+            var resume = new CompletableFuture<Void>();
+            var gate = head.context().executor().submit(() -> {
+                paused.complete(null);
+                resume.get(30, TimeUnit.SECONDS);
+                return null;
+            });
+            try {
+                paused.get(30, TimeUnit.SECONDS);
+                // Publish the setup's peek timeout before Netty observes the resulting cancellation.
+                AdapterTestSupport.advanceTimers(head.handled(), PEEK_TIMEOUT).get(30, TimeUnit.SECONDS);
+                awaitSetupResult(head);
+                assertThrows(SocketTimeoutException.class, head.handled()::awaitSetup);
+            } finally {
+                resume.complete(null);
+            }
+            gate.get(30, TimeUnit.SECONDS);
         });
     }
 
@@ -303,7 +373,8 @@ class Http3CarrierTest {
     private static void unopenedTakeover(Ending ending) throws Exception {
         var held = new CompletableFuture<Head>();
         var taken = new LinkedBlockingQueue<Takeover>();
-        try (var fixture = new QuicFixture(b -> admitTakeover(taken, () -> {}).apply(b).maxPending(1),
+        try (var fixture = new QuicFixture(b -> b.handshakeTimeout(PEEK_TIMEOUT.multipliedBy(2)),
+                b -> admitTakeover(taken, () -> {}).apply(b).maxPending(1),
                 HttpEndpoint.Builder::streaming, holdHead(held))) {
             checkUnopenedTakeover(fixture.listener, fixture.stream(), held, taken, ending);
         }
@@ -414,6 +485,26 @@ class Http3CarrierTest {
             if (bytes != null) {
                 ReferenceCountUtil.release(bytes);
                 promise.tryFailure(new ClosedChannelException());
+            }
+        }
+    }
+
+    @Test void splitUsesBoundTicketsOnTheQuicRequestHeadAndBody() throws Exception {
+        var slot = Duration.ofSeconds(30);
+        var id = new io.zmux.PrefixStore.Id(19, 72);
+        var key = new byte[32];
+        key[0] = 1;
+        var generations = List.of(new io.zmux.PrefixStore.Generation(new byte[32], 0, -1));
+        var options = new io.zmux.PrefixAuth.CarrierOptions(true, false);
+        var store = new io.zmux.MemoryPrefixStore(new io.zmux.PrefixStore.Window(slot, 1), generations);
+        store.addTicket(new io.zmux.PrefixStore.Ticket(id, key, 1, 0, -1, false));
+        var verifier = new io.zmux.PrefixAuth.Verifier(options, store);
+        var presenter = new io.zmux.PrefixAuth(options, slot, id, key, generations);
+        try (var fixture = new QuicFixture(l -> l.admission(verifier.admission().build()), HttpEndpoint.Builder::streaming, null)) {
+            var pipe = fixture.client.splitPipe(fixture.uri, Map.of(), presenter);
+            try (var _ = Zmux.open(pipe, Role.CLIENT, fixture.config);
+                 var accepted = fixture.listener.accept(WAIT)) {
+                assertEquals(id, io.zmux.PrefixAuth.boundPrincipal(accepted).orElseThrow());
             }
         }
     }

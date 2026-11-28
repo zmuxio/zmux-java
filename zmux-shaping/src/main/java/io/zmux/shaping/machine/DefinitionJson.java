@@ -3,9 +3,11 @@ package io.zmux.shaping.machine;
 import static io.zmux.shaping.machine.DefinitionException.Category.*;
 
 import io.zmux.shaping.ShapingBudget;
+import io.zmux.shaping.ProfileLimits;
 import io.zmux.shaping.ShapingLimits;
 import io.zmux.shaping.WireAccount;
 import io.zmux.shaping.machine.Definition.*;
+import io.zmux.internal.json.JsonReader;
 import java.math.BigInteger;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -38,7 +40,7 @@ final class DefinitionJson {
 
     /** Parses JSON text: objects as maps, arrays as lists, integers as Long or BigInteger, other numbers as Double. */
     static Object parse(String json) throws DefinitionException {
-        return new Parser(json).document();
+        return new Parser(json).read();
     }
 
     static DefinitionException err(DefinitionException.Category c, String what) {
@@ -182,16 +184,16 @@ final class DefinitionJson {
     }
 
     static Definition definition(Object root, SizeLimits limits) throws DefinitionException {
-        Map<String, Object> d = members(root, Set.of("machines", "tables"), "definition");
-        return machines(d.get("machines"), new Tables(tableSources(d.get("tables")), limits));
+        Map<String, Object> d = members(root, Set.of("machines", "tables", "include_control"), "definition");
+        return machines(d.get("machines"), new Tables(tableSources(d.get("tables")), limits), flag(d, "include_control"));
     }
 
-    static Definition machines(Object raw, Tables tables) throws DefinitionException {
+    static Definition machines(Object raw, Tables tables, boolean includeControl) throws DefinitionException {
         List<?> l = list(raw, "machines");
         if (l.isEmpty()) throw err(TYPE, "machines");
         List<Machine> ms = new ArrayList<>();
         for (Object m : l) ms.add(machine(m, tables));
-        return new Definition(ms);
+        return new Definition(ms, includeControl);
     }
 
     private static int count(Object x, String what) throws DefinitionException {
@@ -219,17 +221,19 @@ final class DefinitionJson {
     }
 
     private static State state(Object x, Tables tables, int n, int nc, int nt) throws DefinitionException {
-        Map<String, Object> d = members(x, Set.of("record", "enter", "next"), "state");
-        RecordRule record = d.containsKey("record") ? record(d.get("record"), tables) : null;
+        Map<String, Object> d = members(x, Set.of("record", "datagram", "enter", "next"), "state");
+        RecordRule record = d.containsKey("record") ? unit(d.get("record"), tables, true) : null;
+        RecordRule datagram = d.containsKey("datagram") ? unit(d.get("datagram"), tables, false) : null;
         List<Action> enter = new ArrayList<>();
         if (d.containsKey("enter")) for (Object a : list(d.get("enter"), "enter")) enter.add(action(a, tables, nc, nt));
         List<Transition> next = new ArrayList<>();
         if (d.containsKey("next")) for (Object t : list(d.get("next"), "next")) next.add(transition(t, tables, n, nc, nt));
-        return new State(record, List.copyOf(enter), List.copyOf(next));
+        return new State(record, datagram, List.copyOf(enter), List.copyOf(next));
     }
 
-    private static RecordRule record(Object x, Tables tables) throws DefinitionException {
-        Map<String, Object> r = members(x, Set.of("target", "max_len", "pad_to", "pad_multiple", "pad", "delay", "flush"), "record");
+    private static RecordRule unit(Object x, Tables tables, boolean reliable) throws DefinitionException {
+        Map<String, Object> r = members(x, reliable ? Set.of("target", "max_len", "pad_to", "pad_multiple", "pad", "delay", "flush")
+                : Set.of("target", "pad_to", "pad_multiple", "pad", "delay"), reliable ? "record" : "datagram");
         if (r.containsKey("target") && (r.containsKey("max_len") || r.containsKey("pad_to"))) throw err(CONFLICT, "target with max_len or pad_to");
         boolean flush = false;
         if (r.containsKey("flush")) {
@@ -342,7 +346,7 @@ final class DefinitionJson {
         }
         if (seen.cardinality() != n) throw err(UNREACHABLE, "state " + seen.nextClearBit(0));
         if (!onCycle(graph(m, Set.of(Trigger.ENTER, Trigger.ZERO))).isEmpty()) throw err(CYCLE, "enter, zero or restart");
-        BitSet busy = onCycle(graph(m, Set.of(Trigger.ENTER, Trigger.ZERO, Trigger.INJECTED, Trigger.INJECT_DROPPED, Trigger.TIMER)));
+        BitSet busy = onCycle(graph(m, Set.of(Trigger.ENTER, Trigger.ZERO, Trigger.INJECTION_ACCEPTED, Trigger.INJECTION_REJECTED, Trigger.TIMER)));
         for (int i = busy.nextSetBit(0); i >= 0; i = busy.nextSetBit(i + 1)) {
             for (Action a : states.get(i).enter()) {
                 if ((a.op() == Op.INJECT || a.op() == Op.TIMER) && !a.cancel() && a.after().lower() == 0) throw err(ZERO_DELAY_CYCLE, "state " + i);
@@ -407,232 +411,115 @@ final class DefinitionJson {
     }
 
     private static final Set<Scope> SESSION_SCOPE = Set.of(Scope.SESSION);
-    private static final Set<String> WIRE = Set.of("initial", "per_mb", "per_sec");
+    private static final List<String> ACCOUNT_FIELDS = List.of("ceiling", "initial", "per_mb", "per_sec");
+    private static final Set<String> WIRE = Set.copyOf(ACCOUNT_FIELDS);
 
-    /** A {@code budget} object: an account drawn per session, and a bound on one wait. */
+    private static Value[] account(Object x, Tables tables) throws DefinitionException {
+        Map<String, Object> wire = members(x, WIRE, "wire");
+        required(wire, "ceiling", "wire");
+        Value[] values = new Value[ACCOUNT_FIELDS.size()];
+        for (int i = 0; i < values.length; i++) {
+            String key = ACCOUNT_FIELDS.get(i);
+            Family family = i < 2 ? Family.COUNTER : Family.RATE;
+            if (!wire.containsKey(key)) continue;
+            if (tables == null) {
+                long n = bounded(wire, key, family);
+                values[i] = new Value(new long[] {1, n, n}, Scope.SESSION, n);
+            } else {
+                values[i] = value(wire.get(key), family, tables, SESSION_SCOPE, key);
+            }
+        }
+        if (values[1] != null && values[1].upper() > values[0].lower()) throw err(RANGE, "initial exceeds ceiling");
+        return values;
+    }
+
+    private static WireAccount drawAccount(Value[] wire, Sampler sampler) {
+        return wire == null ? null : new WireAccount(draw(sampler, wire[0]), draw(sampler, wire[1]),
+                draw(sampler, wire[2]), draw(sampler, wire[3]));
+    }
+
+    private static long draw(Sampler sampler, Value value) {
+        if (value == null) return 0;
+        return sampler == null ? value.lower() : sampler.draw(value.segments);
+    }
+
+    private static ProfileLimits profile(Object x) throws DefinitionException {
+        if (x == null) return null;
+        Map<String, Object> profile = members(x, Set.of("extra_bytes_ppm", "window_seconds", "floor_bytes", "max_added_delay"), "profile");
+        int ppm = (int) bounded(profile, "extra_bytes_ppm", Family.PPM);
+        long window = integer(required(profile, "window_seconds", "profile"), "window_seconds");
+        if (window < 1 || window > 0xffff_ffffL) throw err(RANGE, "window_seconds");
+        long floor = integer(required(profile, "floor_bytes", "profile"), "floor_bytes");
+        if (floor < 0 || floor > WireAccount.MAX_CEILING) throw err(RANGE, "floor_bytes");
+        return new ProfileLimits(window, ppm, floor, Duration.ofNanos(bounded(profile, "max_added_delay", Family.TIME) * 1000));
+    }
+
     static Budget budget(Object x, Tables tables) throws DefinitionException {
-        Map<String, Object> d = members(x, Set.of("wire", "max_delay"), "budget");
-        Value[] wire = null;
-        if (d.containsKey("wire")) {
-            Map<String, Object> w = members(d.get("wire"), WIRE, "wire");
-            wire = new Value[] {wireValue(w, "initial", Family.COUNTER, tables), wireValue(w, "per_mb", Family.RATE, tables), wireValue(w, "per_sec", Family.RATE, tables)};
-        }
-        long maxDelay = 0;
-        if (d.containsKey("max_delay")) {
-            maxDelay = integer(d.get("max_delay"), "max_delay");
-            if (maxDelay < 1 || maxDelay > Family.TIME.hi) throw err(RANGE, "max_delay");
-        }
-        return new Budget(wire, maxDelay);
+        Map<String, Object> d = members(x, Set.of("wire", "profile", "no_injection"), "budget");
+        Value[] wire = d.containsKey("wire") ? account(d.get("wire"), tables) : null;
+        return new Budget(wire, profile(d.get("profile")), !flag(d, "no_injection"));
     }
 
-    private static Value wireValue(Map<String, Object> w, String k, Family f, Tables tables) throws DefinitionException {
-        return w.containsKey(k) ? value(w.get(k), f, tables, SESSION_SCOPE, k) : null;
-    }
-
-    /** A parsed budget. wire is null when absent; maxDelay in microseconds, 0: none. */
-    record Budget(Value[] wire, long maxDelay) {
-        /** One session's budget: initial, per_mb, per_sec in order. A wire of zeros allows no injection. The caller holds s. */
+    record Budget(Value[] wire, ProfileLimits profile, boolean injection) {
         ShapingBudget draw(Sampler s) {
-            WireAccount a = WireAccount.NONE;
-            if (wire != null) a = new WireAccount(draw(s, wire[0]), draw(s, wire[1]), draw(s, wire[2]));
-            return new ShapingBudget(a, maxDelay > 0 ? Duration.ofNanos(maxDelay * 1000) : null, !(wire != null && !a.isSet()));
+            return new ShapingBudget(drawAccount(wire, s), profile, injection);
         }
-
-        private static long draw(Sampler s, Value v) { return v == null ? 0 : s.draw(v.segments); }
     }
 
-    /** Local limits: {@code wire} of constants, {@code max_delay} (0 the default, negative no bound), and the switches. */
     static ShapingLimits limits(Object x) throws DefinitionException {
-        Map<String, Object> d = members(x, Set.of("wire", "max_delay", "no_padding", "no_pause", "no_injection"), "limits");
-        WireAccount a = WireAccount.NONE;
-        boolean noInjection = flag(d, "no_injection");
-        if (d.containsKey("wire")) {
-            Map<String, Object> w = members(d.get("wire"), WIRE, "wire");
-            a = new WireAccount(constant(w, "initial", Family.COUNTER), constant(w, "per_mb", Family.RATE), constant(w, "per_sec", Family.RATE));
-            noInjection |= !a.isSet();
-        }
-        Duration maxDelay = ShapingLimits.DEFAULT_MAX_DELAY;
-        if (d.containsKey("max_delay")) {
-            long n = integer(d.get("max_delay"), "max_delay");
-            if (n > Family.TIME.hi) throw err(RANGE, "max_delay");
-            if (n < 0) maxDelay = null;
-            else if (n > 0) maxDelay = Duration.ofNanos(n * 1000);
-        }
-        return new ShapingLimits(a, maxDelay, !flag(d, "no_padding"), !flag(d, "no_pause"), !noInjection);
+        Map<String, Object> d = members(x, Set.of("wire", "profile", "no_padding", "no_pause", "no_injection"), "limits");
+        WireAccount a = d.containsKey("wire") ? drawAccount(account(d.get("wire"), null), null) : null;
+        return new ShapingLimits(a, profile(d.get("profile")), !flag(d, "no_padding"),
+                !flag(d, "no_pause"), !flag(d, "no_injection"));
     }
 
-    private static long constant(Map<String, Object> w, String k, Family f) throws DefinitionException {
-        if (!w.containsKey(k)) return 0;
-        long n = integer(w.get(k), k);
-        if (n < f.lo || n > f.hi) throw err(RANGE, k);
+    private static long bounded(Map<String, Object> d, String key, Family family) throws DefinitionException {
+        long n = integer(required(d, key, "shaping"), key);
+        if (n < family.lo || n > family.hi) throw err(RANGE, key);
         return n;
     }
 
-    private static boolean flag(Map<String, Object> d, String k) throws DefinitionException {
+    static boolean flag(Map<String, Object> d, String k) throws DefinitionException {
         if (!d.containsKey(k)) return false;
         if (d.get(k) instanceof Boolean b) return b;
         throw err(TYPE, k);
     }
 
     /** RFC 8259 JSON, with a duplicate member an error wherever it is. Nesting beyond any form read here is a syntax error. */
-    private static final class Parser {
-        private static final int MAX_DEPTH = 64;
+    private static final class Parser extends JsonReader<Object> {
         /** The digits of the largest integer here, 2^64 - 1. */
         private static final int MAX_DIGITS = 20;
         private static final BigInteger BEYOND = BigInteger.ONE.shiftLeft(64);
-        private final String s;
-        private int i, depth;
 
-        Parser(String s) { this.s = s; }
+        Parser(String text) { super(text, false); }
 
-        Object document() throws DefinitionException {
-            Object v = value();
-            ws();
-            if (i != s.length()) throw error("trailing data");
-            return v;
-        }
-
-        private DefinitionException error(String what) {
-            return err(SYNTAX, what + " at offset " + i);
-        }
-
-        private void ws() {
-            while (i < s.length()) {
-                char c = s.charAt(i);
-                if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return;
-                i++;
-            }
-        }
-
-        private Object value() throws DefinitionException {
-            ws();
-            if (i >= s.length()) throw error("unexpected end");
-            return switch (s.charAt(i)) {
-                case '{' -> { enter(); Object o = obj(); depth--; yield o; }
-                case '[' -> { enter(); Object a = arr(); depth--; yield a; }
-                case '"' -> str();
-                case 't' -> lit("true", true);
-                case 'f' -> lit("false", false);
-                case 'n' -> lit("null", null);
-                default -> num();
+        @Override protected ObjectBuilder<Object> newObject() {
+            return new ObjectBuilder<>() {
+                private final Map<String, Object> members = new LinkedHashMap<>();
+                @Override public void checkName(String name) {
+                    if (members.containsKey(name)) throw err(DUPLICATE_KEY, name);
+                }
+                @Override public void add(String name, Object value) { members.put(name, value); }
+                @Override public Object finish() { return members; }
             };
         }
 
-        private void enter() throws DefinitionException {
-            if (++depth > MAX_DEPTH) throw error("nesting too deep");
+        @Override protected Object array(List<Object> values) { return values; }
+        @Override protected Object string(String value) { return value; }
+        @Override protected Object bool(boolean value) { return value; }
+        @Override protected Object nil() { return null; }
+
+        @Override protected Number number(String text, int start, int end, boolean integral) {
+            if (!integral) return Double.valueOf(text.substring(start, end));
+            boolean negative = text.charAt(start) == '-';
+            // Parsing an integer larger than any field permits would have quadratic cost.
+            if (end - start - (negative ? 1 : 0) > MAX_DIGITS) return negative ? BEYOND.negate() : BEYOND;
+            BigInteger n = new BigInteger(text.substring(start, end));
+            return n.bitLength() < 64 ? (Number) n.longValue() : n;
         }
 
-        private Object lit(String word, Object v) throws DefinitionException {
-            if (!s.startsWith(word, i)) throw error("invalid literal");
-            i += word.length();
-            return v;
-        }
-
-        private Map<String, Object> obj() throws DefinitionException {
-            Map<String, Object> m = new LinkedHashMap<>();
-            i++;
-            ws();
-            if (i < s.length() && s.charAt(i) == '}') { i++; return m; }
-            while (true) {
-                ws();
-                if (i >= s.length() || s.charAt(i) != '"') throw error("want a member name");
-                String k = str();
-                ws();
-                if (i >= s.length() || s.charAt(i) != ':') throw error("want ':'");
-                i++;
-                if (m.containsKey(k)) throw err(DUPLICATE_KEY, k);
-                m.put(k, value());
-                ws();
-                if (i >= s.length()) throw error("unexpected end");
-                char c = s.charAt(i++);
-                if (c == '}') return m;
-                if (c != ',') throw error("want ',' or '}'");
-            }
-        }
-
-        private List<Object> arr() throws DefinitionException {
-            List<Object> l = new ArrayList<>();
-            i++;
-            ws();
-            if (i < s.length() && s.charAt(i) == ']') { i++; return l; }
-            while (true) {
-                l.add(value());
-                ws();
-                if (i >= s.length()) throw error("unexpected end");
-                char c = s.charAt(i++);
-                if (c == ']') return l;
-                if (c != ',') throw error("want ',' or ']'");
-            }
-        }
-
-        private String str() throws DefinitionException {
-            StringBuilder b = new StringBuilder();
-            i++;
-            while (true) {
-                if (i >= s.length()) throw error("unterminated string");
-                char c = s.charAt(i++);
-                if (c == '"') return b.toString();
-                if (c < 0x20) throw error("control character in string");
-                if (c != '\\') { b.append(c); continue; }
-                if (i >= s.length()) throw error("unterminated string");
-                char e = s.charAt(i++);
-                switch (e) {
-                    case '"', '\\', '/' -> b.append(e);
-                    case 'b' -> b.append('\b');
-                    case 'f' -> b.append('\f');
-                    case 'n' -> b.append('\n');
-                    case 'r' -> b.append('\r');
-                    case 't' -> b.append('\t');
-                    case 'u' -> {
-                        if (i + 4 > s.length()) throw error("short escape");
-                        int unit = 0;
-                        for (int end = i + 4; i < end; i++) {
-                            int h = hex(s.charAt(i));
-                            if (h < 0) throw error("invalid escape");
-                            unit = unit << 4 | h;
-                        }
-                        b.append((char) unit);
-                    }
-                    default -> throw error("invalid escape");
-                }
-            }
-        }
-
-        private static boolean digit(char c) { return c >= '0' && c <= '9'; }
-
-        private static int hex(char c) {
-            if (digit(c)) return c - '0';
-            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-            return -1;
-        }
-
-        private Number num() throws DefinitionException {
-            int start = i;
-            if (i < s.length() && s.charAt(i) == '-') i++;
-            if (i >= s.length() || !digit(s.charAt(i))) throw error("invalid value");
-            if (s.charAt(i) == '0') i++;
-            else do i++; while (i < s.length() && digit(s.charAt(i)));
-            boolean integral = true;
-            if (i < s.length() && s.charAt(i) == '.') {
-                integral = false;
-                i++;
-                if (i >= s.length() || !digit(s.charAt(i))) throw error("invalid number");
-                while (i < s.length() && digit(s.charAt(i))) i++;
-            }
-            if (i < s.length() && (s.charAt(i) == 'e' || s.charAt(i) == 'E')) {
-                integral = false;
-                i++;
-                if (i < s.length() && (s.charAt(i) == '+' || s.charAt(i) == '-')) i++;
-                if (i >= s.length() || !digit(s.charAt(i))) throw error("invalid number");
-                while (i < s.length() && digit(s.charAt(i))) i++;
-            }
-            String t = s.substring(start, i);
-            if (!integral) return Double.valueOf(t);
-            // More digits than any value here has: out of range whatever they say, and converting them costs n^2.
-            if (t.length() - (t.charAt(0) == '-' ? 1 : 0) > MAX_DIGITS) return t.charAt(0) == '-' ? BEYOND.negate() : BEYOND;
-            BigInteger b = new BigInteger(t);
-            return b.bitLength() < 64 ? (Number) b.longValue() : b;
+        @Override protected DefinitionException syntax(String message, int offset) {
+            return err(SYNTAX, message + " at offset " + offset);
         }
     }
 }

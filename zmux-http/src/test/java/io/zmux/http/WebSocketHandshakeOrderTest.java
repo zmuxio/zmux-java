@@ -63,7 +63,7 @@ class WebSocketHandshakeOrderTest {
         var handshake = new java.util.concurrent.CompletableFuture<io.zmux.carrier.PipeIo>();
         var channel = new java.util.concurrent.CompletableFuture<Channel>();
         WebSocketClient.connectedForTests = channel::complete;
-        try (var f = new Fixture(b -> b.noHandshakeTimeout(), b -> b.maxPendingPerSource(1)
+        try (var f = new Fixture(b -> b.noHandshakeTimeout(), b -> b.maxPendingPerSource(2)
                 .inboundTransform((io, context) -> { entered.countDown(); return handshake; }), b -> b.webSocket(), false, null);
              var c = f.client(b -> b)) {
             c.webSocketPipe(WebSocketTest.ws(f.base), Map.of(), List.of(), null);

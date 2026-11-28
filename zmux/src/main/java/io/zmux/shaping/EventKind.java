@@ -6,14 +6,16 @@ public enum EventKind {
     START,
     /** The instance was replaced; no further calls. */
     REPLACED,
-    /** A record arrived on the pipe ({@link Capability#RECORD_IN}). */
-    RECORD_IN,
-    /** The pending injection was sent, as a record of PADDING only or as PADDING of a record. */
-    INJECTED,
-    /** The pending injection was given up. */
-    INJECT_DROPPED,
-    /** The time of the wake-up came. */
-    WAKE,
+    /** The carrier took a qualifying outbound unit. */
+    OUTBOUND,
+    /** The engine committed the requested cover. */
+    INJECTION_ACCEPTED,
+    /** The carrier completed the cover dispatch, possibly with a partial prefix. */
+    INJECTION_CARRIER_COMPLETED,
+    /** The engine declined the requested cover. */
+    INJECTION_REJECTED,
+    /** A scheduled timer fired. */
+    TIMER,
     /** Shaping of the pipe ended; no further calls. */
     STOPPED,
     /** The pipe's outbound direction failed; no further calls. */

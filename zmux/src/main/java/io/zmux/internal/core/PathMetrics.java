@@ -12,6 +12,26 @@ final class PathMetrics {
     private final AckEngine ack;
     private final Features feat;
     private Pipe openAs;
+    /** Scripted measurements may be supplied by the deterministic contract runner. */
+    private java.util.function.LongFunction<Measurement> measured;
+    record Measurement(long srtt, long variation, long eta, long deviation) {}
+
+    Measurement measured(Pipe p) { return measured == null ? null : measured.apply(p.id); }
+
+    long srtt(Pipe p) {
+        Measurement m = measured(p);
+        return m == null ? p.mp().rtt().smoothed() : m.srtt();
+    }
+
+    long variation(Pipe p) {
+        Measurement m = measured(p);
+        return m == null ? p.mp().rtt().rttvar() : m.variation();
+    }
+
+    long deviation(Pipe p) {
+        Measurement m = measured(p);
+        return m == null ? p.mp().rtt().rttvar() : m.deviation();
+    }
 
     PathMetrics(PipeTable pipes, AckEngine ack, Features feat) {
         this.pipes = pipes;
@@ -34,13 +54,13 @@ final class PathMetrics {
     boolean pipeUsable(Pipe p, boolean probOk) {
         Attach a = p.mp();
         if (a == null || p.out() == null || p.out().failed() || a.health.out() != Attach.OUT_ACTIVE || a.health.retired()) return false;
-        return !a.ret.penalized() && (probOk || (!a.prob.probOn() && !a.prob.reval()));
+        return (a.topologyExcluded() & Action.DIR_OUT) == 0 && !a.ret.penalized() && (probOk || (!a.prob.probOn() && !a.prob.reval()));
     }
 
     /** PTO_p (RFC 9002 6.2.1 with the peer's max_ack_delay). */
-    long pto(Attach a) {
-        long d = a.rtt().smoothed() + Math.max(4 * a.rtt().rttvar(), Time.MILLISECOND);
-        return d + (ack != null ? ack.peerDelay() : 25 * Time.MILLISECOND);
+    long pto(Pipe p) {
+        long d = Time.add(srtt(p), Math.max(Time.mul(variation(p), 4), Time.MILLISECOND));
+        return Time.add(d, ack != null ? ack.peerDelay() : 25 * Time.MILLISECOND);
     }
 
     /** [live outbound, live inbound] pipe counts. */
@@ -67,7 +87,7 @@ final class PathMetrics {
     long queueBytes(Pipe p) {
         if (p.out() == null) return 0;
         long q = 0;
-        for (Pipe.OutLane ol : p.out().lanes) q += ol.tx.queued();
+        for (Pipe.OutLane ol : p.out().lanes) q = Time.add(q, ol.tx.queued());
         return q;
     }
 
@@ -82,6 +102,13 @@ final class PathMetrics {
     boolean open(Pipe p) {
         if (p.out() == null || p.out().failed()) return false;
         return laneOpen(p, p.out().lanes.getFirst());
+    }
+
+    /** An accepting lane whose current write owns its next write opportunity. */
+    boolean writingOnAcceptingLane(Pipe p) {
+        if (p.out() == null || p.out().failed() || Pacer.held(p)) return false;
+        var tx = p.out().lanes.getFirst().tx;
+        return tx.writing() && !tx.notWritable();
     }
 
     /**

@@ -1,6 +1,7 @@
 package io.zmux.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -35,9 +36,37 @@ class CoreStructureTest {
             "Waiter.prev", "intrusive link: written only by WaitList (O(1) withdrawal)",
             "Waiter.next", "intrusive link: written only by WaitList (O(1) withdrawal)",
             "Waiter.list", "intrusive membership: written only by WaitList");
+    // Immutable protocol observations and send options have one representation shared with the API.
+    private static final java.util.Set<String> CORE_VALUES = java.util.Set.of(
+            "CapacityLimits", "CapacitySnapshot", "Directions", "MemberId", "DatagramSendOptions", "DatagramSendOptions.Carriage", "Direction", "DirectionHealth",
+            "DirectionHealth.ProofKind", "DirectionHealth.Reason", "DirectionHealth.State", "JoinTimeoutException", "PipeHealth",
+            "PipeHealthChange", "PipeId");
+
+    // Existing qualified dependencies outside the shared protocol value imports.
+    private static final java.util.Set<String> QUALIFIED_CORE_VALUES = java.util.Set.of(
+            "CarrierKind", "DatagramCopyPolicy", "Liveness", "PipeGoneException", "PipeState", "PipeStats",
+            "SessionTarget", "StreamStats", "ZmuxConfig");
+    private static final Pattern PUBLIC_TYPE = Pattern.compile("\\bio\\.zmux\\.([A-Z][A-Za-z0-9_]*(?:\\.[A-Z][A-Za-z0-9_]*)*)");
     private static final Pattern FORBIDDEN = Pattern.compile(
-            "import io\\.zmux\\.internal\\.(loop|runtime|host|transport|listener)\\b|import io\\.zmux\\.[A-Z]"
+            "\\bio\\.zmux\\.internal\\.(loop|runtime|host|transport|listener)\\b"
                     + "|java\\.nio\\.channels|java\\.util\\.concurrent\\.locks|\\bsynchronized\\b|\\bnew Thread\\b");
+
+    private static boolean forbiddenDependency(String line) {
+        if (FORBIDDEN.matcher(line).find()) return true;
+        return PUBLIC_TYPE.matcher(line).results().anyMatch(match -> {
+            String type = match.group(1);
+            if (line.startsWith("import ")) return !CORE_VALUES.contains(type);
+            int nested = type.indexOf('.');
+            String owner = nested < 0 ? type : type.substring(0, nested);
+            return !CORE_VALUES.contains(owner) && !QUALIFIED_CORE_VALUES.contains(owner);
+        });
+    }
+
+    @Test
+    void rejectsFullyQualifiedUpwardDependencies() {
+        assertTrue(forbiddenDependency("return new io.zmux.DatagramPathFeedback("));
+        assertTrue(forbiddenDependency("io.zmux.internal.runtime.Owner owner;"));
+    }
 
     @Test
     void coreHasNoUpwardDependencyLockOrChannel() throws IOException {
@@ -48,7 +77,7 @@ class CoreStructureTest {
                 for (int i = 0; i < lines.size(); i++) {
                     String l = lines.get(i).strip();
                     if (l.startsWith("*") || l.startsWith("//") || l.startsWith("/*")) continue;
-                    if (FORBIDDEN.matcher(l).find()) bad.add(f.getFileName() + ":" + (i + 1) + ": " + l);
+                    if (forbiddenDependency(l)) bad.add(f.getFileName() + ":" + (i + 1) + ": " + l);
                 }
             }
         }

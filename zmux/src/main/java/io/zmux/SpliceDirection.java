@@ -1,17 +1,39 @@
 package io.zmux;
 
+import java.util.Map;
+import java.time.Duration;
+import java.util.Optional;
+
 /**
  * One direction of a splice: what it forwarded and how it ended.
  *
- * @param bytes stream bytes forwarded
- * @param datagramBytes payload bytes of the datagrams forwarded, those a packet relay wrote as capsules included; with
- *     bytes, exactly what the direction's limiter granted and was not refunded
- * @param datagramsDropped every datagram received and not forwarded
- * @param datagramsTooLarge those of datagramsDropped for their size: above the next hop's {@link ZmuxStream#maxDatagramPayload(long)} ({@link Zmux#splice}), or, in a packet splice, which writes such a datagram as a capsule, above {@link io.zmux.helper.PacketStream#DEFAULT_MAX_PACKET}; a capsule not written for another reason (the next hop ended, the splice ended) counts only in datagramsDropped
- * @param datagramsLimited those of datagramsDropped the direction's or the next hop's datagram limiter refused
- * @param datagramsAsCapsules datagrams a packet relay forwarded as DATAGRAM capsules, counted once written whole;
- *     always 0 for {@link Zmux#splice}
+ * @param bytes reliable stream bytes submitted, including headers of source and injected capsules
+ * @param datagramBytes payload bytes of datagrams submitted on the next hop or encoded as complete reliable capsules
+ * @param datagramsAsCapsules datagrams fully submitted as reliable DATAGRAM capsules
  * @param end how the direction ended
+ * @param cause the original failure, when available
+ * @param inputUnits units admitted for policy or injection
+ * @param inputBytes payload bytes admitted for policy or injection
+ * @param enqueuedItems complete policy or injection outputs submitted
+ * @param hookCalls callback executions
+ * @param replacements replacement decisions
+ * @param mirrorMisses samples refused by the mirror
+ * @param waitTime time spent waiting for policy conditions
  */
-public record SpliceDirection(long bytes, long datagramBytes, long datagramsDropped, long datagramsTooLarge,
-                              long datagramsLimited, long datagramsAsCapsules, SpliceEnd end) {}
+public record SpliceDirection(long bytes, long datagramBytes, long datagramsAsCapsules, SpliceEnd end, Optional<Throwable> cause,
+                              long inputUnits, long inputBytes, long enqueuedItems, long hookCalls, long replacements,
+                              long preAdmissionRefundedBytes, long mirrorMisses, Duration waitTime, SpliceSettlement settlement,
+                              Map<Drop, Long> dropCounts, long payloadCopyBytes, long encodeBytes,
+                              long mirrorCopyBytes, long nativeCount, long recordCount) {
+    public long capsuleCount() { return datagramsAsCapsules; }
+    /** Why a unit was discarded by the splice. */
+    public enum Drop {
+        DROPPED_HOOK, DROPPED_EXPIRED, DROPPED_QUEUE_FULL, DROPPED_LIMITER, DROPPED_BLOCKED,
+        DROPPED_TOO_LARGE, DROPPED_NO_PATH, DROPPED_SEQUENCE_EXHAUSTED, DROPPED_FLOW_CLOSED, DROPPED_CODEL
+    }
+    public long datagramsDropped() { return dropCounts.values().stream().mapToLong(Long::longValue).sum(); }
+    public long datagramsTooLarge() { return dropCounts.getOrDefault(Drop.DROPPED_TOO_LARGE, 0L); }
+    public long datagramsLimited() { return dropCounts.getOrDefault(Drop.DROPPED_LIMITER, 0L); }
+
+    public SpliceDirection { dropCounts = Map.copyOf(dropCounts); }
+}

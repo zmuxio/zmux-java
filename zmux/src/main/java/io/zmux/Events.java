@@ -10,6 +10,8 @@ final class Events {
     static SessionEvent publicEvent(Event e) {
         return switch (e.kind()) {
             case GOAWAY_RECEIVED -> new SessionEvent.GoAwayReceived(e.maxBidi(), e.maxUni(), e.code());
+            case TARGET_CHANGED -> new SessionEvent.TargetChanged(e.code(), e.count(), e.initiator(), e.flag() ? e.rtt() : null);
+            case PIPE_HEALTH -> new SessionEvent.PipeHealthChanged(e.health());
             case PIPE_ADDED -> new SessionEvent.PipeAdded(PipeId.of(e.pipe()), e.carrier(), direction(e));
             case PIPE_JOINED -> new SessionEvent.PipeJoined(PipeId.of(e.pipe()), e.carrier(), direction(e));
             case PIPE_SUSPECT -> new SessionEvent.PipeSuspect(PipeId.of(e.pipe()), e.carrier(), direction(e));
@@ -28,7 +30,7 @@ final class Events {
             case CAPACITY_RESTORED -> new SessionEvent.CapacityRestored((long) e.rate());
             case EPOCH_COMMITTED -> new SessionEvent.EpochCommitted(e.code());
             case EPOCH_DELETED -> new SessionEvent.EpochDeleted(e.code());
-            case DATAGRAM_PATH -> new SessionEvent.DatagramPathChanged((int) e.count());
+            case DATAGRAM_PATH -> new SessionEvent.DatagramPathChanged((int) e.count(), Math.max(0, (int) e.code()), e.code() >= 0);
             default -> null;
         };
     }

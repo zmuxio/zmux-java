@@ -13,6 +13,8 @@ package io.zmux.internal.core;
  * @param kind the carrier kind its adapter declared, or null
  * @param label the label the application gave the carrier, or null
  * @param writeOverhead the fixed bytes each carrier write adds below the pipe, for the shaper factory
+ * @param recordOverhead fixed transform bytes for each record
+ * @param coalescesRecords the transform batches records into one byte-stream write
  * @param variant the host's label of the transform the carrier runs, "" when none
  * @param maxRecord the largest record Size the carrier takes, applied beside the peer's and TLS's; 0 when none
  * @param ownFailure the carrier reports its own failure (its reads or writes fail when its path fails), so a stall
@@ -20,13 +22,18 @@ package io.zmux.internal.core;
  */
 public record CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean lanes, boolean queueBound,
                           DatagramChannel channel, io.zmux.CarrierKind kind, String label, int writeOverhead, String variant, int maxRecord,
-                          boolean ownFailure) {
+                          boolean ownFailure, int recordOverhead, boolean coalescesRecords) {
     /** The carrier record floor: every carrier takes records of this Size; a record limit is never below it. */
     public static final int RECORD_FLOOR = 8192;
 
     public CarrierInfo {
         if (variant == null) variant = "";
     }
+
+    /** Whether every record starts a separate write at the lower carrier boundary. */
+    boolean writesEachRecord() { return framing == Framing.RECORDS && !coalescesRecords; }
+
+    int overhead(boolean first) { return recordOverhead + (first || writesEachRecord() ? writeOverhead : 0); }
 
     /** The smaller of two record limits, 0 being none. */
     public static int minRecord(int a, int b) {
@@ -36,7 +43,7 @@ public record CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean 
     /** A carrier without a write overhead. */
     public CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean lanes, boolean queueBound,
                        DatagramChannel channel, io.zmux.CarrierKind kind, String label) {
-        this(framing, tls, minRtt, lanes, queueBound, channel, kind, label, 0, "", 0, false);
+        this(framing, tls, minRtt, lanes, queueBound, channel, kind, label, 0, "", 0, false, 0, false);
     }
 
     /** A carrier without a datagram channel or a declared kind. */
@@ -46,36 +53,36 @@ public record CarrierInfo(Framing framing, boolean tls, boolean minRtt, boolean 
 
     /** This carrier of the given kind. */
     public CarrierInfo withKind(io.zmux.CarrierKind k) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, k, label, writeOverhead, variant, maxRecord, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, k, label, writeOverhead, variant, maxRecord, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier with datagram channel ch. */
     public CarrierInfo withChannel(DatagramChannel ch) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, ch, kind, label, writeOverhead, variant, maxRecord, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, ch, kind, label, writeOverhead, variant, maxRecord, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier with the application's label l. */
     public CarrierInfo withLabel(String l) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, l, writeOverhead, variant, maxRecord, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, l, writeOverhead, variant, maxRecord, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier with write overhead n. */
     public CarrierInfo withWriteOverhead(int n) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, n, variant, maxRecord, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, n, variant, maxRecord, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier with variant v. */
     public CarrierInfo withVariant(String v) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, v, maxRecord, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, v, maxRecord, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier with record cap n (0: none). */
     public CarrierInfo withMaxRecord(int n) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, variant, n, ownFailure);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, variant, n, ownFailure, recordOverhead, coalescesRecords);
     }
 
     /** This carrier, reporting its own failure or not. */
     public CarrierInfo withOwnFailure(boolean on) {
-        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, variant, maxRecord, on);
+        return new CarrierInfo(framing, tls, minRtt, lanes, queueBound, channel, kind, label, writeOverhead, variant, maxRecord, on, recordOverhead, coalescesRecords);
     }
 }

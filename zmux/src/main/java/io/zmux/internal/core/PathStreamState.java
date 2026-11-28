@@ -7,7 +7,11 @@ package io.zmux.internal.core;
  */
 final class PathStreamState {
     final PathScheduler.StreamSlot sched = new PathScheduler.StreamSlot();
-    final Retention.StreamSlot ret = new Retention.StreamSlot();
+    final Retention.StreamSlot ret;
+
+    PathStreamState(SendHistory history, Stream stream) {
+        ret = new Retention.StreamSlot(history, stream);
+    }
     /** The pipe of the opening frame or of its latest reinjected copy: the stream's datagrams follow it (MULTIPATH.md S7). */
     private Pipe openPipe;
     /** The opening frame (empty or not) was acknowledged. */
@@ -23,6 +27,8 @@ final class PathStreamState {
         openAcked = true;
         openPipe = null;
     }
+
+    boolean openingConfirmed() { return openAcked; }
 
     /** The pipe of the unacknowledged opening frame, or null. */
     Pipe openingPipe() {

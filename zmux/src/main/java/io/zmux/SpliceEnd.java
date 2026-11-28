@@ -26,4 +26,16 @@ public sealed interface SpliceEnd {
      * the other direction went on.
      */
     record LimiterFailed() implements SpliceEnd {}
+
+    /** A policy rejected the direction with an application code. */
+    record HookReset(long code) implements SpliceEnd {}
+
+    /** A policy callback threw or returned an invalid decision. */
+    record HookFailed(java.util.Optional<Throwable> cause) implements SpliceEnd {}
+
+    /** The source sent a malformed or truncated reliable capsule. */
+    record PacketError() implements SpliceEnd {}
+
+    /** A reliable unit's wait or assembly deadline expired. */
+    record WaitTimeout() implements SpliceEnd {}
 }

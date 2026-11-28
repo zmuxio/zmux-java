@@ -7,6 +7,7 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.quic.*;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.zmux.quic.internal.QuicHandshake;
 import io.zmux.*;
 import java.net.InetSocketAddress;
 import java.time.Duration;
@@ -31,14 +32,27 @@ class QuicServeTest {
             var lc = ListenerConfig.builder().session(config)
                     .admission(Admission.builder(0, Admission.Decider.immediate((i, p) -> { decisions.incrementAndGet(); return Admission.Decision.accept(0, "q"); })).build())
                     .build();
-            var served = new CompletableFuture<java.util.concurrent.CompletionStage<Void>>();
+            var served = new CompletableFuture<QuicConnectionService>();
+            var evidence = new CompletableFuture<java.util.List<Admission.OuterSecurity>>();
             try (var listener = Zmux.listener(lc)) {
                 QuicOptions options = QuicOptions.defaults();
                 ChannelHandler codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
                         .handler(new ChannelInboundHandlerAdapter() {
+                            private QuicStreamChannel buffered;
+                            private Admission.OuterSecurity arrival;
+
+                            @Override public void handlerAdded(ChannelHandlerContext ctx) {
+                                buffered = streamEvidence((QuicChannel) ctx.channel());
+                                arrival = QuicHandshake.observe(buffered);
+                            }
+
                             @Override public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-                                if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess())
-                                    served.complete(QuicServer.serve((QuicChannel) ctx.channel(), options, listener));
+                                if (evt instanceof SslHandshakeCompletionEvent e && e.isSuccess()) {
+                                    var connection = (QuicChannel) ctx.channel();
+                                    evidence.complete(java.util.List.of(arrival, QuicHandshake.observe(buffered),
+                                            QuicHandshake.observe(streamEvidence(connection))));
+                                    served.complete(QuicServer.serve(connection, options, listener));
+                                }
                                 ctx.fireUserEventTriggered(evt);
                             }
                             @Override public boolean isSharable() { return true; }
@@ -52,6 +66,8 @@ class QuicServeTest {
                     ZmuxSession accepted = listener.accept(Duration.ofSeconds(10));
                     assertNotNull(accepted);
                     assertEquals(java.util.Optional.of("q"), accepted.admitted());
+                    assertEquals(java.util.List.of(Admission.OuterSecurity.EARLY_DATA, Admission.OuterSecurity.EARLY_DATA,
+                            Admission.OuterSecurity.QUIC), evidence.get(5, TimeUnit.SECONDS));
                     var st = client.openStream();
                     st.write(new byte[] {7});
                     st.finish();
@@ -60,7 +76,7 @@ class QuicServeTest {
                     assertEquals(1, in.read(b, 0, 4));
                     assertEquals(1, decisions.get(), "one decision per connection");
                     assertEquals(1, listener.stats().admission().accepted());
-                    var done = served.get(5, TimeUnit.SECONDS).toCompletableFuture();
+                    var done = served.get(5, TimeUnit.SECONDS).whenDrained().toCompletableFuture();
                     assertFalse(done.isDone());
                     client.close();
                     accepted.awaitClosed();
@@ -75,13 +91,23 @@ class QuicServeTest {
         }
     }
 
+    private static QuicStreamChannel streamEvidence(QuicChannel parent) {
+        var attributes = new io.netty.util.DefaultAttributeMap();
+        return (QuicStreamChannel) java.lang.reflect.Proxy.newProxyInstance(QuicStreamChannel.class.getClassLoader(),
+                new Class<?>[] {QuicStreamChannel.class}, (ignored, method, args) -> switch (method.getName()) {
+                    case "parent" -> parent;
+                    case "attr" -> attributes.attr((io.netty.util.AttributeKey<?>) args[0]);
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
     @Test void streamAndConnectionCloseCancelAnUnreadTransform() throws Exception {
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         try (EventLoops loops = EventLoops.create(1)) {
             var config = ZmuxConfig.builder().eventLoops(loops).noHandshakeTimeout().build();
             var transforms = new java.util.concurrent.LinkedBlockingQueue<CompletableFuture<io.zmux.carrier.PipeIo>>();
             var streams = new java.util.concurrent.LinkedBlockingQueue<QuicStreamChannel>();
-            var lc = ListenerConfig.builder().session(config).maxPendingPerSource(1).inboundTransform((io, context) -> {
+            var lc = ListenerConfig.builder().session(config).maxPendingPerSource(2).inboundTransform((io, context) -> {
                 var waiting = new CompletableFuture<io.zmux.carrier.PipeIo>();
                 transforms.add(waiting);
                 return waiting;
@@ -119,7 +145,10 @@ class QuicServeTest {
                         stream.eventLoop().submit(() -> {}).sync();
                         var slot = listener.adapter().reserve(peer, null);
                         assertNotNull(slot);
+                        var second = listener.adapter().reserve(peer, null);
+                        assertNotNull(second);
                         slot.release();
+                        second.release();
                         dialing.cancel(false);
                     }
                 } finally { udp.close().sync(); }
@@ -127,7 +156,7 @@ class QuicServeTest {
         } finally { group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).sync(); }
     }
 
-    @Test void cancellingServeWithdrawsSetupBeforeTheConnectionLoopCanRunAgain() throws Exception {
+    @Test void stoppingAdmissionWithdrawsSetupBeforeTheConnectionLoopCanRunAgain() throws Exception {
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).noHandshakeTimeout().build();
@@ -136,7 +165,7 @@ class QuicServeTest {
             var lc = ListenerConfig.builder().session(cfg)
                     .admission(Admission.builder(0, Admission.Decider.immediate((i, b) -> Admission.Decision.FALLBACK)).build())
                     .fallback(t -> { takeover.complete(t); return stage; }).build();
-            var served = new CompletableFuture<ZmuxFuture<Void>>();
+            var served = new CompletableFuture<QuicConnectionService>();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listener(lc); var client = new QuicClient(TestTls.client, options)) {
                 var codec = options.apply(new QuicServerCodecBuilder()).sslContext(TestTls.server.build())
@@ -159,7 +188,7 @@ class QuicServeTest {
                     var paused = new java.util.concurrent.CountDownLatch(1);
                     connection.eventLoop().execute(() -> { paused.countDown(); resume.join(); });
                     assertTrue(paused.await(5, TimeUnit.SECONDS));
-                    assertTrue(served.get(5, TimeUnit.SECONDS).cancel(false));
+                    served.get(5, TimeUnit.SECONDS).stopAdmission();
                     // stop has won even though the stream's loop has not processed a single stop task.
                     assertThrows(IllegalStateException.class, pending::detach);
                     assertFalse(stage.isDone());
@@ -175,7 +204,7 @@ class QuicServeTest {
         // HS-57.
         for (String ending : java.util.List.of("stop", "first record", "handshake")) {
             boolean stop = ending.equals("stop");
-            var lc = ListenerConfig.builder().maxPendingPerSource(1)
+            var lc = ListenerConfig.builder().maxPendingPerSource(2)
                     .session(io.zmux.ZmuxConfig.builder().handshakeTimeout(Duration.ofSeconds(ending.equals("handshake") ? 1 : 20)).build())
                     .firstRecordTimeout(Duration.ofSeconds(ending.equals("first record") ? 1 : 20)).build();
             var options = QuicOptions.defaults();
@@ -186,7 +215,10 @@ class QuicServeTest {
                 var accepted = server.connections().getFirst();
                 accepted.eventLoop().submit(() -> {}).sync();
                 var peer = (InetSocketAddress) accepted.remoteSocketAddress();
+                var spare = l.adapter().reserve(peer, null);
+                assertNotNull(spare);
                 assertNull(l.adapter().reserve(peer, null));
+                spare.release();
                 if (stop) l.close();
                 assertTrue(accepted.closeFuture().await(4, TimeUnit.SECONDS));
                 assertTrue(first.channel().closeFuture().await(4, TimeUnit.SECONDS));
@@ -204,7 +236,7 @@ class QuicServeTest {
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
-            var served = new CompletableFuture<java.util.concurrent.CompletionStage<Void>>();
+            var served = new CompletableFuture<QuicConnectionService>();
             var listener = Zmux.listener(ListenerConfig.of(config));
             listener.close();
             QuicOptions options = QuicOptions.defaults();
@@ -222,7 +254,7 @@ class QuicServeTest {
                     .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
             try (var endpoint = new QuicClient(TestTls.client, options)) {
                 var dialing = endpoint.connectAsync((InetSocketAddress) udp.localAddress(), "localhost", config);
-                var done = served.get(10, TimeUnit.SECONDS).toCompletableFuture();
+                var done = served.get(10, TimeUnit.SECONDS).whenDrained().toCompletableFuture();
                 var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> done.get(10, TimeUnit.SECONDS));
                 assertInstanceOf(ListenerClosedException.class, failure.getCause());
                 dialing.toCompletableFuture().cancel(true);

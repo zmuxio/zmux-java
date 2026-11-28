@@ -48,7 +48,7 @@ class NestedSessionTest {
                         var writing = workers.submit(() -> { stream.writeChunk(ByteBuffer.wrap(payload)); stream.finish(); return null; });
                         ByteArrayOutputStream received = new ByteArrayOutputStream();
                         for (Chunk chunk; (chunk = stream.readChunk(65536)) != null;) {
-                            try (Chunk owned = chunk) { ByteBuffer data = owned.buffer(); byte[] bytes = new byte[data.remaining()]; data.get(bytes); received.write(bytes); }
+                            try (Chunk owned = chunk) { received.writeBytes(owned.copy()); }
                         }
                         writing.get(10, TimeUnit.SECONDS); assertArrayEquals(payload, received.toByteArray());
                     }
@@ -59,7 +59,7 @@ class NestedSessionTest {
                 try (var stream = outer.client().openStream()) {
                     stream.write(new byte[] {7}); stream.finish();
                     try (var peer = outer.server().acceptStream(Duration.ofSeconds(5)); Chunk chunk = peer.readChunk(1)) {
-                        assertEquals(7, chunk.buffer().get());
+                        chunk.withBuffer(data -> assertEquals(7, data.get()));
                     }
                 }
             }
@@ -92,7 +92,7 @@ class NestedSessionTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void nestedLanesShareAnOuterCreditLeaseAndDoNotWait() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).maxIncomingStreams(8).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).maxIncomingStreams(8).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(config));
                  var client = Zmux.connect(listener.localAddress(), config);
                  var server = listener.accept(Duration.ofSeconds(5))) {
@@ -116,11 +116,11 @@ class NestedSessionTest {
                     var lane1 = first.capabilities().laneOpener().open().toCompletableFuture().get(2, TimeUnit.SECONDS);
                     var lane2 = second.capabilities().laneOpener().open().toCompletableFuture().get(2, TimeUnit.SECONDS);
                     var lane3 = first.capabilities().laneOpener().open().toCompletableFuture().get(2, TimeUnit.SECONDS);
-                    var lane4 = second.capabilities().laneOpener().open().toCompletableFuture().get(2, TimeUnit.SECONDS);
                     assertSame(client.driver, first.carrierConn()); // a lane shares its pipe's connection
-                    assertThrows(ExecutionException.class, () -> first.capabilities().laneOpener().open()
+                    // Six initial bidirectional credits leave three shared nested lane leases.
+                    assertThrows(ExecutionException.class, () -> second.capabilities().laneOpener().open()
                             .toCompletableFuture().get(2, TimeUnit.SECONDS));
-                    lane1.close(); lane2.close(); lane3.close(); lane4.close();
+                    lane1.close(); lane2.close(); lane3.close();
                     first.reader().close(); first.writer().close(); second.reader().close(); second.writer().close();
                 }
                 client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
@@ -132,7 +132,7 @@ class NestedSessionTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void nestedLanesCarryIndependentStreamsOverMultipathOuterSession() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var outerConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+            var outerConfig = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             var innerConfig = ZmuxConfig.builder().eventLoops(loops).maxLanes(4).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(outerConfig));
                  var outerClient = Zmux.connect(listener.localAddress(), outerConfig);
@@ -181,7 +181,7 @@ class NestedSessionTest {
 
     @Test void addingAPipeThroughTheSameSessionIsRejectedWithoutBreakingTheSession() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+            var config = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (var outer = Pair.memory(config)) {
                 var carrier = outer.client().openPipeStream();
                 assertThrows(PipeRefusedException.class, () -> outer.client().addPipe(carrier, PipeOptions.defaults()));

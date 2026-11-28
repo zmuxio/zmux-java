@@ -1,5 +1,7 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.internal.wire.TransportParams;
@@ -16,8 +18,8 @@ class DatagramLimitTest {
         l.present |= TransportParams.DATAGRAM;
         l.maxDatagramFrameSize = 65535;
         Session s = new Session(c.build(), 0);
-        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true, null, null, null, 0, "", maxRecord, false);
-        s.attachBootstrap(info, info, null);
+        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true, null, null, null, 0, "", maxRecord, false, 0, false);
+        s.attachBootstrap(info, info);
         return s;
     }
 
@@ -58,8 +60,8 @@ class DatagramLimitTest {
         assertNull(b.datagrams().receive());
         assertTrue(a.statsSnapshot().datagramsDroppedSend() >= 1);
 
-        int max = a.datagrams().maxPayload(0);
-        assertEquals(Datagrams.maxData(1000), max);
+        int max = a.datagrams().maxPayload(1);
+        assertEquals(Datagrams.maxData(1000) - 2, max);
         a.sendDatagram(null, 0, new byte[max]);
         pump(a, b);
         assertEquals(max, b.datagrams().receive().length);

@@ -103,7 +103,7 @@ class LaneStressTest {
                                 default -> {
                                     Chunk c = in.readChunk(9000);
                                     if (c == null) { n = -1; break; }
-                                    try (c) { b.clear(); ByteBuffer v = c.buffer(); n = v.remaining(); b.put(v); }
+                                    try (c) { b.clear(); n = c.remaining(); c.withBuffer(b::put); }
                                 }
                             }
                             if (n < 0) return null;

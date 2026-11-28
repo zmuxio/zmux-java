@@ -5,6 +5,7 @@ import io.zmux.internal.core.CoreConfig;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.wire.TransportParams;
 import io.zmux.internal.join.Kdf;
+import io.zmux.internal.spi.AdapterPorts;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.CompletableFuture;
 import javax.net.ssl.SSLEngine;
@@ -23,7 +24,7 @@ public final class Bootstrap {
      */
     @FunctionalInterface
     public interface Presenter {
-        byte[] prefix(String alpn, String serverName, io.zmux.carrier.PipeIo.Exporter exporter) throws java.io.IOException;
+        byte[] prefix(String alpn, String serverName, io.zmux.carrier.PipeIo.Exporter exporter, String tlsVersion) throws java.io.IOException;
     }
 
     /** The prefix bytes of a carrier, computed on its loop. */
@@ -34,10 +35,10 @@ public final class Bootstrap {
 
     /** Holds a carrier while its prefix is written, then starts the session. */
     private record Presenting(Runnable then, java.util.function.Consumer<Throwable> failed) implements Inbound {
-        @Override public int bytes(Transport t, io.zmux.internal.core.ReadBuf buf, java.nio.ByteBuffer data, int pos, int lim) { return 0; }
+        @Override public int bytes(Transport t, io.zmux.internal.buffer.ReadBuf buf, java.nio.ByteBuffer data, int pos, int lim) { return 0; }
         @Override public void ended(Transport t, boolean graceful, boolean partial) {}
 
-        @Override public void written(Transport t, io.zmux.internal.core.Batch b, Throwable cause) {
+        @Override public void written(Transport t, io.zmux.internal.core.Batch b, int confirmed, Throwable cause) {
             b.discard();
             if (cause != null) failed.accept(cause);
             else then.run();
@@ -54,7 +55,7 @@ public final class Bootstrap {
      * (its handshake completed), then runs then; fail gets the failure (c is still open).
      */
     static void present(TlsTransport c, Presenter presenter, Runnable then, java.util.function.Consumer<Throwable> fail) {
-        present(c, () -> presenter.prefix(c.info().applicationProtocol(), c.serverName(), c::export), then, fail);
+        present(c, () -> presenter.prefix(c.info().applicationProtocol(), c.serverName(), c::export, c.handshakeProtocol()), then, fail);
     }
 
     private static void present(Transport c, Prefix prefix, Runnable then, java.util.function.Consumer<Throwable> fail) {
@@ -97,7 +98,11 @@ public final class Bootstrap {
             SessionRuntime driver = null;
             Runnable unregister = () -> {};
             try {
-                SessionRuntime d = new SessionRuntime(loop, new Session(cfg, Clock.now()), hooks);
+                CoreConfig admitted = cfg.withMemoryLedger();
+                if (!CarrierCapacity.reserve(c, admitted.budget(), false)) {
+                    throw new IllegalStateException("carrier backing exceeds memory budget");
+                }
+                SessionRuntime d = new SessionRuntime(loop, new Session(admitted, hooks.clockDomain().now()), hooks);
                 driver = d;
                 if (registration != null) unregister = registration.apply(d);
                 d.attachBootstrap(c);
@@ -121,8 +126,8 @@ public final class Bootstrap {
      * Closes a pipe input handed to zmux that never became a carrier: zmux owns it whatever the
      * outcome, so every failure before it is adopted closes both halves, each once.
      */
-    public static void discard(PipeIo io, Throwable cause) {
-        if (io == null) return;
+    public static CompletableFuture<Void> discard(PipeIo io, Throwable cause) {
+        if (io == null) return CompletableFuture.completedFuture(null);
         try { if (io.reader() != null) io.reader().close(); }
         catch (RuntimeException error) { if (cause != null && cause != error) cause.addSuppressed(error); }
         finally {
@@ -132,6 +137,7 @@ public final class Bootstrap {
                 }
             } catch (RuntimeException error) { if (cause != null && cause != error) cause.addSuppressed(error); }
         }
+        return AdapterPorts.released(io);
     }
 
     /**
@@ -155,7 +161,7 @@ public final class Bootstrap {
         }
         if (l.has(TransportParams.MULTIPATH) && l.secretFlags == 0) {
             c.reject(null);
-            throw new IllegalArgumentException("multipath (maxPipes above 1) or resume without a secret source: set PipeAuth with a pre-shared key"
+            throw new IllegalArgumentException("multipath or resume without a secret source: set PipeAuth with a pre-shared key"
                     + " (static or deferred) or the exporter, or use the secure carrier for the first pipe; withEndToEnd() alone is no source");
         }
         if ((l.secretFlags & TransportParams.SECRET_EXPORTER) == 0) return cfg;
@@ -167,8 +173,9 @@ public final class Bootstrap {
     }
 
     /** Runs the TLS handshake of engine over ch; f gets the connection as a pipe input. */
-    public static void tlsPipe(EventLoop loop, SocketChannel ch, SSLEngine engine, long timeout, boolean secure, CompletableFuture<PipeIo> f) {
-        TlsTransport.handshake(loop, ch, engine, timeout, secure, (c, err) -> {
+    public static void tlsPipe(EventLoop loop, CoreConfig cfg, SocketChannel ch, SSLEngine engine, boolean secure,
+                               CompletableFuture<PipeIo> f) {
+        TlsTransport.handshake(loop, ch, engine, cfg.handshakeTimeout(), secure, cfg.withMemoryLedger().budget(), (c, err) -> {
             if (err != null) Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(err));
             else {
                 PipeIo io = c.asPipe();
@@ -246,7 +253,8 @@ public final class Bootstrap {
                                                 DriverHooks hooks, java.util.function.Function<SessionRuntime, Runnable> registration,
                                                 Presenter presenter) {
         CompletableFuture<Started> f = new CompletableFuture<>();
-        TlsTransport.handshake(loop, ch, engine, cfg.handshakeTimeout(), secure, (c, err) -> {
+        CoreConfig admitted = cfg.withMemoryLedger();
+        TlsTransport.handshake(loop, ch, engine, cfg.handshakeTimeout(), secure, admitted.budget(), (c, err) -> {
             if (err != null) {
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(err));
                 return;
@@ -261,13 +269,13 @@ public final class Bootstrap {
             }
             CoreConfig sc;
             try {
-                sc = withExporter(cfg, c);
+                sc = withExporter(admitted, c);
             } catch (IllegalArgumentException invalid) {
                 Callbacks.EXECUTOR.execute(() -> f.completeExceptionally(invalid));
                 return;
             }
             start(loop, sc, c, alpn, hooks, registration,
-                    presenter == null ? null : () -> presenter.prefix(alpn, c.serverName(), c::export)).whenComplete((s, e) -> {
+                    presenter == null ? null : () -> presenter.prefix(alpn, c.serverName(), c::export, c.handshakeProtocol())).whenComplete((s, e) -> {
                 if (e != null) f.completeExceptionally(e);
                 else f.complete(s);
             });

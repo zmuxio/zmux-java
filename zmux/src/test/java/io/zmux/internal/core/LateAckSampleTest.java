@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 class LateAckSampleTest {
     private static final long MS = Time.MILLISECOND;
     private final CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, true);
-    private final Pipe pipe = new Pipe(0, null, new Pipe.OutDir(info, null), null, null);
+    private final Pipe pipe = new Pipe(0, null, new Pipe.OutDir(info), null, null);
     private final Pipe.OutLane lane = pipe.out().lanes.get(0);
     private final List<Long> sampled = new ArrayList<>();
     private final AckEngine engine;
@@ -24,10 +24,10 @@ class LateAckSampleTest {
     LateAckSampleTest() {
         TransportParams none = new TransportParams();
         List<Pipe> pipes = List.of(pipe);
-        Pacer pacer = new Pacer(CoreConfig.defaults(), 65536, AckEngine.peerDelay(none), pipes, null);
+        Pacer pacer = new Pacer(CoreConfig.defaults(), 65536, AckEngine.peerDelay(none), null);
         engine = new AckEngine(none, none, pipes, pacer, new AckEngine.Port() {
             @Override public void activity() { }
-            @Override public void rttSampled(long min) { sampled.add(min); }
+            @Override public void rttSampled(Pipe pipe, long min) { sampled.add(min); }
             @Override public void advanced(Pipe p, Pipe.OutLane ol, boolean cum) { }
             @Override public boolean quiet() { return false; }
         });

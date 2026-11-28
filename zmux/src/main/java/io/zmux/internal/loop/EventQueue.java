@@ -45,24 +45,6 @@ final class EventQueue {
     /** The live pipes of which the application has read a PipeFailed or PipeClosed (bounded by the pipes the session holds). */
     private final java.util.Set<Long> terminalRead = new java.util.HashSet<>();
     private boolean frozen;
-    private static final class Hold {
-        int count;
-        Boolean retired;
-    }
-    private final java.util.Map<Long, Hold> holds = new java.util.HashMap<>();
-
-    void hold(long pipe) { holds.computeIfAbsent(pipe, ignored -> new Hold()).count++; }
-
-    void release(long pipe) {
-        Hold hold = holds.get(pipe);
-        if (--hold.count != 0) return;
-        holds.remove(pipe);
-        if (hold.retired != null) retire(pipe, hold.retired);
-        wakeFirst();
-    }
-
-    boolean holding() { return !holds.isEmpty(); }
-
     /** Queues e (CLOSED and the internal kinds are not application events). */
     void add(Event e) {
         if (frozen) return;
@@ -74,8 +56,12 @@ final class EventQueue {
                 retire(e.pipe(), e.flag());
             }
             case PIPE_ADDED, PIPE_JOINED -> put(new Key(kind, e.pipe(), 0, null), e, Rule.KEEP);
-            case PIPE_FAILED, PIPE_CLOSED, PIPE_SUSPECT, PIPE_RECOVERED -> put(new Key(kind, e.pipe(), e.dir(), null), e,
-                    kind == Event.Kind.PIPE_FAILED || kind == Event.Kind.PIPE_CLOSED ? Rule.KEEP : Rule.REPLACE);
+            case PIPE_FAILED, PIPE_CLOSED, PIPE_SUSPECT, PIPE_RECOVERED, PIPE_HEALTH ->
+                    put(new Key(kind, e.pipe(), e.dir(), null), e, switch (kind) {
+                        case PIPE_FAILED, PIPE_CLOSED -> Rule.KEEP;
+                        default -> Rule.REPLACE;
+                    });
+            case TARGET_CHANGED -> put(new Key(kind, 0, e.initiator() ? 1 : 0, null), e, Rule.REPLACE);
             case PIPE_QUALITY, PIPE_PRIORITY -> put(new Key(kind, e.pipe(), 0, null), e, Rule.REPLACE);
             case TIER_SATURATION -> put(new Key(kind, -1, 0, e.code()), e, Rule.REPLACE);
             // Suspended and Resumed are two keys, so an interruption is never swallowed by the resumption after it.
@@ -126,12 +112,11 @@ final class EventQueue {
      * counts in neither.
      */
     private void retire(long pipe, boolean failed) {
-        Hold hold = holds.get(pipe);
-        if (hold != null) { hold.retired = failed; return; }
         boolean read = terminalRead.remove(pipe);
         for (Event.Kind kind : PIPE_DIRECTED) {
             for (int dir : DIRECTIONS) pending.remove(new Key(kind, pipe, dir, null));
         }
+        for (int dir : DIRECTIONS) pending.remove(new Key(Event.Kind.PIPE_HEALTH, pipe, dir, null));
         for (Event.Kind kind : PIPE_UNDIRECTED) pending.remove(new Key(kind, pipe, 0, null));
         var s = summary == null ? new SessionRuntime.RetiredPipes(0, 0, 0, List.of()) : summary;
         List<Long> ids = new ArrayList<>(s.last());
@@ -147,9 +132,8 @@ final class EventQueue {
     @SuppressWarnings("ReferenceEquality") // SUMMARY is a sentinel key
     Object poll(Waiter waiter) {
         var it = pending.entrySet().iterator();
-        while (it.hasNext()) {
+        if (it.hasNext()) {
             var first = it.next();
-            if (!holds.isEmpty() && holds.containsKey(first.getKey().pipe)) continue;
             it.remove();
             if (first.getKey() == SUMMARY) summary = null;
             else if (first.getValue() instanceof Event ev && ev.pipeTerminal()) terminalRead.add(ev.pipe());
@@ -177,7 +161,6 @@ final class EventQueue {
 
     /** The mailbox has closed. No consumer can begin another poll. */
     void end() {
-        holds.clear();
         for (Waiter w : new ArrayList<>(waiters)) w.wake();
         waiters.clear();
     }

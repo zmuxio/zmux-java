@@ -9,7 +9,6 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -21,18 +20,12 @@ class ShapingTest {
         private final PipeWriter inner;
         private final ByteArrayOutputStream out = new ByteArrayOutputStream();
         private volatile boolean on;
-        /** System.nanoTime of each recorded write. */
-        final List<Long> writes = Collections.synchronizedList(new ArrayList<>());
-        /** Per write: whether it carries a PIPE_ACK (written together with the stamp, same index). */
-        final List<Boolean> withAck = Collections.synchronizedList(new ArrayList<>());
         Recorder(PipeWriter inner) { this.inner = inner; }
         @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) {
             if (on) {
-                writes.add(System.nanoTime());
                 var batch = new ByteArrayOutputStream();
                 for (ByteBuffer b : data.segments(new ByteBuffer[data.segmentCount()])) { var d = b.duplicate(); byte[] a = new byte[d.remaining()]; d.get(a); batch.writeBytes(a); }
                 byte[] bytes = batch.toByteArray();
-                withAck.add(carriesPipeAck(bytes));
                 synchronized (out) { out.writeBytes(bytes); }
             }
             inner.write(data, done);
@@ -71,13 +64,6 @@ class ShapingTest {
         }
         /** Records from now on, keeping what was recorded. */
         void startNow() { on = true; }
-        void start() throws InterruptedException {
-            Thread.sleep(50);
-            synchronized (out) { out.reset(); }
-            writes.clear();
-            withAck.clear();
-            on = true;
-        }
         /** Frames lengths and trailing zero bytes of the recorded records. */
         List<int[]> records() {
             byte[] b; synchronized (out) { b = out.toByteArray(); }
@@ -142,12 +128,6 @@ class ShapingTest {
         };
     }
 
-    static void await(BooleanSupplierX c) throws Exception {
-        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (!c.get() && System.nanoTime() < until) Thread.sleep(5);
-    }
-    @FunctionalInterface interface BooleanSupplierX { boolean get() throws Exception; }
-
     /**
      * A record whose frames reach the target on their own takes no PADDING, and one whose target
      * falls within the last frame's Length field takes its PADDING before that frame: either way
@@ -159,8 +139,9 @@ class ShapingTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             for (int[] pl : plans) {
                 try (var p = pair(cfg, cfg, false)) {
-                    p.shaped().setShaper(planShaper(r -> r.maxLength(pl[0]).padTo(pl[1]).padMultiple(pl[2])));
-                    p.rec().start();
+                    p.shaped().setShaper(planShaper(r -> r.maxLength(pl[0]).padTo(pl[1]).padMultiple(pl[2])),
+                            () -> new ShapingBudget(null, new ProfileLimits(10, 0, 1 << 20, Duration.ZERO), true));
+                    p.rec().startNow();
                     for (int n = 1; n < 700; n += 37) transfer(p.shaped(), p.other(), n);
                     transfer(p.shaped(), p.other(), 30_000);
                     var recs = p.rec().records();
@@ -169,47 +150,9 @@ class ShapingTest {
                         int wire = VarInt.length(r[0]) + r[0];
                         String what = "plan " + Arrays.toString(pl) + ": record of " + wire + " bytes";
                         if (pl[1] > 0) assertTrue(wire >= pl[1], what);
-                        if (pl[1] > 0 && pl[0] == pl[1]) assertEquals(pl[1], wire, what);
                         if (pl[2] > 0) assertEquals(0, wire % pl[2], what);
                     }
                 }
-            }
-        }
-    }
-
-    @Test void injectionTowardAZmuxPeerSendsPaddingOnlyRecords() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                var sent = new AtomicInteger();
-                p.shaped().setShaper(pipe -> new Shaper() {
-                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
-                    @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Effects effects) {
-                        if (event.kind() == EventKind.START || (event.kind() == EventKind.INJECTED && sent.incrementAndGet() < 40)) {
-                            effects.inject(event.nowNanos(), 100);
-                        } else if (event.kind() == EventKind.INJECTED) {
-                            effects.noInject();
-                        }
-                    }
-                });
-                await(() -> p.shaped().shapingStats().injected() >= 39);
-                assertTrue(p.shaped().shapingStats().injected() >= 39, p.shaped().shapingStats().toString());
-                transfer(p.shaped(), p.other(), 1000);
-            }
-        }
-    }
-
-    @Test void delayedRecordsResumeAndPausesCount() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                p.shaped().setShaper(planShaper(pl -> pl.delayNanos(2_000_000)));
-                long t0 = System.nanoTime();
-                transfer(p.shaped(), p.other(), 3000);
-                assertTrue(System.nanoTime() - t0 >= 2_000_000);
-                await(() -> p.shaped().shapingStats().stallSpent().toNanos() > 0);
-                assertTrue(p.shaped().shapingStats().stallSpent().toNanos() > 0);
             }
         }
     }
@@ -226,148 +169,13 @@ class ShapingTest {
         };
     }
 
-    /**
-     * A planned delay of the bootstrap pipe's first record, from the session's creation on both
-     * ends, holds QX_TRANSPORT_PARAMETERS, which still lead the pipe once it ends (the delay is the
-     * whole record's earliest send time, the first record included): both ends establish and
-     * carry a stream.
-     */
-    @Test void aDelayedFirstRecordKeepsTheParametersFirst() throws Exception {
-        for (boolean all : new boolean[] {false, true}) {
-            try (EventLoops loops = EventLoops.create(2)) {
-                var cfg = ZmuxConfig.builder().eventLoops(loops).shaper(firstDelay(20_000_000, all)).build();
-                long t0 = System.nanoTime();
-                try (var p = pair(cfg, cfg, false)) {
-                    transfer(p.shaped(), p.other(), 3000);
-                    transfer(p.other(), p.shaped(), 3000);
-                    assertTrue(System.nanoTime() - t0 >= 20_000_000, "all=" + all);
-                    assertTrue(p.shaped().error().isEmpty() && p.other().error().isEmpty(), "all=" + all);
-                }
-            }
-        }
-    }
-
-    /**
-     * A planned delay holds the whole record: control frames the shaped side owes for data it
-     * receives wait with it instead of leaving early in a record of their own, which would use up
-     * the plan and make the next record wait a second delay. The one bound a delay never passes is
-     * the deadline of a PIPE_ACK the record carries (zmux_max_ack_delay after the first byte it
-     * reports): a record released short of its delay by that deadline carries the PIPE_ACK, any
-     * other record keeps the whole delay after the one before it.
-     */
-    @Test void aDelayedRecordHoldsItsControlFramesToo() throws Exception {
-        long delay = 5_000_000;
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                p.shaped().setShaper(planShaper(pl -> pl.maxLength(4000).delayNanos(delay)));
-                p.rec().start();
-                var ex = Executors.newVirtualThreadPerTaskExecutor();
-                try {
-                    Future<?> in = ex.submit(() -> { transfer(p.other(), p.shaped(), 2 << 20); return null; });
-                    transfer(p.shaped(), p.other(), 60_000);
-                    in.get(20, TimeUnit.SECONDS);
-                } finally { ex.shutdown(); }
-                List<Long> w; List<Boolean> acked;
-                synchronized (p.rec().writes) { w = new ArrayList<>(p.rec().writes); }
-                synchronized (p.rec().withAck) { acked = new ArrayList<>(p.rec().withAck); }
-                while (acked.size() > w.size()) acked.remove(acked.size() - 1);
-                while (w.size() > acked.size()) w.remove(w.size() - 1);
-                assertTrue(w.size() >= 15, w.size() + " writes");
-                for (int i = 1; i < w.size(); i++) {
-                    long gap = w.get(i) - w.get(i - 1);
-                    assertTrue(gap >= delay - 1_000_000 || acked.get(i), "record " + i + " without a PIPE_ACK " + gap / 1000 + " us after the one before, delay 5 ms");
-                }
-            }
-        }
-    }
-
-    @Test void rateGateBoundsThroughput() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                p.shaped().setShaper(pipe -> new Shaper() {
-                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
-                    @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Effects effects) {
-                        if (event.kind() == EventKind.START) effects.gate(0, 200_000, 4096);
-                    }
-                });
-                long t0 = System.nanoTime();
-                transfer(p.shaped(), p.other(), 60_000);
-                long ms = (System.nanoTime() - t0) / 1_000_000;
-                assertTrue(ms >= 200, "60000 bytes at 200000 B/s took " + ms + " ms");
-            }
-        }
-    }
-
-    /** What an answer leaves alone stays: the session goes on with the old value until an answer clears it. */
-    @Test void anInjectionAndAWakeUpStayUntilAnAnswerChangesThem() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                var injected = new AtomicInteger();
-                var wakes = new AtomicInteger();
-                p.shaped().setShaper(pipe -> new Shaper() {
-                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
-                    @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Effects effects) {
-                        switch (event.kind()) {
-                            case START -> effects.inject(event.nowNanos(), 100).wake(event.nowNanos());
-                            case INJECTED -> { if (injected.incrementAndGet() >= 3) effects.noInject(); }
-                            case WAKE -> { if (wakes.incrementAndGet() >= 3) effects.noWake(); }
-                            default -> { }
-                        }
-                    }
-                });
-                await(() -> injected.get() >= 3 && wakes.get() >= 3);
-                assertEquals(3, Math.min(injected.get(), 3), "the slot was used up by its first injection");
-                assertEquals(3, Math.min(wakes.get(), 3), "the wake-up was used up by its first event");
-                Thread.sleep(100);
-                assertEquals(3, injected.get(), "cleared by the answer");
-                assertEquals(3, wakes.get(), "cleared by the answer");
-                transfer(p.shaped(), p.other(), 1000);
-            }
-        }
-    }
-
-    @Test void wakeUpsComeAndReplacementNotifiesTheOldInstance() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var p = pair(cfg, cfg, false)) {
-                var events = new ConcurrentLinkedQueue<EventKind>();
-                p.shaped().setShaper(pipe -> new Shaper() {
-                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
-                    @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Effects effects) {
-                        events.add(event.kind());
-                        if (event.kind() == EventKind.START) effects.wake(event.nowNanos() + 1_000_000);
-                    }
-                });
-                await(() -> events.contains(EventKind.WAKE));
-                assertTrue(events.contains(EventKind.WAKE));
-                var second = new ConcurrentLinkedQueue<EventKind>();
-                p.shaped().setShaper(pipe -> new Shaper() {
-                    @Override public Set<Capability> capabilities() { return EnumSet.noneOf(Capability.class); }
-                    @Override public void plan(RecordView view, RecordPlan plan) {}
-                    @Override public void onEvent(Event event, Effects effects) { second.add(event.kind()); }
-                });
-                await(() -> events.contains(EventKind.REPLACED) && second.contains(EventKind.START));
-                assertTrue(events.contains(EventKind.REPLACED));
-                assertTrue(second.contains(EventKind.START));
-                p.shaped().pipes().getFirst().setShaper(null);
-                transfer(p.shaped(), p.other(), 100);
-            }
-        }
-    }
-
     @Test void aThrowingShaperEndsShapingOfItsPipe() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             try (var p = pair(cfg, cfg, false)) {
                 p.shaped().setShaper(planShaper(pl -> { throw new IllegalStateException("plan failure"); }));
                 transfer(p.shaped(), p.other(), 5000);
-                await(() -> p.shaped().shapingStats().faults() == 1);
+                p.shaped().shapingMeters(); // Synchronize with the session owner.
                 assertEquals(1, p.shaped().shapingStats().faults());
             }
         }

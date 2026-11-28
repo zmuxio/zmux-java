@@ -1,5 +1,8 @@
 package io.zmux.http;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import io.zmux.Role;
@@ -7,7 +10,7 @@ import io.zmux.Zmux;
 import io.zmux.ZmuxListener;
 import io.zmux.ZmuxSession;
 import io.zmux.ZmuxStream;
-import io.zmux.Admission;
+
 import io.zmux.HttpStatusException;
 import io.zmux.PrefixAuth;
 import java.io.IOException;
@@ -33,13 +36,13 @@ import org.junit.jupiter.api.Timeout;
  *   <li>ZMUX_GO_EXCHANGE_PEER: zmux-go's test binary ({@code go test -c}), run as
  *       {@code TestHTTPExchangeInterop};
  *   <li>ZMUX_RS_EXCHANGE_PEER: zmux-rs's {@code exchange_interop} example;
- *   <li>ZMUX_GO_HTTP_PEER, ZMUX_RS_HTTP_PEER: streaming peers ({@code server|client|bad KIND ADDR}, KIND stream, split, stream2 or split2 for h2c): PrefixAuth "right" as the body prefix or header form, a fallback that answers 418;
+ *   <li>ZMUX_GO_HTTP_PEER, ZMUX_RS_HTTP_PEER: streaming peers ({@code server|client|bad KIND ADDR}, KIND stream, split, stream2 or split2 (split uses TLS)): PrefixAuth "right" as the body prefix or header form, a fallback that answers 418;
  *       KIND tls1 and tls2 (HTTP/1.1 and HTTP/2 over TLS 1.3, multipath, the client joins a second carrier
  *       in Bound, else Sealed, and prints MODE), behind (that server in cleartext, behind a TLS front)
  *       and, for the Rust client, wsh2 (a WebSocket over an HTTP/2 extended CONNECT joined in Bound);
  *   <li>ZMUX_GO_TLS_FRONT: a reverse proxy that terminates TLS ({@code ADDR UPSTREAM}, h2c upstream);
  *   <li>ZMUX_GO_WS_PEER, ZMUX_RS_WS_PEER: WebSocket peers ({@code server|client|bad ADDR}):
- *       PrefixAuth "ws-interop" (30 s slots, skew 1) in the upgrade's header field, a fallback
+ *       PrefixAuth "ws-interop" (30 s slots, skew 1) in the secure upgrade's header field, a fallback
  *       that answers 418 and prints FALLBACK, a session that echoes one stream;
  * </ul>
  *
@@ -89,7 +92,8 @@ class HttpInteropTest {
 
     // ---- WebSocket ----
 
-    static final PrefixAuth WS_AUTH = new PrefixAuth("ws-interop".getBytes(StandardCharsets.US_ASCII), Duration.ofSeconds(30), false, 1, 0);
+    static final AdmissionHttpTest.TicketFixture WS_TICKET = new AdmissionHttpTest.TicketFixture("ws-interop");
+    static final PrefixAuth WS_AUTH = WS_TICKET.presenter();
 
     @Test void webSocketWithGo() throws Exception { webSocket("ZMUX_GO_WS_PEER"); }
 
@@ -100,9 +104,9 @@ class HttpInteropTest {
         assumeTrue(bin != null && !bin.isEmpty(), env + " not set");
         // The peer's clients against a Java server.
         var seen = new LinkedBlockingQueue<String>();
-        var verifier = WS_AUTH.verifier();
-        try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()), e -> e.webSocket(),
-                false, () -> new Teapot(seen))) {
+        var verifier = WS_TICKET.verifier();
+        try (var f = new Fixture(b -> b, l -> l.admission(verifier.admission().refusal(io.zmux.AdmissionVerdict.FALLBACK).build()), e -> e.webSocket(),
+                true, () -> new Teapot(seen))) {
             Thread echo = echoSessions(f.listener);
             String addr = "127.0.0.1:" + f.base.getPort();
             assertEquals("OK ping", lastLine(run(List.of(bin, "client", addr))));
@@ -117,8 +121,8 @@ class HttpInteropTest {
         Peer peer = startServer(a -> List.of(bin, "server", a), Map.of());
         String addr = peer.addr();
         Process p = peer.process();
-        try (var f = Fixture.plain(b -> b); var hc = f.client(b -> b)) {
-            URI u = URI.create("ws://" + addr + "/zmux");
+        try (var f = Fixture.plain(b -> b); var hc = f.client(b -> peerTls(b))) {
+            URI u = URI.create("wss://" + addr + "/zmux");
             try (ZmuxSession s = Zmux.open(hc.webSocketPipe(u, Map.of(), List.of(), WS_AUTH), Role.CLIENT, f.config)) {
                 assertEquals("ping", new String(pingPong(s), StandardCharsets.US_ASCII));
             }
@@ -140,7 +144,13 @@ class HttpInteropTest {
     static final io.zmux.PipeOptions.Direction BIDI = io.zmux.PipeOptions.Direction.BIDIRECTIONAL;
 
     static PrefixAuth streamAuth(String key) {
-        return new PrefixAuth(key.getBytes(StandardCharsets.US_ASCII), Duration.ofSeconds(30), false, 1, 0);
+        return new AdmissionHttpTest.TicketFixture(key).presenter();
+    }
+
+    private static HttpCarrierClient.Builder peerTls(HttpCarrierClient.Builder builder) {
+        return builder.tls(io.netty.handler.ssl.SslContextBuilder.forClient()
+                .sslProvider(io.netty.handler.ssl.SslProvider.JDK)
+                .trustManager(io.netty.handler.ssl.util.InsecureTrustManagerFactory.INSTANCE).protocols("TLSv1.3"));
     }
 
     private static void streaming(String env) throws Exception {
@@ -150,9 +160,9 @@ class HttpInteropTest {
             boolean split = kind.startsWith("split"), h2 = kind.endsWith("2");
             // The peer's client against a Java server.
             var seen = new LinkedBlockingQueue<String>();
-            var verifier = streamAuth("right").verifier();
-            try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()), e -> e.streaming(),
-                    false, () -> new Teapot(seen))) {
+            var verifier = new AdmissionHttpTest.TicketFixture("right").verifier();
+            try (var f = new Fixture(b -> b, l -> l.admission(verifier.admission().refusal(io.zmux.AdmissionVerdict.FALLBACK).build()), e -> e.streaming(),
+                    split, () -> new Teapot(seen))) {
                 Thread echo = echoSessions(f.listener);
                 String addr = "127.0.0.1:" + f.base.getPort();
                 assertEquals("OK ping", lastLine(run(List.of(bin, "client", kind, addr))), kind);
@@ -166,8 +176,11 @@ class HttpInteropTest {
             Peer peer = startServer(a -> List.of(bin, "server", kind, a), Map.of());
             String addr = peer.addr();
             Process p = peer.process();
-            try (var f = Fixture.plain(b -> b); var hc = f.client(b -> h2 ? b.http2() : b.http1())) {
-                URI u = URI.create("http://" + addr + "/zmux");
+            try (var f = Fixture.plain(b -> b); var hc = f.client(b -> {
+                if (split) peerTls(b);
+                return h2 ? b.http2() : b.http1();
+            })) {
+                URI u = URI.create((split ? "https://" : "http://") + addr + "/zmux");
                 var pipe = split ? hc.splitPipe(u, Map.of(), streamAuth("right"))
                         : hc.pipe(u, Map.of(), BIDI, streamAuth("right"));
                 try (ZmuxSession s = Zmux.open(pipe, Role.CLIENT, f.config)) {
@@ -196,7 +209,7 @@ class HttpInteropTest {
 
     /** The peers' session configuration: multipath, joins in Bound only on a carrier that declares the contract. */
     static io.zmux.ZmuxConfig.Builder mp(io.zmux.ZmuxConfig.Builder b) {
-        return b.pipeAuth(io.zmux.PipeAuth.psk(JOIN_PSK).withEndToEnd()).maxPipes(4)
+        return b.pipeAuth(io.zmux.PipeAuth.psk(JOIN_PSK).withEndToEnd()).sessionPolicy(new SessionPolicy(new CapacityLimits(4)))
                 .allowRecordMode((c, m, p) -> m == io.zmux.RecordMode.SEALED || (m == io.zmux.RecordMode.BOUND && c.isSecure() && c.isExporterPresent()));
     }
 

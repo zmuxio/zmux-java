@@ -2,7 +2,7 @@ package io.zmux;
 
 import java.util.Locale;
 
-/** A kind of carrier that {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} may use. */
+/** A kind of carrier that {@link SessionController#open} may use. */
 public enum CarrierKind {
     /** A WebSocket: one binary message per record. */
     WEBSOCKET,

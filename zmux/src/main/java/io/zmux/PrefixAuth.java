@@ -1,252 +1,356 @@
 package io.zmux;
 
+import io.zmux.PrefixStore.Attempt;
+import io.zmux.PrefixStore.Claim;
+import io.zmux.PrefixStore.Generation;
+import io.zmux.PrefixStore.Schedule;
+import io.zmux.PrefixStore.Window;
+import io.zmux.carrier.Framing;
+import io.zmux.internal.random.OsRandom;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Prefix authentication tokens: a carrier starts with {@link
- * #TOKEN_LENGTH} bytes, a random Nonce and a MAC over a time slot, an optional binding to the
- * carrier's TLS handshake, and the Nonce. A carrier decided on its HTTP request head
- * (WebSocket, WebTransport, a request without a body) carries the token in a request header
- * field instead, as {@link #HEADER_LENGTH} characters of base64url without padding. key,
- * slot, bindTls and headerField must be the same on both ends; skew and cacheSize are the
- * verifier's. As a {@link CarrierCredential} it presents a fresh token on every carrier.
- *
- * @param key the pre-shared key, not empty
- * @param slot the slot length, a whole number of seconds
- * @param bindTls tokens are bound to the carrier's TLS handshake through the exporter
- *     ({@link #binding}); a token is then valid on that carrier (or the connection carrying
- *     the request) only
- * @param skew slots on either side of the verifier's current slot it also accepts
- * @param cacheSize bound of the Nonces the verifier records while their slot is acceptable;
- *     0: 65536 (a record of no Nonce would reject every token); a token that finds it full is
- *     rejected
- * @param headerField the request field of the header form (null or empty: {@link
- *     #HEADER_FIELD}), another name only where an intermediary strips unknown fields
+ * Presents a fresh ticket on each independently admitted carrier.
+ * A single-use ticket may be consumed even when the carrier is never admitted, for example
+ * if cancellation or a lost commit receipt prevents acceptance from reaching the caller.
+ * The {@link Verifier} allows up to one second to resolve an uncertain commit receipt.
+ * Obtain a new ticket for a retry after an uncertain outcome.
  */
-public record PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, int cacheSize, String headerField)
-        implements CarrierCredential {
-    public static final int TOKEN_LENGTH = 32;
-    /** The length of a token in the header form: 32 bytes in base64url without padding. */
-    public static final int HEADER_LENGTH = 43;
-    /** The request header field that carries the token when a carrier is decided on its request head. */
+public final class PrefixAuth implements CarrierCredential, AutoCloseable {
+    public static final int TOKEN_LENGTH = 64;
+    public static final int HEADER_LENGTH = 86;
     public static final String HEADER_FIELD = "Zmux-Prefix-Auth";
-    /** The TLS exporter label of the binding. */
     public static final String EXPORTER_LABEL = "EXPORTER-zmux-prefix-auth";
-    private static final int NONCE = 16;
-    private static final byte[] LABEL = "zmux-prefix-auth/1".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-    private static final SecureRandom RANDOM = new SecureRandom();
 
-    public PrefixAuth {
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(slot, "slot");
-        if (key.length == 0) throw new IllegalArgumentException("empty key");
-        if (slot.compareTo(Duration.ofSeconds(1)) < 0 || slot.toNanosPart() != 0) throw new IllegalArgumentException("slot must be whole seconds");
-        if (skew < 0 || cacheSize < 0) throw new IllegalArgumentException("negative bound");
-        if (headerField == null || headerField.isEmpty()) headerField = HEADER_FIELD;
-        else if (!headerField.chars().allMatch(PrefixAuth::tokenChar)) throw new IllegalArgumentException("invalid header field name");
-        key = key.clone();
+    private static final int TAG_LENGTH = 16;
+    private static final byte[] UNBOUND = new byte[0];
+    private static final Base64.Encoder HEADER_ENCODER = Base64.getUrlEncoder().withoutPadding();
+
+    /**
+     * The agreed carrier form. On an unencrypted stream, allowCleartextBearer opts into
+     * the risk of another presenter spending the token first. A header always needs encryption.
+     */
+    public record CarrierOptions(boolean bound, boolean allowCleartextBearer, String headerField) {
+        public CarrierOptions(boolean bound, boolean allowCleartextBearer) {
+            this(bound, allowCleartextBearer, HEADER_FIELD);
+        }
+
+        public CarrierOptions {
+            Objects.requireNonNull(headerField);
+            if (headerField.isEmpty() || !headerField.chars().allMatch(PrefixAuth::tokenChar)) {
+                throw new IllegalArgumentException("invalid prefix header field");
+            }
+        }
+
+        private byte[] binding(Admission.CarrierInfo info, boolean head) {
+            if (info == null || info.earlyData()
+                    || ((head || !allowCleartextBearer) && !info.outerSecurity().encrypted())) return null;
+            if (!bound) return UNBOUND;
+            if (!info.outerSecurity().permitsBinding()) return null;
+            byte[] exporter = info.exportKeyingMaterial(EXPORTER_LABEL, UNBOUND, 32);
+            return exporter != null && exporter.length == 32 ? exporter.clone() : null;
+        }
     }
 
-    /** With the default header field {@link #HEADER_FIELD}. */
-    public PrefixAuth(byte[] key, Duration slot, boolean bindTls, int skew, int cacheSize) {
-        this(key, slot, bindTls, skew, cacheSize, HEADER_FIELD);
+    private final CarrierOptions options;
+    private final Window window;
+    private final PrefixStore.Id id;
+    private final PrefixKey ticketKey;
+    private boolean closed;
+    private final List<Generation> generations;
+    private final Clock clock;
+    private final SecureRandom random;
+
+    /** The generations select the outer key by the presenter's UTC issue slot. */
+    public PrefixAuth(CarrierOptions options, Duration slotLength, PrefixStore.Id id, byte[] ticketKey, List<Generation> generations) {
+        this(options, slotLength, id, ticketKey, generations, Clock.systemUTC(), null);
     }
 
-    /** This configuration with another header field name (agreed by both ends). */
-    public PrefixAuth withHeaderField(String name) { return new PrefixAuth(key, slot, bindTls, skew, cacheSize, name); }
-
-    @Override public byte[] key() { return key.clone(); }
-
-    @Override
-    public boolean equals(Object o) {
-        return o instanceof PrefixAuth a && MessageDigest.isEqual(key, a.key) && slot.equals(a.slot) && bindTls == a.bindTls
-                && skew == a.skew && cacheSize == a.cacheSize && headerField.equals(a.headerField);
+    /**
+     * With a host-provided UTC clock and cryptographically secure randomness. A null source
+     * uses the OS entropy source. A host source must be reseeded after snapshot restore.
+     */
+    public PrefixAuth(CarrierOptions options, Duration slotLength, PrefixStore.Id id, byte[] ticketKey, List<Generation> generations,
+                      Clock clock, SecureRandom random) {
+        this.options = Objects.requireNonNull(options);
+        this.window = new Window(slotLength, 0);
+        this.id = Objects.requireNonNull(id);
+        this.clock = Objects.requireNonNull(clock);
+        this.random = random;
+        this.ticketKey = new PrefixKey(ticketKey);
+        try {
+            this.generations = PrefixStore.copyGenerations(generations);
+        } catch (RuntimeException invalid) {
+            this.ticketKey.clear();
+            throw invalid;
+        }
     }
 
-    @Override
-    public int hashCode() { return Objects.hash(slot, bindTls, skew, cacheSize, headerField); }
+    @Override public byte[] prefix(Admission.CarrierInfo info) throws IOException { return present(info, false); }
 
-    /** The key never appears in a string. */
-    @Override
-    public String toString() {
-        return "PrefixAuth[slot=" + slot + ", bindTls=" + bindTls + ", skew=" + skew + ", cacheSize=" + cacheSize + ", headerField=" + headerField + "]";
+    @Override public HeaderField header(Admission.CarrierInfo info) throws IOException {
+        return new HeaderField(options.headerField(), HEADER_ENCODER.encodeToString(present(info, true)));
     }
 
-    /** An RFC 9110 token character, as a field name consists of. */
+    private synchronized byte[] present(Admission.CarrierInfo info, boolean head) throws IOException {
+        if (closed) throw new IOException("prefix presenter closed");
+        byte[] binding = options.binding(info, head);
+        if (binding == null) throw new IOException("prefix authentication unavailable on this carrier");
+        long now = clock.instant().getEpochSecond();
+        if (now < 0) throw new IOException("prefix authentication needs a nonnegative UTC time");
+        long slot = window.slot(now);
+        for (Generation generation : generations) {
+            if (generation.contains(slot)) {
+                byte[] nonce = new byte[TAG_LENGTH];
+                if (random == null) OsRandom.fill(nonce);
+                else random.nextBytes(nonce);
+                return token(generation, id, ticketKey.mac(), slot, binding, nonce);
+            }
+        }
+        throw new IOException("no outer key for the prefix issue slot");
+    }
+
+    /** Stops presentation and clears the presenter's copies of its ticket key and outer keys. */
+    @Override public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        ticketKey.clear();
+        generations.forEach(Generation::clearKey);
+    }
+
     private static boolean tokenChar(int c) {
         return c > 0x20 && c < 0x7f && "\"(),/:;<=>?@[\\]{}".indexOf(c) < 0;
     }
 
-    /**
-     * A fresh token for the current time slot, bound to info's exporter with bindTls (a
-     * carrier without TLS is then an error).
-     */
-    @Override
-    public byte[] prefix(Admission.CarrierInfo info) throws java.io.IOException {
-        byte[] b = null;
-        if (bindTls) {
-            b = info == null ? null : binding(info);
-            if (b == null) throw new NoExporterException();
-        }
-        return token(b);
-    }
-
-    /** The header form of a fresh token: {@link #headerField()} with the token in base64url without padding. */
-    @Override
-    public CarrierCredential.HeaderField header(Admission.CarrierInfo info) throws java.io.IOException {
-        return new CarrierCredential.HeaderField(headerField, Base64.getUrlEncoder().withoutPadding().encodeToString(prefix(info)));
-    }
-
-    /**
-     * The token of a header form value: exactly {@link #HEADER_LENGTH} base64url characters
-     * without padding whose unused bits are zero; null otherwise.
-     */
+    /** Decodes a canonical unpadded base64url header, or returns null. */
     public static byte[] decodeHeader(String value) {
         if (value == null || value.length() != HEADER_LENGTH) return null;
-        for (int i = 0; i < HEADER_LENGTH; i++) {
-            char c = value.charAt(i);
-            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return null;
-        }
-        // 43 characters carry 258 bits: the last one's low 2 bits are unused and must be zero.
-        int last = value.charAt(HEADER_LENGTH - 1);
-        int sextet = last >= 'A' && last <= 'Z' ? last - 'A' : last >= 'a' && last <= 'z' ? last - 'a' + 26
-                : last >= '0' && last <= '9' ? last - '0' + 52 : last == '-' ? 62 : 63;
-        if ((sextet & 3) != 0) return null;
-        byte[] t = Base64.getUrlDecoder().decode(value);
-        return t.length == TOKEN_LENGTH ? t : null;
-    }
-
-    /** The binding of a TLS carrier: 32 bytes of the exporter with {@link #EXPORTER_LABEL} and an empty context; null without TLS. */
-    public static byte[] binding(Admission.CarrierInfo info) {
-        return info.tls() ? info.exportKeyingMaterial(EXPORTER_LABEL, new byte[0], 32) : null;
-    }
-
-    /** A token for the current slot; binding is the carrier's {@link #binding} when bindTls, else null. */
-    byte[] token(byte[] binding) {
-        byte[] nonce = new byte[NONCE];
-        RANDOM.nextBytes(nonce);
-        return token(binding, System.currentTimeMillis() / 1000, nonce);
-    }
-
-    byte[] token(byte[] binding, long nowSeconds, byte[] nonce) {
-        byte[] b = binding == null ? new byte[0] : binding;
-        if (b.length > 255) throw new IllegalArgumentException("binding over 255 bytes");
-        byte[] out = new byte[TOKEN_LENGTH];
-        System.arraycopy(nonce, 0, out, 0, NONCE);
-        System.arraycopy(tag(mac(derive()), Math.floorDiv(nowSeconds, slot.toSeconds()), b, nonce, 0), 0, out, NONCE, NONCE);
-        return out;
-    }
-
-    /** The token key. */
-    byte[] derive() {
-        Mac m = mac(key);
-        m.update(LABEL);
-        return m.doFinal();
-    }
-
-    private static Mac mac(byte[] k) {
         try {
-            Mac m = Mac.getInstance("HmacSHA256");
-            m.init(new SecretKeySpec(k, "HmacSHA256"));
-            return m;
-        } catch (java.security.GeneralSecurityException e) {
-            throw new IllegalStateException(e);
+            byte[] token = Base64.getUrlDecoder().decode(value);
+            return token.length == TOKEN_LENGTH && HEADER_ENCODER.encodeToString(token).equals(value) ? token : null;
+        } catch (IllegalArgumentException malformed) {
+            return null;
         }
     }
 
-    private static byte[] tag(Mac m, long slot, byte[] binding, byte[] src, int nonceAt) {
-        m.reset();
-        m.update(ByteBuffer.allocate(9).putLong(slot).put((byte) binding.length).array());
-        m.update(binding);
-        m.update(src, nonceAt, NONCE);
-        byte[] t = new byte[NONCE];
-        System.arraycopy(m.doFinal(), 0, t, 0, NONCE);
-        return t;
+    static byte[] token(Generation generation, PrefixStore.Id id, byte[] key, long slot, byte[] binding, byte[] nonce) {
+        return token(generation, id, PrefixKey.mac(key), slot, binding, nonce);
     }
 
-    /** A verifier of this configuration. */
-    public Verifier verifier() { return new Verifier(this); }
+    private static byte[] token(Generation generation, PrefixStore.Id id, Mac ticket, long slot, byte[] binding, byte[] nonce) {
+        if (nonce.length != TAG_LENGTH || (binding.length != 0 && binding.length != 32)) {
+            throw new IllegalArgumentException("invalid prefix nonce or binding length");
+        }
+        byte[] token = Arrays.copyOf(nonce, TOKEN_LENGTH);
+        Mac outer = generation.mac();
+        byte[] masked = xor(id.bytes(), outerTag(outer, 0, token, TAG_LENGTH));
+        System.arraycopy(masked, 0, token, 16, TAG_LENGTH);
+        System.arraycopy(outerTag(outer, 1, token, 32), 0, token, 32, TAG_LENGTH);
+        System.arraycopy(ticketTag(ticket, id.bytes(), token, slot, binding), 0, token, 48, TAG_LENGTH);
+        return token;
+    }
+
+    private static byte[] xor(byte[] value, byte[] mask) {
+        for (int i = 0; i < TAG_LENGTH; i++) value[i] ^= mask[i];
+        return value;
+    }
+
+    private static byte[] outerTag(Mac mac, int domain, byte[] token, int length) {
+        mac.update((byte) domain);
+        mac.update(token, 0, length);
+        return Arrays.copyOf(mac.doFinal(), TAG_LENGTH);
+    }
+
+    private static byte[] ticketTag(Mac mac, byte[] id, byte[] token, long slot, byte[] binding) {
+        mac.update((byte) 2);
+        mac.update(id);
+        mac.update(token, 0, 48);
+        mac.update(ByteBuffer.allocate(9).putLong(slot).put((byte) binding.length).array());
+        mac.update(binding);
+        return Arrays.copyOf(mac.doFinal(), TAG_LENGTH);
+    }
+
+    // This value also passes through admission plumbing before Establish has delivered a peer.
+    private record BoundPrincipal(PrefixStore.Id id) {}
+
+    /** The ID proven on the accepted bootstrap carrier, after any inner handshake completes. */
+    public static Optional<PrefixStore.Id> boundPrincipal(ZmuxSession session) {
+        Object value = session.bootstrapAdmission();
+        return value instanceof BoundPrincipal(var id) ? Optional.of(id) : Optional.empty();
+    }
 
     /**
-     * Verifies tokens and rejects each Nonce after its first use. Safe for concurrent use. As an
-     * {@link Admission.Decider} (with peek {@link #TOKEN_LENGTH}) it accepts a carrier whose prefix
-     * is a valid token, without the token; on a carrier decided on its request head
-     * ({@link Admission.Stage#HEAD}) the token is the request's only header field
-     * {@link PrefixAuth#headerField()} ({@link #decodeHeader}), and the accept skips nothing.
-     * Otherwise, and with bindTls on a carrier without an exporter, it answers
-     * {@link Admission.Decision#FALLBACK}.
+     * A verifier of the specified carrier form and shared domain.
+     * A committed single-use ticket stays consumed even if cancellation, carrier loss or an
+     * unconfirmed receipt prevents admission. If a commit fails without a known outcome,
+     * the verifier queries its original commit ID for up to one second. A late confirmation
+     * can settle accounting but cannot admit a carrier beyond the original deadline.
      */
     public static final class Verifier implements Admission.Decider {
-        private final boolean bind;
-        private final String header;
-        private final long slot, skew;
-        private final byte[] k;
-        private final ThreadLocal<Mac> macs;
-        private final ReplayFilter nonces;
-        java.util.function.LongSupplier clock = () -> System.currentTimeMillis() / 1000;
+        private final CarrierOptions options;
+        private final PrefixStore store;
+        private final Window window;
+        private final Clock clock;
 
-        private Verifier(PrefixAuth a) {
-            bind = a.bindTls;
-            header = a.headerField;
-            slot = a.slot.toSeconds();
-            skew = a.skew;
-            k = a.derive();
-            // The filter reads the clock field on each use, so a clock set later takes effect.
-            java.time.Clock filterClock = new java.time.Clock() {
-                @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
-                @Override public java.time.Clock withZone(java.time.ZoneId z) { return this; }
-                @Override public java.time.Instant instant() { return java.time.Instant.ofEpochSecond(clock.getAsLong()); }
-            };
-            // Tokens of a slot in [cur - skew, cur + skew] verify; a stamp is its slot's start.
-            nonces = new ReplayFilter(java.time.Duration.ofSeconds((skew + 1) * slot), a.cacheSize == 0 ? 1 << 16 : a.cacheSize, null, filterClock);
-            macs = ThreadLocal.withInitial(() -> mac(k));
+        public Verifier(CarrierOptions options, PrefixStore store) {
+            this(options, store, 2, Clock.systemUTC());
         }
 
-        /** Whether token is valid for binding (null: none) and its Nonce is new. */
-        public boolean verify(byte[] token, byte[] binding) {
-            byte[] b = binding == null ? new byte[0] : binding;
-            if (token == null || token.length != TOKEN_LENGTH || b.length > 255) return false;
-            long cur = Math.floorDiv(clock.getAsLong(), slot);
-            Mac m = macs.get();
-            byte[] got = java.util.Arrays.copyOfRange(token, NONCE, TOKEN_LENGTH);
-            boolean found = false;
-            long at = 0;
-            for (long d = 0; d <= 2 * skew && !found; d++) {
-                long s = d % 2 == 1 ? cur - (d + 1) / 2 : cur + (d + 1) / 2; // cur, cur-1, cur+1, ...
-                if (MessageDigest.isEqual(tag(m, s, b, token, 0), got)) { found = true; at = s; }
+        public Verifier(CarrierOptions options, PrefixStore store, int maxSkew, Clock clock) {
+            this.options = Objects.requireNonNull(options);
+            this.store = Objects.requireNonNull(store);
+            this.window = Objects.requireNonNull(store.window());
+            this.clock = Objects.requireNonNull(clock);
+            if (maxSkew < window.skew()) throw new IllegalArgumentException("prefix skew exceeds the local limit");
+        }
+
+        /** Sets the stream peek and first-message read limit for protected admission. */
+        public Admission.Builder admission() {
+            return Admission.builder(TOKEN_LENGTH, this).maxMessage(TOKEN_LENGTH).refusal(AdmissionVerdict.CLOSE);
+        }
+
+        @Override public CompletionStage<Admission.Decision> decide(Admission.CarrierInfo info, ByteBuffer prefix,
+                                                                    Admission.Deadline deadline) {
+            var decision = new CompletableFuture<Admission.Decision>();
+            var attempt = new Attempt(deadline, decision::isCancelled, () -> {
+                long seconds = clock.instant().getEpochSecond();
+                return seconds < 0 ? OptionalLong.empty() : OptionalLong.of(window.slot(seconds));
+            });
+            try {
+                boolean head = info.stage() == Admission.Stage.HEAD;
+                if (head && info.authenticatedEnvelope()) {
+                    return CompletableFuture.completedFuture(attempt.active()
+                            && !info.earlyData()
+                            ? Admission.Decision.accept(0) : Admission.Decision.CLOSE);
+                }
+                byte[] token = decode(info, prefix, head);
+                byte[] binding = token == null ? null : options.binding(info, head);
+                if (binding == null || !attempt.active()) return CompletableFuture.completedFuture(Admission.Decision.CLOSE);
+                redeem(token, binding, attempt).whenComplete((id, error) -> decision.complete(
+                        error == null && id != null && attempt.active()
+                                ? Admission.Decision.accept(head ? 0 : TOKEN_LENGTH, options.bound() ? new BoundPrincipal(id) : null)
+                                : Admission.Decision.CLOSE));
+            } catch (RuntimeException unavailable) {
+                decision.complete(Admission.Decision.CLOSE);
             }
-            if (!found) return false;
-            return nonces.check(java.util.Arrays.copyOf(token, NONCE), at * slot * 1000) == ReplayVerdict.FRESH;
+            return decision;
         }
 
-        @Override public java.util.concurrent.CompletionStage<Admission.Decision> decide(Admission.CarrierInfo info, ByteBuffer prefix,
-                                                                                    Admission.Deadline deadline) {
-            return java.util.concurrent.CompletableFuture.completedFuture(decide(info, prefix));
+        private byte[] decode(Admission.CarrierInfo info, ByteBuffer prefix, boolean head) {
+            if (head) {
+                var fields = info.header(options.headerField());
+                return fields.size() == 1 ? decodeHeader(fields.getFirst()) : null;
+            }
+            if (prefix.remaining() < TOKEN_LENGTH || (info.framing() == Framing.MESSAGES && prefix.remaining() != TOKEN_LENGTH)) {
+                return null;
+            }
+            byte[] token = new byte[TOKEN_LENGTH];
+            prefix.duplicate().get(token);
+            return token;
         }
 
-        /** The decision on a carrier, taken at once. */
-        public Admission.Decision decide(Admission.CarrierInfo info, ByteBuffer prefix) {
-            byte[] binding = null;
-            if (bind) {
-                binding = binding(info);
-                if (binding == null) return Admission.Decision.FALLBACK;
-            }
-            if (info.stage() == Admission.Stage.HEAD) {
-                var values = info.header(header);
-                byte[] t = values.size() == 1 ? decodeHeader(values.getFirst()) : null;
-                return t != null && verify(t, binding) ? Admission.Decision.accept(0) : Admission.Decision.FALLBACK;
-            }
-            if (prefix.remaining() != TOKEN_LENGTH) return Admission.Decision.FALLBACK;
-            byte[] t = new byte[TOKEN_LENGTH];
-            prefix.duplicate().get(t);
-            return verify(t, binding) ? Admission.Decision.accept(TOKEN_LENGTH) : Admission.Decision.FALLBACK;
+        private CompletionStage<PrefixStore.Id> redeem(byte[] token, byte[] binding, Attempt attempt) {
+            var local = attempt.localSlot();
+            Schedule schedule = store.localSchedule();
+            if (local.isEmpty() || schedule == null) return CompletableFuture.completedFuture(null);
+            long prechecked = PrefixStore.later(local.getAsLong(), schedule.floorHint());
+            Generation first = uniqueOuter(schedule, token, prechecked);
+            if (first == null || !attempt.active()) return CompletableFuture.completedFuture(null);
+            return store.floor(attempt).thenCompose(floor -> {
+                if (!attempt.active()) return CompletableFuture.completedFuture(null);
+                long current = PrefixStore.later(local.getAsLong(), floor);
+                Generation selected = schedule.sameEligible(window, prechecked, current) ? first : uniqueOuter(schedule, token, current);
+                if (selected == null) return CompletableFuture.completedFuture(null);
+                PrefixStore.Id id = PrefixStore.Id.of(xor(Arrays.copyOfRange(token, 16, 32), outerTag(selected.mac(), 0, token, TAG_LENGTH)));
+                return store.lookup(id, attempt).thenCompose(ticket -> {
+                    if (ticket == null || !id.equals(ticket.id()) || !ticket.liveAt(current) || !attempt.active()) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    var issue = matchSlot(ticket.mac(), id.bytes(), token, binding, selected, current, window);
+                    if (issue.isEmpty() || !attempt.active()) return CompletableFuture.completedFuture(null);
+                    try {
+                        var claim = new Claim(id, PrefixStore.Id.read(ByteBuffer.wrap(token)), commitId(), ticket.version(),
+                                schedule.version(), selected.firstSlot(), issue.getAsLong(), current);
+                        return commit(claim, attempt).thenApply(ok -> Boolean.TRUE.equals(ok) ? id : null);
+                    } catch (IOException unavailable) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                });
+            });
         }
+
+        private CompletionStage<Boolean> commit(Claim claim, Attempt attempt) {
+            if (!attempt.active()) return CompletableFuture.completedFuture(false);
+            CompletionStage<Boolean> pending;
+            try {
+                pending = store.claim(claim, attempt);
+            } catch (RuntimeException uncertain) {
+                return resolve(claim);
+            }
+            return pending.exceptionallyCompose(uncertain -> resolve(claim));
+        }
+
+        private CompletionStage<Boolean> resolve(Claim claim) {
+            // Resolve under a separate bound even when the original admission has ended.
+            var timeout = java.util.concurrent.TimeUnit.SECONDS;
+            var deadline = new Admission.Deadline(System.nanoTime() + timeout.toNanos(1));
+            var result = new CompletableFuture<Boolean>().completeOnTimeout(false, 1, timeout);
+            store.resolveClaim(claim, deadline).whenComplete((ok, failure) ->
+                    result.complete(failure == null && !deadline.expired() && Boolean.TRUE.equals(ok)));
+            return result;
+        }
+
+        private Generation uniqueOuter(Schedule schedule, byte[] token, long current) {
+            Generation selected = null;
+            int matches = 0;
+            byte[] received = Arrays.copyOfRange(token, 32, 48);
+            for (Generation generation : schedule.generations()) {
+                if (generation.eligible(window, current)
+                        && MessageDigest.isEqual(outerTag(generation.mac(), 1, token, 32), received)) {
+                    selected = generation;
+                    matches++;
+                }
+            }
+            return matches == 1 ? selected : null;
+        }
+    }
+
+    private static UUID commitId() throws IOException {
+        byte[] entropy = new byte[16];
+        OsRandom.fill(entropy);
+        ByteBuffer bytes = ByteBuffer.wrap(entropy);
+        return new UUID(bytes.getLong(), bytes.getLong());
+    }
+
+    static OptionalLong matchSlot(Mac mac, byte[] id, byte[] token, byte[] binding, Generation generation,
+                                            long current, Window window) {
+        byte[] received = Arrays.copyOfRange(token, 48, 64);
+        long first = window.first(current), last = window.last(current);
+        var issue = OptionalLong.empty();
+        for (int offset = -window.skew(); offset <= window.skew(); offset++) {
+            long candidate = current + offset;
+            boolean valid = PrefixStore.containsSlot(first, last, candidate);
+            // When the window spans the uint64 boundary, wrapped candidates lie outside the clamped interval.
+            if (MessageDigest.isEqual(ticketTag(mac, id, token, valid ? candidate : 0, binding), received)
+                    && valid && generation.contains(candidate)) {
+                issue = OptionalLong.of(candidate);
+            }
+        }
+        return issue;
     }
 }

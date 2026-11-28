@@ -22,6 +22,7 @@ class ExternalTransportTest {
     @Test void closeKeepsBorrowedOutputAliveUntilTheWriterCompletesAfterLoopShutdown() throws Exception {
         EventLoop loop = new EventLoop("write-lifetime", true, BufferPool.DEFAULT_IDLE_BYTES);
         AtomicReference<PipeWriter.Completion> completion = new AtomicReference<>();
+        var released = new CompletableFuture<Void>();
         PipeWriter writer = new PipeWriter() {
             @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) { completion.set(done); }
             @Override public void close() {}
@@ -32,16 +33,56 @@ class ExternalTransportTest {
                 var batch = new io.zmux.internal.core.Batch();
                 var payload = loop.pool.take();
                 BatchFixture.pin(batch, payload); payload.unref();
+                carrier.writesReleased().thenRun(() -> released.complete(null));
                 carrier.write(batch); carrier.reject(null);
                 assertEquals(1, loop.pool.outstanding(), "writer still owns the referenced output");
             });
             loop.close();
             completion.get().completed();
+            released.get(5, TimeUnit.SECONDS);
             assertEquals(0, loop.pool.outstanding());
             completion.get().failed(new IllegalStateException("duplicate completion"));
             assertEquals(0, loop.pool.outstanding());
         } finally { loop.close(); }
     }
+    @Test void orderedPrefixesBelongToOneWriteUntilTerminalReceipt() throws Exception {
+        EventLoop loop = new EventLoop("ordered-prefix", true, BufferPool.DEFAULT_IDLE_BYTES);
+        var progress = new java.util.ArrayList<Integer>();
+        var callback = new AtomicReference<PipeWriter.Completion>();
+        var terminal = new CompletableFuture<Integer>();
+        PipeWriter writer = new PipeWriter() {
+            @Override public void write(OutboundBatch data, Completion done) { callback.set(done); }
+            @Override public void close() {}
+        };
+        try {
+            run(loop, () -> {
+                var carrier = new ExternalTransport(loop, PipeIo.of(null, writer));
+                carrier.start(new Inbound() {
+                    @Override public int bytes(Transport t, io.zmux.internal.buffer.ReadBuf b, ByteBuffer data, int pos, int lim) {
+                        return lim - pos;
+                    }
+                    @Override public void ended(Transport t, boolean graceful, boolean partial) {}
+                    @Override public void progress(Transport t, io.zmux.internal.core.Batch b, int n) { progress.add(n); }
+                    @Override public void written(Transport t, io.zmux.internal.core.Batch b, int n, Throwable cause) {
+                        assertTrue(b.progressUnknown());
+                        b.discard();
+                        terminal.complete(n);
+                    }
+                });
+                var batch = new io.zmux.internal.core.Batch();
+                batch.wrap(OutboundBatch.of(ByteBuffer.allocate(100)));
+                carrier.write(batch);
+            });
+            callback.get().progress(21);
+            callback.get().progress(21);
+            run(loop, () -> assertEquals(java.util.List.of(21), progress));
+            callback.get().failedUnknown(new java.io.IOException("uncertain suffix"), 0);
+            assertEquals(21, terminal.get(5, TimeUnit.SECONDS));
+            callback.get().progress(100);
+            run(loop, () -> assertEquals(java.util.List.of(21), progress));
+        } finally { loop.close(); }
+    }
+
     @Test void migrationPreservesTheRestOfALargeInputAndAcknowledgesItOnce() throws Exception {
         EventLoop source = new EventLoop("source", true, BufferPool.DEFAULT_IDLE_BYTES), target = new EventLoop("target", true, BufferPool.DEFAULT_IDLE_BYTES);
         AtomicReference<PipeReader.Sink> sink = new AtomicReference<>();
@@ -54,12 +95,12 @@ class ExternalTransportTest {
         };
         try {
             run(source, () -> {
-                ExternalTransport carrier = new ExternalTransport(source, PipeIo.of(reader, null));
+                ExternalTransport carrier = new ExternalTransport(source, PipeIo.of(reader, null).withReceiveMemory(size));
                 carrier.start(new Inbound() {
-                    @Override public int bytes(Transport c, io.zmux.internal.core.ReadBuf b, ByteBuffer data, int pos, int lim) {
+                    @Override public int bytes(Transport c, io.zmux.internal.buffer.ReadBuf b, ByteBuffer data, int pos, int lim) {
                         Transport moved = CarrierSetup.moveUnowned(c, target);
                         Inbound next = new Inbound() {
-                            @Override public int bytes(Transport n, io.zmux.internal.core.ReadBuf rb, ByteBuffer bytes, int from, int to) {
+                            @Override public int bytes(Transport n, io.zmux.internal.buffer.ReadBuf rb, ByteBuffer bytes, int from, int to) {
                                 for (int i=from; i<to; i++) assertEquals((byte) (count.getAndIncrement() % 251), bytes.get(i));
                                 if (count.get() == size) received.complete(null);
                                 return to-from;
@@ -87,6 +128,87 @@ class ExternalTransportTest {
         } finally { source.close(); target.close(); }
         assertEquals(0, source.pool.outstanding()); assertEquals(0, target.pool.outstanding());
     }
+
+    @Test void boundsTheFirstOwnedBatchByItsAllocationRatherThanItsView() throws Exception {
+        EventLoop loop = new EventLoop("input-root-budget", true, BufferPool.DEFAULT_IDLE_BYTES);
+        try {
+            var sink = new AtomicReference<PipeReader.Sink>();
+            var rejected = new CompletableFuture<Void>();
+            var released = new AtomicInteger();
+            var consumed = new AtomicInteger();
+            PipeReader reader = new PipeReader() {
+                @Override public void start(Sink input) { sink.set(input); }
+                @Override public void close() { rejected.complete(null); }
+            };
+            run(loop, () -> new ExternalTransport(loop, PipeIo.of(reader, null)).start(new Inbound() {
+                @Override public int bytes(Transport c, io.zmux.internal.buffer.ReadBuf b, ByteBuffer data, int pos, int lim) {
+                    throw new AssertionError("oversized backing reached the parser");
+                }
+                @Override public void ended(Transport c, boolean graceful, boolean partial) { c.reject(null); }
+            }));
+            var root = ByteBuffer.allocate(BufferPool.SIZE + 1).limit(1);
+            sink.get().onChunk(io.zmux.Chunk.of(root, released::incrementAndGet), consumed::incrementAndGet);
+            rejected.get(10, TimeUnit.SECONDS);
+            assertEquals(1, released.get());
+            assertEquals(1, consumed.get());
+        } finally { loop.close(); }
+    }
+
+    @Test void sharedRootIsChargedOnceWhileBothViewsAreQueued() throws Exception {
+        EventLoop loop = new EventLoop("shared-input-root", true, BufferPool.DEFAULT_IDLE_BYTES);
+        var consumed = new CompletableFuture<Void>();
+        var released = new AtomicInteger();
+        var retained = new AtomicInteger();
+        var deliveries = new AtomicInteger();
+        try {
+            run(loop, () -> {
+                PipeReader reader = new PipeReader() {
+                    @Override public void start(Sink sink) {
+                        var data = ByteBuffer.allocate(BufferPool.SIZE);
+                        var provider = new io.zmux.internal.spi.ProviderBackings();
+                        sink.onChunk(provider.chunk(data, data.capacity(), data.slice(0, 1),
+                                retained::incrementAndGet, released::incrementAndGet), () -> {});
+                        sink.onChunk(provider.chunk(data, data.capacity(), data.slice(1, 1),
+                                retained::incrementAndGet, released::incrementAndGet), () -> consumed.complete(null));
+                    }
+                    @Override public void close() {}
+                };
+                var carrier = new ExternalTransport(loop, PipeIo.of(reader, null).withReceiveMemory(InputCharge.ENTRY_BYTES));
+                carrier.start(new Inbound() {
+                    @Override public boolean session() { return true; }
+                    @Override public int bytes(Transport c, io.zmux.internal.buffer.ReadBuf b, ByteBuffer data, int pos, int lim) {
+                        deliveries.incrementAndGet();
+                        return lim - pos;
+                    }
+                    @Override public void ended(Transport c, boolean graceful, boolean partial) { c.reject(null); }
+                });
+                loop.execute(() -> carrier.reject(null));
+            });
+            consumed.get(10, TimeUnit.SECONDS);
+            assertEquals(2, deliveries.get());
+            assertEquals(1, retained.get());
+            assertEquals(1, released.get());
+        } finally { loop.close(); }
+    }
+
+    @Test void sparseCarryDropsItsOversizedBackingsAfterOneCompaction() {
+        var pool = new BufferPool(0);
+        var reader = new ChannelReader(pool);
+        var released = new AtomicInteger();
+        try {
+            for (int i = 0; i < 3; i++) {
+                var data = ByteBuffer.allocate(BufferPool.SIZE).put(0, (byte) i);
+                var root = new io.zmux.internal.buffer.ReadBuf(data, ignored -> released.incrementAndGet());
+                try { reader.hold(root, data, 0, 1); } finally { root.unref(); }
+                assertEquals(i < 2 ? 0 : 3, reader.compactSparseCarry());
+            }
+            assertTrue(reader.compacted());
+            assertEquals(3, released.get());
+            assertArrayEquals(new byte[] {0, 1, 2}, reader.copyUnread());
+            assertEquals(0, reader.compactSparseCarry());
+        } finally { reader.release(); }
+        assertEquals(0, pool.outstanding());
+    }
     @Test void loopShutdownClosesPendingFirstRecordGatesAndRejectedCarriers() throws Exception {
         for (boolean knownLane : new boolean[] {false, true}) {
             EventLoop loop = new EventLoop("pending-gate", true, BufferPool.DEFAULT_IDLE_BYTES);
@@ -100,12 +222,15 @@ class ExternalTransportTest {
                 @Override public io.zmux.internal.core.CoreConfig config() { return io.zmux.internal.core.CoreConfig.defaults(); }
                 @Override public DriverHooks hooks() { return DriverHooks.NONE; }
                 @Override public void started(SessionRuntime driver, String protocol, io.zmux.CarrierCredential credential, CarrierSetup setup) { fail("incomplete first record started a session"); }
-            }, null, new byte[0], 8, 0, 0, 0, 0, 0);
+            }, null, new byte[0], io.zmux.ListenerLimits.builder().maxSuspended(0).build(),
+                    io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V4, io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V6);
             try {
                 if (knownLane) ListenerHub.laneInput(loop, PipeIo.of(reader, null));
                 else { hub.external(loop, PipeIo.of(reader, null), io.zmux.JoinHint.inBand(null), false, null, ListenerHub.Entry.Stream.CARRIER, null, PairingShutdownTest.reserved(hub)); }
                 run(loop, () -> {});
-                sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> {});
+                var consumed = new CompletableFuture<Void>();
+                sink.get().onLent(ByteBuffer.wrap(new byte[] {0x40}), () -> consumed.complete(null));
+                consumed.get(30, TimeUnit.SECONDS);
                 run(loop, () -> assertEquals(1, loop.pool.outstanding()));
                 loop.close();
                 // A half's close runs off the loop.

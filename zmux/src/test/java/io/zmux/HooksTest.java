@@ -32,19 +32,19 @@ class HooksTest {
         assertEquals(3, input.transferTo(forwarded));
         assertArrayEquals(new byte[] {3,4,5}, forwarded.toByteArray());
         assertEquals(10, budget.charged.get());
-        AtomicReference<CompletableFuture<Long>> waiting = new AtomicReference<>();
+        var waiting = new CompletableFuture<CompletableFuture<Long>>();
         Limiter paused = new Limiter() {
             @Override public CompletionStage<Long> acquire(long min, long max) {
-                var f = new CompletableFuture<Long>(); waiting.set(f); return f;
+                var f = new CompletableFuture<Long>(); waiting.complete(f); return f;
             }
             @Override public long tryAcquire(long min, long max) { return 0; }
             @Override public void refund(long n) { fail("a cancelled wait took nothing"); }
         };
         Thread thread = Thread.ofVirtual().start(() -> assertThrows(InterruptedIOException.class,
                 () -> LimitedStreams.input(new ByteArrayInputStream(new byte[] {1}), paused).read()));
-        ListenerResourcesTest.until(() -> waiting.get() != null);
+        var permit = waiting.get(30, TimeUnit.SECONDS);
         thread.interrupt(); thread.join(5000);
-        assertFalse(thread.isAlive()); assertTrue(waiting.get().isCancelled());
+        assertFalse(thread.isAlive()); assertTrue(permit.isCancelled());
     }
 
     @Test void permitsRefundUnusedBytesAndAreCancelSafe() throws Exception {
@@ -187,10 +187,11 @@ class HooksTest {
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
-                assertFalse(c.datagrams().send(ByteBuffer.wrap(new byte[5])), "a limiter drop is reported");
-                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {1,2,3})));
+                assertEquals(DatagramDroppedException.Reason.LIMITER, assertThrows(DatagramDroppedException.class,
+                        () -> c.datagrams().send(ByteBuffer.wrap(new byte[5])), "a limiter drop is reported").reason());
+                c.datagrams().send(ByteBuffer.wrap(new byte[] {1,2,3}));
                 assertArrayEquals(new byte[] {1,2,3}, s.datagrams().receive());
-                ListenerResourcesTest.until(() -> receive.charged.get() == 3);
+                assertEquals(3, receive.charged.get());
                 assertEquals(3, send.charged.get());
                 assertEquals(1, c.stats().datagramsDroppedSend());
                 var stream = c.openStream();
@@ -200,7 +201,7 @@ class HooksTest {
                 StreamDatagram datagram = remote.receiveDatagram();
                 assertEquals(1 << 20, datagram.context());
                 assertArrayEquals(new byte[] {9,8}, datagram.payload());
-                ListenerResourcesTest.until(() -> receive.charged.get() == 5);
+                assertEquals(5, receive.charged.get());
                 assertEquals(5, send.charged.get());
                 stream.close(); remote.close(); c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
             }
@@ -230,12 +231,14 @@ class HooksTest {
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
-                assertFalse(c.datagrams().send(ByteBuffer.wrap(new byte[] {1})), "a throwing limiter drops the datagram");
-                assertFalse(c.datagrams().send(ByteBuffer.wrap(new byte[] {2})), "an invalid grant drops the datagram");
+                assertEquals(DatagramDroppedException.Reason.LIMITER, assertThrows(DatagramDroppedException.class,
+                        () -> c.datagrams().send(ByteBuffer.wrap(new byte[] {1})), "a throwing limiter drops the datagram").reason());
+                assertEquals(DatagramDroppedException.Reason.LIMITER, assertThrows(DatagramDroppedException.class,
+                        () -> c.datagrams().send(ByteBuffer.wrap(new byte[] {2})), "an invalid grant drops the datagram").reason());
                 assertEquals(2, c.stats().datagramsDroppedSend());
                 // The receiving limiter throws on the first datagram that arrives: it is dropped, the next is delivered.
-                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {3})));
-                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {4})));
+                c.datagrams().send(ByteBuffer.wrap(new byte[] {3}));
+                c.datagrams().send(ByteBuffer.wrap(new byte[] {4}));
                 assertArrayEquals(new byte[] {4}, s.datagrams().receive());
                 assertEquals(1, s.stats().datagramsDroppedLimit());
                 c.close(); s.close(); c.awaitClosed(); s.awaitClosed();
@@ -248,7 +251,7 @@ class HooksTest {
     @Test void aReceiveGrantIsRefundedWhenTheSessionEndedBeforeTheAnswerWasPosted() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             CountDownLatch entered = new CountDownLatch(1), go = new CountDownLatch(1);
-            AtomicLong refunded = new AtomicLong();
+            var refunded = new CompletableFuture<Long>();
             var receive = new io.zmux.helper.Limiter() {
                 @Override public java.util.concurrent.CompletionStage<Long> acquire(long min, long max) { return CompletableFuture.completedFuture(max); }
                 @Override public long tryAcquire(long min, long max) {
@@ -256,18 +259,18 @@ class HooksTest {
                     try { go.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     return max;
                 }
-                @Override public void refund(long n) { refunded.addAndGet(n); }
+                @Override public void refund(long n) { refunded.complete(n); }
             };
             ZmuxConfig cc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
             ZmuxConfig sc = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).datagramLimiter(new io.zmux.helper.DatagramLimiter(null, receive)).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(sc))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cc); var s = accepted.get();
-                assertTrue(c.datagrams().send(ByteBuffer.wrap(new byte[] {1, 2, 3})));
+                c.datagrams().send(ByteBuffer.wrap(new byte[] {1, 2, 3}));
                 assertTrue(entered.await(5, TimeUnit.SECONDS), "the limiter was asked for the received datagram");
                 s.close(); s.awaitClosed(); c.close(); c.awaitClosed();
                 go.countDown(); // granted after the session is gone
-                ListenerResourcesTest.until(() -> refunded.get() == 3);
+                assertEquals(3L, refunded.get(30, TimeUnit.SECONDS));
             }
         }
     }
@@ -277,7 +280,7 @@ class HooksTest {
             CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), closed = new CountDownLatch(1);
             AtomicLong dropped = new AtomicLong(); AtomicBoolean blocked = new AtomicBoolean();
             AtomicReference<ZmuxSession> ref = new AtomicReference<>(); AtomicReference<SessionId> seen = new AtomicReference<>();
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).tracer(new Tracer() {
                         @Override public void established(SessionId session) {
                             seen.set(session);
                             entered.countDown();
@@ -288,7 +291,7 @@ class HooksTest {
                         @Override public void closed(SessionId session, SessionError error) { if (session.equals(seen.get())) closed.countDown(); }
                     }).build();
             // Trace only the client, so both contexts cannot wait on the same gate.
-            var serverConfig = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+            var serverConfig = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (ZmuxListener listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(serverConfig))) {
                 var accepted = ex.submit((Callable<ZmuxSession>)listener::accept);
                 var c = Zmux.connect(listener.localAddress(), cfg); ref.set(c); var s = accepted.get();

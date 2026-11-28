@@ -27,10 +27,7 @@ public final class StreamTable {
         /** Whether the peer's parameters arrived. */
         boolean established();
 
-        /** Early data is being sent under assumed parameters. */
-        boolean earlyActive();
-
-        /** The peer's parameters (the assumed ones before establishment). */
+        /** The peer's parameters once established. */
         TransportParams peer();
 
         Features features();
@@ -50,6 +47,8 @@ public final class StreamTable {
         /** The stream was discarded: drop what other components keep for it. */
         void discarded(Stream st);
 
+        void memoryCommand(Runnable command);
+
         /** The stream got its identifier. */
         void opened(Stream st);
 
@@ -68,10 +67,17 @@ public final class StreamTable {
         private long opened;
         private long limit;
         private long initial;
+        private long paid;
         private long discarded;
         private boolean staged;
         private long blockedSeen;
     }
+
+    /** Keep idle prepaid bidirectional slots within one MiB per bounded session. */
+    static long initialBatch(boolean multipath) {
+        return (1L << 20) / (ReceiveLayout.STREAM_CHARGE + ConnFlow.sendFloor(multipath));
+    }
+    private final boolean incrementalCredit;
 
     private final CoreConfig cfg;
     private final SessionStats stats;
@@ -79,7 +85,6 @@ public final class StreamTable {
     private final Lifecycle life;
     private final Datagrams dg;
     private final ConnFlow conn;
-    private final MemoryCharge mem;
     private final StreamScheduler sched;
     private final ControlQueue ctl;
     /** What the first accept moves staged unidirectional credit to. */
@@ -93,27 +98,30 @@ public final class StreamTable {
     private final ArrayDeque<Stream>[] acceptQ = (ArrayDeque<Stream>[]) new ArrayDeque<?>[] {new ArrayDeque<Stream>(0), new ArrayDeque<Stream>(0)};
     private final WaitList[] acceptW = {new WaitList(), new WaitList()};
     private final WaitList[] openW = {new WaitList(), new WaitList()};
-    private final ArrayList<Stream> provisional = new ArrayList<>(0);
+    private final java.util.LinkedHashSet<Stream> provisional = new java.util.LinkedHashSet<>();
     private long openLocalBidiRecv;
     private boolean greaseFirst;
 
     StreamTable(CoreConfig cfg, SessionStats stats, Outbox outbox, Lifecycle life, Datagrams dg,
-                ConnFlow conn, MemoryCharge mem, StreamScheduler sched, ControlQueue ctl, Port port) {
+                ConnFlow conn, StreamScheduler sched, ControlQueue ctl, Port port,
+                long desiredBidi, long desiredUni, boolean incrementalCredit) {
         this.cfg = cfg;
+        this.incrementalCredit = incrementalCredit;
         this.stats = stats;
         this.outbox = outbox;
         this.life = life;
         this.dg = dg;
         this.conn = conn;
-        this.mem = mem;
         this.sched = sched;
         this.ctl = ctl;
         this.port = port;
         TransportParams l = cfg.local();
         rem[0].limit = l.maxStreamsBidi;
-        rem[0].initial = l.maxStreamsBidi;
+        rem[0].initial = desiredBidi;
+        rem[0].paid = l.maxStreamsBidi;
         rem[1].limit = l.maxStreamsUni;
-        rem[1].initial = l.maxStreamsUni;
+        rem[1].initial = desiredUni;
+        rem[1].paid = l.maxStreamsUni;
         rem[1].staged = cfg.stagedUni();
         uniTarget = cfg.uniTarget();
         greaseFirst = !cfg.test().enabled() || cfg.test().greaseTlv() != null;
@@ -127,6 +135,14 @@ public final class StreamTable {
 
     /** A copy of the streams without an identifier yet. */
     java.util.List<Stream> withoutId() { return new java.util.ArrayList<>(provisional); }
+
+    /** Stable order for early encoding, which can pin provisional streams while walking the copy. */
+    List<Stream> earlyBatchStreams() {
+        var batch = new ArrayList<Stream>(count());
+        live().forEach(batch::add);
+        batch.addAll(provisional);
+        return batch;
+    }
 
     /** The streams the session holds, those without an identifier yet included. */
     int count() { return streams.size() + provisional.size(); }
@@ -172,20 +188,20 @@ public final class StreamTable {
     long bufferCap() {
         long c = cfg.connWindowCap() > 0 ? cfg.connWindowCap() : SESSION_WINDOW_CAP_FLOOR;
         TransportParams l = cfg.local();
-        long s = rem[0].initial * l.maxStreamDataBidiRemote + rem[1].initial * l.maxStreamDataUni
+        long s = rem[0].paid * l.maxStreamDataBidiRemote + rem[1].paid * l.maxStreamDataUni
                 + openLocalBidiRecv * l.maxStreamDataBidiLocal;
         return Math.max(c, s);
     }
 
     /** Accounts n bytes stored in a stream buffer; the only function that raises the buffered count. */
     void bufAdd(long n) {
-        if (n != 0) conn.buffer(n, bufferCap(), mem.pressure());
+        if (n != 0) conn.buffer(n, bufferCap(), conn.underPressure());
     }
 
     /** Accounts n buffered bytes consumed; the only function that lowers the buffered count. */
     void bufSub(long n) {
         if (n == 0) return;
-        conn.unbuffer(n, bufferCap(), mem.pressure());
+        conn.unbuffer(n, bufferCap(), conn.underPressure());
     }
 
     // ---- the read drain after the peer's close ----
@@ -255,12 +271,6 @@ public final class StreamTable {
         loc[1].limit = uni;
     }
 
-    /** Applies the assumed limits of early data; floor keeps the unidirectional one. */
-    void assumedLimits(long bidi, long uni, boolean floor) {
-        loc[0].limit = bidi;
-        if (!floor) loc[1].limit = uni;
-    }
-
     /** Sets every live stream's initial credit and window once parameters are known. */
     void applyPeerParamsAll() {
         for (Stream st : streams.values()) applyPeerParams(st);
@@ -268,7 +278,7 @@ public final class StreamTable {
 
     /** Sets the initial credit from the peer's parameters and the receive window from the local ones. */
     void applyPeerParams(Stream st) {
-        if ((!port.established() && !port.earlyActive()) || !st.tab.idSet) return;
+        if (!port.established() || !st.tab.idSet) return;
         TransportParams peer = port.peer();
         if (st.hasSend && st.snd.maxData() == 0) {
             StreamSend.raiseCredit(st, !st.bidi ? peer.maxStreamDataUni : st.local ? peer.maxStreamDataBidiRemote : peer.maxStreamDataBidiLocal);
@@ -342,6 +352,7 @@ public final class StreamTable {
             markStreamsBlocked(t);
             throw CoreException.of(CoreException.Reason.STREAM_LIMIT);
         }
+        if (conn.reserveStreams(1, bidi, true) == 0) throw CoreException.of(CoreException.Reason.STREAM_LIMIT);
         loc[t].reserved++;
         Stream st = newStream(bidi, true);
         provisional.add(st);
@@ -410,15 +421,22 @@ public final class StreamTable {
         }
     }
 
-    private static Stream newStream(boolean bidi, boolean local) {
-        return new Stream(bidi, local);
+    private Stream newStream(boolean bidi, boolean local) {
+        var st = new Stream(bidi, local);
+        if (st.hasSend) st.snd.q().backing(conn.newBacking());
+        return st;
+    }
+
+    /** The ID that the next pin would allocate, without opening the stream. */
+    long candidateId(Stream st) {
+        return st.tab.idSet ? st.tab.id : Stream.streamId(loc[Stream.typeIndex(st.bidi)].next, st.bidi, port.responder());
     }
 
     /** Gives a local stream its identifier. */
     void allocId(Stream st) {
         int t = Stream.typeIndex(st.bidi);
-        long idx = loc[t].next++;
-        st.tab.id = Stream.streamId(idx, st.bidi, port.responder());
+        st.tab.id = candidateId(st);
+        loc[t].next++;
         st.tab.idSet = true;
         provisional.remove(st);
         if (st.bidi) openLocalBidiRecv++;
@@ -473,7 +491,7 @@ public final class StreamTable {
      * floor before either, and never above {@link #MAX_PREAMBLE}.
      */
     int preambleLimit() {
-        long peerMax = port.established() || port.earlyActive() ? port.peer().maxPreambleSize : FLOOR_PREAMBLE;
+        long peerMax = port.established() ? port.peer().maxPreambleSize : FLOOR_PREAMBLE;
         if (peerMax <= 0) peerMax = FLOOR_PREAMBLE;
         // The offset-0 STREAM frame carries the whole preamble: within the record floor it fits every pipe, now or later.
         return (int) Math.min(peerMax, MAX_PREAMBLE);
@@ -555,7 +573,10 @@ public final class StreamTable {
     void unreserve(Stream st) {
         int t = Stream.typeIndex(st.bidi);
         if (loc[t].reserved > 0) loc[t].reserved--;
-        wakeOpeners();
+        retireBacking(st, () -> {
+            conn.releaseStreams(1, st.bidi, true);
+            wakeOpeners();
+        });
     }
 
     private void beforeFirstFrame(Stream st) throws CoreException {
@@ -680,7 +701,7 @@ public final class StreamTable {
             port.opened(st);
             applyPeerParams(st);
             stats.streamOpened(false);
-            if ((life.goAwaySent() && i >= life.sentWater(t)) || mem.pressure()) {
+            if (life.goAwaySent() && i >= life.sentWater(t)) {
                 stackReject(st);
             } else if (!port.features().preamble()) {
                 offer(st);
@@ -688,6 +709,7 @@ public final class StreamTable {
             last = st;
         }
         rc.opened = idx + 1;
+        if (incrementalCredit) publishIncoming(t);
         return last;
     }
 
@@ -794,17 +816,40 @@ public final class StreamTable {
         }
         if (n <= rc.initial) return;
         rc.initial = n;
-        if (life.goAwaySent() || port.error() != null) return;
-        long nl = Math.min(n + rc.discarded, MAX_STREAM_COUNT);
-        if (nl > rc.limit) {
-            rc.limit = nl;
-            ctl.wantMaxStreams(bidi ? 0 : 1);
-            port.wantWrite();
-        }
+        publishIncoming(bidi ? 0 : 1);
     }
 
-    /** The largest MAX_STREAMS value. */
-    private static final long MAX_STREAM_COUNT = io.zmux.Zmux.MAX_STREAM_CREDIT;
+    /** Publishes the effective cumulative credit after any change to the target or released count. */
+    private void publishIncoming(int type) {
+        RemoteCount count = rem[type];
+        long promised = count.limit - count.discarded;
+        long maximum = io.zmux.internal.wire.VarInt.MAX_STREAM_COUNT - count.discarded;
+        long desired = count.initial;
+        if (incrementalCredit) {
+            long active = count.opened - count.discarded;
+            desired = Math.min(desired, active + initialBatch(type == 0 && cfg.local().has(TransportParams.MULTIPATH)));
+        }
+        if (count.staged || life.goAwaySent() || port.error() != null) desired = promised;
+        // An issued limit is cumulative and irrevocable. Reclaim only slots retired below it.
+        long target = Math.clamp(desired, promised, maximum);
+        if (count.paid > target) {
+            conn.releaseStreams(count.paid - target, type == 0, false);
+            count.paid = target;
+        } else if (count.paid < target) {
+            count.paid += conn.reserveStreams(target - count.paid, type == 0, false);
+        }
+        long limit = count.discarded + count.paid;
+        if (limit <= count.limit) return;
+        count.limit = limit;
+        ctl.wantMaxStreams(type);
+        port.wantWrite();
+    }
+
+    void receiveRoom() {
+        publishIncoming(0);
+        publishIncoming(1);
+        wakeOpeners();
+    }
 
     /** Raises staged unidirectional credit on the first accept. */
     private void unstageUni() {
@@ -812,13 +857,7 @@ public final class StreamTable {
         if (!rc.staged) return;
         rc.staged = false;
         rc.initial = uniTarget;
-        if (life.goAwaySent()) return;
-        long nl = rc.initial + rc.discarded;
-        if (nl > rc.limit) {
-            rc.limit = nl;
-            ctl.wantMaxStreams(1);
-            port.wantWrite();
-        }
+        publishIncoming(1);
     }
 
     // ---- release and discard ----
@@ -881,25 +920,30 @@ public final class StreamTable {
         if (st.hasRecv) {
             long d = st.rcv.buf().clear();
             if (d > 0) bufSub(d);
+            st.rcv.discardHistory(conn);
         }
         if (st.local && st.bidi && st.hasRecv) openLocalBidiRecv--;
         int t = Stream.typeIndex(st.bidi);
         if (!st.local) {
             RemoteCount rc = rem[t];
-            rc.discarded++;
-            if (!life.goAwaySent() && !rc.staged) {
-                long nl = rc.initial + rc.discarded;
-                if (nl > rc.limit) {
-                    rc.limit = nl;
-                    ctl.wantMaxStreams(t);
-                    port.wantWrite();
-                }
-            }
-        } else if (loc[t].reserved > 0) {
-            loc[t].reserved--;
+            retireBacking(st, () -> {
+                rc.discarded++;
+                publishIncoming(t);
+            });
+        } else {
+            if (loc[t].reserved > 0) loc[t].reserved--;
+            retireBacking(st, () -> {
+                conn.releaseStreams(1, st.bidi, true);
+                wakeOpeners();
+            });
         }
         if (st.tab.keepDatagrams) dg.endStream(st); else dg.dropStream(st);
         life.streamGone();
+    }
+
+    private void retireBacking(Stream st, Runnable released) {
+        if (st.hasSend) st.snd.q().backing().close(() -> port.memoryCommand(released));
+        else released.run();
     }
 
     // ---- session end ----
@@ -925,7 +969,10 @@ public final class StreamTable {
     private static void releaseBuffers(Stream st) {
         if (st.released() == null) st.released(st.stats());
         if (st.hasRecv) StreamRecv.releaseBuffer(st);
-        if (st.hasSend) st.snd.q().drop();
+        if (st.hasSend) {
+            st.snd.dropQueue();
+            st.snd.q().backing().close(() -> {});
+        }
     }
 
     /** The local preamble of a stream opened with one; written only here. */

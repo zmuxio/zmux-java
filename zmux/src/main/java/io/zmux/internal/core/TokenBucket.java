@@ -19,19 +19,12 @@ final class TokenBucket {
     long tokens() { return tokens; }
     private final long[] rem = new long[1];
 
-    /** The lowest rate a bound of mdUs on one wait leaves (mdUs negative: none); rate 0 is no gate. */
-    static long floor(long rate, long mdUs) {
-        if (mdUs < 0 || rate == 0) return rate;
-        long md = Math.max(mdUs, 1), f = (64 * MILLION + md - 1) / md;
-        return Long.compareUnsigned(rate, f) < 0 ? f : rate;
-    }
-
     /** The burst in force for a burst asked (unsigned): 0 is a record, what lies below the least record is raised to it. */
     static long burstFloor(long burst, long recordMax) {
         long least = RecordPlan.MIN_MAX_LENGTH;
         if (burst == 0) return Math.max(recordMax, least);
         if (Long.compareUnsigned(burst, least) < 0) return least;
-        return Long.compareUnsigned(burst, WireAccount.MAX_INITIAL) < 0 ? burst : WireAccount.MAX_INITIAL;
+        return Long.compareUnsigned(burst, WireAccount.MAX_CEILING) < 0 ? burst : WireAccount.MAX_CEILING;
     }
 
     void reset(long us) {

@@ -9,7 +9,7 @@ package io.zmux.internal.wire;
  * @param lanes lanes available toward the receiver
  */
 public record Gates(long maxDatagram, boolean resetStreamAt, boolean goAway, boolean priority,
-                    boolean multipath, boolean pipeAck, boolean lanes) {
+                    boolean multipath, boolean pipeAck, boolean lanes, boolean datagramAck) {
 
     /** Returns normally when the decoded frame's feature is in use (RFC 9221 Section 3). */
     public void check(Frame f) throws WireException {
@@ -26,6 +26,7 @@ public record Gates(long maxDatagram, boolean resetStreamAt, boolean goAway, boo
                 yield true;
             }
             case GOAWAY -> goAway;
+            case DATAGRAM_ACK -> datagramAck;
             case PRIORITY_UPDATE -> priority;
             case PIPE_PING, PIPE_ABANDON, PIPE_STATUS, SESSION_EPOCH -> multipath;
             case PIPE_ACK -> multipath || pipeAck;

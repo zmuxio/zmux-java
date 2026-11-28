@@ -2,6 +2,8 @@ package io.zmux.internal.core;
 
 import io.zmux.internal.wire.TransportError;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 
 /**
  * Failure detection of the attachments: PTO, SUSPECT, failure and dead timeouts, PIPE_PING pacing, drains,
@@ -33,6 +35,7 @@ final class PathHealth {
 
         /** See {@link PathSession}. */
         void emitPipeState(Pipe p);
+        void emitRetired(Pipe p);
 
         /** Whether the session is closing. */
         boolean isClosing();
@@ -42,6 +45,9 @@ final class PathHealth {
 
         /** The session clock. */
         long now();
+
+        /** See {@link PathSession}. */
+        boolean peerAttached(Pipe p);
 
         /** See {@link Joins}. */
         void peerIdRetired(long id);
@@ -90,9 +96,20 @@ final class PathHealth {
     private final KeepAlive ka;
     private final Outbox outbox;
     private final PathMetrics metrics;
+    private final TimerHeap silence = new TimerHeap();
+    private final TimerHeap outboundRtt = new TimerHeap();
+    private final ArrayList<Pipe> activeStallOrder = new ArrayList<>();
+    private final ArrayList<Pipe> references = new ArrayList<>();
+    private final Comparator<Pipe> referenceOrder = Comparator.comparingLong(this::stallCost)
+            .thenComparingLong(p -> p.id);
+    private final LinkedHashSet<SilenceDeadline> silenceMembers = new LinkedHashSet<>();
+    private int liveInbound;
+    private long silenceRttDelay = 2 * Time.SECOND;
+    private static final long SILENCE_BASE = 15 * Time.SECOND;
     private final long[] pingTimes = new long[8];
     private int pingIdx;
     private int pingCount;
+    private long pingWakeAt = Time.NEVER;
 
     PathHealth(CoreConfig cfg, SessionStats stats, Features feat, PipeTable pipes, StreamsView streams, AckEngine ack, KeepAlive ka, Outbox outbox, PathMetrics metrics,
                Port port) {
@@ -169,12 +186,108 @@ final class PathHealth {
     long tSuspect(Pipe p) {
         Attach a = p.mp();
         long f = kept(a) && a.keptHeld() ? a.keptFloor() : floorOf(a);
-        return Math.max(f, Time.mul(Time.add(metrics.pto(a), queueDelay(p)), 2));
+        return Math.max(f, Time.mul(stallCost(p), 2));
     }
 
     long tFail(Pipe p) {
+        return Math.max(tSuspect(p), Math.max(2 * Time.SECOND, Time.mul(stallCost(p), 8)));
+    }
+
+    private long stallCost(Pipe p) {
+        return Time.add(metrics.pto(p), queueDelay(p));
+    }
+
+    /** Records delivery after applying the ACK to both the estimator and the stall clock. */
+    void ackDelivered(Pipe p, long elicitingEnd, long rttSampleEnd, long now) {
+        var slot = p.mp().projection;
+        if (!slot.currentSend(elicitingEnd) || !slot.currentSend(rttSampleEnd)) return;
+        p.mp().health.deliveryGeneration = slot.sendGeneration();
+        p.mp().health.deliveredAt = now;
+        p.mp().health.deliveredCost = stallCost(p);
+    }
+
+    private long deliveryExpiry(Pipe p, boolean liveIn) {
         Attach a = p.mp();
-        return Math.max(2 * Time.SECOND, Time.mul(Time.add(metrics.pto(a), queueDelay(p)), 8));
+        Slot h = a.health;
+        var snapshot = a.projection.snapshot();
+        if (!liveIn || !metrics.pipeUsable(p, false) || snapshot == null || !snapshot.peerAttached()
+                || !snapshot.send().settled() || h.deliveryGeneration != a.projection.sendGeneration()
+                || !a.rtt().has()) return NO_STALL;
+        long cost = stallCost(p);
+        long expiry = Time.add(h.deliveredAt, Time.mul(Math.min(h.deliveredCost, cost), 2));
+        if (a.link.unacked()) expiry = Math.min(expiry, Time.add(a.tref(), cost));
+        long ws = writeStall(p);
+        return ws == NO_STALL ? expiry : Math.min(expiry, Time.add(ws, tSuspect(p)));
+    }
+
+    boolean liveReturn() {
+        for (Pipe p : pipes.all()) {
+            Attach a = p.mp();
+            if (a != null && p.in() != null && !a.health.retired && a.health.in == Attach.IN_OPEN
+                    && (a.topologyExcluded() & Action.DIR_IN) == 0) return true;
+        }
+        return false;
+    }
+
+    boolean deliveringAfter(Pipe p, long anchor, long now, boolean liveIn) {
+        return p.mp().health.deliveredAt > anchor && now < deliveryExpiry(p, liveIn);
+    }
+
+    private static boolean runsOutboundStall(Pipe p) {
+        Attach a = p.mp();
+        return a != null && p.out() != null && !p.out().failed() && !a.handshaking()
+                && !a.health.retired && (a.topologyExcluded() & Action.DIR_OUT) == 0;
+    }
+
+    private void activeStalls(long now, boolean apply, boolean liveIn) {
+        activeStallOrder.clear();
+        references.clear();
+        boolean stalled = false;
+        for (Pipe p : pipes.all()) {
+            if (!runsOutboundStall(p) || p.mp().health.out != Attach.OUT_ACTIVE) continue;
+            activeStallOrder.add(p);
+            stalled |= (liveIn && p.mp().link.unacked()) || writeStall(p) != NO_STALL;
+        }
+        if (!stalled) {
+            activeStallOrder.clear();
+            return;
+        }
+        // Withdrawal only propagates from smaller to larger stall cost.
+        activeStallOrder.sort(referenceOrder);
+        for (Pipe p : activeStallOrder) {
+            Attach a = p.mp();
+            if (a.health.out != Attach.OUT_ACTIVE) continue;
+            long base = tSuspect(p);
+            long ws = writeStall(p);
+            long writeDue = ws == NO_STALL ? Time.NEVER : Time.add(ws, base);
+            long ackDue = Time.NEVER;
+            if (liveIn && a.link.unacked()) {
+                long anchor = a.tref();
+                ackDue = Time.add(anchor, base);
+                for (Pipe q : references) {
+                    long relative = Math.max(floorOf(a), Time.mul(stallCost(q), 3));
+                    if (relative >= base) break;
+                    if (q.mp().health.deliveredAt <= anchor) continue;
+                    long expiry = deliveryExpiry(q, true);
+                    if (now >= expiry) continue;
+                    ackDue = Time.add(anchor, relative);
+                    at(expiry);
+                    break;
+                }
+            }
+            long due = Math.min(ackDue, writeDue);
+            if (at(due)) {
+                if (apply) {
+                    a.projection.fault(ackDue <= writeDue
+                            ? io.zmux.DirectionHealth.Reason.ACK_STALL : io.zmux.DirectionHealth.Reason.WRITE_STALL);
+                    makeSuspect(p);
+                }
+            } else if (now < deliveryExpiry(p, liveIn)) {
+                references.add(p);
+            }
+        }
+        references.clear();
+        activeStallOrder.clear();
     }
 
     /**
@@ -277,7 +390,11 @@ final class PathHealth {
     }
 
     boolean otherActive(Pipe p) {
-        for (Pipe q : pipes.all()) if (q != p && q.mp() != null && q.out() != null && q.mp().health.out == Attach.OUT_ACTIVE) return true;
+        for (Pipe q : pipes.all()) {
+            if (q != p && q.mp() != null && q.out() != null && !q.out().failed()
+                    && q.mp().health.out == Attach.OUT_ACTIVE && (q.mp().topologyExcluded() & Action.DIR_OUT) == 0
+                    && port.peerAttached(q)) return true;
+        }
         return false;
     }
 
@@ -299,6 +416,7 @@ final class PathHealth {
      * for the next deadline between its passing and the timer pass still arms a timer for it.
      */
     private boolean at(long t) {
+        if (t == Time.NEVER) return false;
         if (timerNow >= t) {
             if (!timerApply) nextT = Math.min(nextT, t);
             return true;
@@ -312,7 +430,7 @@ final class PathHealth {
         nextT = Time.NEVER;
         timerNow = now;
         timerApply = apply;
-        boolean liveIn = metrics.liveCounts()[1] > 0;
+        boolean liveIn = liveReturn();
         for (int i = 0; i < pipes.all().size(); i++) {
             Pipe p = pipes.all().get(i);
             Attach a = p.mp();
@@ -326,37 +444,20 @@ final class PathHealth {
                 }
                 continue;
             }
-            long ws = writeStall(p);
-            boolean wstall = ws != NO_STALL;
-            if (p.out() != null && a.liveOut() && ((a.link.unacked() && liveIn) || wstall)) {
-                long stall = a.tref();
-                if (wstall && (!a.link.unacked() || !liveIn || ws < stall)) stall = ws;
-                switch (a.health.out) {
-                    case Attach.OUT_ACTIVE -> {
-                        if (at(Time.add(stall, tSuspect(p))) && apply) {
-                            makeSuspect(p);
-                        }
+            if (a.health.out == Attach.OUT_DRAINING) {
+                if (runsOutboundStall(p) && !a.health.drainSuspect) {
+                    long stall = liveIn && a.link.unacked() ? a.tref() : Time.NEVER;
+                    long ws = writeStall(p);
+                    if (ws != NO_STALL) stall = Math.min(stall, ws);
+                    if (at(Time.add(stall, tSuspect(p))) && apply) {
+                        a.health.drainSuspect = true;
+                        port.reinjectPipe(p);
                     }
-                    case Attach.OUT_SUSPECT -> {
-                        if (stallDeathOff(p)) break;
-                        long lim = otherActive(p) ? tFail(p) : tDead(p);
-                        if (at(Time.add(stall, lim)) && apply) {
-                            failPipe(p, TransportError.PIPE_FAILED, null);
-                            continue;
-                        }
-                    }
-                    case Attach.OUT_DRAINING -> {
-                        if (!a.health.drainSuspect && at(Time.add(stall, tSuspect(p))) && apply) {
-                            a.health.drainSuspect = true;
-                            port.reinjectPipe(p);
-                        }
-                    }
-                    default -> { }
                 }
-            }
-            if (a.health.out == Attach.OUT_DRAINING && at(Time.add(a.health.drainStart, tFail(p))) && apply) {
-                failPipe(p, TransportError.PIPE_FAILED, null);
-                continue;
+                if (at(Time.add(a.health.drainStart, tFail(p))) && apply) {
+                    failPipe(p, TransportError.PIPE_FAILED, null);
+                    continue;
+                }
             }
             if (p.out() != null && (a.health.out == Attach.OUT_ACTIVE || a.health.out == Attach.OUT_SUSPECT) && !a.link.unacked() && !a.health.needPing) {
                 long iv = probeWait(p);
@@ -377,6 +478,7 @@ final class PathHealth {
                     outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
                     if (p.out() != null && a.health.out != Attach.OUT_FAILED) a.health.out = Attach.OUT_CLOSED;
                     if (p.in() != null) a.health.in = Attach.IN_ENDED;
+                    refreshSilence(p);
                     maybeRetire(p);
                     continue;
                 }
@@ -384,19 +486,102 @@ final class PathHealth {
             if (a.health.lingering && a.health.in == Attach.IN_OPEN && at(a.health.lingerUntil) && apply) {
                 a.health.in = Attach.IN_ENDED;
                 outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_IN));
+                refreshSilence(p);
                 maybeRetire(p);
-                continue;
-            }
-            if (p.out() == null && a.health.in == Attach.IN_OPEN) {
-                int nIn = metrics.liveCounts()[1];
-                long lim = 15 * Time.SECOND + nIn * Time.SECOND / 8
-                        + Math.max(2 * Time.SECOND, Math.max(Time.mul(srttMaxOut(), 2), a.link.maxGap() - 15 * Time.SECOND));
-                if (at(Time.add(a.link.lastRecord(), lim)) && apply) {
-                    failPipe(p, TransportError.PIPE_FAILED, null);
-                }
             }
         }
-        return nextT;
+        if (apply) silence.fireDue(now);
+        liveIn = liveReturn();
+        activeStalls(now, apply, liveIn);
+        for (int i = 0; i < pipes.all().size(); i++) {
+            Pipe p = pipes.all().get(i);
+            Attach a = p.mp();
+            if (!runsOutboundStall(p) || a.health.out != Attach.OUT_SUSPECT || stallDeathOff(p)) continue;
+            long stall = liveIn && a.link.unacked() ? a.tref() : Time.NEVER;
+            long ws = writeStall(p);
+            if (ws != NO_STALL) stall = Math.min(stall, ws);
+            long limit = otherActive(p) ? tFail(p) : tDead(p);
+            if (at(Time.add(stall, limit)) && apply) failPipe(p, TransportError.PIPE_FAILED, null);
+        }
+        return Math.min(nextT, silence.earliest());
+    }
+
+    /**
+     * Refreshes the shared inputs changed by a path transition or an RTT sample. Inbound traffic
+     * can only postpone the check. A decrease in the shared delay can advance an existing check.
+     */
+    void refreshSilence(Pipe p) {
+        Attach a = p.mp();
+        Slot slot = a.health;
+        int previousInbound = liveInbound;
+        boolean in = !slot.retired && p.in() != null
+                && (slot.in == Attach.IN_JOINING || slot.in == Attach.IN_OPEN);
+        if (in != slot.countedInbound) {
+            liveInbound += in ? 1 : -1;
+            slot.countedInbound = in;
+        }
+        if (!slot.retired && p.out() != null && a.liveOut()) {
+            if (slot.rttKey == null) slot.rttKey = new TimerHeap.Entry();
+            long key = -a.rtt().smoothed();
+            if (slot.rttKey.deadline() != key) outboundRtt.schedule(slot.rttKey, key);
+        } else if (slot.rttKey != null) {
+            outboundRtt.remove(slot.rttKey);
+        }
+        long nextRttDelay = Math.max(2 * Time.SECOND, Time.mul(srttMax(), 2));
+        SilenceDeadline check = slot.silence;
+        boolean eligible = in && p.out() == null && slot.in == Attach.IN_OPEN && !a.handshaking();
+        if (!eligible && check != null) {
+            silence.remove(check);
+            silenceMembers.remove(check);
+            slot.silence = null;
+            check = null;
+        }
+        boolean earlier = liveInbound < previousInbound || nextRttDelay < silenceRttDelay;
+        silenceRttDelay = nextRttDelay;
+        if (earlier) {
+            for (SilenceDeadline timer : silenceMembers) {
+                long deadline = timer.actualDeadline();
+                if (deadline < timer.deadline()) silence.schedule(timer, deadline);
+            }
+        }
+        if (eligible && check == null) {
+            check = new SilenceDeadline(p);
+            slot.silence = check;
+            silenceMembers.add(check);
+            silence.schedule(check, check.actualDeadline());
+        }
+    }
+
+    void closeTimers() {
+        silence.clear();
+        silenceMembers.clear();
+        outboundRtt.clear();
+    }
+
+    long inboundSilenceDeadline() { return silence.earliest(); }
+
+    private final class SilenceDeadline extends TimerHeap.Timer {
+        private final Pipe pipe;
+
+        SilenceDeadline(Pipe pipe) { this.pipe = pipe; }
+
+        long actualDeadline() {
+            PathSession.Link link = pipe.mp().link;
+            long slack = Math.max(silenceRttDelay, link.maxGap() - SILENCE_BASE);
+            long limit = Time.add(SILENCE_BASE + liveInbound * Time.SECOND / 8, slack);
+            return Time.add(link.lastRecord(), limit);
+        }
+
+        @Override
+        public void fire(long now) {
+            long deadline = actualDeadline();
+            if (deadline > now) {
+                silence.schedule(this, deadline);
+                return;
+            }
+            pipe.mp().projection.fault(io.zmux.DirectionHealth.Reason.INBOUND_SILENCE);
+            failPipe(pipe, TransportError.PIPE_FAILED, null);
+        }
     }
 
     /** The PIPE_PING rate limit deadline while a pipe waits to ping; Time.NEVER when none. */
@@ -404,8 +589,10 @@ final class PathHealth {
         for (Pipe p : pipes.all()) {
             if (p.mp() != null && p.mp().health.needPing) {
                 long t = pingNext();
-                if (t > now) return t;
-                if (apply) pipes.wakeWriters();
+                if (t == 0 || t == pingWakeAt) return Time.NEVER;
+                if (!apply || t > now) return t;
+                pingWakeAt = t;
+                pipes.wakeWriters();
                 break;
             }
         }
@@ -414,27 +601,22 @@ final class PathHealth {
 
     long maxPto() {
         long m = 0;
-        for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, metrics.pto(p.mp()));
+        for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, metrics.pto(p));
         return m == 0 ? 333 * Time.MILLISECOND + 4 * 166 * Time.MILLISECOND + 25 * Time.MILLISECOND : m;
-    }
-
-    long srttMaxOut() {
-        long m = 0;
-        for (Pipe p : pipes.all()) if (p.mp() != null && p.out() != null && p.mp().liveOut()) m = Math.max(m, p.mp().rtt().smoothed());
-        return m == 0 ? 333 * Time.MILLISECOND : m;
     }
 
     /** The largest smoothed RTT of the live outbound pipes, 0 when none. */
     long srttMax() {
-        long m = 0;
-        for (Pipe p : pipes.all()) {
-            if (p.mp() != null && p.out() != null && p.mp().liveOut() && p.mp().rtt().smoothed() > m) m = p.mp().rtt().smoothed();
-        }
-        return m;
+        long best = outboundRtt.earliest();
+        return best == Time.NEVER ? 0 : -best;
     }
 
     /** Fails an attachment: reinjection, carrier closed, PIPE_ABANDON unless one was sent, then the last-pipe rule. */
     void failPipe(Pipe p, long code, Throwable cause) {
+        failPipe(p, code, cause, cause == null ? null : io.zmux.DirectionHealth.Reason.CARRIER_ERROR);
+    }
+
+    private void failPipe(Pipe p, long code, Throwable cause, io.zmux.DirectionHealth.Reason reason) {
         Attach a = p.mp();
         if (a == null || a.health.retired) return;
         if (a.joining()) port.joinFailed();
@@ -457,6 +639,7 @@ final class PathHealth {
             p.in().end();
         }
         if (a.health.failCause == null) a.health.failCause = cause;
+        if (reason != null) a.projection.fault(reason);
         ka.pipeFailed(p.id);
         outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI, cause));
         if (!a.health.abandonSent && !a.health.abandonQueued) {
@@ -496,6 +679,7 @@ final class PathHealth {
         if (a.health.out != Attach.OUT_ACTIVE) return;
         a.health.out = Attach.OUT_SUSPECT;
         a.health.suspects++;
+        a.health.recoveryProbeEnd = 0;
         a.health.suspectAt = port.now();
         a.health.noSampleAt = port.now();
         a.health.noSample = true;
@@ -516,6 +700,7 @@ final class PathHealth {
         if (p == null || p.mp() == null || p.mp().health.retired) return false;
         // A graceful removal needs the carrier.
         if (!graceful || p.mp().handshaking()) {
+            p.mp().projection.fault(io.zmux.DirectionHealth.Reason.CANCELLED);
             p.mp().health.aborted = !graceful; // a graceful removal of a pipe still joining is the application's close, not an abort
             failPipe(p, TransportError.PIPE_FAILED, null);
         } else startDrain(p);
@@ -574,6 +759,7 @@ final class PathHealth {
         Attach a = p.mp();
         if (a.health.out != Attach.OUT_DRAINING || !a.health.abandonSent || !a.health.abandonRecv || unackedStream(p)) return;
         a.health.out = Attach.OUT_CLOSED;
+        p.out().cancelDeadlines();
         port.reinjectPipe(p);
         for (Pipe.OutLane l : p.out().lanes) {
             if (Lanes.shut(l)) {
@@ -612,11 +798,12 @@ final class PathHealth {
         stateGen++;
         if (!a.joinerLocal && p.id != 0) port.peerIdRetired(p.id);
         outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
+        if (ack != null) ack.pipeRetired(p);
         pipes.remove(p);
         for (Stream st : streams.live()) {
             if (st.snd.bind().laneBound() && st.snd.bind().lanePipe() == p.id) Lanes.pipeGone(st);
         }
-        port.emit(Event.pipeRetired(p.id, p.carrier(), p.out() != null && a.health.out == Attach.OUT_FAILED));
+        port.emitRetired(p);
         checkLastPipe(null);
         if (a.joinerLocal && !a.health.resLimited && !a.handshaking()) port.backoffCleared();
     }
@@ -650,7 +837,11 @@ final class PathHealth {
             pipes.wakeWriters();
             return;
         }
-        failPipe(p, TransportError.PIPE_FAILED, cause);
+        if (graceful || cause instanceof java.io.EOFException || cause == null) {
+            failPipe(p, TransportError.PIPE_FAILED, cause, io.zmux.DirectionHealth.Reason.UNEXPECTED_EOF);
+        } else {
+            failPipe(p, TransportError.PIPE_FAILED, cause);
+        }
     }
 
     /** A failed write on an outbound pipe. */
@@ -662,6 +853,7 @@ final class PathHealth {
     /** A joining or SUSPECT outbound attachment became ACTIVE. */
     void activated(Pipe p) {
         p.mp().health.out = Attach.OUT_ACTIVE;
+        p.mp().projection.fault(io.zmux.DirectionHealth.Reason.NONE);
     }
 
     /** A verified Reply opened the inbound direction. */
@@ -691,7 +883,17 @@ final class PathHealth {
 
     /** A batch that holds a PIPE_PING went out on lane 0, ending at lane position end. */
     void pingRecorded(Pipe p, long end) {
-        p.mp().health.pingEnds.addLast(end);
+        p.out().lanes.getFirst().rememberPing(end);
+        if (p.mp().health.out == Attach.OUT_ACTIVE && !p.mp().prob.reval()) p.mp().projection.ping(end);
+    }
+
+    void recoveryProbeRecorded(Pipe p) {
+        p.mp().health.recoveryProbeEnd = p.out().snd.so();
+    }
+
+    boolean recoveryProbeAcknowledged(Pipe p) {
+        long end = p.mp().health.recoveryProbeEnd;
+        return end != 0 && p.out().snd.cum() >= end;
     }
 
     /**
@@ -699,12 +901,7 @@ final class PathHealth {
      * PIPE_PING goes on lane 0 only.
      */
     void laneAcked(Pipe p, Pipe.OutLane ol) {
-        if (ol.lane != 0) return;
-        Slot h = p.mp().health;
-        while (!h.pingEnds.isEmpty() && ol.ack.acked() >= h.pingEnds.peekFirst()) {
-            h.pingEnds.pollFirst();
-            h.pingsAnswered++;
-        }
+        if (ol.lane == 0) p.mp().health.pingsAnswered += ol.drainAcknowledgedPings();
     }
 
     /** The owed PIPE_PING went out on the pipe; returns whether it is that of a suspicion. */
@@ -755,12 +952,18 @@ final class PathHealth {
         private int out;
         private int in;
         private boolean retired;
+        private boolean countedInbound;
+        private TimerHeap.Entry rttKey;
+        private SilenceDeadline silence;
         private boolean draining;
         private boolean drainSuspect;
         private long drainStart;
         private boolean lingering;
         private long lingerUntil;
-        private long suspectAt;
+        private long suspectAt, recoveryProbeEnd;
+        private long deliveryGeneration = -1;
+        private long deliveredAt;
+        private long deliveredCost;
         private Throwable failCause;
         private boolean noSample;
         private long noSampleAt;
@@ -784,8 +987,6 @@ final class PathHealth {
         private long pingSince;
         private long pingsSent;
         private long pingsAnswered;
-        /** The lane 0 positions at the end of the batches that hold unanswered PIPE_PINGs, in send order. */
-        private final java.util.ArrayDeque<Long> pingEnds = new java.util.ArrayDeque<>(2);
         /** Why the attachment failed: the transport error code, -1 before. */
         private long failCode = -1;
         /** The uniform draw of the current probe wait; NaN: not drawn yet. */

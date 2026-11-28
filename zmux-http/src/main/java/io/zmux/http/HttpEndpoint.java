@@ -60,6 +60,11 @@ import java.util.function.Supplier;
 public final class HttpEndpoint implements AutoCloseable {
     final ZmuxListener listener;
     final boolean streaming;
+    private final boolean webTransport;
+
+    static {
+        HttpTransport.installEndpointAccess(endpoint -> endpoint.webTransport ? endpoint.listener.adapter() : null);
+    }
     final ExchangeServer exchange;
     final WebSocketServer webSocket;
     final TrustedProxies trusted;
@@ -79,6 +84,7 @@ public final class HttpEndpoint implements AutoCloseable {
     private HttpEndpoint(Builder b) {
         listener = b.listener;
         streaming = b.streaming;
+        webTransport = b.webTransport;
         trusted = b.trusted;
         pairField = io.zmux.JoinHint.pairField(b.pairField);
         exchange = b.exchange == null ? null : new ExchangeServer(this, b.exchange);
@@ -181,6 +187,10 @@ public final class HttpEndpoint implements AutoCloseable {
     public static final class Builder {
         private final ZmuxListener listener;
         private boolean streaming;
+        private boolean webTransport;
+
+        /** Selects draft-16 WebTransport on a library-managed HTTP/3 connection driver. */
+        public Builder webTransport() { webTransport = true; return this; }
         private ExchangeConfig exchange;
         private List<String> webSocket;
         private TrustedProxies trusted;

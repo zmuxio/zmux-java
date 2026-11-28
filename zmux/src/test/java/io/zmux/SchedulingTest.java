@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Timeout;
 class SchedulingTest {
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(3))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     @Test void customPoliciesUseValuesAndCanChangeOnline() throws Exception {
@@ -62,7 +62,7 @@ class SchedulingTest {
                 assertArrayEquals(data, incoming.get());
                 assertTrue(added.stats().orElseThrow().bytesSent() > before);
                 assertTrue(calls.get() > 0); assertTrue(blocked.get());
-                PipePoolTest.await(() -> c.stats().schedulerAnswers() > 0);
+                SessionTestSupport.await(c, () -> c.stats().schedulerAnswers() > 0);
                 long fallbacks = c.stats().schedulerFallbacks();
                 assertEquals(2, c.pipeStats().size());
                 stream.setScheduler(Scheduler.custom((q, p) -> { throw new IllegalArgumentException("bad picker"); }));
@@ -73,7 +73,7 @@ class SchedulingTest {
                 second.setScheduler(Scheduler.custom((q, p) -> { throw new IllegalStateException("bad picker"); }));
                 second.write(new byte[] {1, 2, 3}); second.finish();
                 assertArrayEquals(new byte[] {1, 2, 3}, fallback.get());
-                PipePoolTest.await(() -> c.stats().schedulerFallbacks() > fallbacks);
+                SessionTestSupport.await(c, () -> c.stats().schedulerFallbacks() > fallbacks);
                 c.setScheduler(Scheduler.SPREAD_ROUND_ROBIN);
                 c.setQualityBand(QualityBand.builder().rtt(Duration.ofMillis(1)).rateRatio(1.5).build());
                 c.clearQualityBand(); c.setQualityBand(QualityBand.builder().rtt(Duration.ofMillis(1)).rateRatio(1.5).build());

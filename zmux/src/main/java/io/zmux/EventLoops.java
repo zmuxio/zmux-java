@@ -21,17 +21,17 @@ public final class EventLoops implements AutoCloseable {
         return SHARED;
     }
 
-    /** A group of n loops of its own; each keeps {@link #DEFAULT_IDLE_BUFFER_BYTES} of idle read buffers. */
+    /** A group of n loops of its own, using the shared cache of idle read buffers. */
     public static EventLoops create(int n) {
         return create(n, DEFAULT_IDLE_BUFFER_BYTES);
     }
 
-    /** Idle read-buffer memory a loop keeps for reuse by default (2 MiB). */
+    /** The shared cache's capacity for idle read buffers (8 MiB). */
     public static final long DEFAULT_IDLE_BUFFER_BYTES = io.zmux.internal.loop.BufferPool.DEFAULT_IDLE_BYTES;
 
     /**
-     * A group of n loops of its own; each keeps up to idleBufferBytes of returned read buffers
-     * for reuse (0: none) and leaves the rest to the garbage collector.
+     * A group of n loops of its own. The default limit shares the process cache. A different
+     * limit gives each loop that much private space for returned buffers (zero retains none).
      */
     public static EventLoops create(int n, long idleBufferBytes) {
         return new EventLoops(new EventLoopGroup(n, idleBufferBytes));

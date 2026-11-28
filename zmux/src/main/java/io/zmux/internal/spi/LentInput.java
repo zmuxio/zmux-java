@@ -51,9 +51,13 @@ public final class LentInput {
     }
 
     /** The input ended gracefully: the sink gets the end after what is queued. */
-    public void end() {
+    public void end() { endAfterInput(null); }
+
+    /** Delivers an ordered terminal event after every queued byte, including a reliable reset prefix. */
+    public void endAfterInput(Throwable cause) {
         if (ended || closed) return;
         ended = true;
+        error = cause;
         drain();
     }
 

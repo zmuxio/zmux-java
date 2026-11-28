@@ -40,7 +40,7 @@ class JoinAttackTest {
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
+                .sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                 .allowRecordMode((c, m, p) -> true);
     }
 
@@ -342,7 +342,7 @@ class JoinAttackTest {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = config(loops).build();
             var reasons = new java.util.concurrent.CopyOnWriteArrayList<String>();
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> reasons.add(i.reason())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT);
                  SocketChannel near = SocketChannel.open(l.localAddress())) {
                 long auth = s.stats().joinAuthFailures();
@@ -436,11 +436,8 @@ class JoinAttackTest {
         var arm = new java.util.concurrent.atomic.AtomicBoolean();
         var entered = new java.util.concurrent.CountDownLatch(1);
         var release = new java.util.concurrent.CompletableFuture<Void>();
-        var outcomes = new java.util.concurrent.LinkedBlockingQueue<Throwable>();
         try (var loops = EventLoops.create(2)) {
-            var cfg = config(loops).maxPipes(2).joinOutcome((session, id, error) -> {
-                if (id.value() == 20) outcomes.add(error);
-            }).handshakeShaper(view -> {
+            var cfg = config(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).handshakeShaper(view -> {
                 if (arm.get() && view.message().equals("reply")) { entered.countDown(); release.join(); }
                 return null;
             }).build();
@@ -456,7 +453,6 @@ class JoinAttackTest {
                     l.close();
                 } finally { release.complete(null); }
                 assertEquals(-1, near.read(ByteBuffer.allocate(256)));
-                assertInstanceOf(ListenerClosedException.class, outcomes.poll(5, java.util.concurrent.TimeUnit.SECONDS));
                 var marker = new SessionEvent.CapacityRestored(23);
                 s.driver.executeCarrier(() -> s.driver.addApplicationEvent(marker, marker));
                 SessionEvent event;
@@ -464,7 +460,6 @@ class JoinAttackTest {
                     if (event instanceof SessionEvent.PipeAdded added) assertNotEquals(20, added.pipe().value());
                     if (event instanceof SessionEvent.PipeJoined joined) assertNotEquals(20, joined.pipe().value());
                 }
-                assertTrue(outcomes.isEmpty());
             }
         } finally { release.complete(null); }
     }
@@ -476,22 +471,17 @@ class JoinAttackTest {
         for (String what : List.of("session", "listener")) {
             try (EventLoops loops = EventLoops.create(2)) {
                 java.util.concurrent.atomic.AtomicInteger rejects = new java.util.concurrent.atomic.AtomicInteger();
-                var ended = new java.util.concurrent.CompletableFuture<Throwable>();
-                ZmuxConfig cfg = config(loops).joinOutcome((session, id, failure) -> ended.complete(failure)).build();
-                var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejects.incrementAndGet(); return RejectInfo.Action.CLOSE; }).build();
+                ZmuxConfig cfg = config(loops).build();
+                var lc = ListenerConfig.builder().session(cfg).onReject(i -> rejects.incrementAndGet()).build();
                 try (var l = Zmux.listen(NetworkTest.any(), lc);
                      var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT);
                      SocketChannel near = SocketChannel.open(l.localAddress())) {
                     near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
                     assertTrue(near.read(ByteBuffer.allocate(4096)) > 0, "a Reply");
-                    long rejected = l.stats().rejected(), started = System.nanoTime();
+                    long rejected = l.stats().rejected();
                     if (what.equals("session")) s.close(); else l.close();
-                    Throwable reason = ended.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                    if (what.equals("session")) assertInstanceOf(SessionClosedException.class, reason);
-                    else assertInstanceOf(ListenerClosedException.class, reason);
                     assertEquals(-1, near.read(ByteBuffer.allocate(64)), what);
-                    assertTrue(System.nanoTime() - started < 5_000_000_000L, what);
-                    ListenerResourcesTest.until(() -> l.stats().refused() > 0);
+                    SessionTestSupport.await(loops, () -> l.stats().refused() > 0);
                     assertEquals(rejected, l.stats().rejected(), what + ": not a rejection");
                     assertEquals(0, rejects.get(), what);
                 }
@@ -499,73 +489,72 @@ class JoinAttackTest {
         }
     }
 
-    /** The wait for a Reply's plan ended by the session is no authentication failure. */
-    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
+    private static final class ReplyGate implements io.zmux.carrier.HandshakeShaper, AutoCloseable {
+        final java.util.concurrent.CompletableFuture<Void> entered = new java.util.concurrent.CompletableFuture<>();
+        final java.util.concurrent.CompletableFuture<Void> release = new java.util.concurrent.CompletableFuture<>();
+
+        @Override public UnitPlan plan(View view) {
+            if (view.handshake().equals("join") && view.message().equals("reply")) {
+                entered.complete(null);
+                release.join();
+            }
+            return UnitPlan.NONE;
+        }
+
+        @Override public void close() { release.complete(null); }
+    }
+
+    /** Closing a session while its Join Reply plan is in flight is no authentication failure. */
+    @SuppressWarnings("try") // Close is itself the input to the test.
     @Test void aSessionEndDuringAReplyPlanRejectsNobody() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var asked = new java.util.concurrent.CountDownLatch(1);
-            ZmuxConfig server = config(loops).handshakeShaper(v -> {
-                asked.countDown();
-                return new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofHours(1));
-            }).build();
-            ZmuxConfig client = config(loops).build();
-            java.util.concurrent.atomic.AtomicInteger rejects = new java.util.concurrent.atomic.AtomicInteger();
-            var lc = ListenerConfig.builder().session(server).onReject(i -> { rejects.incrementAndGet(); return RejectInfo.Action.CLOSE; }).build();
+        try (var loops = EventLoops.create(2); var gate = new ReplyGate()) {
+            var cfg = config(loops).handshakeShaper(gate).build();
+            var lc = ListenerConfig.of(cfg);
             try (var l = Zmux.listen(NetworkTest.any(), lc);
-                 var c = Zmux.connect(l.localAddress(), client); var s = l.accept(WAIT);
-                 SocketChannel near = SocketChannel.open(l.localAddress())) {
+                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT);
+                 var near = SocketChannel.open(l.localAddress())) {
                 near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
-                assertTrue(asked.await(5, java.util.concurrent.TimeUnit.SECONDS));
-                Thread.sleep(50);
-                long rejected = l.stats().rejected();
-                s.close();
-                assertEquals(-1, near.read(ByteBuffer.allocate(64)));
-                ListenerResourcesTest.until(() -> l.stats().refused() > 0);
-                assertEquals(rejected, l.stats().rejected());
-                assertEquals(0, rejects.get());
+                try {
+                    gate.entered.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                    long rejected = l.stats().rejected();
+                    long refused = l.stats().refused();
+                    s.close();
+                    assertEquals(-1, near.read(ByteBuffer.allocate(64)));
+                    SessionTestSupport.await(loops, () -> l.stats().refused() > refused);
+                    assertEquals(rejected, l.stats().rejected());
+                } finally { gate.close(); }
             }
         }
     }
 
-    /** The acceptor's deadline runs from the slot: the delay of its own Reply is inside it. */
+    /** The acceptor's deadline starts at the slot, even if the Reply's handoff consumes part of it. */
+    @SuppressWarnings("try") // Releasing the script gate early is one of the two test cases.
     @Test void theAcceptorsDeadlineRunsFromItsSlot() throws Exception {
-        long timeout = 1500, delay = 1000;
-        var outcome = new java.util.concurrent.CompletableFuture<Throwable>();
-        try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig server = config(loops).joinOutcome((s, id, e) -> outcome.complete(e)).joinTimeout(Duration.ofMillis(timeout))
-                    .handshakeShaper(v -> v.message().equals("reply") ? new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofMillis(delay)) : null).build();
-            ZmuxConfig client = config(loops).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
-                 var c = Zmux.connect(l.localAddress(), client); var _ = l.accept(WAIT);
-                 SocketChannel near = SocketChannel.open(l.localAddress())) {
-                long timedOut = l.stats().timedOut();
-                near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
-                long start = System.nanoTime();
-                ByteBuffer in = ByteBuffer.allocate(4096);
-                int n;
-                while ((n = near.read(in.clear())) > 0) { /* The Reply, then the end. */ }
-                assertEquals(-1, n);
-                long took = (System.nanoTime() - start) / 1_000_000;
-                assertTrue(took >= delay, "the Reply's delay ran: " + took);
-                assertTrue(took < timeout + delay - 200, "from the slot, not from the Reply: " + took);
-                ListenerResourcesTest.until(() -> l.stats().timedOut() > timedOut);
-                assertInstanceOf(JoinTimeoutException.class, outcome.get(5, java.util.concurrent.TimeUnit.SECONDS));
-            }
-        }
-    }
-
-    /** A delay beyond the deadline ends the carrier at the deadline, with no Reply. */
-    @Test void aReplyDelayedBeyondTheDeadlineEndsAtIt() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig server = config(loops).joinTimeout(Duration.ofMillis(500))
-                    .handshakeShaper(v -> v.message().equals("reply") ? new io.zmux.carrier.HandshakeShaper.UnitPlan(0, 0, 0, Duration.ofHours(1)) : null).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(server).build());
-                 var c = Zmux.connect(l.localAddress(), config(loops).build()); var _ = l.accept(WAIT);
-                 SocketChannel near = SocketChannel.open(l.localAddress())) {
-                near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
-                long start = System.nanoTime();
-                assertEquals(-1, near.read(ByteBuffer.allocate(64)));
-                assertTrue(System.nanoTime() - start < 3_000_000_000L);
+        var timeout = Duration.ofSeconds(1);
+        for (boolean reply : new boolean[] {true, false}) {
+            try (var loops = EventLoops.create(2); var gate = new ReplyGate()) {
+                var clock = new SpliceHooksTest.ManualClock();
+                var cfg = config(loops).clockDomain(clock.domain()).joinTimeout(timeout).handshakeShaper(gate).build();
+                try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                     var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT);
+                     var near = SocketChannel.open(l.localAddress())) {
+                    long timedOut = l.stats().timedOut();
+                    near.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
+                    try {
+                        gate.entered.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                        if (reply) {
+                            clock.advance(timeout.dividedBy(2));
+                            gate.close();
+                            assertTrue(near.read(ByteBuffer.allocate(4096)) > 0, "the Reply was handed off");
+                        }
+                        clock.advance(timeout.minusNanos(clock.now()).minusNanos(1));
+                        s.run(op -> null);
+                        assertEquals(timedOut, l.stats().timedOut(), "before the slot deadline");
+                        clock.advance(Duration.ofNanos(1));
+                        assertEquals(-1, near.read(ByteBuffer.allocate(4096)), "the slot expired at equality");
+                        SessionTestSupport.await(loops, () -> l.stats().timedOut() == timedOut + 1);
+                    } finally { gate.close(); }
+                }
             }
         }
     }
@@ -708,7 +697,7 @@ class JoinAttackTest {
                 try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                      var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                     c.addPipe(l.localAddress(), PipeOptions.defaults());
-                    ListenerResourcesTest.until(() -> c.stats().pipesAdded() >= 2);
+                    SessionTestSupport.await(c, () -> c.stats().pipesAdded() >= 2);
                     var stats = c.driver.shapingStats();
                     long n = stats == null ? 0 : stats.handshakeUnplanned();
                     if (planned) assertEquals(0, n);
@@ -722,19 +711,52 @@ class JoinAttackTest {
     @Test void aFirstBatchBeyondTheHellosCiphertextStillJoins() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).joinEarlyHello(70_000)
-                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(2))).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 ZmuxStream st = c.openStream();
                 for (ZmuxPipe q : c.pipes()) q.abort();
-                for (long end = System.nanoTime() + 5_000_000_000L; c.stats().suspensions() == 0 && System.nanoTime() < end; ) Thread.sleep(5);
-                assertTrue(c.stats().suspensions() > 0, "suspended");
-                Thread.ofVirtual().start(() -> {
-                    try { st.write(new byte[128 << 10]); } catch (Exception ended) { /* The test is over. */ }
-                });
-                Thread.sleep(50);
+                while (!(c.nextEvent(WAIT) instanceof SessionEvent.SessionSuspended)) {
+                    // Wait for suspension before buffering the early data.
+                }
+                st.write(new byte[64 << 10]);
                 assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id().value() > 0);
+                st.write(new byte[64 << 10]);
                 assertEquals(128 << 10, s.acceptStream().inputStream().readNBytes(128 << 10).length);
+            }
+        }
+    }
+
+    @Test void anAuthenticatedHelloPrepaysItsEarlyBatchUntilRejected() throws Exception {
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = config(loops).build();
+            try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
+                 var c = Zmux.connect(listener.localAddress(), cfg); var s = listener.accept(WAIT)) {
+                var wire = helloFor(c, 20, Mode.SEALED, new byte[0], new byte[2048]);
+                var framing = io.zmux.internal.join.Framing.STREAM;
+                var hello = io.zmux.internal.join.Hello.parseExact(wire, 0, wire.length, framing);
+                var budget = (io.zmux.internal.memory.MemoryBudget) s.core.sharedBudget();
+                long charge = 8192L + hello.ciphertext().length + 2048;
+                s.run(op -> {
+                    long initial = budget.used();
+                    budget.limit(initial + charge - 1);
+                    var denied = s.core.openHello(hello, framing, new byte[0]);
+                    assertEquals(io.zmux.internal.core.Joins.JoinResult.CLOSE, denied.result());
+                    assertEquals("memory_budget", denied.reason());
+                    assertNull(denied.join());
+
+                    budget.limit(initial + charge);
+                    var owned = s.core.openHello(hello, framing, new byte[0]);
+                    assertEquals(io.zmux.internal.core.Joins.JoinResult.ACCEPTED, owned.result());
+                    try (var peer = owned.join()) {
+                        assertEquals(2048, peer.firstBatchBytes());
+                        assertEquals(initial + charge, budget.used());
+                        assertThrows(IllegalArgumentException.class, () -> budget.limit(initial));
+                    }
+                    budget.limit(initial);
+                    assertEquals(initial, budget.used());
+                    return null;
+                });
             }
         }
     }
@@ -754,7 +776,7 @@ class JoinAttackTest {
     @Test void unconfirmedCarriersDoNotCrowdOutAJoinOrEndASuspension() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).allowRecordMode((c, m, p) -> true)
-                    .maxPipes(2).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(2))).resumeTimeout(Duration.ofSeconds(30)).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation().build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
                  var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
                 SocketChannel[] held = new SocketChannel[4];
@@ -847,7 +869,7 @@ class JoinAttackTest {
         try (EventLoops loops = EventLoops.create(1)) {
             PipeAuth both = PipeAuth.psk(PSK).withExporter().withEndToEnd();
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofSeconds(2))
-                    .maxPipes(4).pipeAuth(both).build();
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(both).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build())) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                 PipeIo.Exporter same = (x, y, n) -> new byte[n];
@@ -957,7 +979,7 @@ class JoinAttackTest {
             ZmuxConfig own = config(loops).joinTimeout(Duration.ofSeconds(20)).build();
             List<String> reasons = new java.util.concurrent.CopyOnWriteArrayList<>();
             var lc = ListenerConfig.builder().session(listener).sessionConfigs((info, admitted) -> own)
-                    .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.STALL; }).build();
+                    .onReject(i -> reasons.add(i.reason())).rejection(RejectInfo.Action.STALL).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var c = Zmux.connect(l.localAddress(), config(loops).build()); var s = l.accept(WAIT)) {
                 for (boolean known : List.of(true, false)) {
@@ -981,7 +1003,7 @@ class JoinAttackTest {
             ZmuxConfig cfg = config(loops).joinTimeout(Duration.ofMillis(800)).build();
             List<String> reasons = new java.util.concurrent.CopyOnWriteArrayList<>();
             var lc = ListenerConfig.builder().session(cfg)
-                    .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.STALL; }).build();
+                    .onReject(i -> reasons.add(i.reason())).rejection(RejectInfo.Action.STALL).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var c = Zmux.connect(l.localAddress(), config(loops).build()); var _ = l.accept(WAIT);
                  SocketChannel ch = SocketChannel.open(l.localAddress())) {
@@ -999,10 +1021,11 @@ class JoinAttackTest {
     @Test void aSourceOverItsPendingLimitIsARejection() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             List<RejectInfo> infos = new java.util.concurrent.CopyOnWriteArrayList<>();
-            var lc = ListenerConfig.builder().session(config(loops).build()).maxPendingPerSource(1)
-                    .onReject(i -> { infos.add(i); return RejectInfo.Action.STALL; }).build();
-            try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel _ = SocketChannel.open(l.localAddress())) {
-                Thread.sleep(300); // the held carrier takes the source's one slot
+            var lc = ListenerConfig.builder().session(config(loops).build()).maxPendingPerSource(2)
+                    .onReject(i -> infos.add(i)).rejection(RejectInfo.Action.STALL).build();
+            try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel _ = SocketChannel.open(l.localAddress());
+                 SocketChannel _ = SocketChannel.open(l.localAddress())) {
+                Thread.sleep(300); // the held carriers take both source slots
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
                     long ms = silentFor(ch);
                     assertTrue(ms < 3000, "closed at once, the source has no slot to stall in: " + ms + " ms");
@@ -1016,42 +1039,40 @@ class JoinAttackTest {
 
     /** A known Locator declined under memory pressure goes to OnReject as memory_pressure. */
     @Test void aJoinDeclinedUnderPressureIsARejection() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = config(loops).joinTimeout(Duration.ofMillis(600)).build();
-            var pressure = new java.util.concurrent.CountDownLatch(1);
-            List<String> reasons = new java.util.concurrent.CopyOnWriteArrayList<>();
-            var lc = ListenerConfig.builder().session(cfg).memoryBudget(128 << 10)
-                    .memoryPressureListener((used, budget) -> { if (used >= budget) pressure.countDown(); })
-                    .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.STALL; }).build();
+        try (EventLoops loops = EventLoops.create(1)) {
+            Duration stall = Duration.ofMinutes(1);
+            ZmuxConfig cfg = config(loops).joinTimeout(stall).noMaxIdleTimeout().build();
+            var pressure = new java.util.concurrent.CompletableFuture<Void>();
+            var rejected = new java.util.concurrent.CompletableFuture<String>();
+            var lc = ListenerConfig.builder().session(cfg).noMemoryBudget()
+                    .memoryPressureListener((used, budget) -> { if (used >= budget) pressure.complete(null); })
+                    .onReject(i -> rejected.complete(i.reason())).rejection(RejectInfo.Action.STALL).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
-                 var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT)) {
-                var a = c.openStream();
-                a.write(new byte[160 << 10]);
-                var held = s.acceptStream(WAIT);
-                assertTrue(pressure.await(10, java.util.concurrent.TimeUnit.SECONDS), "pressure");
-                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null)));
-                    long ms = silentFor(ch);
-                    assertTrue(ms >= 400 && ms < 5000, "stalled " + ms + " ms");
+                 var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT); var writer = c.openStream()) {
+                writer.write(new byte[96 << 10]);
+                try (var incoming = s.acceptStream(WAIT); var lease = incoming.readChunk(1);
+                     var ch = SocketChannel.open(l.localAddress())) {
+                    assertEquals(1, lease.remaining());
+                    l.setLimits(l.limits().toBuilder().memoryBudget(l.adapter().memoryUsed()).build());
+                    pressure.get(20, java.util.concurrent.TimeUnit.SECONDS);
+                    ByteBuffer hello = ByteBuffer.wrap(helloFor(c, 20, Mode.SEALED, new byte[0], null));
+                    while (hello.hasRemaining()) ch.write(hello);
+                    assertEquals("memory_pressure", rejected.get(20, java.util.concurrent.TimeUnit.SECONDS));
+                    s.driver.loop().advanceTimersForTests(stall.toNanos()).get(20, java.util.concurrent.TimeUnit.SECONDS);
+                    assertEquals(-1, ch.read(ByteBuffer.allocate(1)));
                 }
-                assertEquals(List.of("memory_pressure"), reasons);
-                held.close();
             }
         }
     }
 
-    /** The listener's maxPendingPerSession bounds a session's Unconfirmed carriers: one more closes the oldest. */
-    @Test void maxPendingPerSessionEvictsTheOldestUnconfirmed() throws Exception {
+    /** The session's pendingPeerJoins bounds a session's Unconfirmed carriers: one more closes the oldest. */
+    @Test void pendingPeerJoinsEvictsTheOldestUnconfirmed() throws Exception {
         // HS-24.
-        assertEquals(4, ListenerConfig.defaults().maxPendingPerSession());
-        assertThrows(IllegalArgumentException.class, () -> ListenerConfig.builder().maxPendingPerSession(0));
-        assertThrows(IllegalArgumentException.class, () -> ListenerConfig.builder().maxPendingPerSession(-1));
+        assertEquals(4, CapacityLimits.defaults().pendingPeerJoins());
+        assertThrows(IllegalArgumentException.class, () -> new CapacityLimits(4, null, 0, -1));
         try (EventLoops loops = EventLoops.create(2)) {
-            var evicted = new java.util.concurrent.CompletableFuture<PipeId>();
-            ZmuxConfig cfg = config(loops).joinOutcome((session, id, error) -> {
-                if (error instanceof JoinEvictedException) evicted.complete(id);
-            }).build();
-            var lc = ListenerConfig.builder().session(cfg).maxPendingPerSession(2).build();
+            ZmuxConfig cfg = config(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4, null, 0, 2))).build();
+            var lc = ListenerConfig.builder().session(cfg).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
                 SocketChannel[] held = new SocketChannel[3];
@@ -1061,7 +1082,6 @@ class JoinAttackTest {
                         held[i].write(ByteBuffer.wrap(helloFor(c, 20 + 2L * i, Mode.SEALED, new byte[0], null)));
                         assertTrue(held[i].read(ByteBuffer.allocate(4096)) > 0, "a Reply");
                     }
-                    assertEquals(PipeId.of(20), evicted.get(5, java.util.concurrent.TimeUnit.SECONDS));
                     assertEquals(-1, held[0].read(ByteBuffer.allocate(64)), "the oldest is evicted");
                     // A session limit, not an unexplained rejection: counted refused only.
                     until("the eviction is counted", () -> l.stats().refused() == 1);
@@ -1080,11 +1100,10 @@ class JoinAttackTest {
     /** Hold the Confirm write report until the local deadline has conclusively won. */
     @Test void lateConfirmWriteCannotReviveAnExpiredJoin() throws Exception {
         var held = new java.util.concurrent.CompletableFuture<PipeWriter.Completion>();
-        var observed = new java.util.concurrent.LinkedBlockingQueue<Throwable>();
         try (EventLoops loops = EventLoops.create(2); var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             var server = config(loops).build();
             var client = config(loops).joinTimeout(Duration.ofMillis(500))
-                    .joinOutcome((session, pipe, error) -> observed.add(error)).build();
+                    .build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(server));
                  var c = Zmux.connect(listener.localAddress(), client); var s = listener.accept(WAIT)) {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -1101,11 +1120,9 @@ class JoinAttackTest {
                 var completion = held.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 try {
                     var pipe = adding.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                    var failure = assertThrows(JoinTimeoutException.class, pipe::awaitAttached);
-                    assertSame(failure, observed.poll(5, java.util.concurrent.TimeUnit.SECONDS));
+                    assertThrows(JoinTimeoutException.class, pipe::awaitAttached);
                 } finally { completion.completed(); }
                 alive(c, s);
-                assertTrue(observed.isEmpty());
             }
         }
     }

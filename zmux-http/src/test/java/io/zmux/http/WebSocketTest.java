@@ -9,7 +9,7 @@ import io.netty.handler.codec.http.websocketx.ContinuationWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
-import io.zmux.Admission;
+
 import io.zmux.HttpStatusException;
 import io.zmux.PrefixAuth;
 import io.zmux.Role;
@@ -18,7 +18,6 @@ import io.zmux.carrier.Framing;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import java.net.URI;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -116,10 +115,10 @@ class WebSocketTest {
 
     @Test void admissionOnTheUpgradeHead() throws Exception {
         PrefixAuth auth = AdmissionHttpTest.AUTH;
-        var verifier = auth.verifier();
+        var verifier = AdmissionHttpTest.TICKET.verifier();
         var seen = new LinkedBlockingQueue<HostHandler.Seen>();
-        try (var f = new Fixture(b -> b, l -> l.admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).build()),
-                e -> e.webSocket(), false, () -> new HostHandler(seen)); var c = f.client(b -> b)) {
+        try (var f = new Fixture(b -> b, l -> l.admission(verifier.admission().refusal(io.zmux.AdmissionVerdict.FALLBACK).build()),
+                e -> e.webSocket(), true, () -> new HostHandler(seen)); var c = f.client(b -> b)) {
             try (var s = Zmux.open(c.webSocketPipe(ws(f.base), Map.of(), List.of(), auth), Role.CLIENT, f.config)) {
                 f.echo(s);
             }
@@ -128,6 +127,41 @@ class WebSocketTest {
             var e = assertThrows(HttpStatusException.class, () -> c.webSocketPipe(ws(f.base), Map.of(), List.of(), null));
             assertEquals(200, e.status());
             assertEquals("GET", seen.poll(2, TimeUnit.SECONDS).method());
+        }
+    }
+
+    @Test void aShortAnonymousHelloAfterUpgradeEmitsNoInnerFlight() throws Exception {
+        var gate = new io.zmux.seal.Gate() {
+            @Override public byte[] resolve(byte[] handle, java.net.SocketAddress source) { return null; }
+            @Override public io.zmux.seal.Credential credential(byte[] handle, io.zmux.seal.Profile profile,
+                                                                 java.net.SocketAddress source) { return null; }
+            @Override public Object commit(io.zmux.seal.CommitRequest request, java.net.SocketAddress source) {
+                throw new AssertionError("short Hello reached the commit point");
+            }
+        };
+        byte[] scalar = new byte[32];
+        scalar[0] = 7;
+        try (var key = io.zmux.seal.StaticKey.fromScalar(scalar)) {
+            var seal = io.zmux.seal.ServerConfig.builder(gate, key)
+                    .acceptedProfiles(io.zmux.seal.Profile.XXHFS_CHACHA)
+                    .handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build();
+            try (var f = new Fixture(b -> b,
+                    l -> l.admission(AdmissionHttpTest.TICKET.verifier().admission().build()).inboundTransform(io.zmux.seal.Seal.server(seal)),
+                    e -> e.webSocket(), true, null);
+                 var client = f.client(b -> b)) {
+                var carrier = client.webSocketPipe(ws(f.base), Map.of(), List.of(), AdmissionHttpTest.AUTH);
+                var input = RequestTakeoverTest.reading(carrier.reader());
+                try {
+                    RequestTakeoverTest.write(carrier.writer(), "\004\000");
+                    String result = input.poll(5, TimeUnit.SECONDS);
+                    assertNotNull(result);
+                    assertTrue(result.equals("end") || result.startsWith("error "), result);
+                    assertEquals(0, f.listener.stats().sessions());
+                } finally {
+                    carrier.reader().close();
+                    carrier.writer().close();
+                }
+            }
         }
     }
 
@@ -140,7 +174,7 @@ class WebSocketTest {
         Throwable[] err = new Throwable[1];
         boolean[] end = new boolean[1];
         c.reader().start(new PipeReader.Sink() {
-            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(StandardCharsets.US_ASCII.decode(data).toString()); release.run(); }
+            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; chunk.withBuffer(data -> got.add(StandardCharsets.US_ASCII.decode(data).toString())); release.run(); }
             @Override public void onEnd() { end[0] = true; }
             @Override public void onError(Throwable cause) { err[0] = cause; }
         });

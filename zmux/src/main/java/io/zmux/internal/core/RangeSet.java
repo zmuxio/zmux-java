@@ -4,9 +4,20 @@ import java.util.Arrays;
 
 /** A sorted set of disjoint half-open ranges [lo, hi) of non-negative longs. */
 final class RangeSet {
-    private long[] lo = new long[1];
-    private long[] hi = new long[1];
+    private long[] lo;
+    private long[] hi;
     private int n;
+
+    RangeSet() {
+        lo = new long[1];
+        hi = new long[1];
+    }
+
+    RangeSet(RangeSet source) {
+        n = source.n;
+        lo = Arrays.copyOf(source.lo, Math.max(1, n));
+        hi = Arrays.copyOf(source.hi, Math.max(1, n));
+    }
 
     int size() { return n; }
 
@@ -107,6 +118,22 @@ final class RangeSet {
         lo = nlo;
         hi = nhi;
         n = k;
+    }
+
+    /** Takes length bytes from the first range with enough room, or returns -1. */
+    long takeFirst(long length) {
+        for (int i = 0; i < n; i++) {
+            long start = lo[i];
+            if (hi[i] - start < length) continue;
+            lo[i] += length;
+            if (lo[i] == hi[i]) {
+                int remaining = --n - i;
+                System.arraycopy(lo, i + 1, lo, i, remaining);
+                System.arraycopy(hi, i + 1, hi, i, remaining);
+            }
+            return start;
+        }
+        return -1;
     }
 
     void clear() {

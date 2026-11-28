@@ -1,5 +1,8 @@
 package io.zmux.http;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.PipeAuth;
 import io.zmux.PipeOptions;
@@ -18,7 +21,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(60)
 class WebSocketSecureTest {
     @Test void wssCarriesTheExporterAndTakesABoundJoin() throws Exception {
-        try (var f = new Fixture(b -> b.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((c, m, p) -> true).maxPipes(4),
+        try (var f = new Fixture(b -> b.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((c, m, p) -> true).sessionPolicy(new SessionPolicy(new CapacityLimits(4))),
                 b -> b, b -> b.webSocket(), true, null);
              var http = f.client(b -> b.http1())) {
             URI url = URI.create(f.base.toString().replace("https://", "wss://"));

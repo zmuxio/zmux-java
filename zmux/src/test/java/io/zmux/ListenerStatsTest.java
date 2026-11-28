@@ -37,9 +37,10 @@ class ListenerStatsTest {
 
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void everyPipeInputCountsOnceInOneOutcome() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
-            var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).maxPendingPerSource(1).build();
+        try (EventLoops loops = EventLoops.create(1); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            var deadline = Duration.ofMinutes(1);
+            var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(deadline).build();
+            var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(deadline).maxPendingPerSource(2).build();
             int inputs = 0;
             try (var l = Zmux.listener(lc)) {
                 // A split bootstrap: two carriers, one input, one session.
@@ -54,27 +55,37 @@ class ListenerStatsTest {
                         Role.CLIENT, cfg));
                 try (var client = connecting.get(5, TimeUnit.SECONDS); var server = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(server);
-                    PipePoolTest.await(() -> l.stats().sessions() == 1);
+                    SessionTestSupport.await(loops, () -> l.stats().sessions() == 1);
                     // The token again: a replayed half, rejected.
-                    l.adapter().handle(PipeIo.of(null, MemoryPipe.pair(Framing.BYTE_STREAM)[1].writer()), JoinHint.pair(token, false, TestAddr.peer("b"))).closed();
+                    l.adapter().handle(PipeIo.of(null, MemoryPipe.pair(Framing.BYTE_STREAM)[1].writer()),
+                            JoinHint.pair(token, false, TestAddr.peer("b"))).closed().get(20, TimeUnit.SECONDS);
                     inputs++;
-                    PipePoolTest.await(() -> l.stats().rejected() == 1);
+                    assertEquals(1, l.stats().rejected());
                     // An uplink half without a first record: ended by the handshake timeout, on its own.
-                    l.adapter().handle(PipeIo.of(MemoryPipe.pair(Framing.BYTE_STREAM)[1].reader(), null), JoinHint.pair(SplitBootstrapTest.token(2), true, TestAddr.peer("c"))).closed();
+                    var half = new GlobalBoundTest.Fake(true, false);
+                    var alone = l.adapter().handle(half.io, JoinHint.pair(SplitBootstrapTest.token(2), true, TestAddr.peer("c")));
+                    half.sink.get(20, TimeUnit.SECONDS);
+                    expire(loops, deadline, alone);
                     inputs++;
-                    PipePoolTest.await(() -> l.stats().timedOut() == 1);
+                    assertEquals(1, l.stats().timedOut());
                     // Not zmux at all: rejected.
-                    l.adapter().handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes(UTF_8)), JoinHint.inBand(TestAddr.peer("d"))).closed();
+                    l.adapter().handle(bytes("GET / HTTP/1.1\r\n\r\n".getBytes(UTF_8)),
+                            JoinHint.inBand(TestAddr.peer("d"))).closed().get(20, TimeUnit.SECONDS);
                     inputs++;
-                    PipePoolTest.await(() -> l.stats().rejected() == 2);
-                    // A pending carrier holds its source's only slot; the next one of that source is refused.
-                    var idle = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    assertNotNull(l.adapter().reserve(TestAddr.peer("e"), null).handle(idle[1], JoinHint.inBand(TestAddr.peer("e"))));
+                    assertEquals(2, l.stats().rejected());
+                    // A pending carrier and an adapter reservation fill the source's two slots.
+                    var idle = new GlobalBoundTest.Fake();
+                    var pending = l.adapter().reserve(TestAddr.peer("e"), null).handle(idle.io, JoinHint.inBand(TestAddr.peer("e")));
+                    idle.sink.get(20, TimeUnit.SECONDS);
                     inputs++;
-                    assertNull(l.adapter().reserve(TestAddr.peer("e"), null));
+                    var held = l.adapter().reserve(TestAddr.peer("e"), null);
+                    assertNotNull(held);
+                    try { assertNull(l.adapter().reserve(TestAddr.peer("e"), null)); }
+                    finally { held.release(); }
                     inputs++;
                     assertEquals(1, l.stats().refused());
-                    PipePoolTest.await(() -> l.stats().timedOut() == 2);
+                    expire(loops, deadline, pending);
+                    assertEquals(2, l.stats().timedOut());
                     // An adapter's connection that never became an input.
                     l.adapter().countSetupFailure();
                     ListenerStats s = l.stats();
@@ -90,17 +101,20 @@ class ListenerStatsTest {
     @Test void aStalledCarrierCountsInTheAdmissionWhenDecided() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var deadline = Duration.ofMinutes(1);
             var lc = ListenerConfig.builder().session(cfg)
                     .admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.STALL))
-                            .stall(Duration.ofMillis(300), Duration.ofMillis(300)).build()).build();
+                            .stall(deadline, deadline).build()).build();
             try (var l = Zmux.listener(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var admitted = l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("s")));
                 assertEquals(AdmissionVerdict.STALL, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
-                PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
+                SessionTestSupport.await(loops, () -> l.stats().admission().stalled() == 1);
                 assertEquals(0, sum(l.stats()), "an admission's decision is no pipe input");
-                Thread.sleep(500); // the stall ends
-                assertEquals(0, l.stats().rejected());
+                assertFalse(admitted.closed().isDone(), "the stalled carrier still holds its slot");
+                expire(loops, deadline, admitted);
+                assertEquals(1, l.stats().admission().stalled());
+                assertEquals(0, sum(l.stats()));
                 p[0].reader().close(); p[0].writer().close();
             }
             Leaks.none(loops);
@@ -114,7 +128,7 @@ class ListenerStatsTest {
     @Test void aFirstRecordThatIsNoHelloIsRejectedAndLeavesTheSessionAlone() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(8))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofSeconds(10)).build();
             try (var l = Zmux.listener(lc)) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -133,7 +147,7 @@ class ListenerStatsTest {
                         long before = l.stats().rejected();
                         AdmissionTest.silentCarrier(l, "peer", records[i]).get(5, TimeUnit.SECONDS); // closed
                         int n = i;
-                        PipePoolTest.await(() -> l.stats().rejected() == before + 1);
+                        SessionTestSupport.await(loops, () -> l.stats().rejected() == before + 1);
                         assertEquals(0, l.stats().joins(), "record " + n);
                     }
                     assertFalse(s.closed().isDone() || c.closed().isDone(), "the session is not affected");
@@ -145,6 +159,12 @@ class ListenerStatsTest {
                 }
             }
         }
+    }
+
+    /** Drive the listener's native timer only after the test has observed the registered stage. */
+    static void expire(EventLoops loops, Duration interval, io.zmux.adapter.Handled handled) throws Exception {
+        loops.next().advanceTimersForTests(interval.toNanos()).get(20, TimeUnit.SECONDS);
+        handled.closed().get(20, TimeUnit.SECONDS);
     }
 
     /** A record of the concatenated body parts, prefixed with its one-byte Size. */

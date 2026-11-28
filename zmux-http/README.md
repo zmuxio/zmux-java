@@ -81,12 +81,10 @@ the HTTP codec instead.
 `HttpCarrierClient` dials one carrier per call and returns a `PipeIo`:
 `pipe(url, headers, direction, credential)` (streaming),
 `splitPipe(url, headers, credential)`, `exchangePipe(urlTemplate, config)` and
-`webSocketPipe(url, headers, protocols, credential)`. Each kind is also a
-`Candidate` for `Zmux.dial`, which picks the first kind that works
-(`streamingCandidate`, `splitCandidate`, `exchangeCandidate`,
-`webSocketCandidate`). `splitJoin(session, url, headers, credential, options)`
-joins a split carrier as a further pipe of a multipath session; a split
-bootstrap is pipe 0 only. `tls(SslContextBuilder)` sets the trust
+`webSocketPipe(url, headers, protocols, credential)`. A session controller
+can use these methods as carrier openers. `splitOpener(url, headers)` opens
+paired POST/GET carriers for a Join layout.
+`tls(SslContextBuilder)` sets the trust
 configuration, `http1()` or `http2()` fixes the version, and `timeout(Duration)`
 bounds a dial.
 

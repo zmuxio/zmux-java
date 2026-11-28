@@ -16,6 +16,8 @@ public final class KeepAlive {
     interface Port {
         /** A frame of this component wants to be written. */
         void wantWrite();
+        long now();
+        boolean peerZmux();
 
         /** The no-effect budget is exhausted. */
         void budgetExhausted();
@@ -46,8 +48,28 @@ public final class KeepAlive {
     private long next;
     private long outstanding;
 
-    /** When the outstanding QX_PING request was sent; Long.MIN_VALUE: none. */
-    long outstandingSentAt() { return outstanding != 0 ? sentAt : Long.MIN_VALUE; }
+    /** The protocol shares this limit between QX_PING requests and padding-only records. */
+    private long[] plainMarks;
+    private int nextMark;
+
+    boolean limitedRoom(long now, int earlierInBatch) {
+        return plainMarks == null || plainMarks[(nextMark + earlierInBatch) % plainMarks.length] <= now - Time.SECOND;
+    }
+
+    void markPing(long now) { if (!port.peerZmux()) markLimited(now); }
+
+    void markLimited(long now) {
+        if (plainMarks == null) {
+            plainMarks = new long[16];
+            java.util.Arrays.fill(plainMarks, Long.MIN_VALUE);
+        }
+        plainMarks[nextMark] = now;
+        nextMark = (nextMark + 1) % plainMarks.length;
+    }
+
+    private boolean pendingRequest() { return (want || requestFirst) && outstanding == 0; }
+
+    private boolean requestRoom(long now) { return port.peerZmux() || limitedRoom(now, 0); }
     private long sentAt;
     private long expires;
     private boolean want;
@@ -181,7 +203,7 @@ public final class KeepAlive {
     }
 
     boolean wants() {
-        return owe || (want && outstanding == 0) || requestFirst;
+        return owe || (pendingRequest() && requestRoom(port.now()));
     }
 
     // ---- writing ----
@@ -200,7 +222,7 @@ public final class KeepAlive {
     }
 
     private void writeRequest(RecordWriter w, long now, long srtt) {
-        if ((want || requestFirst) && outstanding == 0) {
+        if (pendingRequest() && requestRoom(now)) {
             long seq = next;
             if (!w.frame(8 + VarInt.length(seq), true, bb -> FrameEncoder.ping(bb, false, seq))) return;
             next++;
@@ -299,12 +321,14 @@ public final class KeepAlive {
             }
         }
         if (outstanding != 0) t = Math.min(t, expires);
+        else if (pendingRequest() && !requestRoom(port.now())) t = Math.min(t, Time.add(plainMarks[nextMark], Time.SECOND));
         return t;
     }
 
     /** Runs the timers due at t; true when the idle timeout expired. */
     boolean onTimeout(long t, boolean live) {
         if (outstanding != 0 && t >= expires) expired();
+        if (plainMarks != null && pendingRequest() && requestRoom(t)) port.wantWrite();
         if (!live) return false;
         if (idle > 0) {
             long idleDeadline = Time.add(lastActivity, idle);

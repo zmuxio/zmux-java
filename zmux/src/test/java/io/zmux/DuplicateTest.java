@@ -63,7 +63,8 @@ class DuplicateTest {
                 assertSame(first.server(),b.survivor()); assertSame(second.client(),b.loser());
                 assertThrows(GoingAwayException.class,second.client()::openStream);
                 old.finish(); old.close();
-                PipePoolTest.await(() -> second.client().isClosed() && second.server().isClosed());
+                second.client().awaitClosed();
+                second.server().awaitClosed();
                 try (var fresh = first.client().openStream()) { fresh.write(new byte[] {9}); fresh.finish();
                     try (var accepted = first.server().acceptStream(Duration.ofSeconds(3))) {
                         assertArrayEquals(new byte[] {9},SessionTest.readAll(accepted)); accepted.finish();
@@ -75,7 +76,7 @@ class DuplicateTest {
     }
     @Test void noncesUseOneCommonDomainAndBothEndpointsAgree() throws Exception {
         for (boolean mp : new boolean[] {true,false}) try (EventLoops loops = EventLoops.create(3)) {
-            var cfg = mp ? PipePoolTest.config(loops,3) : ZmuxConfig.builder().eventLoops(loops).build();
+            var cfg = mp ? SessionTestSupport.config(loops,3) : ZmuxConfig.builder().eventLoops(loops).build();
             try (Pair one = mp ? Pair.memory(cfg) : symmetric(cfg); Pair two = mp ? Pair.memory(cfg) : symmetric(cfg);
                  Held _ = Held.open(one); Held _ = Held.open(two)) {
                 if (!mp) {
@@ -94,7 +95,7 @@ class DuplicateTest {
     }
     @Test void undecidableOrEqualInputsChangeNeitherSession() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
-            var plain = ZmuxConfig.builder().eventLoops(loops).build(); var mp = PipePoolTest.config(loops,3);
+            var plain = ZmuxConfig.builder().eventLoops(loops).build(); var mp = SessionTestSupport.config(loops,3);
             try (Pair one = Pair.memory(plain); Pair two = Pair.memory(mp)) {
                 expectReason(DuplicateUndecidedException.Reason.SAME_SESSION,one.client(),one.client(),ids(1,2));
                 expectReason(DuplicateUndecidedException.Reason.SAME_DIALER,one.client(),two.client(),ids(1,2));
@@ -110,57 +111,60 @@ class DuplicateTest {
         assertArrayEquals(new byte[] {1},opts.localIdentity()); assertArrayEquals(new byte[] {2},opts.peerIdentity());
         assertThrows(IllegalArgumentException.class,() -> DuplicateOptions.defaults().withIdentities(local,null));
     }
+    private static final MemberSpec REJOIN = new MemberSpec("", java.util.List.of(new AttachmentSpec(Directions.BOTH, PipeOptions.defaults())));
+
     @Test void rejoinIsOneAttemptAndFailureCannotUndoResolution() throws Exception {
         try (EventLoops loops = EventLoops.create(4)) {
-            var cfg = PipePoolTest.config(loops,3);
-            try (var survivor = new PipePoolTest.Fixture(cfg); Pair loser = Pair.memory(cfg); Held old = Held.open(loser)) {
+            var cfg = SessionTestSupport.config(loops,3);
+            try (var survivor = new SessionTestSupport.Fixture(cfg); Pair loser = Pair.memory(cfg); Held old = Held.open(loser)) {
                 var calls = new AtomicInteger(); var cancel = new Cancellation();
-                var route = PipePool.of(attempt -> { calls.incrementAndGet(); throw new IOException("route unavailable"); });
-                var result = Zmux.resolveDuplicate(survivor.server,loser.client(),ids(2,1).withRejoin(route).withCancellation(cancel));
+                CarrierOpener route = (setup, request) -> {
+                    calls.incrementAndGet();
+                    return new CarrierOpener.Opened(java.util.List.of(), new IOException("route unavailable"));
+                };
+                var result = Zmux.resolveDuplicate(survivor.server,loser.client(),ids(2,1).withRejoin(REJOIN, route).withCancellation(cancel));
                 assertSame(survivor.server,result.survivor()); assertTrue(result.rejoinStarted());
                 var joined = result.rejoin().completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-                assertEquals(1,calls.get()); assertEquals(0,joined.joined()); assertEquals(1,joined.failures()); assertNotNull(joined.cause());
-                assertEquals(0,CancellationTest.registrations(cancel));
+                assertEquals(1,calls.get()); assertEquals(Attempt.Disposition.DIAL_FAILED, joined.disposition()); assertNotNull(joined.error());
                 assertThrows(GoingAwayException.class,loser.client()::openStream);
                 old.finish();
             }
-            try (var survivor = new PipePoolTest.Fixture(cfg); Pair loser = Pair.memory(cfg); Held _ = Held.open(loser)) {
+            try (var survivor = new SessionTestSupport.Fixture(cfg); Pair loser = Pair.memory(cfg); Held _ = Held.open(loser)) {
                 var calls = new AtomicInteger();
-                var route = PipePool.of(attempt -> { calls.incrementAndGet(); throw new IOException("must not dial"); });
-                var result = Zmux.resolveDuplicate(survivor.client,loser.server(),ids(1,2).withRejoin(route));
+                CarrierOpener route = (setup, request) -> { calls.incrementAndGet(); throw new IOException("must not dial"); };
+                var result = Zmux.resolveDuplicate(survivor.client,loser.server(),ids(1,2).withRejoin(REJOIN, route));
                 assertFalse(result.rejoinStarted()); assertEquals(0,calls.get());
             }
         }
     }
-    @Test void successfulOneShotUsesTheMaintenanceOwnershipAndCleanupPath() throws Exception {
-        try (EventLoops loops = EventLoops.create(3); var fixture = new PipePoolTest.Fixture(PipePoolTest.config(loops,3))) {
-            var cancellation = new Cancellation(); var calls = new AtomicInteger();
-            var run = PipeMaintenance.startOnce(fixture.client,PipePool.of(attempt -> {
-                calls.incrementAndGet(); return fixture.dial().open(attempt);
-            }),cancellation);
-            var result = run.completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-            assertEquals(1,calls.get()); assertEquals(1,result.joined()); assertNull(result.cause());
-            assertEquals(PipeState.Outbound.ACTIVE, result.pipes().getFirst().stats().orElseThrow().outbound());
-            assertEquals(0,CancellationTest.registrations(cancellation));
-        }
-    }
-    @Test void cancellingRejoinWaitsForItsDialWorkerWithoutUndoingTheDecision() throws Exception {
+    @Test void cancellingRejoinSignalsItsOpenerWithoutUndoingTheDecision() throws Exception {
         try (EventLoops loops = EventLoops.create(3)) {
-            var cfg = PipePoolTest.config(loops,3);
+            var cfg = SessionTestSupport.config(loops,3);
             try (Pair one = Pair.memory(cfg); Pair two = Pair.memory(cfg); Held hold = Held.open(two)) {
-                var entered = new CountDownLatch(1); var exited = new AtomicInteger(); var cancel = new Cancellation();
-                var route = PipePool.of(attempt -> {
-                    entered.countDown();
-                    try { new CountDownLatch(1).await(); throw new AssertionError(); }
-                    finally { exited.incrementAndGet(); }
-                });
-                var result = Zmux.resolveDuplicate(one.server(),two.client(),ids(2,1).withRejoin(route).withCancellation(cancel));
-                assertTrue(result.rejoinStarted()); assertTrue(entered.await(2,TimeUnit.SECONDS)); cancel.cancel();
-                result.rejoin().completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-                // The interrupted dial is abandoned, not awaited (PipeMaintenance): it exits soon after.
-                long until = System.nanoTime() + 2_000_000_000L;
-                while (exited.get() == 0 && System.nanoTime() < until) Thread.sleep(1);
-                assertEquals(1,exited.get()); assertEquals(0,CancellationTest.registrations(cancel));
+                var entered = new CountDownLatch(1);
+                var exited = new java.util.concurrent.CompletableFuture<Void>();
+                var cancel = new Cancellation();
+                CarrierOpener route = (setup, request) -> {
+                    var release = new java.util.concurrent.CompletableFuture<Void>();
+                    var registration = setup.onCancel(() -> release.complete(null));
+                    try {
+                        entered.countDown();
+                        release.join();
+                        return new CarrierOpener.Opened(java.util.List.of());
+                    } finally {
+                        registration.close();
+                        exited.complete(null);
+                    }
+                };
+                var result = Zmux.resolveDuplicate(one.server(),two.client(),ids(2,1).withRejoin(REJOIN, route).withCancellation(cancel));
+                try {
+                    assertTrue(result.rejoinStarted());
+                    assertTrue(entered.await(30, TimeUnit.SECONDS));
+                } finally {
+                    cancel.cancel();
+                }
+                assertEquals(Attempt.Disposition.CANCELLED, result.rejoin().completion().get(30, TimeUnit.SECONDS).disposition());
+                exited.get(30, TimeUnit.SECONDS);
                 assertThrows(GoingAwayException.class,two.client()::openStream);
                 hold.finish();
             }
@@ -176,32 +180,21 @@ class DuplicateTest {
                 assertSame(two.client(),resolved.loser());
                 assertThrows(GoingAwayException.class,two.client()::openStream);
                 held.finish(); held.close();
-                PipePoolTest.await(() -> two.client().isClosed());
+                two.client().awaitClosed();
             }
         }
     }
     @Test void losingSessionWakesAlreadyBlockedOpeners() throws Exception {
-        try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (EventLoops loops = EventLoops.create(3)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).maxIncomingStreams(4).build();
             try (Pair one = Pair.memory(cfg); Pair two = Pair.memory(cfg); Held held = Held.open(two);
                  Held _ = Held.open(two); Held _ = Held.open(two); Held _ = Held.open(two)) {
-                var blocked = workers.submit(() -> two.client().openStream());
-                PipePoolTest.await(() -> (Boolean)two.client().run(op -> two.client().core.streams().openersWaiting(true)));
+                var blocked = two.client().openStreamAsync();
+                assertEquals(true, two.client().run(op -> two.client().core.streams().openersWaiting(true)));
                 Zmux.resolveDuplicate(one.server(),two.client(),ids(2,1));
                 assertInstanceOf(GoingAwayException.class,assertThrows(ExecutionException.class,() -> blocked.get(3,TimeUnit.SECONDS)).getCause());
                 held.finish();
             }
-        }
-    }
-    @Test void oneShotSkipsDialWhenTargetIsAlreadyFull() throws Exception {
-        try (EventLoops loops = EventLoops.create(3); var fixture = new PipePoolTest.Fixture(PipePoolTest.config(loops,2))) {
-            var occupied = PipeMaintenance.startOnce(fixture.client,PipePool.of(fixture.dial()),null);
-            occupied.completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-            var calls = new AtomicInteger();
-            var skipped = PipeMaintenance.startOnce(fixture.client,PipePool.of(attempt -> {
-                calls.incrementAndGet(); throw new IOException("must not dial");
-            }),null).completion().toCompletableFuture().get(3,TimeUnit.SECONDS);
-            assertEquals(0,calls.get()); assertEquals(0,skipped.joined()); assertNull(skipped.cause());
         }
     }
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
@@ -219,7 +212,7 @@ class DuplicateTest {
                     assertArrayEquals(new byte[0],SessionTest.readAll(provisional));
                 }
                 provisional.close();
-                PipePoolTest.await(() -> two.client().isClosed());
+                two.client().awaitClosed();
             }
         }
     }

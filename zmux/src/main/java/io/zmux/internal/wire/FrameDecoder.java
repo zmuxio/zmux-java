@@ -1,6 +1,6 @@
 package io.zmux.internal.wire;
 
-
+import io.zmux.internal.buffer.ReceiveSpans;
 import java.nio.ByteBuffer;
 
 /**
@@ -8,21 +8,23 @@ import java.nio.ByteBuffer;
  * within the record; nothing allocates.
  */
 public final class FrameDecoder {
-    private static final long MAX_60 = 1L << 60;
+    public static final int MAX_DATAGRAM_ACK_RANGES = 4090;
+    public static final int MAX_DATAGRAM_ACK_SIZE = 8192;
 
     private ByteBuffer b;
+    private ReceiveSpans spans;
     private int i;
     private int limit;
     private boolean bad;
 
     private long varint() {
         if (bad) return 0;
-        long v = VarInt.get(b, i, limit);
+        long v = VarInt.get(b, spans, i, limit);
         if (v < 0) {
             bad = true;
             return 0;
         }
-        i += VarInt.lengthOf(b.get(i));
+        i += VarInt.lengthOf(get(i));
         return v;
     }
 
@@ -31,8 +33,10 @@ public final class FrameDecoder {
             bad = true;
             return 0;
         }
-        return b.get(i++) & 0xff;
+        return get(i++) & 0xff;
     }
+
+    private byte get(int index) { return spans == null ? b.get(index) : spans.get(index); }
 
     /** Skips {@code n} bytes and returns their start, or -1 when they are not there. */
     private int bytes(long n) {
@@ -51,21 +55,27 @@ public final class FrameDecoder {
      * type, which is reported only after the frame decoded.
      */
     public int decode(ByteBuffer buf, int pos, int limit, Frame f) throws WireException {
+        return decode(buf, null, pos, limit, f);
+    }
+
+    public int decode(ByteBuffer buf, ReceiveSpans ranges, int pos, int limit, Frame f) throws WireException {
         f.reset();
         f.src = buf;
+        f.spans = ranges;
         this.b = buf;
+        this.spans = ranges;
         this.i = pos;
         this.limit = limit;
         this.bad = false;
-        long t = VarInt.get(buf, pos, limit);
+        long t = VarInt.get(buf, ranges, pos, limit);
         if (t < 0) throw WireException.frame("truncated frame type");
-        int tn = VarInt.lengthOf(buf.get(pos));
+        int tn = VarInt.lengthOf(get(pos));
         i = pos + tn;
         f.type = t;
         if (t == FrameType.PADDING) {
             f.kind = FrameKind.PADDING;
             int n = i;
-            while (n < limit && buf.get(n) == 0) n++;
+            while (n < limit && get(n) == 0) n++;
             f.count = n - pos;
             i = n;
         } else if (t >= 0x08 && t <= 0x0f) {
@@ -116,7 +126,7 @@ public final class FrameDecoder {
             f.kind = FrameKind.MAX_STREAMS;
             f.bidi = t == FrameType.MAX_STREAMS_BIDI;
             f.value = varint();
-            if (!bad && f.value > MAX_60) throw WireException.frame(t, "MAX_STREAMS above 2^60");
+            if (!bad && f.value > VarInt.MAX_STREAM_COUNT) throw WireException.frame(t, "MAX_STREAMS above 2^60");
         } else if (t == FrameType.DATA_BLOCKED) {
             f.kind = FrameKind.DATA_BLOCKED;
             f.value = varint();
@@ -128,7 +138,7 @@ public final class FrameDecoder {
             f.kind = FrameKind.STREAMS_BLOCKED;
             f.bidi = t == FrameType.STREAMS_BLOCKED_BIDI;
             f.value = varint();
-            if (!bad && f.value > MAX_60) throw WireException.frame(t, "STREAMS_BLOCKED above 2^60");
+            if (!bad && f.value > VarInt.MAX_STREAM_COUNT) throw WireException.frame(t, "STREAMS_BLOCKED above 2^60");
         } else if (t == FrameType.CLOSE_TRANSPORT || t == FrameType.CLOSE_APPLICATION) {
             f.kind = FrameKind.CONNECTION_CLOSE;
             f.application = t == FrameType.CLOSE_APPLICATION;
@@ -149,6 +159,8 @@ public final class FrameDecoder {
                 f.dataLen = limit - i;
                 i = limit;
             }
+        } else if (t == FrameType.DATAGRAM_ACK) {
+            datagramAck(f, pos);
         } else if (t == FrameType.TRANSPORT_PARAMETERS) {
             f.kind = FrameKind.TRANSPORT_PARAMETERS;
             long n = varint();
@@ -163,7 +175,7 @@ public final class FrameDecoder {
             f.maxBidi = varint();
             f.maxUni = varint();
             f.code = varint();
-            if (!bad && (f.maxBidi > MAX_60 || f.maxUni > MAX_60)) throw WireException.frame(t, "GOAWAY watermark above 2^60");
+            if (!bad && (f.maxBidi > VarInt.MAX_STREAM_COUNT || f.maxUni > VarInt.MAX_STREAM_COUNT)) throw WireException.frame(t, "GOAWAY watermark above 2^60");
         } else if (t == FrameType.PRIORITY_UPDATE) {
             f.kind = FrameKind.PRIORITY_UPDATE;
             f.streamId = varint();
@@ -231,6 +243,33 @@ public final class FrameDecoder {
             throw new WireException(TransportError.PROTOCOL_VIOLATION, t, "frame type not minimally encoded", "");
         }
         return i - pos;
+    }
+
+    private void datagramAck(Frame f, int start) throws WireException {
+        f.kind = FrameKind.DATAGRAM_ACK;
+        f.pipeId = varint();
+        f.datagramChannel = u8();
+        f.value = varint();
+        f.datagramAckDelay = varint();
+        long count = varint();
+        f.firstDatagramRange = varint();
+        if (bad) return;
+        if (f.datagramChannel > 1 || count > MAX_DATAGRAM_ACK_RANGES || f.firstDatagramRange > f.value) {
+            throw WireException.frame(f.type, "invalid DATAGRAM_ACK header");
+        }
+        f.entriesPos = i;
+        long low = f.value - f.firstDatagramRange;
+        for (int k = 0; k < count; k++) {
+            long gap = varint(), length = varint();
+            if (bad) return;
+            if (low < gap + 2 || length > low - gap - 2) {
+                throw WireException.frame(f.type, "DATAGRAM_ACK range below zero");
+            }
+            if (i - start > MAX_DATAGRAM_ACK_SIZE) throw WireException.frame(f.type, "DATAGRAM_ACK above size bound");
+            low -= gap + 2 + length;
+        }
+        f.entriesEnd = i;
+        f.count = (int) count;
     }
 
 }

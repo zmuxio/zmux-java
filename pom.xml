@@ -5,7 +5,7 @@
 
     <groupId>io.github.zmuxio</groupId>
     <artifactId>zmux-parent</artifactId>
-    <version>1.2.5</version>
+    <version>1.3.0</version>
     <packaging>pom</packaging>
 
     <name>zmux parent</name>
@@ -48,9 +48,9 @@
 
     <modules>
         <module>zmux</module>
+        <module>zmux-shaping</module>
         <module>zmux-netty-test</module>
         <module>zmux-quic</module>
-        <module>zmux-shaping</module>
         <module>zmux-http</module>
         <module>zmux-http3</module>
         <module>zmux-bench</module>

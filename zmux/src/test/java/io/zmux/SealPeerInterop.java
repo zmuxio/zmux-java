@@ -53,7 +53,7 @@ class SealPeerInterop {
         String binary = InteropProcess.required("ZMUX_SEAL_INTEROP_PEER");
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var server = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.values()).build();
+            var server = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.values()).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc);
                  var child = new InteropProcess(binary, "client", Long.toString(profile.value()), l.localAddress().getHostString() + ":" + l.localAddress().getPort());

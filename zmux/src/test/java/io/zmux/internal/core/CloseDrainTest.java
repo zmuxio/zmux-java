@@ -4,6 +4,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -27,7 +29,7 @@ class CloseDrainTest {
         c.local().present &= ~(io.zmux.internal.wire.TransportParams.PIPE_ACK | io.zmux.internal.wire.TransportParams.ACK_THRESHOLD | io.zmux.internal.wire.TransportParams.ACK_DELAY | io.zmux.internal.wire.TransportParams.LANES);
         Session s = new Session(c.build(), 0);
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
-        s.attachBootstrap(info, info, null);
+        s.attachBootstrap(info, info);
         return s;
     }
 
@@ -49,8 +51,58 @@ class CloseDrainTest {
         assertEquals(SessionState.CLOSING, b.state(), "the accepted stream's data is still unread");
         ByteBuffer dst = ByteBuffer.allocate(200);
         assertEquals(100, b.receiving().read(in, dst).n());
-        b.handleTimeout(b.nextTimeout());
+        b.handleTimeout(DeadlineFixture.next(b));
         assertEquals(SessionState.CLOSED, b.state(), "the last read ends the drain");
+    }
+
+    @Test void eofBeforeLocalShutdownStillReleasesTheCarrierDuringReadDrain() throws Exception {
+        Session a = a(), b = b();
+        Stream in = setUp(a, b, 100, true)[1];
+        a.close(0x2a, "bye".getBytes(UTF_8));
+        HeldControlTest.pump(a, b);
+        assertEquals(List.of(new Action(Action.Kind.SHUTDOWN, 0, 0, Action.DIR_OUT)), takeActions(b));
+
+        b.pipeEnded(0, 0, true, false, null, 0);
+        assertTrue(takeActions(b).isEmpty(), "local shutdown is still pending");
+        b.outputShut(0, 0, 0);
+        assertEquals(List.of(new Action(Action.Kind.CLOSE, 0, 0, Action.DIR_BIDI)), takeActions(b));
+        assertEquals(SessionState.CLOSING, b.state());
+        assertEquals(100, b.receiving().read(in, ByteBuffer.allocate(100)).n());
+
+        b.handleTimeout(DeadlineFixture.next(b));
+        assertEquals(SessionState.CLOSED, b.state());
+        assertTrue(takeActions(b).isEmpty(), "the drain must not close the same carrier twice");
+    }
+
+    @Test void theCarrierWaitsForEveryOutboundLaneToShut() throws Exception {
+        Session a = a(), b = b();
+        setUp(a, b, 100, true);
+        var info = b.pipes.get(0).out().lane(0).st.info();
+        b.pipes.get(0).out().add(new Pipe.OutLane(1, info, true));
+
+        a.close(0x2a, "bye".getBytes(UTF_8));
+        HeldControlTest.pump(a, b);
+        assertEquals(List.of(new Action(Action.Kind.SHUTDOWN, 0, 0, Action.DIR_OUT),
+                new Action(Action.Kind.SHUTDOWN, 0, 1, Action.DIR_OUT)), takeActions(b));
+        b.outputShut(0, 0, 0);
+        assertFalse(b.closeHandedOff(), "the second lane still owes its shutdown");
+        assertTrue(takeActions(b).isEmpty());
+
+        b.outputShut(0, 1, 0);
+        assertTrue(b.closeHandedOff());
+        assertEquals(List.of(new Action(Action.Kind.CLOSE, 0, 0, Action.DIR_BIDI)), takeActions(b));
+        b.pipeEnded(0, 0, true, false, null, 0);
+        assertTrue(takeActions(b).isEmpty(), "a later EOF has no second close to issue");
+
+        b.handleTimeout(b.lingerTimeout());
+        assertEquals(SessionState.CLOSED, b.state());
+        assertTrue(takeActions(b).isEmpty(), "the drain timeout has no carrier left to abort");
+    }
+
+    private static List<Action> takeActions(Session session) {
+        var actions = new ArrayList<Action>();
+        session.outbox().takeActions(actions);
+        return actions;
     }
 
     /**
@@ -68,9 +120,9 @@ class CloseDrainTest {
         b.handleTimeout(bound);
         assertTrue(b.closeHandedOff(), "the hand-off is over at its bound");
         assertEquals(SessionState.CLOSING, b.state(), "the unread data still holds the session");
-        assertEquals(bound + b.lingerTimeout(), b.nextTimeout(), "the linger bounds the drain from there");
+        assertEquals(bound + b.lingerTimeout(), DeadlineFixture.next(b), "the linger bounds the drain from there");
         assertEquals(100, b.receiving().read(in, ByteBuffer.allocate(200)).n());
-        b.handleTimeout(b.nextTimeout());
+        b.handleTimeout(DeadlineFixture.next(b));
         assertEquals(SessionState.CLOSED, b.state());
     }
 
@@ -82,7 +134,7 @@ class CloseDrainTest {
         peerCloses(a, b);
         assertEquals(SessionState.CLOSING, b.state(), "the lane holds unconsumed bytes");
         b.receiving().laneConsumed(in, 100, 0);
-        b.handleTimeout(b.nextTimeout());
+        b.handleTimeout(DeadlineFixture.next(b));
         assertEquals(SessionState.CLOSED, b.state());
     }
 
@@ -132,7 +184,7 @@ class CloseDrainTest {
             assertNull(b.error());
             assertFalse(b.pollTransmit(0, 0, new Batch(), Session.DEFAULT_BATCH, 0));
             long deadline = b.lingerTimeout();
-            assertEquals(deadline, b.nextTimeout());
+            assertEquals(deadline, DeadlineFixture.next(b));
             b.handleTimeout(deadline - 1);
             assertNull(b.error());
             if (eof) b.pipeEnded(0, 0, true, false, null, deadline - 1);
@@ -152,6 +204,6 @@ class CloseDrainTest {
         a.close(0x2a, "bye".getBytes(UTF_8));
         HeldControlTest.pump(a, b);
         assertEquals(SessionState.CLOSING, b.state(), "the close was read; the drain runs");
-        assertTrue(b.nextTimeout() <= 1_000 + b.lingerTimeout(), "bounded by a linger from the close");
+        assertTrue(DeadlineFixture.next(b) <= 1_000 + b.lingerTimeout(), "bounded by a linger from the close");
     }
 }

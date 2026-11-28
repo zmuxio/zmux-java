@@ -1,17 +1,16 @@
 package io.zmux.shaping;
 
-/**
- * A notification.
- *
- * @param nowNanos the session clock, nanoseconds, never negative
- * @param length frames length, bytes ({@link EventKind#RECORD_IN}, {@link EventKind#INJECTED})
- * @param paddingOnly the record holds PADDING only ({@link EventKind#RECORD_IN})
- * @param stream the stream ID ({@link EventKind#STREAM_OPEN}, {@link EventKind#STREAM_END})
- * @param meters the session's readings with {@link Capability#BUDGET}, otherwise {@link ShapingMeters#ZERO}
- */
-public record Event(EventKind kind, io.zmux.PipeId pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream, ShapingMeters meters) {
-    /** An event without readings. */
-    public Event(EventKind kind, io.zmux.PipeId pipe, long lane, long nowNanos, int length, boolean paddingOnly, long stream) {
-        this(kind, pipe, lane, nowNanos, length, paddingOnly, stream, ShapingMeters.ZERO);
+import io.zmux.PipeId;
+
+/** A notification from the session owner. Length and cost are bytes at the carrier boundary. */
+public record Event(EventKind kind, PipeId pipe, long lane, long nowNanos, int length, long stream,
+                    ShapingMeters meters, Unit unit, boolean data, boolean control, long requestId, int wireCost,
+                    RuntimeReason reason) {
+    /** The carrier unit that completed. */
+    public enum Unit { RECORD, NATIVE_DATAGRAM }
+
+    /** A lifecycle or stream event. */
+    public Event(EventKind kind, PipeId pipe, long lane, long nowNanos, int length, long stream, ShapingMeters meters) {
+        this(kind, pipe, lane, nowNanos, length, stream, meters, null, false, false, 0, 0, null);
     }
 }

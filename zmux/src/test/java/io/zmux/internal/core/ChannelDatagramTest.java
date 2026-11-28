@@ -1,7 +1,10 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.zmux.carrier.CarrierChannel.Outcome;
 import io.zmux.internal.wire.ChannelDatagram;
 import io.zmux.internal.wire.FrameDecoder;
 import io.zmux.internal.wire.Frame;
@@ -13,7 +16,6 @@ import io.zmux.internal.wire.WireException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -22,11 +24,16 @@ import org.junit.jupiter.api.Timeout;
 class ChannelDatagramTest {
     /** A fake channel: a Pipe Stream ID and the current maximum. */
     static final class FakeChannel implements DatagramChannel {
-        final long id;
+        long id;
         int max;
+        Integer limit;
+        boolean defaultLimit;
         FakeChannel(long id, int max) { this.id = id; this.max = max; }
         @Override public long channelStreamId() { return id; }
         @Override public int maxChannelDatagram() { return max; }
+        @Override public int channelDatagramLimit(int room) {
+            return defaultLimit ? DatagramChannel.super.channelDatagramLimit(room) : limit == null ? room : limit;
+        }
     }
 
     /** Two cores over one in-memory pipe, each with an optional datagram channel. */
@@ -41,20 +48,29 @@ class ChannelDatagramTest {
         Pair(FakeChannel ca, FakeChannel cb) { this(ca, cb, 1 << 20); }
 
         Pair(FakeChannel ca, FakeChannel cb, long receiveBytes) {
+            this(ca, cb, receiveBytes, CoreConfig.DEFAULT_DATAGRAM_STREAM_BYTES);
+        }
+
+        Pair(FakeChannel ca, FakeChannel cb, long receiveBytes, long streamReceiveBytes) {
             this.ca = ca;
             this.cb = cb;
             a = session(CoreConfig.Role.INITIATOR, ca, receiveBytes);
-            b = session(CoreConfig.Role.RESPONDER, cb, receiveBytes);
+            b = session(CoreConfig.Role.RESPONDER, cb, receiveBytes, streamReceiveBytes);
         }
 
         static Session session(CoreConfig.Role role, DatagramChannel ch, long receiveBytes) {
-            CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role).datagrams(true).datagramReceiveBytes(receiveBytes);
+            return session(role, ch, receiveBytes, CoreConfig.DEFAULT_DATAGRAM_STREAM_BYTES);
+        }
+
+        private static Session session(CoreConfig.Role role, DatagramChannel ch, long receiveBytes, long streamReceiveBytes) {
+            CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role).datagrams(true)
+                    .datagramReceiveBytes(receiveBytes).datagramStreamBytes(streamReceiveBytes);
             TransportParams l = c.local();
-            l.present |= TransportParams.DATAGRAM | TransportParams.FLOWS;
+            l.present |= TransportParams.DATAGRAM;
             l.maxDatagramFrameSize = 65535;
             Session s = new Session(c.build(), 0);
             CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true).withChannel(ch);
-            s.attachBootstrap(info, info, null);
+            s.attachBootstrap(info, info);
             return s;
         }
 
@@ -74,7 +90,9 @@ class ChannelDatagramTest {
                         moved = true;
                     }
                     List<byte[]> out = new ArrayList<>();
-                    from.pollChannel(0, out, new ArrayList<>(), now);
+                    var tickets = new ArrayList<Datagrams.ChannelSent>();
+                    from.pollChannel(0, out, tickets, now);
+                    for (var ticket : tickets) from.channelDone(ticket, Outcome.ACCEPTED, now);
                     if (from == a) fromA.addAll(out);
                     moved |= !out.isEmpty();
                 }
@@ -139,6 +157,36 @@ class ChannelDatagramTest {
         assertEquals(-1, ChannelDatagram.pipeStreamId(ByteBuffer.wrap(new byte[0]), 0, 0));
     }
 
+    @Test void legacyPeerKeepsUnpaddedNativeDatagrams() throws Exception {
+        var p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
+        p.b.localParams().present &= ~TransportParams.CARRIER_DATAGRAM_PADDING;
+        p.pump();
+        assertTrue(p.a.features().carrierDatagrams());
+        assertFalse(p.a.features().carrierDatagramPadding());
+        assertFalse(p.b.features().carrierDatagramPadding());
+        p.a.sendDatagram(null, 0, new byte[] {0x61, 0});
+        p.pump();
+        assertArrayEquals(new byte[] {0, 0x30, 0, 0, 0x61, 0}, p.fromA.getFirst());
+        p.deliverToB();
+        assertArrayEquals(new byte[] {0x61, 0}, p.b.datagrams().receive());
+        p.toB(new byte[] {0, 0, 0x30, 1, 0, 0x61}, 0);
+        assertEquals(TransportError.PROTOCOL_VIOLATION, p.b.error().code());
+    }
+
+    @Test void negotiatedPaddingScanIsBoundedAndPreservesTheTail() throws Exception {
+        int cap = ChannelDatagram.MAX_PADDED_FRAME;
+        byte[] bytes = ChannelDatagram.encode(0, new byte[] {0, 0, 0x61, 0}, cap - 5);
+        Frame f = new Frame();
+        ChannelDatagram.decodeFrame(new FrameDecoder(), ByteBuffer.wrap(bytes), 1, bytes.length, f, true);
+        assertEquals(4, f.dataLen);
+        assertEquals(0, bytes[bytes.length - 1]);
+        var oversized = java.util.Arrays.copyOf(bytes, bytes.length + 1);
+        assertThrows(WireException.class, () -> ChannelDatagram.decodeFrame(new FrameDecoder(),
+                ByteBuffer.wrap(oversized), 1, oversized.length, f, true));
+        var pure = ByteBuffer.wrap(new byte[cap]);
+        assertThrows(WireException.class, () -> ChannelDatagram.decodeFrame(new FrameDecoder(), pure, 0, cap, f, true));
+    }
+
     @Test void wireRejectsAnythingButOneDatagramFrameWithoutLength() {
         byte[][] bad = {
             {}, // truncated
@@ -156,7 +204,7 @@ class ChannelDatagramTest {
 
     @Test void parameterRoundTrips() throws Exception {
         TransportParams p = new TransportParams();
-        p.present = TransportParams.CARRIER_DATAGRAMS | TransportParams.DATAGRAM;
+        p.present = TransportParams.FAMILY | TransportParams.CARRIER_DATAGRAMS | TransportParams.DATAGRAM;
         p.maxDatagramFrameSize = 1200;
         byte[] enc = p.toBytes();
         TransportParams q = TransportParams.decode(ByteBuffer.wrap(enc), 0, enc.length);
@@ -181,34 +229,32 @@ class ChannelDatagramTest {
         byte[] d = p.fromA.get(0);
         assertEquals(0, d[0]); // Pipe Stream ID 0
         assertEquals(0x30, d[1]);
-        assertEquals(0, d[2]); // flow 0: a session datagram
+        assertEquals(0, d[2]); // sequence 0
+        assertEquals(0, d[3]); // flow 0: a session datagram
         p.deliverToB();
         assertArrayEquals(bytes(100, 1), p.b.datagrams().receive());
         assertEquals(1, p.a.stats().datagramsSent());
         assertEquals(1, p.a.stats().datagramsSentChannel());
         assertEquals(1, p.b.stats().datagramsReceived());
         assertEquals(1, p.b.stats().datagramsReceivedChannel());
-        p.a.channelSendFailed(new Datagrams.ChannelSent(null, 100));
-        assertEquals(0, p.a.stats().datagramBytesSent());
-        assertEquals(0, p.a.stats().datagramsSent());
-        assertEquals(0, p.a.stats().datagramsSentChannel());
+        p.a.sendDatagram(null, 0, bytes(100, 1));
+        var tickets = new ArrayList<Datagrams.ChannelSent>();
+        p.a.pollChannel(0, new ArrayList<>(), tickets, p.now);
+        p.a.channelDone(tickets.getFirst(), Outcome.REJECTED, p.now);
+        assertEquals(100, p.a.stats().datagramBytesSent());
+        assertEquals(1, p.a.stats().datagramsSent());
+        assertEquals(1, p.a.stats().datagramsSentChannel());
         assertEquals(1, p.a.stats().datagramsDroppedSend());
     }
 
     @Test void datagramsGoInRecordsWithoutTheChannel() throws Exception {
-        record Case(String name, FakeChannel a, FakeChannel b, int size, boolean shaped) {}
+        record Case(String name, FakeChannel a, FakeChannel b, int size) {}
         for (Case c : List.of(
-                new Case("peer has no channel", new FakeChannel(0, 1200), null, 100, false),
-                new Case("carrier did not negotiate datagrams", new FakeChannel(0, 0), new FakeChannel(0, 1200), 100, false),
-                new Case("too large", new FakeChannel(0, 1200), new FakeChannel(0, 1200), 1198, false),
-                new Case("shaped", new FakeChannel(0, 1200), new FakeChannel(0, 1200), 100, true))) {
+                new Case("peer has no channel", new FakeChannel(0, 1200), null, 100),
+                new Case("carrier did not negotiate datagrams", new FakeChannel(0, 0), new FakeChannel(0, 1200), 100),
+                new Case("too large", new FakeChannel(0, 1200), new FakeChannel(0, 1200), 1198))) {
             Pair p = new Pair(c.a, c.b);
             p.pump();
-            if (c.shaped) p.a.setPipeShaper(0, new io.zmux.shaping.Shaper() {
-                @Override public Set<io.zmux.shaping.Capability> capabilities() { return Set.of(); }
-                @Override public void plan(io.zmux.shaping.RecordView view, io.zmux.shaping.RecordPlan plan) {}
-                @Override public void onEvent(io.zmux.shaping.Event event, io.zmux.shaping.Effects effects) {}
-            });
             p.recordsA.clear();
             p.a.sendDatagram(null, 0, bytes(c.size, 2));
             p.pump();
@@ -221,19 +267,32 @@ class ChannelDatagramTest {
         }
     }
 
+    @Test void peerFrameLimitExcludesThePipeStreamIdAndLengthField() throws Exception {
+        var p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
+        p.b.localParams().maxDatagramFrameSize = 64;
+        p.pump();
+        assertEquals(61, p.a.datagrams().nativePayload(1));
+        byte[] payload = new byte[61];
+        p.a.sendDatagram(null, 0, payload);
+        p.pump();
+        assertEquals(65, p.fromA.getFirst().length);
+        p.deliverToB();
+        assertArrayEquals(payload, p.b.datagrams().receive());
+    }
+
     @Test void theLargestThatFitsGoesOnTheChannel() throws Exception {
         Pair p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
         p.pump();
-        p.a.sendDatagram(null, 0, bytes(1197, 3)); // ID 1 + type 1 + flow 1 + 1197 = 1200
+        p.a.sendDatagram(null, 0, bytes(1196, 3)); // ID, type, sequence and flow each take one byte.
         p.pump();
         assertEquals(1, p.fromA.size());
         assertEquals(1200, p.fromA.get(0).length);
     }
 
     /** The path datagram payloads a reported, in order. */
-    static List<Long> pathEvents(Session s) {
+    static List<Long> nativePathEvents(Session s) {
         List<Long> got = new ArrayList<>();
-        for (Event e; (e = s.outbox().pollEvent()) != null; ) if (e.kind() == Event.Kind.DATAGRAM_PATH) got.add(e.count());
+        for (Event e; (e = s.outbox().pollEvent()) != null; ) if (e.kind() == Event.Kind.DATAGRAM_PATH) got.add(e.code());
         return got;
     }
 
@@ -241,13 +300,13 @@ class ChannelDatagramTest {
      * The path datagram payload is what fits one channel datagram: a datagram of it goes on the channel, one byte more
      * in a record; a smaller channel lowers it and DATAGRAM_PATH reports it once.
      */
-    @Test void pathPayloadIsWhatOneChannelDatagramTakes() throws Exception {
+    @Test void nativePayloadIsWhatOneChannelDatagramTakes() throws Exception {
         Pair p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
         p.pump();
-        int path = p.a.datagrams().pathPayload(1);
-        assertEquals(1200 - 3, path); // Pipe Stream ID, type and flow 0
+        int path = p.a.datagrams().nativePayload(1);
+        assertEquals(1200 - 4, path); // Pipe Stream ID, type and flow 0
         assertTrue(path < p.a.datagrams().maxPayload(1));
-        assertEquals(List.of((long) path), pathEvents(p.a));
+        assertEquals(List.of((long) path), nativePathEvents(p.a));
         p.a.sendDatagram(null, 0, bytes(path, 1));
         p.recordsA.clear();
         p.pump();
@@ -260,12 +319,63 @@ class ChannelDatagramTest {
         assertTrue(datagramInRecords(p.recordsA));
         p.ca.max = 800;
         p.pump();
-        assertEquals(800 - 3, p.a.datagrams().pathPayload(1));
-        assertEquals(List.of(800L - 3), pathEvents(p.a));
+        assertEquals(800 - 4, p.a.datagrams().nativePayload(1));
+        assertEquals(List.of(800L - 4), nativePathEvents(p.a));
         p.ca.max = 0; // the carrier takes no datagrams now: they ride the records
         p.pump();
+        assertEquals(-1, p.a.datagrams().nativePayload(1));
         assertEquals(p.a.datagrams().maxPayload(1), p.a.datagrams().pathPayload(1));
-        assertEquals(List.of((long) p.a.datagrams().maxPayload(1)), pathEvents(p.a));
+        assertEquals(List.of(-1L), nativePathEvents(p.a));
+    }
+
+    @Test void emptyNativePacketRequiresRealOverheadAndWaitsForOpenAndChannelRoom() throws Exception {
+        var channel = new FakeChannel(0, 5);
+        var p = new Pair(channel, new FakeChannel(0, 5));
+        p.pump();
+        var st = p.a.streams().openStream(true);
+        var nativeOnly = new io.zmux.DatagramSendOptions(null, io.zmux.DatagramSendOptions.Carriage.REQUIRE_NATIVE, null, null, null);
+        var options = p.a.resolveDatagram(st, nativeOnly, 0);
+        assertEquals(0, p.a.datagrams().nativePayload(2), "an empty Flow payload fits exactly");
+        channel.limit = channel.max;
+        channel.max = 0;
+        assertEquals(-1, p.a.datagrams().nativePayload(2));
+        assertEquals(Session.DatagramAdmission.QUEUED, p.a.admitDatagram(st, 0, new byte[0], 0, options, 0,
+                Session.DatagramMode.DATAGRAM_OR_CAPSULE, false, false, null));
+        assertTrue(st.idSet());
+        p.pump();
+        assertTrue(p.fromA.isEmpty(), "unwritable native carriage does not turn into a capsule or a record");
+        assertFalse(datagramInRecords(p.recordsA));
+        channel.max = channel.limit;
+        p.pump();
+        assertEquals(1, p.fromA.size(), "the original was queued through the OPEN fence");
+        assertEquals(0, p.a.datagrams().nativePayload(2));
+    }
+
+    @Test void rejectsADeadlineAndExhaustedSequenceBeforePinningOrChoosingCapsules() throws Exception {
+        var p = new Pair(null, null);
+        p.pump();
+        var st = p.a.streams().openStream(true);
+        p.a.setNow(10);
+        var zero = new io.zmux.DatagramSendOptions(new io.zmux.DatagramSendOptions.Deadline.At(10), null, null, null, null);
+        var deadline = assertThrows(CoreException.class, () -> p.a.admitDatagram(st, 0, new byte[0], 0,
+                p.a.resolveDatagram(st, zero, 10), 10, Session.DatagramMode.DATAGRAM_OR_CAPSULE, false, false, null));
+        assertEquals(CoreException.DatagramDrop.DEADLINE, deadline.datagramDrop());
+        assertFalse(st.idSet());
+
+        var tooLong = new io.zmux.DatagramSendOptions(new io.zmux.DatagramSendOptions.Deadline.After(
+                java.time.Duration.ofNanos(Long.MAX_VALUE - 10)), null, null, null, null);
+        assertEquals(CoreException.Reason.INVALID_DATAGRAM_OPTIONS,
+                assertThrows(CoreException.class, () -> p.a.sendDatagram(st, 0, new byte[0], tooLong, 10)).reason());
+        assertFalse(st.idSet());
+
+        var inherited = p.a.resolveDatagram(st, io.zmux.DatagramSendOptions.INHERIT, 10);
+        assertEquals(Session.DatagramAdmission.CAPSULE, p.a.planDatagram(st, 0, 65536, 1, inherited,
+                Session.DatagramMode.DATAGRAM_OR_CAPSULE));
+        Poke.set(p.a.datagrams(), "nextSequence", VarInt.MAX + 1);
+        var exhausted = assertThrows(CoreException.class, () -> p.a.planDatagram(st, 0, 65536, 1, inherited,
+                Session.DatagramMode.DATAGRAM_OR_CAPSULE));
+        assertEquals(CoreException.DatagramDrop.SEQUENCE_EXHAUSTED, exhausted.datagramDrop());
+        assertFalse(st.idSet());
     }
 
     // ---- receiving ----
@@ -296,7 +406,7 @@ class ChannelDatagramTest {
         Pair p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200));
         p.pump();
         long records = p.b.stats().recordsReceived();
-        p.toB(new byte[] {0x30, 0, 9}, ChannelDatagram.NO_ID);
+        p.toB(new byte[] {0x30, 0, 0, 9}, ChannelDatagram.NO_ID);
         assertEquals(records, p.b.stats().recordsReceived());
         assertArrayEquals(new byte[] {9}, p.b.datagrams().receive());
     }
@@ -305,7 +415,8 @@ class ChannelDatagramTest {
 
     /** A channel datagram for a's first bidirectional stream (ID 0): flow 1, context ctx. */
     static byte[] streamDatagram(long ctx, byte[] payload) {
-        ByteBuffer b = ByteBuffer.allocate(16 + payload.length);
+        ByteBuffer b = ByteBuffer.allocate(24 + payload.length);
+        VarInt.put(b, ctx);
         VarInt.put(b, 1);
         VarInt.put(b, ctx);
         b.put(payload);
@@ -329,7 +440,7 @@ class ChannelDatagramTest {
         assertEquals(0, p.b.stats().datagramsReceived());
         assertEquals(0, p.b.stats().datagramsDroppedRecv());
         assertEquals(2 * (Datagrams.HELD_COST + 2L), p.b.datagrams().receivedBytes());
-        assertNotEquals(Time.NEVER, p.b.nextTimeout());
+        assertNotEquals(Time.NEVER, DeadlineFixture.next(p.b));
         Stream st = openAndWrite(p);
         assertEquals(2, p.b.stats().datagramsReceived());
         assertEquals(2, p.b.stats().datagramsReceivedChannel());
@@ -348,7 +459,7 @@ class ChannelDatagramTest {
         p.pump();
         p.toB(streamDatagram(0, new byte[] {'a'}), ChannelDatagram.NO_ID);
         long due = p.now + p.b.srtt();
-        assertTrue(p.b.nextTimeout() <= due);
+        assertTrue(DeadlineFixture.next(p.b) <= due);
         p.b.handleTimeout(due - 1);
         assertEquals(0, p.b.stats().datagramsDroppedRecv());
         p.now = due;
@@ -361,14 +472,14 @@ class ChannelDatagramTest {
     }
 
     @Test void heldDatagramsGiveWayUnderMemoryPressure() throws Exception {
-        // Each held datagram costs its 2 bytes and the fixed overhead: two fit, a third pushes out the oldest.
+        // Each held datagram costs its 2 bytes and the fixed overhead: two fit, a third is refused.
         Pair p = new Pair(new FakeChannel(0, 1200), new FakeChannel(0, 1200), 2 * (Datagrams.HELD_COST + 2));
         p.pump();
         for (int i = 0; i < 3; i++) p.toB(streamDatagram(i, new byte[] {'x'}), ChannelDatagram.NO_ID);
         assertEquals(1, p.b.stats().datagramsDroppedRecv());
         Stream st = openAndWrite(p);
+        assertEquals(0, p.b.datagrams().receive(st).context());
         assertEquals(1, p.b.datagrams().receive(st).context());
-        assertEquals(2, p.b.datagrams().receive(st).context());
         assertNull(p.b.datagrams().receive(st));
         assertEquals(2, p.b.stats().datagramsReceived());
     }
@@ -434,14 +545,14 @@ class ChannelDatagramTest {
         assertSame(opening, m.openingPipe());
 
         Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), new SessionStats(), new Outbox(), () -> 0L);
-        dg.recordCaps(() -> 65535, () -> 65535);
+        dg.recordCap(() -> 65535);
         dg.peer(65535, 65535, true);
         dg.channels(new Datagrams.Channels() {
             @Override public Pipe datagramPipe() { return null; }
             @Override public Datagrams.ChannelUse of(Pipe x) { return Datagrams.ChannelUse.NONE; }
             @Override public boolean carries(Stream s, Pipe x) { Pipe o = s == null ? null : s.snd.mps().openingPipe(); return o == null || o == x; }
         });
-        dg.send(st, 1, new byte[] {9}, true);
+        dg.enqueueSingle(st, 1, new byte[] {9}, 0, Time.NEVER, io.zmux.DatagramSendOptions.INHERIT, null);
         assertFalse(dg.sendable(other, 65535), "another pipe could let it overtake the opening frame");
         assertTrue(dg.sendable(opening, 65535));
         RecordWriter w = new RecordWriter();
@@ -460,7 +571,7 @@ class ChannelDatagramTest {
         assertNull(m.openingPipe());
         m.openedOn(opening);
         assertNull(m.openingPipe(), "a late copy does not pin it again");
-        dg.send(st, 1, new byte[] {9}, true);
+        dg.enqueueSingle(st, 1, new byte[] {9}, 0, Time.NEVER, io.zmux.DatagramSendOptions.INHERIT, null);
         assertTrue(dg.sendable(other, 65535));
     }
 }

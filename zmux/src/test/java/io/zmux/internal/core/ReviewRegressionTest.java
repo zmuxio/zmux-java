@@ -46,7 +46,7 @@ class ReviewRegressionTest {
     }
 
     @Test void aSessionLimitViolationCountsNothing() {
-        ConnFlow f = new ConnFlow(100, () -> { });
+        ConnFlow f = new ConnFlow(100, () -> {}, null, false, () -> {});
         assertTrue(f.received(60));
         assertFalse(f.received(41));
         assertEquals(60, f.received());
@@ -58,7 +58,7 @@ class ReviewRegressionTest {
 
     @Test void aLocatorBeyondItsLengthFieldIsAnError() throws Exception {
         TransportParams p = new TransportParams();
-        p.present |= TransportParams.MULTIPATH | TransportParams.SESSION_CRYPTO;
+        p.present |= TransportParams.MULTIPATH | TransportParams.SESSION_CRYPTO | TransportParams.FAMILY;
         p.sessionCrypto = io.zmux.internal.join.SessionCrypto.of(new long[] {1}, new long[] {2});
         p.locator = new byte[255];
         byte[] b = p.toBytes();
@@ -68,23 +68,23 @@ class ReviewRegressionTest {
     }
 
     /** An answer that repeats a pause a limit shortened counts it once. */
-    @Test void aRepeatedPauseCountsOnce() {
+    @Test void aPauseWithoutEligibleDataCostsNoTime() {
         Session s = HeldControlTest.session(CoreConfig.Role.INITIATOR);
-        s.setShapingLimits(ShapingLimits.defaults().withMaxDelay(Duration.ofMillis(10)));
+        s.setShaper(null, new io.zmux.shaping.ShapingBudget(null, new io.zmux.shaping.ProfileLimits(10, 0, 0, Duration.ofMillis(10)), true));
         s.setShaper(pipe -> new Planner() { @Override public void plan(RecordView v, RecordPlan p) { } });
         var ps = s.pipes.get(0).shape();
         long now = Time.SECOND;
         s.setNow(now);
         Effects e = new Effects().gate(now + Time.SECOND, 0, 0);
-        ps.apply(e);
+        ps.apply(e, null);
         for (int i = 0; i < 5; i++) {
             s.setNow(now += Time.MILLISECOND);
-            ps.apply(e);
+            ps.apply(e, null);
         }
-        assertEquals(Duration.ofMillis(10), s.shapingStats().stallSpent());
+        assertEquals(Duration.ZERO, s.shapingStats().stallSpent());
         s.setNow(now + Time.MILLISECOND);
-        ps.apply(new Effects().gate(Time.SECOND + Time.SECOND + 5 * Time.MILLISECOND, 0, 0));
-        assertEquals(Duration.ofMillis(15), s.shapingStats().stallSpent());
+        ps.apply(new Effects().gate(Time.SECOND + Time.SECOND + 5 * Time.MILLISECOND, 0, 0), null);
+        assertEquals(Duration.ZERO, s.shapingStats().stallSpent());
     }
 
     /** A record planned in the middle of a write and delayed, opening a later write, carries that write's overhead. */
@@ -108,8 +108,8 @@ class ReviewRegressionTest {
 
     private static Session withOverhead(CoreConfig.Role role, int over) {
         Session s = new Session(CoreConfig.builder().role(role).transportRole(role).build(), 0);
-        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false, null, null, "", over, "", 0, false);
-        s.attachBootstrap(info, info, null);
+        CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false, null, null, "", over, "", 0, false, 0, false);
+        s.attachBootstrap(info, info);
         return s;
     }
 }

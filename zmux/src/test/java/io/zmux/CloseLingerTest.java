@@ -1,9 +1,15 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.*;
+
+import io.zmux.SpliceHooksTest.ManualClock;
 import io.zmux.carrier.Framing;
+import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeChannel;
 import io.zmux.carrier.PipeIo;
+import io.zmux.carrier.PipeWriter;
+import io.zmux.internal.loop.Operation;
+import io.zmux.internal.spi.AdapterPorts;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -14,17 +20,19 @@ import java.nio.channels.SocketChannel;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/**
- * A closing session ends a pipe's linger once its own CONNECTION_CLOSE on it is complete and the peer's was read on
- * it, on a carrier with a half-close (TCP) and on one without; a peer that never answers leaves the linger bound.
- */
+/** Close exchange, physical linger and read drain over carriers with and without half-close. */
 @Timeout(120)
 class CloseLingerTest {
-    /** One channel that cannot shut a direction down: the peer's end shows only as the close of the whole channel. */
+    private static final Duration WATCHDOG = Duration.ofSeconds(20);
+
+    /** One channel that cannot shut a direction down. */
     private record Whole(SocketChannel ch) implements ByteChannel {
         @Override public int read(ByteBuffer dst) throws IOException { return ch.read(dst); }
         @Override public int write(ByteBuffer src) throws IOException { return ch.write(src); }
@@ -32,199 +40,228 @@ class CloseLingerTest {
         @Override public void close() throws IOException { ch.close(); }
     }
 
-    /** Two sessions over a connected socket pair; whole: each end is a channel without a half-close. */
-    private record Linked(ZmuxSession client, ZmuxSession server, SocketChannel a, SocketChannel b) {
-        boolean bothClosed() { return !a.isOpen() && !b.isOpen(); }
-    }
+    private record Linked(ZmuxSession client, ZmuxSession server, SocketChannel a, SocketChannel b,
+                          CompletionStage<Void> clientRelease, CompletionStage<Void> serverRelease) implements AutoCloseable {
+        @Override public void close() throws IOException {
+            try (a; b) {
+                // The sockets also clean up a failed scenario whose protocol clocks stay frozen.
+            }
+        }
 
-    private static PipeIo pipe(SocketChannel ch, boolean whole) {
-        ByteChannel c = whole ? new Whole(ch) : ch;
-        return PipeChannel.pipe(c, c, Framing.BYTE_STREAM, 1 << 16);
-    }
-
-    /**
-     * A server channel whose close is held until released: the peer sees no end of the carrier, so this side's own
-     * write side is shut (and reported) before anything ends its inbound direction.
-     */
-    private static final class Held implements ByteChannel {
-        final SocketChannel ch;
-        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicBoolean asked = new java.util.concurrent.atomic.AtomicBoolean();
-        Held(SocketChannel ch) { this.ch = ch; }
-        @Override public int read(ByteBuffer dst) throws IOException { return ch.read(dst); }
-        @Override public int write(ByteBuffer src) throws IOException { return ch.write(src); }
-        @Override public boolean isOpen() { return ch.isOpen(); }
-        @Override public void close() {
-            if (!asked.compareAndSet(false, true)) return;
-            Thread.ofVirtual().start(() -> {
-                try { release.await(); ch.close(); } catch (InterruptedException | IOException e) { Thread.currentThread().interrupt(); }
-            });
+        void awaitCarrierRelease() throws Exception {
+            await(clientRelease);
+            await(serverRelease);
+            assertFalse(a.isOpen(), "the client socket was released");
+            assertFalse(b.isOpen(), "the server socket was released");
         }
     }
 
-    private static Linked link(ZmuxConfig cfg, boolean whole, java.util.function.UnaryOperator<io.zmux.carrier.PipeWriter> serverWriter) throws Exception {
-        return link(cfg, whole, serverWriter, null);
+    /** Holds the actual server socket open after both logical halves release it. */
+    private static final class Held implements ByteChannel {
+        private final SocketChannel socket;
+        private final AtomicBoolean closing = new AtomicBoolean();
+        private final CompletableFuture<Void> requested = new CompletableFuture<>();
+        private final CompletableFuture<Void> allowClose = new CompletableFuture<>();
+
+        Held(SocketChannel socket) { this.socket = socket; }
+
+        @Override public int read(ByteBuffer dst) throws IOException { return socket.read(dst); }
+        @Override public int write(ByteBuffer src) throws IOException { return socket.write(src); }
+        @Override public boolean isOpen() { return socket.isOpen(); }
+
+        @Override public void close() {
+            if (!closing.compareAndSet(false, true)) return;
+            allowClose.thenRun(() -> {
+                try { socket.close(); }
+                catch (IOException failed) { throw new CompletionException(failed); }
+            });
+            requested.complete(null);
+        }
     }
 
-    private static Linked link(ZmuxConfig cfg, boolean whole, java.util.function.UnaryOperator<io.zmux.carrier.PipeWriter> serverWriter, Held[] held) throws Exception {
+    /** Holds the peer's next write until cleanup can return its batch, without sending it. */
+    private static final class BlockedWriter implements PipeWriter, AdapterPorts.ReleasingHalf {
+        private final PipeWriter lower;
+        private final AtomicBoolean blocked = new AtomicBoolean();
+        private final CompletableFuture<Completion> held = new CompletableFuture<>();
+
+        BlockedWriter(PipeWriter lower) { this.lower = lower; }
+
+        @Override public void write(OutboundBatch batch, Completion done) {
+            if (blocked.get()) {
+                if (!held.complete(done)) throw new IllegalStateException("second blocked carrier write");
+            } else lower.write(batch, done);
+        }
+
+        @Override public void close() { lower.close(); }
+        @Override public void abort(Throwable cause) { lower.abort(cause); }
+        @Override public CompletionStage<Void> released() { return AdapterPorts.releasedHalf(lower); }
+
+        void discard() {
+            held.thenAccept(write -> write.failed(new IOException("blocked write discarded by the fixture")));
+        }
+    }
+
+    private static ZmuxConfig config(EventLoops loops, ManualClock clock) {
+        return ZmuxConfig.builder().eventLoops(loops).clockDomain(clock.domain()).build();
+    }
+
+    private static PipeIo pipe(ByteChannel channel) {
+        return PipeChannel.pipe(channel, channel, Framing.BYTE_STREAM, 1 << 16);
+    }
+
+    private static Linked link(ZmuxConfig clientConfig, ZmuxConfig serverConfig, boolean whole,
+                               UnaryOperator<PipeWriter> serverWriter, Held[] held) throws Exception {
         try (var listener = ServerSocketChannel.open().bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
             SocketChannel a = SocketChannel.open(listener.getLocalAddress());
-            SocketChannel b = listener.accept();
-            PipeIo ia = pipe(a, whole);
-            PipeIo ib;
-            if (held == null) ib = pipe(b, whole);
-            else { held[0] = new Held(b); ib = PipeChannel.pipe(held[0], held[0], Framing.BYTE_STREAM, 1 << 16); }
-            var server = CompletableFuture.supplyAsync(() -> {
-                try { return Zmux.open(PipeIo.of(ib.reader(), serverWriter.apply(ib.writer())), Role.SERVER, cfg); }
-                catch (Exception e) { throw new CompletionException(e); }
-            }, r -> Thread.ofVirtual().start(r));
-            var client = Zmux.open(ia, Role.CLIENT, cfg);
-            client.awaitEstablished(System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
-            return new Linked(client, server.get(5, TimeUnit.SECONDS), a, b);
+            try {
+                SocketChannel b = listener.accept();
+                try {
+                    var ia = pipe(whole ? new Whole(a) : a);
+                    if (held != null) held[0] = new Held(b);
+                    var ib = pipe(held != null ? held[0] : whole ? new Whole(b) : b);
+                    var accepting = CompletableFuture.supplyAsync(() -> {
+                        try { return Zmux.open(ib.withHalves(ib.reader(), serverWriter.apply(ib.writer())), Role.SERVER, serverConfig); }
+                        catch (IOException e) { throw new CompletionException(e); }
+                    }, task -> Thread.ofVirtual().start(task));
+                    var client = Zmux.open(ia, Role.CLIENT, clientConfig);
+                    var server = await(accepting);
+                    return new Linked(client, server, a, b, attachment(client), attachment(server));
+                } catch (Exception | Error failure) {
+                    closeAfterFailure(b, failure);
+                    throw failure;
+                }
+            } catch (Exception | Error failure) {
+                closeAfterFailure(a, failure);
+                throw failure;
+            }
         }
     }
 
-    private static void awaitClosed(Linked l, long limitMillis) throws InterruptedException {
-        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(limitMillis);
-        while (!l.bothClosed() && System.nanoTime() < until) Thread.sleep(1);
+    private static void closeAfterFailure(SocketChannel socket, Throwable failure) {
+        try { socket.close(); }
+        catch (IOException cleanup) { failure.addSuppressed(cleanup); }
     }
 
-    /** Both ends close their carriers well under the linger, and the peer is told the code. */
+    private static CompletionStage<Void> attachment(ZmuxSession session) {
+        var release = session.driver.attachmentClosed(PipeId.BOOTSTRAP.value());
+        assertFalse(release.toCompletableFuture().isDone(), "a live bootstrap attachment has a release receipt");
+        return release;
+    }
+
+    private static <T> T await(CompletionStage<T> signal) throws Exception {
+        return signal.toCompletableFuture().get(WATCHDOG.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    static void closeOnOwner(ZmuxSession session, long code, String reason) {
+        // Exercise the real close exchange without the public caller's independent wall-clock flush bound.
+        assertTrue(session.driver.executeCarrier(() -> session.core.close(code, ZmuxSession.reasonBytes(reason))));
+    }
+
+    private static void awaitHandoff(ZmuxSession session) throws Exception {
+        await(session.<Void>async(op -> session.core.waitCloseHandedOff(op) ? true : Operation.PENDING,
+                session.core::cancelCloseHandOffWait, null, Long.MAX_VALUE, ignored -> null));
+    }
+
+    static void afterRound(ZmuxSession session) throws Exception {
+        var loop = session.driver.loop();
+        var done = new CompletableFuture<Void>();
+        loop.execute(() -> loop.execute(() -> done.complete(null)));
+        await(done);
+    }
+
     @Test void aCloseExchangeEndsTheLingerAtOnce() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
-            try {
-                for (boolean whole : new boolean[] {false, true}) {
-                    long[] took = new long[100];
-                    for (int i = 0; i < 105; i++) {
-                        var l = link(cfg, whole, w -> w);
-                        long t0 = System.nanoTime();
-                        l.client().close(0x2a, "bye");
-                        awaitClosed(l, 5_000);
-                        long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                        assertTrue(l.bothClosed(), "carriers closed, whole=" + whole + " round " + i);
-                        if (i >= 5) took[i - 5] = ms;
-                        assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", true), l.server().closed().get(5, TimeUnit.SECONDS));
-                        assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", false), l.client().closed().get(5, TimeUnit.SECONDS));
-                    }
-                    // Ending at once, not on a timer: the typical close is
-                    // immediate, and none reaches the next timer the close
-                    // path has, the 1 s hand-off limit (the linger is 30 s).
-                    // A bound on the worst round alone would measure the
-                    // host's scheduling stalls.
-                    java.util.Arrays.sort(took);
-                    long p95 = took[94], worst = took[99];
-                    assertTrue(p95 < 100 && worst < 500,
-                            "close p95 " + p95 + " ms, worst " + worst + " ms, whole=" + whole);
+        try (var loops = EventLoops.create(2)) {
+            var cfg = config(loops, new ManualClock());
+            for (boolean whole : new boolean[] {false, true}) {
+                try (var link = link(cfg, cfg, whole, writer -> writer, null)) {
+                    closeOnOwner(link.client, 0x2a, "bye");
+                    link.awaitCarrierRelease();
+                    assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", true), await(link.server.closed()));
+                    assertEquals(new SessionError.ApplicationClosed(0x2a, "bye", false), await(link.client.closed()));
                 }
-            } finally {
-                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
             }
         }
     }
 
-    /** A peer whose CONNECTION_CLOSE never goes out leaves the linger as the bound. */
     @Test void aPeerThatNeverClosesLeavesTheLingerBound() throws Exception {
-        long saved = io.zmux.internal.core.Session.closeLimit;
-        io.zmux.internal.core.Session.closeLimit = TimeUnit.SECONDS.toNanos(3);
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofMillis(400));
-            try {
-                for (boolean whole : new boolean[] {false, true}) {
-                    for (int i = 0; i < 5; i++) {
-                        var held = new CloseHandOffTest.Stalling[1];
-                        var l = link(cfg, whole, w -> held[0] = new CloseHandOffTest.Stalling(w));
-                        held[0].held.set(true);
-                        long t0 = System.nanoTime();
-                        l.client().close(7, "x");
-                        long until = t0 + TimeUnit.SECONDS.toNanos(2);
-                        while (l.a().isOpen() && System.nanoTime() < until) Thread.sleep(1);
-                        long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-                        assertFalse(l.a().isOpen(), "the linger ended");
-                        assertTrue(took >= 350 && took < 2_900, "the linger bounded the wait: " + took + " ms, whole=" + whole);
-                        l.server().close();
+        try (var loops = EventLoops.create(2)) {
+            for (boolean whole : new boolean[] {false, true}) {
+                var clock = new ManualClock();
+                // Freeze the peer's own hand-off timer while advancing just the client's linger.
+                var serverConfig = config(loops, new ManualClock());
+                var writer = new BlockedWriter[1];
+                try (var link = link(config(loops, clock), serverConfig, whole,
+                        lower -> writer[0] = new BlockedWriter(lower), null)) {
+                    try {
+                        writer[0].blocked.set(true);
+                        closeOnOwner(link.client, 7, "x");
+                        awaitHandoff(link.client);
+                        await(writer[0].held);
+                        long linger = (Long) link.client.run(op -> link.client.core.lingerTimeout());
+                        clock.advance(Duration.ofNanos(linger - 1));
+                        afterRound(link.client);
+                        assertFalse(link.clientRelease.toCompletableFuture().isDone());
+                        assertTrue(link.a.isOpen());
+
+                        clock.advance(Duration.ofNanos(1));
+                        await(link.clientRelease);
+                        assertFalse(link.a.isOpen());
+                        assertEquals(new SessionError.ApplicationClosed(7, "x", false), await(link.client.closed()));
+                    } finally {
+                        writer[0].discard();
                     }
                 }
-            } finally {
-                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
-                io.zmux.internal.core.Session.closeLimit = saved;
             }
         }
     }
 
-    /**
-     * The read drain keeps a stream's end, not only its bytes (SPEC.md Section 6.5): a finish or a reset received
-     * before the peer's close holds the session until the application reads it, though its carriers may have ended.
-     */
     @Test void aFinishReceivedBeforeTheCloseIsStillReadAsTheEndOfTheStream() throws Exception {
-        endBeforeTheClose(false);
+        endBeforeTheClose(false, false);
     }
 
     @Test void aResetReceivedBeforeTheCloseIsStillReadAsAReset() throws Exception {
-        endBeforeTheClose(true);
+        endBeforeTheClose(true, false);
     }
 
-    /**
-     * This side's CONNECTION_CLOSE is written and its write side shut while the peer's carrier has not ended yet
-     * (its close is held): the pipe has both closes and its linger ends (SPEC.md Section 6.5 step 3), but the read
-     * drain is the session's, which stays closing until the unread end is read.
-     */
-    @Test void anUnreadEndHoldsThePipeWhoseWriteSideShutBeforeThePeerEnded() throws Exception {
-        for (boolean reset : new boolean[] {true, false}) {
-            try (EventLoops loops = EventLoops.create(2)) {
-                var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
-                var held = new Held[1];
+    @Test void aPeerCloseCanReleaseTheCarrierBeforeEofDuringReadDrain() throws Exception {
+        endBeforeTheClose(false, true);
+        endBeforeTheClose(true, true);
+    }
+
+    private static void endBeforeTheClose(boolean reset, boolean holdPeer) throws Exception {
+        try (var loops = EventLoops.create(2)) {
+            var cfg = config(loops, new ManualClock());
+            var held = holdPeer ? new Held[1] : null;
+            try (var link = link(cfg, cfg, false, writer -> writer, held)) {
                 try {
-                    var l = link(cfg, false, w -> w, held);
-                    var s = l.client().openStream();
-                    s.write(new byte[] {7});
-                    var r = l.server().acceptStream(Duration.ofSeconds(5));
-                    if (reset) r.reset(9); else r.finish();
-                    l.server().close();
-                    l.server().awaitClosed(); // the client's CONNECTION_CLOSE and FIN were read; the server's carrier is still open
-                    assertTrue(held[0].asked.get(), "the server let its carrier go");
-                    // Both closes are done on the client's pipe: it may end (step 3), the session may not.
-                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (l.a().isOpen() && System.nanoTime() < until) Thread.sleep(1);
-                    assertFalse(l.a().isOpen(), "the pipe's linger ended with both closes, reset=" + reset);
-                    assertFalse(l.client().closed().isDone(), "the unread end holds the closing session, reset=" + reset);
-                    if (reset) assertThrows(StreamResetException.class, () -> s.read(new byte[16], 0, 16));
-                    else assertEquals(-1, s.read(new byte[16], 0, 16));
-                    held[0].release.countDown();
-                    awaitClosed(l, 5_000);
-                    assertTrue(l.bothClosed(), "the session ends once the end was read, reset=" + reset);
+                    var stream = link.client.openStream();
+                    stream.write(new byte[] {7});
+                    var remote = link.server.acceptStream(WATCHDOG);
+                    if (reset) remote.reset(9); else remote.finish();
+                    // Observe the end without consuming it before submitting the close.
+                    stream.awaitReadable(WATCHDOG);
+                    closeOnOwner(link.server, 0, "");
+                    if (holdPeer) {
+                        await(held[0].requested);
+                        assertTrue(link.b.isOpen(), "the peer has not closed its physical carrier");
+                        await(link.clientRelease);
+                        assertFalse(link.a.isOpen(), "both close frames end the pipe's linger");
+                    } else {
+                        await(link.server.closed());
+                        await(link.clientRelease);
+                        assertFalse(link.a.isOpen(), "the carrier is released with the stream end still unread");
+                    }
+                    assertFalse(link.client.closed().isDone(), "the unread end still holds the session");
+                    if (reset) assertThrows(StreamResetException.class, () -> stream.read(new byte[16], 0, 16));
+                    else assertEquals(-1, stream.read(new byte[16], 0, 16));
+                    if (holdPeer) held[0].allowClose.complete(null);
+                    await(link.client.closed());
+                    await(link.server.closed());
+                    link.awaitCarrierRelease();
                 } finally {
-                    if (held[0] != null) held[0].release.countDown();
-                    io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
+                    if (holdPeer) held[0].allowClose.complete(null);
                 }
-            }
-        }
-    }
-
-    private static void endBeforeTheClose(boolean reset) throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofSeconds(30));
-            try {
-                var l = link(cfg, false, w -> w);
-                var s = l.client().openStream();
-                s.write(new byte[] {7});
-                var r = l.server().acceptStream(Duration.ofSeconds(5));
-                if (reset) r.reset(9); else r.finish(); // the end alone: the client's stream never receives a byte
-                l.server().close();
-                l.server().awaitClosed();
-                awaitClosed(l, 1_500);
-                // The carriers may end first, once both closes are done on the pipe (SPEC.md Section 6.5 step 3).
-                assertFalse(l.client().closed().isDone(), "the unread end holds the closing session");
-                if (reset) assertThrows(StreamResetException.class, () -> s.read(new byte[16], 0, 16));
-                else assertEquals(-1, s.read(new byte[16], 0, 16));
-                awaitClosed(l, 5_000);
-                assertTrue(l.bothClosed(), "the session ends once the end was read");
-            } finally {
-                io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ZERO);
             }
         }
     }

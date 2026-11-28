@@ -13,8 +13,8 @@ import java.util.List;
 sealed interface PathLayer permits SinglePath, PathSession {
     // ---- writing ----
 
-    /** Whether the established session wants to write on lane ol of p now. */
-    boolean wantsWrite(Pipe p, Pipe.OutLane ol);
+    /** Control, copies or datagrams independently ready on this lane. */
+    boolean wantsControl(Pipe p, Pipe.OutLane ol);
 
     /** Writes the established session's frames for lane ol of p. */
     void write(RecordWriter w, Pipe p, Pipe.OutLane ol);
@@ -28,8 +28,6 @@ sealed interface PathLayer permits SinglePath, PathSession {
     /** MAX_STREAM_DATA of st went out; peerWaiting as for {@link #maxDataSent}. */
     void maxStreamDataSent(Stream st, boolean peerWaiting);
 
-    /** st is blocked on stream credit. */
-    void creditBlocked(Stream st);
 
     /** Data of st prefers the urgent (first) lane. */
     boolean urgentLane(Stream st);
@@ -66,7 +64,7 @@ sealed interface PathLayer permits SinglePath, PathSession {
     void onPathFrame(Pipe p, Frame f) throws WireException;
 
     /** The entries of a PIPE_ACK. */
-    void onPipeAck(Frame.AckEntries it) throws WireException;
+    void onPipeAck(Pipe received, Frame.AckEntries it) throws WireException;
 
     /** An inbound lane of p ended; failed: not gracefully, for cause (null: unknown); allEnded: every lane of p ended. */
     void inboundEnded(Pipe p, boolean failed, boolean allEnded, Throwable cause);
@@ -76,11 +74,11 @@ sealed interface PathLayer permits SinglePath, PathSession {
 
     // ---- timers ----
 
-    /** The earliest path-layer deadline. */
-    long deadline(long now);
-
     /** Runs the path-layer timers due at t. */
     void onTimeout(long t);
+
+    /** Releases pending path-layer timer registrations after the session closes. */
+    default void closeTimers() {}
 
     // ---- queries and commands ----
 

@@ -1,5 +1,4 @@
-// This peer exercises the locked zmuxh3 HTTP/3 transport and its production
-// WebTransport dependency at the wire boundary.
+// This peer exercises the production zmuxh3 HTTP/3 and WebTransport transports.
 package main
 
 import (
@@ -20,7 +19,6 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/webtransport-go"
 	"github.com/zmuxio/zmux-go"
 	"github.com/zmuxio/zmux-go/zmuxh3"
 )
@@ -76,9 +74,8 @@ func run(args []string) error {
 	}
 }
 
-func wtConfig() *webtransport.Config {
-	return &webtransport.Config{MaxIncomingStreams: 8, MaxIncomingUniStreams: 8, MaxIncomingData: 65536}
-}
+// The production adapter is the matrix default. Zero selects the historical raw stream fixture.
+func ownedWebTransport() bool { return os.Getenv("ZMUX_WT_OWNED") != "0" }
 
 func serve(ctx context.Context, addr string, config *tls.Config, wt bool) error {
 	packet, err := net.ListenPacket("udp4", addr)
@@ -92,31 +89,67 @@ func serve(ctx context.Context, addr string, config *tls.Config, wt bool) error 
 	serve := h3.Serve
 	if wt {
 		h3.TLSConfig = &tls.Config{Certificates: config.Certificates, NextProtos: []string{http3.NextProtoH3}}
-		server := &webtransport.Server{H3: h3, Config: wtConfig()}
+		server := &zmuxh3.Server{H3: h3}
 		defer server.Close()
-		h3.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && r.URL.Path == "/health" {
-				_, _ = io.WriteString(w, "ok")
-				return
-			}
-			if r.URL.Path != "/wt" {
-				http.NotFound(w, r)
-				return
-			}
-			session, err := server.Upgrade(w, r)
+		if ownedWebTransport() {
+			listener, err := zmux.NewListener(&zmux.ListenerConfig{Config: &zmux.Config{EnableDatagrams: true}})
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-			} else {
-				settings := w.(http3.Settingser).Settings()
-				fmt.Printf("WT CONNECT protocol=%s h3_datagram=%t peer_settings=%v\n",
-					r.Proto, settings.EnableDatagrams, settings.Other)
+				return err
+			}
+			defer listener.Close()
+			handler, err := zmuxh3.NewHandler(listener, nil, server)
+			if err != nil {
+				return err
+			}
+			// One CONNECT in this smoke case. A later GET on this same QUIC connection
+			// acknowledges that the production handler returned after session termination.
+			type closeKey struct{}
+			h3.ConnContext = func(ctx context.Context, conn *quic.Conn) context.Context {
+				return context.WithValue(zmuxh3.QUICConnContext(ctx, conn), closeKey{}, make(chan struct{}))
+			}
+			h3.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				closed := r.Context().Value(closeKey{}).(chan struct{})
+				if r.Method == http.MethodGet && r.URL.Path == "/wt-closed" {
+					if _, err := io.Copy(io.Discard, r.Body); err != nil {
+						return
+					}
+					select {
+					case <-closed:
+						_, _ = io.WriteString(w, "closed")
+					case <-r.Context().Done():
+					}
+					return
+				}
+				if r.Method != http.MethodConnect || r.URL.Path != "/wt" {
+					http.NotFound(w, r)
+					return
+				}
+				handler.ServeHTTP(w, r)
+				close(closed)
+			})
+			go func() { results <- ownedServer(ctx, listener) }()
+		} else {
+			h3.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/health" {
+					_, _ = io.WriteString(w, "ok")
+					return
+				}
+				if r.URL.Path != "/wt" {
+					http.NotFound(w, r)
+					return
+				}
+				session, err := server.Upgrade(w, r)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "WT CONNECT:", err)
+					return
+				}
 				err = runWTServer(ctx, session)
-			}
-			select {
-			case results <- err:
-			default:
-			}
-		})
+				select {
+				case results <- err:
+				default:
+				}
+			})
+		}
 		serve = server.Serve
 	} else {
 		h3.Handler = httpHandler()
@@ -132,7 +165,11 @@ func serve(ctx context.Context, addr string, config *tls.Config, wt bool) error 
 			if err != nil {
 				return err
 			}
-			fmt.Println("PASS wt server close=42 reason=done")
+			if ownedWebTransport() {
+				fmt.Println("PASS wt server bootstrap=1 datagram=1 cancel=peer close=peer")
+			} else {
+				fmt.Println("PASS wt server close=42 reason=done")
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -312,7 +349,7 @@ func sendFIN(w io.WriteCloser, payload string) error {
 	return w.Close()
 }
 
-func runWTServer(ctx context.Context, session *webtransport.Session) error {
+func runWTServer(ctx context.Context, session *zmuxh3.Session) error {
 	stream, err := session.AcceptStream(ctx)
 	if err != nil {
 		return err
@@ -330,13 +367,6 @@ func runWTServer(ctx context.Context, session *webtransport.Session) error {
 	if err := expectEOF(incoming, "client-uni"); err != nil {
 		return err
 	}
-	outgoing, err := session.OpenUniStreamSync(ctx)
-	if err != nil {
-		return err
-	}
-	if err := sendFIN(outgoing, "server-uni"); err != nil {
-		return err
-	}
 	stream, err = session.OpenStreamSync(ctx)
 	if err != nil {
 		return err
@@ -347,6 +377,13 @@ func runWTServer(ctx context.Context, session *webtransport.Session) error {
 	if err := expectEOF(stream, "server-bidi"); err != nil {
 		return err
 	}
+	outgoing, err := session.OpenUniStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+	if err := sendFIN(outgoing, "server-uni"); err != nil {
+		return err
+	}
 	// Accept reports the WebTransport close cause. Session.Context only
 	// signals cancellation and does not carry the capsule's code.
 	unexpected, cause := session.AcceptUniStream(ctx)
@@ -354,40 +391,81 @@ func runWTServer(ctx context.Context, session *webtransport.Session) error {
 		unexpected.CancelRead(0)
 		return errors.New("unexpected stream while waiting for CLOSE_WEBTRANSPORT_SESSION")
 	}
-	var closeErr *webtransport.SessionError
+	var closeErr *zmuxh3.SessionError
 	if !errors.As(cause, &closeErr) || !closeErr.Remote || closeErr.ErrorCode != 42 || closeErr.Message != "done" {
 		return fmt.Errorf("unexpected CONNECT termination: %v", cause)
 	}
 	return nil
 }
 
-// The fixture uses DialSession's credentialed path for its adapter-owned QUIC
-// lifetime, including the linger that allows the close capsule to reach the peer.
-type wtCredential struct{}
-
-func (wtCredential) Prefix(*zmux.CarrierInfo) ([]byte, error) { return nil, nil }
-
-func (wtCredential) Header(*zmux.CarrierInfo) (string, string, error) {
-	return "X-Zmux-Wire-Peer", "go", nil
-}
-
 func runWTClient(ctx context.Context, rawURL string, config *tls.Config) error {
 	var conn *quic.Conn
-	transport := &webtransport.Transport{
+	transport := &zmuxh3.Transport{
 		TLSClientConfig: config,
-		Config:          wtConfig(),
 		DialAddr: func(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
 			var err error
 			conn, err = quic.DialAddr(ctx, addr, tlsConfig, quicConfig)
 			return conn, err
 		},
 	}
-	session, err := zmuxh3.DialSession(ctx, transport, rawURL, nil, wtCredential{})
+	defer transport.Close()
+	session, err := zmuxh3.DialSession(ctx, transport, rawURL, nil, nil)
 	if err != nil {
 		return fmt.Errorf("WT CONNECT: %w", err)
 	}
-	defer transport.Close()
-	defer conn.CloseWithError(0, "")
+	if ownedWebTransport() {
+		pipe, err := zmuxh3.SessionPipe(ctx, session)
+		if err != nil {
+			return err
+		}
+		c, err := zmux.Start(ctx, pipe, zmux.RoleClient, &zmux.Config{EnableDatagrams: true})
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		stream, err := session.OpenStreamSync(ctx)
+		if err != nil {
+			return err
+		}
+		probe, err := zmux.Start(ctx, zmuxh3.StreamPipe(session, stream), zmux.RoleClient, &zmux.Config{EnableDatagrams: true})
+		if err != nil {
+			return err
+		}
+		defer probe.Close()
+		ready, err := probe.OpenStreamSync(ctx)
+		if err != nil {
+			return err
+		}
+		if err := sendFIN(ready, "cancel-ready"); err != nil {
+			return err
+		}
+		if err := expectEOF(ready, "cancel-ready"); err != nil {
+			return err
+		}
+		stream.CancelWrite(42)
+		stream.CancelRead(42)
+		if err := c.SendDatagramWait(ctx, []byte("owned-wt")); err != nil {
+			return err
+		}
+		reply, err := c.ReceiveDatagram(ctx)
+		if err != nil {
+			return err
+		}
+		if string(reply) != "owned-wt" || c.ConnectionStats().DatagramsReceivedChannel != 1 {
+			return errors.New("WT datagram mismatch")
+		}
+		if err := session.CloseWithError(42, "done"); err != nil {
+			return err
+		}
+		// The adapter owns the QUIC linger. Let the peer receive the capsule before closing its socket.
+		select {
+		case <-conn.Context().Done():
+			fmt.Println("PASS wt client bootstrap=1 datagram=1 cancel=1 close=42")
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
 		return err
@@ -405,13 +483,6 @@ func runWTClient(ctx context.Context, rawURL string, config *tls.Config) error {
 	if err := sendFIN(outgoing, "client-uni"); err != nil {
 		return err
 	}
-	incoming, err := session.AcceptUniStream(ctx)
-	if err != nil {
-		return err
-	}
-	if err := expectEOF(incoming, "server-uni"); err != nil {
-		return err
-	}
 	stream, err = session.AcceptStream(ctx)
 	if err != nil {
 		return err
@@ -420,6 +491,14 @@ func runWTClient(ctx context.Context, rawURL string, config *tls.Config) error {
 		return err
 	}
 	if err := sendFIN(stream, "server-bidi"); err != nil {
+		return err
+	}
+	// The server sends this after reading the final bidirectional reply.
+	incoming, err := session.AcceptUniStream(ctx)
+	if err != nil {
+		return err
+	}
+	if err := expectEOF(incoming, "server-uni"); err != nil {
 		return err
 	}
 	if err := session.CloseWithError(42, "done"); err != nil {
@@ -432,4 +511,52 @@ func runWTClient(ctx context.Context, rawURL string, config *tls.Config) error {
 	}
 	fmt.Println("PASS wt client bidi=both uni=both close=42 reason=done")
 	return nil
+}
+
+func ownedServer(ctx context.Context, listener *zmux.Listener) error {
+	c, err := listener.Accept(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	probe, err := listener.Accept(ctx)
+	if err != nil {
+		return err
+	}
+	defer probe.Close()
+	ready, err := probe.AcceptStream(ctx)
+	if err != nil {
+		return err
+	}
+	if err := expectEOF(ready, "cancel-ready"); err != nil {
+		return err
+	}
+	pipe, ok := probe.Pipe(0)
+	if !ok {
+		return errors.New("missing probe pipe")
+	}
+	if err := sendFIN(ready, "cancel-ready"); err != nil {
+		return err
+	}
+	select {
+	case <-pipe.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	first, err := c.ReceiveDatagram(ctx)
+	if err != nil {
+		return err
+	}
+	if string(first) != "owned-wt" || c.ConnectionStats().DatagramsReceivedChannel != 1 {
+		return errors.New("WT datagram mismatch")
+	}
+	if err = c.SendDatagramWait(ctx, first); err != nil {
+		return err
+	}
+	select {
+	case <-c.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

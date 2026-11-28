@@ -10,6 +10,7 @@ import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.quic.QuicChannel;
 import io.zmux.*;
+import io.zmux.internal.core.Time;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -53,6 +54,7 @@ class QuicChannelTest {
         final List<Thread> pumps = new ArrayList<>();
         // Guarded by this.
         private int drop;
+        private CompletableFuture<Void> burstDropped;
         private boolean holding;
         private final List<byte[]> held = new ArrayList<>();
         /** Client packets received, and of them those settled: sent on to the server or dropped. */
@@ -70,7 +72,13 @@ class QuicChannelTest {
         InetSocketAddress address() { return (InetSocketAddress) front.getLocalSocketAddress(); }
 
         /** Drops the next n large client packets and holds the later ones. */
-        synchronized void arm(int n) { drop = n; holding = true; }
+        synchronized void arm(int n) {
+            drop = n;
+            holding = true;
+            burstDropped = new CompletableFuture<>();
+        }
+
+        synchronized CompletableFuture<Void> burstDropped() { return burstDropped; }
 
         /** Sends the held packets on, in order, and holds no more. */
         void release() {
@@ -108,6 +116,7 @@ class QuicChannelTest {
                             drop--;
                             dropped.incrementAndGet();
                             toServer++; // settled: it never reaches the server
+                            if (drop == 0) burstDropped.complete(null);
                             continue;
                         }
                         if (copy.length >= 1000 && holding) { held.add(copy); continue; }
@@ -145,8 +154,14 @@ class QuicChannelTest {
         }
     }
 
+    /** Timestamped payload for the cross-language latency measurement. */
     static byte[] stamp(int seq) {
         return ByteBuffer.allocate(100).putLong(System.nanoTime()).put((byte) seq).array();
+    }
+
+    static void awaitDropped(LossyRelay relay, int n) throws Exception {
+        relay.burstDropped().get(20, TimeUnit.SECONDS);
+        assertEquals(n, relay.dropped.get());
     }
 
     /** The stream burst: within the initial congestion window of the QUIC stack, so that only the lost packets delay anything. */
@@ -157,15 +172,6 @@ class QuicChannelTest {
      * those the server received while the lost stream data was still held back, and in all.
      */
     record Run(int whileHeld, int received, SessionStats client, int dropped) {}
-
-    /** Waits until relay dropped the burst's first n large packets. */
-    static void awaitDropped(LossyRelay relay, int n) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (relay.dropped.get() < n) {
-            assertTrue(System.nanoTime() < deadline, "the burst's head was not lost");
-            Thread.sleep(1);
-        }
-    }
 
     /**
      * A session through a relay with one-way delay d: a burst of stream data whose first large
@@ -202,24 +208,19 @@ class QuicChannelTest {
                     relay.barrier().get(10, TimeUnit.SECONDS);
                     int whileHeld = 0;
                     if (clientOptions.isDatagrams()) {
-                        for (; whileHeld < 10; whileHeld++) {
-                            try { s.datagrams().receive(Duration.ofSeconds(2)); }
-                            catch (java.net.SocketTimeoutException e) { break; }
-                        }
+                        for (; whileHeld < 5; whileHeld++) assertNotNull(s.datagrams().receive(Duration.ofSeconds(20)));
                     } else {
                         whileHeld = (int) (s.stats().datagramsReceived() - 5);
                     }
                     relay.release();
-                    int received = clientOptions.isDatagrams() ? whileHeld : 0;
-                    for (; received < 10; received++) {
-                        try { s.datagrams().receive(Duration.ofSeconds(clientOptions.isDatagrams() ? 1 : 10)); }
-                        catch (java.net.SocketTimeoutException e) { break; }
+                    if (!clientOptions.isDatagrams()) {
+                        for (int i = 0; i < 10; i++) assertNotNull(s.datagrams().receive(Duration.ofSeconds(20)));
                     }
                     st.finish();
                     assertEquals(BURST + 4, read.get(20, TimeUnit.SECONDS).length);
                     in.close();
                     st.close();
-                    return new Run(whileHeld, received, c.stats(), relay.dropped.get());
+                    return new Run(whileHeld, (int) s.stats().datagramsReceived() - 5, c.stats(), relay.dropped.get());
                 } finally {
                     QuicEndpointTest.closed(c, s);
                 }
@@ -248,21 +249,27 @@ class QuicChannelTest {
     /** Larger datagrams, a peer without QUIC datagrams and sessions without datagrams use records. */
     @Test void fallbackToRecords() throws Exception {
         try (var loops = EventLoops.create(2)) {
-            var config = config(loops);
-            for (QuicOptions clientOptions : List.of(QuicOptions.defaults(), QuicOptions.builder().datagrams(false).build())) {
-                try (var listener = Zmux.listener(ListenerConfig.of(config));
-                     var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
+            // Exercise routing after both endpoints establish. The JUnit timeout guards the test.
+            var sessions = ZmuxConfig.builder().eventLoops(loops).noHandshakeTimeout().noMaxIdleTimeout()
+                    .noDatagramQueueDelay();
+            var listenerConfig = ListenerConfig.builder().firstRecordTimeout(Duration.ofNanos(Time.NEVER));
+            var serverOptions = QuicOptions.builder().idleTimeout(Duration.ZERO).build();
+            var none = sessions.build();
+            var config = sessions.enableDatagrams(true).build();
+            for (QuicOptions clientOptions : List.of(serverOptions, serverOptions.toBuilder().datagrams(false).build())) {
+                try (var listener = Zmux.listener(listenerConfig.session(config).build());
+                     var server = new QuicServer(QuicTest.any(), TestTls.server, serverOptions, listener);
                      var endpoint = new QuicClient(TestTls.client, clientOptions)) {
-                    ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", config).get(10, TimeUnit.SECONDS);
-                    ZmuxSession s = listener.accept(Duration.ofSeconds(10));
+                    ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", config).get();
+                    ZmuxSession s = listener.accept();
                     try {
                         byte[] small = {1, 2, 3}, large = new byte[4000];
                         c.datagrams().send(ByteBuffer.wrap(small));
-                        assertArrayEquals(small, s.datagrams().receive(Duration.ofSeconds(5)));
+                        assertArrayEquals(small, s.datagrams().receive());
                         c.datagrams().send(ByteBuffer.wrap(large));
-                        assertArrayEquals(large, s.datagrams().receive(Duration.ofSeconds(5)));
+                        assertArrayEquals(large, s.datagrams().receive());
                         s.datagrams().send(ByteBuffer.wrap(small));
-                        assertArrayEquals(small, c.datagrams().receive(Duration.ofSeconds(5)));
+                        assertArrayEquals(small, c.datagrams().receive());
                         var cs = c.stats();
                         assertEquals(2, cs.datagramsSent());
                         assertEquals(clientOptions.isDatagrams() ? 1 : 0, cs.datagramsSentChannel(), cs.toString());
@@ -273,12 +280,11 @@ class QuicChannelTest {
                     }
                 }
             }
-            var none = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var listener = Zmux.listener(ListenerConfig.of(none));
-                 var server = new QuicServer(QuicTest.any(), TestTls.server, QuicOptions.defaults(), listener);
-                 var endpoint = new QuicClient(TestTls.client, QuicOptions.defaults())) {
-                ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", none).get(10, TimeUnit.SECONDS);
-                ZmuxSession s = listener.accept(Duration.ofSeconds(10));
+            try (var listener = Zmux.listener(listenerConfig.session(none).build());
+                 var server = new QuicServer(QuicTest.any(), TestTls.server, serverOptions, listener);
+                 var endpoint = new QuicClient(TestTls.client, serverOptions)) {
+                ZmuxSession c = endpoint.connectAsync(server.address(), "localhost", none).get();
+                ZmuxSession s = listener.accept();
                 try {
                     assertThrows(NotNegotiatedException.class, () -> c.datagrams().send(ByteBuffer.wrap(new byte[1])));
                 } finally {
@@ -404,10 +410,17 @@ class QuicChannelTest {
                     c.datagrams().send(ByteBuffer.wrap(new byte[] {7}));
                     assertArrayEquals(new byte[] {7}, s.datagrams().receive(Duration.ofSeconds(5)));
                     QuicChannel qc = endpoint.connections().getFirst();
-                    ConnectionCarrier sc = server.connections().getFirst().attr(ConnectionCarrier.KEY).get();
+                    QuicChannel peer = server.connections().getFirst();
+                    ConnectionCarrier sc = peer.attr(ConnectionCarrier.KEY).get();
+                    var dropped = new CompletableFuture<Long>();
+                    peer.eventLoop().submit(() -> peer.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter() {
+                        @Override public void channelReadComplete(ChannelHandlerContext ctx) {
+                            if (sc.channelDropped() > 0) dropped.complete(sc.channelDropped());
+                            ctx.fireChannelReadComplete();
+                        }
+                    })).get(20, TimeUnit.SECONDS);
                     qc.writeAndFlush(Unpooled.wrappedBuffer(new byte[] {0x40, 64, 0x30, 0, 1})).sync(); // pipe stream 64
-                    for (long end = System.nanoTime() + 5_000_000_000L; sc.channelDropped() == 0 && System.nanoTime() < end; ) Thread.sleep(5);
-                    assertEquals(1, sc.channelDropped());
+                    assertEquals(1L, dropped.get(20, TimeUnit.SECONDS));
                     assertTrue(s.error().isEmpty());
                     qc.writeAndFlush(Unpooled.wrappedBuffer(new byte[] {0, 0x31, 1, 0})).sync(); // DATAGRAM with Length
                     SessionError e = s.closed().get(5, TimeUnit.SECONDS);

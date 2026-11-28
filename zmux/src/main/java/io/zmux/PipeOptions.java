@@ -269,7 +269,7 @@ public final class PipeOptions {
          * it ({@link ZmuxPipe#awaitAttached}); default false. Fixed when the pipe is added.
          * Before the peer attached it, closing the session's last other pipes loses the session
          * unless it resumes: an application that replaces pipes itself waits for the attachment
-         * first. Pools and their redials always join this way and judge the attachment themselves.
+         * first.
          */
         public Builder returnOnReply(boolean on) { returnOnReply = on; return this; }
 

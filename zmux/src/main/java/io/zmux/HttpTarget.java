@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The URL of a carrier candidate and the URL that redirects last led it to: later carriers of
- * the candidate (joins, redials) start from the final URL, and a mode dialer keeps it per server
+ * the candidate start from the final URL, whose lifetime is managed by the adapter
  * in its {@link CarrierCache} until the kind fails there, after which it starts at the base URL
  * again. Safe for concurrent use.
  */

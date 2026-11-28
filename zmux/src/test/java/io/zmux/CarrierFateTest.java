@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(30)
 class CarrierFateTest {
     @Test void pooledFateIsPreservedAcrossCapabilitiesAndEncodedByTheOriginalJoin() throws Exception {
-        try(EventLoops loops=EventLoops.create(2);var f=new PipePoolTest.Fixture(PipePoolTest.config(loops,4))) {
+        try(EventLoops loops=EventLoops.create(2);var f=new SessionTestSupport.Fixture(SessionTestSupport.config(loops,4))) {
             var pair=MemoryPipe.pair(Framing.BYTE_STREAM);f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("pooled"))).closed();
             var io=pair[0].withFateGroup(123).withProtocol("").withLabel("pooled").withReceiveMemory(0).withLaneOpener(null).withExporter(null);
             assertEquals(123,io.capabilities().fateGroup());
@@ -25,7 +25,7 @@ class CarrierFateTest {
         }
     }
     @Test void anExplicitFateWinsOverTheCarriersDefault() throws Exception {
-        try(EventLoops loops=EventLoops.create(2);var f=new PipePoolTest.Fixture(PipePoolTest.config(loops,4))) {
+        try(EventLoops loops=EventLoops.create(2);var f=new SessionTestSupport.Fixture(SessionTestSupport.config(loops,4))) {
             var pair=MemoryPipe.pair(Framing.BYTE_STREAM);
             var lifetime=f.listener.adapter().handle(pair[1],JoinHint.inBand(TestAddr.peer("pooled"))).closed();
             var pipe=f.client.addPipe(pair[0].withFateGroup(123),PipeOptions.builder().fateGroup(321).build());

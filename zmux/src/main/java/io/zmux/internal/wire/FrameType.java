@@ -23,6 +23,7 @@ public final class FrameType {
     public static final long RESET_STREAM_AT = 0x24;
     public static final long DATAGRAM = 0x30;
     public static final long DATAGRAM_LEN = 0x31;
+    public static final long DATAGRAM_ACK = 0x28bbd99fL;
     public static final long TRANSPORT_PARAMETERS = 0x3f5153300d0a0d0aL;
     public static final long PING_REQUEST = 0x348c67529ef8c7bdL;
     public static final long PING_RESPONSE = 0x348c67529ef8c7beL;

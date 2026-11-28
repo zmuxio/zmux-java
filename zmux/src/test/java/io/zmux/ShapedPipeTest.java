@@ -14,21 +14,21 @@ class ShapedPipeTest {
     /** A factory that records the pipes it is asked for and shapes none of them. */
     static final class Seen implements ShaperFactory {
         final List<ShapedPipe> pipes = new CopyOnWriteArrayList<>();
-        @Override public Shaper create(ShapedPipe pipe) { pipes.add(pipe); return null; }
+        final BlockingQueue<ShapedPipe> installed = new LinkedBlockingQueue<>();
+        int observed;
+        @Override public Shaper create(ShapedPipe pipe) { pipes.add(pipe); installed.add(pipe); return null; }
         Set<CarrierKind> kinds() {
             Set<CarrierKind> s = new HashSet<>();
             for (ShapedPipe p : pipes) s.add(p.carrier());
             return s;
         }
         void await(int n) throws InterruptedException {
-            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (pipes.size() < n && System.nanoTime() < until) Thread.sleep(5);
-            assertTrue(pipes.size() >= n, pipes.toString());
+            for (; observed < n; observed++) installed.take();
         }
     }
 
     static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b) {
-        return b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
+        return b.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     /** A server configured with a shaper pads its very first record and every one after. */

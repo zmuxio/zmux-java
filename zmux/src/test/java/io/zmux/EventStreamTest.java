@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(60)
 class EventStreamTest {
     private static ZmuxConfig.Builder multipath(EventLoops loops, byte[] psk) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(psk).withEndToEnd()).noProbation();
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(psk).withEndToEnd()).noProbation();
     }
 
     /** Records the tracer's events of every session it serves, and completes a future once want holds. */
@@ -78,14 +78,14 @@ class EventStreamTest {
 
     @Test void aFailedPipeIsRetiredAsFailedInTheTracerAndACleanOneAsClosed() {
         long pipe = 7;
-        var failed = Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, true, 0, 0, null));
-        var clean = Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null));
+        var failed = Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, true, 0, 0, null, null));
+        var clean = Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null));
         assertEquals(new SessionEvent.PipesRetired(1, 1, 0, List.of(PipeId.of(pipe))), failed);
         assertEquals(new SessionEvent.PipesRetired(1, 0, 1, List.of(PipeId.of(pipe))), clean);
         for (var r : List.of((SessionEvent.PipesRetired) failed, (SessionEvent.PipesRetired) clean)) {
             assertEquals(1, r.failed() + r.closed(), "a retirement is exactly one of failed and closed");
         }
-        assertNull(Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_OUT, PipeInfo.Out.CLOSED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null)),
+        assertNull(Events.traceEvent(new Event(Event.Kind.PIPE_STATE, pipe, io.zmux.internal.core.Action.DIR_OUT, PipeInfo.Out.CLOSED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null)),
                 "the other pipe states are internal");
     }
 

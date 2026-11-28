@@ -55,7 +55,7 @@ public final class InteropPeer {
         var remote = address(args.length > 1 ? args[1] : "127.0.0.1:0");
         try (var loops = EventLoops.create(2)) {
             var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16);
-            if (mp) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
+            if (mp) builder.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
             try (var endpoint = mode.equals("server") ? Zmux.listen(remote, ListenerConfig.of(config)) : Zmux.listener(ListenerConfig.of(config))) {
                 ZmuxSession session;

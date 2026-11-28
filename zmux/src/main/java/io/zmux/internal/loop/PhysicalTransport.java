@@ -2,6 +2,29 @@ package io.zmux.internal.loop;
 
 /** Operations reserved to the physical owner. Protocol phases receive only Transport. */
 abstract sealed class PhysicalTransport implements Transport permits AbstractTransport, SealedTransport {
+    private io.zmux.internal.buffer.WriteWorkspace nextSeal;
+    private io.zmux.internal.buffer.WriteWorkspace encoder;
+    private io.zmux.internal.buffer.WriteWorkspace history;
+
+    /** The space reserved for adding a layer, before a Join publishes the new carrier. */
+    final io.zmux.internal.buffer.WriteWorkspace nextSeal() {
+        if (nextSeal == null) nextSeal = new io.zmux.internal.buffer.WriteWorkspace();
+        return nextSeal;
+    }
+
+    io.zmux.internal.buffer.WriteWorkspace encoder() {
+        if (encoder == null) encoder = new io.zmux.internal.buffer.WriteWorkspace();
+        return encoder;
+    }
+
+    io.zmux.internal.buffer.WriteWorkspace history() {
+        if (history == null) history = new io.zmux.internal.buffer.WriteWorkspace();
+        return history;
+    }
+
+    /** TLS record storage shares one physical lifetime even through a bridge. */
+    java.util.List<TlsTransport.RecordWorkspace> tlsWorkspaces() { return java.util.List.of(); }
+
     /** All I/O views of a physical transport share its one close right. */
     abstract CarrierSetup.Bound closeRight();
 

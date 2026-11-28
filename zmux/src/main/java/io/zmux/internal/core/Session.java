@@ -1,10 +1,21 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.core.CoreException.DatagramDrop;
+import io.zmux.DatagramSendOptions;
+import io.zmux.internal.buffer.CarrierCharge;
+
+import io.zmux.internal.memory.SharedMemory;
+
+
+import io.zmux.internal.buffer.ReadBuf;
+import io.zmux.internal.buffer.ReceiveSpans;
+
 import io.zmux.internal.core.CoreConfig.Role;
 import io.zmux.internal.core.Lifecycle.CloseFrame;
 import io.zmux.internal.wire.Gates;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
+import io.zmux.internal.wire.VarInt;
 import io.zmux.internal.wire.WireException;
 import io.zmux.internal.wire.ChannelDatagram;
 import io.zmux.internal.wire.FrameDecoder;
@@ -18,9 +29,11 @@ import java.util.List;
  * and the next deadline.
  */
 public final class Session {
-    static final long MAX_62 = (1L << 62) - 1;
 
     final CoreConfig cfg;
+    private CoreSessionPolicy sessionPolicy;
+    private int localCarriers, authorizationExecutions;
+    private final SessionCapacity capacity = new SessionCapacity(this);
     private io.zmux.shaping.ShapingLimits shapingLimits;
     private io.zmux.shaping.ShapingBudget shapingBudget;
     private long now;
@@ -34,6 +47,7 @@ public final class Session {
     private TransportParams peer = new TransportParams();
     TransportParams peer() { return peer; }
     private boolean peerSeen;
+    private Long establishedAt;
     private Features feat = Features.NONE;
     private Gates gates;
 
@@ -45,25 +59,25 @@ public final class Session {
     final StreamScheduler sched = new StreamScheduler();
     final Outbox outbox = new Outbox();
     /** The pipes by ID and in attachment order. */
-    final PipeTable pipes = new PipeTable(outbox);
+    final PipeTable pipes = new PipeTable(outbox, this::carrierReplaced);
     final ControlQueue ctl = new ControlQueue(pipes::wakeWriters);
     final ConnFlow conn;
     final KeepAlive ka;
-    final EarlyData early;
     /** Pipe acknowledgement and pacing; null without acknowledgement. */
     private AckEngine ack;
     private Pacer pacer;
     /** The resume grace deadline while SUSPENDED. */
     private long grace = Time.NEVER;
+    private final java.util.Set<java.util.function.LongConsumer> suspensionObservers = new java.util.LinkedHashSet<>();
     private volatile SessionError err;
     final Lifecycle life;
     final SessionStats stats = new SessionStats();
     final Datagrams dg;
     final WaitList closedW = new WaitList();
+    private final WaitList endingW = new WaitList();
     /** Close calls waiting for the carriers to take CONNECTION_CLOSE ({@link #closeHandedOff}). */
     private final WaitList handOffW = new WaitList();
     final WaitList estW = new WaitList();
-    final MemoryCharge mem;
     final WindowTuner tuner;
     /** The path layer: single pipe until multipath is negotiated. */
     private PathLayer path = singlePath();
@@ -74,49 +88,87 @@ public final class Session {
     final Lanes lanes;
     final RecordReceiver rx;
     final Transmitter tx;
+    private final ProtocolTimeline deadlines = new ProtocolTimeline(this::protocolDeadline);
 
     /** Creates a session; the bootstrap pipe is attached with {@link #attachBootstrap}. */
     public Session(CoreConfig cfg, long now) {
-        this.cfg = cfg;
-        this.policy = cfg.policy();
-        this.joinPsk = cfg.psk();
-        this.declared = cfg.declaredEndToEnd() || cfg.secureFirstPipe();
-        this.shapingLimits = cfg.shapingLimits();
-        this.shapingBudget = cfg.shapingBudget();
-        this.now = now;
-        this.start = now;
-        dg = new Datagrams(cfg, stats, outbox, this::now);
-        TransportParams l = cfg.local();
-        if (l.maxRecordSize == 0) l.maxRecordSize = TransportParams.DEFAULT_MAX_RECORD_SIZE;
-        conn = new ConnFlow(l.initialMaxData, this::maxDataDue);
-        mem = new MemoryCharge(cfg, conn, dg);
-        tuner = new WindowTuner(cfg, conn, new TunerPort());
-        if (cfg.role() != Role.AUTO) {
-            role = cfg.role();
-            roleKnown = true;
-        } else if (!l.has(TransportParams.ROLE)) {
-            role = cfg.transportRole();
-            roleKnown = true;
+        this(cfg, now, false);
+    }
+
+    /** A policy refusal can exchange parameters and close without promising receive capacity. */
+    public static Session refusing(CoreConfig cfg, long now) {
+        return new Session(cfg, now, true);
+    }
+
+    private Session(CoreConfig cfg, long now, boolean refusing) {
+        cfg = cfg.withMemoryLedger();
+        var requestedParams = cfg.local();
+        long requested = refusing ? 0 : requestedParams.initialMaxData;
+        long desiredBidi = refusing ? 0 : requestedParams.maxStreamsBidi;
+        long desiredUni = refusing ? 0 : requestedParams.maxStreamsUni;
+        boolean incrementalCredit = !refusing && cfg.budget() != null && cfg.budget().limit() != CoreConfig.UNLIMITED;
+        boolean multipath = requestedParams.has(TransportParams.MULTIPATH);
+        long firstBidi = incrementalCredit ? Math.min(desiredBidi, StreamTable.initialBatch(multipath)) : desiredBidi;
+        long firstUni = incrementalCredit ? Math.min(desiredUni, StreamTable.initialBatch(false)) : desiredUni;
+        var reservation = refusing ? null : ConnFlow.reserveInitial(cfg.budget(), requested, desiredBidi > 0, multipath);
+        try {
+            long credit = reservation == null ? requested : reservation.window();
+            long bidi = firstBidi;
+            long uni = firstUni;
+            if (reservation != null) {
+                long mandatory = desiredBidi > 0 ? 1 : 0;
+                bidi = mandatory + reservation.reserveStreams(firstBidi - mandatory, ReceiveLayout.STREAM_CHARGE, ConnFlow.sendFloor(multipath));
+                uni = reservation.reserveStreams(firstUni, ReceiveLayout.STREAM_CHARGE, 0);
+            }
+            var granted = requestedParams.withReceiveLimits(credit, bidi, uni);
+            if (granted != requestedParams) cfg = cfg.toBuilder().local(granted).build();
+            this.cfg = cfg;
+            sessionPolicy = cfg.sessionPolicy();
+            this.policy = cfg.policy();
+            this.joinPsk = cfg.psk();
+            this.declared = cfg.declaredEndToEnd() || cfg.secureFirstPipe();
+            this.shapingLimits = cfg.shapingLimits();
+            this.shapingBudget = cfg.shapingBudget();
+            this.now = now;
+            this.start = now;
+            dg = new Datagrams(cfg, stats, outbox, this::now);
+            TransportParams l = cfg.local();
+            if (l.maxRecordSize == 0) l.maxRecordSize = TransportParams.DEFAULT_MAX_RECORD_SIZE;
+            var receiveStorage = new RecvBuffer.Storage(reservation);
+            conn = new ConnFlow(credit, this::maxDataDue, reservation, multipath, pipes::wakeWriters);
+            tuner = new WindowTuner(cfg, conn, new TunerPort());
+            if (cfg.role() != Role.AUTO) {
+                role = cfg.role();
+                roleKnown = true;
+            } else if (!l.has(TransportParams.ROLE)) {
+                role = cfg.transportRole();
+                roleKnown = true;
+            }
+            gates = new Gates(l.has(TransportParams.DATAGRAM) ? l.maxDatagramFrameSize : 0,
+                    l.has(TransportParams.RESET_AT), false, false, false, false, false, false);
+            ka = new KeepAlive(cfg, new KeepAlivePort(), outbox, now);
+            life = new Lifecycle(Time.add(now, cfg.handshakeTimeout()),
+                    () -> deadlines.changed(ProtocolTimeline.Reason.LIFE.bit()));
+            StreamsPort sp = new StreamsPort();
+            streamsView = sp;
+            streams = new StreamTable(cfg, stats, outbox, life, dg, conn, sched, ctl, sp, desiredBidi, desiredUni, incrementalCredit);
+            send = new StreamSend(stats, outbox, conn, sched, ctl, streams, sp);
+            recv = new StreamRecv(cfg, stats, outbox, conn, tuner, ctl, streams, sp, receiveStorage, reservation);
+            IoPort ioPort = new IoPort();
+            lanes = new Lanes(cfg, pipes, outbox, ioPort);
+            lanes.onDeadlineChanged(() -> deadlines.changed(ProtocolTimeline.Reason.LANE.bit()));
+            rx = new RecordReceiver(cfg, stats, life, ioPort);
+            tx = new Transmitter(cfg, stats, pipes, lanes, streams, send, recv, sched, ctl, conn, tuner, ka, life, dg, ioPort);
+            dg.recordCap(tx::largestRecordCap);
+            dg.channels(new ChannelsPort());
+            var bounds = shapingLimitsInForce();
+            if (bounds.wire() != null || !shapingBudget.equals(io.zmux.shaping.ShapingBudget.NONE)) shaping();
+            if (cfg.shaper() != null) setShaper(cfg.shaper());
+            refreshDeadlines();
+        } catch (RuntimeException | Error failure) {
+            if (reservation != null) reservation.close();
+            throw failure;
         }
-        gates = new Gates(l.has(TransportParams.DATAGRAM) ? l.maxDatagramFrameSize : 0,
-                l.has(TransportParams.RESET_AT), false, false, false, false, false);
-        ka = new KeepAlive(cfg, new KeepAlivePort(), outbox, now);
-        life = new Lifecycle(Time.add(now, cfg.handshakeTimeout()));
-        if (cfg.holdFirstFlight()) life.holdFirstFlight();
-        early = new EarlyData(cfg);
-        StreamsPort sp = new StreamsPort();
-        streamsView = sp;
-        streams = new StreamTable(cfg, stats, outbox, life, dg, conn, mem, sched, ctl, sp);
-        send = new StreamSend(stats, outbox, conn, sched, ctl, streams, sp);
-        recv = new StreamRecv(cfg, stats, outbox, conn, tuner, ctl, streams, sp);
-        IoPort io = new IoPort();
-        lanes = new Lanes(cfg, pipes, outbox, io);
-        rx = new RecordReceiver(cfg, stats, life, io);
-        tx = new Transmitter(cfg, stats, pipes, lanes, streams, send, recv, sched, ctl, conn, tuner, ka, life, early, dg, io);
-        dg.recordCaps(tx::smallestRecordCap, tx::largestRecordCap);
-        if (early.active()) assume(early.assumed(), early.floor());
-        dg.channels(new ChannelsPort());
-        if (cfg.shaper() != null) setShaper(cfg.shaper());
     }
 
     /** Advances the session clock for API calls; the driver calls it before every operation. */
@@ -125,6 +177,26 @@ public final class Session {
     }
 
     public long now() { return now; }
+
+    private java.util.function.LongFunction<PathEvidence.Loss> carrierLoss = ignored -> null;
+
+    public void carrierLoss(java.util.function.LongFunction<PathEvidence.Loss> source) { carrierLoss = source; }
+    PathEvidence.Loss publishedLoss(long pipe) { return carrierLoss.apply(pipe); }
+
+    /** Publishes a host wake only after a denied receive commitment can be retried. */
+    public void onReceiveRoom(Runnable ready) { conn.onRoom(ready); }
+
+    private java.util.function.Consumer<Runnable> onOwner = Runnable::run;
+
+    public void onMemoryCommand(java.util.function.Consumer<Runnable> onOwner) { this.onOwner = onOwner; }
+
+    public void receiveRoom() {
+        if (isClosing()) return;
+        streams.receiveRoom();
+        conn.backingRoom();
+        recv.loanRoom();
+        conn.checkCredit();
+    }
     public SessionState state() { return state; }
     /** The terminal error, null while open. */
     public SessionError error() { return err; }
@@ -137,6 +209,212 @@ public final class Session {
     /** Bootstrap transport direction, independent of negotiated protocol role. */
     public Role transportRole() { return cfg.transportRole(); }
     public CoreConfig config() { return cfg; }
+
+    public CoreSessionPolicy sessionPolicy() { return sessionPolicy; }
+
+    /** Returns a consistent snapshot of the current membership and resource owners. */
+    public SessionCapacity.Snapshot capacity() {
+        return capacity.snapshot(localCarriers, authorizationExecutions);
+    }
+
+    public boolean validQualityInput(io.zmux.MemberId member, io.zmux.PipeId pipe, io.zmux.Direction direction,
+                                     long generation, PathEvidence.Sample sample) {
+        return capacity.validQualityInput(member, pipe, direction, generation, sample);
+    }
+
+    public long capacityRevision() { return capacity.observed(); }
+
+    /** Attributes the original, confirmed bootstrap member to a matching carrier registration. */
+    public void bindBootstrapCandidate(String candidate, SessionCapacity.CandidateIdentity identity) throws io.zmux.PipeGoneException {
+        Pipe first = pipes.get(0);
+        if (first == null || (first.mp() != null && first.mp().retired())) {
+            throw new io.zmux.PipeGoneException(io.zmux.PipeId.BOOTSTRAP);
+        }
+        var member = validateBootstrapCandidate(candidate, identity, first);
+        member.checkIdentity(candidate, identity);
+        boolean changed = member.bind(candidate);
+        member.attribute(identity);
+        if (!changed) return;
+        if (path instanceof PathSession mp) applyTopology(mp, first);
+        capacity.changed();
+    }
+
+    private SessionCapacity.Member validateBootstrapCandidate(String candidate, SessionCapacity.CandidateIdentity identity, Pipe first) {
+        if (!identity.layout().equals(List.of(io.zmux.Directions.BOTH)) || first.out() == null || first.in() == null) {
+            throw new IllegalArgumentException("bootstrap candidate must match the duplex attachment");
+        }
+        var kind = identity.kind();
+        var variant = identity.variant();
+        if (kind != first.carrier() || !variant.equals(first.variant())) {
+            throw new IllegalArgumentException("bootstrap candidate " + candidate + " has carrier " + kind + " variant '"
+                    + variant + "', pipe 0 has carrier " + first.carrier() + " variant '" + first.variant() + "'");
+        }
+        var member = first.member();
+        var view = capacity().members().stream().filter(snapshot -> snapshot.id().equals(member.id())).findFirst();
+        if (view.isEmpty() || !view.get().complete() || view.get().draining()) {
+            throw new IllegalArgumentException("bootstrap member is not confirmed and available");
+        }
+        return member;
+    }
+
+    public void checkCandidateIdentity(String candidate, SessionCapacity.CandidateIdentity identity) {
+        for (var pipe : pipes.all()) {
+            if (pipe.mp() == null || !pipe.mp().retired()) pipe.member().checkIdentity(candidate, identity);
+        }
+    }
+
+    /** Registers an internal owner-loop observer of the recovery grace. */
+    public Runnable watchSuspension(java.util.function.LongConsumer observer) {
+        suspensionObservers.add(observer);
+        return () -> suspensionObservers.remove(observer);
+    }
+
+    /** Bounds an attempt strictly before an active recovery grace deadline. */
+    public long boundAttemptDeadline(long deadline) {
+        return state == SessionState.SUSPENDED ? Math.min(deadline, Time.sub(grace, 1)) : deadline;
+    }
+
+    /** Tests the observed version and subscribes to a later capacity commit in the same owner turn. */
+    public boolean waitCapacity(long observed, Waiter waiter) { return capacity.waitForChange(observed, waiter); }
+
+    /** Withdraws a capacity observation. */
+    public void cancelCapacityWait(Waiter waiter) { capacity.withdraw(waiter); }
+
+    public boolean drainClaimAvailable(java.util.Set<io.zmux.MemberId> members) { return capacity.drainClaimAvailable(members); }
+
+    /** Claims the selected members for a single prospective drain. */
+    public SessionCapacity.DrainClaim claimDrain(java.util.Set<io.zmux.MemberId> members) throws CoreException {
+        requireMultipath();
+        return capacity.claimDrain(members);
+    }
+
+    public void releaseDrain(SessionCapacity.DrainClaim claim) { capacity.releaseDrain(claim); }
+
+    public void setMemberPolicy(io.zmux.MemberId member, Tiers.PipeSettings preferences,
+                                long sendLimit, long receiveLimit) throws CoreException {
+        capacity.setMemberPolicy(requireMultipath(), member, preferences, sendLimit, receiveLimit);
+    }
+
+    /** Fresh outgoing protocol evidence committed by the session owner. */
+    @FunctionalInterface
+    public interface PerformanceFeedback {
+        void record(io.zmux.MemberId member, long at, long validUntil, java.time.Duration rtt, long rate);
+    }
+
+    private PerformanceFeedback performanceFeedback;
+    public void performanceFeedback(PerformanceFeedback observer) { performanceFeedback = observer; }
+
+    /** A credited byte resident at the first ACK, identified without retaining the stream. */
+    record DeliveryBacklog(long stream, long end, long connectionLimit, long at, long topology, int pipesVersion) {}
+    private void clearDeliveryBacklog() {
+        for (var pipe : pipes.all()) if (pipe.out() != null) pipe.out().snd.deliveryBacklog(null);
+    }
+
+
+    public void targetChanged(long generation, long revision, boolean initial, Long previous) {
+        emit(Event.targetChanged(generation, revision, initial, previous));
+    }
+
+    public void memberFeedback(java.util.function.Consumer<SessionCapacity.MemberHealth> observer) {
+        capacity.feedback(observer);
+    }
+
+    private void memberBytes(Pipe pipe, boolean sending, long bytes) {
+        if (pipe.member().record(sending, bytes)) capacity.changed();
+    }
+
+    /** Validates a retirement batch, then passes the attachments starting a drain to the optional reservation callback. */
+    public boolean drainMembers(java.util.Set<io.zmux.MemberId> members, long minimumEpoch, long policyRevision,
+                                java.util.function.Predicate<List<io.zmux.PipeId>> beforeDrain) throws CoreException {
+        PathSession path = requireMultipath();
+        return policyRevision == sessionPolicy.revision() && capacity.drain(path, members, minimumEpoch, beforeDrain);
+    }
+
+    /** Cleans up a provisional member when doing so preserves currently confirmed service. */
+    public boolean rollbackMember(io.zmux.MemberId member) {
+        return path instanceof PathSession mp && !isClosing() && capacity.rollback(mp, member);
+    }
+
+    /** Reserves new physical connections. Already charged connections consume no new slots. */
+    public boolean acquireCarriers(int count) {
+        if (isClosing() || (count > 0 && count > sessionPolicy.limits().localCarriers() - localCarriers)) return false;
+        localCarriers += count;
+        if (count > 0) capacity.changed();
+        return true;
+    }
+
+    /** Releases connections whose last attachment and I/O owner has exited. */
+    public void releaseCarriers(int count) {
+        if (count > localCarriers) throw new IllegalStateException("unbalanced carrier capacity");
+        localCarriers -= count;
+        if (count > 0) capacity.changed();
+    }
+
+    /** Admits an authorization callback until its actual execution ends. */
+    public boolean acquireJoinAuthorization() {
+        if (isClosing() || authorizationExecutions >= sessionPolicy.limits().pendingPeerJoins()) return false;
+        authorizationExecutions++;
+        capacity.changed();
+        return true;
+    }
+
+    public void releaseJoinAuthorization() {
+        if (authorizationExecutions == 0) throw new IllegalStateException("unbalanced Join authorization capacity");
+        authorizationExecutions--;
+        capacity.changed();
+    }
+
+    /** Publishes authorization and hard limits in one owner turn. */
+    public void setSessionPolicy(CoreSessionPolicy next) throws CoreException {
+        deadlines.changed(ProtocolTimeline.ALL);
+        if (isClosing()) throw CoreException.session(err);
+        java.util.Objects.requireNonNull(next, "sessionPolicy");
+        if (next.equals(sessionPolicy)) return;
+        if (Long.compareUnsigned(next.revision(), sessionPolicy.revision()) <= 0
+                || Long.compareUnsigned(next.authGeneration(), sessionPolicy.authGeneration()) < 0) {
+            throw new IllegalArgumentException("stale or conflicting session policy, current revision "
+                    + Long.toUnsignedString(sessionPolicy.revision()));
+        }
+        if (next.limits().attachmentLimit() > cfg.sessionPolicy().limits().attachmentLimit()) {
+            throw new IllegalArgumentException("session policy exceeds the initial attachment capacity");
+        }
+        boolean revoke = next.authGeneration() != sessionPolicy.authGeneration();
+        sessionPolicy = next;
+        if (path instanceof PathSession mp) {
+            mp.joins.invalidateReservations();
+            for (Pipe pipe : java.util.List.copyOf(pipes.all())) {
+                var attachment = pipe.mp();
+                if (attachment.retired()) continue;
+                applyTopology(mp, pipe);
+                if (revoke && pipe.id != 0 && !attachment.joinerLocal
+                        && Long.compareUnsigned(attachment.peerAuthorization(), next.authGeneration()) < 0) {
+                    mp.health.removePipe(pipe.id, true);
+                }
+            }
+            mp.tiers.refreshTiers(mp.tiers.buildGate());
+            mp.tiers.checkTakeover();
+        }
+        capacity.invalidateDrains();
+        capacity.changed();
+        pipes.wakeWriters();
+    }
+    private void applyTopology(PathSession path, Pipe pipe) {
+        String candidate = pipe.member().candidate();
+        int excluded = 0;
+        if (!sessionPolicy.allows(candidate, Action.DIR_IN)) excluded |= Action.DIR_IN;
+        if (!sessionPolicy.allows(candidate, Action.DIR_OUT)) excluded |= Action.DIR_OUT;
+        var attachment = pipe.mp();
+        if (excluded == attachment.topologyExcluded()) return;
+        boolean lostSend = (excluded & ~attachment.topologyExcluded() & Action.DIR_OUT) != 0;
+        attachment.topologyExcluded(excluded);
+        if (lostSend) {
+            dg.cancelPathCopies(pipe);
+            path.retention.reinjectPipe(pipe);
+        }
+        path.syncHealth(pipe);
+        path.scheduler.pickChanged();
+    }
+
     public SessionStats stats() { return stats; }
 
     /**
@@ -180,8 +458,14 @@ public final class Session {
     public PipeTable pipes() { return pipes; }
     public Outbox outbox() { return outbox; }
     public Transmitter transmitter() { return tx; }
+
+    public void routeOutput() {
+        tx.routeOutput(hasChannelOutput());
+        deadlines.changed(ProtocolTimeline.Reason.PACING.bit() | ProtocolTimeline.Reason.SHAPING.bit()
+                | ProtocolTimeline.Reason.CUSTOM_PICK.bit());
+    }
     public WindowTuner tuner() { return tuner; }
-    public MemoryCharge memory() { return mem; }
+    public long reservedBytes() { return conn.reservedBytes(); }
     public KeepAlive keepAlive() { return ka; }
     PathLayer path() { return path; }
 
@@ -193,6 +477,7 @@ public final class Session {
 
     /** Hands the application's answers (or its failure) for req back to the path layer. */
     public void answerPick(PathScheduler.PickRequest req, List<PathScheduler.PickAnswer> answers, boolean failed) {
+        deadlines.changed(ProtocolTimeline.PATH);
         path.answerPick(req, answers, failed);
     }
     /** The lanes of the session's pipes. */
@@ -203,12 +488,13 @@ public final class Session {
      * record. With datagrams enabled, the session offers zmux_carrier_datagrams when the
      * carrier has a datagram channel, or a joined pipe may have one.
      */
-    public void attachBootstrap(CarrierInfo in, CarrierInfo out, Waiter writerWaiter) {
+    public void attachBootstrap(CarrierInfo in, CarrierInfo out) {
+        deadlines.changed(ProtocolTimeline.ALL);
         TransportParams l = cfg.local();
         if (l.has(TransportParams.DATAGRAM) && (out.channel() != null || l.has(TransportParams.MULTIPATH))) {
-            l.present |= TransportParams.CARRIER_DATAGRAMS;
+            l.present |= TransportParams.CARRIER_DATAGRAMS | TransportParams.CARRIER_DATAGRAM_PADDING;
         }
-        pipes.attachBootstrap(in, out, writerWaiter);
+        pipes.attachBootstrap(in, out);
         stats.pipeAdded();
     }
 
@@ -245,8 +531,8 @@ public final class Session {
         boolean goAway = both(l, p, TransportParams.GOAWAY);
         boolean preamble = both(l, p, TransportParams.PREAMBLE);
         boolean priority = both(l, p, TransportParams.PRIORITY);
-        boolean flows = both(l, p, TransportParams.FLOWS) && l.has(TransportParams.DATAGRAM);
-        boolean carrierDatagrams = both(l, p, TransportParams.CARRIER_DATAGRAMS) && l.has(TransportParams.DATAGRAM);
+        boolean flows = both(l, p, TransportParams.FAMILY);
+        boolean carrierDatagrams = flows && both(l, p, TransportParams.CARRIER_DATAGRAMS);
         boolean multipath = false, jsu = false, pskSelected = false;
         if (both(l, p, TransportParams.MULTIPATH)) {
             int sources = TransportParams.SECRET_EXPORTER | TransportParams.SECRET_PSK;
@@ -267,21 +553,21 @@ public final class Session {
         boolean acked = multipath || pipeAck;
         boolean lanesOut = p.has(TransportParams.LANES) && p.maxLanes > 1 && acked;
         boolean lanesIn = l.has(TransportParams.LANES) && l.maxLanes > 1 && acked;
-        feat = new Features(fRole, goAway, preamble, priority, flows, multipath, pipeAck, resume, lanesOut, lanesIn, jsu, carrierDatagrams);
-        gates = new Gates(gates.maxDatagram(), gates.resetStreamAt(), goAway, priority, multipath, pipeAck, lanesIn);
+        feat = new Features(fRole, goAway, preamble, priority, flows, multipath, pipeAck, resume, lanesOut, lanesIn, jsu, carrierDatagrams, carrierDatagrams && both(l, p, TransportParams.CARRIER_DATAGRAM_PADDING));
+        gates = new Gates(gates.maxDatagram(), gates.resetStreamAt(), goAway, priority, multipath, pipeAck, lanesIn,
+                flows && p.has(TransportParams.DATAGRAM) && p.maxDatagramFrameSize > 0);
         tx.peerRecordLimit(p.maxRecordSize);
         dg.peer(p.has(TransportParams.DATAGRAM) ? p.maxDatagramFrameSize : 0, p.maxRecordSize, flows);
         conn.sendLimit(p.initialMaxData);
         streams.peerLimits(p.maxStreamsBidi, p.maxStreamsUni);
         if (multipath && (l.secretFlags & TransportParams.SECRET_EXPORTER) != 0) readExporter();
         if (cfg.deferredPsk() && secretSet && !pskSelected) dropSecret();
-        earlyOutcome();
         streams.applyPeerParamsAll();
         if (acked) {
-            pacer = new Pacer(cfg, p.has(TransportParams.ACK_THRESHOLD) ? p.ackThreshold : 65536, AckEngine.peerDelay(p), pipes.all(),
-                    new PacerPort());
+            pacer = new Pacer(cfg, p.has(TransportParams.ACK_THRESHOLD) ? p.ackThreshold : 65536, AckEngine.peerDelay(p), new PacerPort());
             ack = new AckEngine(l, p, pipes.all(), pacer, new AckPort());
         }
+        establishedAt = now;
         if (multipath) {
             path = multiPath();
             if (cfg.declaredEndToEnd() || cfg.secureFirstPipe()) declared = true;
@@ -352,12 +638,14 @@ public final class Session {
 
     /** The host has proven pipe 0 end to end: local, sends nothing. A secure first pipe needs no call. */
     public void declareEndToEnd() {
+        deadlines.changed(ProtocolTimeline.PATH);
         declared = true;
         keysArrived();
     }
 
     /** Derives the join keys when the last missing input came. */
     private void keysArrived() {
+        deadlines.changed(ProtocolTimeline.PATH);
         if (!(path instanceof PathSession mp) || !mp.joins.keysPending()) return;
         try {
             mp.joins.inputs(declared, cfg.deferredPsk() && !secretSet, joinPsk);
@@ -415,6 +703,7 @@ public final class Session {
 
     /** Takes a local join's place: the name of its Hello's plan; null while the cap or the backoff holds it. */
     public String joinPrepare(long id, long t) throws CoreException {
+        deadlines.changed(ProtocolTimeline.PATH);
         setNow(t);
         if (isClosing()) throw CoreException.of(CoreException.Reason.INVALID);
         try {
@@ -429,13 +718,25 @@ public final class Session {
     //noinspection ClassEscapesItsScope
     public byte[] joinHello(long id, io.zmux.internal.join.Framing f, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t)
             throws io.zmux.seal.SecureCarrierException, CoreException {
+        return joinHello(id, f, plan, overhead, t, null);
+    }
+
+    public void joinHello(Batch batch, long id, io.zmux.internal.join.Framing framing,
+                          io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t)
+            throws io.zmux.seal.SecureCarrierException, CoreException {
+        batch.appendUnit(joinHello(id, framing, plan, overhead, t, batch));
+    }
+
+    private byte[] joinHello(long id, io.zmux.internal.join.Framing f, io.zmux.carrier.HandshakeShaper.UnitPlan plan,
+                             int overhead, long t, Batch receipt) throws io.zmux.seal.SecureCarrierException, CoreException {
         setNow(t);
         if (isClosing()) throw CoreException.of(CoreException.Reason.INVALID);
-        return requireMultipath().joins.joinHello(pipes.get(id), f, cfg.joinEarlyHello(), plan, overhead);
+        return requireMultipath().joins.joinHello(pipes.get(id), f, cfg.joinEarlyHello(), plan, overhead, receipt);
     }
 
     /** Feeds bytes read from a JOINING carrier. */
     public Joins.JoinStep verifyReply(long id, byte[] b, int off, int len, long t) {
+        deadlines.changed(ProtocolTimeline.PATH);
         setNow(t);
         Pipe p = pipes.get(id);
         if (p == null || !(path instanceof PathSession mp)) return new Joins.JoinStep(Joins.Step.FAILED, 0, 0);
@@ -444,6 +745,7 @@ public final class Session {
 
     /** A verified join goes active; null when the session or the pipe ended since its Reply. */
     public Joins.Finished joinFinish(long id, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long t) throws io.zmux.seal.SecureCarrierException {
+        deadlines.changed(ProtocolTimeline.PATH);
         setNow(t);
         if (isClosing() || !(path instanceof PathSession mp)) return null;
         return mp.joins.joinFinish(pipes.get(id), plan, overhead);
@@ -451,33 +753,49 @@ public final class Session {
 
     /** A Hello in Bound refused because its carrier has no Binding. */
     public void helloWithoutBinding() {
+        deadlines.changed(ProtocolTimeline.PATH);
         if (path instanceof PathSession mp) mp.joins.helloWithoutBinding();
     }
 
     /** The acceptor's handling of a Hello naming this session, up to its verification. */
     //noinspection ClassEscapesItsScope
     public Joins.Opened openHello(io.zmux.internal.join.Hello h, io.zmux.internal.join.Framing f, byte[] binding) {
+        deadlines.changed(ProtocolTimeline.PATH);
         if (isClosing()) return new Joins.Opened(Joins.JoinResult.CLOSE, null);
         if (!peerSeen) return new Joins.Opened(Joins.JoinResult.HOLD, null);
         return path instanceof PathSession mp ? mp.joins.openHello(h, f, binding) : new Joins.Opened(Joins.JoinResult.CLOSE, null);
     }
 
-    /** The rest of step 7; unconfirmedCap is the session's bound on Unconfirmed carriers (MULTIPATH.md 5.6), at least 1. */
-    public Joins.Claimed claimHello(Joins.PeerJoin pj, Joins.JoinCarrier c, io.zmux.carrier.HandshakeShaper.UnitPlan plan, int overhead, long received,
-                                    int unconfirmedCap) {
-        if (isClosing() || !(path instanceof PathSession mp)) return new Joins.Claimed(Joins.JoinResult.CLOSE, null);
-        return mp.joins.claimHello(pj, c, plan, overhead, received, unconfirmedCap);
+    /** Checks the captured generation when the policy callback returns. */
+    public boolean currentJoinAuthorization(Joins.PeerJoin pj) {
+        return path instanceof PathSession mp && mp.joins.currentAuthorization(pj);
     }
 
-    /** An Unconfirmed join of {@link #claimHello} ended without its confirmation. */
+    /** Claims an authorized Hello, with the entry's original deadline. */
+    public Joins.Claimed claimHello(Joins.PeerJoin pj, Joins.JoinCarrier c, io.zmux.carrier.HandshakeShaper.UnitPlan plan,
+                                    int overhead, long received, long deadline) {
+        deadlines.changed(ProtocolTimeline.PATH);
+        if (isClosing() || !(path instanceof PathSession mp)) {
+            pj.close();
+            return new Joins.Claimed(Joins.JoinResult.CLOSE, null);
+        }
+        var result = mp.joins.claimHello(pj, c, plan, overhead, received, deadline);
+        if (result.result() == Joins.JoinResult.ACCEPTED) capacity.changed();
+        return result;
+    }
+
+    /** An accepted Hello of {@link #claimHello} ended without confirmation. */
     public void unconfirmedEnded(Joins.PeerJoin pj) {
-        if (path instanceof PathSession mp) mp.joins.unconfirmedEnded(pj);
+        deadlines.changed(ProtocolTimeline.PATH);
+        if (path instanceof PathSession mp && mp.joins.unconfirmedEnded(pj)) capacity.changed();
     }
 
-    /** Step 8. */
-    public Joins.JoinResult confirmJoin(Joins.PeerJoin pj, Joins.JoinCarrier c) {
-        if (isClosing() || !(path instanceof PathSession mp)) return Joins.JoinResult.CLOSE;
-        return mp.joins.confirmJoin(pj, c);
+    /** Commits confirmation and consumes its pending identity. */
+    public Joins.Confirmed confirmJoin(Joins.PeerJoin pj) {
+        deadlines.changed(ProtocolTimeline.PATH);
+        if (!(path instanceof PathSession mp)) return new Joins.Confirmed(Joins.JoinResult.CLOSE, null, "session_closed");
+        capacity.changed();
+        return mp.joins.confirmJoin(pj);
     }
 
     /** Frames of a verified Hello or Reply: STREAM without FIN only; one in error is dropped and counted, since a batch can be a replay. */
@@ -487,10 +805,18 @@ public final class Session {
         ReadBuf buf = new ReadBuf(bb, null);
         io.zmux.internal.wire.FrameDecoder decoder = new io.zmux.internal.wire.FrameDecoder();
         io.zmux.internal.wire.Frame f = new io.zmux.internal.wire.Frame();
-        for (int pos = 0; pos < b.length; ) {
+        try {
+            applyBatch(buf, bb, decoder, f);
+        } finally {
+            buf.unref();
+        }
+    }
+
+    private void applyBatch(ReadBuf buf, java.nio.ByteBuffer bb, io.zmux.internal.wire.FrameDecoder decoder, io.zmux.internal.wire.Frame f) {
+        for (int pos = 0; pos < bb.limit(); ) {
             int n;
             try {
-                n = decoder.decode(bb, pos, b.length, f);
+                n = decoder.decode(bb, pos, bb.limit(), f);
             } catch (WireException bad) {
                 stats.joinBatchDrop();
                 return;
@@ -522,6 +848,7 @@ public final class Session {
      * the one in progress. NOT_NEGOTIATED without multipath; join pending before the join keys.
      */
     public void advanceEpoch() throws CoreException {
+        deadlines.changed(ProtocolTimeline.PATH);
         if (err != null) throw CoreException.session(err);
         if (!(path instanceof PathSession mp)) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
         if (mp.joins.keysPending()) throw CoreException.joinPending(joinMissing());
@@ -563,6 +890,7 @@ public final class Session {
 
     /** Replaces the session's liveness settings; nothing is sent, timers rearm with the next round. */
     public void setLiveness(CoreConfig.Live l) {
+        deadlines.changed(ProtocolTimeline.ALL);
         for (Pipe p : pipes.all()) if (path instanceof PathSession mp) mp.health.keepSuspect(p);
         cfg.live().set(l);
         ka.settings(l.keepAlive(), l.probeJitter());
@@ -571,6 +899,7 @@ public final class Session {
 
     /** Replaces a pipe's own liveness settings: 0 (for the interval -1, for the jitter NaN) follows the session's. */
     public void setPipeLiveness(long id, long suspectFloor, long deadTimeout, long probeInterval, double probeJitter) throws CoreException {
+        deadlines.changed(ProtocolTimeline.ALL);
         Pipe p = pipes.get(id);
         if (p == null || p.mp() == null || p.mp().health.retired()) throw CoreException.of(CoreException.Reason.INVALID);
         mp().health.keepSuspect(p);
@@ -587,26 +916,55 @@ public final class Session {
     public io.zmux.shaping.ShapingLimits shapingLimits() { return shapingLimits; }
 
     /** The local limits under the budget. */
-    public io.zmux.shaping.ShapingLimits shapingLimitsInForce() { return shapingLimits.under(shapingBudget); }
+    public io.zmux.shaping.ShapingLimits.Effective shapingLimitsInForce() { return shapingLimits.under(shapingBudget); }
 
     /** The session's shaping readings. */
-    public io.zmux.shaping.ShapingMeters shapingMeters() { return shaping().meters(); }
-
-    /** Replaces the configuration's budget; the account carries over. */
-    public void setShapingBudget(io.zmux.shaping.ShapingBudget b) {
-        shapingBudget = b;
-        shaping().limits(shapingLimitsInForce());
+    public io.zmux.shaping.ShapingMeters shapingMeters() {
+        Shaping sh = pipes.shaping();
+        return sh == null ? io.zmux.shaping.ShapingMeters.ZERO : sh.snapshotMeters();
     }
 
-    /** Meters the padding of a handshake run before the session. */
-    public void spendHandshake(long n) {
-        if (n > 0) shaping().spend(n);
+    /** Bytes available to the Join encoder for optional padding. */
+    long handshakeRoom() {
+        Shaping sh = pipes.shaping();
+        return shapingLimits.padding() && (sh == null || sh.exact()) ? io.zmux.internal.join.Sealer.MESSAGE_FLOOR : 0;
     }
 
-    /** Replaces the local limits, shaped yet or not; the account carries over. */
+    public void submitHandshake(Batch unit, int fixed, boolean atomic, long now) {
+        setNow(now);
+        unit.submitHandshake(shaping(), fixed, atomic);
+    }
+
+    public boolean handshakeFits(io.zmux.carrier.HandshakeCost cost) {
+        return cost.baselineOnly() || shaping().handshakeFits(cost);
+    }
+
+    public void transferHandshake(io.zmux.carrier.HandshakeCost cost, long observedNanoTime) {
+        if (!cost.units().isEmpty()) shaping().transferHandshake(cost, observedNanoTime);
+    }
+
+    public long shapingGeneration() { return pipes.shaping() == null ? 0 : pipes.shaping().generation(); }
+
+    public void holdJoin(Object key, long wait, java.util.function.BooleanSupplier live, Runnable release) {
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
+        shaping().holdJoin(key, wait, live, release);
+    }
+
+    public void cancelJoinHold(Object key, long at) {
+        if (pipes.shaping() == null) return;
+        setNow(at);
+        pipes.shaping().cancelJoinHold(key);
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
+    }
+
+    /** Updates the local limits when existing commitments fit within the new bounds. */
     public void setShapingLimits(io.zmux.shaping.ShapingLimits l) {
+        var effective = l.under(shapingBudget);
+        Shaping sh = pipes.shaping();
+        if (sh != null) sh.validateLimits(effective);
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
         shapingLimits = l;
-        shaping().limits(shapingLimitsInForce());
+        if (sh != null) sh.limits(effective);
     }
 
     private static boolean both(TransportParams l, TransportParams p, int bit) {
@@ -628,6 +986,15 @@ public final class Session {
     }
 
     public void cancelClosedWait(Waiter sig) { closedW.remove(sig); }
+
+    /** Registers sig until terminal arbitration; true after the error is committed. */
+    public boolean waitEnding(Waiter sig) {
+        if (isClosing()) return true;
+        endingW.add(sig);
+        return false;
+    }
+
+    public void cancelEndingWait(Waiter sig) { endingW.remove(sig); }
 
     /**
      * Whether written stream data, a written FIN or a reset's RESET_STREAM is still unsent: a graceful close flushes
@@ -658,6 +1025,7 @@ public final class Session {
      * never extends the bound.
      */
     public void closeBounded(long code, byte[] reason, long limit, long t) {
+        deadlines.changed(ProtocolTimeline.ALL);
         setNow(t);
         boolean first = !isClosing();
         close(code, reason);
@@ -716,6 +1084,7 @@ public final class Session {
 
     /** Ends a close whose carriers did not take CONNECTION_CLOSE in time: CLOSED, every carrier closed. */
     public void endClose() {
+        deadlines.changed(ProtocolTimeline.ALL);
         if (state != SessionState.CLOSING || closeHandedOff()) return;
         if (!life.closeQueued() || life.closePending() || !pipes.closeWritten()) {
             finishClose();
@@ -776,10 +1145,13 @@ public final class Session {
      * wins.
      */
     void closeWith(SessionError e, CloseFrame fr) {
+        deadlines.changed(ProtocolTimeline.ALL);
         if (isClosing()) return;
         pendingWriteFailure = null;
         err = e;
         state = SessionState.CLOSING;
+        for (Pipe p : pipes.all()) if (p.shape() != null) p.shape().cancelIntents();
+        endingW.wakeAll(outbox);
         failAllStreams();
         wakeAll();
         if (closeReceived) streams.startDrain();
@@ -828,6 +1200,11 @@ public final class Session {
     /** Ends the close wait once {@link #closeCovered} holds; the writers then take CONNECTION_CLOSE. */
     void recheckCloseWait() {
         if (!life.closeWait() || !closeCovered()) return;
+        endCloseWait();
+    }
+
+    private void endCloseWait() {
+        if (!life.waitingLanes()) return;
         life.lanesDone(now);
         pipes.wakeWriters();
     }
@@ -855,10 +1232,13 @@ public final class Session {
 
     /** Closes without CONNECTION_CLOSE; graceful shuts down the write sides and lingers. */
     void closeSilently(SessionError e, boolean graceful) {
+        deadlines.changed(ProtocolTimeline.ALL);
         if (isClosing()) return;
         pendingWriteFailure = null;
         err = e;
         state = SessionState.CLOSING;
+        for (Pipe p : pipes.all()) if (p.shape() != null) p.shape().cancelIntents();
+        endingW.wakeAll(outbox);
         failAllStreams();
         wakeAll();
         if (graceful) {
@@ -882,16 +1262,23 @@ public final class Session {
         if (state == SessionState.CLOSED) return;
         if (err != null && state != SessionState.CLOSING) failAllStreams();
         state = SessionState.CLOSED;
+        for (Pipe p : pipes.all()) if (p.shape() != null) p.shape().cancelIntents();
         clearJoinSecrets();
-        mem.release();
         // The end first: what the pipes' release reports after it never reaches the event stream or the tracer.
         emitClosedEvent();
         if (graceful) pipes.closeAll(); else pipes.abortAll();
+        path.closeTimers();
+        if (path instanceof PathSession mp) mp.retention.close();
+        pipes.releaseOutbound();
+        lanes.closeTimers();
+        if (pacer != null) pacer.closeTimers();
+        if (ack != null) ack.clearTimers();
         life.clearTimers();
         grace = Time.NEVER;
         closedW.wakeAll(outbox);
         handOffW.wakeAll(outbox);
         releaseAll();
+        conn.releaseReservation();
         wakeAll();
     }
 
@@ -903,6 +1290,10 @@ public final class Session {
     // ---- events, actions, wake-ups ----
 
     void emit(Event e) {
+        switch (e.kind()) {
+            case PIPE_STATE, PIPE_HEALTH, PIPE_CLOSED, ESTABLISHED, CLOSED, EPOCH_COMMITTED -> capacity.changed();
+            default -> { }
+        }
         if (quality != null && quality.floorSet() && (e.kind() == Event.Kind.PIPE_STATE || e.kind() == Event.Kind.PIPE_PRIORITY)) quality.checkFloor();
         if (e.kind() == Event.Kind.PIPE_STATE) {
             path.wakePeerAttachedWaiters();
@@ -913,15 +1304,17 @@ public final class Session {
     }
 
     /** The path datagram payload of a session datagram last reported (DATAGRAM_PATH). */
-    private int datagramPath;
+    private int datagramPath, datagramNative = -1;
 
     /** Reports a change of a session datagram's path datagram payload. */
     private void noteDatagramPath() {
-        if (!cfg.datagrams() || !peerSeen) return;
-        int v = dg.pathPayload(1);
-        if (v == datagramPath) return;
+        deadlines.changed(ProtocolTimeline.DATAGRAM | ProtocolTimeline.Reason.SHAPING.bit());
+        if (!peerSeen) return;
+        int v = dg.pathPayload(1), nativePayload = dg.nativePayload(1);
+        if (v == datagramPath && nativePayload == datagramNative) return;
         datagramPath = v;
-        emit(Event.datagramPath(v));
+        datagramNative = nativePayload;
+        emit(Event.datagramPath(v, nativePayload));
     }
 
 
@@ -963,6 +1356,7 @@ public final class Session {
 
     /** Drops every buffer of the session (CLOSED). */
     void releaseAll() {
+        recv.closeLoanWaits();
         streams.releaseBuffers();
         dg.releaseAll();
         conn.clearBuffers();
@@ -978,9 +1372,13 @@ public final class Session {
         pipes.wakeWriters();
     }
 
-    /** Absolute send-buffer max, using the existing memory account including this round's uncharged growth. */
+    /** Absolute send-buffer max from the memory account. */
     long sendBufferLimit() {
-        return mem.sendBufferLimit();
+        if (cfg.sendBufferMax() > 0) return Math.max(cfg.sendBufferMax(), cfg.sendBuffer());
+        long room = memoryHeadroom();
+        long held = conn.sendHeld();
+        long cap = room >= Long.MAX_VALUE - held ? Long.MAX_VALUE : held + room;
+        return Math.max(Math.max(64L << 20, cap), cfg.sendBuffer());
     }
 
     /** The single effective buffer used for fair sharing and affinity load. */
@@ -996,10 +1394,26 @@ public final class Session {
      * buf owns data; pieces of stream data may keep a reference to it.
      */
     public int receive(long pipeId, long lane, ReadBuf buf, java.nio.ByteBuffer data, int pos, int limit, long t) {
+        return receive(pipeId, lane, buf, data, pos, limit, t, false);
+    }
+
+    /** Processes records whose carrier has identified the early-data provenance. */
+    public int receive(long pipeId, long lane, ReadBuf buf, java.nio.ByteBuffer data, int pos, int limit, long t,
+                       boolean carrierEarly) {
+        return receive(pipeId, lane, buf, data, null, pos, limit, t, carrierEarly);
+    }
+
+    /** Processes the byte carrier's owned ranges without joining them into a record buffer. */
+    public int receive(long pipeId, long lane, ReceiveSpans spans, long t) {
+        return receive(pipeId, lane, null, null, spans, 0, spans.size(), t, false);
+    }
+
+    private int receive(long pipeId, long lane, ReadBuf buf, java.nio.ByteBuffer data, ReceiveSpans spans,
+                        int pos, int limit, long t, boolean carrierEarly) {
         setNow(t);
         if (handshaking(pipeId)) return limit - pos; // nothing read before Proven reaches the session
         path.pickInput();
-        return rx.receive(pipes.get(pipeId), lane, buf, data, pos, limit, now);
+        return rx.receive(pipes.get(pipeId), lane, buf, data, spans, pos, limit, now, carrierEarly);
     }
 
     /** Processes one message of a message-framed carrier. */
@@ -1017,9 +1431,11 @@ public final class Session {
     /** A record was applied: acknowledgement, attachment liveness and the idle timer. */
     private void recorded(Pipe p, Pipe.InLane il, long posBytes, boolean elicit, boolean pipePing, boolean pingOnly, boolean traffic,
                           boolean activity) {
+        deadlines.changed(ProtocolTimeline.RECORD);
         // A PIPE_PING alone in a quiet session is answered on its pipe pair only.
         boolean pairOnly = pingOnly && p.mp() != null && mp().pingAnsweredOnPair(p);
         if (ack != null && ack.onRecord(p, il, posBytes, elicit && !pairOnly, pipePing && !pairOnly, now)) pipes.wakeWriters();
+        memberBytes(p, false, posBytes);
         if (traffic) p.traffic(now);
         if (p.mp() != null) mp().recorded(p, il, traffic);
         if (!feat.acked() || activity) ka.activity(now);
@@ -1077,11 +1493,15 @@ public final class Session {
                 if (!streams.onStreamsBlocked(f.bidi, f.value) && !multi) charge();
             }
             case CONNECTION_CLOSE -> onClose(f);
-            case DATAGRAM -> dg.onFrame(f, flows, false);
+            case DATAGRAM -> {
+                dg.onFrame(f, flows, p.id, false);
+                if (feat.flows()) pipes.wakeWriters();
+            }
+            case DATAGRAM_ACK -> dg.feedback.acknowledge(f, now);
             case PING -> ka.onPing(f, feat.multipath(), now);
             case GOAWAY -> onGoAway(f);
             case PRIORITY_UPDATE -> onPriorityUpdate(f);
-            case PIPE_ACK -> onPipeAck(f);
+            case PIPE_ACK -> onPipeAck(p, f);
             case PIPE_LANE -> throw WireException.protocol("PIPE_LANE out of place");
             case PIPE_PING -> {
                 charge(); // Every PIPE_PING.
@@ -1116,11 +1536,13 @@ public final class Session {
      * inside a record. The driver calls it after feeding every complete record it read.
      */
     public void pipeEnded(long pipeId, long lane, boolean graceful, boolean partial, Throwable cause, long t) {
+        deadlines.changed(ProtocolTimeline.ALL);
         setNow(t);
         Pipe p = pipes.get(pipeId);
         if (p == null || p.in() == null) return;
         Pipe.InLane il = p.in().lane(lane);
         if (il == null || !rx.laneEnded(il)) return;
+        if (ack != null && (!isClosing() || life.waitingLanes()) && ack.laneEnded(il)) pipes.wakeWriters();
         boolean earlyEnd = il.lane > 0 && il.rx.recs() <= 1;
         boolean allEnded = true;
         for (Pipe.InLane l : p.in().lanes) if (!l.rx.ended()) { allEnded = false; break; }
@@ -1155,6 +1577,7 @@ public final class Session {
 
     /** Reports a failed write on an outbound lane. */
     void pipeWriteFailed(long pipeId, long lane, Throwable cause) {
+        deadlines.changed(ProtocolTimeline.ALL);
         if (isClosing()) {
             if (state == SessionState.CLOSING) {
                 // During the close wait a failed pipe is a failure as before: what it carried is reinjected.
@@ -1195,6 +1618,7 @@ public final class Session {
 
     /** The write batch. */
     public static final int DEFAULT_BATCH = 256 << 10;
+    public static final long FRAME_HISTORY_WORKSPACE = FrameHistory.WORKSPACE;
 
 
     /**
@@ -1202,12 +1626,26 @@ public final class Session {
      * is due. The driver writes the batch and reports it with {@link #writeDone}.
      */
     public boolean pollTransmit(long pipeId, long lane, Batch b, int max, long t) {
+        return pollReady(pipeId, lane, b, max, 0, t, null);
+    }
+
+    /** Claims ready work and samples the carrier only after the lane can build a batch. */
+    public boolean pollReady(long pipeId, long lane, Batch b, int max, int recordWorkspace, long t, java.util.function.LongSupplier unsent) {
         setNow(t);
-        return tx.poll(pipeId, lane, b, max, t);
+        int width = dg.sequenceWidth();
+        boolean written = tx.poll(pipeId, lane, b, max, recordWorkspace, t, unsent);
+        if (written) {
+            deadlines.changed(ProtocolTimeline.RECORD);
+            if (width != dg.sequenceWidth()) noteDatagramPath();
+        } else if (path instanceof PathSession || pipes.shaping() != null) {
+            deadlines.changed(ProtocolTimeline.Reason.CUSTOM_PICK.bit() | ProtocolTimeline.Reason.SHAPING.bit());
+        }
+        return written;
     }
 
     /** The carrier of pipe's lane shut its write side (after CONNECTION_CLOSE: the close is handed off). */
     public void outputShut(long pipeId, long lane, long t) {
+        deadlines.changed(ProtocolTimeline.ALL);
         setNow(t);
         tx.outputShut(pipeId, lane);
         if (state == SessionState.CLOSING) {
@@ -1216,9 +1654,26 @@ public final class Session {
         }
     }
 
-    public void writeDone(Batch b, Throwable cause, long t) {
+    public void writeProgress(Batch b, int prefix, long t) {
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
         setNow(t);
-        tx.written(b, cause == null, t);
+        b.progress(tx, pipes.shaping(), prefix, false);
+    }
+
+    public void writeDone(Batch b, Throwable cause, long t) {
+        writeDone(b, cause == null ? b.bytes() : 0, cause, t);
+    }
+
+    public void writeDone(Batch b, int confirmed, Throwable cause, long t) {
+        deadlines.changed(ProtocolTimeline.PATH | ProtocolTimeline.Reason.LIFE.bit() | ProtocolTimeline.Reason.SHAPING.bit());
+        setNow(t);
+        Pipe p = pipes.get(b.pipe());
+        Pipe.OutLane current = p == null || p.out() == null ? null : p.out().lane(b.lane());
+        if (current != null && current == b.owner() && p.member().rotating()) {
+            memberBytes(p, true, b.tally(confirmed).bytes());
+        }
+        tx.written(b, confirmed, cause == null, now);
+        if (cause != null && current != b.owner()) return;
         if (cause != null) pipeWriteFailed(b.pipe(), b.lane(), cause);
         if (state == SessionState.CLOSING) wakeHandOff();
     }
@@ -1229,6 +1684,7 @@ public final class Session {
      */
     public void unsentReported(long pipeId, long lane, long unsent) {
         tx.setUnsent(pipeId, lane, unsent);
+        deadlines.changed(ProtocolTimeline.Reason.PREFIX_REPAIR.bit());
     }
 
     /**
@@ -1254,10 +1710,10 @@ public final class Session {
         checkLingerDone();
     }
 
-    /** Enters CLOSED once every inbound pipe ended. */
+    /** Advances the physical linger and enters CLOSED once the application drain also ends. */
     void checkLingerDone() {
         if (state != SessionState.CLOSING) return;
-        // A pipe whose peer's CONNECTION_CLOSE was read, with this side's complete, lingers no longer.
+        // The physical carrier can close while the accepted streams retain their unread data.
         pipes.endLingeringPipes();
         if (life.closePending()) {
             // A pipe that failed is no longer waited for.
@@ -1281,6 +1737,7 @@ public final class Session {
 
     /** Records whether a carrier half accepts bytes now. */
     public void setWritable(long pipeId, long lane, boolean writable, long t) {
+        deadlines.changed(ProtocolTimeline.PATH);
         setNow(t);
         tx.setWritable(pipeId, lane, writable, t);
     }
@@ -1301,10 +1758,61 @@ public final class Session {
         return p == null ? JoinProgress.GONE : path.joinProgress(p);
     }
 
-    /**
-     * Physical readiness, independent of tier/standby selection by the traffic scheduler; not
-     * whether the peer holds the pipe yet ({@link #pipePeerAttached}).
-     */
+    /** Captures both directions of a live or retiring attachment without querying the carrier. */
+    public io.zmux.PipeHealth pipeHealth(long id) {
+        Pipe pipe = pipes.get(id);
+        return pipe == null ? null : pipeHealth(pipe);
+    }
+
+    io.zmux.PipeHealth pipeHealth(Pipe pipe) {
+        if (path instanceof PathSession mp) {
+            io.zmux.PipeHealth snapshot = pipe.mp().projection.snapshot();
+            if (snapshot == null) snapshot = mp.syncHealth(pipe);
+            var joined = snapshot.joinedAt();
+            var age = joined.isEmpty() ? java.time.Duration.ZERO : HealthProjection.sinceJoin(now, joined.getAsLong());
+            return new io.zmux.PipeHealth(snapshot.seq(), snapshot.send(), snapshot.receive(), snapshot.peerAttached(),
+                    joined, snapshot.attachedAt(), age, snapshot.failure());
+        }
+        var ended = new io.zmux.DirectionHealth(io.zmux.DirectionHealth.State.ENDED,
+                io.zmux.DirectionHealth.Reason.SESSION_CLOSING, now, false, false,
+                java.util.OptionalLong.empty(), 0, io.zmux.DirectionHealth.ProofKind.NONE);
+        var established = establishedAt == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(establishedAt);
+        var active = new io.zmux.DirectionHealth(peerSeen ? io.zmux.DirectionHealth.State.USABLE : io.zmux.DirectionHealth.State.JOINING,
+                peerSeen ? io.zmux.DirectionHealth.Reason.PROGRESS : io.zmux.DirectionHealth.Reason.AWAIT_ATTACHMENT,
+                established.orElse(start), peerSeen, peerSeen, established, 0, io.zmux.DirectionHealth.ProofKind.NONE);
+        var send = pipe.out() == null ? HealthProjection.ABSENT : isClosing() || pipe.out().failed() ? ended : active;
+        var receive = pipe.in() == null ? HealthProjection.ABSENT : isClosing() ? ended : active;
+        return new io.zmux.PipeHealth(0, send, receive, peerSeen, established, established,
+                established.isEmpty() ? java.time.Duration.ZERO : HealthProjection.sinceJoin(now, established.getAsLong()), null);
+    }
+
+    /** Asks the probe owner for evidence to settle this attachment in its current observation interval. */
+    public void observeStability(long id) {
+        Pipe pipe = pipes.get(id);
+        if (pipe != null && path instanceof PathSession mp) mp.observeStability(pipe);
+    }
+
+    public int pipeVersion() { return pipes.version(); }
+
+    /** Aggregate of a pool member's pipe health and directions. */
+    public record PipeGroup(boolean alive, boolean usable, boolean settled, boolean outbound, boolean inbound) {}
+
+    /** A pool member's state on one owner turn. */
+    public PipeGroup pipeGroup(long[] ids) {
+        boolean alive = true, usable = true, settled = true, outbound = false, inbound = false;
+        for (long id : ids) {
+            var h = pipeHealth(id);
+            if (h == null) return new PipeGroup(false, false, false, false, false);
+            alive &= h.alive();
+            usable &= h.usable();
+            settled &= h.settled();
+            outbound |= h.send().state() != io.zmux.DirectionHealth.State.ABSENT;
+            inbound |= h.receive().state() != io.zmux.DirectionHealth.State.ABSENT;
+        }
+        return new PipeGroup(alive, usable, settled, outbound, inbound);
+    }
+
+    /** Whether a pipe is ready to carry new data on all its directions. */
     public boolean pipeUsable(long id) {
         Pipe p = pipes.get(id);
         return p != null && !isClosing() && path.pipeUsable(p);
@@ -1496,38 +2004,62 @@ public final class Session {
 
     // ---- timers ----
 
-    /** The earliest deadline, {@link Time#NEVER} when none (every deadline source is here). */
-    public long nextTimeout() {
-        if (state == SessionState.CLOSED) return Time.NEVER;
-        long t = life.deadline();
-        if (pendingWriteFailure != null) return t;
-        if (isClosing()) return life.closeWait() ? Math.min(t, closeWaitDeadline()) : t;
-        t = Math.min(t, lanes.deadline());
-        if (state == SessionState.SUSPENDED) t = Math.min(t, grace);
-        t = Math.min(t, ka.deadline(peerSeen && state != SessionState.SUSPENDED));
-        if (ack != null) {
-            t = Math.min(t, ack.deadline());
-            t = Math.min(t, pacer.deadline(!sched.isEmpty()));
-            if (quality != null) t = Math.min(t, quality.timers(now, false));
-        }
-        t = Math.min(t, path.deadline(now));
-        if (pipes.shaping() != null) t = Math.min(t, pipes.shaping().deadline());
-        return Math.min(t, dg.heldDeadline());
+    /** The earliest registered protocol deadline, or {@link Time#NEVER}. */
+    public long nextTimeout() { return deadlines.earliest(); }
+
+    /** Applies the owner's input changes to the deadline index before parking. */
+    public void refreshDeadlines() {
+        long enabled;
+        if (state == SessionState.CLOSED) enabled = 0;
+        else if (pendingWriteFailure != null) enabled = ProtocolTimeline.Reason.LIFE.bit();
+        else if (isClosing()) enabled = ProtocolTimeline.Reason.LIFE.bit() | (life.closeWait() ? ProtocolTimeline.DRAIN : 0);
+        else enabled = ProtocolTimeline.ALL;
+        deadlines.refresh(enabled);
     }
 
-    /**
-     * Lets pipe 0 write what is queued and starts the handshake deadline; whether the first
-     * flight was held.
-     */
-    public boolean releaseFirstFlight(long t) {
-        setNow(t);
-        if (!life.releaseFirstFlight(peerSeen ? Time.NEVER : Time.add(t, cfg.handshakeTimeout()))) return false;
-        pipes.wakeWriters();
-        return true;
+    private long protocolDeadline(ProtocolTimeline.Reason reason) {
+        return switch (reason) {
+            case LIFE -> life.deadline();
+            case LANE -> lanes.deadline();
+            case RESUME -> state == SessionState.SUSPENDED ? grace : Time.NEVER;
+            case KEEPALIVE -> ka.deadline(peerSeen && state != SessionState.SUSPENDED);
+            case ACK -> ack == null ? Time.NEVER : ack.deadline();
+            case PACING -> pacer == null ? Time.NEVER : pacer.deadline(!sched.isEmpty()
+                    || (path instanceof PathSession mp && mp.retention.hasPrefixWork()));
+            case QUALITY -> ack == null || quality == null ? Time.NEVER : quality.timers(now, false);
+            case SHAPING -> pipes.shaping() == null ? Time.NEVER : pipes.shaping().deadline();
+            case DATAGRAM_HOLD -> dg.heldDeadline();
+            case DATAGRAM_SEND -> dg.sendDeadline();
+            case DATAGRAM_FEEDBACK -> {
+                long at = nextDatagramAck();
+                yield at > now ? at : Time.NEVER;
+            }
+            default -> path instanceof PathSession mp ? mp.protocolDeadline(reason, now) : Time.NEVER;
+        };
     }
 
-    /** Runs every timer that is due at t. */
+    long deadlineVisits() { return deadlines.visits(); }
+
+    /** Drains chained deadlines at equality in protocol order. */
     public void handleTimeout(long t) {
+        refreshDeadlines();
+        deadlines.beginDispatch();
+        boolean first = true;
+        do {
+            long due = deadlines.dueReasons(t);
+            long stalled = deadlines.recordDispatch(due);
+            for (long rest = stalled; rest != 0; rest &= rest - 1) {
+                emit(Event.stalledDeadline(ProtocolTimeline.reasonAt(Long.numberOfTrailingZeros(rest))));
+            }
+            if (!first && due == stalled) break;
+            first = false;
+            applyTimeout(t);
+            deadlines.changed(ProtocolTimeline.ALL);
+            refreshDeadlines();
+        } while (nextTimeout() != Time.NEVER && nextTimeout() <= t);
+    }
+
+    private void applyTimeout(long t) {
         setNow(t);
         path.pickInput();
         if (state == SessionState.CLOSED) return;
@@ -1535,7 +2067,6 @@ public final class Session {
             if (life.lingerDue(t)) closeWith(pendingWriteFailure, null);
             return;
         }
-        if (life.firstFlightDue(t) && releaseFirstFlight(t)) stats.firstFlightTimeout();
         if (life.handshakeDue(t)) {
             if (!peerSeen) {
                 closeWith(SessionError.of(SessionError.Kind.HANDSHAKE_TIMEOUT, false), null);
@@ -1574,19 +2105,10 @@ public final class Session {
         }
         path.onTimeout(t);
         dg.expireHeld(t);
+        dg.expireSend(t);
+        if (nextDatagramAck() <= now) pipes.wakeWriters();
         if (ack != null && quality != null) quality.timers(t, true);
         if (pipes.shaping() != null) pipes.shaping().timeout(t);
-    }
-
-    /**
-     * The timers the close wait runs: acknowledgement, pacing and the path layer's (liveness, a
-     * pipe's failure and so reinjection) and the lanes' handshake timeout. Keepalive and idle,
-     * resume grace and shaping wait no more.
-     */
-    private long closeWaitDeadline() {
-        long t = Math.min(path.deadline(now), lanes.deadline());
-        if (ack != null) t = Math.min(t, Math.min(ack.deadline(), pacer.deadline(!sched.isEmpty())));
-        return t;
     }
 
     private void closeWaitTimeout(long t) {
@@ -1618,17 +2140,81 @@ public final class Session {
     /** Processes a PIPE_ACK. */
     private final io.zmux.internal.wire.Frame.AckEntries ackIt = new io.zmux.internal.wire.Frame.AckEntries();
 
-    void onPipeAck(io.zmux.internal.wire.Frame f) throws WireException {
-        path.onPipeAck(f.entries(ackIt));
+    void onPipeAck(Pipe received, io.zmux.internal.wire.Frame f) throws WireException {
+        path.onPipeAck(received, f.entries(ackIt));
     }
 
     private final class AckPort implements AckEngine.Port {
-        @Override public void activity() { ka.activity(now); }
-        @Override public void rttSampled(long min) { tuner.loopRtt(min, now); }
+        private final PathScheduler.Decision deliveryDecision = new PathScheduler.Decision();
+        private final StreamScheduler.Iter deliveryStreams = new StreamScheduler.Iter();
+        @Override public void activity() {
+            deadlines.changed(ProtocolTimeline.Reason.KEEPALIVE.bit());
+            ka.activity(now);
+        }
+        @Override public void rttSampled(Pipe pipe, long min) {
+            tuner.loopRtt(min, now);
+            if (performanceFeedback != null && pipe.mp() != null && pipe.out() != null) {
+                var health = pipe.mp().projection.snapshot();
+                if (health != null) pipe.out().snd.quality(health.send(), now).currentRtt()
+                        .ifPresent(sample -> performanceFeedback.record(pipe.member().id(), sample.sampledAt(),
+                                sample.validUntil(), sample.rtt(), 0));
+            }
+            if (pipe.mp() != null) {
+                mp().health.refreshSilence(pipe);
+                deadlines.changed(ProtocolTimeline.Reason.HEALTH.bit());
+            }
+        }
+        @Override public void deliverySampled(Pipe pipe, long start, long end, boolean constrained) {
+            var send = pipe.out().snd;
+            if (!(path instanceof PathSession ps) || pipe.mp() == null || pipe.mp().health.out() != Attach.OUT_ACTIVE
+                    || Pacer.paced(pipe) || send.re().bound() > 0 || (pipe.shape() != null && pipe.shape().active())) {
+                send.deliveryBacklog(null);
+                return;
+            }
+            ps.scheduler.newDecision(deliveryDecision, pipe);
+            long topology = ps.health.stateGen();
+            var previous = send.deliveryBacklog();
+            var stream = previous == null ? null : streams.get(previous.stream());
+            if (previous != null && previous.topology() == topology && previous.pipesVersion() == pipes.version()
+                    && conn.sent() < previous.connectionLimit() && credited(ps, deliveryDecision, stream, previous.end())) {
+                if (previous.at() <= start && !constrained) {
+                    send.backlogged();
+                    var health = pipe.mp().projection.snapshot();
+                    if (performanceFeedback != null && health != null) {
+                        send.quality(health.send(), end).delivery().ifPresent(rate ->
+                                performanceFeedback.record(pipe.member().id(), rate.end(), rate.validUntil(),
+                                        java.time.Duration.ZERO, (long) rate.bytesPerSecond()));
+                    }
+                }
+                return;
+            }
+            send.deliveryBacklog(null);
+            if (conn.sent() >= conn.sendMax()) return;
+            var ready = deliveryStreams.reset(sched);
+            while ((stream = ready.next()) != null) {
+                long offset = Math.min(stream.snd.sendEnd(), stream.snd.maxData());
+                if (!credited(ps, deliveryDecision, stream, offset)) continue;
+                send.deliveryBacklog(new DeliveryBacklog(stream.id(), offset, conn.sendMax(), end, topology, pipes.version()));
+                return;
+            }
+        }
+
+        private static boolean credited(PathSession ps, PathScheduler.Decision decision, Stream stream, long end) {
+            return stream != null && stream.idSet() && !stream.tab.discarded() && !stream.snd.cancelled()
+                    && !stream.snd.reset() && ps.scheduler.policyOf(stream) != CoreConfig.Policy.CUSTOM
+                    && Math.max(stream.snd.sent(), stream.snd.q().base()) < end && end <= stream.snd.sendEnd()
+                    && ps.scheduler.onPipe(decision, stream);
+        }
+
         @Override public boolean quiet() { return path instanceof PathSession ps && ps.quiet(); }
 
         @Override public void advanced(Pipe p, Pipe.OutLane ol, boolean cum) {
             if (cum) {
+                if (p.mp() != null && p.out() != null) {
+                    var health = p.mp().projection.snapshot();
+                    if (health != null && p.out().snd.qualityEvidence.observe(
+                            p.out().snd.quality(health.send(), now), publishedLoss(p.id), now)) capacity.changed();
+                }
                 if (quality != null) quality.sample(p);
                 if (p.mp() != null) mp().advanced(p, ol);
             } else if (p.mp() != null) {
@@ -1643,15 +2229,20 @@ public final class Session {
         @Override public void wakePipe(Pipe p) { pipes.wake(p); }
     }
 
-    // ---- receive-window auto-tuning  and the memory budget ----
+    // ---- receive-window auto-tuning and the memory budget ----
 
-
-
-
+    private long memoryHeadroom() {
+        var budget = cfg.budget();
+        if (budget == null) return Long.MAX_VALUE;
+        long limit = budget.limit();
+        if (limit == CoreConfig.UNLIMITED) return Long.MAX_VALUE;
+        return limit - Math.min(limit, budget.used());
+    }
 
     /** The largest session window the memory budget allows. */
     long connAllowance() {
-        return mem.windowAllowance(path.retained());
+        long room = memoryHeadroom();
+        return room == Long.MAX_VALUE ? room : conn.window() + room / ConnFlow.RECEIVE_COST;
     }
 
     private final class TunerPort implements WindowTuner.Port {
@@ -1671,7 +2262,7 @@ public final class Session {
 
     /** Listener memory pressure: the session behaves as at its buffer cap and refuses new peer streams. */
     boolean underPressure() {
-        return mem.pressure();
+        return conn.underPressure();
     }
 
     /** The received GOAWAY watermarks [maxBidi, maxUni, code], or null while none was received. */
@@ -1684,46 +2275,11 @@ public final class Session {
         closeTransport(SessionError.transport(TransportError.CONNECTION_REFUSED, 0, reason, "", false));
     }
 
-    // ---- early data ----
-
-    /** Sends early under the assumed parameters until the peer's arrive. */
-    private void assume(TransportParams assumed, boolean floor) {
-        peer = assumed;
-        boolean pre = cfg.local().has(TransportParams.PREAMBLE) && assumed.has(TransportParams.PREAMBLE);
-        feat = new Features(false, false, pre, false, false, false, false, false, false, false, false, false);
-        conn.sendLimit(assumed.initialMaxData);
-        streams.assumedLimits(assumed.maxStreamsBidi, assumed.maxStreamsUni, floor);
-    }
-
-    boolean earlyActive() {
-        return early.active() && !peerSeen;
-    }
-
-    /** Decides the fate of early data when the peer's parameters arrive. */
-    void earlyOutcome() throws WireException {
-        switch (early.outcome(peer, feat.acked())) {
-            case NONE -> {}
-            case ADOPT -> earlyAdopt();
-            case REJECTED -> closeWith(SessionError.of(SessionError.Kind.EARLY_REJECTED, false), CloseFrame.of(false, TransportError.NO_ERROR, 0, null));
-            case BELOW -> throw WireException.param("peer parameters below the assumed set");
-        }
-    }
-
-    /** Raises the early streams' credit to the peer's values. */
-    void earlyAdopt() {
-        for (Stream st : streams.live()) {
-            if (st.local && st.hasSend) {
-                long v = st.bidi ? peer.maxStreamDataBidiRemote : peer.maxStreamDataUni;
-                if (StreamSend.raiseCredit(st, v)) sched.ensure(st);
-            }
-        }
-    }
-
-
     // ---- QX_PING and the no-effect budget ----
 
     /** Asks for a QX_PING request, or joins the outstanding one; returns a ticket. */
     public long ping(Waiter w) throws CoreException {
+        deadlines.changed(ProtocolTimeline.Reason.KEEPALIVE.bit());
         if (err != null) throw CoreException.session(err);
         return ka.ping(w);
     }
@@ -1742,8 +2298,19 @@ public final class Session {
     }
 
 
+    private boolean peerZmux() {
+        TransportParams peer = peerParams();
+        return peer != null && peer.isZmux();
+    }
+
     private final class KeepAlivePort implements KeepAlive.Port {
-        @Override public void wantWrite() { pipes.wakeWriters(); }
+        @Override public long now() { return now; }
+        @Override public boolean peerZmux() { return Session.this.peerZmux(); }
+        @Override public void wantWrite() {
+            deadlines.changed(ProtocolTimeline.Reason.PACING.bit() | ProtocolTimeline.Reason.SHAPING.bit()
+                    | ProtocolTimeline.Reason.KEEPALIVE.bit());
+            pipes.wakeWriters();
+        }
         @Override public void budgetExhausted() { failLocal(new WireException(TransportError.EXCESSIVE_LOAD, "no-effect budget exhausted")); }
         @Override public void pingMeasured(long rtt) { tuner.loopRtt(rtt, now); if (pacer != null) pacer.onPing(pipes.get(0), rtt, now); }
         @Override public void fenceReached() { fenceDone(); }
@@ -1840,16 +2407,138 @@ public final class Session {
         return dg;
     }
 
-    /** Queues a datagram; a full queue drops its oldest entry. st is null for a session datagram. */
-    public void sendDatagram(Stream st, long context, byte[] payload) throws CoreException {
-        if (err != null) throw CoreException.session(err);
-        if (!cfg.datagrams()) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
-        if (st != null) {
-            if ((peerSeen && !feat.flows()) || !st.bidi) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
-            if (!st.tab.idSet()) streams.pinId(st);
+    /** Representations the caller can commit for this packet. */
+    public enum DatagramMode { DATAGRAM_ONLY, DATAGRAM_OR_CAPSULE, CAPSULE_ONLY }
+
+    /** A local submission either queued a datagram, selected reliable output, or is waiting for room. */
+    public enum DatagramAdmission { QUEUED, CAPSULE, WAITING }
+
+    /** Resolved datagram options with a deadline in the session clock domain. */
+    public record DatagramOptions(DatagramSendOptions options, long deadline) {
+        private static final DatagramOptions INHERIT = new DatagramOptions(DatagramSendOptions.INHERIT, Time.NEVER);
+
+        public DatagramOptions expiresAt(long at) {
+            return at == deadline ? this : new DatagramOptions(options, at);
         }
-        dg.send(st, context, payload, feat.flows() || (!peerSeen && cfg.local().has(TransportParams.FLOWS)));
+    }
+
+    public DatagramOptions resolveDatagram(Stream st, DatagramSendOptions options, long at) throws CoreException {
+        if (st != null) options = options.inheriting(st.datagramDefaults());
+        options = options.inheriting(cfg.datagramDefaults());
+        if (options == DatagramSendOptions.INHERIT) return DatagramOptions.INHERIT;
+        long deadline = switch (options.deadline()) {
+            case null -> Time.NEVER;
+            case DatagramSendOptions.Deadline.None ignored -> Time.NEVER;
+            case DatagramSendOptions.Deadline.After(var ttl) -> {
+                long end = Time.add(at, ttl.toNanos());
+                if (end == Time.NEVER) throw CoreException.of(CoreException.Reason.INVALID_DATAGRAM_OPTIONS);
+                yield end;
+            }
+            case DatagramSendOptions.Deadline.At(long end) -> end;
+        };
+        return new DatagramOptions(options, deadline);
+    }
+
+    /** Queues an original, evicting older entries only after this send passes admission. */
+    public void sendDatagram(Stream st, long context, byte[] payload) throws CoreException {
+        sendDatagram(st, context, payload, DatagramSendOptions.INHERIT, now);
+    }
+
+    public void sendDatagram(Stream st, long context, byte[] payload, DatagramSendOptions options, long at)
+            throws CoreException {
+        admitDatagram(st, context, payload, payload.length, resolveDatagram(st, options, at), at,
+                DatagramMode.DATAGRAM_ONLY, false, false, null);
+    }
+
+    public DatagramAdmission admitDatagram(Stream st, long context, byte[] payload, int length, DatagramOptions options, long at,
+                                          DatagramMode mode, boolean limited, boolean wait, CarrierCharge charge)
+            throws CoreException {
+        DatagramAdmission admission = planDatagram(st, context, length, 1, options, mode);
+        if (admission == DatagramAdmission.CAPSULE) return admission;
+        if (wait && dg.sendQueueFull()) return DatagramAdmission.WAITING;
+        requireDatagramRoom(st, length, 1, limited, false);
+        if (st != null) streams.pinId(st);
+        dg.enqueueSingle(st, context, payload, at, options.deadline(), options.options(), charge);
+        queuedDatagrams();
+        return DatagramAdmission.QUEUED;
+    }
+
+    /** Validates and publishes a relay group in one session-owner turn. */
+    public DatagramAdmission admitDatagramGroup(Stream st, long context, StreamRecv.Chunk[] payloads, int largest,
+                                               long bytes, DatagramOptions options, long at, DatagramMode mode,
+                                               boolean limited, CarrierCharge[] charges) throws CoreException {
+        DatagramAdmission admission = planDatagram(st, context, largest, payloads.length, options, mode);
+        if (admission == DatagramAdmission.CAPSULE) return admission;
+        requireDatagramRoom(st, bytes, payloads.length, limited, true);
+        if (st != null) streams.pinId(st);
+        dg.enqueueGroup(st, context, payloads, at, options.deadline(), options.options(), charges);
+        queuedDatagrams();
+        return DatagramAdmission.QUEUED;
+    }
+
+    /** Quotes the representation for a relay's exact limiter request. Admission rechecks the quote. */
+    public DatagramAdmission planDatagram(Stream st, long context, int largest, int count, DatagramOptions options,
+                                          DatagramMode mode) throws CoreException {
+        if (err != null) throw CoreException.session(err);
+        if (st != null && st.released() != null)
+            throw CoreException.stream(StreamError.of(StreamError.Kind.CLOSED_LOCALLY, st.id()));
+        if (context < 0 || context > VarInt.MAX) throw CoreException.of(CoreException.Reason.INVALID_DATAGRAM_OPTIONS);
+        boolean strict = options.options().carriage() == DatagramSendOptions.Carriage.REQUIRE_NATIVE;
+        if (strict && mode == DatagramMode.CAPSULE_ONLY)
+            throw CoreException.of(CoreException.Reason.INVALID_DATAGRAM_OPTIONS);
+        if (options.deadline() <= now) throw dg.reject(DatagramDrop.DEADLINE);
+        if (mode == DatagramMode.CAPSULE_ONLY) return DatagramAdmission.CAPSULE;
+        if (dg.exhausted(count)) throw dg.reject(DatagramDrop.SEQUENCE_EXHAUSTED);
+
+        if (!peerSeen && st == null && cfg.datagrams()) return DatagramAdmission.QUEUED;
+        boolean negotiated = peerSeen && peer.has(TransportParams.DATAGRAM) && peer.maxDatagramFrameSize > 0
+                && (st == null || (feat.flows() && st.bidi));
+        if (mode == DatagramMode.DATAGRAM_OR_CAPSULE && !strict && peerSeen) {
+            int structural = negotiated ? dg.structuralPayload(flowWidth(st, context, true)) : -1;
+            if (largest > structural) return DatagramAdmission.CAPSULE;
+        }
+        if (!negotiated) throw CoreException.of(CoreException.Reason.NOT_NEGOTIATED);
+        if (strict && !feat.carrierDatagrams()) throw dg.reject(DatagramDrop.NO_NATIVE_PATH);
+        int max = dg.admissionPayload(flowWidth(st, context, false));
+        if (largest > max) throw CoreException.tooLarge(Math.max(0, max));
+        return DatagramAdmission.QUEUED;
+    }
+
+    private int flowWidth(Stream st, long context, boolean structural) throws CoreException {
+        if (st == null) return 1;
+        long id = structural && !st.tab.idSet() ? 0 : streams.candidateId(st);
+        if (id >= VarInt.MAX) throw CoreException.of(CoreException.Reason.STREAM_LIMIT);
+        return VarInt.length(id + 1) + VarInt.length(context);
+    }
+
+    private void requireDatagramRoom(Stream st, long bytes, int count,
+                                     boolean limited, boolean group) throws CoreException {
+        if (limited) throw dg.reject(DatagramDrop.LIMITER);
+        if (!dg.sendFits(st, count, bytes, group)) throw dg.reject(DatagramDrop.QUEUE_OVERFLOW);
+    }
+
+    private void queuedDatagrams() {
+        deadlines.changed(ProtocolTimeline.DATAGRAM);
         pipes.wakeWriters();
+    }
+
+    private final java.util.function.LongUnaryOperator feedbackRtt = pipe -> {
+        Pipe p = pipes.get(pipe);
+        if (p == null) return 0;
+        var rtt = p.mp() == null ? (p.out() == null ? null : p.out().snd.rtt()) : p.mp().rtt();
+        return rtt != null && rtt.has() ? rtt.smoothed() : 0;
+    };
+
+    private int feedbackInboundPipes() {
+        int count = 0;
+        for (Pipe p : pipes.all()) {
+            if (p.in() != null && (p.mp() == null || p.mp().in() == Attach.IN_OPEN)) count++;
+        }
+        return count;
+    }
+
+    private long nextDatagramAck() {
+        return dg.feedback.reportPending() ? dg.feedback.next(now, feedbackInboundPipes(), feedbackRtt) : Time.NEVER;
     }
 
     // ---- datagram channels ----
@@ -1857,7 +2546,7 @@ public final class Session {
     private final Datagrams.FlowLookup flows = new Datagrams.FlowLookup() {
         @Override public Stream flow(long id) throws WireException { return streams.flow(id); }
         @Override public boolean unopened(long id) { return streams.unopenedPeer(id); }
-        @Override public long holdUntil() { return Time.add(now, srtt()); }
+        @Override public long holdUntil() { return Time.add(now, cfg.datagramHoldNanos() < 0 ? srtt() : cfg.datagramHoldNanos()); }
     };
 
     /**
@@ -1880,47 +2569,305 @@ public final class Session {
 
     /**
      * How DATAGRAM frames for p may use its carrier's datagram channel: when both endpoints sent
-     * zmux_carrier_datagrams, the carrier has a channel that takes datagrams now, and p's
-     * records are not shaped.
+     * zmux_carrier_datagrams, the carrier has a channel that takes datagrams now, and the pipe has an outbound direction.
      */
     Datagrams.ChannelUse channelOf(Pipe p) {
         if (!feat.carrierDatagrams() || p == null || p.out() == null || p.out().failed()) return Datagrams.ChannelUse.NONE;
         Pipe.OutLane l0 = p.out().lane(0);
         DatagramChannel ch = l0 == null ? null : l0.st.info().channel();
-        if (ch == null || (pipes.shaping() != null && pipes.shaping().of(p) != null)) return Datagrams.ChannelUse.NONE;
+        if (ch == null) return Datagrams.ChannelUse.NONE;
         int room = ch.maxChannelDatagram();
-        return room <= 0 ? Datagrams.ChannelUse.NONE : new Datagrams.ChannelUse(room, ch.channelStreamId());
+        int limit = ch.channelDatagramLimit(room);
+        if (limit == 0) return Datagrams.ChannelUse.NONE;
+        return new Datagrams.ChannelUse(limit, limit < 0 ? room : Math.min(room, limit), ch.channelStreamId(), feat.carrierDatagramPadding());
+    }
+
+    private java.util.Set<io.zmux.DatagramCopyPolicy.IndependentPair> datagramIndependence = java.util.Set.of();
+
+    public void datagramIndependence(java.util.Set<io.zmux.DatagramCopyPolicy.IndependentPair> paths) {
+        for (var prior : datagramIndependence) {
+            if (!paths.contains(prior)) dg.feedback.clearPairings(prior.first().value(), prior.second().value());
+        }
+        datagramIndependence = java.util.Set.copyOf(paths);
+    }
+
+    private void carrierReplaced(long pipeId) {
+        dg.feedback.resetOutbound(new DatagramFeedback.Path(pipeId, false));
+        dg.feedback.resetOutbound(new DatagramFeedback.Path(pipeId, true));
+        var current = new java.util.HashSet<>(datagramIndependence);
+        current.removeIf(pair -> pair.first().value() == pipeId || pair.second().value() == pipeId);
+        datagramIndependence = java.util.Set.copyOf(current);
+    }
+
+    /** The outcome of submitting a carrier loss observation. */
+    public enum DatagramLossReport { ACCEPTED, IGNORED, SOURCE_EXPIRED }
+
+    public DatagramLossReport reportDatagramLoss(long pipeId, boolean nativePath, long observed, long generation,
+                                                 long finalized, long lost) {
+        Pipe pipe = pipes.get(pipeId);
+        if (!established() || isClosing() || !feat.flows() || pipe == null || pipe.out() == null || pipe.out().failed()
+                || (pipe.mp() != null && pipe.mp().retired())
+                || (nativePath && observeChannel(pipe).limit() == 0)) return DatagramLossReport.IGNORED;
+        return dg.feedback.reportLoss(new DatagramFeedback.Path(pipe.id, nativePath), observed, generation,
+                finalized, lost, now);
+    }
+
+    private boolean hasIndependenceEvidence(Pipe first, Pipe second) {
+        return datagramIndependence.contains(new io.zmux.DatagramCopyPolicy.IndependentPair(
+                io.zmux.PipeId.of(first.id), io.zmux.PipeId.of(second.id)));
     }
 
     private final class ChannelsPort implements Datagrams.Channels {
         @Override public Pipe datagramPipe() { return Session.this.datagramPipe(); }
         @Override public Datagrams.ChannelUse of(Pipe p) { return channelOf(p); }
+        @Override public boolean fixedRecordPath() { return !(path instanceof PathSession); }
+        @Override public boolean nativeNegotiated() { return feat.carrierDatagrams(); }
+
+        @Override public int recordRoom() {
+            int best = 0;
+            for (Pipe pipe : pipes.all()) {
+                if (pathEligible(pipe)) best = Math.max(best, tx.recordRoom(pipe));
+            }
+            return best;
+        }
+
+        @Override public int nativeLimit() { return nativeCapacity(false); }
+
+        @Override public int nativeRoom() { return nativeCapacity(true); }
+
+        private int nativeCapacity(boolean available) {
+            if (!feat.carrierDatagrams()) return -1;
+            int best = -1;
+            for (Pipe pipe : pipes.all()) {
+                if (!pathEligible(pipe)) continue;
+                var use = of(pipe);
+                int limit = available ? use.room() : Math.max(use.room(), use.limit());
+                best = Math.max(best, limit - ChannelDatagram.length(use.id(), 0));
+            }
+            return best;
+        }
+
+        private boolean pathEligible(Pipe pipe) {
+            if (!carries(null, pipe) || isClosing()) return false;
+            if (!(path instanceof PathSession mp)) return true;
+            int eligible = mp.tiers.usableClass();
+            return (eligible & 4) != 0 && mp.tiers.classUsable((eligible & 1) != 0, (eligible & 2) != 0, pipe);
+        }
+
+        @Override public Pipe pick(Stream stream, Pipe current, int bytes, long deadline,
+                                   io.zmux.DatagramSendOptions.Carriage carriage) {
+            if (!(path instanceof PathSession mp)) {
+                return deadline == Time.NEVER || Time.add(now, Math.max(cfg.test().rtt(), srttMax()) / 2) <= deadline ? current : null;
+            }
+            var selected = select(mp, stream, null, java.util.Set.of(), bytes, deadline, carriage, false, false, null);
+            return selected == null ? null : selected.pipe();
+        }
+
+        @Override public boolean redundant(Stream stream, Pipe original) {
+            if (!(path instanceof PathSession) || original == null) return false;
+            return stream == null || !stream.local || (stream.snd.mps() != null && stream.snd.mps().openingConfirmed());
+        }
+
+        @Override public Datagrams.CopyPath copyPath(Stream stream, Pipe original, java.util.Set<Pipe> selected,
+                                                     int length, long deadline, io.zmux.DatagramSendOptions.Carriage carriage,
+                                                     boolean distinct, boolean adaptive, DatagramFeedback.Path impaired) {
+            return select((PathSession) path, stream, original, selected, length, deadline, carriage, distinct, adaptive, impaired);
+        }
+
+        @Override public boolean copyEligible(Stream stream, Pipe original, Pipe candidate, java.util.Set<Pipe> selected,
+                                              int length, long deadline, io.zmux.DatagramSendOptions.Carriage carriage,
+                                              boolean distinct) {
+            if (!(path instanceof PathSession mp) || !redundant(stream, original)
+                    || pipes.get(original.id) != original) return false;
+            int eligible = mp.tiers.usableClass();
+            if ((eligible & 4) == 0) return false;
+            boolean standby = (eligible & 1) != 0, probation = (eligible & 2) != 0;
+            if (!canCarry(mp, stream, candidate, standby, probation, true)) return false;
+            long firstTier = original.mp().effPrio();
+            if (!inCopyTier(candidate, firstTier, nextCopyTier(mp, stream, firstTier, standby, probation))) return false;
+            if (distinct && !independent(candidate, selected)) return false;
+            return arrival(mp, candidate, of(candidate).supports(length), length, deadline, carriage, false) < Double.POSITIVE_INFINITY;
+        }
+
+        @Override public void wake(Pipe pipe) { pipes.wake(pipe); }
+
+        private record Alternative(Datagrams.CopyPath path, double eta) {}
+
+        private Datagrams.CopyPath select(PathSession mp, Stream stream, Pipe original, java.util.Set<Pipe> selected,
+                                          int bytes, long deadline, io.zmux.DatagramSendOptions.Carriage carriage,
+                                          boolean distinct, boolean adaptive, DatagramFeedback.Path impaired) {
+            int eligible = mp.tiers.usableClass();
+            if ((eligible & 4) == 0) {
+                if (impaired != null) dg.feedback.clearImpairment(impaired);
+                return null;
+            }
+            boolean standby = (eligible & 1) != 0;
+            boolean probation = (eligible & 2) != 0;
+            long firstTier = original == null ? Long.MIN_VALUE : original.mp().effPrio();
+            long nextTier = original == null ? Long.MAX_VALUE : nextCopyTier(mp, stream, firstTier, standby, probation);
+            Pipe best = null;
+            boolean bestNative = false;
+            var alternatives = impaired == null ? null : new java.util.ArrayList<Alternative>();
+            long tier = Long.MAX_VALUE;
+            double eta = Double.POSITIVE_INFINITY;
+            for (Pipe candidate : pipes.all()) {
+                if (selected.contains(candidate) || !canCarry(mp, stream, candidate, standby, probation, original != null)) continue;
+                long priority = candidate.mp().effPrio();
+                if (original != null && !inCopyTier(candidate, firstTier, nextTier)) continue;
+                if (distinct && !independent(candidate, selected)) continue;
+                var use = of(candidate);
+                boolean nativePath = use.supports(bytes);
+                if (nativePath && !use.takes(bytes)) continue;
+                double arrival = arrival(mp, candidate, nativePath, bytes, deadline, carriage, original != null);
+                if (arrival == Double.POSITIVE_INFINITY) continue;
+                if (alternatives != null) {
+                    alternatives.add(new Alternative(new Datagrams.CopyPath(candidate, nativePath), arrival));
+                } else if (best == null || (adaptive ? arrival < eta
+                        : priority < tier || (priority == tier && ((nativePath && !bestNative)
+                        || (nativePath == bestNative && arrival < eta))))) {
+                    best = candidate;
+                    bestNative = nativePath;
+                    tier = priority;
+                    eta = arrival;
+                }
+            }
+            if (alternatives == null) return best == null ? null : new Datagrams.CopyPath(best, bestNative);
+            alternatives.sort(java.util.Comparator.comparingDouble(Alternative::eta));
+            for (Alternative alternative : alternatives) {
+                var choice = alternative.path();
+                if (dg.feedback.impairment(impaired, new DatagramFeedback.Path(choice.pipe().id, choice.nativePath()), now)) {
+                    return choice;
+                }
+            }
+            dg.feedback.clearImpairment(impaired);
+            return null;
+        }
+
+        private long nextCopyTier(PathSession mp, Stream stream, long firstTier, boolean standby, boolean probation) {
+            long next = Long.MAX_VALUE;
+            for (Pipe candidate : pipes.all()) {
+                if (candidate.mp() == null) continue;
+                long priority = candidate.mp().effPrio();
+                if (priority > firstTier && priority < next && canCarry(mp, stream, candidate, standby, probation, true)) next = priority;
+            }
+            return next;
+        }
+
+        private static boolean inCopyTier(Pipe candidate, long firstTier, long nextTier) {
+            long tier = candidate.mp().effPrio();
+            return tier == firstTier || tier == nextTier;
+        }
+
+        private double arrival(PathSession mp, Pipe candidate, boolean nativePath, int bytes, long deadline,
+                               io.zmux.DatagramSendOptions.Carriage carriage, boolean planCopy) {
+            if (!nativePath && (carriage == io.zmux.DatagramSendOptions.Carriage.REQUIRE_NATIVE
+                    || !(mp.metrics.open(candidate) || (planCopy && mp.metrics.writingOnAcceptingLane(candidate)))
+                    || !dg.fitsRecord(tx.recordRoom(candidate), bytes))) return Double.POSITIVE_INFINITY;
+            var shape = candidate.shape();
+            long wait = nativePath && shape != null ? Math.max(0, Time.sub(shape.nativeReady(), now)) : 0;
+            double seconds = nativePath ? (mp.metrics.owd(candidate) + (double) wait) / 1e9 : mp.scheduler.eta(candidate, bytes);
+            return deadline != Time.NEVER && (deadline <= now || seconds * 1e9 > deadline - now)
+                    ? Double.POSITIVE_INFINITY : seconds;
+        }
+
+        private boolean canCarry(PathSession mp, Stream stream, Pipe pipe, boolean standby, boolean probation, boolean copy) {
+            if (!carries(stream, pipe)) return false;
+            if (copy && pipe.mp().effStandby() && !cfg.copyPolicy().standby()) return false;
+            return mp.tiers.classUsable(standby, probation, pipe)
+                    || (copy && cfg.copyPolicy().standby() && mp.tiers.classUsable(true, probation, pipe));
+        }
+
+        private boolean independent(Pipe candidate, java.util.Set<Pipe> selected) {
+            for (Pipe used : selected) {
+                var a = candidate.mp();
+                var b = used.mp();
+                if (candidate.conn() != null && candidate.conn() == used.conn()) return false;
+                if (a.fate != 0 && a.fate == b.fate && a.joinerLocal == b.joinerLocal) return false;
+                if (!hasIndependenceEvidence(candidate, used)) return false;
+            }
+            return true;
+        }
+
         @Override public boolean carries(Stream st, Pipe p) {
-            if (st == null || !(path instanceof PathSession)) return true;
-            Pipe f = followPipe(st);
-            // While the pipe of the opening frame may carry no DATAGRAM frame (SUSPECT, DRAINING), it stays queued.
-            return f == null || (f == p && f.mp().out() == Attach.OUT_ACTIVE);
+            if (p == null || p.out() == null || p.out().failed()) return false;
+            if (!(path instanceof PathSession)) return true;
+            if (p.mp().out() != Attach.OUT_ACTIVE || p.mp().handshaking() || p.mp().retired()) return false;
+            Pipe opening = st == null ? null : followPipe(st);
+            return opening == null || opening == p;
         }
     }
 
     /**
      * Appends to dst the channel datagrams due on the datagram channel of pipe, in order; the
-     * driver sends each at once, never behind a batch. They count as sent;
-     * {@link #channelSendFailed} counts those the carrier refused as dropped instead.
+     * driver reports each outcome through {@link #channelDone}.
      */
     public void pollChannel(long pipeId, List<byte[]> dst, List<Datagrams.ChannelSent> sent, long t) {
+        if (path instanceof PathSession mp) mp.beginRoute();
+        deadlines.changed(ProtocolTimeline.DATAGRAM | ProtocolTimeline.Reason.SHAPING.bit());
         setNow(t);
         if (!peerSeen || isClosing()) return;
         noteDatagramPath(); // the channel's room as read now
         Pipe p = pipes.get(pipeId);
-        if (p == null || p != datagramPipe()) return;
-        dg.pollChannel(channelOf(p), dst, sent);
+        if (p == null) return;
+        if (pipes.shaping() != null) pipes.shaping().of(p);
+        int first = sent.size();
+        dg.pollChannel(p, observeChannel(p), dst, sent, pipes.shaping());
+
+        if (sent.size() != first) noteDatagramPath();
     }
 
-    /** A channel datagram that {@link #pollChannel} returned was refused by the carrier. */
-    public void channelSendFailed(Datagrams.ChannelSent c) {
-        dg.channelRefused(c);
+    /** Settles the carrier receipt for a submitted datagram. */
+    public void channelDone(Datagrams.ChannelSent ticket, io.zmux.carrier.CarrierChannel.Outcome outcome, long t) {
+        deadlines.changed(ProtocolTimeline.DATAGRAM | ProtocolTimeline.Reason.SHAPING.bit());
+        setNow(t);
+        boolean accepted = outcome == io.zmux.carrier.CarrierChannel.Outcome.ACCEPTED;
+        if (!dg.channelDone(ticket, outcome)) return;
+        Shaping sh = pipes.shaping();
+        if (!accepted) {
+            if (sh != null && outcome == io.zmux.carrier.CarrierChannel.Outcome.UNKNOWN) sh.unknownProgress();
+            if (sh != null) sh.reason(outcome == io.zmux.carrier.CarrierChannel.Outcome.EXPIRED
+                    ? io.zmux.shaping.RuntimeReason.APPLICATION_EXPIRED : io.zmux.shaping.RuntimeReason.CARRIER_REJECTED);
+            return;
+        }
+        var pipe = pipes.get(ticket.pipe);
+        if (pipe != null) memberBytes(pipe, true, ticket.length);
+        if (ticket.copy) return;
+        tx.earn(ticket.payload);
+        if (sh != null) sh.outbound(ticket.shape, 0, ticket.length, io.zmux.shaping.Event.Unit.NATIVE_DATAGRAM, true, false);
     }
+
+    /** Whether any datagram remains for a record or a native channel. */
+    public boolean hasChannelOutput() {
+        return peerSeen && feat.carrierDatagrams() && !isClosing() && dg.queued();
+    }
+
+    public void channelChanged(long pipeId, long at) {
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
+        setNow(at);
+        Pipe p = pipes.get(pipeId);
+        if (p != null) observeChannel(p);
+        noteDatagramPath();
+    }
+
+    /** Observes a channel identity at the send boundary, without changing pure capacity probes. */
+    private Datagrams.ChannelUse observeChannel(Pipe pipe) {
+        var use = channelOf(pipe);
+        Pipe.OutLane lane = pipe.out() == null ? null : pipe.out().lane(0);
+        if (lane == null) return use;
+        long id = use.limit() == 0 ? Long.MIN_VALUE + 1 : use.id();
+        long previous = lane.replaceNativeChannel(id);
+        var shape = pipe.shape();
+        if (previous != Long.MIN_VALUE && previous != id) {
+            dg.feedback.resetOutbound(new DatagramFeedback.Path(pipe.id, true));
+            if (shape != null) shape.cancelNative(io.zmux.shaping.RuntimeReason.STALE_GENERATION);
+        } else if (shape != null && shape.nativeItem() != null) {
+            shape.nativeRoom(use);
+        }
+        return use;
+    }
+
+    /** A native completion needs a fresh clock sample for shaping meters and callbacks. */
+    public boolean usesCompletionClock() { return pipes.shaping() != null || path instanceof PathSession; }
 
     private final FrameDecoder channelDecoder = new FrameDecoder();
     private final io.zmux.internal.wire.Frame channelFrame = new io.zmux.internal.wire.Frame();
@@ -1931,17 +2878,21 @@ public final class Session {
      * charged to the no-effect budget and restarts no idle timer. The payload is copied.
      */
     public void receiveChannelDatagram(long pipeId, java.nio.ByteBuffer b, int pos, int end, long t) {
+        deadlines.changed(ProtocolTimeline.DATAGRAM | ProtocolTimeline.Reason.SHAPING.bit());
         setNow(t);
         if (isClosing()) return;
-        if (pipes.get(pipeId) == null || !peerSeen || !feat.carrierDatagrams()) {
+        Pipe pipe = pipes.get(pipeId);
+        if (pipe == null || !peerSeen || !feat.carrierDatagrams()) {
             dg.dropReceived();
             return;
         }
         io.zmux.internal.wire.Frame f = channelFrame;
         try {
-            ChannelDatagram.decodeFrame(channelDecoder, b, pos, end, f);
+            ChannelDatagram.decodeFrame(channelDecoder, b, pos, end, f, feat.carrierDatagramPadding());
             gates.check(f);
-            dg.onFrame(f, flows, true);
+            dg.onFrame(f, flows, pipeId, true);
+            memberBytes(pipe, false, end - pos);
+            pipes.wakeWriters();
         } catch (WireException e) {
             failLocal(e);
         } finally {
@@ -1972,16 +2923,44 @@ public final class Session {
         return cfg.handshakeTimeout();
     }
 
-    /** The configured attachment limit. */
-    public int maxPipes() {
-        return cfg.maxPipes();
+    /** Whether the peer's Join refusal still blocks local openings. */
+    public boolean joinBackedOff() {
+        if (!(path instanceof PathSession mp)) return false;
+        long retry = mp.joins.backoffTimer(now, false);
+        return retry != Time.NEVER && retry > now;
     }
 
+    /** Reserves local protocol room after the optional controller grant succeeds in the same owner turn. */
+    public Joins.JoinReservation reserveJoins(int count, boolean replacement, int directions,
+                                               java.util.function.BooleanSupplier grant) throws CoreException {
+        return requireMultipath().joins.reserve(count, replacement, directions, grant);
+    }
+
+    /** Releases all slots this batch still holds. */
+    public void releaseJoins(Joins.JoinReservation reservation) {
+        if (path instanceof PathSession mp) mp.joins.release(reservation);
+    }
 
     /** Starts a local join; returns the pipe ID, or -id - 1 when the cap or the refusal backoff holds it. */
-    public long addPipe(Joins.JoinOptions o) throws CoreException {
+    public long addPipe(Joins.JoinOptions options) throws CoreException {
+        deadlines.changed(ProtocolTimeline.PATH);
+        return addPipe(options, null, null);
+    }
+
+    /** Starts a local Join using the given batch's reservation. */
+    public long addPipe(Joins.JoinOptions options, Joins.JoinReservation reservation, SessionCapacity.Member member)
+            throws CoreException {
         if (joinPending()) throw CoreException.joinPending(joinMissing());
-        return requireMultipath().joins.addPipe(o);
+        Joins joins = requireMultipath().joins;
+        if (reservation != null && !joins.consume(reservation)) throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
+        return joins.addPipe(options, member);
+    }
+
+    /** Binds the intended group before publishing its first attachment. */
+    public SessionCapacity.Member newMember(String candidate, int directions, int attachments) throws CoreException {
+        requireMultipath();
+        if (!sessionPolicy.allows(candidate, directions)) throw CoreException.of(CoreException.Reason.PIPE_REFUSED);
+        return pipes.member(candidate, directions, attachments);
     }
 
     /** The session's own locator (joins name it). */
@@ -2020,7 +2999,13 @@ public final class Session {
         if (!requireMultipath().health.removePipe(id, graceful)) throw CoreException.of(CoreException.Reason.INVALID);
     }
 
+    /** Starts a planned single-attachment drain if the remaining members cover both directions. */
+    public boolean drainPipe(long id) throws CoreException {
+        return capacity.drainPipe(requireMultipath(), id);
+    }
+
     public void setPipe(long id, Tiers.PipeSettings o) throws CoreException {
+        deadlines.changed(ProtocolTimeline.PATH);
         if (!requireMultipath().tiers.setPipe(id, o)) throw CoreException.of(CoreException.Reason.INVALID);
     }
 
@@ -2030,6 +3015,8 @@ public final class Session {
 
     /** Changes the session's scheduling policy; the previous policy's state is discarded. */
     public void setPolicy(CoreConfig.Policy p) {
+        clearDeliveryBacklog();
+        deadlines.changed(ProtocolTimeline.PATH);
         policy = p;
         path.policyChanged();
         pipes.wakeWriters();
@@ -2037,12 +3024,15 @@ public final class Session {
 
     /** Sets a stream direction's own policy; null returns it to the session's. */
     public void setStreamPolicy(Stream st, CoreConfig.Policy p) {
+        clearDeliveryBacklog();
+        deadlines.changed(ProtocolTimeline.PATH);
         PathScheduler.streamPolicy(st, p);
         pipes.wakeWriters();
     }
 
     /** Overrides the session's redundancy for a stream direction; null returns it to the default. */
     public void setRedundant(Stream st, Boolean on) {
+        deadlines.changed(ProtocolTimeline.PATH);
         PathScheduler.streamRedundant(st, on == null ? 0 : on ? 1 : -1);
         pipes.wakeWriters();
     }
@@ -2071,30 +3061,74 @@ public final class Session {
     // ---- record shaping ----
 
     private Shaping shaping() {
-        if (pipes.shaping() == null) {
-            pipes.shaping(new Shaping(new Shaping.Port() {
-                @Override public long now() { return now; }
-                @Override public int peerRecordLimit() { return tx.peerRecordLimit(); }
-                @Override public boolean peerZmux() { TransportParams p = peerParams(); return p != null && p.isZmux(); }
-                @Override public long earnBytes() { return tx.earnBytes(); }
-                @Override public boolean dataWaiting() { return !sched.isEmpty(); }
-                @Override public long ackRelease(Pipe p) {
-                    if (ack == null) return Time.NEVER;
-                    return path instanceof PathSession m ? m.ackRelease(p) : ack.release();
-                }
-            }, pipes, shapingLimitsInForce(), ka.outstandingSentAt(), start));
+        Shaping active = pipes.shaping();
+        if (active == null) {
+            active = newShaping();
+            pipes.shaping(active);
         }
-        return pipes.shaping();
+        return active;
+    }
+
+    private Shaping newShaping() {
+        return new Shaping(new Shaping.Port() {
+            @Override public long now() { return now; }
+            @Override public int preambleLimit() {
+                return preambleInUse() ? (peerSeen ? streams.preambleLimit() : StreamTable.MAX_PREAMBLE) : 0;
+            }
+            @Override public int peerRecordLimit() { return tx.peerRecordLimit(); }
+            @Override public boolean peerZmux() { return Session.this.peerZmux(); }
+            @Override public boolean standaloneRoom(int earlier) { return ka.limitedRoom(now, earlier); }
+            @Override public void markStandalone() { ka.markLimited(now); }
+            @Override public long earnBytes() { return tx.earnBytes(); }
+            @Override public boolean dataWaiting() { return !sched.isEmpty(); }
+            @Override public boolean coverEligible(Pipe p) {
+                if (!peerSeen || isClosing() || p.out() == null || p.out().failed()) return false;
+                Attach a = p.mp();
+                if (a != null && (a.out() != Attach.OUT_ACTIVE || a.handshaking() || a.retired()
+                        || (a.topologyExcluded() & Action.DIR_OUT) != 0)) return false;
+                Pipe.OutLane lane = p.out().lane(0);
+                return lane != null && lane.st.confirmed() && !lane.st.shut() && !lane.st.laneFirst()
+                        && (p.id != 0 || lane.tx.tpSent());
+            }
+            @Override public long ackRelease(Pipe p) {
+                if (ack == null) return Time.NEVER;
+                return path instanceof PathSession m ? m.ackRelease(p) : ack.release();
+            }
+        }, pipes, shapingLimitsInForce(), start, now);
     }
 
     /** Installs f on every outbound pipe, replacing earlier instances; null: no shaping. */
     public void setShaper(io.zmux.shaping.ShaperFactory f) {
-        shaping().setFactory(f);
+        setShaper(f, shapingBudget);
+    }
+
+    public void setShaper(io.zmux.shaping.ShaperFactory f, io.zmux.shaping.ShapingBudget budget) {
+        var shape = shapingCandidate();
+        shape.setFactory(f, shapingLimits.under(budget), () -> {
+            shapingBudget = budget;
+            publishShaping(shape);
+        });
     }
 
     /** Installs x on one outbound pipe until the next setShaper; false when the pipe has no outbound direction. */
     public boolean setPipeShaper(long pipe, io.zmux.shaping.Shaper x) {
-        return shaping().setPipe(pipe, x);
+        var shape = shapingCandidate();
+        return shape.setPipe(pipe, x, () -> publishShaping(shape));
+    }
+
+    private Shaping shapingCandidate() {
+        Shaping active = pipes.shaping();
+        return active == null ? newShaping() : active;
+    }
+
+    private void publishShaping(Shaping shape) {
+        pipes.shaping(shape);
+        clearDeliveryBacklog();
+        deadlines.changed(ProtocolTimeline.Reason.SHAPING.bit());
+    }
+
+    void observeShaping(java.util.function.Consumer<io.zmux.shaping.Event> observer) {
+        shaping().observe(observer);
     }
 
     /** A value that grows whenever a shaping counter changes; -1 when no shaper was ever set. */
@@ -2104,11 +3138,8 @@ public final class Session {
 
     /** The shaping counters; null when no shaper was ever set. */
     public io.zmux.shaping.ShapingStats shapingStats() {
-        var st = pipes.shaping() == null ? null : pipes.shaping().stats();
-        if (st == null && handshakeFaults == 0 && handshakeUnplanned == 0) return null;
-        if (st == null) st = io.zmux.shaping.ShapingStats.ZERO;
-        return new io.zmux.shaping.ShapingStats(st.wireSpent(), st.stallSpent(), st.injected(), st.injectDropped(), st.clamped(),
-                st.faults() + handshakeFaults, handshakeUnplanned);
+        if (pipes.shaping() == null && handshakeFaults == 0 && handshakeUnplanned == 0) return null;
+        return shaping().stats(handshakeFaults, handshakeUnplanned);
     }
 
     /** The handshake shaper threw on a Join. */
@@ -2181,7 +3212,9 @@ public final class Session {
 
     /** The single-pipe behaviour behind {@link SinglePath}. */
     private final class SinglePort implements SinglePath.Port {
-        @Override public boolean wantsWrite(Pipe p, Pipe.OutLane ol) { return tx.wantsWriteSingle(p, ol); }
+        @Override public boolean wantsControl(Pipe p, Pipe.OutLane ol) {
+            return ol.lane == 0 && (tx.controlPending(true) || tx.datagramsPending(p, ol));
+        }
         @Override public void write(RecordWriter w, Pipe p, Pipe.OutLane ol) { tx.writeSingle(w, p, ol); }
 
         @Override public void onPipeAck(io.zmux.internal.wire.Frame.AckEntries it) throws WireException { ack.onSinglePipeAck(it, pipes.get(0), now); }
@@ -2192,10 +3225,18 @@ public final class Session {
 
     /** The session behind the multipath layer. */
     private final class PathPort implements PathSession.Port {
+        @Override public CoreSessionPolicy sessionPolicy() { return sessionPolicy; }
         @Override public long now() { return now; }
-        @Override public byte[] firstBatch(int limit) { return ack == null ? null : send.firstBatch(limit, tx::canSendNow, path); }
+        @Override public int firstBatchStreamCount() { return streams.count(); }
+        @Override public StreamSend.FirstBatch firstBatch(int limit, Batch receipt) {
+            return ack == null ? null : send.firstBatch(limit, tx::canSendNow, path, receipt);
+        }
+        @Override public void firstBatchAccepted(long own) {
+            tx.earn(own);
+        }
         @Override public void applyBatch(byte[] frames) { Session.this.applyBatch(frames); }
-        @Override public void joinPadding(long n) { spendHandshake(n); }
+        @Override public long joinPaddingRoom() { return handshakeRoom(); }
+        @Override public boolean profileBounded() { return pipes.shaping() != null; }
         @Override public CoreConfig.Policy policy() { return policy; }
         @Override public void emit(Event e) { Session.this.emit(e); }
         @Override public void failLocal(WireException e) { Session.this.failLocal(e); }
@@ -2208,7 +3249,13 @@ public final class Session {
 
         @Override
         public void capacityChanged() {
+            capacity.changed();
             if (quality != null && quality.floorSet()) quality.checkFloor();
+        }
+
+        @Override
+        public void memberHealth(Pipe pipe, io.zmux.PipeHealth before, io.zmux.PipeHealth after) {
+            if (path instanceof PathSession mp) capacity.healthChanged(mp, pipe, before, after);
         }
 
         @Override
@@ -2217,6 +3264,7 @@ public final class Session {
             state = SessionState.SUSPENDED;
             stats.suspended(now);
             grace = graceDeadline;
+            for (var observer : suspensionObservers) observer.accept(graceDeadline);
         }
 
         @Override
@@ -2231,12 +3279,16 @@ public final class Session {
 
     /** The session behind the stream components and the path layer's view of the streams. */
     private final class StreamsPort implements StreamTable.Port, StreamSend.Port, StreamRecv.Port, StreamsView {
+        @Override public void memoryCommand(Runnable command) { onOwner.accept(command); }
+
         @Override public long now() { return now; }
-        @Override public void wantWrite() { pipes.wakeWriters(); }
+        @Override public void wantWrite() {
+            deadlines.changed(ProtocolTimeline.Reason.PACING.bit() | ProtocolTimeline.Reason.SHAPING.bit()
+                    | ProtocolTimeline.Reason.KEEPALIVE.bit());
+            pipes.wakeWriters();
+        }
         @Override public SessionError error() { return err; }
-        @Override public boolean firstHeld() { return life.firstHeld(); }
         @Override public boolean established() { return peerSeen; }
-        @Override public boolean earlyActive() { return Session.this.earlyActive(); }
         @Override public TransportParams peer() { return peer; }
         @Override public Features features() { return feat; }
         @Override public boolean responder() { return role == Role.RESPONDER; }
@@ -2252,6 +3304,7 @@ public final class Session {
             if (p != null && p.mp() != null) p.mp().ret.duplicate(n);
         }
         @Override public void discarded(Stream st) {
+            if (path instanceof PathSession mp) mp.retention.discarded(st);
             lanes.unbind(st);
             if (pipes.shaping() != null) pipes.shaping().stream(io.zmux.shaping.EventKind.STREAM_END, st.tab.id());
         }
@@ -2279,6 +3332,13 @@ public final class Session {
         @Override public long now() { return now; }
         @Override public SessionState state() { return state; }
         @Override public boolean established() { return peerSeen; }
+        @Override public boolean familyConfirmed() { return peer.has(TransportParams.FAMILY); }
+
+        @Override public boolean datagramAckDue() { return nextDatagramAck() <= now; }
+
+        @Override public void writeDatagramAcks(RecordWriter writer) {
+            if (dg.feedback.reportPending()) dg.feedback.write(writer, now, feedbackInboundPipes(), feedbackRtt);
+        }
         @Override public boolean closing() { return isClosing(); }
         @Override public Features features() { return feat; }
         @Override public TransportParams peer() { return peer; }
@@ -2313,5 +3373,6 @@ public final class Session {
         @Override public PathLayer path() { return path; }
         @Override public void closeSent() { closeSentOn(); }
         @Override public void closeRead() { checkLingerDone(); }
+        @Override public void closeWaitDone() { endCloseWait(); }
     }
 }

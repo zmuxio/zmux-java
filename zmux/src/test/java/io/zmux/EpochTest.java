@@ -1,14 +1,10 @@
 package io.zmux;
 
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import io.zmux.carrier.Framing;
-import io.zmux.carrier.MemoryPipe;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +19,7 @@ class EpochTest {
     }
 
     private static ZmuxConfig.Builder builder(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).noProbation()
                 .resumeTimeout(Duration.ofSeconds(10));
     }
 
@@ -157,116 +153,11 @@ class EpochTest {
         }
     }
 
-    @Test void replacePipesNeedsRedialAndAdvanceNeedsMultipath() throws Exception {
+    @Test void advanceNeedsMultipath() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = config(loops);
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var c = Zmux.connect(l.localAddress(), cfg); var _ = l.accept(WAIT)) {
-                assertThrows(IllegalStateException.class, () -> c.replacePipes());
-            }
             var single = ZmuxConfig.builder().eventLoops(loops).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(single)); var c = Zmux.connect(l.localAddress(), single); var _ = l.accept(WAIT)) {
                 assertThrows(NotNegotiatedException.class, c::advanceEpoch);
-            }
-        }
-    }
-
-    /** Replacing the pipes waits for the new epoch, then replaces every pipe through the redial hook. */
-    @Test void replacePipesWaitsForTheEpochAndRedials() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
-            var dials = new java.util.concurrent.atomic.AtomicInteger();
-            var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
-                dials.incrementAndGet();
-                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("redial")));
-                return io[0];
-            }).build();
-            try (listener) {
-                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
-                try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
-                    var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
-                    c.addPipe(joined[0], PipeOptions.defaults());
-                    ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    c.replacePipes().get(WAIT.toMillis() * 2, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    assertEquals(1, c.epoch());
-                    assertEquals(2, dials.get());
-                }
-            }
-        }
-    }
-
-    /** replacePipes' timeout bounds the joins of the replacements, not only the dials. */
-    @Test void replacePipesTimeoutBoundsTheJoin() throws Exception {
-        // HS-24.
-        try (EventLoops loops = EventLoops.create(2)) {
-            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
-            var sawHello = new java.util.concurrent.CompletableFuture<Void>();
-            var reason = new java.util.concurrent.CompletableFuture<Throwable>();
-            var client = builder(loops).epochAfterFirstPipe(false).joinTimeout(Duration.ofSeconds(20))
-                    .joinOutcome((session, pipe, error) -> { if (error != null) reason.complete(error); })
-                    .redial((need, cancellation) -> {
-                        var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                        pair[1].reader().start(new io.zmux.carrier.PipeReader.Sink() {
-                            @Override public void onChunk(Chunk chunk, Runnable consumed) {
-                                chunk.close();
-                                consumed.run();
-                                sawHello.complete(null);
-                            }
-                            @Override public void onEnd() {}
-                            @Override public void onError(Throwable failure) { sawHello.completeExceptionally(failure); }
-                        });
-                        return pair[0];
-                    }).build();
-            try (listener) {
-                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
-                try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
-                    var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
-                    c.addPipe(joined[0], PipeOptions.defaults());
-                    assertEquals(2, s.pipes().size());
-                    var replacing = c.replacePipes();
-                    sawHello.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                    var e = assertThrows(java.util.concurrent.ExecutionException.class,
-                            () -> replacing.orTimeout(1, java.util.concurrent.TimeUnit.MILLISECONDS).get(5, java.util.concurrent.TimeUnit.SECONDS));
-                    assertInstanceOf(java.util.concurrent.TimeoutException.class, e.getCause());
-                    assertSame(e.getCause(), reason.get(5, java.util.concurrent.TimeUnit.SECONDS));
-                }
-            }
-        }
-    }
-
-    /** Cancelling replacePipes signals the redial hook's cancellation, so a dial in progress can stop. */
-    @Test void cancellingReplacePipesSignalsTheRedialHook() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var listener = Zmux.listener(ListenerConfig.of(config(loops)));
-            var dialing = new java.util.concurrent.CountDownLatch(1);
-            var signalled = new java.util.concurrent.CountDownLatch(1);
-            var client = builder(loops).epochAfterFirstPipe(false).redial((need, cancellation) -> {
-                cancellation.onCancel(signalled::countDown);
-                dialing.countDown();
-                // A dial that ignores interrupts and stops only on its cancellation.
-                while (true) {
-                    try { if (signalled.await(10, java.util.concurrent.TimeUnit.SECONDS)) break; }
-                    catch (InterruptedException e) { /* Keep dialing. */ }
-                }
-                throw new java.io.IOException("dial cancelled");
-            }).build();
-            try (listener) {
-                var io = MemoryPipe.pair(Framing.BYTE_STREAM);
-                listener.adapter().handle(io[1], JoinHint.inBand(TestAddr.peer("first")));
-                try (var c = Zmux.open(io[0], Role.CLIENT, client); var s = listener.accept(WAIT)) {
-                    var joined = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    listener.adapter().handle(joined[1], JoinHint.inBand(TestAddr.peer("joined")));
-                    c.addPipe(joined[0], PipeOptions.defaults());
-                    ListenerEntryTest.await(() -> s.pipes().size() == 2);
-                    var f = c.replacePipes();
-                    org.junit.jupiter.api.Assertions.assertTrue(dialing.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
-                    f.cancel(true);
-                    org.junit.jupiter.api.Assertions.assertTrue(signalled.await(WAIT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS));
-                }
             }
         }
     }

@@ -101,7 +101,7 @@ class PipeChannelTest {
             SocketChannel peer = server.accept();
             var got = new java.util.concurrent.LinkedBlockingQueue<Object>();
             io.reader().start(new PipeReader.Sink() {
-                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(data.remaining()); release.run(); }
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; got.add(chunk.remaining()); release.run(); }
                 @Override public void onEnd() { got.add("end"); }
                 @Override public void onError(Throwable cause) { got.add(cause); }
             });

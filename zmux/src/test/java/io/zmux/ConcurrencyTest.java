@@ -1,129 +1,75 @@
 package io.zmux;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.time.Duration;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.SplittableRandom;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/**
- * Races between application threads and the loop: random operations while the session
- * closes; every call returns (no lost wake-up, no deadlock) and nothing leaks.
- */
+/** Races between application calls and the owner, with live streams at the close cut. */
 @Timeout(120)
 class ConcurrencyTest {
-
-    @RepeatedTest(5)
-    @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
-    void randomOperationsRaceClose() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
-            Pair p = Pair.memory(cfg);
-            AtomicInteger done = new AtomicInteger();
-            AtomicInteger served = new AtomicInteger();
-            AtomicBoolean unexpected = new AtomicBoolean();
-            try (var ex = Executors.newVirtualThreadPerTaskExecutor()) {
-                List<Future<?>> fs = new ArrayList<>();
-                fs.add(ex.submit(() -> {
-                    while (true) {
-                        ZmuxStream s;
-                        try {
-                            s = p.server().acceptStream();
-                        } catch (IOException e) {
-                            return null;
-                        }
-                        served.incrementAndGet();
-                        ex.submit(() -> {
-                            try {
-                                byte[] b = new byte[4096];
-                                while (s.read(b, 0, b.length) >= 0) s.write(b, 0, 16);
-                                s.finish();
-                            } catch (IOException e) {
-                                // Reset, stopped or session gone: expected outcomes.
-                            } finally {
-                                s.close();
-                            }
-                            return null;
-                        });
-                    }
-                }));
-                // One stream that surely reaches the server, so the close races live traffic
-                // even when every random stream happens to end before its first frame.
-                ZmuxStream keeper = p.client().openStream();
-                keeper.write(new byte[1]);
-                for (int t = 0; t < 32; t++) {
-                    int seed = t;
-                    fs.add(ex.submit(() -> {
-                        SplittableRandom r = new SplittableRandom(seed);
-                        try {
-                            for (int i = 0; i < 50; i++) {
-                                ZmuxStream s = p.client().openStream();
-                                int ops = r.nextInt(6);
-                                for (int k = 0; k < ops; k++) {
-                                    switch (r.nextInt(6)) {
-                                        case 0 -> s.write(new byte[r.nextInt(20000)]);
-                                        case 1 -> s.reset(r.nextInt(5));
-                                        case 2 -> s.stop(r.nextInt(5));
-                                        case 3 -> p.client().datagrams().send(ByteBuffer.allocate(r.nextInt(100)));
-                                        case 4 -> s.finish();
-                                        default -> {
-                                            s.setReadTimeout(Duration.ofMillis(5));
-                                            try {
-                                                s.read(new byte[100], 0, 100);
-                                            } catch (java.net.SocketTimeoutException e) {
-                                                // Fine.
-                                            }
-                                        }
-                                    }
+    @Test
+    void queuedOperationsRaceClose() throws Exception {
+        int count = 8;
+        var loops = EventLoops.create(2);
+        try (loops) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).build();
+            try (var pair = Pair.memory(cfg); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+                var start = new CountDownLatch(1);
+                var reads = new ArrayList<ZmuxFuture<Integer>>();
+                var tasks = new ArrayList<Future<?>>();
+                var accepted = new ArrayList<ZmuxStream>();
+                try {
+                    for (int i = 0; i < count; i++) {
+                        int step = i % 4;
+                        var stream = pair.client().openStream();
+                        stream.write(new byte[1]);
+                        reads.add(stream.readAsync(ByteBuffer.allocate(1)));
+                        var peer = pair.server().acceptStream();
+                        assertEquals(stream.id(), peer.id());
+                        accepted.add(peer); // Keep peer handles alive until the session settles the reads.
+                        tasks.add(workers.submit(() -> {
+                            try (stream) {
+                                start.await();
+                                switch (step) {
+                                    case 0 -> stream.write(new byte[32]);
+                                    case 1 -> stream.reset(7);
+                                    case 2 -> stream.finish();
+                                    case 3 -> pair.client().datagrams().send(ByteBuffer.allocate(1));
+                                    default -> throw new AssertionError(step);
                                 }
-                                s.close();
+                            } catch (SessionClosedException expected) {
+                                var closed = assertInstanceOf(SessionError.ApplicationClosed.class, expected.error());
+                                assertEquals(1, closed.code());
                             }
-                        } catch (ZmuxException | java.net.SocketTimeoutException e) {
-                            // Session closed under us or a stream outcome: expected.
-                        } catch (IllegalStateException e) {
-                            // A finished direction: expected.
-                        } catch (Exception e) {
-                            unexpected.set(true);
-                            throw e;
-                        }
-                        done.incrementAndGet();
-                        return null;
-                    }));
+                            return null;
+                        }));
+                    }
+                    assertTrue(reads.stream().noneMatch(ZmuxFuture::isDone));
+                } finally { start.countDown(); }
+                pair.client().abort(1, "race");
+                for (Future<?> task : tasks) task.get(30, TimeUnit.SECONDS);
+                for (var read : reads) {
+                    var failure = assertThrows(ExecutionException.class, () -> read.get(30, TimeUnit.SECONDS));
+                    assertTrue(failure.getCause() instanceof IOException);
                 }
-                // Close only once a stream got through, so the race is between close and live traffic, not start-up.
-                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (served.get() == 0 && System.nanoTime() < until) Thread.sleep(1);
-                Thread.sleep(seedDelay());
-                p.client().abort(1, "race");
-                for (Future<?> f : fs) f.get(60, TimeUnit.SECONDS);
+                for (var peer : accepted) peer.close();
             }
-            assertEquals(32, done.get());
-            assertTrue(served.get() > 0, "no stream reached the server before the close");
-            assertTrue(!unexpected.get());
-            p.client().awaitClosed();
-            p.server().awaitClosed();
-            loops.close();
-            assertEquals(0, loops.liveThreads());
-            Leaks.none(loops, "read buffers leaked");
         }
-    }
-
-    private static long seedDelay() {
-        return System.nanoTime() % 30;
+        assertEquals(0, loops.liveThreads());
+        Leaks.none(loops, "read buffers leaked");
     }
 
     @Test
@@ -146,34 +92,20 @@ class ConcurrencyTest {
     }
 
     @Test
-    void droppedHandleResetsTheStream() throws Exception {
-        try (EventLoops loops = EventLoops.create(1)) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (Pair p = Pair.memory(cfg)) {
-                openAndDrop(p.client());
-                ZmuxStream b = p.server().acceptStream();
-                StreamResetException e = null;
-                for (int i = 0; i < 200 && e == null; i++) {
-                    System.gc();
-                    b.setReadTimeout(Duration.ofMillis(20));
-                    try {
-                        byte[] buf = new byte[16];
-                        while (b.read(buf, 0, 16) > 0) { }
-                    } catch (StreamResetException x) {
-                        e = x;
-                    } catch (java.net.SocketTimeoutException x) {
-                        // Not collected yet.
-                    }
-                }
-                assertTrue(e != null, "no reset after the handle became unreachable");
-                assertEquals(0x5a4d0001L, e.code());
+    void cleaningTheHandleResetsTheStream() throws Exception {
+        try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
+            var stream = pair.client().openStream();
+            stream.write(new byte[] {1, 2, 3});
+            try (var peer = pair.server().acceptStream()) {
+                var cleanable = ZmuxStream.class.getDeclaredField("cleanable");
+                cleanable.setAccessible(true);
+                ((java.lang.ref.Cleaner.Cleanable) cleanable.get(stream)).clean();
+                var reset = assertThrows(StreamResetException.class, () -> {
+                    while (peer.read(ByteBuffer.allocate(16)) > 0) { /* Drain the reliable prefix. */ }
+                });
+                assertEquals(0x5a4d0001L, reset.code());
             }
         }
-    }
-
-    private static void openAndDrop(ZmuxSession s) throws IOException {
-        ZmuxStream a = s.openStream();
-        a.write(new byte[] {1, 2, 3});
     }
 
     @Test

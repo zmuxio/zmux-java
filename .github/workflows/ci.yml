@@ -75,9 +75,14 @@ jobs:
         run: ./mvnw -B -Pstatic-checks clean test-compile spotbugs:check
 
   interop:
-    name: Interop (Go and Rust zmux, independent QMux peers)
+    name: Interop (incumbent peers)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 6
+      GOMAXPROCS: 4
+      GOFLAGS: -p=4
+      MAVEN_ARGS: -T 2 -DforkCount=1
     steps:
       - name: Checkout zmux-java
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,7 +119,7 @@ jobs:
           cache: maven
           cache-dependency-path: zmux-java/**/pom.xml
 
-      - name: Run interop tests
+      - name: Run incumbent interop tests
         working-directory: zmux-java
         env:
           ZMUX_RS_ROOT: ${{ github.workspace }}/zmux-rs

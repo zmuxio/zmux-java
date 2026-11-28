@@ -1,5 +1,7 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+
 import static org.junit.jupiter.api.Assertions.*;
 import java.nio.ByteBuffer;
 import org.junit.jupiter.api.Test;
@@ -19,7 +21,7 @@ class PreambleLimitTest {
         c.local().maxPreambleSize = maxPreamble;
         Session s = new Session(c.build(), 0);
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
-        s.attachBootstrap(info, info, null);
+        s.attachBootstrap(info, info);
         return s;
     }
 

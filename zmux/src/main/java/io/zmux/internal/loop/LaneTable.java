@@ -32,7 +32,7 @@ public final class LaneTable {
         l = new StreamLanes(st, st.hasSend() ? new SendLane(driver, st) : null, st.hasRecv() ? new RecvLane(driver, st) : null);
         map.put(st, l);
         if (driver.finished()) {
-            if (l.send() != null) l.send().terminate(CoreException.session(driver.terminal()));
+            if (l.send() != null) l.send().sessionEnded(CoreException.session(driver.terminal()));
             if (l.recv() != null) l.recv().sessionEnded(CoreException.session(driver.terminal()));
         } else {
             if (l.recv() != null) l.recv().pump();
@@ -127,7 +127,7 @@ public final class LaneTable {
         if (l.send() != null) l.send().hostTakeover();
     }
 
-    /** Calls watcher (on the loop) with a failed end of st's receiving lane; null removes it. */
+    /** Watches the receiving lane's failure or final-offset changes, on its loop. Null removes the watcher. */
     public void watchRecvEnd(Stream st, Consumer<CoreException> watcher) {
         StreamLanes l = watcher == null ? map.get(st) : of(st);
         if (l != null && l.recv() != null) l.recv().watchEnd(watcher);
@@ -198,7 +198,7 @@ public final class LaneTable {
     /** The session ended: every lane ends with outcome; on the loop. */
     void sessionEnded(CoreException outcome) {
         for (StreamLanes l : map.values()) {
-            if (l.send() != null) l.send().terminate(outcome);
+            if (l.send() != null) l.send().sessionEnded(outcome);
             if (l.recv() != null) l.recv().sessionEnded(outcome);
         }
         leased = null;

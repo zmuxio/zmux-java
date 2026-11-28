@@ -1,20 +1,39 @@
 package io.zmux;
 
+import java.util.TreeMap;
+import java.util.concurrent.CompletionStage;
+import java.util.function.Predicate;
+import io.zmux.SpliceController.Rejection;
+import io.zmux.SpliceDirection.Drop;
+import io.zmux.internal.core.Session.DatagramAdmission;
+import io.zmux.internal.core.Session.DatagramMode;
+import io.zmux.internal.core.Session.DatagramOptions;
+import io.zmux.SpliceUnit.Origin;
+import io.zmux.SpliceUnit.Shape;
 import io.zmux.helper.Limiter;
 import io.zmux.helper.Permit;
+import io.zmux.internal.buffer.CarrierCharge;
 import io.zmux.internal.core.CoreException;
 import io.zmux.internal.core.Datagrams;
-import io.zmux.internal.core.ReadBuf;
+import io.zmux.internal.buffer.ReadBuf;
 import io.zmux.internal.core.StreamRecv;
+import io.zmux.internal.core.Time;
 import io.zmux.internal.loop.Operation;
 import io.zmux.internal.loop.RecvLane;
 import io.zmux.internal.loop.SendLane;
 import io.zmux.internal.loop.SerialCallbacks;
 import io.zmux.internal.wire.Capsule;
+import io.zmux.internal.wire.TransportError;
+import io.zmux.internal.spi.Spi;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -39,7 +58,7 @@ final class Splice {
     private final ZmuxStream a, b;
     private final SpliceOptions options;
     /** A packet relay (EXTENSIONS.md Section 12): the stream bytes are capsules, and datagrams may become capsules. */
-    private final boolean packets;
+    private final boolean packets, controlled;
     private final AtomicBoolean cancelled = new AtomicBoolean();
     /** The code of an abort through the splice's {@link SpliceAbort}; -1 for none (a cancelled stage resets with ZMUX_CANCELLED and stops with 0). */
     private volatile long cancelCode = -1;
@@ -68,26 +87,49 @@ final class Splice {
     /** The stream whose side was lost in the failure behind {@link #teardown}; null when the cause names no side. */
     private ZmuxStream teardownLost;
 
-    private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
+    private Splice(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets, boolean controlled) {
+        this.controlled = controlled;
         this.a = a; this.b = b; this.options = options; this.packets = packets;
-        forward = new Direction(a, b, options.aToB().orElse(null)); reverse = new Direction(b, a, options.bToA().orElse(null));
+        forward = new Direction(a, b, options.aToB().orElse(null), options.packetsAToB(),
+                SpliceUnit.Direction.A_TO_B, options.hooksAToB());
+        reverse = new Direction(b, a, options.bToA().orElse(null), options.packetsBToA(),
+                SpliceUnit.Direction.B_TO_A, options.hooksBToA());
     }
 
     static ZmuxFuture<SpliceResult> start(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
+        return start(a, b, options, packets, options.abort().orElse(null), false).result;
+    }
+
+    static SpliceController controlled(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets) {
+        SpliceAbort abort = options.abort().orElseGet(SpliceAbort::new);
+        Splice relay = start(a, b, options, packets, abort, true);
+        return new SpliceController(relay.forward.policy, relay.reverse.policy, abort, relay.result);
+    }
+
+    private static Splice start(ZmuxStream a, ZmuxStream b, SpliceOptions options, boolean packets, SpliceAbort abort, boolean controlled) {
         Objects.requireNonNull(a); Objects.requireNonNull(b); Objects.requireNonNull(options);
+        options.hooksAToB().validate(packets, options.limits().maxHookSteps());
+        options.hooksBToA().validate(packets, options.limits().maxHookSteps());
+        options.limits().validate(options.chunk(), options.maxPacketPayload(), options.maxOpaqueValue(), packets);
+        options.aToB().ifPresent(limiter -> validateBurst(limiter, options.limits()));
+        options.bToA().ifPresent(limiter -> validateBurst(limiter, options.limits()));
         if (a.session.driver == b.session.driver && a.st == b.st) throw new IllegalArgumentException("cannot splice a stream into itself");
         a.claimIo();
         try { b.claimIo(); } catch (RuntimeException error) { a.unclaimIo(); throw error; }
         try {
-            Splice splice = new Splice(a, b, options, packets);
-            SpliceAbort abort = options.abort().orElse(null);
+            Splice relay = new Splice(a, b, options, packets, controlled);
             if (abort != null) {
-                abort.attach(splice);
-                splice.result.whenComplete((r, e) -> abort.detach(splice));
+                abort.attach(relay);
+                relay.result.whenComplete((r, e) -> abort.detach(relay));
             }
-            splice.wake();
-            return splice.result;
+            relay.wake();
+            return relay;
         } catch (RuntimeException | Error failure) { a.unclaimIo(); b.unclaimIo(); throw failure; }
+    }
+
+    private static void validateBurst(Limiter limiter, SpliceLimits limits) {
+        if (limiter.maxBurstBytes() < limits.maxGroupBytes())
+            throw new IllegalArgumentException("direction limiter must declare sufficient maximum burst");
     }
 
     private void cancel() {
@@ -138,7 +180,12 @@ final class Splice {
         do {
             boolean f = forward.pump(), r = reverse.pump(); // both, every time
             more = f || r;
-            if (!dataDone && forward.streamDone() && reverse.streamDone()) { dataDone = true; more = true; }
+            if (!dataDone && forward.streamDone() && reverse.streamDone()) {
+                dataDone = true;
+                forward.policy.close();
+                reverse.policy.close();
+                more = true;
+            }
             if (dataDone && !cleaning && forward.datagramsDone() && reverse.datagramsDone()) { cleaning = true; release(); }
         } while (more);
     }
@@ -204,720 +251,1694 @@ final class Splice {
         if (c.buf() != null) c.buf().unref();
     }
 
-    // Stream path stages of a direction.
-    private static final int IDLE = 0, PEEK = 1, LIMIT = 2, READ = 3, HOLD = 4, END = 5, FINISH = 6,
-            RESET_QUERY = 7, RESET_SOURCE = 8, RESET_TARGET = 9, DRAIN = 10, RESET_SEND = 11, DONE = 12;
-    // What the target write in progress carries.
-    private static final int STREAM = 0, CONVERTED_HEAD = 1, CONVERTED_BODY = 2, CAPSULE_HEAD = 3;
-    // Datagram path stages.
-    private static final int DG_IDLE = 0, DG_RECEIVE = 1, DG_SEND = 2, DG_DONE = 3;
-    /** Rounds a direction advances before the other gets its turn. */
+    enum Disposition { SUBMITTED, DROPPED, DIRECTION_ENDED }
+
+    private enum Read { IDLE, READY, GRANT, CHUNK }
+    private enum End { OPEN, FINISH, RESET_QUERY, DRAIN, RESET_SEND, DONE }
+    private enum Write { DIRECT, HEADER, BODY, FALLBACK_FIRST, GROUP_HEADER, GROUP_BODY }
     private static final int ROUNDS = 16;
 
-    /**
-     * One direction: the stream path reads the source's receiving lane and writes the target's
-     * sending lane, the same lanes as application reads and writes, so forwarding needs no loop
-     * hand-off of its own; the datagram path receives the source's flow datagrams and sends them
-     * on the target's. Lane and session observers wake the splice when either side fails while
-     * the direction waits elsewhere (the limiter, the other lane); the drain then cancels what the
-     * direction awaits.
-     */
+    /** One owner sequences reliable admissions and writes. The datagram path progresses separately. */
+    private record Received(Datagrams.OwnedDatagram data, SplicePolicy.QueueCharge charge) {}
+
+    private record HookWork(SpliceGroup group, List<SpliceHook> hooks, Operation<?> resolving) {}
+
+    private record DatagramQuote(DatagramOptions options, DatagramAdmission admission) {}
+
     private final class Direction {
+        // Only the head can run. Its callback owns the group until it posts its return.
+        private final ArrayDeque<HookWork> reliableHooks = new ArrayDeque<>();
+        private final ArrayDeque<HookWork> datagramHooks = new ArrayDeque<>();
+
         private final ZmuxStream source, target;
         private final Limiter limiter;
+        private final DatagramSendOptions datagramOptions;
+        private final SpliceUnit.Direction direction;
+        private final SplicePolicy policy;
+        private final SpliceLimits limits = options.limits();
+        private final SpliceClock clock;
+        private final boolean directBytes, directRead;
+        private final SpliceMirror mirror;
+        private final SpliceSettlement settlement = new SpliceSettlement();
+        private final boolean trackSettlement;
+        private final java.util.EnumMap<Drop, Long> dropCounts = new java.util.EnumMap<>(Drop.class);
+        private final Measures measures = new Measures();
+        private final Capsule.Cursor cursor = packets
+                ? new Capsule.Cursor(options.maxPacketPayload(), options.maxOpaqueValue(), true) : null;
+        private final TreeMap<Long, SpliceGroup> reliable = new TreeMap<>();
+        private long fifoOrder, inputOrder;
+        private final ArrayList<SpliceGroup> datagrams = new ArrayList<>();
         private final AtomicReference<IOException> readFault = new AtomicReference<>(), writeFault = new AtomicReference<>();
-        /** A source reset arrived: the limiter wait in progress, or the next one, must look again, as the reset is read in order. */
         private final AtomicBoolean resetPoke = new AtomicBoolean();
-        // Context only from here on.
-        private Runnable closeRead, closeWrite;
-        private int stage = IDLE;
-        /** The stream path's operation in progress (a read, the finish, a reset step), null while none. */
-        private Operation<?> op;
-        /** The limiter wait in progress, null while none; cancelling it refunds a grant that arrives anyway. */
-        private CompletableFuture<Permit> ready;
-
-        /** The grant taken for the chunk being read, null while none; what the read does not fill is refunded. */
-        private Permit permit;
-        /** The granted bytes behind the chunk held or being written; what is not forwarded is refunded. */
-        private long chunkPaid;
-        /** The read in progress takes the end that a wait reported: anything else it returns is dropped. */
-        private boolean endRead;
-        /** A chunk taken from the source, waiting for the target (HOLD); the splice owns its reference. */
-        private StreamRecv.Chunk held;
-        /** The target write in progress (one at a time), what it carries, and its stream length. */
-        private Operation<?> write;
-        private int writeKind, writeLength;
-        /** The granted bytes behind the target write in progress. */
-        private long writePaid;
-        /** The reset code being forwarded. */
-        private long resetCode;
-        private int dgStage = DG_DONE;
-        private Operation<?> dgReceive;
-        private ZmuxFuture<Boolean> dgSend;
-        private Datagrams.StreamDatagram dgSending;
         private final Operation.Step receiveStep;
         private final Operation.Withdraw receiveWithdraw;
-        private long bytes, datagramBytes, drops, tooLarge, limited, asCapsules;
-        /** Packet relay: the capsule parser of the source's bytes. */
-        private final Capsule.Header capsule = new Capsule.Header();
-        /** Packet relay: the value bytes of the current capsule not yet read. */
-        private long capsuleRemaining;
-        /**
-         * Packet relay under a limiter: the header of the next capsule, read and parsed before its whole capsule is
-         * acquired, then written; empty at a capsule boundary. At most two variable-length integers.
-         */
-        private final ByteBuffer capsuleHeader = ByteBuffer.allocate(16);
-        /** Packet relay under a limiter: capsuleHeader holds a whole header, not yet granted. */
-        private boolean headerReady;
-        /** Packet relay under a limiter: the read in progress takes header bytes. */
-        private boolean headerRead;
-        /** Packet relay under a limiter: what the current capsule's grant still covers of its unread value bytes. */
-        private long capsulePaid;
-        /** Packet relay: datagrams too large for the target, waiting for a capsule boundary; at most {@link #CONVERTED}. */
-        private final ArrayDeque<Datagrams.StreamDatagram> converted = new ArrayDeque<>();
-        /** Packet relay: the converted datagram being written. */
-        private Datagrams.StreamDatagram converting;
-        /** Packet relay: the header of a converted datagram; one write at a time uses it. */
-        private final ByteBuffer convertedHeader = ByteBuffer.allocate(Capsule.MAX_DATAGRAM_HEADER);
-        /** Packet relay: the target can take no more capsules (finished or failed). */
-        private boolean targetClosed;
-        /** How the direction ended; null while running, when cancelled, or after a callback failure. */
-        private SpliceEnd end;
-        /** A limiter callback failed, and the splice completes with it. */
-        private IOException callbackFailure;
-        /** The stream path is in an operation on the target, so a failure it throws is the downstream side's. */
-        private boolean atTarget;
+        private final String sourceTag, targetTag;
 
-        Direction(ZmuxStream source, ZmuxStream target, Limiter limiter) {
-            this.source = source; this.target = target; this.limiter = limiter;
+        // The splice context owns everything below.
+        private Runnable closeRead, closeWrite;
+        private SplicePolicy.Configuration settings;
+        private Read readStage = Read.IDLE;
+        private End endStage = End.OPEN;
+        private Write writeKind;
+        private Operation<?> read, write, terminal, dgReceive, dgRoute, capacity;
+        private StreamRecv.Chunk packetPending;
+        private final SpliceGrants grants;
+        private SpliceGrants.Request grant;
+        private Permit inputPermit, memberPermit, writePermit;
+        private CarrierCharge memberCharge, writeCharge;
+        private long memberChargeOffset;
+        private StreamRecv.Chunk direct, batch;
+        private SplicePolicy.Configuration batchSettings;
+        private long directEnd;
+        private SpliceGroup active, dgActive, dgRouting;
+        private ZmuxFuture<DatagramAdmission> dgSend;
+        private SplicePayload collected;
+        private ByteBuffer compacted, readCopy;
+        private int readingSize;
+        private SplicePayload compactedPayload;
+        private List<SpliceHook> inputHooks = List.of();
+        private long inputAt, inputStart, inputGeneration, inputSequence, sequence;
+        private long resetCode, protectedBytes, targetBytes, bytes, datagramBytes, asCapsules;
+        private long timerAt = Time.NEVER;
+        private Runnable stopTimer;
+        private boolean fin, rawHeader, streaming, writingAtTarget, dgClosed, dgInputClosed, sourcePosition, discardingCapsule;
+        private long datagramLength;
+        private SpliceEnd end;
+        private IOException callbackFailure;
+
+        Direction(ZmuxStream source, ZmuxStream target, Limiter limiter, DatagramSendOptions datagramOptions,
+                  SpliceUnit.Direction direction, SpliceHooks hooks) {
+            this.source = source;
+            this.target = target;
+            clock = options.clock() == null ? SpliceClock.on(source.session.driver) : options.clock();
+            this.limiter = limiter;
+            grants = limiter == null ? null : new SpliceGrants(limiter, limits, context, wakeTask,
+                    settlement::unused);
+            this.datagramOptions = datagramOptions;
+            trackSettlement = controlled || limiter != null || !hooks.empty();
+            this.direction = direction;
+            mirror = (direction == SpliceUnit.Direction.A_TO_B ? options.mirrorAToB() : options.mirrorBToA()).orElse(null);
+            directRead = !controlled && hooks.empty() && mirror == null && (!packets || target.session.info().peerResetStreamAt());
+            directBytes = directRead && !packets && limiter == null;
+            sourceTag = direction == SpliceUnit.Direction.A_TO_B ? options.aTag() : options.bTag();
+            targetTag = direction == SpliceUnit.Direction.A_TO_B ? options.bTag() : options.aTag();
+            policy = new SplicePolicy(packets, options, hooks, controlled, () -> context.execute(this::commandsReady), settlement, direction,
+                    this::snapshot);
+            settings = policy.configuration();
             receiveStep = o -> {
                 if (cancelled.get()) throw CoreException.of(CoreException.Reason.INVALID);
-                Datagrams.StreamDatagram d = source.session.core.datagrams().receive(source.st);
-                if (d != null) return d;
+                Datagrams queue = source.session.core.datagrams();
+                if (controlled || !hooks.datagram().isEmpty() || mirror != null) {
+                    class Transfer implements Predicate<ReadBuf> {
+                        SplicePolicy.QueueCharge charge;
+                        @Override public boolean test(ReadBuf root) {
+                            charge = policy.reserveReceive(root);
+                            return charge != null;
+                        }
+                    }
+                    var transfer = new Transfer();
+                    try {
+                        var data = queue.transfer(source.st, source.session.core.receiving().loans(), transfer);
+                        if (data != null) return new Received(data, transfer.charge);
+                    } catch (CoreException declined) {
+                        if (declined.reason() != CoreException.Reason.CHUNK_BUDGET) throw declined;
+                        // The head is still owned by receive. Copy-read can consume it independently.
+                        return queue.receive(source.st);
+                    }
+                } else {
+                    var data = queue.receive(source.st);
+                    if (data != null) return data;
+                }
                 if (source.session.core.error() != null) throw CoreException.session(source.session.core.error());
-                source.session.core.datagrams().waitReceive(source.st, o); return Operation.PENDING;
+                source.session.core.datagrams().waitReceive(source.st, o);
+                return Operation.PENDING;
             };
             receiveWithdraw = o -> source.session.core.datagrams().cancelReceiveWait(source.st, o);
         }
 
         void begin() {
-            closeRead = source.session.driver.watchClosed(error -> fail(new SessionClosedException(Errors.session(error)), true));
-            closeWrite = target.session.driver.watchClosed(error -> fail(new SessionClosedException(Errors.session(error)), false));
-            source.session.driver.post(() -> source.session.driver.lanes.watchRecvEnd(source.st, this::sourceEnded));
-            target.session.driver.post(() -> target.session.driver.lanes.watchSendEnd(target.st, this::targetEnded));
-            dgStage = source.session.info().datagramFlows() ? DG_IDLE : DG_DONE;
+            closeRead = source.session.driver.watchClosed(error -> sourceFailed(new SessionClosedException(Errors.session(error))));
+            closeWrite = target.session.driver.watchClosed(error -> targetFailed(new SessionClosedException(Errors.session(error))));
+            source.session.driver.post(() -> source.session.driver.lanes.watchRecvEnd(source.st, this::sourceChanged));
+            target.session.driver.post(() -> target.session.driver.lanes.watchSendEnd(target.st, e -> targetFailed(ended(e))));
+            dgInputClosed = !source.session.info().datagramFlows() || !source.session.driver.info().localDatagrams();
         }
 
-        /** Records a side's failure (any thread); the drain cancels what the direction awaits. */
-        void fail(IOException error, boolean reading) {
-            if ((reading ? readFault : writeFault).compareAndSet(null, error)) wake();
-        }
-
-        /** The source's receiving lane ended with failure (on its loop). */
-        void sourceEnded(CoreException e) {
-            IOException error = ended(e);
-            // A reset is read in order, after the bytes before its Reliable Size; only a limiter wait must look again.
-            if (error instanceof StreamResetException) { resetPoke.set(true); wake(); return; }
-            fail(error, true);
-        }
-
-        /** The target's sending lane ended (on its loop). */
-        void targetEnded(CoreException e) { fail(ended(e), false); }
-
-        /**
-         * A lane's end as a failure, never an exception thrown on the loop: the reasons the API reports by
-         * throwing (a misuse, such as INVALID or TOO_LATE) end the direction like any other failure.
-         */
-        private static IOException ended(CoreException e) {
-            try {
-                return Errors.io(e);
-            } catch (RuntimeException misuse) {
-                return new IOException("splice side ended: " + e.reason(), misuse);
+        private void sourceChanged(CoreException error) {
+            if (error == null) {
+                if (source.in.reliableCut() != Long.MAX_VALUE) resetPoke.set(true);
+                wake();
+                return;
             }
+            IOException cause = ended(error);
+            if (cause instanceof StreamResetException) { resetPoke.set(true); wake(); }
+            else sourceFailed(cause);
         }
 
-        /** Whether the forwarding stages must stop waiting: a cancellation or either side's failure. */
-        private boolean interrupted() {
-            return cancelled.get() || writeFault.get() != null || readFault.get() != null;
+        private void sourceFailed(IOException error) { if (readFault.compareAndSet(null, error)) wake(); }
+        private void targetFailed(IOException error) { if (writeFault.compareAndSet(null, error)) wake(); }
+
+        private static IOException ended(CoreException error) {
+            try { return Errors.io(error); }
+            catch (RuntimeException misuse) { return new IOException("splice side ended: " + error.reason(), misuse); }
         }
 
-        private void check() throws IOException {
-            if (cancelled.get()) throw new InterruptedIOException("splice cancelled");
-            IOException error = writeFault.get(); if (error != null) throw error;
-            error = readFault.get(); if (error != null) throw error;
-        }
+        private void listen(Operation<?> op) { if (!op.onDone(wakeTask)) wake(); }
 
-        /** Cancels op when interrupt holds; whether op is decided. */
-        private static boolean awaited(Operation<?> o, boolean interrupt) {
-            if (interrupt) o.cancel();
-            return o.isDone();
-        }
+        boolean streamDone() { return endStage == End.DONE; }
+        boolean datagramsDone() { return dgClosed && dgSend == null && dgReceive == null && datagrams.isEmpty() && dgActive == null && dgRoute == null; }
 
-        private void listen(Operation<?> o) {
-            o.onDone(wakeTask); // false: decided already, and the running drain sees it
-        }
-
-        boolean streamDone() { return stage == DONE; }
-
-        boolean datagramsDone() { return dgStage == DG_DONE; }
-
-        /** Advances the direction a bounded number of rounds; whether anything moved. */
         boolean pump() {
             boolean progress = false;
             for (int round = 0; round < ROUNDS; round++) {
                 boolean moved;
                 try {
-                    boolean wrote = pumpTarget();
-                    moved = pumpStream() || wrote;
-                } catch (LimiterFailed failed) {
-                    stopForwarding(); limiterFailed();
+                    moved = advanceDirection();
+                } catch (SplicePayload.BudgetExceeded failure) {
+                    terminate(new SpliceEnd.HookFailed(java.util.Optional.of(failure)), TransportError.CANCELLED, false);
                     moved = true;
-                } catch (IOException error) {
-                    stopForwarding(); failed(error);
+                } catch (LimiterFailed failure) {
+                    measures.cause = failure.getCause();
+                    terminate(new SpliceEnd.LimiterFailed(), TransportError.CANCELLED, false);
                     moved = true;
-                } catch (RuntimeException error) {
-                    stopForwarding(); callbackFailed(new CallbackFailedException("relay callback failed", error)); finished();
+                } catch (IOException failure) {
+                    settle(failure);
                     moved = true;
                 }
-                moved |= pumpDatagrams();
+                if (!directBytes) setTimer();
                 if (!moved) return progress;
                 progress = true;
             }
             return true;
         }
 
-        // ---- stream path ----
-
-        private boolean pumpStream() throws IOException {
-            return switch (stage) {
-                case IDLE -> {
-                    check();
-                    if (limiter != null) { op = source.in.awaitReadableAsync(Long.MAX_VALUE); listen(op); stage = PEEK; }
-                    else startRead(sized(options.chunk()));
-                    yield true;
+        private boolean advanceDirection() throws IOException {
+            if (endStage != End.DONE) {
+                if ((endStage == End.RESET_SEND || endStage == End.FINISH) && terminal.isDone()) return pumpEnd();
+                checkFaults();
+            }
+            boolean moved = false;
+            if (endStage == End.OPEN) {
+                if (resetPoke.getAndSet(false)) moved |= observeReset();
+                if (directBytes) moved |= pumpDirectBytes();
+                else {
+                    if (!reliable.isEmpty() && expireReliable()) return true;
+                    moved |= pumpWriter();
+                    moved |= pumpReader();
                 }
-                case PEEK -> {
-                    if (!awaited(op, interrupted())) yield false;
-                    Operation<?> w = op; op = null;
-                    Object r = outcome(w);
-                    if (!ok(r)) throw failure(r);
-                    long available = RecvLane.readable(w);
-                    if (available < 0) { endRead = true; startRead(1); yield true; }
-                    if (available == 0) { stage = IDLE; yield true; }
-                    int n = sized((int) Math.min(options.chunk(), available));
-                    if (packets) {
-                        // Each whole capsule is acquired at once, (n, n), from its header; its value bytes then flow.
-                        if (capsuleRemaining > 0) { startRead((int) Math.min(n, capsuleRemaining)); yield true; }
-                        headerRead = true;
-                        startRead(Math.min(n, headerNeed()));
-                        yield true;
+                if (fin && !hasReliable() && read == null && endStage == End.OPEN) {
+                    terminal = target.out.finishAsync(Long.MAX_VALUE);
+                    listen(terminal);
+                    endStage = End.FINISH;
+                    moved = true;
+                }
+            } else if (endStage != End.DONE) moved |= pumpEnd();
+            if (controlled) {
+                boolean atBoundary = write == null && (!packets || targetBytes == protectedBytes);
+                policy.confirmPause(atBoundary && dgSend == null);
+            }
+            moved |= pumpDatagrams();
+            return moved;
+        }
+
+        private void commandsReady() {
+            try {
+                do {
+                    if (endStage != End.DONE) checkFaults();
+                } while (pumpControl());
+            } catch (IOException fault) { settle(fault); }
+            catch (SplicePayload.BudgetExceeded failure) {
+                terminate(new SpliceEnd.HookFailed(Optional.of(failure)), TransportError.CANCELLED, false);
+            }
+            wake();
+        }
+
+        private boolean pumpControl() {
+            SplicePolicy.Command command = policy.poll();
+            if (command == null) return false;
+            if (command instanceof SplicePolicy.Inject injection) admitInjection(injection);
+            else {
+                policy.apply(command);
+                settings = policy.configuration();
+                if (command instanceof SplicePolicy.Pause) {
+                    if (dgReceive != null) {
+                        dgReceive.cancel();
+                        Object received = outcome(dgReceive);
+                        dgReceive = null;
+                        admitReceivedDatagram(received);
                     }
-                    // Nothing was consumed while the source was idle: the grant is taken only for bytes already readable.
-                    waitGrant(1, n);
-                    yield true;
-                }
-                case LIMIT -> {
-                    boolean poked = resetPoke.getAndSet(false); // Always consumed: a poke left set would repeat the next wait.
-                    CompletableFuture<Permit> f = ready;
-                    if (!f.isDone() && !poked && !interrupted()) yield false;
-                    ready = null;
-                    if (poked || !f.isDone()) {
-                        io.zmux.internal.spi.Spi.abandon(f); check();
-                        // A source reset: read again, up to its end; a held header keeps its capsule's bytes to come.
-                        if (headerReady) waitGrant(capsuleHeader.position() + capsuleRemaining, capsuleHeader.position() + capsuleRemaining);
-                        else stage = IDLE;
-                        yield true;
+                    if (readStage == Read.GRANT) {
+                        grant.revoke();
+                        grant = null;
+                        readStage = Read.IDLE;
                     }
-                    if (interrupted()) { io.zmux.internal.spi.Spi.abandon(f); check(); } // a cancellation or a side failure wins over the grant
-                    Permit granted = granted(f);
-                    check();
-                    if (headerReady) { writeHeader(granted); yield true; }
-                    permit = granted;
-                    startRead((int) permit.size());
-                    yield true;
+                    if (outputGrant != null) { outputGrant.revoke(); outputGrant = null; }
                 }
-                case READ -> {
-                    if (!awaited(op, interrupted())) yield false;
-                    Object r = outcome(op); op = null;
-                    if (r == StreamRecv.FIN) { endRead = false; headerRead = false; giveBack(); reachedEnd(); yield true; }
-                    if (r instanceof StreamRecv.Chunk c) {
-                        if (endRead) { endRead = false; unref(c); giveBack(); stage = IDLE; yield true; }
-                        if (headerRead) { headerRead = false; takeHeader(c); yield true; }
-                        int length = c.data().remaining();
-                        if (permit != null) { chunkPaid = Math.min(length, permit.size()); permit.consume(length); }
-                        else if (packets && limiter != null) { chunkPaid = Math.min(length, capsulePaid); capsulePaid -= chunkPaid; }
-                        else chunkPaid = 0;
-                        giveBack(); // the part of the grant the read did not fill; the chunk's part is forwarded or refunded
-                        held = c; stage = HOLD;
-                        yield true;
-                    }
-                    throw failure(r);
-                }
-                case HOLD -> {
-                    if (held != null && interrupted()) check(); // waiting for the target, not yet written
-                    yield false;
-                }
-                case END -> {
-                    check();
-                    if (write != null || (packets && !converted.isEmpty() && !targetClosed)) yield false; // the waiting datagrams go first
-                    if (packets) targetClosed = true; // later ones are dropped
-                    atTarget = true;
-                    op = target.out.finishAsync(Long.MAX_VALUE); listen(op);
-                    stage = FINISH;
-                    yield true;
-                }
-                case FINISH -> {
-                    if (!awaited(op, interrupted())) yield false;
-                    Object r = outcome(op); op = null;
-                    if (!ok(r)) throw failure(r);
-                    atTarget = false;
-                    end = new SpliceEnd.Finished(); finished();
-                    yield true;
-                }
-                case RESET_QUERY, RESET_SOURCE, RESET_TARGET, DRAIN, RESET_SEND -> pumpReset();
-                default -> false;
-            };
+            }
+            return true;
         }
 
-        /** The bytes to read now: with converted datagrams waiting, up to the next capsule boundary, where they go in. */
-        private int sized(int n) {
-            if (packets && !converted.isEmpty()) return (int) Math.min(n, capsuleRemaining > 0 ? capsuleRemaining : capsule.idle() ? n : 1);
-            return n;
-        }
-
-        private void startRead(int n) {
-            op = source.in.readAsync(null, n, Long.MAX_VALUE); listen(op);
-            stage = READ;
-        }
-
-        /** Waits for a grant of min through max bytes from the direction's limiter (stage LIMIT). */
-        private void waitGrant(long min, long max) {
-            ready = Permit.acquire(limiter, min, max).toCompletableFuture();
-            stage = LIMIT;
-            ready.whenComplete(wakeOnComplete);
-        }
-
-        /** The decided grant; a failing limiter ends the direction. */
-        private static Permit granted(CompletableFuture<Permit> f) throws LimiterFailed {
-            try { return f.join(); }
-            catch (CompletionException | CancellationException error) {
-                throw new LimiterFailed(error instanceof CompletionException && error.getCause() != null ? error.getCause() : error);
+        private void admitInjection(SplicePolicy.Inject injection) {
+            if (fin || source.in.finKnown() || source.in.reliableCut() != Long.MAX_VALUE || endStage != End.OPEN) {
+                policy.rejected(injection, Rejection.CLOSED);
+            } else if (settings.paused()) {
+                policy.rejected(injection, Rejection.PAUSED);
+            } else {
+                Shape shape = injection.shape;
+                SpliceGroup group = group(shape, injection.type, injection.context, Origin.INJECTED,
+                        ++sequence, settings.generation(), -1, -1, clock.now(),
+                        SplicePayload.of(new SplicePayload.Budget(limits), injection.take()), injection, null);
+                long cut = source.in.reliableCut();
+                if (source.in.finKnown() || cut != Long.MAX_VALUE) {
+                    group.close();
+                    policy.rejected(injection, Rejection.CLOSED);
+                    return;
+                }
+                measures.payloadCopyBytes += group.output.getFirst().length();
+                policy.accepted(group);
+                transform(group, settings.hooks().forShape(shape));
             }
         }
 
-        /** Packet relay under a limiter: the header bytes still missing, 0 once Type and Length are whole (1 while a length is unknown). */
-        private int headerNeed() {
-            int have = capsuleHeader.position();
-            if (have == 0) return 1;
-            int first = 1 << ((capsuleHeader.get(0) & 0xff) >>> 6);
-            if (have < first) return first - have;
-            if (have == first) return 1;
-            return first + (1 << ((capsuleHeader.get(first) & 0xff) >>> 6)) - have;
+        private void checkFaults() throws IOException {
+            if (cancelled.get()) throw new InterruptedIOException("splice cancelled");
+            IOException fault = writeFault.get();
+            if (fault == null && !(end instanceof SpliceEnd.PacketError)) fault = readFault.get();
+            if (fault != null) throw fault;
         }
 
-        /** Packet relay under a limiter: keeps header bytes read; a whole header waits for its capsule's grant. */
-        private void takeHeader(StreamRecv.Chunk c) {
-            ByteBuffer b = c.data();
-            capsuleHeader.put(b.duplicate());
-            unref(c);
-            if (headerNeed() > 0) { stage = IDLE; return; }
-            ByteBuffer parse = capsuleHeader.duplicate().flip();
-            if (!capsule.feed(parse)) throw new AssertionError("capsule header");
-            capsuleRemaining = capsule.length();
-            headerReady = true;
-            long total = capsuleHeader.position() + capsuleRemaining;
-            waitGrant(total, total);
-        }
-
-        /** Packet relay under a limiter: the capsule is granted, its header goes to the target first. */
-        private void writeHeader(Permit granted) {
-            long g = granted.size();
-            int length = capsuleHeader.position();
-            granted.consume(g); // the grant stays with the capsule: refunded only for bytes not forwarded
-            headerReady = false;
-            capsulePaid = Math.max(0, g - length);
-            atTarget = true;
-            writeKind = CAPSULE_HEAD; writeLength = length; writePaid = Math.min(g, length);
-            capsuleHeader.flip();
-            write = target.out.writeAsync(capsuleHeader, null, null, Long.MAX_VALUE);
-            listen(write);
-            stage = HOLD; // the next read follows the header's write
-        }
-
-        /** FIN read upstream. */
-        private void reachedEnd() {
-            if (packets && !atBoundary()) { end = truncated(); finished(); return; }
-            stage = END;
-        }
-
-        // ---- the target's writes: forwarded chunks and converted datagrams, one at a time ----
-
-        private boolean pumpTarget() throws IOException {
-            if (write != null) {
-                if (writeKind == STREAM ? interrupted() : cancelled.get()) write.cancel();
-                if (!write.isDone()) return false;
-                written(false);
+        private boolean observeReset() {
+            long cut = source.in.reliableCut();
+            reliable.values().removeIf(group -> {
+                if (group.sourceEnd >= 0 && group.sourceEnd <= cut) return false;
+                failReliable(group);
                 return true;
+            });
+            if (active != null && ((active.sourceEnd < 0 && !active.memberStarted()) || active.sourceEnd > cut)) {
+                releaseWrite();
+                failReliable(active);
+                active = null;
             }
-            if (packets && !converted.isEmpty() && atBoundary() && stage != DONE) {
-                if (targetClosed) return false; // counted as dropped in the result
-                startConverted(converted.remove()); // non-empty: checked above
-                return true;
+            if (packets && sourcePosition && (inputStart >= cut || (cursor.headerReady()
+                    && parsedOffset() + cursor.remaining() > cut))) {
+                discardCapsuleTail();
+            } else if (write != null && writeKind == Write.DIRECT && directEnd > cut) {
+                releaseWrite();
             }
-            if (stage == HOLD && held != null && !interrupted()) {
-                StreamRecv.Chunk c = held; held = null;
-                int length = c.data().remaining();
-                if (packets) scan(c.data().duplicate());
-                ReadBuf buf = c.buf() != null ? c.buf() : new ReadBuf(c.data(), null);
-                atTarget = true;
-                writeKind = STREAM; writeLength = length; writePaid = chunkPaid; chunkPaid = 0;
-                write = target.out.writeAsync(null, c.data(), buf, Long.MAX_VALUE); // takes the reference over
-                listen(write);
+            if (readStage == Read.GRANT) {
+                grant.revoke();
+                grant = null;
+                readStage = Read.IDLE;
                 return true;
             }
             return false;
         }
 
-        /** Accounts for the decided target write; a failed forwarding write throws unless settling. */
-        private void written(boolean settling) throws IOException {
-            Operation<?> w = write; write = null;
-            Object r = outcome(w);
-            switch (writeKind) {
-                case STREAM -> {
-                    if (ok(r)) {
-                        bytes += writeLength;
-                        atTarget = false;
-                        if (!settling) stage = IDLE;
-                    } else {
-                        long forwarded = r == CANCELLED ? SendLane.written(w) : 0;
-                        bytes += forwarded;
-                        refund(writePaid - Math.min(writePaid, forwarded));
-                        if (!settling) throw failure(r);
+        private boolean hasReliable() {
+            return !reliableHooks.isEmpty() || direct != null || batch != null || sourcePosition || write != null || packetPending != null || active != null || !reliable.isEmpty();
+        }
+
+        /** The unmetered static byte path has one read or one write in flight. */
+        private boolean pumpDirectBytes() throws IOException {
+            if (write != null) {
+                if (!write.isDone()) return false;
+                finishWrite(false);
+                return true;
+            }
+            if (fin) return false;
+            if (read == null) {
+                startRead(options.chunk());
+                return true;
+            }
+            if (!read.isDone()) return false;
+            Object value = takeRead();
+            if (value == Operation.PENDING) return true;
+            if (value == StreamRecv.FIN) fin = true;
+            else if (value instanceof StreamRecv.Chunk chunk) {
+                directEnd = source.in.readOffset();
+                long suffix = directEnd - source.in.reliableCut();
+                if (suffix >= chunk.data().remaining()) unref(chunk);
+                else {
+                    if (suffix > 0) chunk.data().limit(chunk.data().limit() - (int) suffix);
+                    startWrite(chunk, Write.DIRECT);
+                }
+            } else throw failure(value);
+            return true;
+        }
+
+        private Object takeRead() {
+            Object result = outcome(read);
+            read = null;
+            readStage = Read.IDLE;
+            if (result instanceof CoreException e && e.reason() == CoreException.Reason.CHUNK_BUDGET) {
+                // A declined loan has not advanced the lane. Copy directly into a bounded buffer.
+                if (collected != null) collected.budget().requireRoom(readingSize);
+                readCopy = ByteBuffer.allocate(readingSize);
+                read = source.in.readAsync(readCopy, readingSize, Long.MAX_VALUE);
+                listen(read);
+                readStage = Read.CHUNK;
+                return Operation.PENDING;
+            }
+            if (readCopy != null) {
+                if (result instanceof Integer count) {
+                    if (count < 0) result = StreamRecv.FIN;
+                    else {
+                        measures.payloadCopyBytes += count;
+                        ByteBuffer data = readCopy.flip();
+                        result = new StreamRecv.Chunk(data, new ReadBuf(data, null), false);
                     }
                 }
-                case CAPSULE_HEAD -> {
-                    capsuleHeader.clear();
-                    if (ok(r)) {
-                        bytes += writeLength;
-                        atTarget = false;
-                        if (!settling) stage = IDLE;
-                    } else {
-                        refund(writePaid);
-                        if (!settling) throw failure(r);
+                readCopy = null;
+            }
+            return result;
+        }
+
+        private boolean pumpReader() throws IOException {
+            if (fin || endStage != End.OPEN || !reliableHooks.isEmpty()) return false;
+            if (packets && sourcePosition && !streaming && (!inputHooks.isEmpty() || mirror != null || !target.session.info().peerResetStreamAt())
+                    && clock.now() >= assemblyDeadline()) {
+                terminate(new SpliceEnd.WaitTimeout(), TransportError.CANCELLED, false);
+                return true;
+            }
+            if (readStage == Read.CHUNK) {
+                if (!read.isDone()) return false;
+                Object result = takeRead();
+                if (result == Operation.PENDING) return true;
+                if (result == StreamRecv.FIN) {
+                    closeInputPermit();
+                    if (sourcePosition && packets) packetError();
+                    else {
+                        sourcePosition = false;
+                        fin = true;
                     }
-                }
-                case CONVERTED_HEAD -> {
-                    if (ok(r) && !settling) {
-                        writeKind = CONVERTED_BODY;
-                        write = target.out.writeAsync(ByteBuffer.wrap(converting.payload()), null, null, Long.MAX_VALUE);
-                        listen(write);
+                } else if (result instanceof StreamRecv.Chunk chunk) {
+                    if (discardingCapsule) unref(chunk);
+                    else if (packets) {
+                        batch = chunk;
+                        batchSettings = controlled ? readBoundary() : settings;
                     } else {
-                        // The target failed or the splice ends: the stream path reports it. A capsule cut short can be followed by nothing.
-                        if (ok(r) || r == CANCELLED) targetClosed = true;
-                        refund(converting.payload().length);
-                        converting = null; drops++; // not for its size: the capsule could not be written
+                        var observed = controlled ? readBoundary() : settings;
+                        if (!observed.hooks().stream().isEmpty() || mirror != null)
+                            beginInput(observed, source.in.readOffset() - chunk.data().remaining());
+                        receiveBytes(chunk);
                     }
+                } else {
+                    closeInputPermit();
+                    throw failure(result);
                 }
-                default -> {
-                    int n = converting.payload().length;
-                    converting = null;
-                    if (ok(r)) { datagramBytes += n; asCapsules++; }
-                    else { targetClosed = true; refund(n); drops++; }
+                return true;
+            }
+            if (direct != null || write != null || packetPending != null || active != null) return false;
+            boolean paused = settings.paused() && !streaming && !discardingCapsule;
+            if (readStage == Read.GRANT) {
+                if (paused || !grant.done()) return false;
+                var request = grant;
+                grant = null;
+                inputPermit = granted(request);
+                startRead((int) inputPermit.size());
+                return true;
+            }
+            if (rawHeader || (!sourcePosition && !reliable.isEmpty())) return false;
+            if (batch != null) {
+                if (paused) return false;
+                consumeBatch();
+                return true;
+            }
+            if (readStage == Read.IDLE) {
+                if (paused && source.in.readableNow() > 0) return false;
+                if (grants != null && !grants.reliableAvailable() && !packets && settings.hooks().stream().isEmpty()
+                        && mirror == null) return false;
+                read = source.in.awaitReadableAsync(Long.MAX_VALUE);
+                listen(read);
+                readStage = Read.READY;
+                return true;
+            }
+            if (!read.isDone()) return false;
+            Object result = outcome(read);
+            if (!ok(result)) throw failure(result);
+            long available = RecvLane.readable(read);
+            if (paused && available > 0) {
+                read = null;
+                readStage = Read.IDLE;
+                return true;
+            }
+            read = null;
+            readStage = Read.IDLE;
+            if (available <= 0) { startRead(1); return true; }
+            int count = (int) Math.min(options.chunk(), available);
+            if (discardingCapsule) { startRead(count); return true; }
+            if (!packets && limiter != null && settings.hooks().stream().isEmpty() && mirror == null) {
+                grant = grants.request(1, count, false);
+                if (grant == null) return false;
+                readStage = Read.GRANT;
+            } else startRead(count);
+            return true;
+        }
+
+        private void startRead(int count) {
+            readingSize = count;
+            if (directRead) {
+                read = source.in.readAsync(null, count, Long.MAX_VALUE);
+            } else {
+                // The group cannot change while its next source read is pending.
+                var budget = collected == null ? null : collected.budget();
+                read = source.in.readAsync(null, count, Long.MAX_VALUE, root -> budget == null
+                        ? root.capacity() <= limits.maxBackingBytes() : budget.fits(root.root(), root.capacity()));
+            }
+            listen(read);
+            readStage = Read.CHUNK;
+        }
+
+        private long parsedOffset() {
+            return source.in.readOffset() - (batch == null ? 0 : batch.data().remaining());
+        }
+
+        private void consumeBatch() {
+            long offset = parsedOffset();
+            long room = source.in.reliableCut() - offset;
+            if (room <= 0 || discardingCapsule) {
+                unref(batch);
+                batch = null;
+                return;
+            }
+            if (!sourcePosition) beginInput(batchSettings, offset);
+            ByteBuffer data = batch.data();
+            int need = cursor.headerReady() ? cursor.remaining() : cursor.headerNeed();
+            int n = (int) Math.min(room, Math.min(need, data.remaining()));
+            ByteBuffer part = data.slice(data.position(), n);
+            data.position(data.position() + n);
+            ReadBuf owner = batch.buf();
+            if (!data.hasRemaining()) batch = null;
+            else if (owner != null) owner.ref();
+            receiveCapsule(new StreamRecv.Chunk(part, owner, false));
+        }
+
+        private SplicePolicy.Configuration readBoundary() {
+            if (options.probe != null) options.probe.accept(direction, SpliceOptions.Work.BOUNDARY_READ);
+            return policy.configuration();
+        }
+
+        private void beginInput(SplicePolicy.Configuration observed, long offset) {
+            sourcePosition = true;
+            inputStart = offset;
+            inputHooks = observed.hooks().forShape(packets ? Shape.CAPSULE : Shape.STREAM);
+            if (inputHooks.isEmpty() && mirror == null && target.session.info().peerResetStreamAt()) return;
+            inputOrder = ++fifoOrder;
+            inputAt = clock.now();
+            inputGeneration = observed.generation();
+            inputSequence = ++sequence;
+        }
+
+        private long assemblyDeadline() { return limits.deadline(inputAt); }
+
+        private void receiveBytes(StreamRecv.Chunk chunk) {
+            if (inputHooks.isEmpty() && mirror == null) {
+                direct = chunk;
+                directEnd = parsedOffset();
+                sourcePosition = false;
+                return;
+            }
+            var backing = new SplicePayload.Budget(limits);
+            SplicePayload payload = new SplicePayload(backing);
+            try {
+                if (!payload.append(chunk)) {
+                    byte[] copy = backing.allocate(chunk.data().remaining());
+                    chunk.data().duplicate().get(copy);
+                    measures.payloadCopyBytes += copy.length;
+                    payload = SplicePayload.of(backing, copy);
+                }
+            } finally {
+                unref(chunk);
+            }
+            SpliceGroup group = group(Shape.STREAM, -1, -1, Origin.FORWARDED, inputSequence,
+                    inputGeneration, inputStart, parsedOffset(), inputAt, payload, null, null);
+            sourcePosition = false;
+            transform(group, inputHooks);
+            inputHooks = List.of();
+        }
+
+        private void receiveCapsule(StreamRecv.Chunk chunk) {
+            int size = chunk.data().remaining();
+            if (!cursor.headerReady()) {
+                try {
+                    if (!cursor.readHeader(chunk.data())) { packetError(); return; }
+                } finally {
+                    unref(chunk);
+                }
+                if (cursor.headerReady()) {
+                    if (inputHooks.isEmpty() && mirror == null && target.session.info().peerResetStreamAt()) rawHeader = true;
+                    else if (cursor.remaining() == 0) finishCollection();
+                }
+                return;
+            }
+            cursor.readValue(size);
+            if (streaming) {
+                direct = chunk;
+                directEnd = parsedOffset();
+                return;
+            }
+            try {
+                if (collected == null) collected = new SplicePayload(new SplicePayload.Budget(limits));
+                if (compacted == null && (collected.segments() >= limits.maxSegments() || !collected.append(chunk))) {
+                    var backing = collected.budget();
+                    byte[] copy = backing.allocate(collected.length() + size + cursor.remaining());
+                    compactedPayload = SplicePayload.of(backing, copy);
+                    compacted = ByteBuffer.wrap(copy);
+                    collected.copyTo(0, compacted, collected.length());
+                    measures.payloadCopyBytes += collected.length();
+                    collected.close();
+                }
+                if (compacted != null) {
+                    compacted.put(chunk.data().duplicate());
+                    measures.payloadCopyBytes += size;
+                }
+            } finally {
+                unref(chunk);
+            }
+            if (cursor.remaining() == 0) finishCollection();
+        }
+
+        private void finishCollection() {
+            SplicePayload payload = compactedPayload != null ? compactedPayload :
+                    collected != null ? collected : new SplicePayload(new SplicePayload.Budget(limits));
+            payload.budget().requireRoom(cursor.headerSize());
+            byte[] header = new byte[cursor.headerSize()];
+            cursor.header().get(header);
+            SpliceGroup group = group(Shape.CAPSULE, cursor.type(), cursor.context(), Origin.FORWARDED, inputSequence,
+                    inputGeneration, inputStart, parsedOffset(), inputAt, payload, null, ByteBuffer.wrap(header));
+            collected = null;
+            compacted = null;
+            compactedPayload = null;
+            cursor.clear();
+            sourcePosition = false;
+            transform(group, inputHooks);
+            inputHooks = List.of();
+        }
+
+        private SpliceGroup group(Shape shape, long type, long context, Origin origin, long seq, long generation,
+                                  long offset, long sourceEnd, long at, SplicePayload payload, SplicePolicy.Inject injection,
+                                  ByteBuffer originalHeader) {
+            var meta = new SpliceUnit.Metadata(direction, shape, origin, seq, generation,
+                    offset < 0 ? OptionalLong.empty() : optional(source.in.applicationOffset(offset)),
+                    optional(source.st.idSet() ? source.st.id() : -1), optional(target.st.idSet() ? target.st.id() : -1),
+                    optional(type), optional(context), origin == Origin.FORWARDED && source.isReplayable(),
+                    source.st.local() ? Preamble.EMPTY : source.preamble(), sourceTag, targetTag);
+            long deadline = limits.deadline(at);
+            var group = new SpliceGroup(meta, payload, at, sourceEnd, deadline, injection, originalHeader);
+            group.probe = options.probe;
+            if (shape == Shape.DATAGRAM) group.targetAt = target.session.driver.now();
+            else group.fifoOrder = injection == null ? inputOrder : ++fifoOrder;
+            return group;
+        }
+
+        private static DatagramOptions targetDatagramOptions(DatagramOptions resolved, long deadline, long targetAt, long here) {
+            return deadline == Time.NEVER ? resolved : resolved.expiresAt(Time.add(targetAt, Math.max(0, Time.sub(deadline, here))));
+        }
+
+        private static long datagramExpiry(long cap, long helperAt, long targetAt, DatagramOptions resolved) {
+            if (resolved.deadline() == Time.NEVER) return cap;
+            return Math.min(cap, Time.add(helperAt, Math.max(0, Time.sub(resolved.deadline(), targetAt))));
+        }
+
+        private static OptionalLong optional(long value) { return value < 0 ? OptionalLong.empty() : OptionalLong.of(value); }
+
+        private void transform(SpliceGroup group, List<SpliceHook> hooks) {
+            measures.inputUnits++;
+            measures.inputBytes += group.output.getFirst().length();
+            mirror(group, SpliceMirror.Phase.INPUT, 0);
+            var queue = group.datagram() ? datagramHooks : reliableHooks;
+            if (hooks.isEmpty() && queue.isEmpty() && (!group.datagram() || immediatelyRoutable(group))) {
+                transformed(group, null);
+                return;
+            }
+            Operation<?> resolving = group.datagram() ? onLoop(target, ignored ->
+                    target.session.core.resolveDatagram(target.st, datagramOptions, group.targetAt)) : null;
+            queue.addLast(new HookWork(group, hooks, resolving));
+            if (queue.size() == 1) startCallback(queue);
+        }
+
+        private boolean immediatelyRoutable(SpliceGroup group) {
+            return group.injection == null && !settings.paused() && group.ready(clock.now()) && dgRoute == null && dgSend == null;
+        }
+
+        private void startCallback(ArrayDeque<HookWork> queue) {
+            HookWork work = queue.getFirst();
+            if (work.resolving() == null) {
+                invokeCallback(queue, work);
+                return;
+            }
+            Runnable ready = () -> context.execute(() -> {
+                // The queued hook owns its group until invocation completes or the direction ends.
+                //noinspection resource
+                var group = work.group();
+                Object result = outcome(work.resolving());
+                if (result instanceof DatagramOptions resolved) {
+                    group.options = resolved;
+                    group.expiry = datagramExpiry(group.expiry, group.admittedAt, group.targetAt, resolved);
+                    if (clock.now() >= group.expiry) group.dropReason = Drop.DROPPED_EXPIRED;
+                } else group.dropReason = result instanceof Throwable failure ? datagramDrop(failure) : Drop.DROPPED_FLOW_CLOSED;
+                invokeCallback(queue, work);
+            });
+            if (!work.resolving().onDone(ready)) ready.run();
+        }
+
+        private void invokeCallback(ArrayDeque<HookWork> queue, HookWork work) {
+            var group = work.group();
+            if (work.hooks().isEmpty() || group.dropReason != null || (group.datagram() && dgClosed)) {
+                finishCallback(queue, group, null);
+                return;
+            }
+            int max = policy.maxItem(group.metadata.shape(), group.metadata.capsuleType().orElse(-1));
+            Thread.ofVirtual().name("zmux-splice-hook").start(() -> {
+                SpliceEnd result;
+                try { result = group.transform(work.hooks(), limits, max, wakeTask); }
+                catch (Throwable failure) { result = new SpliceEnd.HookFailed(Optional.of(failure)); }
+                SpliceEnd decision = result;
+                context.execute(() -> finishCallback(queue, group, decision));
+            });
+        }
+
+        private void finishCallback(ArrayDeque<HookWork> queue, SpliceGroup group, SpliceEnd decision) {
+            queue.removeFirst();
+            try { transformed(group, decision); }
+            catch (SplicePayload.BudgetExceeded failure) {
+                terminate(new SpliceEnd.HookFailed(Optional.of(failure)), TransportError.CANCELLED, false);
+            }
+            if (!queue.isEmpty()) startCallback(queue);
+            wake();
+        }
+
+        private void transformed(SpliceGroup group, SpliceEnd decision) {
+            measures.payloadCopyBytes += group.copied;
+            measures.hookCalls += group.hookCalls;
+            measures.replacements += group.replacements;
+            if (cancelled.get() || writeFault.get() != null || readFault.get() != null
+                    || (group.datagram() ? dgClosed : endStage != End.OPEN)
+                    || group.sourceEnd > source.in.reliableCut()) {
+                dispose(group, Disposition.DIRECTION_ENDED);
+                return;
+            }
+            if (group.dropReason != null) {
+                discard(group, group.dropReason);
+                return;
+            }
+            if (decision != null) {
+                if (decision instanceof SpliceEnd.HookFailed(var cause)) measures.cause = cause.orElse(null);
+                dispose(group, Disposition.DIRECTION_ENDED);
+                long code = decision instanceof SpliceEnd.HookReset(var hookCode) ? hookCode : TransportError.CANCELLED;
+                terminate(decision, code, false);
+                return;
+            }
+            if (group.output.isEmpty()) {
+                discard(group, Drop.DROPPED_HOOK);
+                return;
+            }
+            if (!group.datagram()) {
+                try {
+                    group.prepare(group.capsule, limits);
+                    if (group.capsule && group.originalHeader == null) measures.encodeBytes += group.encodingCapacity;
+                }
+                catch (SplicePayload.BudgetExceeded failure) {
+                    dispose(group, Disposition.DIRECTION_ENDED);
+                    throw failure;
                 }
             }
+            if (!group.ready(clock.now())) group.waitingSince = clock.now();
+            if (group.datagram() && immediatelyRoutable(group)) {
+                chooseDatagramRoute(group);
+            } else if ((group.datagram() || group.injection != null) && !policy.queue(group)) {
+                discard(group, Drop.DROPPED_QUEUE_FULL);
+            } else if (group.datagram()) {
+                datagrams.add(group);
+            } else reliable.put(group.fifoOrder, group);
         }
 
-        /** Refunds n bytes granted and not forwarded to the limiter. */
-        private void refund(long n) {
-            if (limiter != null) Permit.refund(limiter, n);
+        private void mirror(SpliceGroup group, SpliceMirror.Phase phase, int index) {
+            if (mirror == null) return;
+            int copied = mirror.publish(group.metadata, phase, index, group.output.get(index));
+            if (copied < 0) measures.mirrorDropped++;
+            else measures.mirrorCopyBytes += copied;
         }
 
-        /** Gives back what the chunk in flight still holds. */
-        private void giveBack() {
-            if (permit != null) { permit.close(); permit = null; }
+        private void finishWait(SpliceGroup group) {
+            if (group.waitingSince < 0) return;
+            measures.waitNanos += clock.now() - group.waitingSince;
+            group.waitingSince = -1;
         }
 
-        /** Writes a waiting datagram as a DATAGRAM capsule, at a capsule boundary. */
-        private void startConverted(Datagrams.StreamDatagram d) {
-            converting = d;
-            convertedHeader.clear();
-            Capsule.putDatagramHeader(convertedHeader, d.context(), d.payload().length);
-            convertedHeader.flip();
-            writeKind = CONVERTED_HEAD;
-            write = target.out.writeAsync(convertedHeader, null, null, Long.MAX_VALUE);
+        private void packetError() {
+            if (source.in.reliableCut() <= parsedOffset()) discardCapsuleTail();
+            else terminate(new SpliceEnd.PacketError(), TransportError.PACKET_ERROR, true);
+        }
+
+        private void discardCapsuleTail() {
+            releaseWrite();
+            if (direct != null) { unref(direct); direct = null; }
+            clearCapsule();
+            discardingCapsule = true;
+        }
+
+        private boolean expireReliable() {
+            var iterator = reliable.values().iterator();
+            while (iterator.hasNext()) {
+                SpliceGroup group = iterator.next();
+                if (clock.now() < group.expiry) continue;
+                iterator.remove();
+                if (group.datagram()) {
+                    discard(group, Drop.DROPPED_EXPIRED);
+                } else {
+                    dispose(group, Disposition.DIRECTION_ENDED);
+                    terminate(new SpliceEnd.WaitTimeout(), TransportError.CANCELLED, false);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private long writeLength;
+        private SpliceGrants.Request outputGrant;
+
+        private boolean pumpWriter() throws IOException {
+            if (write != null) {
+                if (writeKind == Write.FALLBACK_FIRST && clock.now() >= active.expiry) write.cancel();
+                if (settings.paused() && !streaming && (active == null || !active.capsule)) {
+                    pauseByteWrite();
+                    return true;
+                }
+                if (!write.isDone()) return false;
+                finishWrite(false);
+                return true;
+            }
+            if (packetPending != null) return writePacketRange();
+            if (active == null && !sourcePosition && !reliable.isEmpty()) {
+                long first = reliable.firstKey();
+                boolean earlierCallback = false;
+                for (HookWork waiting : reliableHooks) {
+                    // The hook work still owns this group while its order is inspected.
+                    //noinspection resource
+                    if (waiting.group().fifoOrder < first) { earlierCallback = true; break; }
+                }
+                // Polling transfers the group from the queue to the active write state.
+                //noinspection resource
+                if (!earlierCallback) active = reliable.pollFirstEntry().getValue();
+            }
+            if (active != null) return writeGroup();
+            if (settings.paused() && !streaming) return false;
+            if (direct != null) {
+                if (directEnd > source.in.reliableCut()) {
+                    long keep = (long) direct.data().remaining() - (directEnd - source.in.reliableCut());
+                    if (keep <= 0 || streaming) {
+                        if (streaming) clearCapsule();
+                        unref(direct);
+                        direct = null;
+                        closeInputPermit();
+                        return true;
+                    }
+                    direct.data().limit(direct.data().position() + (int) keep);
+                }
+                int size = direct.data().remaining();
+                if (controlled && limiter != null && !streaming && inputPermit == null) {
+                    if (!acquireOutput(1, size)) return false;
+                    int accepted = (int) memberPermit.size();
+                    if (accepted < size) {
+                        ReadBuf owner = direct.buf();
+                        if (owner != null) owner.ref();
+                        ByteBuffer data = direct.data();
+                        ByteBuffer part = data.slice(data.position(), accepted);
+                        data.position(data.position() + accepted);
+                        writePermit = memberPermit;
+                        memberPermit = null;
+                        startWrite(new StreamRecv.Chunk(part, owner, false), Write.DIRECT);
+                        return true;
+                    }
+                    inputPermit = memberPermit;
+                    memberPermit = null;
+                }
+                StreamRecv.Chunk chunk = direct;
+                direct = null;
+                writePermit = inputPermit;
+                inputPermit = null;
+                startWrite(chunk, streaming ? Write.BODY : Write.DIRECT);
+                return true;
+            }
+            if (!rawHeader) return false;
+            if (limiter != null) {
+                long size = cursor.headerSize() + (long) cursor.remaining();
+                if (!acquireOutput(size, size)) return false;
+                startMemberCharge();
+            }
+            rawHeader = false;
+            streaming = true;
+            startWrite(new StreamRecv.Chunk(cursor.header(), null, false), Write.HEADER);
+            return true;
+        }
+
+        private void pauseByteWrite() throws IOException {
+            if (writeKind == Write.DIRECT) {
+                StreamRecv.Chunk paused = SendLane.pauseChunkWrite(write);
+                if (paused != null) {
+                    if (direct == null) direct = paused;
+                    else {
+                        // Taking a subrange for the grant left a remainder on the same backing.
+                        direct.data().position(direct.data().position() - paused.data().remaining());
+                        unref(paused);
+                    }
+                }
+            } else write.cancel();
+            finishWrite(write.isCancelled());
+        }
+
+        private boolean writeGroup() throws IOException {
+            SpliceGroup group = active;
+            if (!group.started) {
+                if (clock.now() >= group.expiry) {
+                    active = null;
+                    if (group.datagram()) {
+                        discard(group, Drop.DROPPED_EXPIRED);
+                    } else {
+                        dispose(group, Disposition.DIRECTION_ENDED);
+                        terminate(new SpliceEnd.WaitTimeout(), TransportError.CANCELLED, false);
+                    }
+                    return true;
+                }
+                if (settings.paused() || !group.ready(clock.now())) return false;
+                finishWait(group);
+            }
+            if (group.member == group.output.size()) {
+                active = null;
+                dispose(group, Disposition.SUBMITTED);
+                return true;
+            }
+            SplicePayload item = group.output.get(group.member);
+            if (group.capsule && !group.started) {
+                // Encode exactly the representation that the selected reliable exit will submit.
+                group.header = group.headers[group.member];
+                int size = group.header.remaining() + item.length();
+                if (limiter != null) {
+                    if (group.datagram()) memberPermit = group.reservation.split(size);
+                    else if (!acquireOutput(size, size)) return false;
+                    startMemberCharge();
+                }
+                group.started = true;
+                if (group.datagram() && group.written == 0) {
+                    ByteBuffer first = group.header.slice(group.header.position(), 1);
+                    group.header.position(group.header.position() + 1);
+                    startWrite(new StreamRecv.Chunk(first, null, false), Write.FALLBACK_FIRST);
+                } else startWrite(new StreamRecv.Chunk(group.header, null, false), Write.GROUP_HEADER);
+                return true;
+            }
+            if (group.capsule && group.header.hasRemaining()) {
+                startWrite(new StreamRecv.Chunk(group.header, null, false), Write.GROUP_HEADER);
+                return true;
+            }
+            if (group.segment == item.segments()) {
+                if (group.capsule) protectedBytes = targetBytes;
+                if (group.datagram()) { datagramBytes += item.length(); asCapsules++; }
+                group.submitted++;
+                measures.outputUnits++;
+                mirror(group, SpliceMirror.Phase.OUTPUT, group.member);
+                nextMember();
+                return true;
+            }
+            int size = Math.min(options.chunk(), item.segmentLength(group.segment) - group.segmentOffset);
+            if (size == 0) { group.segment++; return true; }
+            if (!group.capsule && limiter != null) {
+                if (!acquireOutput(1, size)) return false;
+                size = (int) memberPermit.size();
+                writePermit = memberPermit;
+                memberPermit = null;
+            }
+            startWrite(item.chunk(group.segment, group.segmentOffset, size), Write.GROUP_BODY);
+            return true;
+        }
+
+        private boolean acquireOutput(long min, long max) throws LimiterFailed {
+            if (outputGrant == null) {
+                outputGrant = grants.request(min, max, false);
+            }
+            if (outputGrant == null || !outputGrant.done()) return false;
+            var next = outputGrant;
+            outputGrant = null;
+            memberPermit = granted(next);
+            return true;
+        }
+
+        private void startWrite(StreamRecv.Chunk chunk, Write kind) {
+            writeKind = kind;
+            if (packets) {
+                packetPending = chunk;
+                return;
+            }
+            submitWrite(chunk, kind);
+        }
+
+        private boolean writePacketRange() throws IOException {
+            if (writeKind == Write.FALLBACK_FIRST && clock.now() >= active.expiry) {
+                releaseWrite();
+                discard(active, Drop.DROPPED_EXPIRED);
+                active = null;
+                return true;
+            }
+            if (settings.paused() && targetBytes == protectedBytes) return false;
+            if (capacity == null) {
+                capacity = new Operation<>(target.session.driver, op -> {
+                    target.session.driver.lanes.flushSending(target.st);
+                    var send = target.session.core.sending();
+                    CoreException error = send.writeError(target.st);
+                    if (error != null) throw error;
+                    if (!send.waitSendCapacity(target.st, 1, op)) return Operation.PENDING;
+                    return send.sendCapacity(target.st);
+                }, op -> target.session.core.sending().cancelCapacityWait(target.st, op)).submit();
+                listen(capacity);
+                return true;
+            }
+            if (!capacity.isDone()) return false;
+            Object result = outcome(capacity);
+            capacity = null;
+            if (!(result instanceof Long room) || room <= 0) throw failure(result);
+            var pending = packetPending;
+            int n = (int) Math.min(room, pending.data().remaining());
+            if (n == pending.data().remaining()) {
+                packetPending = null;
+                submitWrite(pending, writeKind);
+            } else {
+                ByteBuffer data = pending.data();
+                ByteBuffer part = data.slice(data.position(), n);
+                data.position(data.position() + n);
+                if (pending.buf() != null) pending.buf().ref();
+                submitWrite(new StreamRecv.Chunk(part, pending.buf(), false), writeKind);
+            }
+            return true;
+        }
+
+        private void submitWrite(StreamRecv.Chunk chunk, Write kind) {
+            writeLength = chunk.data().remaining();
+            writingAtTarget = true;
+            if (writePermit != null || (trackSettlement && memberCharge == null && writeLength > 0)) {
+                writeCharge = charge(writePermit, writeLength, false);
+                writePermit = null;
+            }
+            CarrierCharge billing = writeCharge != null ? writeCharge : memberCharge;
+            if (kind == Write.HEADER && billing == null) {
+                // The transparent cursor reuses its header scratch space after this operation.
+                write = target.out.writeAsync(chunk.data(), null, null, Long.MAX_VALUE);
+            } else {
+                ByteBuffer data = chunk.data();
+                if (kind == Write.HEADER) data = ByteBuffer.allocate(data.remaining()).put(data.duplicate()).flip();
+                ReadBuf owner = chunk.buf() == null ? new ReadBuf(data, null) : chunk.buf();
+                long expiry = kind == Write.FALLBACK_FIRST ? active.expiry : Time.NEVER;
+                write = target.out.writeAsync(null, data, owner, Long.MAX_VALUE, billing,
+                        writeCharge == null ? memberChargeOffset : 0,
+                        expiry == Time.NEVER ? null : () -> clock.now() < expiry);
+            }
             listen(write);
         }
 
-        // ---- packet relay ----
-
-        /** Advances the capsule parser over b, the bytes about to be forwarded. */
-        private void scan(ByteBuffer b) {
-            while (b.hasRemaining()) {
-                if (capsuleRemaining > 0) {
-                    int k = (int) Math.min(capsuleRemaining, b.remaining());
-                    b.position(b.position() + k); capsuleRemaining -= k;
-                } else if (capsule.feed(b)) capsuleRemaining = capsule.length();
+        private void finishWrite(boolean abandoning) throws IOException {
+            Operation<?> completed = write;
+            write = null;
+            Object result = outcome(completed);
+            long progressed = ok(result) ? writeLength : SendLane.written(completed);
+            targetBytes += progressed;
+            boolean converted = (writeKind == Write.FALLBACK_FIRST || writeKind == Write.GROUP_HEADER || writeKind == Write.GROUP_BODY) && active.datagram();
+            if (!converted) bytes += progressed;
+            if (writeCharge != null) {
+                writeCharge.release();
+                writeCharge = null;
+            } else if (memberCharge != null) memberChargeOffset += progressed;
+            if (writeKind == Write.FALLBACK_FIRST) {
+                if (progressed == 0 && !abandoning && (result == CANCELLED || result == Boolean.FALSE)) {
+                    closeMemberPermit();
+                    discard(active, Drop.DROPPED_EXPIRED);
+                    active = null;
+                    writingAtTarget = false;
+                    return;
+                }
+                if (progressed > 0) active.expiry = Time.NEVER;
+            }
+            if (converted || writeKind == Write.GROUP_HEADER || writeKind == Write.GROUP_BODY) active.written += progressed;
+            if (writeKind == Write.DIRECT || (writeKind == Write.GROUP_BODY && !active.capsule)) protectedBytes = targetBytes;
+            if (!ok(result) && !(abandoning && result == CANCELLED && writeKind == Write.GROUP_BODY && !active.capsule)) {
+                if (!abandoning) throw failure(result);
+                return;
+            }
+            writingAtTarget = false;
+            switch (writeKind) {
+                case DIRECT -> { /* No capsule boundary to update. */ }
+                case HEADER, BODY -> {
+                    if (packetPending == null && cursor.remaining() == 0) {
+                        protectedBytes = targetBytes;
+                        clearCapsule();
+                    }
+                }
+                case FALLBACK_FIRST, GROUP_HEADER -> { /* A reliable capsule still owns the writer. */ }
+                case GROUP_BODY -> {
+                    SpliceGroup group = active;
+                    group.segmentOffset += (int) progressed;
+                    if (group.segmentOffset == group.output.get(group.member).segmentLength(group.segment)) {
+                        group.segment++;
+                        group.segmentOffset = 0;
+                    }
+                }
             }
         }
 
-        private boolean atBoundary() { return capsuleRemaining == 0 && capsule.idle() && capsuleHeader.position() == 0 && !headerReady; }
-
-        private void dropTooLarge() { drops++; tooLarge++; }
-        private void dropLimited() { drops++; limited++; }
-
-        /** The source ended inside a capsule: the target is reset and the source stopped with ZMUX_PACKET_ERROR. */
-        private SpliceEnd truncated() {
-            long code = io.zmux.internal.wire.TransportError.PACKET_ERROR;
-            source.stop(code); target.reset(code);
-            return new SpliceEnd.Reset(code);
+        private void nextMember() {
+            closeMemberPermit();
+            active.header = null;
+            active.member++;
+            active.segment = 0;
+            active.segmentOffset = 0;
+            active.started = false;
         }
 
-        // ---- settling ----
+        private static Permit granted(SpliceGrants.Request request) throws LimiterFailed {
+            Permit permit = request.adopt();
+            if (permit == null) throw new LimiterFailed(request.failure());
+            return permit;
+        }
 
-        /** The stream path stops: whatever it awaits is cancelled, a taken chunk released and its unused grant refunded. */
-        private void stopForwarding() {
-            if (ready != null) { io.zmux.internal.spi.Spi.abandon(ready); ready = null; }
-            if (op != null) {
-                op.cancel(); // decided once it returns: a lane read's or a loop step's attempt is not left running
-                if (outcome(op) instanceof StreamRecv.Chunk c) unref(c);
-                op = null;
+        private void clearCapsule() {
+            closeMemberPermit();
+            if (collected != null) { collected.close(); collected = null; }
+            if (compactedPayload != null) { compactedPayload.close(); compactedPayload = null; }
+            compacted = null;
+            cursor.clear();
+            rawHeader = false;
+            streaming = false;
+            sourcePosition = false;
+        }
+
+        private void closeInputPermit() {
+            if (inputPermit != null) { settlement.unused(inputPermit.size()); inputPermit.close(); inputPermit = null; }
+        }
+
+        private void closeMemberPermit() {
+            if (memberPermit != null) { settlement.unused(memberPermit.size()); memberPermit.close(); memberPermit = null; }
+            if (memberCharge != null) {
+                memberCharge.release();
+                memberCharge = null;
             }
-            if (held != null) { refund(chunkPaid); unref(held); held = null; }
-            chunkPaid = 0;
-            refund(capsulePaid); capsulePaid = 0; // the rest of a granted capsule is not forwarded
-            headerReady = false; headerRead = false; capsuleHeader.clear();
+        }
+
+        private void startMemberCharge() {
+            memberCharge = charge(memberPermit, memberPermit.size(), false);
+            memberPermit = null;
+            memberChargeOffset = 0;
+        }
+
+        private CarrierCharge charge(Permit permit, long size, boolean atomic) {
+            // Refund can invoke application code, so keep it on the splice context.
+            return new CarrierCharge(size, atomic, confirmed -> {
+                if (permit != null) context.execute(() -> {
+                    permit.consume(confirmed);
+                    permit.close();
+                });
+            }, new CarrierCharge.Observer() {
+                @Override public void encoded(int bytes) { settlement.encoded(bytes); }
+                @Override public void dispatched(boolean nativeChannel) { settlement.dispatched(nativeChannel); }
+                @Override public void enqueued(long count) { settlement.enqueue(count); }
+                @Override public void handedOff(long count) { settlement.handoff(count); }
+                @Override public void finished(long unaccepted, long unsent) {
+                    settlement.finish(unaccepted, unsent, permit != null);
+                }
+            });
+        }
+
+        private boolean pumpDatagrams() {
+            if (dgSend != null) {
+                if (!dgSend.isDone()) return false;
+                finishDatagram();
+                if (dgClosed) closeDatagrams();
+                return true;
+            }
+            if (dgClosed) return false;
+            if (dataDone || cancelled.get() || (endStage == End.DONE && !(end instanceof SpliceEnd.Finished))) {
+                closeDatagrams();
+                return false;
+            }
+            boolean pendingDatagrams = !datagrams.isEmpty() || dgActive != null;
+            long now = pendingDatagrams ? clock.now() : 0;
+            if (pendingDatagrams && expireDatagrams(now)) return true;
+            if (settings.paused()) {
+                if (dgReceive != null && !dgReceive.isDone()) dgReceive.cancel();
+                return false;
+            }
+            if (dgRoute != null) {
+                if (!dgRoute.isDone()) return false;
+                routeDatagram();
+                return true;
+            }
+            SpliceGroup candidate = datagrams.isEmpty() ? null : selectDatagram(now);
+            if (candidate != null) {
+                datagrams.remove(candidate);
+                if (candidate.request != null) completeGroupGrant(candidate);
+                else chooseDatagramRoute(candidate);
+                return true;
+            }
+            if (dgInputClosed || !datagramHooks.isEmpty()) return false;
+            if (dgReceive == null) {
+                dgReceive = new Operation<>(source.session.driver, receiveStep, receiveWithdraw).submit();
+                listen(dgReceive);
+                return true;
+            }
+            if (!dgReceive.isDone()) return false;
+            Object result = outcome(dgReceive);
+            dgReceive = null;
+            if (result == CANCELLED) return true;
+            if (admitReceivedDatagram(result)) return true;
+            if (result instanceof RuntimeException failure) {
+                callbackFailure = new CallbackFailedException("relay callback failed", failure);
+                terminate(new SpliceEnd.HookFailed(java.util.Optional.of(failure)), TransportError.CANCELLED, false);
+            }
+            dgInputClosed = true;
+            return true;
+        }
+
+        private boolean admitReceivedDatagram(Object received) {
+            SplicePayload input;
+            long context, expiry;
+            var hooks = settings.hooks().datagram();
+            SplicePolicy.QueueCharge charge = null;
+            if (received instanceof Received(var data, var queueCharge)) {
+                charge = queueCharge;
+                StreamRecv.Chunk chunk = data.payload();
+                try {
+                    context = data.context();
+                    expiry = data.expiry();
+                    input = new SplicePayload(new SplicePayload.Budget(limits));
+                    if (!input.append(chunk)) throw new SplicePayload.BudgetExceeded();
+                } finally { unref(chunk); }
+            } else if (received instanceof Datagrams.StreamDatagram(var flow, var payload, var expiresAt)) {
+                if (!controlled && hooks.isEmpty() && mirror == null && !packets) {
+                    sendDatagram(flow, payload);
+                    return true;
+                }
+                context = flow;
+                expiry = expiresAt;
+                measures.payloadCopyBytes += payload.length;
+                input = SplicePayload.of(new SplicePayload.Budget(limits), payload);
+            } else return false;
+            receiveDatagram(context, input, hooks, expiry, charge);
+            return true;
+        }
+
+        private void receiveDatagram(long context, SplicePayload input, List<SpliceHook> hooks, long receiveExpiry, SplicePolicy.QueueCharge charge) {
+            if (input.length() > policy.maxItem(Shape.DATAGRAM, -1)) {
+                if (charge != null) policy.releaseQueue(charge);
+                input.close();
+                countDrop(Drop.DROPPED_TOO_LARGE);
+                return;
+            }
+            SpliceGroup group = group(Shape.DATAGRAM, -1, context, Origin.FORWARDED, ++sequence,
+                    settings.generation(), -1, -1, clock.now(), input, null, null);
+            group.queueCharge = charge;
+            if (receiveExpiry != Time.NEVER) {
+                long remaining = receiveExpiry - source.session.driver.now();
+                if (remaining <= 0) { dispose(group, Disposition.DROPPED); return; }
+                group.expiry = Math.min(group.expiry, Time.add(group.admittedAt, remaining));
+            }
+            transform(group, hooks);
+        }
+
+        private DatagramMode datagramMode() {
+            return packets && !fin && !source.in.finKnown() && source.in.reliableCut() == Long.MAX_VALUE
+                    && endStage == End.OPEN ? DatagramMode.DATAGRAM_OR_CAPSULE : DatagramMode.DATAGRAM_ONLY;
+        }
+
+        private void chooseDatagramRoute(SpliceGroup group) {
+            finishWait(group);
+            long context = group.metadata.contextId().orElseThrow();
+            dgRouting = group;
+            var mode = datagramMode();
+            int largest = group.largestDatagram(), count = group.output.size();
+            long targetNow = target.session.driver.now(), here = clock.now();
+            long expiry = group.expiry, admittedAt = group.targetAt, helperAt = group.admittedAt;
+            var options = group.options;
+            dgRoute = onLoop(target, ignored -> {
+                if (options != null) {
+                    var resolved = targetDatagramOptions(options, expiry, targetNow, here);
+                    return target.session.core.planDatagram(target.st, context, largest, count, resolved, mode);
+                }
+                var initial = target.session.core.resolveDatagram(target.st, datagramOptions, admittedAt);
+                var resolved = targetDatagramOptions(initial, datagramExpiry(expiry, helperAt, admittedAt, initial), targetNow, here);
+                var admission = target.session.core.planDatagram(target.st, context, largest, count, resolved, mode);
+                return new DatagramQuote(initial, admission);
+            });
+            listen(dgRoute);
+        }
+
+        private void routeDatagram() {
+            SpliceGroup group = dgRouting;
+            Object result = outcome(dgRoute);
+            dgRouting = null;
+            dgRoute = null;
+            if (result instanceof DatagramQuote(var quotedOptions, var quotedAdmission)) {
+                group.options = quotedOptions;
+                group.expiry = datagramExpiry(group.expiry, group.admittedAt, group.targetAt, group.options);
+                result = quotedAdmission;
+            }
+            if (clock.now() >= group.expiry) {
+                discard(group, Drop.DROPPED_EXPIRED);
+                return;
+            }
+            if (!(result instanceof DatagramAdmission admission)) {
+                discard(group, result instanceof Throwable failure ? datagramDrop(failure) : Drop.DROPPED_FLOW_CLOSED);
+                return;
+            }
+            boolean oversized = admission == DatagramAdmission.CAPSULE;
+            if (group.reservation != null) {
+                if (group.capsule == oversized) {
+                    publishDatagramGroup(group);
+                    return;
+                }
+                settlement.unused(group.reservation.size());
+                group.reservation.close();
+                group.reservation = null;
+                group.headers = null;
+            }
+            try {
+                group.prepare(oversized, limits);
+                if (oversized) measures.encodeBytes += group.encodingCapacity;
+            }
+            catch (SplicePayload.BudgetExceeded failure) {
+                dispose(group, Disposition.DIRECTION_ENDED);
+                throw failure;
+            }
+            if (oversized || limiter != null) {
+                if (!policy.queue(group)) {
+                    discard(group, Drop.DROPPED_QUEUE_FULL);
+                    return;
+                }
+            }
+            if (limiter != null && group.logicalBytes > 0) {
+                group.request = grants.request(group.logicalBytes, group.logicalBytes, true);
+                if (group.request == null) {
+                    discard(group, Drop.DROPPED_BLOCKED);
+                } else datagrams.add(group);
+            } else publishDatagramGroup(group);
+        }
+
+        private void completeGroupGrant(SpliceGroup group) {
+            group.reservation = group.request.adopt();
+            group.request = null;
+            if (group.reservation == null) {
+                discard(group, Drop.DROPPED_LIMITER);
+            } else chooseDatagramRoute(group);
+        }
+
+        private void publishDatagramGroup(SpliceGroup group) {
+            if (group.capsule) {
+                if (fin || source.in.finKnown() || endStage != End.OPEN || source.in.reliableCut() != Long.MAX_VALUE) {
+                    discard(group, Drop.DROPPED_FLOW_CLOSED);
+                } else reliable.put(++fifoOrder, group);
+                return;
+            }
+            long context = group.metadata.contextId().orElseThrow();
+            StreamRecv.Chunk[] payloads = new StreamRecv.Chunk[group.output.size()];
+            CarrierCharge[] charges = new CarrierCharge[payloads.length];
+            for (int i = 0; i < payloads.length; i++) {
+                SplicePayload item = group.output.get(i);
+                payloads[i] = item.datagram();
+                measures.payloadCopyBytes += item.copyForDatagram();
+                if (trackSettlement) {
+                    Permit part = group.reservation == null ? null : group.reservation.split(item.length());
+                    charges[i] = charge(part, item.length(), true);
+                }
+            }
+            long at = target.session.driver.now();
+            datagramLength = group.logicalBytes;
+            dgActive = group;
+            dgSend = target.session.sendDatagramGroupAsync(target.st, context, payloads, group.largestDatagram(), group.logicalBytes,
+                    targetDatagramOptions(group.options, group.expiry, at, clock.now()), at, datagramMode(), charges,
+                    () -> !cancelled.get() && writeFault.get() == null && readFault.get() == null);
+            dgSend.whenComplete((status, failure) -> {
+                for (CarrierCharge charge : charges) if (charge != null) charge.release();
+                wake();
+            });
+        }
+
+        private void sendDatagram(long context, byte[] payload) {
+            datagramLength = payload.length;
+            CarrierCharge billing = null;
+            if (limiter != null && datagramLength > 0) {
+                Permit permit = Permit.tryAcquireExact(limiter, datagramLength);
+                if (permit.size() != datagramLength) {
+                    permit.close();
+                    countDrop(Drop.DROPPED_LIMITER);
+                    return;
+                }
+                billing = charge(permit, datagramLength, true);
+            } else if (trackSettlement && datagramLength > 0) billing = charge(null, datagramLength, true);
+            dgSend = target.session.sendDatagramAsync(target.st, context, payload, datagramOptions, billing);
+            if (billing != null) {
+                CarrierCharge reservation = billing;
+                dgSend.whenComplete((status, error) -> reservation.release());
+            }
+            dgSend.whenComplete(wakeOnComplete);
+        }
+
+        private void finishDatagram() {
+            ZmuxFuture<DatagramAdmission> sent = dgSend;
+            dgSend = null;
+            boolean accepted = false;
+            try {
+                var status = sent.join();
+                if (status == DatagramAdmission.CAPSULE && dgActive != null) {
+                    SpliceGroup group = dgActive;
+                    dgActive = null;
+                    if (group.reservation != null) {
+                        group.reservation.close();
+                        group.reservation = null;
+                    }
+                    chooseDatagramRoute(group);
+                    return;
+                }
+                accepted = status == DatagramAdmission.QUEUED;
+                if (accepted) datagramBytes += datagramLength;
+            } catch (CancellationException | CompletionException failure) {
+                Throwable cause = Spi.completionCause(failure);
+                declined(datagramDrop(cause));
+            } finally {
+                if (dgActive != null) {
+                    if (accepted) {
+                        dgActive.submitted = dgActive.output.size();
+                        dgActive.written = datagramLength;
+                        measures.outputUnits += dgActive.submitted;
+                        for (int i = 0; i < dgActive.submitted; i++) mirror(dgActive, SpliceMirror.Phase.OUTPUT, i);
+                    }
+                    Disposition status = accepted ? Disposition.SUBMITTED
+                            : dgClosed && end != null ? Disposition.DIRECTION_ENDED : Disposition.DROPPED;
+                    dispose(dgActive, status);
+                    dgActive = null;
+                }
+            }
+        }
+
+        private static Drop datagramDrop(Throwable failure) {
+            if (failure instanceof CoreException core) {
+                return switch (core.reason()) {
+                    case DATAGRAM_TOO_LARGE -> Drop.DROPPED_TOO_LARGE;
+                    case NOT_NEGOTIATED -> Drop.DROPPED_NO_PATH;
+                    case DATAGRAM_DROPPED -> datagramDrop(DatagramDroppedException.Reason.from(core.datagramDrop()));
+                    default -> Drop.DROPPED_FLOW_CLOSED;
+                };
+            }
+            if (failure instanceof DatagramDroppedException drop) return datagramDrop(drop.reason());
+            if (failure instanceof DatagramTooLargeException) return Drop.DROPPED_TOO_LARGE;
+            if (failure instanceof NotNegotiatedException) return Drop.DROPPED_NO_PATH;
+            return Drop.DROPPED_FLOW_CLOSED;
+        }
+
+        private static Drop datagramDrop(DatagramDroppedException.Reason reason) {
+            return switch (reason) {
+                case DEADLINE -> Drop.DROPPED_EXPIRED;
+                case NO_NATIVE_PATH -> Drop.DROPPED_NO_PATH;
+                case LIMITER -> Drop.DROPPED_LIMITER;
+                case QUEUE_OVERFLOW -> Drop.DROPPED_QUEUE_FULL;
+                case SEQUENCE_EXHAUSTED -> Drop.DROPPED_SEQUENCE_EXHAUSTED;
+            };
+        }
+
+        private void declined(Drop reason) {
+            if (dgActive != null) dgActive.dropReason = reason;
+            countDrop(reason);
+        }
+
+        private void countDrop(Drop reason) { dropCounts.merge(reason, 1L, Long::sum); }
+
+        private void discard(SpliceGroup group, Drop reason) {
+            group.dropReason = reason;
+            if (group.datagram()) countDrop(reason);
+            dispose(group, Disposition.DROPPED);
+        }
+
+        private boolean expireDatagrams(long now) {
+            for (int index = 0; index < datagrams.size(); index++) {
+                // The queue owns this group until it expires, then discard disposes it.
+                //noinspection resource
+                SpliceGroup group = datagrams.get(index);
+                if (now < group.expiry) continue;
+                // Removing the expired entry transfers its group to discard for release.
+                //noinspection resource
+                discard(datagrams.remove(index), Drop.DROPPED_EXPIRED);
+                return true;
+            }
+            return false;
+        }
+
+        private SpliceGroup selectDatagram(long now) {
+            SpliceGroup first = null;
+            for (SpliceGroup group : datagrams) {
+                if (group.ready(now) && (group.request == null || group.request.done())
+                        && (first == null || group.earliest < first.earliest
+                        || (group.earliest == first.earliest && group.metadata.sequence() < first.metadata.sequence())))
+                    first = group;
+
+            }
+            return first;
+        }
+
+        private void closeDatagrams() {
+            revokeQueuedCallbacks(datagramHooks);
+            dgClosed = true;
+            if (dgSend != null && !dgSend.isDone()) dgSend.cancel(false);
+            if (dgReceive != null) {
+                dgReceive.cancel();
+                Object value = outcome(dgReceive);
+                if (value instanceof Received(var data, var charge)) {
+                    unref(data.payload());
+                    policy.releaseQueue(charge);
+                    countDrop(Drop.DROPPED_FLOW_CLOSED);
+                } else if (value instanceof Datagrams.StreamDatagram) countDrop(Drop.DROPPED_FLOW_CLOSED);
+                dgReceive = null;
+            }
+            for (SpliceGroup group : datagrams) {
+                endDatagram(group);
+            }
+            datagrams.clear();
+            if (dgRoute != null) {
+                dgRoute.cancel();
+                dgRoute = null;
+                endDatagram(dgRouting);
+                dgRouting = null;
+            }
+            if (dgSend == null && dgActive != null) {
+                endDatagram(dgActive);
+                dgActive = null;
+            }
+        }
+
+        private void endDatagram(SpliceGroup group) {
+            countDrop(Drop.DROPPED_FLOW_CLOSED);
+            dispose(group, Disposition.DIRECTION_ENDED);
+        }
+
+        private void failReliable(SpliceGroup group) {
+            if (group.datagram()) countDrop(Drop.DROPPED_FLOW_CLOSED);
+            dispose(group, Disposition.DIRECTION_ENDED);
+        }
+
+        private void dispose(SpliceGroup group, Disposition status) {
+            finishWait(group);
+            if (group.reservation != null) settlement.unused(group.reservation.size());
+            group.close();
+            if (group.injection != null) policy.settled(group, status, end);
+            if (group.queueCharge != null) policy.releaseQueue(group.queueCharge);
+        }
+
+        private void setTimer() {
+            if (stopTimer == null && !sourcePosition && active == null && dgActive == null && reliable.isEmpty() && datagrams.isEmpty()) return;
+            long when = Time.NEVER;
+            if (packets && sourcePosition && !streaming && (!inputHooks.isEmpty() || mirror != null || !target.session.info().peerResetStreamAt())) when = assemblyDeadline();
+            if (active != null && (!active.started || (writeKind == Write.FALLBACK_FIRST && (write != null || packetPending != null)))) when = Math.min(when, active.nextWake(clock.now()));
+            if (dgActive != null && dgSend == null) when = Math.min(when, dgActive.expiry);
+            for (SpliceGroup group : datagrams) when = Math.min(when, group.nextWake(clock.now()));
+            for (SpliceGroup group : reliable.values()) when = Math.min(when, group.expiry);
+            if (when == timerAt) return;
+            if (stopTimer != null) stopTimer.run();
+            timerAt = when;
+            if (when != Time.NEVER && options.probe != null) options.probe.accept(direction, SpliceOptions.Work.TIMER);
+            stopTimer = when == Time.NEVER ? null : clock.schedule(when, wakeTask);
+        }
+
+        /** Disposes all reliable work, incorporating any progress reported by an interrupted write. */
+        private void revokeQueuedCallbacks(ArrayDeque<HookWork> queue) {
+            // The executing callback still owns its borrowed views. It disposes them on return.
+            while (queue.size() > 1) {
+                var work = queue.removeLast();
+                if (work.resolving() != null) work.resolving().cancel();
+                dispose(work.group(), Disposition.DIRECTION_ENDED);
+            }
+        }
+
+        private void closeReliable() {
+            revokeQueuedCallbacks(reliableHooks);
+            if (grant != null) { grant.revoke(); grant = null; }
+            releaseWrite();
+            if (read != null) {
+                read.cancel();
+                if (outcome(read) instanceof StreamRecv.Chunk chunk) unref(chunk);
+                read = null;
+            }
+            if (direct != null) { unref(direct); direct = null; }
+            closeInputPermit();
+            if (batch != null) { unref(batch); batch = null; }
+            if (packets) clearCapsule();
+            sourcePosition = false;
+            discardingCapsule = false;
+            if (active != null) {
+                failReliable(active);
+                active = null;
+            }
+            for (SpliceGroup group : reliable.values()) failReliable(group);
+            reliable.clear();
+        }
+
+        private void releaseWrite() {
+            if (capacity != null) { capacity.cancel(); capacity = null; }
+            if (packetPending != null) { unref(packetPending); packetPending = null; }
+            if (outputGrant != null) { outputGrant.revoke(); outputGrant = null; }
             if (write != null) {
                 write.cancel();
-                try { written(true); }
+                try { finishWrite(true); }
                 catch (IOException impossible) { throw new AssertionError(impossible); }
-                catch (RuntimeException error) { callbackFailed(new CallbackFailedException("relay callback failed", error)); }
             }
-            giveBack();
-            if (packets) targetClosed = true;
+            closeMemberPermit();
         }
 
-        /** The stream path failed with error: the side's own fault explains it better than the wait it ended. */
-        private void failed(IOException error) {
-            IOException outcome = error;
-            IOException terminal = writeFault.get();
-            if (terminal == null) terminal = readFault.get();
-            if (terminal != null && !cancelled.get()) outcome = terminal;
-            if (teardown != null && outcome instanceof StreamClosedException) outcome = teardown;
-            settle(outcome);
+        private void terminate(SpliceEnd reason, long code, boolean protect) {
+            if (end != null || endStage == End.DONE) return;
+            end = reason;
+            closeReliable();
+            closeDatagrams();
+            source.stop(code);
+            if (protect) startReset(code);
+            else { target.reset(code); finished(); }
         }
 
-        private void settle(IOException error) {
-            if (cancelled.get() || error instanceof InterruptedIOException) {
+        private void settle(IOException failure) {
+            closeReliable();
+            closeDatagrams();
+            if (terminal != null) { terminal.cancel(); terminal = null; }
+            if (end != null) {
+                // A failure can interrupt the protected-prefix drain, but its cause already won.
+                if (endStage != End.DONE && endStage != End.RESET_SEND) target.reset(resetCode);
+                finished();
+                return;
+            }
+            IOException fault = writeFault.get();
+            if (fault == null) fault = readFault.get();
+            IOException cause = fault == null ? failure : fault;
+            measures.cause = cause;
+            if (cancelled.get() || cause instanceof InterruptedIOException) {
                 long code = cancelCode;
                 end = code >= 0 ? new SpliceEnd.Cancelled(code) : null;
-                if (code >= 0) abortBoth(source, target, code);
-                else abortBoth(source, target, io.zmux.internal.wire.TransportError.CANCELLED, 0); // 7.4: reset with ZMUX_CANCELLED, stop with 0
+                target.reset(code >= 0 ? code : TransportError.CANCELLED);
+                source.stop(code >= 0 ? code : 0);
                 finished();
-            } else if (error instanceof StreamResetException reset) {
-                resetCode = reset.code();
-                end = new SpliceEnd.Reset(resetCode);
-                op = onLoop(target, o -> target.session.core.sending().resetAtInUse()); listen(op);
-                stage = RESET_QUERY;
-            } else if (error instanceof StreamStoppedException stopped) {
-                end = new SpliceEnd.Stopped(stopped.code()); source.stop(stopped.code());
+            } else if (cause instanceof StreamResetException reset) {
+                end = new SpliceEnd.Reset(reset.code());
+                startReset(reset.code());
+            } else if (cause instanceof StreamStoppedException stopped) {
+                end = new SpliceEnd.Stopped(stopped.code());
+                source.stop(stopped.code());
                 finished();
             } else {
-                // A lost session, or a carrier failure of one side: the side it came from.
                 boolean downstream;
-                // The other direction's failure tore this one down: its cause names the side that was lost.
-                if (error == teardown && teardownLost != null) downstream = teardownLost == target;
-                else downstream = error == writeFault.get() || (error != readFault.get() && atTarget);
-                if (teardown == null) { teardown = error; teardownLost = downstream ? target : source; }
+                if (teardown != null && cause instanceof StreamClosedException && teardownLost != null)
+                    downstream = teardownLost == target;
+                else downstream = cause == writeFault.get() || (cause != readFault.get() && writingAtTarget);
+                if (teardown == null) { teardown = cause; teardownLost = downstream ? target : source; }
                 end = downstream ? new SpliceEnd.DownstreamLost() : new SpliceEnd.UpstreamLost();
-                abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
+                target.reset(io.zmux.carrier.PipeIo.CARRIER_FAILED);
+                source.stop(io.zmux.carrier.PipeIo.CARRIER_FAILED);
                 finished();
             }
         }
 
-        /**
-         * Forwarding a reset: without RESET_AT a reset drops unsent bytes, so what was taken is
-         * transmitted first. Only a cancellation ends these steps early, and side failures the
-         * transmission wait.
-         */
-        private boolean pumpReset() {
-            boolean draining = stage == DRAIN;
-            if (!awaited(op, draining ? interrupted() : cancelled.get())) return false;
-            Object r = outcome(op); op = null;
-            if (r instanceof Throwable || r == CANCELLED) { resetFailed(failure(r)); return true; }
-            switch (stage) {
-                case RESET_QUERY -> {
-                    if ((Boolean) r) { sendReset(); return true; }
-                    IOException fault = cancelled.get() ? new InterruptedIOException("splice cancelled") : writeFault.get();
-                    if (fault == null) fault = readFault.get();
-                    if (fault != null) { resetFailed(fault); return true; }
-                    op = onLoop(source, o -> {
-                        if (source.session.core.error() != null) throw CoreException.session(source.session.core.error());
-                        return true;
-                    });
-                    stage = RESET_SOURCE;
-                }
-                case RESET_SOURCE -> {
-                    op = onLoop(target, o -> {
-                        CoreException failure = target.session.core.sending().writeError(target.st);
-                        if (failure != null) throw failure;
-                        return true;
-                    });
-                    stage = RESET_TARGET;
-                }
-                case RESET_TARGET -> { op = target.out.awaitSent(false, Long.MAX_VALUE); stage = DRAIN; }
-                case DRAIN -> { sendReset(); return true; }
-                default -> { finished(); return true; }
+        private void startReset(long code) {
+            resetCode = code;
+            terminal = onLoop(target, ignored -> target.session.core.sending().resetAtInUse());
+            listen(terminal);
+            endStage = End.RESET_QUERY;
+        }
+
+        private boolean pumpEnd() throws IOException {
+            if (!terminal.isDone()) return false;
+            Object result = outcome(terminal);
+            terminal = null;
+            if (endStage == End.RESET_QUERY && result instanceof Boolean resetAt) {
+                if (!resetAt && protectedBytes > 0) {
+                    terminal = target.out.awaitSent(false, Long.MAX_VALUE, targetBytes - protectedBytes);
+                    listen(terminal);
+                    endStage = End.DRAIN;
+                } else sendReset();
+                return true;
             }
-            listen(op);
+            if (!ok(result)) throw failure(result);
+            if (endStage == End.DRAIN) sendReset();
+            else {
+                if (endStage == End.FINISH) end = new SpliceEnd.Finished();
+                finished();
+            }
             return true;
         }
 
         private void sendReset() {
-            long code = resetCode;
-            boolean boundary = bytes > 0 && code != io.zmux.carrier.PipeIo.CARRIER_FAILED;
-            op = onLoop(target, o -> {
+            long code = resetCode, trailing = targetBytes - protectedBytes;
+            boolean protect = protectedBytes > 0 || trailing > 0;
+            terminal = onLoop(target, ignored -> {
+                CoreException fault = target.session.core.sending().writeError(target.st);
+                if (fault != null) throw fault;
+                target.session.driver.lanes.watchSendEnd(target.st, null);
                 target.session.driver.lanes.flushSending(target.st);
-                if (boundary) target.session.core.sending().setReliableBoundary(target.st);
-                target.session.driver.lanes.resetSending(target.st, code); return true;
-            });
-            listen(op);
-            stage = RESET_SEND;
-        }
-
-        private void resetFailed(IOException failure) {
-            // A fault of either side explains the failure better than the wait it ended.
-            IOException next = readFault.get() instanceof SessionClosedException lost ? lost : writeFault.get();
-            if (next == null) next = readFault.get();
-            if (next == null || cancelled.get()) next = failure;
-            if (teardown != null && next instanceof StreamClosedException) next = teardown;
-            settle(next);
-        }
-
-        /**
-         * The direction's limiter failed in acquire: the target is reset and the source stopped with ZMUX_CANCELLED,
-         * and the direction ends {@link SpliceEnd.LimiterFailed}; the other direction goes on.
-         */
-        private void limiterFailed() {
-            long code = io.zmux.internal.wire.TransportError.CANCELLED;
-            target.reset(code); source.stop(code);
-            end = new SpliceEnd.LimiterFailed();
-            finished();
-        }
-
-        /** The stream path ended: its observers go, and the target takes no more capsules. */
-        private void finished() {
-            stage = DONE;
-            if (write != null) stopForwarding();
-            targetClosed = true;
-            for (Datagrams.StreamDatagram d; (d = converted.poll()) != null;) { refund(d.payload().length); drops++; } // never written
-            if (closeRead != null) { closeRead.run(); closeWrite.run(); }
-        }
-
-        /** A relay bug: everything the direction awaits is dropped. */
-        void abandon() {
-            stopForwarding();
-            if (dgReceive != null) dgReceive.cancel();
-            dgStage = DG_DONE;
-            finished();
-        }
-
-        // ---- datagram path ----
-
-        private boolean pumpDatagrams() {
-            try {
-                return pumpDatagramsOnce();
-            } catch (RuntimeException error) {
-                // A limiter callback (or the relay itself) failed: the splice reports it as the stream path's would.
-                if (dgReceive != null) { dgReceive.cancel(); dgReceive = null; }
-                if (dgSending != null) refund(dgSending.payload().length);
-                dgSend = null; dgSending = null; dgStage = DG_DONE;
-                if (!cancelled.get()) callbackFailed(new CallbackFailedException("relay callback failed", error));
+                if (protect) target.session.core.sending().protectWrittenPrefix(target.st, trailing);
+                target.session.driver.lanes.resetSending(target.st, code);
                 return true;
-            }
+            });
+            listen(terminal);
+            endStage = End.RESET_SEND;
         }
 
-        private boolean pumpDatagramsOnce() {
-            return switch (dgStage) {
-                case DG_IDLE -> {
-                    if (dataDone || cancelled.get()) { dgStage = DG_DONE; yield true; }
-                    dgReceive = new Operation<>(source.session.driver, receiveStep, receiveWithdraw).submit();
-                    listen(dgReceive);
-                    dgStage = DG_RECEIVE;
-                    yield true;
-                }
-                case DG_RECEIVE -> {
-                    if (!awaited(dgReceive, dataDone || cancelled.get())) yield false;
-                    Object r = outcome(dgReceive); dgReceive = null;
-                    if (r instanceof RuntimeException error) throw error;
-                    if (!(r instanceof Datagrams.StreamDatagram data)) { dgStage = DG_DONE; yield true; } // the stream paths own terminal propagation
-                    if (dataDone || cancelled.get()) { drops++; dgStage = DG_DONE; yield true; }
-                    int n = data.payload().length;
-                    dgStage = DG_IDLE;
-                    // tryAcquire(n, n), never a wait while the datagram is held (a packet relay's too, even one it turns
-                    // into a capsule); an empty one bypasses the limiter.
-                    if (limiter != null && !Permit.police(limiter, n)) { dropLimited(); yield true; } // taken: refunded unless forwarded
-                    forward(data);
-                    yield true;
-                }
-                case DG_SEND -> {
-                    if (!dgSend.isDone()) yield false;
-                    ZmuxFuture<Boolean> f = dgSend; Datagrams.StreamDatagram data = dgSending;
-                    dgSend = null; dgSending = null;
-                    dgStage = DG_IDLE;
-                    try {
-                        if (f.join()) datagramBytes += data.payload().length;
-                        else { refund(data.payload().length); dropLimited(); }
-                    } catch (CompletionException error) {
-                        Throwable cause = error.getCause();
-                        if (cause instanceof NotNegotiatedException || cause instanceof DatagramTooLargeException) {
-                            if (!packets) { refund(data.payload().length); dropTooLarge(); } else convert(data);
-                        } else {
-                            refund(data.payload().length);
-                            if (cause instanceof RuntimeException failure) throw failure;
-                            dgStage = DG_DONE;
-                        }
-                    }
-                    yield true;
-                }
-                default -> false;
-            };
+        private void finished() {
+            if (endStage == End.DONE) return;
+            endStage = End.DONE;
+            policy.finish(end);
+            if (closeRead != null) { closeRead.run(); closeWrite.run(); }
+            if (!(end instanceof SpliceEnd.Finished)) policy.close(end instanceof SpliceEnd.Cancelled
+                    ? Rejection.CANCELLED : Rejection.CLOSED);
         }
 
-        /** Sends a datagram that passed the limiter on the target, or, in a packet relay, as a capsule when it does not fit. */
-        private void forward(Datagrams.StreamDatagram data) {
-            int max = target.maxDatagramPayload(data.context());
-            if (!packets || (max > 0 && data.payload().length <= max)) {
-                dgSending = data;
-                dgSend = target.session.sendDatagramAsync(target.st, data.context(), data.payload());
-                dgStage = DG_SEND;
-                dgSend.whenComplete(wakeOnComplete);
-            } else convert(data);
+        void abandon() {
+            closeReliable();
+            closeDatagrams();
+            if (terminal != null) terminal.cancel();
+            policy.close();
+            finished();
+            setTimer();
         }
 
-        /** A packet relay writes it as a capsule at the next boundary; a bounded wait, never a queue of its own. */
-        private void convert(Datagrams.StreamDatagram data) {
-            if (data.payload().length > io.zmux.helper.PacketStream.DEFAULT_MAX_PACKET) { refund(data.payload().length); dropTooLarge(); }
-            else if (targetClosed || converted.size() >= CONVERTED) { refund(data.payload().length); drops++; } // not for its size
-            else converted.add(data);
-        }
-
-        /**
-         * A callback failed: the splice completes exceptionally with cause (the direction's first such failure, of its stream
-         * or its datagram path) and both streams are torn down.
-         */
-        private void callbackFailed(IOException cause) {
-            if (callbackFailure == null) callbackFailure = cause;
-            if (teardown == null) teardown = cause;
-            abortBoth(source, target, io.zmux.carrier.PipeIo.CARRIER_FAILED);
+        private CompletionStage<SpliceDirection> snapshot() {
+            var reply = new CompletableFuture<SpliceDirection>();
+            context.execute(() -> policy.complete(reply, result()));
+            return reply.minimalCompletionStage();
         }
 
         SpliceDirection result() {
-            return new SpliceDirection(bytes, datagramBytes, drops, tooLarge, limited, asCapsules, end);
+            return new SpliceDirection(bytes, datagramBytes, asCapsules, end,
+                    Optional.ofNullable(measures.cause), measures.inputUnits, measures.inputBytes, measures.outputUnits,
+                    measures.hookCalls, measures.replacements, settlement.preAdmissionRefundedBytes(),
+                    measures.mirrorDropped, Duration.ofNanos(measures.waitNanos), settlement, dropCounts, measures.payloadCopyBytes,
+                    measures.encodeBytes + settlement.encodeBytes(), measures.mirrorCopyBytes, settlement.nativeCount(), settlement.recordCount());
         }
     }
 
-    /** Packet relay: datagrams that wait for a capsule boundary, per direction; more are dropped as too large. */
-    private static final int CONVERTED = 64;
+    private static final class Measures {
+        long inputUnits, inputBytes, outputUnits, hookCalls, replacements;
+        long mirrorDropped, waitNanos, mirrorCopyBytes, payloadCopyBytes, encodeBytes;
+        Throwable cause;
+    }
 
     /** The direction's limiter failed in acquire or broke its contract: the direction ends {@link SpliceEnd.LimiterFailed}. */
     private static final class LimiterFailed extends IOException {

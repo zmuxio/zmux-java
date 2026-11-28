@@ -68,7 +68,7 @@ class ProofTest {
             var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE)
                     .anchor(in -> new VerifyVerdict(new Principal(Principal.NODE_KEY, in.peerStatic()), CLIENT_PROOF.keyId(), null)).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
-                    .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
+                    .onReject(i -> reasons.add(i.reason())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var e = fails(Seal.establish(SealTest.tcp(l.localAddress()), SealTest.client().anchor(pinWithProof()).build()).toCompletableFuture());
                 assertTrue(e instanceof CredentialsFailedException, e.toString());

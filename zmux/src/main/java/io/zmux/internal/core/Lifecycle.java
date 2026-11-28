@@ -17,15 +17,14 @@ final class Lifecycle {
         }
     }
 
+    private final Runnable deadlineChanged;
+
     // timers
     private long handshake;
     private long linger = Time.NEVER;
     private long laneWait = Time.NEVER;
     /** The bound of a close's hand-off of CONNECTION_CLOSE to the carriers. */
     private long handOff = Time.NEVER;
-    /** Pipe 0 writes nothing until the release or firstFlight (a CONNECTION_CLOSE does not wait). */
-    private boolean firstHeld;
-    private long firstFlight = Time.NEVER;
 
     // CONNECTION_CLOSE
     private CloseFrame close;
@@ -46,50 +45,23 @@ final class Lifecycle {
     private boolean received;
     private boolean closeWhenDone;
 
-    Lifecycle(long handshakeDeadline) {
+    Lifecycle(long handshakeDeadline, Runnable deadlineChanged) {
         handshake = handshakeDeadline;
+        this.deadlineChanged = deadlineChanged;
     }
 
     // ---- timers ----
 
     void established() {
         handshake = Time.NEVER;
-    }
-
-    /** Holds the first flight until the deadline, which the handshake deadline then runs after. */
-    void holdFirstFlight() {
-        firstHeld = true;
-        firstFlight = handshake;
-        handshake = Time.NEVER;
-    }
-
-    boolean firstHeld() {
-        return firstHeld;
-    }
-
-    /** Whether pipe's output waits for the release. */
-    boolean holdsFirst(long pipe) {
-        return firstHeld && pipe == 0 && !closePending;
-    }
-
-    /** Ends the hold; handshakeDeadline applies when the handshake is still to complete (else NEVER). False when not held. */
-    boolean releaseFirstFlight(long handshakeDeadline) {
-        if (!firstHeld) return false;
-        firstHeld = false;
-        firstFlight = Time.NEVER;
-        handshake = handshakeDeadline;
-        return true;
-    }
-
-    /** Whether the hold's deadline passed at t. */
-    boolean firstFlightDue(long t) {
-        return firstHeld && t >= firstFlight;
+        deadlineChanged.run();
     }
 
     /** True once when the handshake deadline passed at t. */
     boolean handshakeDue(long t) {
         if (t < handshake) return false;
         handshake = Time.NEVER;
+        deadlineChanged.run();
         return true;
     }
 
@@ -97,6 +69,7 @@ final class Lifecycle {
     boolean lingerDue(long t) {
         if (t < linger) return false;
         linger = Time.NEVER;
+        deadlineChanged.run();
         return true;
     }
 
@@ -109,18 +82,23 @@ final class Lifecycle {
 
     /** Bounds the hand-off at until; a later bound never extends an earlier one. */
     void handOffBy(long until) {
-        if (until < handOff) handOff = until;
+        if (until < handOff) {
+            handOff = until;
+            deadlineChanged.run();
+        }
     }
 
     /** True once when the hand-off bound passed at t. */
     boolean handOffDue(long t) {
         if (t < handOff) return false;
         handOff = Time.NEVER;
+        deadlineChanged.run();
         return true;
     }
 
     void linger(long until) {
         linger = until;
+        deadlineChanged.run();
     }
 
     /** When to check again whether a close that waits for the application's reads is done; NEVER: no check. */
@@ -129,24 +107,27 @@ final class Lifecycle {
     /** Checks again at t whether the linger may end (the application read while the session closes). */
     void checkReads(long t) {
         readsCheck = t;
+        deadlineChanged.run();
     }
 
     /** True once when the check of {@link #checkReads} is due at t. */
     boolean readsCheckDue(long t) {
         if (t < readsCheck) return false;
         readsCheck = Time.NEVER;
+        deadlineChanged.run();
         return true;
     }
 
     long deadline() {
-        long t = Math.min(Math.min(Math.min(Math.min(handshake, linger), firstFlight), handOff), readsCheck);
+        long t = Math.min(Math.min(Math.min(handshake, linger), handOff), readsCheck);
         if (waitLanes) t = Math.min(t, laneWait);
         return t;
     }
 
     /** CLOSED: no deadline remains. */
     void clearTimers() {
-        handshake = linger = laneWait = firstFlight = handOff = readsCheck = Time.NEVER;
+        handshake = linger = laneWait = handOff = readsCheck = Time.NEVER;
+        deadlineChanged.run();
     }
 
     // ---- CONNECTION_CLOSE ----
@@ -160,6 +141,7 @@ final class Lifecycle {
             waitLanes = true;
             laneWait = laneWaitUntil;
         }
+        deadlineChanged.run();
     }
 
     /** Whether a CONNECTION_CLOSE was queued, pending or already sent. */
@@ -193,12 +175,14 @@ final class Lifecycle {
         if (!waitLanes) return;
         waitLanes = false;
         handOff = Time.add(t, Session.closeLimit);
+        deadlineChanged.run();
     }
 
     /** Every live outbound pipe took CONNECTION_CLOSE; linger until lingerUntil. */
     void closeSent(long lingerUntil) {
         closePending = false;
         linger = lingerUntil;
+        deadlineChanged.run();
     }
 
     /** Writes the queued CONNECTION_CLOSE; nothing follows it. False when it did not fit. */
@@ -206,7 +190,7 @@ final class Lifecycle {
         CloseFrame c = close;
         int n = FrameEncoder.closeLength(c.app(), c.code(), c.frameType(), c.reason().length);
         w.end();
-        if (!w.frame(n, false, bb -> FrameEncoder.close(bb, c.app(), c.code(), c.frameType(), c.reason()))) return false;
+        if (!w.setupFrame(n, false, bb -> FrameEncoder.close(bb, c.app(), c.code(), c.frameType(), c.reason()))) return false;
         w.close();
         return true;
     }
@@ -294,11 +278,14 @@ final class Lifecycle {
         return true;
     }
 
+    private int goAwayWritten;
+
     boolean writeGoAway(RecordWriter w) {
         long b0 = sentWater[0], b1 = sentWater[1], c = code;
         int n = 4 + VarInt.length(b0) + VarInt.length(b1) + VarInt.length(c);
-        if (!w.frame(n, true, bb -> FrameEncoder.goAway(bb, b0, b1, c))) return false;
-        w.logFrame(FrameDesc.of(FrameDesc.Kind.GOAWAY));
+        if (!w.trackedFrame(n, goAwayWritten == phase, bb -> FrameEncoder.goAway(bb, b0, b1, c),
+                FrameDesc.of(FrameDesc.Kind.GOAWAY))) return false;
+        goAwayWritten = phase;
         return true;
     }
 

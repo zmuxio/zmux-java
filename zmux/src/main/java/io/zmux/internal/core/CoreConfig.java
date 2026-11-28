@@ -1,5 +1,7 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.memory.SharedMemory;
+
 import io.zmux.internal.wire.Preamble;
 import io.zmux.internal.wire.TransportParams;
 import java.security.SecureRandom;
@@ -20,7 +22,6 @@ public record CoreConfig(
         long localIdleTimeout,
         long handshakeTimeout,
         long joinTimeout,
-        boolean redial,
         boolean stagedUni,
         long uniTarget,
         long streamWindowCap,
@@ -40,13 +41,17 @@ public record CoreConfig(
         long datagramStreamBytes,
         long datagramQueueDelay,
         boolean datagramReceiveLimited,
-        int maxPipes,
-        int headroom,
-        int replayWindow,
+        int datagramWindow,
+        int datagramHoldPackets,
+        long datagramHoldNanos,
+        io.zmux.DatagramSendOptions datagramDefaults,
+        io.zmux.DatagramCopyPolicy copyPolicy,
+        CoreSessionPolicy sessionPolicy,
         long resume,
         Policy policy,
         int spreadChunk,
         long probation,
+        long settleFor,
         long overflowDelay,
         boolean redundancy,
         byte[] psk,
@@ -57,13 +62,24 @@ public record CoreConfig(
         io.zmux.internal.join.Mode firstPipeMode,
         int joinEarlyHello,
         Live live,
-        boolean earlyZmuxPeer,
-        boolean holdFirstFlight,
         io.zmux.shaping.ShapingLimits shapingLimits,
         io.zmux.shaping.ShapingBudget shapingBudget,
         io.zmux.shaping.ShaperFactory shaper,
         Epochs epochs,
         TestHooks test) {
+    public static final long DEFAULT_HANDSHAKE_TIMEOUT = 10 * Time.SECOND;
+    public static final long DEFAULT_IDLE_TIMEOUT_MILLIS = 30000;
+    public static final long DEFAULT_STREAM_WINDOW = 256 << 10;
+    public static final long DEFAULT_CONNECTION_WINDOW = 1 << 20;
+    public static final long DEFAULT_BIDI_STREAMS = 256;
+    public static final long DEFAULT_SEND_BUFFER = 4L << 20;
+    public static final long DEFAULT_MEMORY_BUDGET = 1L << 30;
+    public static final int DEFAULT_SEND_DATAGRAMS = 64;
+    public static final int DEFAULT_RECEIVE_DATAGRAMS = 128;
+    public static final int DEFAULT_STREAM_DATAGRAMS = 32;
+    public static final long DEFAULT_DATAGRAM_RECEIVE_BYTES = 1L << 20;
+    public static final int DEFAULT_DATAGRAM_WINDOW = 1024;
+
     /** The per-stream datagram byte bound by default: 32 datagrams of 9000 bytes fit. */
     public static final long DEFAULT_DATAGRAM_STREAM_BYTES = 512 << 10;
     /** The CoDel target of every datagram queue by default. */
@@ -112,8 +128,8 @@ public record CoreConfig(
 
     public static final int DEFAULT_SPREAD_CHUNK = 16384;
     public static final long DEFAULT_OVERFLOW_DELAY = Time.SECOND;
-    public static final long DEFAULT_STANDBY_PROBE = Time.SECOND;
-    public static final long DEFAULT_PROBE_INTERVAL = 15 * Time.SECOND;
+    public static final long DEFAULT_STANDBY_PROBE = io.zmux.Liveness.DEFAULT_STANDBY_PROBE.toNanos();
+    public static final long DEFAULT_PROBE_INTERVAL = io.zmux.Liveness.DEFAULT_PROBE_INTERVAL.toNanos();
     public static final long DEFAULT_LATENCY_BUDGET = 100 * Time.MICROSECOND;
     /**
      * The liveness settings in effect, one set per built configuration: owned by the session's
@@ -153,7 +169,13 @@ public record CoreConfig(
     /** {@link #keepAlive()} turned off; 0 is a period of zero. */
     public static final long OFF = -1;
     /** An unlimited {@link #memoryBudget()}; 0 is a budget of no byte. */
-    public static final long UNLIMITED = Long.MAX_VALUE;
+    public static final long UNLIMITED = SharedMemory.UNLIMITED;
+
+    /** Ensures a bounded standalone session and its carriers use the same ledger. */
+    public CoreConfig withMemoryLedger() {
+        if (budget != null || memoryBudget == UNLIMITED) return this;
+        return toBuilder().budget(new io.zmux.internal.memory.MemoryBudget(memoryBudget, null)).build();
+    }
 
     /** The trace runner's deterministic values. epochLocatorPrefix: when set, the local Locator of epoch e is this prefix and e in decimal ASCII. */
     public record TestHooks(boolean enabled, Preamble.Tlv greaseTlv, long pingSeqStart, long rtt,
@@ -191,7 +213,6 @@ public record CoreConfig(
         b.handshakeTimeout = handshakeTimeout;
         b.joinTimeout = joinTimeout;
         b.epochs = epochs;
-        b.redial = redial;
         b.declaredEndToEnd = declaredEndToEnd;
         b.secureFirstPipe = secureFirstPipe;
         b.firstPipeMode = firstPipeMode;
@@ -216,15 +237,19 @@ public record CoreConfig(
         b.datagramStreamBytes = datagramStreamBytes;
         b.datagramQueueDelay = datagramQueueDelay;
         b.datagramReceiveLimited = datagramReceiveLimited;
-        b.maxPipes = maxPipes;
-        b.headroom = headroom;
-        b.replayWindow = replayWindow;
+        b.datagramWindow = datagramWindow;
+        b.datagramHoldPackets = datagramHoldPackets;
+        b.datagramHoldNanos = datagramHoldNanos;
+        b.datagramDefaults = datagramDefaults;
+        b.copyPolicy = copyPolicy;
+        b.sessionPolicy = sessionPolicy;
         b.resume = resume;
         b.policy = policy;
         b.spreadChunk = spreadChunk;
         b.suspectFloor = live.suspectFloor();
         b.deadTimeout = live.deadTimeout();
         b.probation = probation;
+        b.settleFor = settleFor;
         b.overflowDelay = overflowDelay;
         b.standbyProbe = live.standbyProbe();
         b.probeInterval = live.probeInterval();
@@ -233,8 +258,6 @@ public record CoreConfig(
         b.psk = psk;
         b.exporter = exporter;
         b.deferredPsk = deferredPsk;
-        b.earlyZmuxPeer = earlyZmuxPeer;
-        b.holdFirstFlight = holdFirstFlight;
         b.shapingLimits = shapingLimits;
         b.shapingBudget = shapingBudget;
         b.shaper = shaper;
@@ -249,13 +272,13 @@ public record CoreConfig(
                 | TransportParams.BIDI_REMOTE | TransportParams.UNI | TransportParams.STREAMS_BIDI
                 | TransportParams.STREAMS_UNI | TransportParams.RESET_AT | TransportParams.RECORD_SIZE
                 | TransportParams.GOAWAY | TransportParams.PREAMBLE | TransportParams.PRIORITY
-                | TransportParams.PIPE_ACK | TransportParams.LANES;
-        p.maxIdleTimeoutMillis = 30000;
-        p.initialMaxData = 1 << 20;
-        p.maxStreamDataBidiLocal = 256 << 10;
-        p.maxStreamDataBidiRemote = 256 << 10;
-        p.maxStreamDataUni = 256 << 10;
-        p.maxStreamsBidi = 256;
+                | TransportParams.PIPE_ACK | TransportParams.LANES | TransportParams.FAMILY;
+        p.maxIdleTimeoutMillis = DEFAULT_IDLE_TIMEOUT_MILLIS;
+        p.initialMaxData = DEFAULT_CONNECTION_WINDOW;
+        p.maxStreamDataBidiLocal = DEFAULT_STREAM_WINDOW;
+        p.maxStreamDataBidiRemote = DEFAULT_STREAM_WINDOW;
+        p.maxStreamDataUni = DEFAULT_STREAM_WINDOW;
+        p.maxStreamsBidi = DEFAULT_BIDI_STREAMS;
         p.maxStreamsUni = 16;
         p.maxRecordSize = 65535;
         p.maxPreambleSize = 4096;
@@ -269,10 +292,9 @@ public record CoreConfig(
         private Role transportRole = Role.INITIATOR;
         private TransportParams local = endpointParams();
         private RandomGenerator random = new SecureRandom();
-        private long handshakeTimeout = 10 * Time.SECOND;
+        private long handshakeTimeout = DEFAULT_HANDSHAKE_TIMEOUT;
         private long joinTimeout = DEFAULT_JOIN_TIMEOUT;
-        private boolean redial;
-        private long keepAlive = OFF;
+        private long keepAlive = io.zmux.Liveness.DEFAULT_KEEP_ALIVE_PERIOD.toNanos();
         private boolean stagedUni = true;
         // Trace profiles can supply the deadline through the transport parameters alone.
         private long localIdleTimeout = -1;
@@ -280,29 +302,35 @@ public record CoreConfig(
         private long streamWindowCap;
         private long connWindowCap;
         private long latencyBudget = DEFAULT_LATENCY_BUDGET;
-        private long memoryBudget = 1L << 30;
+        // Public endpoints supply their configured budget. A standalone sans-I/O core
+        // has no host allocations unless its caller sets a bound.
+        private long memoryBudget = UNLIMITED;
         private SharedMemory budget;
         private boolean noAutotune;
         private boolean windowPredicate;
-        private long sendBuffer = 4L << 20;
+        private long sendBuffer = DEFAULT_SEND_BUFFER;
         private long sendBufferMax;
         private boolean datagrams;
-        private int datagramSendQueue = 64;
-        private int datagramReceiveQueue = 128;
-        private int datagramStreamQueue = 32;
-        private long datagramReceiveBytes = 1L << 20;
+        private int datagramSendQueue = DEFAULT_SEND_DATAGRAMS;
+        private int datagramReceiveQueue = DEFAULT_RECEIVE_DATAGRAMS;
+        private int datagramStreamQueue = DEFAULT_STREAM_DATAGRAMS;
+        private long datagramReceiveBytes = DEFAULT_DATAGRAM_RECEIVE_BYTES;
         private long datagramStreamBytes = DEFAULT_DATAGRAM_STREAM_BYTES;
         private long datagramQueueDelay = DEFAULT_DATAGRAM_QUEUE_DELAY;
         private boolean datagramReceiveLimited;
-        private int maxPipes = 1;
-        private int headroom = 8;
-        private int replayWindow;
+        private io.zmux.DatagramCopyPolicy copyPolicy = io.zmux.DatagramCopyPolicy.DEFAULT;
+        private int datagramWindow = DEFAULT_DATAGRAM_WINDOW;
+        private int datagramHoldPackets = Integer.MAX_VALUE;
+        private long datagramHoldNanos = -1;
+        private io.zmux.DatagramSendOptions datagramDefaults = io.zmux.DatagramSendOptions.INHERIT;
+        private CoreSessionPolicy sessionPolicy = CoreSessionPolicy.DEFAULT;
         private long resume;
         private Policy policy = Policy.AFFINITY;
         private int spreadChunk = DEFAULT_SPREAD_CHUNK;
-        private long suspectFloor = 250 * Time.MILLISECOND;
+        private long suspectFloor = io.zmux.Liveness.DEFAULT_SUSPECT_FLOOR.toNanos();
         private long deadTimeout;
         private long probation = -1;
+        private long settleFor = 5 * Time.SECOND;
         private long overflowDelay = DEFAULT_OVERFLOW_DELAY;
         private long standbyProbe = DEFAULT_STANDBY_PROBE;
         private long probeInterval = DEFAULT_PROBE_INTERVAL;
@@ -311,8 +339,6 @@ public record CoreConfig(
         private byte[] psk;
         private java.util.function.Supplier<byte[]> exporter;
         private boolean deferredPsk;
-        private boolean earlyZmuxPeer;
-        private boolean holdFirstFlight;
         private boolean declaredEndToEnd;
         private boolean secureFirstPipe;
         private io.zmux.internal.join.Mode firstPipeMode;
@@ -326,7 +352,7 @@ public record CoreConfig(
         private Builder() { }
 
         public CoreConfig build() {
-            return new CoreConfig(role, transportRole, local, random, localIdleTimeout, handshakeTimeout, joinTimeout, redial, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramQueueDelay, datagramReceiveLimited, maxPipes, headroom, replayWindow, resume, policy, spreadChunk, probation, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), earlyZmuxPeer, holdFirstFlight, shapingLimits, shapingBudget, shaper, epochs, test);
+            return new CoreConfig(role, transportRole, local, random, localIdleTimeout, handshakeTimeout, joinTimeout, stagedUni, uniTarget, streamWindowCap, connWindowCap, latencyBudget, memoryBudget, budget, noAutotune, windowPredicate, sendBuffer, sendBufferMax, datagrams, datagramSendQueue, datagramReceiveQueue, datagramStreamQueue, datagramReceiveBytes, datagramStreamBytes, datagramQueueDelay, datagramReceiveLimited, datagramWindow, datagramHoldPackets, datagramHoldNanos, datagramDefaults, copyPolicy, sessionPolicy, resume, policy, spreadChunk, probation, settleFor, overflowDelay, redundancy, psk, exporter, deferredPsk, declaredEndToEnd, secureFirstPipe, firstPipeMode, joinEarlyHello, new Live(keepAlive, suspectFloor, deadTimeout, standbyProbe, probeInterval, probeJitter), shapingLimits, shapingBudget, shaper, epochs, test);
         }
 
         public Builder localIdleTimeout(long v) { localIdleTimeout = v; return this; }
@@ -354,8 +380,6 @@ public record CoreConfig(
 
         public Builder handshakeTimeout(long v) { handshakeTimeout = v; return this; }
         public Builder joinTimeout(long v) { joinTimeout = v; return this; }
-        /** A redial hook dials for the session when it suspends. */
-        public Builder redial(boolean v) { redial = v; return this; }
 
         public Builder keepAlive(long v) { keepAlive = v; return this; }
 
@@ -389,6 +413,27 @@ public record CoreConfig(
         /** 0 = auto. */
         public Builder sendBufferMax(long v) { sendBufferMax = v; return this; }
 
+        public Builder datagramCopyPolicy(io.zmux.DatagramCopyPolicy value) {
+            copyPolicy = java.util.Objects.requireNonNull(value);
+            return this;
+        }
+
+        public Builder datagramWindow(int value) {
+            datagramWindow = value;
+            return this;
+        }
+
+        Builder datagramHold(int packets, long nanos) {
+            datagramHoldPackets = packets;
+            datagramHoldNanos = nanos;
+            return this;
+        }
+
+        public Builder datagramDefaults(io.zmux.DatagramSendOptions value) {
+            datagramDefaults = java.util.Objects.requireNonNull(value);
+            return this;
+        }
+
         public Builder datagrams(boolean v) { datagrams = v; return this; }
 
         public Builder datagramSendQueue(int v) { datagramSendQueue = v; return this; }
@@ -408,11 +453,7 @@ public record CoreConfig(
         /** Received datagrams wait for the driver's receive limiter before they are queued. */
         public Builder datagramReceiveLimited(boolean v) { datagramReceiveLimited = v; return this; }
 
-        public Builder maxPipes(int v) { maxPipes = v; return this; }
-
-        public Builder headroom(int v) { headroom = v; return this; }
-
-        public Builder replayWindow(int v) { replayWindow = v; return this; }
+        public Builder sessionPolicy(CoreSessionPolicy v) { sessionPolicy = v; return this; }
 
         public Builder resume(long v) { resume = v; return this; }
 
@@ -427,6 +468,7 @@ public record CoreConfig(
         public Builder deadTimeout(long v) { deadTimeout = v; return this; }
 
         /** Negative = default. */
+        public Builder settleFor(long nanos) { settleFor = nanos; return this; }
         public Builder probation(long v) { probation = v; return this; }
 
         public Builder overflowDelay(long v) { overflowDelay = v; return this; }
@@ -453,9 +495,7 @@ public record CoreConfig(
         public Builder secureFirstPipe(io.zmux.internal.join.Mode m) { secureFirstPipe = m != null; firstPipeMode = m; return this; }
         public Builder joinEarlyHello(int v) { joinEarlyHello = v; return this; }
 
-        public Builder earlyZmuxPeer(boolean v) { earlyZmuxPeer = v; return this; }
 
-        public Builder holdFirstFlight(boolean v) { holdFirstFlight = v; return this; }
 
         /** Test hooks; never set from production configuration. */
         public Builder test(TestHooks v) { test = v; return this; }

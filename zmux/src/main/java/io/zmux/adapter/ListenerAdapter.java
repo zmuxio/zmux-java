@@ -22,6 +22,7 @@ import java.util.Objects;
 public final class ListenerAdapter {
     static {
         AdapterPorts.install(new AdapterPorts.Views() {
+            @Override public io.zmux.internal.spi.CarrierBudget carrierBudget(ListenerAdapter listener) { return listener.port.carrierBudget(); }
             @Override public ListenerAdapter listener(AdapterPorts.Listener port) { return new ListenerAdapter(port); }
             @Override public io.zmux.internal.loop.CarrierSetup setup(Handled handled) { return handled.setup(); }
             @Override public AdapterPorts.Setup reservation(Slot slot) { return slot.reservation(); }

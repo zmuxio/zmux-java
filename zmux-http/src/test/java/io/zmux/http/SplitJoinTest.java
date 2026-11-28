@@ -1,49 +1,67 @@
 package io.zmux.http;
 
 import static org.junit.jupiter.api.Assertions.*;
+
+import io.zmux.AttachmentSpec;
+import io.zmux.CapacitySnapshot;
+import io.zmux.CarrierKind;
+import io.zmux.Directions;
 import io.zmux.PipeOptions;
-import io.zmux.PipePool;
 import io.zmux.Role;
+import io.zmux.SessionController;
+import io.zmux.SessionTarget;
 import io.zmux.Zmux;
-import io.zmux.ZmuxPipe;
+import io.zmux.ZmuxSession;
+import java.net.URI;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.function.BooleanSupplier;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** A split carrier joined as a further pipe: an uplink and a downlink, kept by a pool as one member. */
-@Timeout(60)
+/** A paired POST and GET supplies one bidirectional member. */
+@Timeout(90)
 class SplitJoinTest {
-    static void await(BooleanSupplier c) throws InterruptedException {
-        long until = System.nanoTime() + 10_000_000_000L;
-        while (!c.getAsBoolean()) {
-            assertTrue(System.nanoTime() < until, "condition not reached");
-            Thread.sleep(5);
+    static final String CANDIDATE = "split";
+
+    static SessionController controller(HttpCarrierClient client, URI uri, PipeOptions options) {
+        var candidate = new SessionController.Candidate(CANDIDATE, "split", CarrierKind.SPLIT, "", 0, false, false,
+                List.of(new AttachmentSpec(Directions.BOTH, options)), client.splitOpener(uri, Map.of()));
+        return new SessionController(new SessionController.Options(UUID.randomUUID().toString(), List.of(candidate),
+                SessionController.Choice.STATIC, SessionController.Limits.DEFAULT.withMaximumOpeners(1).withAttemptTimeout(Duration.ofSeconds(45)), null, null, java.util.Map.of()));
+    }
+
+    static SessionTarget target() {
+        return new SessionTarget(1, List.of(new SessionTarget.Group("route",
+                List.of(new SessionTarget.Quota("member", 1, Directions.BOTH, List.of(CANDIDATE))), SessionTarget.Rotation.NONE)), List.of());
+    }
+
+    static CapacitySnapshot.Member member(ZmuxSession session, Predicate<CapacitySnapshot.Member> test) throws Exception {
+        var capacity = session.capacity();
+        for (;;) {
+            var found = capacity.members().stream()
+                    .filter(m -> m.candidate().equals(CANDIDATE) && m.covered() == Directions.BOTH && test.test(m))
+                    .findFirst();
+            if (found.isPresent()) return found.orElseThrow();
+            capacity = session.awaitCapacityChange(capacity.observed()).get(45, TimeUnit.SECONDS);
         }
     }
 
-    @Test void aSplitJoinPoolKeepsOnePipeAcrossItsPairedRequests() throws Exception {
+    @Test void aSplitJoinUsesOneAttachmentAcrossItsPairedRequests() throws Exception {
         try (var f = new Fixture(ModeHttpTest.session(true, null), b -> b, b -> b.streaming(), false, null);
-             var c = f.client(b -> b)) {
-            try (var s = Zmux.open(c.pipe(f.base, Map.of(), PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, f.config);
-                 var server = f.listener.accept(Duration.ofSeconds(5))) {
-                var pool = PipePool.join(a -> List.of(c.splitJoin(a.session(), f.base, Map.of(), null, a.options())));
-                try (var run = s.maintainPipes(pool)) {
-                    await(() -> run.pipes().size() == 1);
-                    List<ZmuxPipe> first = run.pipes();
-                    var st = first.getFirst().stats().orElseThrow();
-                    assertTrue(st.outbound() != null && st.inbound() != null, "one bidirectional attachment");
-                    var old = new HashSet<io.zmux.PipeId>();
-                    for (ZmuxPipe p : first) old.add(p.id());
-                    // The loss of the pipe replaces the member.
-                    first.getFirst().abort();
-                    await(() -> run.pipes().size() == 1 && run.pipes().stream().noneMatch(p -> old.contains(p.id())));
-                    Fixture.exchange(s, server, 4);
-                }
-            }
+             var c = f.client(b -> b); var controller = controller(c, f.base, PipeOptions.defaults());
+             var s = Zmux.open(c.pipe(f.base, Map.of(), PipeOptions.Direction.BIDIRECTIONAL, null), Role.CLIENT, f.config);
+             var server = f.listener.accept(Duration.ofSeconds(10)); var control = controller.manage(s, target())) {
+            var first = member(s, m -> true);
+            assertEquals(1, first.pipes().size());
+            s.pipes().stream().filter(p -> p.id().equals(first.pipes().getFirst())).findFirst().orElseThrow().abort();
+            var second = member(s, m -> !m.id().equals(first.id()));
+            assertEquals(1, second.pipes().size());
+            assertFalse(control.done().isDone());
+            Fixture.exchange(s, server, 4);
         }
     }
 }

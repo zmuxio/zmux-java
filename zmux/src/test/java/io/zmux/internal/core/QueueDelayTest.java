@@ -13,7 +13,7 @@ class QueueDelayTest {
     private static long expected(PathMetrics m, Pipe p, long ahead) {
         long queue = (long) Math.min(Time.SECOND, ahead / m.rateOf(p) * Time.SECOND);
         long floor = CoreConfig.builder().build().suspectFloor();
-        return Math.max(floor, Time.mul(Time.add(m.pto(p.mp()), queue), 2));
+        return Math.max(floor, Time.mul(Time.add(m.pto(p), queue), 2));
     }
 
     /** Hands over one ack-eliciting batch on pipe 0 and reports it written; the peer never acknowledges. */
@@ -42,7 +42,7 @@ class QueueDelayTest {
         assertEquals(expected(m, p, 200 << 10), slow);
         assertTrue(slow > idle, "T_suspect grows with the carrier's queue: " + slow + " <= " + idle);
         long queue = PathHealth.queueDelay(200 << 10, m.rateOf(p));
-        assertEquals(Math.max(2 * Time.SECOND, Time.mul(Time.add(m.pto(p.mp()), queue), 8)), h.tFail(p));
+        assertEquals(Math.max(2 * Time.SECOND, Time.mul(Time.add(m.pto(p), queue), 8)), h.tFail(p));
 
         // The snapshot does not grow afterwards, so a pipe that stops moving is still detected.
         s.unsentReported(0, 0, 64L << 20);
@@ -60,7 +60,7 @@ class QueueDelayTest {
         t.unsentReported(0, 0, 64L << 20);
         handOver(t);
         long capped = t.mp().health.tSuspect(q);
-        assertEquals(Time.mul(Time.add(t.mp().metrics.pto(q.mp()), Time.SECOND), 2), capped);
+        assertEquals(Time.mul(Time.add(t.mp().metrics.pto(q), Time.SECOND), 2), capped);
         assertEquals(expected(t.mp().metrics, q, 64L << 20), capped);
     }
 

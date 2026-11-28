@@ -1,5 +1,7 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.memory.MemoryBudget;import io.zmux.internal.buffer.ReadBuf;
+
 import io.zmux.internal.spi.AttachmentRelease;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -18,6 +20,7 @@ public class CarrierActionsTest {
             info = new TransportInfo(new CarrierInfo(Framing.BYTES, false, false, false, false), "", connection, bytes, 0);
         }
         @Override public TransportInfo info() { return info; }
+        @Override public long privateWorkspace() { return 0; }
         @Override public int directions() { return direction; }
         @Override public boolean writable() { return false; }
         @Override public boolean isClosed() { return closed; }
@@ -391,49 +394,46 @@ public class CarrierActionsTest {
             });
         } finally { loop.close(); }
     }
-    @Test void connectionChargesTrackActualHoldersAndRaiseEstimates() throws Exception {
+    @Test void connectionChargeIsReservedBeforeAttachmentAndLivesThroughPhysicalClose() throws Exception {
         EventLoop loop = new EventLoop("carrier-budget", true, BufferPool.DEFAULT_IDLE_BYTES);
         try {
             ExternalTransportTest.run(loop, () -> {
-                for (boolean shared : new boolean[] {false, true}) {
-                    MemoryBudget budget = shared ? new MemoryBudget(0, null) : null;
-                    CoreConfig config = CoreConfig.builder().budget(budget).build();
-                    Session core = new Session(config, Clock.now());
-                    SessionRuntime driver = new SessionRuntime(loop, core, DriverHooks.NONE);
-                    long base = core.memory().usage(); Object connection = new Object();
-                    var set = driver.carriers();
-                    Carrier a = new Carrier(loop, Action.DIR_IN, connection, 100);
-                    Carrier zero = new Carrier(loop, Action.DIR_IN, connection, 0);
-                    Carrier b = new Carrier(loop, Action.DIR_OUT, connection, 150);
-                    var at = set.attach(a, 0, 0, null); var zt = set.attach(zero, 0, 1, null); set.remove(zt, null);
-                    assertEquals(100, shared ? budget.used() : core.memory().usage()-base);
-                    var bt = set.attach(b, 0, 0, null); assertSame(bt, set.attach(b, 0, 0, null));
-                    assertEquals(150, shared ? budget.used() : core.memory().usage()-base);
-                    set.remove(at, null);
-                    assertEquals(150, shared ? budget.used() : core.memory().usage()-base);
-                    set.remove(bt, null); set.remove(bt, null);
-                    assertEquals(0, shared ? budget.used() : core.memory().usage()-base);
-                    a = new Carrier(loop, Action.DIR_IN, connection, 100);
-                    zero = new Carrier(loop, Action.DIR_IN, connection, 0);
-                    at = set.attach(a, 0, 0, null); zt = set.attach(zero, 0, 1, null);
-                    set.remove(at, null);
-                    assertEquals(100, shared ? budget.used() : core.memory().usage()-base,
-                            "a zero estimate does not erase the known connection cost");
-                    set.remove(zt, null);
-                    assertEquals(0, shared ? budget.used() : core.memory().usage()-base);
-                    if (shared) {
-                        CoreConfig secondConfig = CoreConfig.builder().budget(budget).build();
-                        SessionRuntime second = new SessionRuntime(loop, new Session(secondConfig, Clock.now()), DriverHooks.NONE);
-                        a = new Carrier(loop, Action.DIR_IN, connection, 100);
-                        zero = new Carrier(loop, Action.DIR_IN, connection, 0);
-                        at = set.attach(a, 0, 0, null); zt = second.carriers().attach(zero, 0, 0, null); set.remove(at, null);
-                        assertEquals(100, budget.used(), "another session still owns an attachment");
-                        second.carriers().remove(zt, null); assertEquals(0, budget.used());
-                    }
+                long output = CarrierCapacity.OUTBOUND_WORKSPACE;
+                var budget = new MemoryBudget(150 + output, null);
+                Object connection = new Object();
+                class HoldingCarrier extends Carrier {
+                    private final java.util.concurrent.CompletableFuture<Void> released = new java.util.concurrent.CompletableFuture<>();
+                    HoldingCarrier(SessionHost host, int directions, long bytes) { super(host, directions, connection, bytes); }
+                    @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return released; }
                 }
+                var first = new HoldingCarrier(loop, Action.DIR_IN, 100);
+                var sibling = new HoldingCarrier(loop, Action.DIR_OUT, 0);
+                var rejected = new HoldingCarrier(loop, Action.DIR_IN, 151);
+                assertTrue(CarrierCapacity.reserve(first, budget, false));
+                assertTrue(CarrierCapacity.reserve(sibling, budget, false));
+                assertFalse(CarrierCapacity.reserve(rejected, budget, false));
+                assertEquals(100 + output, budget.used());
+                rejected.reject(null);
+                rejected.released.complete(null);
+                assertEquals(100 + output, budget.used());
+
+                var larger = new HoldingCarrier(loop, Action.DIR_IN, 150);
+                assertTrue(CarrierCapacity.reserve(larger, budget, false));
+                var core = new Session(CoreConfig.defaults(), Clock.now());
+                var set = new SessionRuntime(loop, core, DriverHooks.NONE).carriers();
+                var attached = set.attach(larger, 0, 0, null);
+                first.reject(null);
+                first.released.complete(null);
+                sibling.reject(null);
+                sibling.released.complete(null);
+                set.remove(attached, null);
+                assertEquals(150, budget.used());
+                larger.released.complete(null);
+                assertEquals(0, budget.used());
             });
         } finally { loop.close(); }
     }
+
     @Test void rejectedLaneImmediatelyDrivesTheProtocolClose() throws Exception {
         EventLoop loop = new EventLoop("lane-admission-close", true, BufferPool.DEFAULT_IDLE_BYTES);
         java.util.concurrent.CompletableFuture<Void> closing = new java.util.concurrent.CompletableFuture<>();
@@ -447,7 +447,7 @@ public class CarrierActionsTest {
                 driver.attachBootstrap(bootstrap);
                 CoreConfig remote = CoreConfig.builder().role(CoreConfig.Role.RESPONDER).transportRole(CoreConfig.Role.RESPONDER).build();
                 Session peer = new Session(remote, Clock.now());
-                peer.pipes().attachBootstrap(bootstrap.info().carrier(), bootstrap.info().carrier(), null);
+                peer.pipes().attachBootstrap(bootstrap.info().carrier(), bootstrap.info().carrier());
                 Batch batch = new Batch();
                 assertTrue(peer.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, Clock.now()));
                 java.nio.ByteBuffer bytes = java.nio.ByteBuffer.wrap(io.zmux.internal.core.BatchFixture.flat(batch));

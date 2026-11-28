@@ -31,8 +31,10 @@ final class TraceFrames {
             Map.entry("max_record_size", TransportParams.ID_MAX_RECORD_SIZE),
             Map.entry("zmux_role", TransportParams.ID_ROLE), Map.entry("zmux_goaway", TransportParams.ID_GOAWAY),
             Map.entry("zmux_preamble", TransportParams.ID_PREAMBLE), Map.entry("zmux_priority", TransportParams.ID_PRIORITY),
-            Map.entry("zmux_datagram_flows", TransportParams.ID_DATAGRAM_FLOWS),
+            Map.entry("zmux_datagram_flows", TransportParams.ID_RETIRED_DATAGRAM_FLOWS),
+            Map.entry("zmux_datagram_family", TransportParams.ID_DATAGRAM_FAMILY),
             Map.entry("zmux_carrier_datagrams", TransportParams.ID_CARRIER_DATAGRAMS),
+            Map.entry("zmux_carrier_datagram_padding", TransportParams.ID_CARRIER_DATAGRAM_PADDING),
             Map.entry("zmux_multipath", TransportParams.ID_MULTIPATH),
             Map.entry("zmux_session_crypto", TransportParams.ID_SESSION_CRYPTO),
             Map.entry("zmux_ack_threshold", TransportParams.ID_ACK_THRESHOLD),
@@ -41,7 +43,8 @@ final class TraceFrames {
             Map.entry("zmux_max_lanes", TransportParams.ID_MAX_LANES), Map.entry("zmux_resume", TransportParams.ID_RESUME));
 
     static final Set<String> EMPTY_PARAMS = Set.of("reset_stream_at", "zmux_goaway", "zmux_priority",
-            "zmux_datagram_flows", "zmux_pipe_ack");
+            "zmux_datagram_family", "zmux_datagram_flows", "zmux_pipe_ack", "zmux_carrier_datagrams",
+            "zmux_carrier_datagram_padding");
 
     static byte[] hex(Object v) {
         return HexFormat.of().parseHex((String) v);
@@ -150,7 +153,7 @@ final class TraceFrames {
                 case "zmux_goaway" -> p.present |= TransportParams.GOAWAY;
                 case "zmux_preamble" -> { p.present |= TransportParams.PREAMBLE; p.maxPreambleSize = num(v); }
                 case "zmux_priority" -> p.present |= TransportParams.PRIORITY;
-                case "zmux_datagram_flows" -> p.present |= TransportParams.FLOWS;
+                case "zmux_datagram_family" -> p.present |= TransportParams.FAMILY;
                 case "zmux_multipath" -> {
                     Map<String, Object> m = map(v);
                     p.present |= TransportParams.MULTIPATH;
@@ -172,6 +175,7 @@ final class TraceFrames {
                 case "zmux_ack_threshold" -> { p.present |= TransportParams.ACK_THRESHOLD; p.ackThreshold = num(v); }
                 case "zmux_pipe_ack" -> p.present |= TransportParams.PIPE_ACK;
                 case "zmux_carrier_datagrams" -> p.present |= TransportParams.CARRIER_DATAGRAMS;
+                case "zmux_carrier_datagram_padding" -> p.present |= TransportParams.CARRIER_DATAGRAM_PADDING;
                 case "zmux_max_ack_delay" -> { p.present |= TransportParams.ACK_DELAY; p.maxAckDelayMillis = num(v); }
                 case "zmux_max_lanes" -> {
                     Map<String, Object> m = map(v);
@@ -328,6 +332,13 @@ final class TraceFrames {
                 if (!f.application) o.put("frame_type", f.errorFrameType);
             }
             case DATAGRAM -> { o.put("data", hex(f.dataBytes())); o.put("has_len", f.hasLength); }
+            case DATAGRAM_ACK -> {
+                o.put("pipe", f.pipeId);
+                o.put("channel", (long) f.datagramChannel);
+                o.put("largest", f.value);
+                o.put("delay", f.datagramAckDelay);
+                o.put("first_range", f.firstDatagramRange);
+            }
             case TRANSPORT_PARAMETERS -> o.put("block", f.dataBytes());
             case PING -> { o.put("response", f.response); o.put("seq", f.value); }
             case GOAWAY -> { o.put("max_bidi", f.maxBidi); o.put("max_uni", f.maxUni); o.put("code", f.code); }

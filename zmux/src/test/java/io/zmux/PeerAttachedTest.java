@@ -15,10 +15,10 @@ class PeerAttachedTest {
     /** Adding returns at the verified Reply, so the wait for the attachment is the test's own. */
     static final PipeOptions NO_WAIT = PipeOptions.builder().returnOnReply(true).build();
 
-    static ZmuxPipe lateJoin(PipePoolTest.Fixture f, long delayMillis, PipeOptions options) throws Exception {
+    static ZmuxPipe lateJoin(SessionTestSupport.Fixture f, long delayMillis, PipeOptions options) throws Exception {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
         f.listener.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("late-confirm"))).closed();
-        return f.client.addPipe(PipeIo.of(pair[0].reader(), new PipePoolTest.LateConfirm(pair[0].writer(), delayMillis)), options);
+        return f.client.addPipe(PipeIo.of(pair[0].reader(), new SessionTestSupport.LateConfirm(pair[0].writer(), delayMillis)), options);
     }
 
     static boolean held(ZmuxSession acceptor, ZmuxPipe p) throws Exception {
@@ -26,7 +26,7 @@ class PeerAttachedTest {
     }
 
     @Test void aJoinedPipeIsAttachedOnlyOnceTheAcceptorReadItsConfirm() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 3))) {
             for (ZmuxPipe q : f.client.pipes()) if (q.id().value() == 0) q.awaitAttached(WAIT);
             for (ZmuxPipe q : f.server.pipes()) q.awaitAttached(WAIT);
             ZmuxPipe p = lateJoin(f, 300, NO_WAIT);
@@ -42,7 +42,7 @@ class PeerAttachedTest {
     }
 
     @Test void closeAndAbortRemoveThePipeEvenWithTheInterruptFlagSet() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 5))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 5))) {
             for (boolean graceful : new boolean[] {true, false}) {
                 ZmuxPipe p = lateJoin(f, 0, PipeOptions.defaults());
                 p.awaitAttached(WAIT);
@@ -61,10 +61,10 @@ class PeerAttachedTest {
 
     @Test void aPipeThisEndpointAbortedReportsTheAbortInItsWait() throws Exception {
         // HS-28.
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 3))) {
             var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
             var deliver = new java.util.concurrent.CompletableFuture<Runnable>();
-            var confirm = new PipePoolTest.LateConfirm(pair[0].writer(), deliver::complete);
+            var confirm = new SessionTestSupport.LateConfirm(pair[0].writer(), deliver::complete);
             f.listener.adapter().handle(pair[1], JoinHint.inBand(null));
             ZmuxPipe p = f.client.addPipe(PipeIo.of(pair[0].reader(), confirm), NO_WAIT);
             var late = deliver.get(5, TimeUnit.SECONDS);
@@ -87,7 +87,7 @@ class PeerAttachedTest {
     }
 
     @Test void aReceiveOnlyJoinIsAttachedByARecord() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 3))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 3))) {
             ZmuxPipe p = lateJoin(f, 100, PipeOptions.builder().direction(PipeOptions.Direction.RECEIVE_ONLY).returnOnReply(true).build());
             p.awaitAttached(WAIT);
             assertTrue(held(f.server, p));
@@ -95,7 +95,7 @@ class PeerAttachedTest {
     }
 
     @Test void theWaitEndsAtItsDeadlineTheRetirementAndTheSessionsEnd() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var f = new PipePoolTest.Fixture(PipePoolTest.config(loops, 4))) {
+        try (EventLoops loops = EventLoops.create(2); var f = new SessionTestSupport.Fixture(SessionTestSupport.config(loops, 4))) {
             ZmuxPipe slow = lateJoin(f, 1_000, NO_WAIT);
             assertThrows(SocketTimeoutException.class, () -> slow.awaitAttached(Duration.ofMillis(50)));
             var cancelled = slow.attached();

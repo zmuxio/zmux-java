@@ -1,8 +1,10 @@
 package io.zmux.quic;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import io.zmux.EarlyData;
 import io.zmux.EventLoops;
 import io.zmux.ListenerConfig;
 import io.zmux.PipeAuth;
@@ -11,6 +13,7 @@ import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxSession;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -34,11 +37,11 @@ public final class QuicInteropPeer {
         // A last argument "exporter": the join secret from the exporter alone, and KEYS <hex> for each session.
         boolean exporter = args[args.length - 1].equals("exporter");
         try (var loops = EventLoops.create(2)) {
-            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4);
+            var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).sessionPolicy(new SessionPolicy(new CapacityLimits(4)));
             if (exporter) builder.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             else builder.pipeAuth(PipeAuth.psk(PSK).withEndToEnd());
             var config = builder.build();
-            Consumer<ZmuxSession> serve = exporter ? session -> { printKeysWhenReady(session); script.accept(session); } : script;
+            Consumer<ZmuxSession> serve = exporter ? session -> { printKeys(session); script.accept(session); } : script;
             switch (args[0]) {
                 case "quic-server" -> server(args.length > 1 && !args[1].equals("exporter") ? Integer.parseInt(args[1]) : 1, config, serve);
                 case "quic-client" -> client(args[1], config, serve);
@@ -57,7 +60,6 @@ public final class QuicInteropPeer {
                 if (session == null) throw new IOException("no session");
                 script.accept(session);
             }
-            linger();
         }
     }
 
@@ -77,25 +79,16 @@ public final class QuicInteropPeer {
                 System.out.println("EARLY sent=false accepted=false reply=" + reply.toString(StandardCharsets.UTF_8));
             }
             script.accept(session);
-            linger();
         }
     }
 
-    /** Prints the session's exporter value once the carrier's handshake gives it (a session on early data starts before). */
-    private static void printKeysWhenReady(ZmuxSession session) {
-        Thread.ofVirtual().start(() -> {
-            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (System.nanoTime() - end < 0) {
-                try {
-                    System.out.println("KEYS " + java.util.HexFormat.of().formatHex(session.exportKeyingMaterial("EXPORTER-interop-app", new byte[0], 16)));
-                    return;
-                } catch (IOException notYet) {
-                    try { Thread.sleep(5); } catch (InterruptedException e) { return; }
-                }
-            }
-        });
+    /** Prints the exporter value after connect or accept returns an established session. */
+    private static void printKeys(ZmuxSession session) {
+        try {
+            byte[] keys = session.exportKeyingMaterial("EXPORTER-interop-app", new byte[0], 16);
+            System.out.println("KEYS " + java.util.HexFormat.of().formatHex(keys));
+        } catch (IOException error) {
+            throw new UncheckedIOException(error);
+        }
     }
-
-    /** Closing the endpoint at once would overtake the last session's close. */
-    private static void linger() throws InterruptedException { Thread.sleep(300); }
 }

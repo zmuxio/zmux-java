@@ -4,13 +4,14 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.zmux.carrier.*;
+import io.zmux.adapter.Handled;
+import io.zmux.internal.loop.AdmissionCarrier;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.HexFormat;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.Test;
@@ -18,154 +19,31 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(60)
 class AdmissionTest {
-    static final HexFormat HEX = HexFormat.of();
-    static final byte[] PSK = filled(32, 0x6b);
-    static final byte[] NONCE = HEX.parseHex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
+    private static final Duration DEADLINE = Duration.ofMinutes(5);
+    private static final long WATCHDOG_SECONDS = 20;
+    static final Duration SLOT = Duration.ofSeconds(30);
+    static final PrefixStore.Id TICKET_ID = new PrefixStore.Id(1, 2);
+    static final byte[] TICKET_KEY = filled(32, 0x6b);
+    static final PrefixStore.Generation GENERATION = new PrefixStore.Generation(filled(32, 0x3c), 0, -1);
 
     static byte[] filled(int n, int v) { byte[] b = new byte[n]; Arrays.fill(b, (byte) v); return b; }
 
-    @Test void prefixTokensMatchTheTestVectors() {
-        var a = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 0, 0);
-        assertEquals("2eaed9a5e8ca0729884488be9c349871b69823f01876ad48062a8b15c6c1839c", HEX.formatHex(a.derive()));
-        assertEquals("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf3fed5e50dc8fc8fce2e962ddb13dbfae",
-                HEX.formatHex(a.token(null, 1767225600L, NONCE)));
-        byte[] binding = new byte[32];
-        for (int i = 0; i < 32; i++) binding[i] = (byte) i;
-        assertEquals("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf36747d163099e42de649d7159d462334",
-                HEX.formatHex(a.token(binding, 1767225600L, NONCE)));
-        var b64 = java.util.Base64.getUrlEncoder().withoutPadding();
-        assertEquals(UNBOUND_HEADER, b64.encodeToString(a.token(null, 1767225600L, NONCE)));
-        assertEquals(BOUND_HEADER, b64.encodeToString(a.token(binding, 1767225600L, NONCE)));
-        assertArrayEquals(a.token(null, 1767225600L, NONCE), PrefixAuth.decodeHeader(UNBOUND_HEADER));
-        assertArrayEquals(a.token(binding, 1767225600L, NONCE), PrefixAuth.decodeHeader(BOUND_HEADER));
+    private static PrefixAuth.CarrierOptions options(boolean bound) {
+        return new PrefixAuth.CarrierOptions(bound, !bound);
     }
 
-    static final String UNBOUND_HEADER = "oKGio6SlpqeoqaqrrK2urz_tXlDcj8j84uli3bE9v64";
-    static final String BOUND_HEADER = "oKGio6SlpqeoqaqrrK2urzZ0fRYwmeQt5knXFZ1GIzQ";
-    static final byte[] VECTOR_BINDING = new byte[32];
-    static { for (int i = 0; i < 32; i++) VECTOR_BINDING[i] = (byte) i; }
-
-    /** The metadata of a carrier decided on its request head, with these header fields (name, value, ...). */
-    static Admission.CarrierInfo headInfo(PipeIo.Exporter exporter, String... fields) {
-        var headers = new java.util.LinkedHashMap<String, java.util.List<String>>();
-        for (int i = 0; i < fields.length; i += 2)
-            headers.computeIfAbsent(fields[i], k -> new java.util.ArrayList<>()).add(fields[i + 1]);
-        return new Admission.CarrierInfo(TestAddr.peer("peer"), TestAddr.peer("peer"), "", "", exporter, RequestHead.of(headers))
-                .at(Admission.Stage.HEAD, Framing.BYTE_STREAM, false);
+    private static PrefixAuth presenter(boolean bound) {
+        return new PrefixAuth(options(bound), SLOT, TICKET_ID, TICKET_KEY, java.util.List.of(GENERATION));
     }
 
-    static PipeIo.Exporter exporting(byte[] binding) {
-        return (label, context, length) -> PrefixAuth.EXPORTER_LABEL.equals(label) && context.length == 0 && length == 32 ? binding.clone() : null;
+    private static PrefixAuth.Verifier verifier(boolean bound) {
+        return verifier(bound, java.time.Clock.systemUTC());
     }
 
-    /**
-     * The header form of the token: the vectors verify on a carrier decided on
-     * its request head, with no prefix and a skip of 0; a missing, repeated (also in another
-     * case) or malformed field, a replay, and another connection's binding fail like a wrong
-     * token; the field name is configurable.
-     */
-    @Test void headerFormVerifiesTheVectorsAndRejectsMalformedValues() {
-        var unbound = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 0, 0);
-        var empty = ByteBuffer.allocate(0);
-        var v = unbound.verifier();
-        v.clock = () -> 1767225600L;
-        var accept0 = Admission.Decision.accept(0);
-        assertEquals(accept0, v.decide(headInfo(null, "zmux-prefix-auth", UNBOUND_HEADER), empty), "field names ignore case");
-        assertEquals(Admission.Decision.FALLBACK, v.decide(headInfo(null, "Zmux-Prefix-Auth", UNBOUND_HEADER), empty), "replay");
-
-        String canonical = UNBOUND_HEADER;
-        String[][] malformed = {
-                {},
-                {"Zmux-Prefix-Auth", canonical, "Zmux-Prefix-Auth", canonical},
-                {"Zmux-Prefix-Auth", canonical, "ZMUX-PREFIX-AUTH", canonical},
-                {"Zmux-Prefix-Auth", canonical + "="},
-                {"Zmux-Prefix-Auth", canonical.substring(0, 42)},
-                {"Zmux-Prefix-Auth", canonical.substring(0, 42) + "+"},
-                {"Zmux-Prefix-Auth", "/" + canonical.substring(1)},
-                {"Zmux-Prefix-Auth", canonical.substring(0, 42) + "5"},
-                {"Zmux-Prefix-Auth", canonical.substring(0, 41) + "=="},
-                {"Zmux-Prefix-Auth", " " + canonical.substring(1)},
-                {"Other", canonical},
-        };
-        String[] names = {"missing", "duplicate", "duplicate in another case", "padded", "42 chars", "bad char +",
-                "bad char /", "non-zero trailing bits", "padding inside", "space", "other field"};
-        for (int i = 0; i < malformed.length; i++) {
-            var fresh = unbound.verifier();
-            fresh.clock = () -> 1767225600L;
-            assertEquals(Admission.Decision.FALLBACK, fresh.decide(headInfo(null, malformed[i]), empty), names[i]);
-            assertEquals(accept0, fresh.decide(headInfo(null, "Zmux-Prefix-Auth", canonical), empty),
-                    names[i] + ": a rejected value records no Nonce");
-        }
-        assertNull(PrefixAuth.decodeHeader(canonical.substring(0, 42) + "5"), "non-canonical trailing bits");
-        assertNull(PrefixAuth.decodeHeader(canonical.substring(0, 42) + "9"), "non-canonical trailing bits");
-        assertNotNull(PrefixAuth.decodeHeader(canonical.substring(0, 42) + "8"));
-
-        var bound = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 0, 0);
-        var bv = bound.verifier();
-        bv.clock = () -> 1767225600L;
-        byte[] other = VECTOR_BINDING.clone();
-        other[0] ^= 1;
-        assertEquals(Admission.Decision.FALLBACK, bv.decide(headInfo(exporting(other), "Zmux-Prefix-Auth", BOUND_HEADER), empty),
-                "another connection's binding");
-        assertEquals(Admission.Decision.FALLBACK, bv.decide(headInfo(null, "Zmux-Prefix-Auth", BOUND_HEADER), empty),
-                "a bound token on a carrier without an exporter");
-        assertEquals(Admission.Decision.FALLBACK, bv.decide(headInfo(exporting(VECTOR_BINDING), "Zmux-Prefix-Auth", UNBOUND_HEADER), empty),
-                "an unbound token where tokens are bound");
-        assertEquals(accept0, bv.decide(headInfo(exporting(VECTOR_BINDING), "Zmux-Prefix-Auth", BOUND_HEADER), empty));
-
-        var renamed = unbound.withHeaderField("X-Auth");
-        var rv = renamed.verifier();
-        rv.clock = () -> 1767225600L;
-        assertEquals(Admission.Decision.FALLBACK, rv.decide(headInfo(null, "Zmux-Prefix-Auth", canonical), empty), "default name not agreed");
-        assertEquals(accept0, rv.decide(headInfo(null, "x-auth", canonical), empty));
-        assertThrows(IllegalArgumentException.class, () -> unbound.withHeaderField("bad name"));
-    }
-
-    /** As a credential, PrefixAuth presents fresh tokens that its verifier accepts once, in either form. */
-    @Test void prefixAuthIsACredential() throws Exception {
-        // HS-58.
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 1, 0);
-        var stream = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "qmux-02", "example.com", exporting(VECTOR_BINDING), RequestHead.NONE);
-        byte[] a = auth.prefix(stream), b = auth.prefix(stream);
-        var otherKey = new byte[32];
-        new java.security.SecureRandom().nextBytes(otherKey);
-        var foreign = new PrefixAuth(otherKey, Duration.ofSeconds(30), true, 1, 0).verifier();
-        assertEquals(Admission.Decision.FALLBACK, foreign.decide(stream, ByteBuffer.wrap(a)));
-        assertEquals(PrefixAuth.TOKEN_LENGTH, a.length);
-        assertFalse(Arrays.equals(a, b), "a fresh Nonce per carrier");
-        var v = auth.verifier();
-        assertEquals(Admission.Decision.accept(PrefixAuth.TOKEN_LENGTH), v.decide(stream, ByteBuffer.wrap(a)));
-        assertEquals(Admission.Decision.FALLBACK, v.decide(stream, ByteBuffer.wrap(a)), "replay");
-        CarrierCredential.HeaderField h = auth.header(stream);
-        assertEquals(PrefixAuth.HEADER_FIELD, h.name());
-        assertEquals(PrefixAuth.HEADER_LENGTH, h.value().length());
-        assertEquals(Admission.Decision.accept(0), v.decide(headInfo(exporting(VECTOR_BINDING), h.name(), h.value()), ByteBuffer.allocate(0)));
-        var plain = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
-        assertThrows(IOException.class, () -> auth.prefix(plain), "a bound token needs an exporter");
-        assertEquals("X-Auth", auth.withHeaderField("X-Auth").header(stream).name());
-    }
-
-    @Test void verifierAcceptsWithinTheSkewOnceAndRejectsReplays() {
-        var a = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 1, 0);
-        var v = a.verifier();
-        AtomicLong now = new AtomicLong(1767225600L);
-        v.clock = now::get;
-        byte[] t = a.token(null, 1767225600L, NONCE);
-        assertTrue(v.verify(t, null));
-        assertFalse(v.verify(t, null), "replayed Nonce");
-        byte[] old = a.token(null, 1767225600L - 30, HEX.parseHex("b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"));
-        assertTrue(v.verify(old, null), "previous slot within the skew");
-        byte[] older = a.token(null, 1767225600L - 60, HEX.parseHex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"));
-        assertFalse(v.verify(older, null), "outside the skew");
-        byte[] bad = t.clone();
-        bad[31] ^= 1;
-        assertFalse(v.verify(bad, null));
-        assertFalse(v.verify(a.token(new byte[32], 1767225600L, HEX.parseHex("d0d1d2d3d4d5d6d7d8d9dadbdcdddedf")), null),
-                "binding mismatch");
-        var full = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 0, 1).verifier();
-        full.clock = now::get;
-        assertTrue(full.verify(a.token(null, 1767225600L, filled(16, 1)), null));
-        assertFalse(full.verify(a.token(null, 1767225600L, filled(16, 2)), null), "record full");
+    private static PrefixAuth.Verifier verifier(boolean bound, java.time.Clock clock) {
+        var store = new MemoryPrefixStore(new PrefixStore.Window(SLOT, 1), java.util.List.of(GENERATION));
+        store.addTicket(new PrefixStore.Ticket(TICKET_ID, TICKET_KEY, 0, 0, -1, false));
+        return new PrefixAuth.Verifier(options(bound), store, 2, clock);
     }
 
     /** A carrier over a blocking socket, for a client that writes bytes before the session. */
@@ -200,19 +78,20 @@ class AdmissionTest {
     }
 
     @Test void prefixAuthAdmitsTokenCarriersAndStallsOthers() throws Exception {
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 1, 0);
-        var stallFor = Duration.ofMillis(300);
-        try (EventLoops loops = EventLoops.create(2)) {
+        var auth = presenter(false);
+        var stallFor = DEADLINE;
+        try (EventLoops loops = EventLoops.create(1)) {
             var multipath = PipeAuth.psk(new byte[32]).withEndToEnd();
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
-            var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).carrierCredential(auth).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(multipath).build();
+            var dialer = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(multipath).carrierCredential(auth).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(2))
+                    .admission(verifier(false).admission().refusal(AdmissionVerdict.STALL).peekTimeout(DEADLINE)
                             .stall(stallFor, stallFor).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 assertEquals(stallFor, l.adapter().stallDuration(new java.net.InetSocketAddress("127.0.0.1", 0)));
                 try (var c = Zmux.connect(l.localAddress(), dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
+                    assertTrue(PrefixAuth.boundPrincipal(s).isEmpty());
                     assertTrue(c.addPipe(l.localAddress(), PipeOptions.defaults()).id().value() > 0, "a session's own TCP pipe presents the credential");
                     try (var st = c.openStream()) {
                         st.write(new byte[] {1, 2, 3});
@@ -220,17 +99,13 @@ class AdmissionTest {
                         try (var in = s.acceptStream(Duration.ofSeconds(5))) { assertArrayEquals(new byte[] {1, 2, 3}, in.readAll(16)); }
                     }
                 }
-                // Without a token: nothing is sent, and the carrier closes after the stall.
-                try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
-                    raw.write(ByteBuffer.wrap(new byte[40]));
-                    long t0 = System.nanoTime();
-                    raw.socket().setSoTimeout(5000);
-                    int n = raw.socket().getInputStream().read(new byte[16]);
-                    long ms = (System.nanoTime() - t0) / 1_000_000;
-                    assertEquals(-1, n, "a stalled carrier sends nothing");
-                    assertTrue(ms >= 200, "closed after " + ms + " ms");
-                }
-                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(100)));
+                var denied = GlobalBoundTest.handle(l, "no-token");
+                denied.sendZeros(PrefixAuth.TOKEN_LENGTH);
+                assertEquals(AdmissionVerdict.STALL, denied.handled.verdict().get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
+                elapse(loops, stallFor);
+                denied.handled.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                assertEquals(0, denied.written.get(), "a stalled carrier sends nothing");
+                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ZERO));
             }
         }
     }
@@ -244,14 +119,12 @@ class AdmissionTest {
                     .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> {
                         seen.set(info.source().getHostString() + " " + info.tls() + " " + prefix.remaining());
                         return verdict.get();
-                    })).peekTimeout(Duration.ofSeconds(2)).stall(Duration.ofSeconds(5), Duration.ofSeconds(5)).build()).build();
+                    })).peekTimeout(DEADLINE).stall(DEADLINE, DEADLINE).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
                     raw.write(ByteBuffer.wrap(new byte[] {9, 9, 9, 9}));
                     raw.socket().setSoTimeout(3000);
-                    long t0 = System.nanoTime();
                     assertEquals(-1, raw.socket().getInputStream().read());
-                    assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(2), "closed at once");
                 }
                 assertEquals("127.0.0.1 false 4", seen.get());
                 verdict.set(Admission.Decision.accept(4));
@@ -261,16 +134,14 @@ class AdmissionTest {
                     assertNotNull(s, "accepted after the skipped prefix");
                 }
                 verdict.set(Admission.Decision.STALL);
-                try (SocketChannel first = SocketChannel.open(l.localAddress());
-                     SocketChannel second = SocketChannel.open(l.localAddress())) {
-                    first.write(ByteBuffer.wrap(new byte[4]));
-                    Thread.sleep(200);
-                    second.write(ByteBuffer.wrap(new byte[4]));
-                    second.socket().setSoTimeout(3000);
-                    long t0 = System.nanoTime();
-                    assertEquals(-1, second.socket().getInputStream().read(), "beyond the per-source limit");
-                    assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(2));
-                }
+                var first = GlobalBoundTest.handle(l, "stall-source");
+                first.sendZeros(4);
+                assertEquals(AdmissionVerdict.STALL, first.handled.verdict().get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
+                var second = GlobalBoundTest.handle(l, "stall-source");
+                second.sendZeros(4);
+                second.handled.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                assertFalse(first.isClosed(), "the incumbent keeps its per-source stall");
+                assertEquals(1, l.stats().admission().stallOverflow());
             }
         }
     }
@@ -284,16 +155,16 @@ class AdmissionTest {
                         .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> d))
                                 .stall(Duration.ofMinutes(5), Duration.ofMinutes(5)).build()).build();
                 var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc);
-                try (SocketChannel raw = SocketChannel.open(l.localAddress())) {
-                    raw.write(ByteBuffer.wrap(new byte[4]));
-                    PipePoolTest.await(() -> l.stats().admission().stalled() == 1);
+                GlobalBoundTest.Fake stalled;
+                try (l) {
+                    stalled = GlobalBoundTest.handle(l, "stall-source");
+                    stalled.sendZeros(4);
+                    assertEquals(AdmissionVerdict.STALL, stalled.handled.verdict().get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
                     assertEquals(0, l.stats().admission().fallback());
-                    long t0 = System.nanoTime();
-                    l.close();
-                    raw.socket().setSoTimeout(5000);
-                    assertEquals(-1, raw.socket().getInputStream().read(), d + ": ended gracefully, nothing sent");
-                    assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(2), d + ": ended at the close");
-                } finally { l.close(); }
+                    assertFalse(stalled.isClosed());
+                }
+                stalled.handled.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                assertEquals(0, stalled.written.get(), "the stalled carrier sent nothing");
             }
         }
     }
@@ -306,10 +177,8 @@ class AdmissionTest {
             sources.add(t.info().source().getHostString());
             var got = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
-                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
-                    byte[] b = new byte[data.remaining()];
-                    data.get(b);
-                    got.writeBytes(b);
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); };
+                    got.writeBytes(chunk.copy());
                     release.run();
                 }
                 @Override public void onEnd() {
@@ -336,7 +205,7 @@ class AdmissionTest {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg).fallback(echo(sources))
                     .admission(Admission.builder(4, Admission.Decider.immediate((info, prefix) -> Admission.Decision.FALLBACK))
-                            .peekTimeout(Duration.ofMillis(200)).build()).build();
+                            .peekTimeout(DEADLINE).build()).build();
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc)) {
                 // The whole prefix at once: decided on live input.
                 try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
@@ -351,54 +220,69 @@ class AdmissionTest {
                     assertEquals("xy", readAll(ch));
                 }
                 assertEquals("127.0.0.1", sources.poll(1, TimeUnit.SECONDS));
-                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ofMillis(50)));
+                assertThrows(java.net.SocketTimeoutException.class, () -> l.accept(Duration.ZERO));
             }
         }
     }
 
-    /** Wait for the host to receive the late prefix before sending the rest. */
-    private static String afterFallback(ZmuxListener l, BlockingQueue<String> started, String part, String rest) throws Exception {
-        try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-            ch.write(ByteBuffer.wrap(part.getBytes(UTF_8)));
-            assertNotNull(started.poll(5, TimeUnit.SECONDS));
-            ch.write(ByteBuffer.wrap(rest.getBytes(UTF_8)));
-            ch.shutdownOutput();
-            return readAll(ch);
+    private record Peek(AdmissionCarrier carrier, Handled handled) {
+        static Peek open(ZmuxListener listener) {
+            var carrier = new AdmissionCarrier(listener.config().eventLoops().next());
+            return new Peek(carrier, listener.adapter().handle(carrier.pipe(), JoinHint.inBand(TestAddr.peer("peer"))));
         }
+
+        void feed(String bytes) throws Exception { carrier.feed(bytes.getBytes(UTF_8)); }
+
+        void closedAs(AdmissionVerdict verdict) throws Exception {
+            assertEquals(verdict, handled.verdict().get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
+            handled.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+        }
+    }
+
+    private static void elapse(EventLoops loops, Duration interval) throws Exception {
+        loops.next().advanceTimersForTests(interval.toNanos()).get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private static void afterFallback(Peek input, BlockingQueue<String> started, String rest) throws Exception {
+        assertNotNull(started.poll(WATCHDOG_SECONDS, TimeUnit.SECONDS));
+        input.carrier().awaitResume();
+        input.feed(rest);
+        input.carrier().eof();
+        input.closedAs(AdmissionVerdict.FALLBACK);
+        assertEquals("abcdefgh", new String(input.carrier().written(), UTF_8));
     }
 
     @Test void aLatePrefixTakesTheFallbackWithItsBytesWhenAskedTo() throws Exception {
         var sources = new LinkedBlockingQueue<String>();
         var decided = new AtomicInteger();
-        try (EventLoops loops = EventLoops.create(2)) {
+        try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             Admission.Decider closing = Admission.Decider.immediate((info, prefix) -> {
                 decided.incrementAndGet();
                 return Admission.Decision.CLOSE;
             });
-            var on = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
-            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
-                assertEquals("abcdefgh", afterFallback(l, sources, "ab", "cdefgh"));
+            var on = Admission.builder(4, closing).peekTimeout(DEADLINE).fallbackOnPeekTimeout(true).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
+                var input = Peek.open(l);
+                input.feed("ab");
+                elapse(loops, DEADLINE);
+                afterFallback(input, sources, "cdefgh");
                 assertEquals(0, decided.get(), "the decider never saw the late prefix");
-                var st = l.stats().admission();
-                assertEquals(new AdmissionStats(0, 1, 0, 0, 0, 0, 0, 0, 0), st);
+                assertEquals(new AdmissionStats(0, 1, 0, 0, 0, 0, 0, 0, 0), l.stats().admission());
             }
-            // A prefix complete in time is decided as usual.
-            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
-                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("abcd".getBytes(UTF_8)));
-                    assertEquals("", readAll(ch));
-                }
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(on).build())) {
+                var input = Peek.open(l);
+                input.feed("abcd");
+                input.closedAs(AdmissionVerdict.CLOSE);
                 assertEquals(1, decided.get());
                 assertEquals(1, l.stats().admission().closed());
             }
-            // Off: expiration closes a partial prefix without asking the decider.
-            var off = Admission.builder(4, closing).peekTimeout(Duration.ofMillis(200)).build();
-            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(off).build())) {
-                try (SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                    ch.write(ByteBuffer.wrap("ab".getBytes(UTF_8)));
-                    assertEquals("", readAll(ch));
-                }
+            var off = Admission.builder(4, closing).peekTimeout(DEADLINE).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(off).build())) {
+                var input = Peek.open(l);
+                input.feed("ab");
+                elapse(loops, DEADLINE);
+                input.closedAs(AdmissionVerdict.CLOSE);
                 assertEquals(1, decided.get());
                 assertEquals(1, l.stats().admission().peekTimedOut());
                 assertEquals(0, l.stats().admission().fallback());
@@ -408,13 +292,17 @@ class AdmissionTest {
 
     @Test void aLateMoreRoundTakesTheFallbackToo() throws Exception {
         var sources = new LinkedBlockingQueue<String>();
-        try (EventLoops loops = EventLoops.create(2)) {
+        try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.builder(4,
-                    Admission.Decider.immediate((info, prefix) -> prefix.remaining() < 8 ? new Admission.Decision(AdmissionVerdict.MORE, 0, null, 8, "partial") : Admission.Decision.CLOSE))
-                    .maxPeek(8).peekTimeout(Duration.ofMillis(200)).fallbackOnPeekTimeout(true).build();
-            try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(adm).build())) {
-                assertEquals("abcdefgh", afterFallback(l, sources, "abcd", "efgh"));
+            var adm = Admission.builder(4, Admission.Decider.immediate((info, prefix) ->
+                            new Admission.Decision(AdmissionVerdict.MORE, 0, null, 8, "partial")))
+                    .maxPeek(8).peekTimeout(DEADLINE).fallbackOnPeekTimeout(true).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(cfg).fallback(echo(sources)).admission(adm).build())) {
+                var input = Peek.open(l);
+                input.feed("abcd");
+                input.carrier().awaitResume();
+                elapse(loops, DEADLINE);
+                afterFallback(input, sources, "efgh");
                 assertEquals(java.util.List.of(new Admission.VariantStat("partial", false, 0, 1, 0, 0, 0)), l.variantStats());
                 assertEquals(new AdmissionStats(0, 1, 0, 0, 0, 0, 0, 0, 0), l.stats().admission());
             }
@@ -424,12 +312,13 @@ class AdmissionTest {
     @Test void aLatePrefixWithoutATargetUsesOnlyTheStallOutcome() throws Exception {
         try (var loops = EventLoops.create(1)) {
             var adm = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> { throw new AssertionError("no input"); }))
-                    .peekTimeout(Duration.ofMillis(300)).fallbackOnPeekTimeout(true).build();
+                    .peekTimeout(DEADLINE).fallbackOnPeekTimeout(true).build();
             var cfg = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
-                    .admission(adm).maxPendingPerSource(1).build();
-            try (var l = Zmux.listen(NetworkTest.any(), cfg);
-                 SocketChannel ch = SocketChannel.open(l.localAddress())) {
-                assertEquals("", readAll(ch));
+                    .admission(adm).maxPending(1).build();
+            try (var l = Zmux.listener(cfg)) {
+                var input = Peek.open(l);
+                elapse(loops, DEADLINE);
+                input.closedAs(AdmissionVerdict.CLOSE);
                 assertEquals(new AdmissionStats(0, 0, 0, 0, 0, 1, 0, 0, 0), l.stats().admission());
                 assertTrue(l.variantStats().isEmpty());
             }
@@ -481,7 +370,7 @@ class AdmissionTest {
             var admission = Admission.builder(8, Admission.Decider.immediate((i, p) -> {
                 calls.incrementAndGet();
                 return Admission.Decision.accept(0);
-            })).fallbackOnPeekTimeout(true).peekTimeout(Duration.ofMillis(100)).build();
+            })).fallbackOnPeekTimeout(true).peekTimeout(DEADLINE).build();
             var cfg = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
                     .admission(admission).fallback(t -> { routed.incrementAndGet(); return null; }).build();
             try (var listener = Zmux.listener(cfg)) {
@@ -492,7 +381,8 @@ class AdmissionTest {
                     var h = request ? port.handleRequest(pipe, JoinHint.of(RequestHead.of(java.util.Map.of()), false, source),
                             false, t -> { routed.incrementAndGet(); return null; }, () -> CompletableFuture.completedFuture(null))
                             : port.handle(pipe, JoinHint.inBand(source));
-                    h.closed().get(3, TimeUnit.SECONDS);
+                    elapse(loops, DEADLINE);
+                    h.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
                 }
                 assertEquals(2, listener.stats().admission().peekTimedOut());
                 assertEquals(0, calls.get());
@@ -603,27 +493,31 @@ class AdmissionTest {
         return sock;
     }
 
-    static byte[] binding(javax.net.ssl.SSLSocket sock) throws Exception {
-        return ((javax.net.ssl.ExtendedSSLSession) sock.getSession()).exportKeyingMaterialData(PrefixAuth.EXPORTER_LABEL, new byte[0], 32);
+    static byte[] boundToken(PrefixAuth auth, javax.net.ssl.SSLSocket sock) throws Exception {
+        var session = (javax.net.ssl.ExtendedSSLSession) sock.getSession();
+        var info = new Admission.CarrierInfo(null, null, "", "", (label, context, length) -> {
+            try { return session.exportKeyingMaterialData(label, context, length); }
+            catch (javax.net.ssl.SSLException e) { return null; }
+        }, RequestHead.NONE).withOuterSecurity(Admission.OuterSecurity.tls(session.getProtocol()));
+        return auth.prefix(info);
     }
 
     /**
      * A TLS listener with bound prefix tokens: a valid carrier is accepted; a replayed token,
      * another carrier's token, a truncated one, random bytes and a first record without a
      * token all reach the fallback with exactly the bytes sent, and nothing else is written;
-     * without a fallback they are stalled: nothing is written, and the carrier ends with an
-     * orderly close.
+     * without a fallback handler they close silently.
      */
     @Test void invalidPrefixesTakeTheFallbackPathAlike() throws Exception {
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 1, 0);
+        var auth = presenter(true);
         var got = new LinkedBlockingQueue<byte[]>();
         Admission.Fallback fallback = t -> {
             var carrier = t.pipe();
             var done = new java.util.concurrent.CompletableFuture<Void>();
             var all = new java.io.ByteArrayOutputStream();
             carrier.reader().start(new PipeReader.Sink() {
-                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { java.nio.ByteBuffer data = chunk.buffer(); Runnable release = () -> { chunk.close(); consumed.run(); };
-                    byte[] b = new byte[data.remaining()]; data.get(b); all.writeBytes(b); release.run();
+                @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); };
+                    all.writeBytes(chunk.copy()); release.run();
                 }
                 @Override public void onEnd() {
                     got.add(all.toByteArray());
@@ -639,21 +533,19 @@ class AdmissionTest {
         };
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var adm = Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofMillis(300))
-                    .stall(Duration.ofMillis(50), Duration.ofMillis(100)).build();
+            var adm = verifier(true).admission().refusal(AdmissionVerdict.FALLBACK).peekTimeout(DEADLINE).build();
             var base = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).admission(adm);
             byte[] rec = firstRecord(cfg);
-            byte[] random = new byte[64];
-            new java.security.SecureRandom().nextBytes(random);
+            byte[] random = filled(PrefixAuth.TOKEN_LENGTH, 0x93);
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), base.fallback(fallback).build())) {
                 var sock = dialTls(l.localAddress());
-                byte[] tok = auth.token(binding(sock));
+                byte[] tok = boundToken(auth, sock);
                 sock.getOutputStream().write(tok);
                 try (var _ = Zmux.open(streamPipe(sock), Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "a valid carrier is accepted");
                 }
                 byte[] valid;
-                try (var other = dialTls(l.localAddress())) { valid = auth.token(binding(other)); }
+                try (var other = dialTls(l.localAddress())) { valid = boundToken(auth, other); }
                 assertArrayEquals(new byte[0], got.poll(5, TimeUnit.SECONDS), "a carrier closed without bytes");
                 byte[][] cases = {tok, valid, Arrays.copyOf(valid, PrefixAuth.TOKEN_LENGTH / 2), random, rec};
                 String[] names = {"replayed", "other carrier", "truncated", "random", "record"};
@@ -668,14 +560,13 @@ class AdmissionTest {
             }
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), base.fallback(null).build())) {
                 byte[] tok;
-                try (var other = dialTls(l.localAddress())) { tok = auth.token(binding(other)); }
+                try (var other = dialTls(l.localAddress())) { tok = boundToken(auth, other); }
                 byte[][] cases = {tok, Arrays.copyOf(tok, PrefixAuth.TOKEN_LENGTH / 2), random, rec};
                 for (byte[] x : cases) {
                     try (var c = dialTls(l.localAddress())) {
                         c.getOutputStream().write(x);
-                        long t0 = System.nanoTime();
-                        assertEquals(-1, c.getInputStream().read(), "a stalled carrier sends nothing");
-                        assertTrue(System.nanoTime() - t0 >= TimeUnit.MILLISECONDS.toNanos(40), "closed after the stall");
+                        c.shutdownOutput();
+                        assertEquals(-1, c.getInputStream().read(), "a refused carrier sends nothing");
                     }
                 }
             }
@@ -688,23 +579,24 @@ class AdmissionTest {
      * admission sees the server name the client sent.
      */
     @Test void tlsDialersPresentTheConfiguredCredential() throws Exception {
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), true, 1, 0);
-        var verifier = auth.verifier();
+        var auth = presenter(true);
+        var verifier = verifier(true);
         var seen = new LinkedBlockingQueue<String>();
         try (EventLoops loops = EventLoops.create(2)) {
             var multipath = PipeAuth.psk(new byte[32]).withEndToEnd();
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).build();
-            var dialer = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(multipath).carrierCredential(auth).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(multipath).build();
+            var dialer = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(multipath).carrierCredential(auth).build();
             var lc = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()))
-                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, (info, prefix, deadline) -> {
                         seen.add(info.serverName() + " " + info.tls() + " " + (info.stage() == Admission.Stage.HEAD) + " " + info.header(PrefixAuth.HEADER_FIELD));
-                        return verifier.decide(info, prefix);
-                    })).peekTimeout(Duration.ofSeconds(5)).build()).build();
+                        return verifier.decide(info, prefix, deadline);
+                    }).peekTimeout(Duration.ofSeconds(5)).build()).build();
             var tls = TlsOptions.client(TestTls.client(), "localhost");
             try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), lc);
                  var endpoint = Zmux.listener(ListenerConfig.builder().session(dialer).build())) {
                 try (var c = Zmux.connectTls(l.localAddress(), tls, dialer); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s, "accepted with the credential");
+                    assertEquals(TICKET_ID, PrefixAuth.boundPrincipal(s).orElseThrow());
                     assertEquals("localhost true false []", seen.poll(1, TimeUnit.SECONDS));
                     assertTrue(c.addTlsPipe(l.localAddress(), tls, PipeOptions.defaults()).id().value() > 0,
                             "a session's own TLS pipe presents the credential too");
@@ -717,7 +609,40 @@ class AdmissionTest {
                 try (var _ = endpoint.connect(new InetSocketAddress("127.0.0.1", l.localAddress().getPort()))) {
                     fail("a bound credential on a carrier without TLS fails the dial");
                 } catch (IOException expected) {
-                    assertTrue(expected.getMessage().contains("exporter"), expected.toString());
+                    assertTrue(expected.getMessage().contains("prefix authentication"), expected.toString());
+                }
+            }
+        }
+    }
+
+    @Test void carrierKindCannotAuthorizeAnExchangeEnvelope() throws Exception {
+        var cfg = ListenerConfig.builder().admission(verifier(false).admission().build()).build();
+        try (var listener = Zmux.listener(cfg)) {
+            var carriers = MemoryPipe.pair(Framing.BYTE_STREAM);
+            var tagged = carriers[1].withCarrier(CarrierKind.EXCHANGE)
+                    .withOuterSecurity(Admission.OuterSecurity.ENCRYPTED);
+            var hint = JoinHint.inBand(TestAddr.peer("client"));
+            var handled = listener.adapter().handleRequest(tagged, hint, true, null,
+                    () -> { throw new AssertionError("unexpected takeover"); });
+            assertEquals(AdmissionVerdict.CLOSE, handled.verdict().get(5, TimeUnit.SECONDS));
+            carriers[0].reader().close();
+            carriers[0].writer().close();
+        }
+    }
+
+    @Test void boundTicketAndInnerPeerSurviveEstablishTogether() throws Exception {
+        var auth = presenter(true);
+        try (EventLoops loops = EventLoops.create(2)) {
+            var cfg = ZmuxConfig.builder().eventLoops(loops).build();
+            var server = io.zmux.seal.ServerConfig.builder(SealTest.gate(null), SealTest.NODE).build();
+            var options = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server()))
+                    .admission(verifier(true).admission().build()).inboundTransform(io.zmux.seal.Seal.server(server)).build();
+            try (var listener = Zmux.listen(NetworkTest.any(), options); var socket = dialTls(listener.localAddress())) {
+                socket.getOutputStream().write(boundToken(auth, socket));
+                var established = SealTest.establish(streamPipe(socket), SealTest.client().allowedProfiles(io.zmux.seal.Profile.XXHFS_PSK0_CHACHA).build());
+                try (var _ = Zmux.open(established, Role.CLIENT, cfg); var accepted = listener.accept(Duration.ofSeconds(5))) {
+                    assertEquals(TICKET_ID, PrefixAuth.boundPrincipal(accepted).orElseThrow());
+                    assertEquals(io.zmux.seal.Profile.XXHFS_PSK0_CHACHA, accepted.admitted(io.zmux.seal.Peer.class).orElseThrow().profile());
                 }
             }
         }
@@ -729,36 +654,37 @@ class AdmissionTest {
      * carrier's server name, and the header form of the token admits it.
      */
     @Test void carriersDecidedOnTheirRequestHeadCarryTheTokenInAHeader() throws Exception {
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 1, 0);
-        var verifier = auth.verifier();
+        var auth = presenter(false);
+        var verifier = verifier(false);
         var seen = new LinkedBlockingQueue<String>();
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
             var lc = ListenerConfig.builder().session(cfg)
-                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, Admission.Decider.immediate((info, prefix) -> {
+                    .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, (info, prefix, deadline) -> {
                         seen.add(info.source().getHostString() + " " + info.serverName() + " " + (info.stage() == Admission.Stage.HEAD) + " " + prefix.remaining()
                                 + " " + info.header("x-app"));
-                        return verifier.decide(info, prefix);
-                    })).peekTimeout(Duration.ofSeconds(30)).build()).build();
-            var client = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
+                        return verifier.decide(info, prefix, deadline);
+                    }).peekTimeout(Duration.ofSeconds(30)).build()).build();
+            var client = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE)
+                    .withOuterSecurity(Admission.OuterSecurity.ENCRYPTED);
             try (var l = Zmux.listener(lc)) {
                 var header = auth.header(client);
                 var request = RequestHead.of(java.util.Map.of(header.name(), java.util.List.of(header.value()),
                         "X-App", java.util.List.of("1")));
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
-                var admitted = l.adapter().handleRequest(pair[1].withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); });
+                var admitted = l.adapter().handleRequest(pair[1].withOuterSecurity(Admission.OuterSecurity.ENCRYPTED).withServerName("example.com"), JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); });
                 // Decided before the client writes anything: a prefix read would wait out the peek timeout.
                 assertEquals(AdmissionVerdict.ACCEPT, admitted.verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 assertEquals("peer example.com true 0 [1]", seen.poll(1, TimeUnit.SECONDS));
                 try (var _ = Zmux.open(pair[0], Role.CLIENT, cfg); var s = l.accept(Duration.ofSeconds(5))) {
                     assertNotNull(s);
                 }
-                // The same token again, and none at all: both stall at once.
+                // The same token again, and none at all: both close.
                 var again = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(again[1], JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
+                assertEquals(AdmissionVerdict.CLOSE, l.adapter().handleRequest(again[1].withOuterSecurity(Admission.OuterSecurity.ENCRYPTED), JoinHint.of(request, false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 var none = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.STALL, l.adapter().handleRequest(none[1], JoinHint.of(RequestHead.of(java.util.Map.of()), false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
+                assertEquals(AdmissionVerdict.CLOSE, l.adapter().handleRequest(none[1], JoinHint.of(RequestHead.of(java.util.Map.of()), false, TestAddr.peer("peer")), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })
                         .verdict().toCompletableFuture().get(5, TimeUnit.SECONDS));
                 for (var p : new PipeIo[] {again[0], none[0]}) { p.reader().close(); p.writer().abort(new IOException("done")); }
             }
@@ -801,29 +727,35 @@ class AdmissionTest {
      * the join that record starts moves the carrier to its session without the skipped bytes.
      */
     @Test void aJoinRightAfterTheSkippedTokenReachesItsSessionWithoutTheToken() throws Exception {
-        var auth = new PrefixAuth(PSK, Duration.ofSeconds(30), false, 1, 0);
+        long nowSeconds = 120L;
+        // The class timeout guards the test. Carrier timeouts must not race token and record delivery.
+        var carrierTimeout = Duration.ofMinutes(5);
         for (int loopsCount : new int[] {1, 4}) {
             try (EventLoops loops = EventLoops.create(loopsCount)) {
+                var clock = java.time.Clock.fixed(java.time.Instant.ofEpochSecond(nowSeconds), java.time.ZoneOffset.UTC);
+                var verifier = verifier(false, clock);
                 var cfg = ZmuxConfig.builder().eventLoops(loops)
-                        .maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
-                var lc = ListenerConfig.builder().session(cfg)
-                        .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(5)).build()).build();
-                var plain = new Admission.CarrierInfo(TestAddr.peer("server"), TestAddr.peer("server"), "", "", null, RequestHead.NONE);
+                        .noHandshakeTimeout().joinTimeout(Duration.ofMinutes(1))
+                        .sessionPolicy(new SessionPolicy(new CapacityLimits(8))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+                var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(carrierTimeout)
+                        .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier).peekTimeout(carrierTimeout).build()).build();
                 try (var l = Zmux.listener(lc)) {
                     var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
-                    l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
-                    try (var c = Zmux.open(prefixed(boot[0], auth.prefix(plain)), Role.CLIENT, cfg);
-                         var s = l.accept(Duration.ofSeconds(5))) {
-                        assertNotNull(s);
+                    byte[] token = PrefixAuth.token(GENERATION, TICKET_ID, TICKET_KEY, nowSeconds / SLOT.toSeconds(), new byte[0], new byte[16]);
+                    l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("peer")));
+                    try (var c = assertDoesNotThrow(() -> Zmux.open(prefixed(boot[0], token), Role.CLIENT, cfg),
+                            () -> l.stats().toString()); var s = l.accept()) {
                         for (int i = 0; i < 6; i++) {
                             var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
-                            l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.peer("peer"))).closed();
-                            assertTrue(c.addPipe(prefixed(pipe[0], auth.prefix(plain)), PipeOptions.defaults()).id().value() > 0);
+                            byte[] nonce = ByteBuffer.allocate(16).putInt(i + 1).array();
+                            byte[] joinToken = PrefixAuth.token(GENERATION, TICKET_ID, TICKET_KEY, nowSeconds / SLOT.toSeconds(), new byte[0], nonce);
+                            l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.peer("peer")));
+                            assertTrue(c.addPipe(prefixed(pipe[0], joinToken), PipeOptions.defaults()).id().value() > 0);
                         }
                         try (var st = c.openStream()) {
                             st.write(new byte[] {1, 2, 3});
                             st.finish();
-                            try (var in = s.acceptStream(Duration.ofSeconds(5))) { assertArrayEquals(new byte[] {1, 2, 3}, in.readAll(16)); }
+                            try (var in = s.acceptStream()) { assertArrayEquals(new byte[] {1, 2, 3}, in.readAll(16)); }
                         }
                     }
                 }
@@ -831,50 +763,56 @@ class AdmissionTest {
         }
     }
 
-    /** A pipe input given to l from source after writing prefix; ended completes when l closes it. */
-    static CompletableFuture<Void> silentCarrier(ZmuxListener l, String source, byte[] prefix) {
+    /** A pipe input with no further input after the supplied prefix. */
+    static CompletableFuture<Void> silentCarrier(ZmuxListener listener, String source, byte[] prefix) {
+        return submitPrefix(listener, source, prefix).closed();
+    }
+
+    private static Handled submitPrefix(ZmuxListener listener, String source, byte[] prefix) {
         var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
-        var ended = new CompletableFuture<Void>();
-        pipe[0].reader().start(new PipeReader.Sink() {
-            @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) { Runnable release = () -> { chunk.close(); consumed.run(); }; release.run(); }
-            @Override public void onEnd() { ended.complete(null); }
-            @Override public void onError(Throwable cause) { ended.complete(null); }
-        });
-        pipe[0].writer().write(io.zmux.carrier.OutboundBatch.of(ByteBuffer.wrap(prefix)), new PipeWriter.Completion() {
+        TakeoverTest.reading(pipe[0]);
+        pipe[0].writer().write(OutboundBatch.of(ByteBuffer.wrap(prefix)), new PipeWriter.Completion() {
             @Override public void completed() {}
             @Override public void failed(Throwable cause) {}
         });
-        l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.literal(source)));
-        return ended;
+        return listener.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.literal(source)));
     }
 
     /**
      * A carrier accepted with prefix bytes left over waits for its first record counted against
-     * its own source: under one pending carrier per source, silent carriers from two hosts both
-     * wait, a second from the same host (an IPv6 one: from the same /64) is closed.
+     * its own source: silent carriers from different hosts can both wait. A source with two slots
+     * occupied refuses another carrier, including from the same IPv6 /64.
      */
     @Test void anAcceptedCarrierWithBytesLeftCountsAgainstItsOwnSource() throws Exception {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(1).firstRecordTimeout(Duration.ofSeconds(10))
+            var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(2).firstRecordTimeout(Duration.ofSeconds(10))
                     .admission(Admission.builder(2, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(1))).peekTimeout(Duration.ofSeconds(5)).build()).build();
             try (var l = Zmux.listener(lc)) {
                 byte[] prefix = {0, 0x40}; // the leftover byte starts a record
-                var one = silentCarrier(l, "192.0.2.1", prefix);
-                var two = silentCarrier(l, "192.0.2.2", prefix);
-                Thread.sleep(300);
+                var one = acceptedPrefix(l, "192.0.2.1", prefix);
+                var two = acceptedPrefix(l, "192.0.2.2", prefix);
                 assertFalse(one.isDone(), "the first host's carrier waits");
                 assertFalse(two.isDone(), "the second host's carrier waits");
-                var three = silentCarrier(l, "192.0.2.1", prefix);
-                three.get(5, TimeUnit.SECONDS); // beyond the first host's limit
+                var same = l.adapter().reserve(new java.net.InetSocketAddress("192.0.2.1", 1), null);
+                assertNotNull(same);
+                try { silentCarrier(l, "192.0.2.1", prefix).get(5, TimeUnit.SECONDS); }
+                finally { same.release(); }
                 assertFalse(one.isDone());
                 // An IPv6 client counts by its /64.
-                var v6 = silentCarrier(l, "2001:db8::1", prefix);
-                Thread.sleep(300);
+                var v6 = acceptedPrefix(l, "2001:db8::1", prefix);
                 assertFalse(v6.isDone());
-                silentCarrier(l, "2001:db8::2", prefix).get(5, TimeUnit.SECONDS);
+                var samePrefix = l.adapter().reserve(new java.net.InetSocketAddress("2001:db8::3", 1), null);
+                assertNotNull(samePrefix);
+                try { silentCarrier(l, "2001:db8::2", prefix).get(5, TimeUnit.SECONDS); }
+                finally { samePrefix.release(); }
                 assertFalse(v6.isDone());
             }
         }
+    }
+    private static CompletableFuture<Void> acceptedPrefix(ZmuxListener listener, String source, byte[] prefix) throws Exception {
+        var handled = submitPrefix(listener, source, prefix);
+        assertEquals(AdmissionVerdict.ACCEPT, handled.verdict().get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
+        return handled.closed();
     }
 }

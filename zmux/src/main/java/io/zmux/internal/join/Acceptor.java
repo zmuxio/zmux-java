@@ -115,6 +115,9 @@ public final class Acceptor {
         return 1 + rLen + Frames.unitLength(f, ciphertext);
     }
 
+    /** Start of the encrypted TLVs after the clear header and framing. */
+    public int replyPayloadOffset() { return replyLength(c.suite.nonceLen(), c.framing, 0); }
+
     /** The ciphertext of a Reply with this payload. */
     public int replyCiphertext(ReplyPayload p) throws SecureCarrierException {
         return Schedule.encodeReply(p, new KeyShare(share.group(), new byte[share.group().shareLength(false)])).length + Suite.TAG_LEN;

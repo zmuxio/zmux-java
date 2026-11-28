@@ -1,5 +1,8 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+import io.zmux.internal.buffer.ReceiveSpans;
+
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.FrameDecoder;
 import io.zmux.internal.wire.FrameKind;
@@ -22,6 +25,7 @@ final class RecordReceiver {
         SessionState state();
 
         boolean established();
+        boolean familyConfirmed();
 
         Gates gates();
 
@@ -41,6 +45,9 @@ final class RecordReceiver {
 
         /** The peer's CONNECTION_CLOSE was read on an inbound pipe of a session that lingers: its linger may end. */
         void closeRead();
+
+        /** The peer's close releases the local CONNECTION_CLOSE from its coverage wait. */
+        void closeWaitDone();
 
         /** Charges one no-effect frame or record. */
         void charge();
@@ -82,26 +89,26 @@ final class RecordReceiver {
      * Processes the complete records in data[pos, limit) of an inbound lane and returns how
      * many bytes it consumed; the caller keeps the rest (a partial record).
      */
-    int receive(Pipe p, long lane, ReadBuf buf, ByteBuffer data, int pos, int limit, long now) {
+    int receive(Pipe p, long lane, ReadBuf buf, ByteBuffer data, ReceiveSpans spans, int pos, int limit, long now, boolean carrierEarly) {
         int all = limit - pos;
         if (p == null || p.in() == null) return all;
         Pipe.InLane il = p.in().lane(lane);
         SessionState state = port.state();
         if (il == null || il.rx.ended || state == SessionState.CLOSED) return all;
-        if (state == SessionState.CLOSING && !life.waitingLanes()) return lingerRead(p, il, data, pos, limit);
+        if (state == SessionState.CLOSING && !life.waitingLanes()) return lingerRead(p, il, data, spans, pos, limit);
         int consumed = 0;
         while (pos + consumed < limit && (!closing() || life.waitingLanes())) {
             int at = pos + consumed;
             if (il.rx.expectTp) {
-                WireException e = checkFirstRecord(data, at, limit);
+                WireException e = checkFirstRecord(data, spans, at, limit);
                 if (e != null) {
                     port.failLocal(e);
                     return all;
                 }
             }
-            long size = VarInt.get(data, at, limit);
+            long size = VarInt.get(data, spans, at, limit);
             if (size < 0) break;
-            int n = VarInt.lengthOf(data.get(at));
+            int n = VarInt.lengthOf(ReceiveSpans.get(data, spans, at));
             long lim = cfg.local().maxRecordSize;
             if (size == 0 || size > lim) {
                 port.failLocal(WireException.withDetails(TransportError.FRAME_ENCODING_ERROR, "record size", "value", size,
@@ -109,8 +116,20 @@ final class RecordReceiver {
                 return all;
             }
             if (limit - at - n < size) break;
-            consumed += n + (int) size;
-            record(p, il, buf, data, at + n, at + n + (int) size, n + size, now);
+            int payloadAt = at + n;
+            int recordSize = n + (int) size;
+            consumed += recordSize;
+            if (spans == null) {
+                record(p, il, buf, data, null, payloadAt, payloadAt + (int) size, recordSize, now, carrierEarly);
+                continue;
+            }
+            var head = spans.span(payloadAt);
+            int from = spans.position(head, payloadAt);
+            if (size <= head.to() - from) {
+                record(p, il, head.owner(), head.data(), null, from, from + (int) size, recordSize, now, carrierEarly);
+            } else {
+                record(p, il, null, null, spans, payloadAt, payloadAt + (int) size, recordSize, now, carrierEarly);
+            }
         }
         return consumed;
     }
@@ -122,7 +141,7 @@ final class RecordReceiver {
         if (il == null || il.rx.ended) return;
         // During the close wait records are still processed, as by receive: acknowledgements and the peer's close.
         if (closing() && !(port.state() == SessionState.CLOSING && life.waitingLanes())) {
-            if (port.state() == SessionState.CLOSING && lingerWatch(p, il) && holdsClose(data, pos, limit)) markClose(p);
+            if (port.state() == SessionState.CLOSING && lingerWatch(p, il) && holdsClose(data, null, pos, limit)) markClose(p);
             return;
         }
         int len = limit - pos;
@@ -140,7 +159,7 @@ final class RecordReceiver {
                 return;
             }
         }
-        record(p, il, buf, data, pos, limit, VarInt.length(len) + len, now);
+        record(p, il, buf, data, null, pos, limit, VarInt.length(len) + len, now, false);
     }
 
     /** Whether a lane of a lingering session is still read for the peer's CONNECTION_CLOSE (lane 0 carries it, once). */
@@ -153,19 +172,19 @@ final class RecordReceiver {
      * linger waits for, the peer's CONNECTION_CLOSE (nothing follows it on the pipe). Returns the bytes consumed;
      * a partial record stays with the caller.
      */
-    private int lingerRead(Pipe p, Pipe.InLane il, ByteBuffer data, int pos, int limit) {
+    private int lingerRead(Pipe p, Pipe.InLane il, ByteBuffer data, ReceiveSpans spans, int pos, int limit) {
         int all = limit - pos;
         if (!lingerWatch(p, il)) return all;
         int consumed = 0;
         while (pos + consumed < limit) {
             int at = pos + consumed;
-            long size = VarInt.get(data, at, limit);
+            long size = VarInt.get(data, spans, at, limit);
             if (size < 0) break;
-            int n = VarInt.lengthOf(data.get(at));
+            int n = VarInt.lengthOf(ReceiveSpans.get(data, spans, at));
             if (size == 0 || size > cfg.local().maxRecordSize) return all;
             if (limit - at - n < size) break;
             consumed += n + (int) size;
-            if (holdsClose(data, at + n, at + n + (int) size)) {
+            if (holdsClose(data, spans, at + n, at + n + (int) size)) {
                 markClose(p);
                 return all;
             }
@@ -174,11 +193,11 @@ final class RecordReceiver {
     }
 
     /** Whether the record in data[pos, end) holds a CONNECTION_CLOSE; undecodable bytes hold none. */
-    private boolean holdsClose(ByteBuffer data, int pos, int end) {
+    private boolean holdsClose(ByteBuffer data, ReceiveSpans spans, int pos, int end) {
         Frame f = frame;
         while (pos < end) {
             try {
-                pos += decoder.decode(data, pos, end, f);
+                pos += decoder.decode(data, spans, pos, end, f);
             } catch (WireException e) {
                 return false;
             }
@@ -193,16 +212,16 @@ final class RecordReceiver {
     }
 
     /** Validates the prefix of a bootstrap pipe's first record byte by byte. */
-    private WireException checkFirstRecord(ByteBuffer b, int pos, int limit) {
+    private WireException checkFirstRecord(ByteBuffer b, ReceiveSpans spans, int pos, int limit) {
         if (pos >= limit) return null;
-        long size = VarInt.get(b, pos, limit);
+        long size = VarInt.get(b, spans, pos, limit);
         if (size < 0) return null;
-        int n = VarInt.lengthOf(b.get(pos));
+        int n = VarInt.lengthOf(ReceiveSpans.get(b, spans, pos));
         if (size < 9 || size > cfg.local().maxRecordSize) {
             return WireException.withDetails(TransportError.PROTOCOL_VIOLATION, "not a zmux or QMux peer", "value", size);
         }
         for (int i = 0; i < 8 && pos + n + i < limit; i++) {
-            if (b.get(pos + n + i) != Records.TRANSPORT_PARAMETERS_PREFIX[i]) {
+            if (ReceiveSpans.get(b, spans, pos + n + i) != Records.TRANSPORT_PARAMETERS_PREFIX[i]) {
                 return WireException.protocol("not a zmux or QMux peer");
             }
         }
@@ -210,19 +229,18 @@ final class RecordReceiver {
     }
 
     /** Applies every frame of one complete record, then counts it into the lane's position. */
-    private void record(Pipe p, Pipe.InLane il, ReadBuf buf, ByteBuffer data, int pos, int end, long posBytes, long now) {
+    private void record(Pipe p, Pipe.InLane il, ReadBuf buf, ByteBuffer data, ReceiveSpans spans, int pos, int end, long posBytes, long now, boolean carrierEarly) {
         rxPipe = p;
-        int frames = end - pos;
         boolean first = il.rx.expectTp;
-        boolean elicit = false, otherElicit = false, activity = false, pipePing = false, traffic = false, onlyPad = true;
+        boolean elicit = false, otherElicit = false, activity = false, pipePing = false, traffic = false;
         Frame f = frame;
         int idx = 0;
         while (pos < end) {
             int n;
             try {
-                n = decoder.decode(data, pos, end, f);
+                n = decoder.decode(data, spans, pos, end, f);
                 if (f.kind == FrameKind.TRANSPORT_PARAMETERS && (!first || idx != 0)) {
-                    TransportParams.decode(f.src, f.dataPos, f.dataLen);
+                    TransportParams.decode(f.src, f.spans, f.dataPos, f.dataLen);
                     throw new WireException(TransportError.PROTOCOL_VIOLATION, f.type, "QX_TRANSPORT_PARAMETERS out of place", "");
                 }
             } catch (WireException e) {
@@ -250,7 +268,7 @@ final class RecordReceiver {
                     return;
                 }
                 try {
-                    TransportParams tp = TransportParams.decode(f.src, f.dataPos, f.dataLen);
+                    TransportParams tp = TransportParams.decode(f.src, f.spans, f.dataPos, f.dataLen);
                     il.rx.expectTp = false;
                     port.peerParams(tp);
                 } catch (WireException e) {
@@ -266,13 +284,19 @@ final class RecordReceiver {
                 port.failLocal(WireException.protocol("frame before transport parameters"));
                 return;
             }
+            if (carrierEarly && port.familyConfirmed() && switch (f.kind) {
+                case STREAM, RESET_STREAM, RESET_STREAM_AT, STOP_SENDING, DATAGRAM -> true;
+                default -> false;
+            }) {
+                port.failLocal(WireException.protocol("application frame in carrier early data"));
+                return;
+            }
             try {
                 port.gates().check(f);
             } catch (WireException e) {
                 port.failLocal(e);
                 return;
             }
-            if (f.kind != FrameKind.PADDING) onlyPad = false;
             if (f.kind.ackEliciting()) {
                 elicit = true;
                 if (f.kind != FrameKind.PIPE_PING) otherElicit = true;
@@ -294,7 +318,7 @@ final class RecordReceiver {
                     case PIPE_ACK, PIPE_PING, PIPE_ABANDON, PIPE_STATUS, MAX_DATA, MAX_STREAM_DATA -> port.closingFrame(p, f, buf);
                     default -> { }
                 }
-                if (f.kind == FrameKind.CONNECTION_CLOSE) life.lanesDone(now);
+                if (f.kind == FrameKind.CONNECTION_CLOSE) port.closeWaitDone();
                 pos += n;
                 idx++;
                 continue;
@@ -314,7 +338,6 @@ final class RecordReceiver {
         il.rx.posAt = now;
         stats.received(posBytes);
         port.recorded(p, il, posBytes, elicit, pipePing, pipePing && !otherElicit, traffic, activity);
-        if (p.shape() != null) Shaping.recordIn(p, il.lane, frames, onlyPad);
     }
 
     /** The inbound lane ended; false when it had ended already. */

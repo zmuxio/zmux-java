@@ -1,6 +1,7 @@
 package io.zmux.internal.core;
 
-import io.zmux.internal.loop.MemoryBudget;
+import io.zmux.internal.memory.MemoryBudget;
+
 
 import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
@@ -9,7 +10,7 @@ class QualityAndLimiterTest {
     @Test void qualityBandCoalescesAndZeroCapacityFloorIsDisabled() throws Exception {
         Session session = new Session(CoreConfig.defaults(), 0);
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false);
-        session.pipes().attachBootstrap(info, info, null);
+        session.pipes().attachBootstrap(info, info);
         session.setCapacityFloor(0, 0);
         assertNull(session.outbox().pollEvent());
         session.setQualityBand(0, 10, 0, 100);
@@ -28,7 +29,7 @@ class QualityAndLimiterTest {
     @Test void aPipeWhoseBandIsOffReportsNothingWhateverTheSessionBand() throws Exception {
         Session session = new Session(CoreConfig.defaults(), 0);
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, false);
-        session.pipes().attachBootstrap(info, info, null);
+        session.pipes().attachBootstrap(info, info);
         session.setQualityBand(-1, 10, 0, 0); // the session's band: every 10 ns of RTT change
         assertTrue(session.offQualityBand(0));
         Pipe pipe = session.pipes.get(0);
@@ -44,13 +45,16 @@ class QualityAndLimiterTest {
     }
 
     @Test void delayedWindowPermissionCannotSpendAnExhaustedBudget() {
-        CoreConfig config = CoreConfig.builder().windowPredicate(true).budget(new MemoryBudget(100, null)).build();
-        Session session = new Session(config, 0);
+        long initial = ReceiveLayout.WORKING + CoreConfig.DEFAULT_CONNECTION_WINDOW * ConnFlow.RECEIVE_COST;
+        var budget = new MemoryBudget(initial + 100, null);
+        var config = CoreConfig.builder().windowPredicate(true).budget(budget);
+        config.local().maxStreamsBidi = 0;
+        Session session = new Session(config.build(), 0);
         long original = session.conn.window();
         session.tuner.growConn(original + 50);
         long proposal = session.tuner().proposal();
         assertEquals(original + 50, proposal);
-        config.budget().add(100);
+        assertTrue(budget.tryCharge(100));
         session.tuner().applyProposal(proposal, true);
         assertEquals(original, session.conn.window());
     }
@@ -74,7 +78,7 @@ class QualityAndLimiterTest {
     @Test void capacityCountsAcceptedApplicationLimitedSamplesWithoutEndingPlacement() throws Exception {
         Session session = new Session(CoreConfig.defaults(), 0);
         var info = new CarrierInfo(Framing.BYTES, false, false, false, false);
-        session.pipes().attachBootstrap(info, info, null);
+        session.pipes().attachBootstrap(info, info);
         session.setCapacityFloor(1_500_000, 1.01);
         assertEquals(0, capacityEvent(session).rate());
         var rate = session.pipes.get(0).out().snd.re();
@@ -90,7 +94,7 @@ class QualityAndLimiterTest {
     @Test void capacityDoesNotCountTheSyntheticInitialRateAfterARejectedSample() throws Exception {
         Session session = new Session(CoreConfig.defaults(), 0);
         var info = new CarrierInfo(Framing.BYTES, false, false, false, false);
-        session.pipes().attachBootstrap(info, info, null);
+        session.pipes().attachBootstrap(info, info);
         session.pipes.get(0).out().snd.re().sample(500_000, true, 0, false, 1);
         session.setCapacityFloor(100_000, 1.01);
         assertEquals(0, capacityEvent(session).rate());

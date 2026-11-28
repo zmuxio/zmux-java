@@ -16,6 +16,7 @@ package io.zmux;
  *     {@link CapacityBelow}, {@link CapacityRestored}, {@link EpochCommitted}, {@link EpochDeleted},
  *     {@link CarrierChosen}, {@link DatagramPathChanged}, {@link SessionSuspended}, {@link SessionResumed}, {@link ResumeUnattended}
  *     (a {@link SessionResumed} removes an unread one) and {@link GoAwayReceived};
+ * <li>controller observations are replaced by the latest per event type; the tracer sees individual commits;
  * <li>counted: {@link JoinAuthFailed} by reason;
  * <li>accumulated: {@link PipesRetired}; a retired pipe's unread events leave the queue and are
  *     counted in it.
@@ -25,6 +26,34 @@ package io.zmux;
  * {@code nextEvent} throws the session's error.
  */
 public sealed interface SessionEvent {
+    /** The owner installed a binding or updated its target. A takeover identifies the old generation. */
+    record TargetChanged(long generation, long revision, boolean initial, Long predecessor) implements SessionEvent {}
+    /** One controller transaction event in session owner order. */
+    sealed interface ControlEvent extends SessionEvent {
+        long generation();
+        long revision();
+        long batch();
+        long at();
+    }
+
+    /** The controller reserved capacity for a batch. */
+    record BatchReserved(long generation, long revision, long batch, long at, long deadline,
+                         int attachments) implements ControlEvent {}
+    /** The controller abandoned an uncommitted batch. */
+    record BatchRolledBack(long generation, long revision, long batch, long at,
+                           CapacityChange.Status reason) implements ControlEvent {}
+    /** The controller committed a planned drain. */
+    record DrainCommitted(long generation, long revision, long batch, long at,
+                          java.util.Set<MemberId> draining) implements ControlEvent {
+        public DrainCommitted { draining = java.util.Set.copyOf(draining); }
+    }
+    /** An opener started for a controller attempt. */
+    record AttemptStarted(long generation, long revision, long batch, Attempt.Snapshot attempt,
+                          long at) implements ControlEvent {}
+    /** A controller attempt reached a logical outcome. */
+    record AttemptEnded(long generation, long revision, long batch, Attempt.Result attempt,
+                        long at) implements ControlEvent {}
+
     /** The peer sent GOAWAY and lowered a watermark: no new streams; streams at or above it fail. */
     record GoAwayReceived(long maxBidi, long maxUni, long code) implements SessionEvent {}
 
@@ -33,6 +62,9 @@ public sealed interface SessionEvent {
      * declared it, null when undeclared, and direction the pipe direction the event is about,
      * from the local endpoint: SEND_ONLY for the outbound direction, RECEIVE_ONLY for the inbound.
      */
+
+    /** One committed directional health transition. */
+    record PipeHealthChanged(PipeHealthChange change) implements SessionEvent {}
 
     /** A local outbound pipe direction appeared (joining, or already active). */
     record PipeAdded(PipeId pipe, CarrierKind carrier, PipeOptions.Direction direction) implements SessionEvent {}
@@ -76,7 +108,7 @@ public sealed interface SessionEvent {
     record CapacityRestored(long rate) implements SessionEvent {}
 
     /**
-     * A candidate of {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} was tried; an unread one is
+     * A candidate of {@link SessionController#open} was tried; an unread one is
      * replaced by the next try of the same carrier kind and variant.
      */
     record CarrierCandidate(CandidateResult result) implements SessionEvent {}
@@ -104,8 +136,7 @@ public sealed interface SessionEvent {
 
     /**
      * Follows {@link SessionSuspended} when the session can rejoin but nothing in the library
-     * will dial for it: it has no {@link ZmuxConfig.Builder#redial(Redial) redial hook} and no running
-     * pool ({@link ZmuxSession#maintainPipes}). It ends at the grace period unless the
+     * will dial for it: it has no active {@link SessionControl control binding}. It ends at the grace period unless the
      * application adds a pipe; one that resumes by its own {@link ZmuxSession#addPipe} calls
      * can ignore this event. Also logged as a warning ({@link ZmuxConfig.Builder#logger(System.Logger)}).
      */
@@ -115,11 +146,9 @@ public sealed interface SessionEvent {
     record SessionResumed() implements SessionEvent {}
 
     /**
-     * A new {@link ConnectionInfo#pathDatagramPayload()} (datagramPayload): the carrier's datagram size changed (path
-     * MTU discovery), another pipe carries the datagrams, or they moved between the carrier's datagrams and records.
-     * It is noticed when the session sends or its pipes change.
+     * A change in the eligible path's payload limit or in the size available on native datagram channels.
      */
-    record DatagramPathChanged(int datagramPayload) implements SessionEvent {}
+    record DatagramPathChanged(int datagramPayload, int nativePayload, boolean nativeAvailable) implements SessionEvent {}
 
     /** The session committed a session epoch: its secret is derived, and joins of it are accepted. */
     record EpochCommitted(long epoch) implements SessionEvent {}

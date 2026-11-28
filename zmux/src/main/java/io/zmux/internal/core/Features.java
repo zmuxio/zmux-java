@@ -11,10 +11,10 @@ package io.zmux.internal.core;
  */
 public record Features(boolean role, boolean goAway, boolean preamble, boolean priority, boolean flows,
                        boolean multipath, boolean pipeAck, boolean resume, boolean lanesOut, boolean lanesIn,
-                       boolean joinSecurityUnavailable, boolean carrierDatagrams) {
+                       boolean joinSecurityUnavailable, boolean carrierDatagrams, boolean carrierDatagramPadding) {
 
     public static final Features NONE = new Features(false, false, false, false, false, false, false, false, false,
-            false, false, false);
+            false, false, false, false);
 
     /** A session with acknowledgement. */
     public boolean acked() {

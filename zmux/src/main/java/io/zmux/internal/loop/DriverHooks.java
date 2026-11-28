@@ -8,7 +8,18 @@ import java.util.function.LongPredicate;
 /** Immutable driver callbacks; the core receives only the corresponding feature flags. */
 public record DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth,
                           Limiter datagramSend, Limiter datagramReceive, PickerBridge.Picker picker, Object scheduler, JoinPolicy joinPolicy,
-                          io.zmux.carrier.HandshakeShaper handshakeShaper, System.Logger logger, Redial redial) {
+                          io.zmux.carrier.HandshakeShaper handshakeShaper, System.Logger logger, io.zmux.ClockDomain clockDomain, io.zmux.AccountingPolicy accounting) {
+    public DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth, Limiter datagramSend, Limiter datagramReceive,
+                       PickerBridge.Picker picker, Object scheduler, JoinPolicy joinPolicy,
+                       io.zmux.carrier.HandshakeShaper handshakeShaper, System.Logger logger) {
+        this(tracer, allowWindowGrowth, datagramSend, datagramReceive, picker, scheduler, joinPolicy, handshakeShaper,
+                logger, io.zmux.ClockDomain.system(), io.zmux.AccountingPolicy.OFF);
+    }
+
+    public DriverHooks withClock(io.zmux.ClockDomain clock) {
+        return new DriverHooks(tracer, allowWindowGrowth, datagramSend, datagramReceive, picker, scheduler, joinPolicy,
+                handshakeShaper, logger, clock, accounting);
+    }
     /**
      * The tracer as the loop drives it. {@link #view} runs on the loop, the other calls on the session's serial
      * hook context, in order.
@@ -27,8 +38,6 @@ public record DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth,
         void closed(SessionId session, io.zmux.internal.core.SessionError error);
     }
 
-    /** The session's redial hook and its backoff bounds (nanoseconds), for the public layer. */
-    public record Redial(Object hook, long minBackoff, long maxBackoff, double jitter) {}
 
     /** The acceptor's checks of a verified Hello; unset, only Sealed passes. */
     public interface JoinPolicy {
@@ -38,11 +47,9 @@ public record DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth,
         //noinspection ClassEscapesItsScope
         default boolean allow(Transport c, io.zmux.internal.join.Mode mode, Object peer) { return mode == io.zmux.internal.join.Mode.SEALED; }
 
-        default io.zmux.JoinOutcome outcome() { return null; }
+        default io.zmux.AuthorizeJoin initialAuthorizer() { return null; }
 
         default Throwable publicError(io.zmux.internal.core.CoreException terminal) { return terminal; }
-
-        default boolean authorize(Object host, long pipe) { return true; }
 
         /** The record mode of a carrier the local endpoint joins, when its options name none. */
         //noinspection ClassEscapesItsScope
@@ -70,5 +77,5 @@ public record DriverHooks(TraceSink tracer, LongPredicate allowWindowGrowth,
         }
     }
 
-    public static final DriverHooks NONE = new DriverHooks(null, null, null, null, null, null, JoinPolicy.DEFAULT, null, null, null);
+    public static final DriverHooks NONE = new DriverHooks(null, null, null, null, null, null, JoinPolicy.DEFAULT, null, null);
 }

@@ -63,9 +63,7 @@ final class WebSocketClient {
             try {
                 return new Opened(attempt(http, cur, headers, protocols, credential), cur);
             } catch (Redirected r) {
-                URI next = Redirects.check(cur, "GET", r.status, r.location);
-                if (hops >= Redirects.DEFAULT_MAX) throw new io.zmux.HttpRedirectException(r.status, next.toString(), "too many redirects");
-                cur = next;
+                cur = Redirects.follow(cur, "GET", r.status, r.location, hops, true);
             }
         }
     }
@@ -89,7 +87,8 @@ final class WebSocketClient {
             if (credential != null) {
                 var e = Requests.tls(ch);
                 var info = new Admission.CarrierInfo(Connections.address(url), Connections.address(url), "", e == null ? "" : url.getHost(),
-                        e == null ? null : Requests.exporter(e), RequestHead.of(Map.of()))
+                        Requests.exporter(ch), RequestHead.of(Map.of()))
+                        .withOuterSecurity(Requests.outerSecurity(ch))
                         .at(Admission.Stage.HEAD, io.zmux.carrier.Framing.MESSAGES, true);
                 CarrierCredential.HeaderField f = credential.header(info);
                 h.add(f.name(), f.value());

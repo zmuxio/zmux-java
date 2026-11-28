@@ -1,5 +1,6 @@
 package io.zmux.http;
 
+import io.zmux.JoinHint;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -10,7 +11,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -36,19 +36,23 @@ final class TestProxy implements Closeable {
      *     unless honorAccel and the upstream sent X-Accel-Buffering: no
      * @param webSocket forwards WebSocket upgrades; otherwise Upgrade and Connection are dropped
      *     and the request goes up as a plain GET
-     * @param webSocketOnly refuses every request but a WebSocket upgrade (403)
-     * @param responseTimeoutMillis answers 504 when a buffered response has not arrived whole within it (0: none)
+     * @param webSocketOnly redirects every request but a WebSocket upgrade to a host the client disallows
+     * @param failBufferedUploads injects a 504 for a chunked upload the proxy would buffer and its paired download
      * @param maxBody answers 413 for a request body above it (0: no limit)
      */
     record Profile(boolean bufferRequests, boolean bufferResponses, boolean honorAccel, boolean webSocket,
-                   boolean webSocketOnly, long responseTimeoutMillis, long maxBody) {
-        static final Profile PASS = new Profile(false, false, false, true, false, 0, 0);
+                   boolean webSocketOnly, boolean failBufferedUploads, long maxBody) {
+        static final Profile PASS = new Profile(false, false, false, true, false, false, 0);
 
-        static Profile nginxDefaults() { return new Profile(true, true, true, false, false, 0, 1 << 20); }
+        static Profile nginxDefaults() { return new Profile(true, true, true, false, false, false, 1 << 20); }
 
-        static Profile bufferingCdn(long timeoutMillis) { return new Profile(true, true, false, false, false, timeoutMillis, 0); }
+        static Profile bufferingCdn() { return new Profile(true, true, false, false, false, false, 0); }
 
-        static Profile webSocketFront() { return new Profile(false, false, false, true, true, 0, 0); }
+        static Profile webSocketFront() { return new Profile(false, false, false, true, true, false, 0); }
+
+        Profile withBufferedUploadFailure() {
+            return new Profile(bufferRequests, bufferResponses, honorAccel, webSocket, webSocketOnly, true, maxBody);
+        }
     }
 
     /**
@@ -246,7 +250,16 @@ final class TestProxy implements Closeable {
             if (h == null) return;
             requests.incrementAndGet();
             boolean upgrade = h.has("Upgrade", "websocket");
-            if (p.webSocketOnly && !upgrade) { simple(out, 403, "Forbidden"); return; }
+            if (p.webSocketOnly && !upgrade) {
+                respond(out, "HTTP/1.1 307 Temporary Redirect",
+                        new Head("", List.<String[]>of(new String[] {"Location", "http://other.example/z"})), new byte[0]);
+                return;
+            }
+            // Refuse the download of a split attempt even if the upload's socket closes first.
+            if (p.bufferRequests && p.failBufferedUploads && h.get(JoinHint.PAIR_HEADER) != null && h.line().startsWith("GET ")) {
+                simple(out, 504, "Gateway Timeout");
+                return;
+            }
             h = h.with("X-Forwarded-For", c.getInetAddress().getHostAddress());
             if (upgrade && p.webSocket) { tunnel(c, in, h); return; }
             if (!exchange(in, out, h.chunked(), h.without(HOP))) return;
@@ -257,7 +270,10 @@ final class TestProxy implements Closeable {
     private boolean exchange(InputStream in, OutputStream out, boolean chunked, Head h) throws IOException {
         long cl = h.length();
         if (p.maxBody > 0 && cl > p.maxBody) { simple(out, 413, "Too Large"); return false; }
-        if (!p.bufferRequests && chunked) return stream(in, out, h);
+        if (chunked) {
+            if (!p.bufferRequests) return stream(in, out, h);
+            if (p.failBufferedUploads) { simple(out, 504, "Gateway Timeout"); return false; }
+        }
         Head framing = chunked ? new Head(h.line, List.<String[]>of(new String[] {"Transfer-Encoding", "chunked"})) : h;
         byte[] body = chunked || cl > 0 ? body(in, framing, false, p.maxBody) : new byte[0];
         if (p.maxBody > 0 && body.length > p.maxBody) { simple(out, 413, "Too Large"); return false; }
@@ -282,34 +298,22 @@ final class TestProxy implements Closeable {
             }
         }
         try (Socket u = upstream()) {
-            if (p.responseTimeoutMillis > 0) u.setSoTimeout((int) p.responseTimeoutMillis);
-            long t0 = System.nanoTime();
             OutputStream uo = u.getOutputStream();
             uo.write(up.bytes());
             uo.write(body);
             uo.flush();
             InputStream ui = new BufferedInputStream(u.getInputStream());
-            Head rh;
-            try {
-                rh = head(ui);
-                if (rh == null) { simple(out, 502, "Bad Gateway"); return false; }
-                boolean buffer = p.bufferResponses && !(p.honorAccel && "no".equalsIgnoreCase(rh.get("X-Accel-Buffering")));
-                if (!buffer) return streamResponse(ui, out, rh);
-                byte[] rb = body(ui, rh, true, 0);
-                if (p.responseTimeoutMillis > 0 && (System.nanoTime() - t0) / 1_000_000 > p.responseTimeoutMillis) {
-                    simple(out, 504, "Gateway Timeout");
-                    return false;
-                }
-                maxResponseBody.accumulateAndGet(rb.length, Math::max);
-                if (roll(f.dropResponse)) return false;
-                if (roll(f.replay) && lastResponse != null) rb = lastResponse;
-                else if (rh.status() == 200) lastResponse = rb;
-                respond(out, rh.line, rh.without(HOP).without("Content-Length", "X-Accel-Buffering"), rb);
-                return true;
-            } catch (SocketTimeoutException e) {
-                simple(out, 504, "Gateway Timeout");
-                return false;
-            }
+            Head rh = head(ui);
+            if (rh == null) { simple(out, 502, "Bad Gateway"); return false; }
+            boolean buffer = p.bufferResponses && !(p.honorAccel && "no".equalsIgnoreCase(rh.get("X-Accel-Buffering")));
+            if (!buffer) return streamResponse(ui, out, rh);
+            byte[] rb = body(ui, rh, true, 0);
+            maxResponseBody.accumulateAndGet(rb.length, Math::max);
+            if (roll(f.dropResponse)) return false;
+            if (roll(f.replay) && lastResponse != null) rb = lastResponse;
+            else if (rh.status() == 200) lastResponse = rb;
+            respond(out, rh.line, rh.without(HOP).without("Content-Length", "X-Accel-Buffering"), rb);
+            return true;
         } catch (IOException e) {
             simple(out, 502, "Bad Gateway");
             return false;

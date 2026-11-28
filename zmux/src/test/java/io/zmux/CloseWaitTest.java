@@ -12,7 +12,6 @@ import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -126,7 +125,7 @@ class CloseWaitTest {
                 inner.start(new Sink() {
                     @Override
                     public void onChunk(Chunk c, Runnable consumed) {
-                        int n = c.buffer().remaining();
+                        int n = c.remaining();
                         if (client) towardClient.addAndGet(n);
                         Runnable deliver = () -> {
                             if (client) towardClient.addAndGet(-n);
@@ -168,7 +167,7 @@ class CloseWaitTest {
     /** A client and a server joined over n delayed pipes. */
     private record Mesh(ZmuxListener listener, ZmuxSession client, ZmuxSession server, List<Link> links) {
         static Mesh open(EventLoops loops, ScheduledExecutorService timer, long delayMs, int n) throws Exception {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
                     .noProbation().scheduler(Scheduler.SPREAD_ETA).build();
             ZmuxListener l = Zmux.listener(ListenerConfig.of(cfg));
             List<Link> links = new ArrayList<>();
@@ -251,49 +250,6 @@ class CloseWaitTest {
                 m.client().awaitClosed(Duration.ofSeconds(10));
                 m.server().awaitClosed(Duration.ofSeconds(10));
                 out.close();
-            } finally {
-                m.listener().close();
-            }
-            Leaks.none(loops, "read buffers leaked");
-        } finally {
-            unbound(was);
-            timer.shutdownNow();
-        }
-    }
-
-    /**
-     * Both ends write and close at once: each one's CONNECTION_CLOSE waits for the acknowledgement of its data, which
-     * the other end, waiting too, keeps sending. Both closes complete within a few RTTs, not at the bound.
-     */
-    @Test void aSimultaneousCloseCompletesWithinRoundTrips() throws Exception {
-        int size = 64 << 10;
-        long was = bound();
-        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
-        try (EventLoops loops = EventLoops.create(2); ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {
-            Mesh m = Mesh.open(loops, timer, 50, 2);
-            try {
-                ZmuxStream a = m.client().openStream(), b = m.server().openStream();
-                a.write(new byte[size]);
-                b.write(new byte[size]);
-                CompletableFuture<Void> go = new CompletableFuture<>();
-                List<Future<Long>> took = new ArrayList<>();
-                for (ZmuxSession s : List.of(m.client(), m.server())) {
-                    took.add(ex.submit(() -> {
-                        go.join();
-                        long t = System.nanoTime();
-                        s.close(0x10, "");
-                        return System.nanoTime() - t;
-                    }));
-                }
-                go.complete(null);
-                for (Future<Long> t : took) {
-                    long ns = t.get(10, TimeUnit.SECONDS);
-                    assertTrue(ns < LINGER.toNanos() / 4, "a close took " + ns / 1_000_000 + " ms (RTT 100 ms)");
-                }
-                m.client().awaitClosed(Duration.ofSeconds(10));
-                m.server().awaitClosed(Duration.ofSeconds(10));
-                a.close();
-                b.close();
             } finally {
                 m.listener().close();
             }

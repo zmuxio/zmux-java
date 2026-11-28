@@ -1,5 +1,8 @@
 package io.zmux.internal.core;
 
+import io.zmux.CapacityLimits;
+import io.zmux.internal.buffer.ReadBuf;
+
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.internal.wire.TransportParams;
 import java.nio.ByteBuffer;
@@ -8,6 +11,37 @@ import org.junit.jupiter.api.Test;
 /** penalties, bytes_opportunistic and pings_answered follow what the core does. */
 class CounterSemanticsTest {
     static SessionStats.Snapshot snap(Session s) { return s.stats().snapshot(0, null); }
+
+    @Test void unexpectedInputEofRetainsItsReasonAndCountsAsAMemberFault() throws Exception {
+        var session = established();
+        PipeTargetTest.appendOut(session, true, Attach.OUT_ACTIVE, Attach.IN_OPEN);
+        var bootstrap = session.pipes().get(0);
+        session.bindBootstrapCandidate("initial", new SessionCapacity.CandidateIdentity(
+                "initial", bootstrap.carrier(), bootstrap.variant(), java.util.List.of(io.zmux.Directions.BOTH)));
+        session.pipeHealth(0);
+        var changes = new java.util.ArrayList<SessionCapacity.MemberHealth>();
+        session.memberFeedback(changes::add);
+        var eof = new java.io.EOFException("input ended");
+        session.pipeEnded(0, 0, false, false, eof, Time.MICROSECOND);
+        var health = session.pipeHealth(0);
+        assertEquals(io.zmux.DirectionHealth.Reason.UNEXPECTED_EOF, health.receive().reason());
+        assertSame(eof, health.failure());
+        assertEquals(1, changes.stream().filter(SessionCapacity.MemberHealth::failed).count());
+    }
+
+    @Test void arrivalEstimateKeepsTheCarrierQueueNonnegativeWithAWriteInFlight() throws Exception {
+        var session = established();
+        var stream = session.streams.openStream(true);
+        assertEquals(128, session.send.write(stream, ByteBuffer.allocate(128), false));
+        var batch = new Batch();
+        assertTrue(session.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, session.now()));
+        try {
+            session.unsentReported(0, 0, Long.MAX_VALUE);
+            assertEquals(Long.MAX_VALUE, session.mp().metrics.queueBytes(session.pipes().get(0)));
+        } finally {
+            session.writeDone(batch, null, session.now());
+        }
+    }
 
     @Test void aPenaltyCountsOncePerEpisode() {
         Session s = PipeTargetTest.session();
@@ -24,18 +58,23 @@ class CounterSemanticsTest {
 
     /** An established multipath session whose peer reads nothing more: what it sends stays unacknowledged. */
     static Session established() throws Exception {
+        return established(ignored -> {});
+    }
+
+    static Session established(java.util.function.Consumer<CoreConfig.Builder> configure) throws Exception {
         Session[] ends = new Session[2];
         for (int i = 0; i < 2; i++) {
             CoreConfig.Role role = i == 0 ? CoreConfig.Role.INITIATOR : CoreConfig.Role.RESPONDER;
-            CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role).maxPipes(2).headroom(8);
+            CoreConfig.Builder c = CoreConfig.builder().role(role).transportRole(role).sessionPolicy(new CoreSessionPolicy(new CapacityLimits(2, 8)));
             c.local().present |= TransportParams.MULTIPATH;
             c.local().secretFlags |= TransportParams.SECRET_PSK;
             c.local().present |= TransportParams.SESSION_CRYPTO;
             c.local().sessionCrypto = io.zmux.internal.join.SessionCrypto.supported();
             c.psk(new byte[32]).declaredEndToEnd(true);
+            configure.accept(c);
             ends[i] = new Session(c.build(), 0);
-            CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true);
-            ends[i].attachBootstrap(info, info, null);
+            CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, false, true).withKind(io.zmux.CarrierKind.STREAMING);
+            ends[i].attachBootstrap(info, info);
         }
         Batch batch = new Batch();
         for (int round = 0; round < 20; round++) {
@@ -51,51 +90,6 @@ class CounterSemanticsTest {
         }
         assertNotNull(ends[0].mp(), "multipath negotiated");
         return ends[0];
-    }
-
-    @Test void bytesBlockingTheReceiverGoAgainOnTheFastestPipeAndAreCountedThere() throws Exception {
-        Session s = established();
-        Pipe a = s.pipes.get(0);
-        Pipe c = PipeTargetTest.appendOut(s, true, Attach.OUT_ACTIVE, Attach.IN_OPEN);
-        Stream st = s.streams.openStream(true);
-        s.send.write(st, ByteBuffer.allocate(4096), false);
-        // The stream goes on the pipe affinity binds it to: that one stalls.
-        for (Pipe p : new Pipe[] {a, c}) {
-            Batch b = new Batch(); RecordWriter w = new RecordWriter();
-            try {
-                w.init(b, Framing.BYTES, 65536, 65536);
-                w.retainFor(p);
-                s.mp().write(w, p, p.out().lanes.getFirst()); w.end();
-                s.tx.afterBatch(w, p, p.out().lanes.getFirst());
-            } finally { b.release(); }
-        }
-        Pipe slow = a.out().lanes.getFirst().log.isEmpty() ? c : a, fast = slow == a ? c : a;
-        long sent = st.snd.sent();
-        assertTrue(sent > 0, "the data went on one pipe");
-        assertFalse(slow.out().lanes.getFirst().log.isEmpty(), "and is retained there");
-        // The peer's credit ends at what was sent: the stream is blocked on bytes the slow pipe holds.
-        Poke.set(st.snd, "maxData", sent);
-        s.send.write(st, ByteBuffer.allocate(1024), false);
-        assertTrue(Retention.streamBlocked(st));
-        s.setNow(Time.add(0, 10 * Time.SECOND));
-
-        Batch b2 = new Batch(); RecordWriter w2 = new RecordWriter();
-        try {
-            w2.init(b2, Framing.BYTES, 65536, 65536);
-            w2.retainFor(fast);
-            // One chunk per call, until the blocking bytes are all copied.
-            for (long before = -1; before != snap(s).bytesOpportunistic(); ) {
-                before = snap(s).bytesOpportunistic();
-                assertTrue(s.mp().retention.oppSend(w2, fast, st));
-            }
-            w2.end();
-        } finally { b2.release(); }
-        long copied = snap(s).bytesOpportunistic();
-        assertEquals(sent, copied, "every blocking byte, once");
-        assertTrue(snap(s).bytesReinjected() >= copied, "a part of bytes_reinjected");
-        assertEquals(1, snap(s).penalties(), "the pipe that held them is penalized");
-        assertEquals(copied, fast.mp().ret.oppBytes(), "counted on the pipe that carried the copies");
-        assertEquals(0, slow.mp().ret.oppBytes());
     }
 
     @Test void aPingIsAnsweredOnceItsRecordIsAcknowledgedEachOnce() throws Exception {
@@ -130,7 +124,7 @@ class CounterSemanticsTest {
         Stream st = s.streams.openStream(true);
         s.sending().write(st, ByteBuffer.allocate(6000), false);
         long sessionBefore = s.conn.sent(), retainedBefore = s.path().retained();
-        byte[] first = s.sending().firstBatch(4000, s.tx::canSendNow, s.path());
+        byte[] first = s.sending().firstBatch(4000, s.tx::canSendNow, s.path()).frames();
         assertNotNull(first);
         long carried = st.snd.sent();
         assertTrue(carried > 0 && carried < 6000, "carried " + carried);

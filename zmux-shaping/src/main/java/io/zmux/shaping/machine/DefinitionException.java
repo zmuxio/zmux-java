@@ -13,10 +13,10 @@ public final class DefinitionException extends IllegalArgumentException {
     /** The kinds of error. */
     public enum Category {
         SYNTAX, DUPLICATE_KEY, UNKNOWN_MEMBER, TYPE, RANGE, TABLE, SCOPE, CONFLICT, REFERENCE, UNREACHABLE, CYCLE,
-        ZERO_DELAY_CYCLE, LIMIT, NO_DEFAULT, NO_CANDIDATE;
+        ZERO_DELAY_CYCLE, LIMIT, NO_DEFAULT, NO_CANDIDATE, SCHEMA_VERSION;
 
         /** The lower case name, as in {@code zero_delay_cycle}. */
-        public String id() { return name().toLowerCase(java.util.Locale.ROOT); }
+        public String id() { return this == SCHEMA_VERSION ? "schema" : name().toLowerCase(java.util.Locale.ROOT); }
     }
 
     private final transient Category category;

@@ -1,5 +1,14 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.OffsetCoverage;
+
+import io.zmux.internal.memory.SharedMemory;
+
+import io.zmux.internal.buffer.ReceiveLoans;
+
+import io.zmux.internal.buffer.ReadBuf;
+import io.zmux.internal.buffer.ReceiveSpans;
+
 import io.zmux.internal.wire.Frame;
 import io.zmux.internal.wire.Preamble;
 import io.zmux.internal.wire.TransportError;
@@ -23,6 +32,8 @@ public final class StreamRecv {
 
         /** n stream bytes received again in a multipath session, on the pipe being read. */
         void duplicateReceived(long n);
+
+        void memoryCommand(Runnable command);
     }
 
     /** Result of a read: bytes copied and whether the end of the stream was reached. */
@@ -41,9 +52,14 @@ public final class StreamRecv {
     private final ControlQueue ctl;
     private final StreamTable table;
     private final Port port;
+    private final RecvBuffer.Storage storage;
+    private final ReceiveLoans loans;
+    private final SharedMemory.Receive budget;
+    private final java.util.LinkedHashSet<Runnable> loanW = new java.util.LinkedHashSet<>();
+    private volatile boolean loanWaiting;
 
     StreamRecv(CoreConfig cfg, SessionStats stats, Outbox outbox, ConnFlow conn, WindowTuner tuner, ControlQueue ctl,
-               StreamTable table, Port port) {
+               StreamTable table, Port port, RecvBuffer.Storage storage, SharedMemory.Receive budget) {
         this.cfg = cfg;
         this.stats = stats;
         this.outbox = outbox;
@@ -52,6 +68,45 @@ public final class StreamRecv {
         this.ctl = ctl;
         this.table = table;
         this.port = port;
+        this.storage = storage;
+        this.budget = budget;
+        loans = new ReceiveLoans(ReceiveLoans.DEFAULT_BYTES, ReceiveLoans.DEFAULT_SLOTS, budget, this::loanReleased);
+    }
+
+    private void loanReleased() {
+        if (loanWaiting) port.memoryCommand(this::loanRoom);
+    }
+
+    public void waitLoan(Runnable waiter) {
+        loanWaiting = true;
+        loanW.add(waiter);
+    }
+
+    public void cancelLoanWait(Runnable waiter) {
+        loanW.remove(waiter);
+        loanWaiting = !loanW.isEmpty();
+    }
+
+    void loanRoom() {
+        if (loanW.isEmpty()) return;
+        var ready = java.util.List.copyOf(loanW);
+        loanW.clear();
+        loanWaiting = false;
+        ready.forEach(Runnable::run);
+    }
+
+    void closeLoanWaits() {
+        loanWaiting = false;
+        loanW.clear();
+        loans.stopNotifications();
+    }
+
+    public ReceiveLoans loans() {
+        return loans;
+    }
+
+    long queuePayloadCopies() {
+        return storage.copied();
     }
 
     // ---- input ----
@@ -98,7 +153,7 @@ public final class StreamRecv {
         int dataPos = f.dataPos;
         int dataLen = f.dataLen;
         if (!st.local && feat.preamble() && !r.preDone && off == 0) {
-            Preamble pre = Preamble.parse(f.src, dataPos, dataLen, cfg.local().maxPreambleSize);
+            Preamble pre = Preamble.parse(f.src, f.spans, dataPos, dataLen, cfg.local().maxPreambleSize);
             effect = true;
             r.preDone = true;
             r.preSize = pre.size();
@@ -115,6 +170,7 @@ public final class StreamRecv {
             conn.releaseUnbuffered(newPre);
             r.readOff = Math.max(r.readOff, r.preSize);
             r.pushOff = Math.max(r.pushOff, r.preSize);
+            if (!r.stopped) r.retireThrough(conn, r.readOff);
             dataPos += pre.size();
             dataLen -= pre.size();
             off = pre.size();
@@ -132,8 +188,7 @@ public final class StreamRecv {
                 if (r.stopped || st.tab.stackReject()) {
                     conn.releaseUnbuffered(nb);
                 } else if (nb > 0) {
-                    ByteBuffer part = f.src.slice(dataPos + (int) (lo - off), (int) (hi - lo));
-                    long stored = r.buf.insert(lo, part, buf);
+                    long stored = insert(r.buf, f, buf, lo, dataPos + (int) (lo - off), (int) (hi - lo));
                     table.bufAdd(stored);
                     if (stored < nb) conn.releaseUnbuffered(nb - stored);
                 }
@@ -149,6 +204,22 @@ public final class StreamRecv {
         return effect || st.tab.opened();
     }
 
+    private long insert(RecvBuffer queue, Frame frame, ReadBuf owner, long off, int pos, int length) {
+        ReceiveSpans spans = frame.spans;
+        if (spans == null) return queue.insert(storage, off, frame.src, pos, length, owner);
+        long stored = 0;
+        while (length > 0) {
+            ReceiveSpans.Span span = spans.span(pos);
+            int start = spans.position(span, pos);
+            int count = Math.min(length, span.to() - start);
+            stored += queue.insert(storage, off, span.data(), start, count, span.owner());
+            pos += count;
+            off += count;
+            length -= count;
+        }
+        return stored;
+    }
+
     /** The check of a reset against the preamble once both the preamble size and a reset are known. */
     private static void checkPreambleReset(Stream st, Features feat) throws WireException {
         StreamRecv.RecvPart r = st.rcv;
@@ -161,8 +232,7 @@ public final class StreamRecv {
     /** Updates the receiving state after input and wakes the reader. */
     private void progress(Stream st) {
         StreamRecv.RecvPart r = st.rcv;
-        if (r.finKnown && r.state == Stream.RECV_SIZE_KNOWN && r.arrived.contains(r.readOff, r.finalSize)
-                && r.arrived.prefix() >= r.finalSize) {
+        if (r.finKnown && r.state == Stream.RECV_SIZE_KNOWN && r.arrived.prefix() >= r.finalSize) {
             r.state = Stream.RECV_DATA_RECVD;
         }
         if ((r.stopped || st.tab.releasedRecv()) && (r.state == Stream.RECV_DATA_RECVD || r.state == Stream.RECV_RESET_RECVD)) {
@@ -256,24 +326,36 @@ public final class StreamRecv {
      * stream's or the session's outcome when the part ended otherwise.
      */
     public ReadResult read(Stream st, ByteBuffer dst) throws CoreException {
-        if (!st.hasRecv) throw CoreException.of(CoreException.Reason.INVALID);
-        StreamRecv.RecvPart r = st.rcv;
-        if (r.stopped) throw CoreException.stream(new StreamError(StreamError.Kind.CLOSED_LOCALLY, st.tab.id(), r.stopCode, 0, false));
+        RecvPart r = readPart(st);
         if (r.state == Stream.RECV_DATA_READ) return new ReadResult(0, true);
-        int n = 0;
-        if (dst.hasRemaining()) {
-            if (r.reset) {
-                int lim = (int) Math.min(dst.remaining(), r.resetRel - Math.min(r.resetRel, r.pushOff));
-                ByteBuffer d = dst.slice(dst.position(), lim);
-                n = r.buf.read(r.pushOff, d);
-                dst.position(dst.position() + n);
-            } else {
-                n = r.buf.read(r.pushOff, dst);
-            }
+        int n = r.buf.read(r.pushOff, dst, readLimit(r, dst.remaining()));
+        boolean fin = finishRead(st, n);
+        return n == 0 && !fin ? ReadResult.WAIT : new ReadResult(n, fin);
+    }
+
+    private static RecvPart readPart(Stream st) throws CoreException {
+        if (!st.hasRecv) throw CoreException.of(CoreException.Reason.INVALID);
+        RecvPart r = st.rcv;
+        if (r.stopped) throw CoreException.stream(new StreamError(StreamError.Kind.CLOSED_LOCALLY, st.tab.id(), r.stopCode, 0, false));
+        return r;
+    }
+
+    private static int readLimit(RecvPart r, int max) {
+        return !r.reset ? max : (int) Math.min(max, r.resetRel - Math.min(r.resetRel, r.pushOff));
+    }
+
+    private void readBytes(Stream st, int n) {
+        if (n > 0) {
+            st.rcv.pushOff += n;
+            consumed(st, n);
         }
-        if (n > 0) { r.pushOff += n; consumed(st, n); }
+    }
+
+    private boolean finishRead(Stream st, int n) throws CoreException {
+        readBytes(st, n);
+        RecvPart r = st.rcv;
         if (r.reset && r.readOff >= r.resetRel && r.buf.contiguous(r.pushOff) == r.pushOff) {
-            if (n > 0) return new ReadResult(n, false);
+            if (n > 0) return false;
             r.state = Stream.RECV_RESET_READ;
             table.maybeDiscard(st);
             table.drainUpdate(st);
@@ -283,15 +365,16 @@ public final class StreamRecv {
             r.state = Stream.RECV_DATA_READ;
             table.maybeDiscard(st);
             table.drainUpdate(st);
-            return new ReadResult(n, true);
+            return true;
         }
         SessionError err = port.error();
         if (n == 0 && err != null) throw CoreException.session(err);
-        return n == 0 ? ReadResult.WAIT : new ReadResult(n, false);
+        return false;
     }
 
     private void consumed(Stream st, long n) {
         st.rcv.readOff += n;
+        st.rcv.retireThrough(conn, st.rcv.readOff);
         stats.appRead(n);
         st.counters.read(n);
         table.bufSub(n);
@@ -302,32 +385,18 @@ public final class StreamRecv {
 
     /** Consumes up to max contiguous bytes without copying; null when the caller must wait. */
     public Chunk readChunk(Stream st, int max) throws CoreException {
-        if (!st.hasRecv) throw CoreException.of(CoreException.Reason.INVALID);
-        StreamRecv.RecvPart r = st.rcv;
-        if (r.stopped) throw CoreException.stream(new StreamError(StreamError.Kind.CLOSED_LOCALLY, st.tab.id(), r.stopCode, 0, false));
+        return readChunk(st, max, loans);
+    }
+
+    Chunk readChunk(Stream st, int max, ReceiveLoans budget) throws CoreException {
+        RecvPart r = readPart(st);
         if (r.state == Stream.RECV_DATA_READ) return new Chunk(ByteBuffer.allocate(0), null, true);
-        if (r.reset && r.pushOff + max > r.resetRel) max = (int) (r.resetRel - Math.min(r.resetRel, r.pushOff));
-        RecvBuffer.Chunk c = r.buf.take(r.pushOff, max);
+        Chunk c = r.buf.borrow(r.pushOff, readLimit(r, max), budget);
         if (c != null) {
-            r.pushOff += c.data().remaining();
-            consumed(st, c.data().remaining());
-            return new Chunk(c.data(), c.buf(), false);
+            readBytes(st, c.data().remaining());
+            return c;
         }
-        if (r.reset && r.readOff >= r.resetRel) {
-            r.state = Stream.RECV_RESET_READ;
-            table.maybeDiscard(st);
-            table.drainUpdate(st);
-            throw CoreException.stream(r.errState);
-        }
-        if (r.finKnown && r.readOff == r.finalSize && !r.reset) {
-            r.state = Stream.RECV_DATA_READ;
-            table.maybeDiscard(st);
-            table.drainUpdate(st);
-            return new Chunk(ByteBuffer.allocate(0), null, true);
-        }
-        SessionError err = port.error();
-        if (err != null) throw CoreException.session(err);
-        return null;
+        return finishRead(st, 0) ? new Chunk(ByteBuffer.allocate(0), null, true) : null;
     }
 
     // ---- the receive lane: in-order data handed to the application ahead of reads ----
@@ -341,11 +410,10 @@ public final class StreamRecv {
         if (!st.hasRecv) return null;
         StreamRecv.RecvPart r = st.rcv;
         if (r.stopped || r.state == Stream.RECV_DATA_READ || r.state == Stream.RECV_RESET_READ) return null;
-        if (r.reset) max = (int) Math.min(max, r.resetRel - Math.min(r.resetRel, r.pushOff));
-        RecvBuffer.Chunk c = r.buf.take(r.pushOff, max);
+        Chunk c = r.buf.take(r.pushOff, readLimit(r, max));
         if (c == null) return null;
         r.pushOff += c.data().remaining();
-        return new Chunk(c.data(), c.buf(), false);
+        return c;
     }
 
     /**
@@ -368,8 +436,22 @@ public final class StreamRecv {
         return st.rcv.pushOff;
     }
 
+    public boolean packed(Stream st) { return st.rcv.buf.packed(); }
+
+    public boolean hasQueued(Stream st) { return !st.rcv.buf.isEmpty(); }
+
+    public boolean pushOutstanding(Stream st) { return st.rcv.pushOff > st.rcv.readOff; }
+
+    /** A descriptor crossing into a receive lane stays paid until that lane consumes it. */
+    public boolean reserveLaneView() { return budget == null || budget.reserveView(ReceiveLayout.VIEW_PIECE); }
+
+    public void releaseLaneView() { if (budget != null) budget.releaseView(ReceiveLayout.VIEW_PIECE); }
+
     /** The end marker of a finished part. */
     public static final Object FIN = new Object() { @Override public String toString() { return "FIN"; } };
+
+    /** Whether FIN announced a final offset for this receiving part. */
+    public boolean finKnown(Stream st) { return st.hasRecv && st.rcv.finKnown && !st.rcv.reset; }
 
     /** Where the application must stop delivering pushed bytes: the Reliable Size of a reset, else none. */
     public long pushCut(Stream st) {
@@ -392,6 +474,7 @@ public final class StreamRecv {
             tuner.consumed();
         }
         r.readOff += n;
+        r.retireThrough(conn, r.readOff);
         table.bufSub(n);
         creditChanged(st);
         table.drainUpdate(st);
@@ -420,14 +503,6 @@ public final class StreamRecv {
         long n = r.buf.contiguous(r.pushOff) - r.pushOff;
         if (r.reset) n = Math.min(n, r.resetRel - Math.min(r.resetRel, r.pushOff));
         return n;
-    }
-
-    /** Whether a read with nothing readable would return the part's end (FIN, reset, stop, session error). */
-    public boolean readEnded(Stream st) {
-        if (!st.hasRecv) return true;
-        StreamRecv.RecvPart r = st.rcv;
-        return r.stopped || r.state == Stream.RECV_DATA_READ || (r.finKnown && r.readOff == r.finalSize && !r.reset)
-                || (r.reset && r.readOff >= r.resetRel) || port.error() != null;
     }
 
     public void waitRead(Stream st, Waiter sig) { st.rcv.rsig = sig; }
@@ -512,9 +587,9 @@ public final class StreamRecv {
         long v = r.readOff + r.window;
         if (r.finKnown || r.stopped || !(v > r.adv || st.rcv.forceMaxStreamData)) return true;
         long id = st.tab.id();
-        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), true,
-                bb -> io.zmux.internal.wire.FrameEncoder.maxStreamData(bb, id, v))) return false;
-        w.logFrame(FrameDesc.id(FrameDesc.Kind.MAX_STREAM_DATA, id));
+        if (!w.trackedFrame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), v <= r.adv,
+                bb -> io.zmux.internal.wire.FrameEncoder.maxStreamData(bb, id, v),
+                FrameDesc.id(FrameDesc.Kind.MAX_STREAM_DATA, id))) return false;
         path.maxStreamDataSent(st, r.highest >= r.adv || (r.blockSeen == r.adv && r.blockSeen > 0));
         if (r.tune != null && v > r.adv) r.tune.sent(r.adv, now, r.highest == r.adv);
         r.adv = Math.max(r.adv, v);
@@ -525,9 +600,8 @@ public final class StreamRecv {
     /** Writes STOP_SENDING for st; false when the batch is full. */
     boolean writeStop(RecordWriter w, Stream st) {
         long id = st.tab.id(), c = st.rcv.stopCode;
-        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(c), true,
-                bb -> io.zmux.internal.wire.FrameEncoder.stopSending(bb, id, c))) return false;
-        w.logFrame(FrameDesc.id(FrameDesc.Kind.STOP, id));
+        if (!w.trackedFrame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(c), st.rcv.stopSent,
+                bb -> io.zmux.internal.wire.FrameEncoder.stopSending(bb, id, c), FrameDesc.id(FrameDesc.Kind.STOP, id))) return false;
         st.rcv.stopSent = true;
         w.wroteTraffic();
         return true;
@@ -575,6 +649,7 @@ public final class StreamRecv {
     /** CLOSED: the buffer is dropped and pushed bytes no longer count (the session's count is cleared). */
     static void releaseBuffer(Stream st) {
         st.rcv.buf.clear();
+        st.rcv.arrived.discardTail();
         st.rcv.readOff = st.rcv.pushOff;
     }
 
@@ -589,10 +664,11 @@ public final class StreamRecv {
         private Waiter rsig;
         private boolean forceMaxStreamData;
         private final RecvBuffer buf = new RecvBuffer();
-        private final RangeSet arrived = new RangeSet();
+        private final OffsetCoverage arrived = new OffsetCoverage();
         private long highest;
         private long finalSize;
         private long readOff;
+        private long retired;
         /** The offset up to which data left the buffer for the receive lane; readOff <= pushOff. */
         private long pushOff;
         private long window;
@@ -614,14 +690,25 @@ public final class StreamRecv {
         private boolean preDone;
     
         RecvPart(boolean hasRecv) {
-            if (hasRecv) relLo = (1L << 62) - 1;
+            if (hasRecv) relLo = io.zmux.internal.wire.VarInt.MAX;
         }
 
         RecvBuffer buf() {
             return buf;
         }
-        RangeSet arrived() {
+        OffsetCoverage arrived() {
             return arrived;
+        }
+
+        void retireThrough(ConnFlow conn, long end) {
+            long delta = end - retired;
+            retired = end;
+            conn.retire(delta);
+        }
+
+        void discardHistory(ConnFlow conn) {
+            arrived.discardTail();
+            retireThrough(conn, finKnown ? finalSize : highest);
         }
         long highest() {
             return highest;

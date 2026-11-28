@@ -61,7 +61,7 @@ class SourcePrefixTest {
     }
 
     @Test void theDefaultsCountAnIpv4AddressAloneAndAnIpv6OneByItsSlash64() throws Exception {
-        var a = new CarrierAdmission(2, 0, 0, 0);
+        var a = new CarrierAdmission(2, -1, CarrierAdmission.DEFAULT_PREFIX_V4, CarrierAdmission.DEFAULT_PREFIX_V6);
         assertNotEquals(a.sourceKey(at("10.0.0.1", 1)), a.sourceKey(at("10.0.0.2", 1)));
         assertEquals(a.sourceKey(at("10.0.0.1", 1)), a.sourceKey(at("10.0.0.1", 2)), "ports are ignored");
         assertEquals(a.sourceKey(at("2001:db8::1", 1)), a.sourceKey(at("2001:db8::ffff:2", 1)));
@@ -70,7 +70,7 @@ class SourcePrefixTest {
     }
 
     @Test void stalledCarriersAreCountedPerPrefix() throws Exception {
-        var a = new CarrierAdmission(3, 0, 24, 56);
+        var a = new CarrierAdmission(3, -1, 24, 56);
         for (String s : new String[] {"10.0.0.1", "10.0.0.2", "10.0.0.3"}) assertEquals(CarrierAdmission.TAKEN, a.take(at(s, 1)));
         assertTrue(a.stall(at("10.0.0.1", 1)));
         assertTrue(a.stall(at("10.0.0.2", 1)));

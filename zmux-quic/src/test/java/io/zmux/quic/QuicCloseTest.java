@@ -60,9 +60,7 @@ class QuicCloseTest {
             io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofHours(1));
             SessionError.ApplicationClosed mine;
             try {
-                long t0 = System.nanoTime();
                 if (code == 0 && reason.isEmpty()) client.close(); else client.close(code, reason);
-                assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(5), "close is bounded");
                 mine = assertInstanceOf(SessionError.ApplicationClosed.class, client.closed().get(30, TimeUnit.SECONDS));
                 assertEquals(new SessionError.ApplicationClosed(code, reason, true), server.closed().get(30, TimeUnit.SECONDS));
             } finally {

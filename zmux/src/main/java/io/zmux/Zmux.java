@@ -16,8 +16,7 @@ import javax.net.ssl.SSLEngine;
 
 /**
  * Entry points: sessions over TCP, TLS or any pipe input. Establishment returns once the
- * peer's parameters were processed, or at once when early data toward a declared zmux peer
- * is configured.
+ * peer's current transport parameters have been processed.
  */
 public final class Zmux {
     private Zmux() {}
@@ -29,7 +28,7 @@ public final class Zmux {
      * and {@link ZmuxSession#raiseIncomingStreams}. It is a value of their range, not an unlimited
      * setting; their none setting stays 0.
      */
-    public static final long MAX_STREAM_CREDIT = 1L << 60;
+    public static final long MAX_STREAM_CREDIT = io.zmux.internal.wire.VarInt.MAX_STREAM_COUNT;
 
     /** The record size limit before the peer's parameters arrive, 16382 bytes (SPEC.md Section 3.2). */
     public static final int DEFAULT_MAX_RECORD_SIZE = io.zmux.internal.wire.TransportParams.DEFAULT_MAX_RECORD_SIZE;
@@ -76,14 +75,11 @@ public final class Zmux {
     /**
      * {@link #splice(ZmuxStream, ZmuxStream, SpliceOptions)} for two packet streams
      * (EXTENSIONS.md Section 12, {@link io.zmux.helper.PacketStream}): the stream bytes are
-     * capsules, forwarded in chunks with only their headers parsed, unknown types included. A
-     * datagram goes on as a datagram when it fits the next hop's
-     * {@link ZmuxStream#maxDatagramPayload(long)}, otherwise as a DATAGRAM capsule written at the
-     * next capsule boundary; such a capsule counts as a datagram, in bytes and against the
-     * limiter, and a datagram that cannot wait for a boundary (too many already wait, or the
-     * next hop's stream has ended) is dropped as too large. A source that ends inside a capsule
-     * resets the next hop and stops the source with ZMUX_PACKET_ERROR, and the direction ends
-     * {@link SpliceEnd.Reset} with that code. Ends, limiters and the result are as for splice.
+     * capsules, including opaque types. With a capsule hook, the relay validates and assembles
+     * each capsule before passing it to the chain. Otherwise it streams the value to the next hop.
+     * A datagram for a next hop without flow support can be written as a DATAGRAM capsule at
+     * a reliable boundary when the send policy allows it. Malformed or truncated capsule input
+     * ends the direction with {@link SpliceEnd.PacketError} and propagates ZMUX_PACKET_ERROR.
      */
     public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
         return Splice.start(a, b, options, true);
@@ -91,6 +87,16 @@ public final class Zmux {
 
     public static ZmuxFuture<SpliceResult> splicePackets(ZmuxStream a, ZmuxStream b) {
         return splicePackets(a, b, SpliceOptions.DEFAULT);
+    }
+
+    /** Starts a byte splice with live controls for the two forwarding directions. */
+    public static SpliceController spliceControlled(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+        return Splice.controlled(a, b, options, false);
+    }
+
+    /** Starts a packet splice with live controls for the two forwarding directions. */
+    public static SpliceController splicePacketsControlled(ZmuxStream a, ZmuxStream b, SpliceOptions options) {
+        return Splice.controlled(a, b, options, true);
     }
 
     /** Resolves two established sessions the application authenticated as connecting the same endpoints. */
@@ -136,7 +142,7 @@ public final class Zmux {
         Bootstrap.Presenter p = presenter(credential, address);
         if (p == null) return;
         try {
-            byte[] b = p.prefix("", "", null);
+            byte[] b = p.prefix("", "", null, null);
             if (b == null) return;
             java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(b);
             while (buf.hasRemaining()) ch.write(buf);
@@ -151,8 +157,9 @@ public final class Zmux {
      */
     static Bootstrap.Presenter presenter(CarrierCredential credential, InetSocketAddress address) {
         if (credential == null) return null;
-        return (alpn, serverName, exporter) ->
-                credential.prefix(new Admission.CarrierInfo(address, address, alpn, serverName, exporter, RequestHead.NONE));
+        return (alpn, serverName, exporter, tlsVersion) ->
+                credential.prefix(new Admission.CarrierInfo(address, address, alpn, serverName, exporter, RequestHead.NONE)
+                        .withOuterSecurity(Admission.OuterSecurity.tls(tlsVersion)));
     }
 
     /** {@link #connect(InetSocketAddress, ZmuxConfig)} on a virtual thread. */
@@ -187,9 +194,10 @@ public final class Zmux {
     public static ZmuxFuture<PipeIo> dialTlsPipeAsync(InetSocketAddress address, TlsOptions tls, ZmuxConfig cfg) {
         CompletableFuture<PipeIo> f = new CompletableFuture<>();
         try {
+            var core = cfg.toCore(CoreConfig.Role.INITIATOR, CoreConfig.Role.INITIATOR);
             SSLEngine engine = tls.clientEngine(address.getPort(), cfg.alpn());
             SocketChannel ch = dial(address, cfg.handshakeNanos());
-            io.zmux.internal.loop.Bootstrap.tlsPipe(cfg.nextLoop(), ch, engine, cfg.handshakeNanos(), tls.secure(), f);
+            Bootstrap.tlsPipe(cfg.nextLoop(), core, ch, engine, tls.secure(), f);
         } catch (IOException | RuntimeException e) {
             f.completeExceptionally(e);
         }
@@ -215,7 +223,7 @@ public final class Zmux {
      * included, and the caller never does.
      *
      * <p>A {@link Role#SERVER} or {@link Role#AUTO} session opened here has no listener, so it
-     * cannot accept joins: {@link ZmuxConfig.Builder#maxPipes(int)} above 1 or a
+     * cannot accept joins: more than one steady attachment or a
      * {@link ZmuxConfig.Builder#resumeTimeout(Duration)} on it is rejected with
      * {@link IllegalArgumentException} (use {@link io.zmux.adapter.ListenerAdapter#handle} instead).
      *
@@ -242,35 +250,6 @@ public final class Zmux {
         };
     }
 
-    /**
-     * Dials a client session over the carrier the choice selects; each
-     * carrier presents cfg's {@link ZmuxConfig#carrierCredential()}. policy is the policy of
-     * {@link CarrierChoice#auto(Candidate...)} (null: the defaults).
-     *
-     * <p>An explicit choice dials its one candidate as its own dialer does. An auto choice does not
-     * use early data, so that nothing the application sends goes out before a carrier is chosen,
-     * and it does not race candidates: it skips the kinds the cache holds as failed (unless all
-     * are) and, when the configuration allows more than one pipe, establishes the session on the
-     * most robust candidate (a kind the cache holds as usable, else the exchange carrier, else
-     * the last) and joins the preferred ones as further pipes in the background, retiring the
-     * pipes of the kind they replace once one has stayed joined for {@link CarrierChoicePolicy#settle()};
-     * it keeps retrying preferred kinds as their backoff expires, and joins the best kind
-     * available again when the active one fails. Without joins (one pipe,
-     * {@link CarrierChoicePolicy#join()} off, or a peer without multipath) it tries the candidates one after
-     * another, in order, and keeps the first usable one. A candidate is usable when the peer's
-     * parameters arrive within its timer ({@link CarrierChoicePolicy#timerFactor()}); one that misses it
-     * is closed without CONNECTION_CLOSE.
-     *
-     * <p>Each try is reported as a {@link SessionEvent.CarrierCandidate}, the choice as a
-     * {@link SessionEvent.CarrierChosen} (again on every switch), and both in
-     * {@link SessionStats}.
-     *
-     * @throws CarrierChoiceException when no candidate is usable, with the outcome of every one tried
-     */
-    public static ZmuxSession dial(CarrierChoice choice, ZmuxConfig cfg, CarrierChoicePolicy policy) throws IOException {
-        return CarrierSelection.dial(choice, cfg, policy);
-    }
-
     /** Listens for TCP carriers on address with the default configuration. */
     public static ZmuxListener listen(InetSocketAddress address) throws IOException {
         return listen(address, ListenerConfig.defaults());
@@ -289,11 +268,16 @@ public final class Zmux {
 
     /** Starts a session over io without waiting for the peer's parameters. */
     static CompletableFuture<Bootstrap.Started> startExternal(PipeIo io, ZmuxConfig cfg, CoreConfig.Role role, CoreConfig.Role transport) {
+        return startExternal(io, cfg, role, transport, cfg.hooks);
+    }
+
+    static CompletableFuture<Bootstrap.Started> startExternal(PipeIo io, ZmuxConfig cfg, CoreConfig.Role role,
+                                                             CoreConfig.Role transport, io.zmux.internal.loop.DriverHooks hooks) {
         CompletableFuture<Bootstrap.Started> started;
         try {
             if (SessionHost.onHostThread()) throw new IllegalStateException("connect on a zmux event-loop thread");
             started = Bootstrap.external(() -> io.carrierConn() instanceof SessionRuntime parent
-                    ? parent.loop() : cfg.nextLoop(), cfg.toCore(role, transport), io, cfg.hooks);
+                    ? parent.loop() : cfg.nextLoop(), cfg.toCore(role, transport), io, hooks);
         } catch (RuntimeException error) {
             Bootstrap.discard(io, error);
             throw error;
@@ -316,13 +300,11 @@ public final class Zmux {
 
     static ZmuxSession established(CompletableFuture<Bootstrap.Started> f, ZmuxConfig cfg) throws IOException {
         ZmuxSession s = started(f, cfg.carrierCredential);
-        if (cfg.earlyData() == EarlyData.OFF) {
-            try {
-                s.awaitEstablished(Long.MAX_VALUE);
-            } catch (IOException e) {
-                s.close();
-                throw e;
-            }
+        try {
+            s.awaitEstablished(Long.MAX_VALUE);
+        } catch (IOException e) {
+            s.close();
+            throw e;
         }
         return s;
     }

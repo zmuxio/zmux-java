@@ -59,22 +59,22 @@ final class InteropProcess implements AutoCloseable {
         if (reader.isAlive()) throw new IOException("peer output reader did not terminate");
         if (failure.get() != null) throw new IOException("peer output failed", failure.get());
     }
+    boolean isAlive() { return process.isAlive(); }
+
     @Override public void close() throws IOException {
         closing = true;
         boolean interrupted = Thread.interrupted();
         IOException error = null;
-        process.destroy();
         try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-            while (process.isAlive() && System.nanoTime() < deadline) {
-                try { process.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS); }
-                catch (InterruptedException ignored) { interrupted = true; }
-            }
-            if (process.isAlive()) process.destroyForcibly();
-            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-            while (process.isAlive() && System.nanoTime() < deadline) {
-                try { process.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS); }
-                catch (InterruptedException ignored) { interrupted = true; }
+            for (int attempt = 0; attempt < 2 && process.isAlive(); attempt++) {
+                boolean force = attempt != 0;
+                if (force) process.destroyForcibly();
+                else process.destroy();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(force ? 3 : 2);
+                while (process.isAlive() && System.nanoTime() < deadline) {
+                    try { process.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS); }
+                    catch (InterruptedException ignored) { interrupted = true; }
+                }
             }
             if (process.isAlive()) error = new IOException("peer did not terminate");
         } finally {

@@ -30,7 +30,9 @@ public interface CarrierProvider {
     /**
      * Returns the provider for this concrete connection, or null when the provider is unknown. The query must
      * stay bound to that connection even if a wrapper replaces its sender, and complete in the provider's
-     * execution context when the read finishes.
+     * execution context when the read finishes. Collectors schedule work on their carrier event loop and return
+     * immediately. The session loop and the carrier loop never wait for each other. The timestamp uses
+     * System.nanoTime() and is sampled with the counters.
      */
     default Query carrierQuery(Object identity) { return null; }
 }

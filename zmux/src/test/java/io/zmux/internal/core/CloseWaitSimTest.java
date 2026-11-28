@@ -1,5 +1,7 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.ReadBuf;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteBuffer;
@@ -67,7 +69,7 @@ class CloseWaitSimTest {
         CarrierInfo info = new CarrierInfo(Framing.BYTES, false, true, true, true);
         Features f = x.features();
         Poke.set(x, "feat", new Features(f.role(), f.goAway(), f.preamble(), f.priority(), f.flows(), f.multipath(), f.pipeAck(),
-                f.resume(), true, true, f.joinSecurityUnavailable(), f.carrierDatagrams()));
+                f.resume(), true, true, f.joinSecurityUnavailable(), f.carrierDatagrams(), false));
         x.peer().maxLanes = 3;
         Pipe p = x.pipes.get(0);
         Poke.set(p.out().lo, "offered", true);
@@ -99,13 +101,13 @@ class CloseWaitSimTest {
         while ((a.closeAt == Time.NEVER || b.closeAt == Time.NEVER) && now <= bound + 100 * MS) {
             for (End e : new End[] {a, b}) {
                 e.s.setNow(now);
-                if (e.s.nextTimeout() <= now) e.s.handleTimeout(now);
+                if (DeadlineFixture.next(e.s) <= now) e.s.handleTimeout(now);
             }
             a.deliver(now, b);
             b.deliver(now, a);
             a.flush(now);
             b.flush(now);
-            long next = Math.min(Math.min(a.s.nextTimeout(), b.s.nextTimeout()), now + MS);
+            long next = Math.min(Math.min(DeadlineFixture.next(a.s), DeadlineFixture.next(b.s)), now + MS);
             for (End e : new End[] {a, b}) for (Link l : e.out) next = Math.min(next, l.head());
             now = Math.max(next, now + 1);
         }

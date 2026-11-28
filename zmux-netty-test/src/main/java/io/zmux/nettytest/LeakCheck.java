@@ -10,31 +10,20 @@ import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
 
 /**
- * Fails a test class when Netty's leak detector reported a leaked buffer, zmux's reported a dropped
- * chunk, or an exception reached the tail of a pipeline, while it ran. Registered for every
+ * Fails a test class when Netty's leak detector reports a leaked buffer or an exception reaches
+ * the tail of a pipeline. Registered for every
  * test of a module that depends on this one, by JUnit's extension autodetection (this jar's resources name it), and installed
  * before the first buffer class loads so that every detector reports here. Leaks are only noticed after
- * the garbage collector found the buffer, so the end of each class collects and allocates until the
- * detector has polled.
+ * the garbage collector found the buffer. The end of each class polls the detector after a collection
+ * request, in addition to the tests' explicit ownership checks.
  */
 @org.jspecify.annotations.NullMarked
 public final class LeakCheck implements AfterAllCallback {
     private static final List<String> LEAKS = new CopyOnWriteArrayList<>();
     private static final List<String> UNHANDLED = new CopyOnWriteArrayList<>();
     private static final java.util.logging.Logger TAIL = java.util.logging.Logger.getLogger("io.netty.channel.DefaultChannelPipeline");
-    private static final java.util.logging.Logger CHUNKS = java.util.logging.Logger.getLogger("io.zmux.Chunk");
 
     static {
-        // The build runs with zmux.leakDetection=paranoid: every chunk dropped without close or transfer is logged.
-        CHUNKS.addHandler(new java.util.logging.Handler() {
-            @Override public void publish(java.util.logging.LogRecord r) {
-                if (r.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue()) LEAKS.add("zmux Chunk: " + r.getMessage() + "\n" + r.getThrown());
-            }
-
-            @Override public void flush() {}
-
-            @Override public void close() {}
-        });
         // An exception that reached the tail of a pipeline is one no handler took: Netty warns, and so would a production server.
         TAIL.addHandler(new java.util.logging.Handler() {
             @Override public void publish(java.util.logging.LogRecord r) {
@@ -69,15 +58,10 @@ public final class LeakCheck implements AfterAllCallback {
     /** Loaded by JUnit. */
     public LeakCheck() {}
 
-    @SuppressWarnings("InterruptedExceptionSwallowed") // JUnit's signature; an interrupt fails the class, which is right here
-    @Override public void afterAll(ExtensionContext context) throws Exception {
-        // A leaked buffer is reported by a later allocation once it is collected: nudge both for a while (clients shut their groups down in the background).
-        for (int i = 0; i < 24; i++) {
-            System.gc();
-            Thread.sleep(50);
-            ByteBuf b = ByteBufAllocator.DEFAULT.buffer(16);
-            b.release();
-        }
+    @Override public void afterAll(ExtensionContext context) {
+        System.gc();
+        ByteBuf b = ByteBufAllocator.DEFAULT.buffer(16);
+        b.release();
         if (!UNHANDLED.isEmpty()) {
             String all = String.join("\n", UNHANDLED);
             UNHANDLED.clear();

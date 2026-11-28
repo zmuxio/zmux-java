@@ -123,16 +123,11 @@ class OptionalValuesTest {
             assertThrows(IllegalArgumentException.class, () -> QualityBand.builder().rateRatio(bad), String.valueOf(bad));
     }
 
-    @Test void modePolicyRejectsANanTimerFactor() {
-        assertThrows(IllegalArgumentException.class, () -> CarrierChoicePolicy.defaults().withTimer(Double.NaN, null, null));
-    }
-
     @Test void oneWaitIsBoundedByDefault() {
         var d = ShapingLimits.defaults();
-        assertFalse(d.wire().isSet());
-        assertEquals(Duration.ofSeconds(1), d.under(io.zmux.shaping.ShapingBudget.NONE).maxDelay());
-        assertNull(d.withNoMaxDelay().under(io.zmux.shaping.ShapingBudget.NONE).maxDelay(), "no bound");
-        assertThrows(IllegalArgumentException.class, () -> d.withMaxDelay(Duration.ZERO));
+        assertNull(d.wire());
+        assertEquals(Duration.ofMillis(2), d.under(io.zmux.shaping.ShapingBudget.NONE).maxAddedDelay());
+        assertNull(d.profile());
     }
 
     @Test void recheckIsPositiveAndItsEffectFlooredByMinRecheck() {
@@ -145,21 +140,4 @@ class OptionalValuesTest {
         assertThrows(IllegalArgumentException.class, () -> PoolDecision.KEEP.withCount(0));
     }
 
-    @Test void carrierCacheTakesZeroAndRejectsNegatives() {
-        var c = new CarrierCache(Duration.ZERO, Duration.ZERO, Duration.ZERO);
-        assertEquals(Duration.ZERO, c.successTtl());
-        assertEquals(Duration.ZERO, c.backoffMin());
-        assertThrows(IllegalArgumentException.class, () -> new CarrierCache(Duration.ofSeconds(-1), Duration.ZERO, Duration.ZERO));
-        assertThrows(IllegalArgumentException.class, () -> new CarrierCache(Duration.ZERO, Duration.ofSeconds(2), Duration.ofSeconds(1)));
-    }
-
-    @Test void modePolicyTakesZeroAndRejectsNegatives() {
-        var p = CarrierChoicePolicy.defaults().withTimer(0, Duration.ZERO, Duration.ZERO).withSettle(Duration.ZERO).withDropWindow(Duration.ZERO);
-        assertEquals(Duration.ZERO, p.timer(Duration.ofMillis(100)));
-        assertEquals(Duration.ZERO, p.settle());
-        assertEquals(Duration.ofSeconds(1), CarrierChoicePolicy.defaults().settle());
-        assertThrows(IllegalArgumentException.class, () -> CarrierChoicePolicy.defaults().withSettle(Duration.ofNanos(-1)));
-        assertThrows(IllegalArgumentException.class, () -> CarrierChoicePolicy.defaults().withTimer(-1, Duration.ZERO, Duration.ZERO));
-        assertThrows(IllegalArgumentException.class, () -> CarrierChoicePolicy.defaults().withTimer(3, Duration.ofSeconds(2), Duration.ofSeconds(1)));
-    }
 }

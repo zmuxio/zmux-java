@@ -1,7 +1,7 @@
 package io.zmux.internal.loop;
 
 import io.zmux.internal.core.CoreException;
-import io.zmux.internal.core.ReadBuf;
+import io.zmux.internal.buffer.ReadBuf;
 import io.zmux.internal.core.Session;
 import io.zmux.internal.core.Stream;
 import io.zmux.internal.core.StreamError;
@@ -36,17 +36,19 @@ public final class RecvLane {
 
     /** Pushed data [off, off + data.remaining()) or the part's end. */
     private static final class Piece {
-        final ByteBuffer data;
-        final ReadBuf buf;
+        ByteBuffer data;
+        ReadBuf buf;
         long off;
         final Object end;
+        final boolean paid;
         volatile Piece next;
 
-        Piece(ByteBuffer data, ReadBuf buf, long off, Object end) {
+        Piece(ByteBuffer data, ReadBuf buf, long off, Object end, boolean paid) {
             this.data = data;
             this.buf = buf;
             this.off = off;
             this.end = end;
+            this.paid = paid;
         }
     }
 
@@ -55,12 +57,14 @@ public final class RecvLane {
     private final Stream st;
     final Turn turn = new Turn("read (readAsync or readChunkAsync)");
     private volatile long cut = Long.MAX_VALUE;
+    private volatile boolean finKnown;
     private final AtomicLong read = new AtomicLong(), dropped = new AtomicLong();
     private volatile long reportBytes;
     private volatile boolean endSeen;
     // The readiness state, readable from any thread without the turn: how far data was pushed (loop), how far the
     // reader consumed (turn holder), and whether the end was pushed (loop).
     private volatile long pushedTo;
+    private volatile long applicationOrigin;
     private final AtomicLong consumedTo = new AtomicLong();
     private volatile boolean endPushed;
     /** The waits for something to read, any number at once; each is woken once and checks again. */
@@ -102,7 +106,7 @@ public final class RecvLane {
         this.driver = driver;
         this.core = driver.core;
         this.st = st;
-        head = tail = new Piece(null, null, 0, null);
+        head = tail = new Piece(null, null, 0, null, false);
     }
 
     // ---- reader side (the turn holder) ----
@@ -125,8 +129,19 @@ public final class RecvLane {
     }
 
     private void release(Piece p) {
+        finishPiece(p, false);
+    }
+
+    private void finishPiece(Piece p, boolean moved) {
         head = p;
-        if (p.buf != null) p.buf.unref();
+        ReadBuf buf = p.buf;
+        p.buf = null;
+        p.data = null;
+        try {
+            if (buf != null && !moved) buf.unref();
+        } finally {
+            if (p.paid) core.receiving().releaseLaneView();
+        }
     }
 
     /** The end outcome once the reader reached it: StreamRecv.FIN or a CoreException. */
@@ -179,22 +194,27 @@ public final class RecvLane {
     }
 
     /** Takes up to max bytes without copying: a chunk (data, owned reference), FIN, an outcome, or null. */
-    private Object takeChunk(int max) {
+    private Object takeChunk(int max) { return takeChunk(max, null); }
+
+    private Object takeChunk(int max, java.util.function.Predicate<ReadBuf> fits) {
         if (closed || stopped) return closedOutcome();
         Piece p = peek();
         if (p == null) return null;
         if (p.end != null) return reachEnd(p);
         long room = cut - p.off; // One read of cut: a reset may lower it after peek took the piece.
-        if (room <= 0) return takeChunk(max); // The next peek drops the piece.
+        if (room <= 0) return takeChunk(max, fits); // The next peek drops the piece.
         int c = (int) Math.min(Math.min(p.data.remaining(), room), max);
-        ByteBuffer d = p.data.slice(p.data.position(), c);
-        ReadBuf buf = p.buf;
-        p.data.position(p.data.position() + c);
-        p.off += c;
-        if (p.data.hasRemaining() && p.off < cut) {
-            if (buf != null) buf.ref();
+        boolean whole = c == p.data.remaining();
+        ByteBuffer d = whole ? p.data : p.data.slice(p.data.position(), c);
+        var loans = core.receiving().loans();
+        ReadBuf buf = fits == null ? loans.acquire(p.buf, whole) : loans.transfer(p.buf, whole, fits);
+        if (buf == null) return CoreException.of(CoreException.Reason.CHUNK_BUDGET);
+        if (whole) {
+            finishPiece(p, true);
         } else {
-            head = p; // Its reference moves to the chunk.
+            p.data.position(p.data.position() + c);
+            p.off += c;
+            if (p.off >= cut) release(p);
         }
         consumed(c);
         return new StreamRecv.Chunk(d, buf, false);
@@ -283,12 +303,21 @@ public final class RecvLane {
      * The readiness now: the bytes readable, -1 when the next read reports the part's end (FIN, a reset, a local stop,
      * the session's end), 0 when nothing is readable. Without the turn: the bytes are counted from the offsets.
      */
-    private long readableNow() {
+    public long readableNow() {
         if (closed || stopped) return -1;
         long n = Math.min(pushedTo, cut) - consumedTo.getAcquire();
         if (n > 0) return n;
         return endPushed ? -1 : 0;
     }
+
+    /** Application read position in the core's stream coordinate system. */
+    public long readOffset() { return consumedTo.getAcquire(); }
+    /** Removes the opening preamble from a position in the stream's wire coordinates. */
+    public long applicationOffset(long wireOffset) { return wireOffset - applicationOrigin; }
+    /** Reliable Size of the latest reset, or MAX_VALUE while there is no reset. */
+    public long reliableCut() { return cut; }
+    /** Whether the source announced a final offset with FIN. */
+    public boolean finKnown() { return finKnown; }
 
     private void wakeReady() {
         for (Ready r; (r = readyWaiters.poll()) != null; ) r.ready();
@@ -380,8 +409,11 @@ public final class RecvLane {
         /** The chunk limit of a chunk read (no dst). */
         private final int max;
 
-        AsyncRead(ByteBuffer dst, int max, long deadline) {
+        private final java.util.function.Predicate<ReadBuf> fits;
+
+        AsyncRead(ByteBuffer dst, int max, long deadline, java.util.function.Predicate<ReadBuf> fits) {
             super(RecvLane.this.driver, self -> ((AsyncRead) self).withdraw(), deadline);
+            this.fits = fits;
             this.dst = dst;
             this.max = max;
         }
@@ -404,7 +436,7 @@ public final class RecvLane {
         void step() {
             if (!begin()) { leave(); return; }
             while (true) {
-                Object r = dst != null ? RecvLane.this.take(dst) : takeChunk(max);
+                Object r = dst != null ? RecvLane.this.take(dst) : takeChunk(max, fits);
                 if (r != null) {
                     finish(dst != null ? asRead(r) : r); // a chunk read reports FIN itself
                     leave();
@@ -423,7 +455,11 @@ public final class RecvLane {
      * The outcome is the count (-1 at FIN), a StreamRecv.Chunk, StreamRecv.FIN, or a core outcome.
      */
     public Operation<Object> readAsync(ByteBuffer dst, int max, long deadline) {
-        AsyncRead op = new AsyncRead(dst, max, deadline);
+        return readAsync(dst, max, deadline, null);
+    }
+
+    public Operation<Object> readAsync(ByteBuffer dst, int max, long deadline, java.util.function.Predicate<ReadBuf> fits) {
+        AsyncRead op = new AsyncRead(dst, max, deadline, fits);
         op.armDeadline();
         if (turn.tryEnterAsync()) {
             if (op.grant()) op.step();
@@ -449,8 +485,8 @@ public final class RecvLane {
             if (!begin()) return;
             long r = readableNow();
             if (r != 0) { readable = r; finish(true); return; }
-            pause();
             readyWaiters.add(this);
+            pause();
             r = readableNow(); // after registering: a push between the two checks wakes this
             if (r != 0 && readyWaiters.remove(this)) ready();
         }
@@ -478,22 +514,40 @@ public final class RecvLane {
     void pump() {
         if (closed || ended) return;
         long c = core.receiving().pushCut(st);
-        if (c != cut) cut = c;
+        boolean f = core.receiving().finKnown(st);
+        boolean changed = c != cut || f != finKnown;
+        cut = c;
+        finKnown = f;
+        if (changed && endWatcher != null) endWatcher.accept(null);
         boolean pushed = false;
-        while (true) {
+        reportBytes = core.receiving().laneReportBytes(st);
+        while (core.receiving().hasQueued(st)) {
+            boolean paid = !core.receiving().packed(st) && core.receiving().reserveLaneView();
+            if (!paid) {
+                reportBytes = 1;
+                applyReport();
+                if (core.receiving().pushOutstanding(st)) break;
+            }
             long off = core.receiving().pushed(st);
             StreamRecv.Chunk ch = core.receiving().push(st, PIECE);
-            if (ch == null) break;
+            if (ch == null) {
+                if (paid) core.receiving().releaseLaneView();
+                break;
+            }
             long to = off + ch.data().remaining(); // before the reader may take from the piece
-            if (!based) { based = true; consumedTo.set(off); } // offsets need not start at 0; nothing was pushed to consume yet
-            append(new Piece(ch.data(), ch.buf(), off, null));
+            if (!based) {
+                based = true;
+                applicationOrigin = off;
+                consumedTo.set(off);
+            } // offsets need not start at 0; nothing was pushed to consume yet
+            append(new Piece(ch.data(), ch.buf(), off, null, paid));
             pushedTo = to;
             pushed = true;
         }
         Object end = core.receiving().pushEnd(st);
         if (end != null) {
             ended = true;
-            append(new Piece(null, null, 0, end));
+            append(new Piece(null, null, 0, end, false));
             endPushed = true;
             pushed = true;
             if (end instanceof CoreException failure && endWatcher != null) endWatcher.accept(failure);
@@ -501,7 +555,6 @@ public final class RecvLane {
         } else {
             core.receiving().waitRead(st, hostWaiter);
         }
-        reportBytes = core.receiving().laneReportBytes(st);
         if (pushed) {
             SendLane.Resumable w = waiter;
             if (w != null && WAITER.compareAndSet(this, w, null)) w.resume();
@@ -539,6 +592,7 @@ public final class RecvLane {
         if (closed) return;
         if (closedWith == null) applyReport();
         closed = true;
+        if (hostReader != null) core.receiving().cancelLoanWait(hostReader);
         core.receiving().cancelReadWait(st, hostWaiter);
         SendLane.Resumable w = (SendLane.Resumable) WAITER.getAndSet(this, null);
         if (w != null) w.resume();
@@ -551,12 +605,13 @@ public final class RecvLane {
         if (endWatcher != null && !appDone) endWatcher.accept(closedOutcome());
     }
 
-    /** Calls watcher (on the loop) with a failed end once it is pushed; null removes it. */
+    /** Calls the watcher with a failed end once pushed, or with null when the source final offset changes. */
     void watchEnd(java.util.function.Consumer<CoreException> watcher) {
         endWatcher = watcher;
         if (watcher == null) return;
         if (closed) { if (!appDone) watcher.accept(closedOutcome()); }
         else if (ended && tail.end instanceof CoreException failure) watcher.accept(failure);
+        else if (finKnown || cut != Long.MAX_VALUE) watcher.accept(null);
     }
 
     /** The session ended: like the core, which drops every buffer, the lane releases what it holds; reads report outcome. */
@@ -571,12 +626,19 @@ public final class RecvLane {
 
     /** Makes the loop this direction's only reader; reader runs after each push. */
     public void hostReader(Runnable reader) {
+        if (hostReader != null) core.receiving().cancelLoanWait(hostReader);
         hostReader = reader;
     }
 
     /** A loop-run reader's take: like a chunk read, never waiting; its consumption applies at once. */
     public Object hostTake(int max) {
         Object r = takeChunk(max);
+        if (r instanceof CoreException error && error.reason() == CoreException.Reason.CHUNK_BUDGET) {
+            core.receiving().waitLoan(hostReader);
+            r = takeChunk(max);
+            if (r instanceof CoreException retry && retry.reason() == CoreException.Reason.CHUNK_BUDGET) return null;
+        }
+        core.receiving().cancelLoanWait(hostReader);
         unreported = 0;
         if (!closed) applyReport();
         return r;

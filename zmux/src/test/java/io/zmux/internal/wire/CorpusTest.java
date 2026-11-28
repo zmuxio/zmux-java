@@ -14,7 +14,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** The wire corpus of the dev spec. */
-class CorpusTest {
+public class CorpusTest {
 
     static Gates gates(Map<String, Object> e) {
         @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
@@ -30,13 +30,14 @@ class CorpusTest {
                 case "zmux_multipath" -> mp = true;
                 case "zmux_pipe_ack" -> pa = true;
                 case "zmux_max_lanes" -> lanes = true;
+                case "zmux_datagram_family", "zmux_carrier_datagrams", "zmux_carrier_datagram_padding" -> {}
                 default -> fail("unknown gate " + n);
             }
         }
         @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
         Map<String, Object> limits = (Map<String, Object>) e.get("limits");
         if (limits != null && limits.get("max_datagram_frame_size") instanceof Long v) dg = v;
-        return new Gates(dg, rsa, ga, pr, mp, pa, lanes && (mp || pa));
+        return new Gates(dg, rsa, ga, pr, mp, pa, lanes && (mp || pa), names.contains("zmux_datagram_family") && dg > 0);
     }
 
     /** Decodes the frames of a record that is not the first of a bootstrap pipe. */
@@ -87,46 +88,89 @@ class CorpusTest {
                     processFrames(b, 0, b.limit(), g, kinds);
                 }
             }
+            case "channel_datagram" -> kinds.add(processChannelDatagram(e, g).kind);
             default -> fail("unknown kind " + e.get("kind"));
         }
         return kinds;
     }
 
+    private static Frame processChannelDatagram(Map<String, Object> e, Gates g) throws WireException {
+        byte[] data = SpecFixtures.hex(e.get("hex"));
+        if (e.get("zero_fill") instanceof Map<?, ?> fill) {
+            int offset = Math.toIntExact((Long) fill.get("offset"));
+            int count = Math.toIntExact((Long) fill.get("count"));
+            assertTrue(offset >= 0 && offset <= data.length && count >= 0
+                    && count <= ChannelDatagram.MAX_PADDED_FRAME);
+            byte[] expanded = new byte[data.length + count];
+            System.arraycopy(data, 0, expanded, 0, offset);
+            System.arraycopy(data, offset, expanded, offset + count, data.length - offset);
+            data = expanded;
+        }
+        ByteBuffer b = ByteBuffer.wrap(data);
+        int start = 0;
+        if (e.get("pipe_stream_id") instanceof Long id) {
+            assertEquals(id.longValue(), ChannelDatagram.pipeStreamId(b, 0, b.limit()));
+            start = VarInt.lengthOf(b.get(0));
+        }
+        var names = (List<?>) e.get("gates");
+        Frame f = new Frame();
+        ChannelDatagram.decodeFrame(new FrameDecoder(), b, start, b.limit(), f, names.contains("zmux_carrier_datagram_padding"));
+        g.check(f);
+        if (g.datagramAck()) {
+            int end = f.dataPos + f.dataLen;
+            int pos = f.dataPos;
+            if (VarInt.get(b, pos, end) < 0) throw WireException.protocol("truncated datagram sequence");
+            pos += VarInt.lengthOf(b.get(pos));
+            long flow = VarInt.get(b, pos, end);
+            if (flow < 0) throw WireException.protocol("truncated datagram flow");
+            pos += VarInt.lengthOf(b.get(pos));
+            if (flow != 0 && VarInt.get(b, pos, end) < 0) throw WireException.protocol("truncated datagram context");
+        }
+        if (e.get("frame") instanceof Map<?, ?> expected) {
+            assertEquals(Math.toIntExact((Long) e.get("padding")), f.dataPos - start - 1);
+            byte[] actual = new byte[f.dataLen];
+            b.get(f.dataPos, actual);
+            assertArrayEquals(SpecFixtures.hex(expected.get("data")), actual);
+        }
+        return f;
+    }
+
     @Test
     void valid() throws Exception {
-        int n = 0;
-        for (var e : SpecFixtures.ndjson("wire/valid.ndjson")) {
-            List<FrameKind> kinds;
-            try {
-                kinds = process(e);
-            } catch (WireException x) {
-                fail(e.get("id") + ": unexpected " + x.getMessage());
-                return;
-            }
-            if (e.get("frame") instanceof Map<?, ?> fr) {
-                assertEquals(fr.get("type"), kinds.getFirst().wireName(), (String) e.get("id"));
-            }
-            if ("frame".equals(e.get("kind"))) {
-                checkRoundTrip((String) e.get("id"), SpecFixtures.hex(e.get("hex")), !Boolean.TRUE.equals(e.get("non_minimal")));
-            }
-            n++;
-        }
-        assertTrue(n > 50);
+        var vectors = SpecFixtures.ndjson("wire/valid.ndjson");
+        assertTrue(vectors.size() > 50);
+        for (var vector : vectors) verify(vector);
     }
 
     @Test
     void invalid() throws Exception {
-        int n = 0;
-        for (var e : SpecFixtures.ndjson("wire/invalid.ndjson")) {
+        var vectors = SpecFixtures.ndjson("wire/invalid.ndjson");
+        assertTrue(vectors.size() > 80);
+        for (var vector : vectors) verify(vector);
+    }
+
+    public static void verify(Map<String, Object> e) {
+        String id = (String) e.get("id");
+        if (e.get("error") instanceof String expected) {
             try {
                 process(e);
-                fail(e.get("id") + ": accepted, want " + e.get("error"));
+                fail(id + ": accepted, want " + expected);
             } catch (WireException x) {
-                assertEquals(e.get("error"), TransportError.name(x.code()), e.get("id") + ": " + x.getMessage());
+                assertEquals(expected, TransportError.name(x.code()), id + ": " + x.getMessage());
             }
-            n++;
+            return;
         }
-        assertTrue(n > 80);
+        List<FrameKind> kinds;
+        try {
+            kinds = process(e);
+        } catch (WireException x) {
+            fail(id + ": unexpected " + x.getMessage());
+            return;
+        }
+        if (e.get("frame") instanceof Map<?, ?> fr) assertEquals(fr.get("type"), kinds.getFirst().wireName(), id);
+        if ("frame".equals(e.get("kind"))) {
+            checkRoundTrip(id, SpecFixtures.hex(e.get("hex")), !Boolean.TRUE.equals(e.get("non_minimal")));
+        }
     }
 
     /** Re-encoding is no longer, decodes to the same frame and is stable. */

@@ -4,7 +4,6 @@ import io.zmux.CallbackFailedException;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import io.zmux.ZmuxFuture;
 import io.zmux.internal.spi.Spi;
 
@@ -30,6 +29,18 @@ public final class Permit implements AutoCloseable {
      * (a positive invalid grant is refunded). A permit the future already holds is the caller's to close.
      */
     public static ZmuxFuture<Permit> acquire(Limiter limiter, long min, long max) {
+        return acquire(limiter, min, max, false);
+    }
+
+    /**
+     * Requires the entire size of an atomic unit. A positive short grant is refunded and the
+     * request fails, allowing permanent burst limits to terminate the operation.
+     */
+    public static ZmuxFuture<Permit> acquireExact(Limiter limiter, long size) {
+        return acquire(limiter, size, size, true);
+    }
+
+    private static ZmuxFuture<Permit> acquire(Limiter limiter, long min, long max, boolean exact) {
         Objects.requireNonNull(limiter);
         if (max <= 0) return Spi.future(CompletableFuture.completedFuture(new Permit(limiter, 0)), null);
         long lo = Math.clamp(min, 1, max);
@@ -42,11 +53,11 @@ public final class Permit implements AutoCloseable {
         CompletableFuture<Permit> out = new CompletableFuture<>();
         wait.whenComplete((got, error) -> {
             if (error != null) {
-                Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
+                Throwable cause = Spi.completionCause(error);
                 out.completeExceptionally(cause instanceof CancellationException ? cause : new CallbackFailedException("limiter failed", cause));
                 return;
             }
-            if (got == null || got < 1 || got > max) {
+            if (got == null || got < 1 || got > max || (exact && got != max)) {
                 if (got != null && got > 0) refund(limiter, got);
                 out.completeExceptionally(new CallbackFailedException("invalid limiter grant " + got + " for max " + max));
                 return;
@@ -74,6 +85,13 @@ public final class Permit implements AutoCloseable {
         return new Permit(limiter, Math.max(got, 0));
     }
 
+    /** Attempts a full atomic reservation. A short grant is refunded and returned empty. */
+    public static Permit tryAcquireExact(Limiter limiter, long size) {
+        Permit permit = tryAcquire(limiter, size, size);
+        if (permit.size() != size) permit.close();
+        return permit;
+    }
+
     /**
      * Polices one atomic unit (a datagram) of n bytes with {@code tryAcquire(n, n)}: true when granted, the grant
      * then staying taken (the whole unit may be sent even when fewer bytes were granted); false with nothing taken
@@ -93,6 +111,19 @@ public final class Permit implements AutoCloseable {
         if (limiter == null || n <= 0) return;
         try { limiter.refund(n); }
         catch (RuntimeException | AssertionError ignored) { /* a failing refund is ignored */ }
+    }
+
+    /** Takes ownership of an already granted positive reservation. */
+    public static Permit fromGrant(Limiter limiter, long bytes) {
+        if (bytes <= 0) throw new IllegalArgumentException("empty grant");
+        return new Permit(Objects.requireNonNull(limiter), bytes);
+    }
+
+    /** Moves a portion of this reservation to an independently settled receipt. */
+    public Permit split(long bytes) {
+        if (bytes < 0 || bytes > left) throw new IllegalArgumentException("permit split outside grant");
+        left -= bytes;
+        return new Permit(limiter, bytes);
     }
 
     /** The bytes it holds unused. */

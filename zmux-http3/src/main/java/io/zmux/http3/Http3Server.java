@@ -15,6 +15,7 @@ import io.netty.handler.codec.http3.Http3ConnectionHandler;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.Http3Exception;
 import io.netty.handler.codec.http3.Http3ServerConnectionHandler;
+import io.netty.handler.codec.http3.Http3SettingsFrame;
 import io.netty.handler.codec.quic.QuicChannel;
 import io.netty.handler.codec.quic.QuicServerCodecBuilder;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
@@ -32,10 +33,9 @@ import io.zmux.quic.QuicExporter;
 import io.zmux.quic.QuicOptions;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.HashSet;
-import java.util.List;
+import java.util.HashMap;
 import java.util.Objects;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -62,9 +62,19 @@ public final class Http3Server implements AutoCloseable {
      */
     public static Http3Server bind(InetSocketAddress address, QuicSslContextBuilder tls, QuicOptions options,
                                    HttpEndpoint endpoint, Supplier<ChannelHandler> host) throws IOException {
+        return bind(address, tls, options, endpoint, host, provider(endpoint, options));
+    }
+
+    private static WebTransportProvider provider(HttpEndpoint endpoint, QuicOptions options) {
+        Objects.requireNonNull(endpoint, "endpoint");
+        return HttpTransport.webTransport(endpoint) == null ? null : WebTransportProvider.require(options == null ? null : WebTransportProvider.linked(options));
+    }
+
+    static Http3Server bind(InetSocketAddress address, QuicSslContextBuilder tls, QuicOptions options,
+                            HttpEndpoint endpoint, Supplier<ChannelHandler> host, WebTransportProvider provider) throws IOException {
         Objects.requireNonNull(address, "address");
         Objects.requireNonNull(options, "options");
-        var connections = initializer(endpoint, host, true);
+        var connections = initializer(endpoint, host, true, provider);
         var context = Objects.requireNonNull(tls, "tls").applicationProtocols("h3").earlyData(false)
                 .keylog(QuicExporter.KEYLOG).build();
         if (context.isClient()) throw new IllegalArgumentException("server TLS builder required");
@@ -102,15 +112,21 @@ public final class Http3Server implements AutoCloseable {
      * credentials. Reserve receive credit for the peer's control and two QPACK streams.
      */
     public static ChannelInitializer<QuicChannel> initializer(HttpEndpoint endpoint, Supplier<ChannelHandler> host) {
-        return initializer(endpoint, host, false);
+        return initializer(endpoint, host, null);
+    }
+
+    /** Initializes host connections using the same receive limits applied to the host QUIC codec. */
+    public static ChannelInitializer<QuicChannel> initializer(HttpEndpoint endpoint, Supplier<ChannelHandler> host,
+                                                               QuicOptions options) {
+        return initializer(endpoint, host, false, provider(endpoint, options));
     }
 
     private static ChannelInitializer<QuicChannel> initializer(
-            HttpEndpoint endpoint, Supplier<ChannelHandler> host, boolean ownsConnection) {
+            HttpEndpoint endpoint, Supplier<ChannelHandler> host, boolean ownsConnection, WebTransportProvider provider) {
         Objects.requireNonNull(endpoint, "endpoint");
         return new ChannelInitializer<>() {
             @Override protected void initChannel(QuicChannel channel) {
-                new Binding(endpoint, host, ownsConnection).install(channel);
+                new Binding(endpoint, host, ownsConnection, false).install(channel, provider);
             }
         };
     }
@@ -124,9 +140,25 @@ public final class Http3Server implements AutoCloseable {
      * continue to belong to their current owners.
      */
     public static ZmuxFuture<Void> serve(QuicChannel connection, HttpEndpoint endpoint, Supplier<ChannelHandler> host) {
+        return serve(connection, endpoint, host, false);
+    }
+
+    static ZmuxFuture<Void> serve(QuicChannel connection, HttpEndpoint endpoint, Supplier<ChannelHandler> host,
+                                          boolean datagramEnabled) {
+        return serve(connection, endpoint, host, datagramEnabled, null);
+    }
+
+    /** Serves a host connection using the receive limits applied to its QUIC codec. */
+    public static ZmuxFuture<Void> serve(QuicChannel connection, HttpEndpoint endpoint, Supplier<ChannelHandler> host,
+                                         QuicOptions options) {
+        return serve(connection, endpoint, host, false, options);
+    }
+
+    private static ZmuxFuture<Void> serve(QuicChannel connection, HttpEndpoint endpoint, Supplier<ChannelHandler> host,
+                                          boolean datagramEnabled, QuicOptions options) {
         Objects.requireNonNull(connection, "connection");
-        Objects.requireNonNull(endpoint, "endpoint");
-        Binding binding = new Binding(endpoint, host, false);
+        var provider = provider(endpoint, options);
+        Binding binding = new Binding(endpoint, host, false, datagramEnabled);
         var loop = connection.eventLoop();
         Loops.dispatch(loop, loop.inEventLoop(), () -> {
             if (!connection.isOpen()) {
@@ -134,7 +166,7 @@ public final class Http3Server implements AutoCloseable {
                 return;
             }
             try {
-                binding.install(connection);
+                binding.install(connection, provider);
             } catch (RuntimeException failed) {
                 binding.result.completeExceptionally(failed);
             }
@@ -152,6 +184,9 @@ public final class Http3Server implements AutoCloseable {
     public static ChannelInitializer<QuicStreamChannel> requestInitializer(
             HttpEndpoint endpoint, Supplier<ChannelHandler> host) {
         Objects.requireNonNull(endpoint, "endpoint");
+        if (HttpTransport.webTransport(endpoint) != null) {
+            throw new IllegalArgumentException("WebTransport requires the connection-level HTTP/3 initializer");
+        }
         return requestInitializer(endpoint, host, null);
     }
 
@@ -166,7 +201,9 @@ public final class Http3Server implements AutoCloseable {
                 if (binding == null || !binding.result.isCancelled()) {
                     Route route = HttpTransport.route(endpoint, pipeline);
                     if (binding != null) {
-                        binding.routes.add(route);
+                        var wt = WebTransportConnection.get(stream.parent());
+                        if (wt != null) Http3Streams.raw(stream, new WebTransportRequest(wt, route, stream));
+                        binding.routes.put(route, stream);
                         stream.closeFuture().addListener(ignored ->
                                 route.afterSetup(() -> binding.routes.remove(route)));
                     }
@@ -180,28 +217,41 @@ public final class Http3Server implements AutoCloseable {
     private static final class Binding extends ChannelInboundHandlerAdapter {
         private final HttpEndpoint endpoint;
         private final Supplier<ChannelHandler> host;
-        private final Set<Route> routes = new HashSet<>();
+        private final Map<Route, QuicStreamChannel> routes = new HashMap<>();
         private final boolean ownsConnection;
+        private final boolean datagramEnabled;
         private final CompletableFuture<Void> result = new CompletableFuture<>();
         private final RequestErrors requestErrors = new RequestErrors(result);
 
-        Binding(HttpEndpoint endpoint, Supplier<ChannelHandler> host, boolean ownsConnection) {
+        Binding(HttpEndpoint endpoint, Supplier<ChannelHandler> host, boolean ownsConnection, boolean datagramEnabled) {
             this.endpoint = endpoint;
             this.host = host;
             this.ownsConnection = ownsConnection;
+            this.datagramEnabled = datagramEnabled;
         }
 
-        void install(QuicChannel connection) {
+        void install(QuicChannel connection, WebTransportProvider provider) {
             var pipeline = connection.pipeline();
             if (pipeline.get(Http3ConnectionHandler.class) != null) {
                 throw new IllegalStateException("connection already has an HTTP/3 handler");
             }
+            var listener = HttpTransport.webTransport(endpoint);
+            var options = provider == null ? null : provider.receiveLimits(connection);
+            var wt = provider == null ? null : new WebTransportConnection(connection, options, true, provider,
+                    io.zmux.internal.spi.AdapterPorts.carrierBudget(listener), listener.firstRecordTimeout());
+            var datagrams = datagramEnabled ? H3Datagrams.install(connection) : null;
             var control = new ChannelInboundHandlerAdapter() {
                 @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                    if (msg instanceof Http3SettingsFrame settings) {
+                        if (datagrams != null) datagrams.peerSettings(settings);
+                        if (wt != null) wt.settings(settings.settings());
+                    }
+                    if (wt != null && msg instanceof io.netty.handler.codec.http3.Http3GoAwayFrame goAway) wt.goAway(goAway.id());
                     ReferenceCountUtil.release(msg);
                 }
 
                 @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                    if (wt != null) WebTransportSettings.controlFailure(ctx, cause);
                     result.completeExceptionally(cause);
                     ctx.channel().parent().pipeline().fireExceptionCaught(cause);
                 }
@@ -215,12 +265,20 @@ public final class Http3Server implements AutoCloseable {
                     ctx.fireUserEventTriggered(event);
                 }
             };
+            var requests = requestInitializer(endpoint, host, this);
+            if (wt == null) {
+                // Netty accepts null for handlers and settings supplied by its defaults.
+                //noinspection DataFlowIssue
+                pipeline.addLast(new Http3ServerConnectionHandler(requests, control, null,
+                        datagrams == null ? null : datagrams.settings(), true));
+            } else {
+                var local = new io.netty.handler.codec.http3.DefaultHttp3SettingsFrame(WebTransportSettings.advertise(true));
+                // Netty accepts null to select the default unknown-stream handler.
+                //noinspection DataFlowIssue
+                wt.install(new Http3ServerConnectionHandler(requests, control, null,
+                        local, true, WebTransportSettings::validate));
+            }
             pipeline.addLast(this);
-            // Netty declares these parameters @Nullable and passes null itself (default unknown streams and
-            // settings); the inspection misreads its class-file annotations.
-            //noinspection DataFlowIssue
-            pipeline.addBefore(pipeline.context(this).name(), null,
-                    new Http3ServerConnectionHandler(requestInitializer(endpoint, host, this), control, null, null, true));
             connection.closeFuture().addListener(ignored -> {
                 // A protocol error on a child can be reported later in the same read turn.
                 Runnable ended = () -> result.complete(null);
@@ -229,7 +287,11 @@ public final class Http3Server implements AutoCloseable {
         }
 
         void stop() {
-            for (Route route : List.copyOf(routes)) route.stop();
+            for (var request : Map.copyOf(routes).entrySet()) {
+                var wt = request.getValue().pipeline().get(WebTransportRequest.class);
+                if (wt != null) wt.stopBeforeAdmission();
+                request.getKey().stop();
+            }
         }
 
         @Override public void userEventTriggered(ChannelHandlerContext ctx, Object event) {

@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Timeout;
 class InboundTransformTest {
     static ZmuxConfig.Builder builder(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
+                .sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation();
     }
 
     static ZmuxConfig config(EventLoops loops) { return builder(loops).build(); }

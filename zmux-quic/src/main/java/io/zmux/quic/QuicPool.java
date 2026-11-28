@@ -60,6 +60,7 @@ public final class QuicPool implements AutoCloseable {
     private final Limits limits;
     private final io.zmux.CarrierCredential credential;
     private final PoolPolicy policy;
+    private final java.util.function.LongSupplier clock;
     private final java.util.function.Consumer<Throwable> decisionRejected;
     private final System.Logger logger;
     /** A decision rejected, reported outside the lock. */
@@ -110,7 +111,7 @@ public final class QuicPool implements AutoCloseable {
     private QuicPool(Builder b) {
         client = b.client; address = b.address; serverName = b.serverName; limits = b.limits;
         lifetime = limits.maxPipesPerConnectionLifetime().orElse(0); maxAge = limits.maxConnectionAge().map(Duration::toNanos).orElse(0L);
-        credential = b.credential; policy = b.policy; decisionRejected = b.decisionRejected; logger = b.logger;
+        credential = b.credential; policy = b.policy; decisionRejected = b.decisionRejected; logger = b.logger; clock = b.clock;
     }
 
     /**
@@ -131,6 +132,7 @@ public final class QuicPool implements AutoCloseable {
         private Limits limits = Limits.defaults();
         private io.zmux.CarrierCredential credential;
         private PoolPolicy policy;
+        private java.util.function.LongSupplier clock = System::nanoTime;
         private java.util.function.Consumer<Throwable> decisionRejected;
         private System.Logger logger;
 
@@ -161,6 +163,8 @@ public final class QuicPool implements AutoCloseable {
          */
         public Builder policy(PoolPolicy p) { policy = Objects.requireNonNull(p, "p"); return this; }
 
+        Builder clock(java.util.function.LongSupplier source) { clock = Objects.requireNonNull(source); return this; }
+
         /**
          * Takes the error of a look whose decision the policy failed to give (it threw anything but a VirtualMachineError, or returned null), outside the
          * pool's lock; the pool keeps its own behaviour for that look. Default: the error goes to the {@link #logger}.
@@ -175,14 +179,16 @@ public final class QuicPool implements AutoCloseable {
 
     private static final class Entry {
         final ConnectionCarrier carrier;
-        final long fate, born = System.nanoTime();
-        long idleSince = born;
+        final long fate, born;
+        long idleSince;
         final AtomicBoolean disposed = new AtomicBoolean();
         int active, pending;
         long total;
         boolean retiring;
         volatile java.util.concurrent.ScheduledFuture<?> expiry;
-        Entry(ConnectionCarrier carrier, long fate) { this.carrier = carrier; this.fate = fate; }
+        Entry(ConnectionCarrier carrier, long fate, long now) {
+            this.carrier = carrier; this.fate = fate; born = now; idleSince = now;
+        }
     }
     private final class Request {
         final CompletableFuture<PipeIo> result = new CompletableFuture<>();
@@ -233,7 +239,7 @@ public final class QuicPool implements AutoCloseable {
             boolean dispose;
             synchronized (QuicPool.this) {
                 entry.active--; expire(entry);
-                if (entry.active == 0) entry.idleSince = System.nanoTime();
+                if (entry.active == 0) entry.idleSince = clock.getAsLong();
                 dispose = entry.retiring && entry.active == 0 && entries.remove(entry);
             }
             if (dispose) dispose(entry);
@@ -259,7 +265,7 @@ public final class QuicPool implements AutoCloseable {
         finally { if (pipe.writer() != null) pipe.writer().abort(new IOException("pooled operation cancelled")); }
     }
     private void expire(Entry entry) {
-        if (!entry.carrier.channel().isActive() || (maxAge > 0 && System.nanoTime() - entry.born >= maxAge)) entry.retiring = true;
+        if (!entry.carrier.channel().isActive() || (maxAge > 0 && clock.getAsLong() - entry.born >= maxAge)) entry.retiring = true;
     }
     private long room(Entry entry) {
         long remaining = (long) limits.maxPipesPerConnection() - entry.active;
@@ -275,7 +281,7 @@ public final class QuicPool implements AutoCloseable {
             if (request.result.isDone()) return;
             if (closed) reject = true;
             else {
-                boolean due = policyDial && dueLocked(System.nanoTime());
+                boolean due = policyDial && dueLocked(clock.getAsLong());
                 Entry best = null;
                 for (int i=0;i<entries.size();) {
                     Entry entry = entries.get(i); expire(entry);
@@ -313,7 +319,7 @@ public final class QuicPool implements AutoCloseable {
             if (abort && opening == shared) opening = null;
         }
         if (abort) { shared.ready.completeExceptionally(new CancellationException()); return; }
-        synchronized (this) { dialed = true; lastDial = System.nanoTime(); }
+        synchronized (this) { dialed = true; lastDial = clock.getAsLong(); }
         // Keep the Opening published until this factory returns a handle and cancellation is propagated.
         CompletableFuture<ConnectionCarrier> dialing;
         try { dialing = client.connectCarrier(address,serverName,credential,ConnectionCarrier.POOLED).toCompletableFuture(); }
@@ -332,11 +338,11 @@ public final class QuicPool implements AutoCloseable {
                 return;
             }
             long fate = NEXT_FATE.getAndIncrement();
-            if (fate <= 0 || fate > ((1L << 62)-1)) {
+            if (fate <= 0 || fate > io.zmux.internal.wire.VarInt.MAX) {
                 carrier.dispose(); synchronized (this) { if (opening == shared) opening = null; }
                 shared.ready.completeExceptionally(new io.zmux.CarrierFailedException("fate group namespace exhausted")); return;
             }
-            Entry entry = new Entry(carrier,fate); boolean adopted;
+            Entry entry = new Entry(carrier, fate, clock.getAsLong()); boolean adopted;
             synchronized (this) {
                 adopted = !closed && !shared.cancelled && opening == shared;
                 if (opening == shared) opening = null;
@@ -409,7 +415,7 @@ public final class QuicPool implements AutoCloseable {
                 synchronized (this) {
                     if (closed) return;
                     lookAgain = false;
-                    view = viewLocked(System.nanoTime());
+                    view = viewLocked(clock.getAsLong());
                 }
                 var look = PolicyCall.decide(policy, view);
                 apply(look.decision(), look.rejected());
@@ -435,9 +441,10 @@ public final class QuicPool implements AutoCloseable {
         var view = new ArrayList<PoolMember>(entries.size());
         for (Entry entry : entries) {
             expire(entry);
-            // A retired connection is reported, not usable, until it closes.
+            // A retired connection stays visible until it closes. The pool owns the connection,
+            // while the sessions using it own their individual path snapshots.
             view.add(new PoolMember(null, entry.fate, Duration.ofNanos(Math.max(0, now - entry.born)),
-                    Duration.ofNanos(idle(entry, now)), entry.active, 0, 0, !entry.retiring && room(entry) > 0, false));
+                    Duration.ofNanos(idle(entry, now)), entry.active, 0, 0, !entry.retiring && room(entry) > 0, false, List.of()));
         }
         return new PoolView(List.copyOf(view), failures,
                 dialed ? java.util.Optional.of(Duration.ofNanos(now - lastDial)) : java.util.Optional.empty(), growthDial() ? 1 : 0);
@@ -453,11 +460,13 @@ public final class QuicPool implements AutoCloseable {
         synchronized (this) {
             if (closed) return;
             if (error != null && rejected == null) rejected = error;
-            long now = System.nanoTime();
+            long now = clock.getAsLong();
             recheckLocked(recheckDelay(decision));
             for (Entry entry : entries) if (decision.retireConnections().contains(entry.fate)) entry.retiring = true;
             target = decision.count().orElse(0);
-            dialAfter = decision.dialAfter().map(QuicPool::nanos).orElse(0L);
+            Duration spacing = decision.dialAfter().orElse(Duration.ZERO);
+            var maximum = Duration.ofNanos(Long.MAX_VALUE);
+            dialAfter = spacing.compareTo(maximum) >= 0 ? Long.MAX_VALUE : spacing.toNanos();
             if (decision.count().isPresent()) shrinkLocked(target);
             for (int i=0;i<entries.size();) {
                 Entry entry = entries.get(i);
@@ -480,7 +489,7 @@ public final class QuicPool implements AutoCloseable {
      * pipe request waits for is not counted and is left to the request. Guarded by this.
      */
     private void shrinkLocked(int count) {
-        long now = System.nanoTime();
+        long now = clock.getAsLong();
         var candidates = new ArrayList<PoolShrink.Candidate<Entry>>();
         for (Entry entry : entries) {
             if (!entry.retiring) candidates.add(new PoolShrink.Candidate<>(entry, entry.fate, false, idle(entry, now), entry.active, Math.max(0, now - entry.born)));
@@ -511,13 +520,10 @@ public final class QuicPool implements AutoCloseable {
     }
     /** The delay to the next look a decision asks for: its recheck floored at MIN_RECHECK, at most the maintenance interval. */
     static long recheckDelay(PoolDecision decision) {
-        long again = decision.recheck().map(d -> Math.max(nanos(d), nanos(PoolDecision.MIN_RECHECK))).orElse(INTERVAL);
-        return Math.min(again, INTERVAL);
-    }
-
-    /** d in nanoseconds, saturated. */
-    private static long nanos(Duration d) {
-        try { return d.toNanos(); } catch (ArithmeticException tooLong) { return Long.MAX_VALUE; }
+        if (decision.recheck().isEmpty()) return INTERVAL;
+        Duration delay = decision.recheck().orElseThrow();
+        if (delay.compareTo(Duration.ofNanos(INTERVAL)) >= 0) return INTERVAL;
+        return Math.max(delay.toNanos(), PoolDecision.MIN_RECHECK.toNanos());
     }
 
     /** Replaces the pending recheck by one after n nanoseconds (0: none). */
@@ -550,7 +556,7 @@ public final class QuicPool implements AutoCloseable {
     }
     /** Current owned connections, including retiring connections held by live streams. */
     public synchronized List<PooledConnection> connections() {
-        long now = System.nanoTime();
+        long now = clock.getAsLong();
         return entries.stream().map(entry -> new PooledConnection(entry.carrier.channel(),entry.fate,entry.active,entry.total,
                 entry.retiring,Duration.ofNanos(Math.max(0,now-entry.born)))).toList();
     }

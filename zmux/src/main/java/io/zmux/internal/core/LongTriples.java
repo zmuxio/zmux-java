@@ -31,6 +31,11 @@ final class LongTriples {
         n++;
     }
 
+    void release() {
+        v = new long[0];
+        head = n = 0;
+    }
+
     void removeFirst(int k) {
         head += k;
         if (head == n) head = n = 0;

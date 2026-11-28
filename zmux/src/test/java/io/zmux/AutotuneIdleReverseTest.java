@@ -20,7 +20,7 @@ class AutotuneIdleReverseTest {
     void theWindowGrowsWithAnIdleReverseDirection() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var ex = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg)); var relay = new TcpRelay(listener.localAddress())) {
                 relay.delayMs = 50;
                 var accepted = ex.submit((Callable<ZmuxSession>) listener::accept);

@@ -113,10 +113,6 @@ public final class EventLoop extends SessionHost {
 
     boolean terminated() { return terminated; }
 
-    int registeredKeys() {
-        return selector.isOpen() ? selector.keys().size() : 0;
-    }
-
     private void run() {
         try {
             while (!closing) round();

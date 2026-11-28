@@ -7,51 +7,50 @@ package io.zmux.shaping;
  */
 public final class RecordPlan {
     /**
-     * The largest record a TLS carrier takes, in bytes of frames, and the default max_record_size
-     *; also the PADDING a proportion limit allows from the start of a session.
+     * The largest record a TLS carrier takes, in bytes of frames, and the default max_record_size.
      */
     public static final int MAX_RECORD_LENGTH = 16382;
     /** The smallest record a {@link #maxLength} leaves, in frames bytes: a STREAM frame header and data fit. */
     public static final int MIN_MAX_LENGTH = 64;
 
-    private int maxLength, padTo, padMultiple, pad;
-    private boolean flush, stop;
-    private long delayNanos;
+    private int maxLength;
     private final Effects effects = new Effects();
+    private final UnitPlan unit = new UnitPlan();
+    private boolean flush, stop;
 
     /** A cleared plan. */
     public RecordPlan() {}
 
-    /** The largest length; 0: the view's limit. A plan with {@code padTo} above it cuts here and pads there. */
+    /** Requests a maximum encoded length. The session reports an unsupported capability for record splitting. */
     public RecordPlan maxLength(int bytes) { maxLength = bytes; return this; }
     /** The length padded up to; 0: none. */
-    public RecordPlan padTo(int bytes) { padTo = bytes; return this; }
+    public RecordPlan padTo(int bytes) { unit.padTo(bytes); return this; }
     /** The length rounded up to a multiple; 0: none. */
-    public RecordPlan padMultiple(int bytes) { padMultiple = bytes; return this; }
+    public RecordPlan padMultiple(int bytes) { unit.padMultiple(bytes); return this; }
     /** Bytes added after padTo and padMultiple; 0: none. */
-    public RecordPlan pad(int bytes) { pad = bytes; return this; }
-    /** The record ends its carrier write. */
+    public RecordPlan pad(int bytes) { unit.pad(bytes); return this; }
+    /** Requests a carrier write boundary. The session reports an unsupported capability for this request. */
     public RecordPlan flush(boolean on) { flush = on; return this; }
     /** Stream data of the pipe waits this long, nanoseconds; 0: none. */
-    public RecordPlan delayNanos(long nanos) { delayNanos = nanos; return this; }
+    public RecordPlan delayNanos(long nanos) { unit.delayNanos(nanos); return this; }
     /** Shaping of the pipe ends after this record. */
     public RecordPlan stop(boolean on) { stop = on; return this; }
     /** Applied when the plan is made. */
     public Effects effects() { return effects; }
 
     public int maxLength() { return maxLength; }
-    public int padTo() { return padTo; }
-    public int padMultiple() { return padMultiple; }
-    public int pad() { return pad; }
+    public int padTo() { return unit.padTo(); }
+    public int padMultiple() { return unit.padMultiple(); }
+    public int pad() { return unit.pad(); }
     public boolean isFlush() { return flush; }
-    public long delayNanos() { return delayNanos; }
+    public long delayNanos() { return unit.delayNanos(); }
     public boolean isStop() { return stop; }
 
     /** Resets every field. */
     public void clear() {
-        maxLength = padTo = padMultiple = pad = 0;
+        maxLength = 0;
         flush = stop = false;
-        delayNanos = 0;
+        unit.clear();
         effects.clear();
     }
 }

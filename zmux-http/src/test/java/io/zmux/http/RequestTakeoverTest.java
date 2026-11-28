@@ -33,9 +33,7 @@ class RequestTakeoverTest {
         var got = new LinkedBlockingQueue<String>();
         r.start(new PipeReader.Sink() {
             @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
-                ByteBuffer b = chunk.buffer();
-                byte[] m = new byte[b.remaining()];
-                b.get(m);
+                byte[] m = chunk.copy();
                 chunk.close();
                 consumed.run();
                 got.add(new String(m, US_ASCII));
@@ -47,12 +45,16 @@ class RequestTakeoverTest {
     }
 
     static void write(PipeWriter w, String s) {
+        writeAsync(w, s).orTimeout(5, TimeUnit.SECONDS).join();
+    }
+
+    static CompletableFuture<Void> writeAsync(PipeWriter w, String s) {
         var done = new CompletableFuture<Void>();
         w.write(OutboundBatch.of(ByteBuffer.wrap(s.getBytes(US_ASCII))), new PipeWriter.Completion() {
             @Override public void completed() { done.complete(null); }
             @Override public void failed(Throwable cause) { done.completeExceptionally(cause); }
         });
-        done.orTimeout(5, TimeUnit.SECONDS).join();
+        return done;
     }
 
     /** Reads q until the concatenated text has n characters (TCP may split it). */

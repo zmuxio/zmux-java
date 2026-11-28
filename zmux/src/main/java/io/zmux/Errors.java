@@ -28,7 +28,6 @@ final class Errors {
                     : new SessionError.TransportClosed(e.code(), TransportError.name(e.code()), e.frameType(), e.reason(), e.details(), e.remote());
             case IDLE -> new SessionError.IdleTimeout(e.remote());
             case HANDSHAKE_TIMEOUT -> new SessionError.HandshakeTimeout();
-            case EARLY_REJECTED -> new SessionError.EarlyDataRejected();
             case RESUME_TIMEOUT -> new SessionError.ResumeTimeout(e.cause());
             case PIPES_LOST -> new SessionError.PipesLost(e.cause());
         };
@@ -44,10 +43,13 @@ final class Errors {
             case SESSION -> closed(session(e.sessionError()));
             case STREAM -> stream(e.streamError());
             case STREAM_LIMIT -> new StreamLimitException();
+            case CHUNK_BUDGET -> new ChunkBudgetException();
             case NOT_NEGOTIATED -> new NotNegotiatedException("feature");
             case NOT_ESTABLISHED -> new NotEstablishedException();
             case TOO_LATE -> throw new IllegalStateException("the setting must precede the stream's first frame");
             case INVALID -> throw new IllegalStateException("not valid in this state");
+            case DATAGRAM_DROPPED -> new DatagramDroppedException(DatagramDroppedException.Reason.from(e.datagramDrop()));
+            case INVALID_DATAGRAM_OPTIONS -> throw new IllegalArgumentException("invalid datagram options");
             case DATAGRAM_TOO_LARGE -> new DatagramTooLargeException(e.max());
             case PIPE_REFUSED -> new PipeRefusedException();
             case PIPE_ABORTED -> new PipeAbortedException(PipeId.of(e.pipe()));

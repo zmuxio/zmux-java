@@ -6,6 +6,10 @@ import io.zmux.internal.spi.Loops;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPromise;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.PromiseCombiner;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpRequest;
@@ -55,6 +59,7 @@ final class StreamingRequest {
     private URI url;
     private int hops;
     private BodyCarrier current;
+    private ChannelFuture currentOpening;
     /** Installed only while a session tracks this outbound request as a carrier. */
     private List<Runnable> carrierWatchers;
     /** The connection whose TLS a bidirectional carrier reports; null for a split half. */
@@ -64,7 +69,7 @@ final class StreamingRequest {
     /** A redirect is under way: the next request is not ready yet. */
     private boolean redirecting;
     /** A response that is not a redirect arrived: nothing more is kept or followed. */
-    private boolean settled;
+    private boolean settled, accepted;
     /** Copies of the uplink bytes written so far; null once beyond the bound or settled. */
     private ArrayList<ByteBuf> kept = new ArrayList<>();
     private long keptBytes;
@@ -111,6 +116,10 @@ final class StreamingRequest {
         for (var watcher : watchers) watcher.run();
     }
 
+    private synchronized Channel carrierRequest() {
+        return redirecting || failed || current == null ? null : current.ch;
+    }
+
     /** Opens the carrier at url (target's URL when there is a target). */
     static PipeIo open(HttpCarrierClient client, URI url, Map<String, List<String>> headers, PipeOptions.Direction dir,
                        CarrierCredential credential, HttpTarget target) throws IOException {
@@ -123,7 +132,9 @@ final class StreamingRequest {
             synchronized (r) {
                 // A bidirectional carrier reports the TLS of this connection: a redirect may only continue it there.
                 if (dir == PipeOptions.Direction.BIDIRECTIONAL) r.boundConn = Requests.connection(ch);
-                r.current = r.request(ch, url, List.of());
+                var opened = r.request(ch, url, List.of());
+                r.current = opened.body();
+                r.currentOpening = opened.written();
             }
         } catch (IOException | RuntimeException e) {
             ch.close();
@@ -135,15 +146,20 @@ final class StreamingRequest {
         if (dir != PipeOptions.Direction.BIDIRECTIONAL) {
             return (h3 ? Requests.pipe(io, ch) : io.withReceiveMemory(BodyCarrier.RECEIVE_MEMORY)).withCarrier(CarrierKind.SPLIT);
         }
-        return Requests.pipe(io, ch).withCarrier(h3 ? CarrierKind.HTTP3 : CarrierKind.STREAMING);
+        io = Requests.pipe(io, ch);
+        if (io.capabilities().datagramChannel() != null) io = io.withDatagramChannel(r.new Datagrams());
+        return io.withCarrier(h3 ? CarrierKind.HTTP3 : CarrierKind.STREAMING);
     }
 
     /** Sends the request head on ch, then the credential's prefix and replay, and returns its carrier. */
-    private BodyCarrier request(Channel ch, URI u, List<ByteBuf> replay) throws IOException {
-        boolean h3 = Requests.h3(ch);
+    private record Opened(BodyCarrier body, ChannelFuture written) {}
+
+    private Opened request(Channel ch, URI u, List<ByteBuf> replay) throws IOException {
         var address = Connections.address(u);
-        var info = new Admission.CarrierInfo(address, address, "", h3 ? u.getHost() : "",
-                h3 ? Requests.exporter(ch) : null, RequestHead.of(Map.of()))
+        var security = Requests.outerSecurity(ch);
+        var info = new Admission.CarrierInfo(address, address, "", security.encrypted() ? u.getHost() : "",
+                Requests.exporter(ch), RequestHead.of(Map.of()))
+                .withOuterSecurity(security)
                 .at(get ? Admission.Stage.HEAD : Admission.Stage.CARRIER, Framing.BYTE_STREAM, false);
         byte[] prefix = null;
         CarrierCredential.HeaderField field = null;
@@ -164,7 +180,9 @@ final class StreamingRequest {
         } else {
             HttpUtil.setContentLength(req, 0);
         }
+        ChannelPromise opening = ch.newPromise();
         BodyCarrier c = new BodyCarrier(ch, Framing.BYTE_STREAM, reads, writes, new BodyCarrier.Out() {
+            @Override public ChannelFuture head() { return opening; }
             @Override public Object content(ByteBuf data) { return new DefaultHttpContent(data); }
             @Override public Object end() { return new DefaultLastHttpContent(); }
         }, ch::close, cause -> { HttpTransport.abort(ch); return null; });
@@ -174,17 +192,37 @@ final class StreamingRequest {
             @Override public boolean redirect(int status, String location) { return StreamingRequest.this.redirect(gen, c, status, location); }
             @Override public void response(boolean ok) { settle(gen, ok); }
         }));
-        var head = ch.write(req);
-        if (h3) head.addListener(done -> {
+        opening.addListener(done -> {
             if (!done.isSuccess()) {
                 c.lost(done.cause());
                 HttpTransport.abort(ch);
             }
         });
-        if (prefix != null && prefix.length > 0) ch.write(new DefaultHttpContent(Unpooled.wrappedBuffer(prefix)));
-        for (ByteBuf b : replay) ch.write(new DefaultHttpContent(b.retainedDuplicate()));
+        var preface = prefix;
+        var held = replay.isEmpty() ? List.<ByteBuf>of() : replay.stream().map(ByteBuf::retainedDuplicate).toList();
+        var loop = ch.eventLoop();
+        Loops.dispatch(loop, loop.inEventLoop(), () -> {
+            c.start();
+            writeOpening(ch, req, preface, held, opening);
+        }, () -> {
+            ReferenceCountUtil.release(req);
+            for (ByteBuf bytes : held) bytes.release();
+            opening.tryFailure(new java.nio.channels.ClosedChannelException());
+        });
+        return new Opened(c, opening);
+    }
+
+    private static void writeOpening(Channel ch, HttpRequest request, byte[] prefix, List<ByteBuf> replay, ChannelPromise opening) {
+        if ((prefix == null || prefix.length == 0) && replay.isEmpty()) {
+            ch.writeAndFlush(request, opening);
+            return;
+        }
+        var writes = new PromiseCombiner(ch.eventLoop());
+        writes.add(ch.write(request));
+        if (prefix != null && prefix.length > 0) writes.add(ch.write(new DefaultHttpContent(Unpooled.wrappedBuffer(prefix))));
+        for (ByteBuf bytes : replay) writes.add(ch.write(new DefaultHttpContent(bytes)));
+        writes.finish(opening);
         ch.flush();
-        return c;
     }
 
     /** The first response that is not a redirect: the carrier keeps no more. */
@@ -193,9 +231,11 @@ final class StreamingRequest {
         synchronized (this) {
             if (gen != generation || settled) return;
             settled = true;
+            accepted = ok;
             dropKept();
             settledUrl = url;
         }
+        carrierChanged();
         if (ok && target != null) target.redirected(settledUrl.toString());
     }
 
@@ -216,8 +256,7 @@ final class StreamingRequest {
             if (gen != generation || settled || failed) return false;
             next = null;
             try {
-                next = Redirects.check(url, get ? "GET" : "POST", status, location);
-                if (hops >= Redirects.DEFAULT_MAX) throw new HttpRedirectException(status, next.toString(), "too many redirects");
+                next = Redirects.follow(url, get ? "GET" : "POST", status, location, hops, true);
                 if (writes && kept == null) {
                     throw new HttpRedirectException(status, next.toString(), "more than " + Redirects.MAX_REPLAY + " uplink bytes sent");
                 }
@@ -250,6 +289,7 @@ final class StreamingRequest {
             }
             Loops.run(ch.eventLoop(), () -> {
                 BodyCarrier nc;
+                ChannelFuture replayed = null;
                 List<PipeWriter.Completion> done;
                 PipeReader.Sink s;
                 boolean closeReader, closeWriter;
@@ -261,7 +301,9 @@ final class StreamingRequest {
                         if (boundConn != null && Requests.connection(ch) != boundConn && Requests.tls(boundConn) != null) {
                             throw new HttpRedirectException(status, u.toString(), "redirect to another TLS connection");
                         }
-                        nc = request(ch, u, kept == null ? List.of() : kept);
+                        var opened = request(ch, u, kept == null ? List.of() : kept);
+                        nc = opened.body();
+                        replayed = opened.written();
                     } catch (IOException | RuntimeException e) {
                         ch.close();
                         why = e;
@@ -273,6 +315,7 @@ final class StreamingRequest {
                         closeReader = closeWriter = false;
                     } else {
                         current = nc;
+                        currentOpening = replayed;
                         redirecting = false;
                         done = new ArrayList<>(deferred);
                         deferred.clear();
@@ -300,7 +343,9 @@ final class StreamingRequest {
                     else if (s != null) readerOf(nc).start(s);
                 }
                 if (writes && closeWriter) writerOf(nc).close();
-                for (PipeWriter.Completion d : done) d.completed();
+                replayed.addListener(result -> {
+                    for (PipeWriter.Completion completion : done) completeWrite(completion, result.cause());
+                });
             }, () -> { ch.close(); fail(new java.nio.channels.ClosedChannelException()); });
         });
         return true;
@@ -334,8 +379,75 @@ final class StreamingRequest {
         if (s != null) s.onError(cause);
     }
 
-    private final class Reader implements PipeReader {
-        @Override public void start(Sink s) {
+    private synchronized io.zmux.carrier.CarrierChannel datagramChannel() {
+        if (!accepted || failed || current == null) return null;
+        var stream = io.zmux.http.internal.HttpTransport.stream(current.ch);
+        return stream == null ? null : stream.datagrams();
+    }
+
+    /** Native datagrams belong to the settled request and are never replayed across a redirect. */
+    private final class Datagrams implements io.zmux.carrier.CarrierChannel {
+        @Override public long channelStreamId() { return -1; }
+
+        @Override public int maxChannelDatagram() {
+            var lower = datagramChannel();
+            return lower == null ? 0 : lower.maxChannelDatagram();
+        }
+
+        @Override public int channelDatagramLimit(int room) {
+            var lower = datagramChannel();
+            return lower == null ? 0 : lower.channelDatagramLimit(room);
+        }
+
+        @Override public void send(byte[] bytes, long expiry, java.util.function.Consumer<Outcome> completion) {
+            var lower = datagramChannel();
+            if (lower == null) completion.accept(Outcome.REJECTED);
+            else lower.send(bytes, expiry, completion);
+        }
+
+        @Override public Runnable receive(io.zmux.carrier.CarrierChannel.Sink sink) {
+            return subscribe(lower -> lower.receive(sink));
+        }
+
+        @Override public Runnable watch(Runnable changed) {
+            return subscribe(lower -> {
+                Runnable stop = lower.watch(changed);
+                changed.run();
+                return stop;
+            });
+        }
+
+        private Runnable subscribe(java.util.function.Function<io.zmux.carrier.CarrierChannel, Runnable> start) {
+            final class Subscription {
+                private io.zmux.carrier.CarrierChannel currentChannel;
+                private Runnable stop;
+                private boolean closed;
+
+                synchronized void refresh() {
+                    if (closed) return;
+                    var lower = datagramChannel();
+                    if (lower == currentChannel) return;
+                    if (stop != null) stop.run();
+                    currentChannel = lower;
+                    stop = lower == null ? null : start.apply(lower);
+                }
+
+                synchronized void close() {
+                    closed = true;
+                    if (stop != null) stop.run();
+                }
+            }
+            var subscription = new Subscription();
+            Runnable unwatch = watchCarrier(subscription::refresh);
+            subscription.refresh();
+            return () -> { unwatch.run(); subscription.close(); };
+        }
+    }
+
+    private final class Reader implements PipeReader, Requests.CarrierHalf {
+        @Override public Runnable watchCarrier(Runnable watcher) { return StreamingRequest.this.watchCarrier(watcher); }
+        @Override public Channel carrierRequest() { return StreamingRequest.this.carrierRequest(); }
+        @Override public void start(PipeReader.Sink s) {
             BodyCarrier c;
             synchronized (StreamingRequest.this) {
                 sink = s;
@@ -358,11 +470,7 @@ final class StreamingRequest {
     private final class Writer implements Requests.CarrierWriter {
         @Override public Runnable watchCarrier(Runnable watcher) { return StreamingRequest.this.watchCarrier(watcher); }
 
-        @Override public Channel carrierRequest() {
-            synchronized (StreamingRequest.this) {
-                return redirecting || failed || current == null ? null : current.ch;
-            }
-        }
+        @Override public Channel carrierRequest() { return StreamingRequest.this.carrierRequest(); }
 
         @Override public void write(OutboundBatch batch, Completion done) {
             BodyCarrier c;
@@ -403,14 +511,16 @@ final class StreamingRequest {
                 }
 
                 private void report(Throwable cause) {
-                    boolean replaced;
+                    ChannelFuture replayed = null;
                     Throwable why;
                     synchronized (StreamingRequest.this) {
-                        replaced = gen != generation && !StreamingRequest.this.failed;
+                        if (kept && gen != generation && !StreamingRequest.this.failed) {
+                            if (redirecting) { deferred.add(done); return; }
+                            replayed = currentOpening;
+                        }
                         why = refusal;
                     }
-                    // A request a redirect replaced: its bytes go again on the next one.
-                    if (kept && replaced) done.completed();
+                    if (replayed != null) replayed.addListener(result -> completeWrite(done, result.cause()));
                     else done.failed(why != null ? why : cause);
                 }
             });
@@ -439,5 +549,10 @@ final class StreamingRequest {
             for (Completion d : done) d.failed(cause == null ? new java.nio.channels.ClosedChannelException() : cause);
             if (c != null) writerOf(c).abort(cause);
         }
+    }
+
+    private static void completeWrite(PipeWriter.Completion completion, Throwable cause) {
+        if (cause == null) completion.completed();
+        else completion.failed(cause);
     }
 }

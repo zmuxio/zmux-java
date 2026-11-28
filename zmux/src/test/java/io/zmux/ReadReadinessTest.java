@@ -3,17 +3,19 @@ package io.zmux;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.zmux.internal.loop.RecvLane;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /** The wait for read readiness: success for data and for every end, failure only with its own bound, nothing consumed. */
 @Timeout(60)
 class ReadReadinessTest {
-    private static final Duration SHORT = Duration.ofMillis(100);
-
     private static ZmuxStream accepted(Pair p, ZmuxStream opened) throws Exception {
         opened.write("x".getBytes(UTF_8)); // the first frame, so that the peer accepts it
         ZmuxStream s = p.server().acceptStream();
@@ -26,7 +28,7 @@ class ReadReadinessTest {
         try (var loops = EventLoops.create(1); Pair p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             ZmuxStream c = p.client().openStream();
             ZmuxStream s = accepted(p, c);
-            assertThrows(SocketTimeoutException.class, () -> s.awaitReadable(SHORT), "nothing yet: the bound is the only failure");
+            assertThrows(SocketTimeoutException.class, () -> s.awaitReadable(Duration.ZERO), "nothing yet: the bound is the only failure");
             c.write("hello".getBytes(UTF_8));
             s.awaitReadable(Duration.ofSeconds(10));
             s.awaitReadable(); // a wait takes nothing, so it repeats
@@ -36,12 +38,17 @@ class ReadReadinessTest {
         }
     }
 
-    @Test void theReadTimeoutBoundsTheWaitWithoutAnArgument() throws Exception {
+    @Test void anOwnerDeadlineExpiresAnAlreadyRegisteredReadinessWait() throws Exception {
         try (var loops = EventLoops.create(1); Pair p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             ZmuxStream c = p.client().openStream();
             ZmuxStream s = accepted(p, c);
-            s.setReadTimeout(SHORT);
-            assertThrows(SocketTimeoutException.class, s::awaitReadable);
+            var timeout = Duration.ofMinutes(1);
+            s.setReadTimeout(timeout);
+            var pending = waiting(s, ZmuxSession.until(s.readTimeout().orElseThrow()));
+            assertFalse(pending.isDone());
+            s.session.driver.loop().advanceTimersForTests(timeout.toNanos()).get(30, TimeUnit.SECONDS);
+            assertInstanceOf(SocketTimeoutException.class,
+                    assertThrows(ExecutionException.class, () -> pending.get(30, TimeUnit.SECONDS)).getCause());
         }
     }
 
@@ -76,16 +83,14 @@ class ReadReadinessTest {
         }
     }
 
-    @Test void theSessionsEndIsReadyAndAWaitingThreadWakes() throws Exception {
+    @Test void theSessionsEndWakesAnAlreadyRegisteredWaiter() throws Exception {
         try (var loops = EventLoops.create(1); Pair p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             ZmuxStream c = p.client().openStream();
             ZmuxStream s = accepted(p, c);
-            var waiting = java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try { s.awaitReadable(Duration.ofSeconds(30)); } catch (java.io.IOException e) { throw new IllegalStateException(e); }
-            }, r -> Thread.ofVirtual().start(r));
-            Thread.sleep(50); // the wait has most likely begun; either order gives the same outcome
+            var pending = waiting(s, Long.MAX_VALUE);
+            assertFalse(pending.isDone());
             p.client().close();
-            waiting.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(-1L, pending.get(30, TimeUnit.SECONDS));
             assertThrows(java.io.IOException.class, () -> s.read(ByteBuffer.allocate(4)));
         }
     }
@@ -168,18 +173,25 @@ class ReadReadinessTest {
         }
     }
 
-    /** Any number of waits proceed at once. */
-    @Test void manyThreadsMayWaitAtOnce() throws Exception {
-        try (var loops = EventLoops.create(1); Pair p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build());
-             var ex = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+    private static ZmuxFuture<Long> waiting(ZmuxStream stream, long deadline) {
+        var op = stream.in.awaitReadableAsync(deadline);
+        return ZmuxSession.future(op, result -> {
+            if (result instanceof java.io.IOException failure) throw failure;
+            assertEquals(true, result);
+            return RecvLane.readable(op);
+        });
+    }
+
+    /** Any number of registered waits proceed at once. */
+    @Test void manyWaitersMayRegisterAtOnce() throws Exception {
+        try (var loops = EventLoops.create(1); Pair p = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             ZmuxStream c = p.client().openStream();
             ZmuxStream s = accepted(p, c);
-            var waiters = new java.util.ArrayList<java.util.concurrent.Future<?>>();
-            var ready = new java.util.concurrent.CountDownLatch(8);
-            for (int i = 0; i < 8; i++) waiters.add(ex.submit(() -> { ready.countDown(); s.awaitReadable(Duration.ofSeconds(10)); return null; }));
-            assertTrue(ready.await(10, java.util.concurrent.TimeUnit.SECONDS));
+            var waiters = new ArrayList<ZmuxFuture<Long>>();
+            for (int i = 0; i < 8; i++) waiters.add(waiting(s, Long.MAX_VALUE));
+            assertTrue(waiters.stream().noneMatch(ZmuxFuture::isDone));
             c.write("x".getBytes(UTF_8));
-            for (var w : waiters) w.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            for (var w : waiters) assertEquals(1L, w.get(30, TimeUnit.SECONDS));
             assertEquals(1, s.tryRead(ByteBuffer.allocate(4)));
         }
     }

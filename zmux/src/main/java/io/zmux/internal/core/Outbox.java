@@ -36,6 +36,8 @@ public final class Outbox {
         return !wakes.isEmpty() || !actions.isEmpty();
     }
 
+    public Event lastEvent() { return events.peekLast(); }
+
     public Event pollEvent() {
         return events.poll();
     }

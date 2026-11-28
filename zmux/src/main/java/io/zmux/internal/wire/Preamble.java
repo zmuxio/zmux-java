@@ -1,6 +1,6 @@
 package io.zmux.internal.wire;
 
-
+import io.zmux.internal.buffer.ReceiveSpans;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -51,10 +51,14 @@ public record Preamble(int size, byte[] openInfo, int urgency, boolean increment
      * . Every violation is a PROTOCOL_VIOLATION.
      */
     public static Preamble parse(ByteBuffer b, int pos, int len, long limit) throws WireException {
+        return parse(b, null, pos, len, limit);
+    }
+
+    public static Preamble parse(ByteBuffer b, ReceiveSpans spans, int pos, int len, long limit) throws WireException {
         int end = pos + len;
-        long l = VarInt.get(b, pos, end);
+        long l = VarInt.get(b, spans, pos, end);
         if (l < 0) throw WireException.protocol("preamble Length incomplete");
-        int n = VarInt.lengthOf(b.get(pos));
+        int n = VarInt.lengthOf(ReceiveSpans.get(b, spans, pos));
         long size = n + l;
         if (size > len) throw WireException.protocol("preamble longer than its frame");
         if (size > limit) throw WireException.protocol("preamble above the limit");
@@ -62,24 +66,18 @@ public record Preamble(int size, byte[] openInfo, int urgency, boolean increment
         int urgency = -1;
         boolean incremental = false, carrier = false;
         List<Tlv> app = List.of();
-        int i = pos + n, stop = pos + (int) size;
-        while (i < stop) {
-            long t = VarInt.get(b, i, stop);
-            if (t < 0) throw WireException.protocol("truncated preamble TLV");
-            i += VarInt.lengthOf(b.get(i));
-            long vl = VarInt.get(b, i, stop);
-            if (vl < 0) throw WireException.protocol("truncated preamble TLV");
-            i += VarInt.lengthOf(b.get(i));
-            if (vl > stop - i) throw WireException.protocol("truncated preamble TLV");
-            int vp = i;
-            i += (int) vl;
+        var values = new TlvCursor(b, spans, pos + n, pos + (int) size);
+        while (values.hasNext()) {
+            if (!values.advance()) throw WireException.protocol("truncated preamble TLV");
+            long t = values.type();
+            int vp = values.offset(), vl = values.length();
             if (t == TLV_OPEN_INFO) {
                 if (openInfo != null) throw WireException.protocol("second OPEN_INFO");
-                openInfo = new byte[(int) vl];
-                b.get(vp, openInfo);
+                openInfo = new byte[vl];
+                values.copy(vp, openInfo);
             } else if (t == TLV_PRIORITY) {
                 if (urgency >= 0) throw WireException.protocol("second PRIORITY");
-                int p = vl == 1 ? b.get(vp) & 0xff : -1;
+                int p = vl == 1 ? values.get(vp) & 0xff : -1;
                 if (p < 0 || (p & 0x0f) != 0) throw WireException.protocol("bad PRIORITY TLV");
                 urgency = p >>> 5;
                 incremental = (p & 0x10) != 0;
@@ -88,8 +86,8 @@ public record Preamble(int size, byte[] openInfo, int urgency, boolean increment
                 if (vl != 0) throw WireException.protocol("bad PIPE_CARRIER TLV");
                 carrier = true;
             } else if (isApplication(t)) {
-                byte[] v = new byte[(int) vl];
-                b.get(vp, v);
+                byte[] v = new byte[vl];
+                values.copy(vp, v);
                 if (app.isEmpty()) app = new ArrayList<>(2);
                 app.add(new Tlv(t, v));
             }

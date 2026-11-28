@@ -30,7 +30,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Consumer;
-import java.util.function.BiFunction;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLEngine;
 
@@ -46,6 +45,8 @@ public final class HttpTransport {
         CompletableFuture<Channel> connect(EventLoopGroup group, URI uri, Duration timeout, Consumer<Channel> track);
         boolean reusable(Channel connection);
         CompletableFuture<Channel> stream(Channel connection, Duration timeout);
+        default boolean borrowsConnection() { return false; }
+        default boolean onBorrowedLoop() { return false; }
     }
 
     /** An opening that can be attempted on the next connection before any request has been written. */
@@ -58,14 +59,20 @@ public final class HttpTransport {
         Channel connection();
         InetSocketAddress peer();
         SSLEngine tls();
+        io.zmux.Admission.OuterSecurity outerSecurity();
         PipeIo.Exporter exporter();
         void abort();
+        default io.zmux.carrier.CarrierChannel datagrams() { return null; }
     }
 
     /** The request router lifecycle observed by a hosted transport. */
     public interface Route extends ChannelHandler {
         void stop();
         void afterSetup(Runnable done);
+        Duration setupTimeout();
+        io.zmux.adapter.Handled admitUpgrade(HttpRequest head, PipeIo first, io.zmux.adapter.Upgrade upgrade,
+                Function<BooleanSupplier, CompletionStage<Void>> fallback);
+        io.zmux.adapter.Handled currentSetup();
     }
 
     public static void attach(Channel ch, Stream stream) { ch.attr(STREAM).set(stream); }
@@ -83,17 +90,43 @@ public final class HttpTransport {
         return value == null ? "" : value;
     }
 
-    private static final AtomicReference<BiFunction<HttpCarrierClient.Builder, Client, HttpCarrierClient.Builder>>
-            CLIENT_BUILDER = new AtomicReference<>();
+    /** Access to HTTP client operations used by sibling transports. */
+    public interface ClientAccess {
+        HttpCarrierClient.Builder select(HttpCarrierClient.Builder builder, Client transport);
+        CompletableFuture<Channel> open(HttpCarrierClient client, URI target);
+        int openConnections(HttpCarrierClient client);
+        Client transport(HttpCarrierClient client);
+    }
 
-    // HttpCarrierClient registers its package-private builder method at initialization.
-    public static void installClientBuilder(BiFunction<HttpCarrierClient.Builder, Client, HttpCarrierClient.Builder> factory) {
-        if (!CLIENT_BUILDER.compareAndSet(null, factory)) throw new IllegalStateException("client builder already installed");
+    private static final AtomicReference<ClientAccess> CLIENT = new AtomicReference<>();
+
+    // HttpCarrierClient registers its package-private request and builder methods at initialization.
+    public static void installClientAccess(ClientAccess access) {
+        if (!CLIENT.compareAndSet(null, access)) throw new IllegalStateException("client access already installed");
     }
 
     public static HttpCarrierClient.Builder clientBuilder(Client transport) {
         var builder = HttpCarrierClient.builder();
-        return CLIENT_BUILDER.get().apply(builder, transport);
+        return CLIENT.get().select(builder, transport);
+    }
+
+    public static CompletableFuture<Channel> openRequest(HttpCarrierClient client, URI target) {
+        return CLIENT.get().open(client, target);
+    }
+
+    public static Client transport(HttpCarrierClient client) { return CLIENT.get().transport(client); }
+
+    public static int openConnections(HttpCarrierClient client) { return CLIENT.get().openConnections(client); }
+
+    private static final AtomicReference<Function<HttpEndpoint, io.zmux.adapter.ListenerAdapter>> WEB_TRANSPORT =
+            new AtomicReference<>();
+
+    public static void installEndpointAccess(Function<HttpEndpoint, io.zmux.adapter.ListenerAdapter> access) {
+        WEB_TRANSPORT.set(access);
+    }
+
+    public static io.zmux.adapter.ListenerAdapter webTransport(HttpEndpoint endpoint) {
+        return WEB_TRANSPORT.get().apply(endpoint);
     }
 
     public static Route route(HttpEndpoint endpoint, ChannelPipeline pipeline) {

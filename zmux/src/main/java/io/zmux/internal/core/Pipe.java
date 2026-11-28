@@ -11,12 +11,27 @@ import java.util.ArrayList;
  */
 final class Pipe {
     final long id;
+    private SessionCapacity.Member member;
+
+    SessionCapacity.Member member() { return member; }
+
+    void member(SessionCapacity.Member value) { member = value; }
+
     /** The carrier connection of lane 0, compared by identity (lanes). */
     private Object conn;
     /** The kind of the pipe's carrier, null when undeclared. */
     private final io.zmux.CarrierKind carrier;
     private final InDir in;
     private final OutDir out;
+    /** The session queued this carrier's terminal action, independently of inbound EOF. */
+    private boolean carrierCloseRequested;
+
+    boolean requestCarrierClose() {
+        if (carrierCloseRequested) return false;
+        carrierCloseRequested = true;
+        return true;
+    }
+
     /** Multipath side storage; null outside multipath. */
     private Attach mp;
     /** Record shaping of the outbound direction; null until a shaper was set. */
@@ -176,8 +191,6 @@ final class Pipe {
         final AckEngine.Send snd = new AckEngine.Send();
         final Pacer.Slot pace = new Pacer.Slot();
         final QualityMonitor.PipeQ q = new QualityMonitor.PipeQ();
-        /** The writer of lane 0. */
-        final Waiter sig;
         private long records;
         private boolean failed;
         /** Own lanes of this direction the peer refused. */
@@ -205,8 +218,7 @@ final class Pipe {
         }
 
         /** An outbound direction with its confirmed lane 0 on the carrier. */
-        OutDir(CarrierInfo info, Waiter sig) {
-            this.sig = sig;
+        OutDir(CarrierInfo info) {
             lo = new Lanes.Out(info.lanes());
             add(new OutLane(0, info, true));
         }
@@ -236,21 +248,94 @@ final class Pipe {
         /** Writes on the outbound direction failed: nothing more goes out on it. */
         void fail() {
             failed = true;
+            cancelDeadlines();
+        }
+
+        void cancelDeadlines() {
+            lo.cancel();
+            pace.cancel();
         }
     }
 
     static final class OutLane {
         final long lane;
+        private long nativeChannelId = Long.MIN_VALUE;
+
+        long replaceNativeChannel(long id) {
+            long previous = nativeChannelId;
+            nativeChannelId = id;
+            return previous;
+        }
+        final Shaping.Delay shapeDelay = new Shaping.Delay();
         final Transmitter.LaneTx tx = new Transmitter.LaneTx();
         final AckEngine.LaneAck ack = new AckEngine.LaneAck();
         final Lanes.LaneState st;
+        private PipeTable.Writer writer;
+
+        void writer(PipeTable.Writer writer) {
+            if (this.writer != null) this.writer.invalidate();
+            this.writer = writer;
+        }
+
+        void requestWrite() {
+            if (writer != null) writer.changed();
+        }
+
+        boolean hasWriter() { return writer != null && writer.current(); }
+        void grantRecord() { if (hasWriter()) writer.record(); }
+        void grantChannel() { if (hasWriter()) writer.channel(); }
         /** Unacknowledged bytes in send order: (pos, end, so) triples. */
         final LongTriples segs = new LongTriples();
         /** End positions of records with activity frames. */
         final LongList activity = new LongList();
         final ArrayList<Stream> boundSt = new ArrayList<>(0);
         /** Multipath retention log, in sending order. */
-        final java.util.ArrayDeque<Retained> log = new java.util.ArrayDeque<>(0);
+        final FrameHistory log = new FrameHistory();
+        // The earliest copy of an outstanding epoch answer suffices for cumulative lane ACKs.
+        private long epochAnswer;
+        private long epochAnswerPosition;
+        private final LongList pingEnds = new LongList();
+        private long pingTailEnd;
+        private long pingTailCount;
+
+        void rememberEpochAnswer(long epoch, long pos) {
+            if (epochAnswer == epoch) return;
+            epochAnswer = epoch;
+            epochAnswerPosition = pos;
+        }
+
+        boolean acknowledgedEpochAnswer(long epoch, long pos) {
+            return epochAnswer == epoch && pos >= epochAnswerPosition;
+        }
+
+        void rememberPing(long end) {
+            if (pingEnds.size() < FrameHistory.SLOTS && pingTailCount == 0) {
+                pingEnds.add(end);
+            } else {
+                // Keep a count past the exact sampling window. A covering ACK releases all of it.
+                pingTailEnd = end;
+                pingTailCount++;
+            }
+        }
+
+        long drainAcknowledgedPings() {
+            int count = 0;
+            while (count < pingEnds.size() && ack.acked() >= pingEnds.get(count)) count++;
+            pingEnds.removeFirst(count);
+            if (pingTailCount == 0 || ack.acked() < pingTailEnd) return count;
+            long answered = count + pingTailCount;
+            pingTailCount = 0;
+            return answered;
+        }
+
+        void retire() {
+            writer(null);
+            segs.release();
+            activity.release();
+            pingEnds.release();
+            pingTailCount = 0;
+            log.retire();
+        }
 
         OutLane(long lane, CarrierInfo info, boolean confirmed) {
             this.lane = lane;

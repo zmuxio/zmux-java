@@ -17,5 +17,6 @@ export GOWORK=off
 go mod edit -module=github.com/zmuxio/zmux-java/interop/h3-go-peer \
     -require=github.com/zmuxio/zmux-go/zmuxh3@v0.0.0 \
     -replace="github.com/zmuxio/zmux-go=$checkout" \
+    -replace="github.com/zmuxio/zmux-go/zmuxquic=$checkout/zmuxquic" \
     -replace="github.com/zmuxio/zmux-go/zmuxh3=$checkout/zmuxh3"
-go build -mod=readonly -o "$output" .
+go build -buildvcs=false -mod=readonly -o "$output" .

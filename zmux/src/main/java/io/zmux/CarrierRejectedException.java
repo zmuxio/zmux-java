@@ -3,9 +3,9 @@ package io.zmux;
 import java.io.Serial;
 
 /**
- * An {@link InboundTransform}'s refusal of an unauthenticated carrier: the carrier goes to {@link
- * ListenerConfig#onReject()} and the transform does not close it. Any other failure closes it. The reason
- * may be finer than the protocol's error classes; what goes on the wire is the same for every reason.
+ * An {@link InboundTransform}'s refusal of an unauthenticated carrier. The listener
+ * observes the local reason through {@link ListenerConfig#onReject()} and applies
+ * {@link ListenerConfig#rejection()} to the carrier.
  */
 public final class CarrierRejectedException extends ZmuxException {
     @Serial

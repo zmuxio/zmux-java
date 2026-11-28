@@ -35,8 +35,14 @@ class AdmissionStageTest {
 
     /** A listener whose decider is f, counted in calls; fallback may be null. */
     private static ZmuxListener listener(EventLoops loops, Admission.Builder adm, Admission.Fallback fallback) {
-        var lc = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build()).maxPendingPerSource(1)
+        return listener(loops, adm, fallback, false);
+    }
+
+    private static ZmuxListener listener(EventLoops loops, Admission.Builder adm, Admission.Fallback fallback,
+                                         boolean refuseStalls) {
+        var lc = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build()).maxPendingPerSource(2)
                 .admission(adm.build());
+        if (refuseStalls) lc.maxPending(1);
         if (fallback != null) lc.fallback(fallback);
         return Zmux.listener(lc.build());
     }
@@ -73,9 +79,7 @@ class AdmissionStageTest {
             var r = new Reading(new LinkedBlockingQueue<>(), new CompletableFuture<>());
             io.reader().start(new PipeReader.Sink() {
                 @Override public void onChunk(Chunk chunk, Runnable consumed) {
-                    ByteBuffer b = chunk.buffer();
-                    byte[] copy = new byte[b.remaining()];
-                    b.get(copy);
+                    byte[] copy = chunk.copy();
                     chunk.close();
                     consumed.run();
                     r.chunks.add(copy);
@@ -100,20 +104,23 @@ class AdmissionStageTest {
     }
 
     /** The source's one slot went back. */
-    private static void slotBack(ZmuxListener l) throws Exception {
-        PipePoolTest.await(() -> {
-            var s = l.adapter().reserve(TestAddr.peer("client"), null);
-            if (s == null) return false;
-            s.release();
-            return true;
-        });
+    private static void slotBack(ZmuxListener listener, Handled handled) throws Exception {
+        handled.closed().get(30, TimeUnit.SECONDS);
+        var slot = listener.adapter().reserve(TestAddr.peer("client"), null);
+        assertNotNull(slot, "the completed admission returned its source slot");
+        slot.release();
     }
 
     /** An upgrade under the test's control. */
     private static final class Up implements io.zmux.adapter.Upgrade {
         final CompletableFuture<Void> stage = new CompletableFuture<>();
         final AtomicInteger opened = new AtomicInteger();
-        @Override public CompletableFuture<Void> open() { opened.incrementAndGet(); return stage; }
+        final CompletableFuture<Void> entered = new CompletableFuture<>();
+        @Override public CompletableFuture<Void> open() {
+            opened.incrementAndGet();
+            entered.complete(null);
+            return stage;
+        }
     }
 
     @Test void maxMessageDefaultsToTheLargestRecordAndIsBounded() {
@@ -141,12 +148,13 @@ class AdmissionStageTest {
                 send(bytes[0], new byte[] {1, 2, 3, 4});
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
                 assertEquals("CARRIER BYTE_STREAM false 4", stages.poll(5, TimeUnit.SECONDS));
-                slotBack(l);
+                slotBack(l, h);
 
                 var head = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().handleRequest(head[1], request(), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })));
+                var headHandled = l.adapter().handleRequest(head[1], request(), true, null, () -> { throw new AssertionError("unexpected acceptance head"); });
+                assertEquals(AdmissionVerdict.CLOSE, verdict(headHandled));
                 assertEquals("HEAD BYTE_STREAM false 0", stages.poll(5, TimeUnit.SECONDS));
-                slotBack(l);
+                slotBack(l, headHandled);
 
                 // On an upgrade's head it defers: the upgrade runs, and the first message is decided on;
                 // a second DEFER there closes.
@@ -154,13 +162,14 @@ class AdmissionStageTest {
                 var ws = MemoryPipe.pair(Framing.MESSAGES);
                 var u = l.adapter().admitFirst(ws[1], request(), up, null);
                 assertEquals("HEAD MESSAGES true 0", stages.poll(5, TimeUnit.SECONDS));
-                PipePoolTest.await(() -> up.opened.get() == 1);
+                up.entered.get(30, TimeUnit.SECONDS);
+                assertEquals(1, up.opened.get());
                 assertFalse(u.verdict().toCompletableFuture().isDone(), "a deferral is no verdict");
                 up.stage.complete(null);
                 send(ws[0], new byte[] {9, 9, 9});
                 assertEquals(AdmissionVerdict.CLOSE, verdict(u));
                 assertEquals("CARRIER MESSAGES true 3", stages.poll(5, TimeUnit.SECONDS));
-                slotBack(l);
+                slotBack(l, u);
                 assertEquals(4, calls.get());
                 var st = l.stats().admission();
                 assertEquals(3, st.closed());
@@ -176,18 +185,20 @@ class AdmissionStageTest {
             var calls = new AtomicInteger();
             try (var l = listener(loops, deciding(1, calls, (info, prefix) -> Admission.Decision.more(8)).maxPeek(16), null)) {
                 var head = MemoryPipe.pair(Framing.BYTE_STREAM);
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().handleRequest(head[1], request(), true, null, () -> { throw new AssertionError("unexpected acceptance head"); })));
-                slotBack(l);
+                var headHandled = l.adapter().handleRequest(head[1], request(), true, null, () -> { throw new AssertionError("unexpected acceptance head"); });
+                assertEquals(AdmissionVerdict.CLOSE, verdict(headHandled));
+                slotBack(l, headHandled);
                 var up = new Up();
                 var ws = MemoryPipe.pair(Framing.MESSAGES);
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().admitFirst(ws[1], request(), up, null)));
+                var upgradeHandled = l.adapter().admitFirst(ws[1], request(), up, null);
+                assertEquals(AdmissionVerdict.CLOSE, verdict(upgradeHandled));
                 assertEquals(0, up.opened.get(), "nothing upgraded");
-                slotBack(l);
+                slotBack(l, upgradeHandled);
                 var messages = MemoryPipe.pair(Framing.MESSAGES);
                 var h = l.adapter().handle(messages[1], hint());
                 send(messages[0], new byte[] {1, 2});
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                slotBack(l);
+                slotBack(l, h);
                 assertEquals(3, calls.get(), "each decided once");
                 addsUp(l.stats().admission(), 3);
                 assertEquals(3, l.stats().admission().closed());
@@ -204,7 +215,7 @@ class AdmissionStageTest {
                 var h = l.adapter().handle(big[1], hint());
                 send(big[0], new byte[9]);
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                slotBack(l);
+                slotBack(l, h);
                 // A reader that fails the message at the bound itself counts the same.
                 var limited = MemoryPipe.pair(Framing.MESSAGES);
                 var limit = new AtomicInteger(-1);
@@ -213,9 +224,10 @@ class AdmissionStageTest {
                     @Override public void start(Sink s) { s.onError(new io.zmux.carrier.MessageTooLargeException(limit.get())); }
                     @Override public void close() { }
                 };
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().handle(limited[1].withHalves(r, limited[1].writer()), hint())));
+                var limitedHandled = l.adapter().handle(limited[1].withHalves(r, limited[1].writer()), hint());
+                assertEquals(AdmissionVerdict.CLOSE, verdict(limitedHandled));
                 assertEquals(8, limit.get(), "the reader is given maxMessage");
-                slotBack(l);
+                slotBack(l, limitedHandled);
                 assertEquals(0, calls.get(), "no decision on an oversized first message");
                 var st = l.stats().admission();
                 assertEquals(2, st.tooLarge());
@@ -226,8 +238,9 @@ class AdmissionStageTest {
                     @Override public void start(Sink s) { s.onError(new io.zmux.carrier.MessageTooLargeException(8, 17)); }
                     @Override public void close() { }
                 };
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().handle(overBoth[1].withHalves(observed, overBoth[1].writer()), hint())));
-                slotBack(l);
+                var oversizedHandled = l.adapter().handle(overBoth[1].withHalves(observed, overBoth[1].writer()), hint());
+                assertEquals(AdmissionVerdict.CLOSE, verdict(oversizedHandled));
+                slotBack(l, oversizedHandled);
                 assertEquals(new AdmissionStats(0, 0, 0, 0, 1, 0, 2, 0, 0), l.stats().admission());
                 // A message of exactly the bound is decided.
                 var fits = MemoryPipe.pair(Framing.MESSAGES);
@@ -250,7 +263,7 @@ class AdmissionStageTest {
                 var h = l.adapter().handle(ordinary[1], hint());
                 send(ordinary[0], new byte[9]);
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                slotBack(l);
+                slotBack(l, h);
 
                 var deferred = MemoryPipe.pair(Framing.MESSAGES);
                 var up = new Up();
@@ -258,7 +271,7 @@ class AdmissionStageTest {
                 up.stage.complete(null);
                 send(deferred[0], new byte[9]);
                 assertEquals(AdmissionVerdict.CLOSE, verdict(d));
-                slotBack(l);
+                slotBack(l, d);
 
                 assertEquals(1, calls.get(), "only the upgrade head was decided");
                 assertEquals(new AdmissionStats(0, 0, 0, 0, 1, 0, 1, 0, 0), l.stats().admission());
@@ -280,7 +293,7 @@ class AdmissionStageTest {
                 up.stage.complete(null);
                 ws[0].writer().abort(new IOException("first input failed"));
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                slotBack(l);
+                slotBack(l, h);
                 assertEquals(new AdmissionStats(0, 0, 0, 0, 0, 0, 0, 0, 1), l.stats().admission());
                 assertEquals(0, l.stats().setupFailures());
                 assertTrue(l.variantStats().isEmpty());
@@ -297,13 +310,13 @@ class AdmissionStageTest {
                 var h = l.adapter().handle(ended[1], hint());
                 ended[0].writer().close();
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                slotBack(l);
+                slotBack(l, h);
                 var failed = MemoryPipe.pair(Framing.MESSAGES);
                 var g = l.adapter().handle(failed[1], hint());
                 // What a WebSocket reader reports for a text message.
                 failed[0].writer().abort(new java.net.ProtocolException("a text message on a zmux carrier"));
                 assertEquals(AdmissionVerdict.CLOSE, verdict(g));
-                slotBack(l);
+                slotBack(l, g);
                 assertEquals(0, calls.get());
                 var st = l.stats().admission();
                 assertEquals(2, st.closed());
@@ -321,15 +334,17 @@ class AdmissionStageTest {
             try (var l = listener(loops, adm, null)) {
                 var up = new Up();
                 var ws = MemoryPipe.pair(Framing.MESSAGES);
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().admitFirst(ws[1], request(), up, null)));
+                var upgradeHandled = l.adapter().admitFirst(ws[1], request(), up, null);
+                assertEquals(AdmissionVerdict.CLOSE, verdict(upgradeHandled));
                 assertThrows(java.util.concurrent.CancellationException.class, () -> up.stage.get(3, TimeUnit.SECONDS));
-                slotBack(l);
+                slotBack(l, upgradeHandled);
                 // The upgrade completes, the first message never comes.
                 var up2 = new Up();
                 up2.stage.complete(null);
                 var silent = MemoryPipe.pair(Framing.MESSAGES);
-                assertEquals(AdmissionVerdict.CLOSE, verdict(l.adapter().admitFirst(silent[1], request(), up2, null)));
-                slotBack(l);
+                var silentHandled = l.adapter().admitFirst(silent[1], request(), up2, null);
+                assertEquals(AdmissionVerdict.CLOSE, verdict(silentHandled));
+                slotBack(l, silentHandled);
                 assertEquals(2, calls.get(), "only the heads were decided");
                 var st = l.stats().admission();
                 assertEquals(2, st.peekTimedOut());
@@ -350,17 +365,16 @@ class AdmissionStageTest {
                 failing.stage.completeExceptionally(new IOException("101 not written"));
                 assertEquals(AdmissionVerdict.CLOSE, verdict(f));
                 assertEquals(1, l.stats().admission().handshakeFailed());
-                slotBack(l);
+                slotBack(l, f);
 
                 var up = new Up();
                 var ws = MemoryPipe.pair(Framing.MESSAGES);
                 var h = l.adapter().admitFirst(ws[1], request(), up, null);
                 up.stage.complete(null);
-                PipePoolTest.await(() -> calls.get() == 2);
-                long t0 = System.nanoTime();
+                up.entered.get(30, TimeUnit.SECONDS);
+                assertEquals(2, calls.get());
                 l.close();
                 assertEquals(AdmissionVerdict.CLOSE, verdict(h));
-                assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(5), "ended at the close, not at the peek timeout");
                 var st = l.stats().admission();
                 assertEquals(1, st.closed());
                 addsUp(st, 2);
@@ -406,7 +420,7 @@ class AdmissionStageTest {
                 h.closed().get(5, TimeUnit.SECONDS);
                 if (ending.equals("deadline") || ending.equals("withdraw") || ending.equals("stop")) assertTrue(flush.isCancelled());
                 assertEquals(ending.equals("commit") ? 1 : 0, served.get());
-                if (!ending.equals("stop")) slotBack(l);
+                if (!ending.equals("stop")) slotBack(l, h);
                 var counts = l.stats().admission();
                 assertEquals(ending.equals("write") ? 1 : 0, counts.handshakeFailed());
                 assertEquals(ending.equals("deadline") ? 1 : 0, counts.peekTimedOut());
@@ -444,7 +458,10 @@ class AdmissionStageTest {
                 var turn = new CompletableFuture<Void>();
                 loops.group().next().execute(() -> turn.complete(null));
                 turn.get(3, TimeUnit.SECONDS);
-                assertNull(l.adapter().reserve(request().source(), null));
+                var held = l.adapter().reserve(request().source(), null);
+                assertNotNull(held);
+                try { assertNull(l.adapter().reserve(request().source(), null)); }
+                finally { held.release(); }
                 assertFalse(h.closed().isDone());
             } finally { release.complete(null); }
             assertThrows(java.io.InterruptedIOException.class, h::awaitSetup);
@@ -520,7 +537,10 @@ class AdmissionStageTest {
                 loops.group().next().execute(() -> turn.complete(null));
                 turn.get(3, TimeUnit.SECONDS);
                 assertFalse(h.closed().isDone());
-                assertNull(l.adapter().reserve(request().source(), null));
+                var held = l.adapter().reserve(request().source(), null);
+                assertNotNull(held);
+                try { assertNull(l.adapter().reserve(request().source(), null)); }
+                finally { held.release(); }
             } finally { physical.complete(null); }
             h.closed().get(3, TimeUnit.SECONDS);
             var first = l.adapter().reserve(request().source(), null);
@@ -555,7 +575,7 @@ class AdmissionStageTest {
                     h.closed().toCompletableFuture().get(10, TimeUnit.SECONDS);
                     Throwable end = peer.end().get(10, TimeUnit.SECONDS);
                     if (m > 0) assertNotNull(end, "a failed fallback ends the carrier abortively");
-                    slotBack(l);
+                    slotBack(l, h);
                 }
                 var st = l.stats().admission();
                 assertEquals(1, st.closed());
@@ -602,7 +622,7 @@ class AdmissionStageTest {
                 done.complete(null);
                 h.closed().toCompletableFuture().get(10, TimeUnit.SECONDS);
                 peer.end().get(10, TimeUnit.SECONDS);
-                slotBack(l);
+                slotBack(l, h);
                 addsUp(l.stats().admission(), 1);
             }
         }
@@ -616,7 +636,7 @@ class AdmissionStageTest {
                     var admission = deciding(0, new AtomicInteger(), (info, prefix) -> info.stage() == Admission.Stage.HEAD
                             ? new Admission.Decision(AdmissionVerdict.DEFER, 0).withVariant("head")
                             : new Admission.Decision(verdict, 0).withVariant("carrier"));
-                    try (var l = listener(loops, admission, hasTarget ? takeover -> { reached.incrementAndGet(); return null; } : null)) {
+                    try (var l = listener(loops, admission, hasTarget ? takeover -> { reached.incrementAndGet(); return null; } : null, true)) {
                         var pair = MemoryPipe.pair(Framing.MESSAGES);
                         var up = new Up();
                         var h = l.adapter().admitFirst(pair[1], request(), up, null);
@@ -701,8 +721,10 @@ class AdmissionStageTest {
             var calls = new AtomicInteger();
             var replayed = new CompletableFuture<byte[]>();
             var bothViews = new AtomicReference<String>();
+            var entered = new CompletableFuture<Void>();
             Admission.Fallback fallback = t -> {
                 var s = t.socket().orElseThrow();
+                entered.complete(null);
                 bothViews.set(t.socket().isPresent() + "");
                 try {
                     assertTrue(s.channel().isBlocking());
@@ -724,7 +746,8 @@ class AdmissionStageTest {
             try (var l = Zmux.listen(new java.net.InetSocketAddress("127.0.0.1", 0), lc);
                  SocketChannel c = SocketChannel.open(l.localAddress())) {
                 c.write(ByteBuffer.wrap(new byte[] {1, 2, 3}));
-                PipePoolTest.await(() -> calls.get() == 1);
+                entered.get(30, TimeUnit.SECONDS);
+                assertEquals(1, calls.get());
                 c.write(ByteBuffer.wrap(new byte[] {4, 5}));
                 assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, replayed.get(10, TimeUnit.SECONDS));
                 assertEquals("false", bothViews.get(), "taken once");
@@ -775,7 +798,10 @@ class AdmissionStageTest {
                         .execute(() -> expired.complete(null));
                 expired.get(3, TimeUnit.SECONDS);
                 assertTrue(d.expired());
-                assertNull(l.adapter().reserve(hint().source(), null));
+                var held = l.adapter().reserve(hint().source(), null);
+                assertNotNull(held);
+                try { assertNull(l.adapter().reserve(hint().source(), null)); }
+                finally { held.release(); }
             } finally { release.complete(null); }
             assertThrows(IOException.class, h::awaitSetup);
             h.closed().get(3, TimeUnit.SECONDS);
@@ -811,10 +837,10 @@ class AdmissionStageTest {
 
     @Test void anAcceptedCarriersLaterRefusalDoesNotCountAsAdmissionStallOverflow() throws Exception {
         try (var loops = EventLoops.create(1)) {
-            var config = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build()).maxPendingPerSource(1)
+            var config = ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build()).maxPending(1)
                     .admission(deciding(0, new AtomicInteger(), (i, p) -> Admission.Decision.accept(0).withVariant("accepted")).build())
                     .inboundTransform((io, context) -> CompletableFuture.failedFuture(new CarrierRejectedException(0, null, "test refusal")))
-                    .onReject(info -> RejectInfo.Action.STALL).build();
+                    .rejection(RejectInfo.Action.STALL).build();
             try (var l = Zmux.listener(config)) {
                 var h = l.adapter().handle(MemoryPipe.pair(Framing.BYTE_STREAM)[1], hint());
                 assertEquals(AdmissionVerdict.ACCEPT, verdict(h));

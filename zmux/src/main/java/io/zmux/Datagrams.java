@@ -1,5 +1,7 @@
 package io.zmux;
 
+import io.zmux.internal.core.Session.DatagramMode;
+import io.zmux.internal.core.Time;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -10,25 +12,28 @@ public final class Datagrams {
 
     Datagrams(ZmuxSession session) { this.session = session; }
 
-    /**
-     * Queues a datagram; never blocks (a full queue drops its oldest datagram). False when
-     * the datagram limiter dropped it (counted as {@code datagrams_dropped_limit}).
-     */
-    public boolean send(ByteBuffer payload) throws IOException {
-        return session.sendSessionDatagram(payload);
+    /** Queues a datagram with inherited options, evicting the oldest entry when full. */
+    public void send(ByteBuffer payload) throws IOException {
+        send(payload, DatagramSendOptions.INHERIT);
     }
 
     /**
-     * Queues a datagram, waiting for send-queue space instead of dropping the oldest datagram;
-     * never waits for limiter tokens. False when the datagram limiter dropped it.
+     * Queues a datagram with hop-local options. Throws {@link DatagramDroppedException} when
+     * local admission drops the datagram.
      */
-    public boolean sendWait(ByteBuffer payload) throws IOException {
-        return session.sendSessionDatagram(payload, Long.MAX_VALUE);
+    public void send(ByteBuffer payload, DatagramSendOptions options) throws IOException {
+        session.submitDatagram(null, 0, payload, options, DatagramMode.DATAGRAM_ONLY, false, Time.NEVER);
     }
 
-    /** {@link #sendWait(ByteBuffer)} waiting at most timeout; {@link java.net.SocketTimeoutException} after it. */
-    public boolean sendWait(ByteBuffer payload, Duration timeout) throws IOException {
-        return session.sendSessionDatagram(payload, ZmuxSession.deadline(timeout));
+    /** Queues a datagram, waiting for send-queue space. */
+    public void sendWait(ByteBuffer payload) throws IOException {
+        session.submitDatagram(null, 0, payload, DatagramSendOptions.INHERIT, DatagramMode.DATAGRAM_ONLY, true, Time.NEVER);
+    }
+
+    /** Queues a datagram, waiting at most timeout for send-queue space. */
+    public void sendWait(ByteBuffer payload, Duration timeout) throws IOException {
+        session.submitDatagram(null, 0, payload, DatagramSendOptions.INHERIT, DatagramMode.DATAGRAM_ONLY, true,
+                ZmuxSession.deadline(timeout));
     }
 
     /** Waits for the next datagram. */
@@ -44,5 +49,21 @@ public final class Datagrams {
     /** The largest payload as of the loop's last round; 0 until negotiated. */
     public int maxPayload() {
         return session.info().maxDatagramPayload();
+    }
+
+    /** The largest payload on an eligible path, as of the loop's last round. */
+    public int pathPayload() { return session.info().pathDatagramPayload(); }
+
+    /** The largest native-channel payload, zero when unavailable. */
+    public int nativePayload() { return session.info().nativeDatagramPayload(); }
+
+    /** Whether a native channel can carry an original, even if only an empty datagram fits. */
+    public boolean nativeAvailable() { return session.info().nativeDatagramAvailable(); }
+
+    /** Feedback in the send direction from the reported pipe and channel. */
+    public java.util.Optional<DatagramPathFeedback> feedback(PipeId pipe, DatagramPathFeedback.Channel channel) throws IOException {
+        java.util.Objects.requireNonNull(pipe);
+        java.util.Objects.requireNonNull(channel);
+        return java.util.Optional.ofNullable(session.datagramFeedback(pipe, channel));
     }
 }

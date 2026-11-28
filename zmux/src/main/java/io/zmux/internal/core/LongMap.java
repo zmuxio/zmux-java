@@ -15,11 +15,13 @@ public final class LongMap<V> {
     private Object[] vals;
     private int size;
     private int mask;
+    private final int floor;
 
     public LongMap() { this(16); }
 
     public LongMap(int expected) {
         int cap = Integer.highestOneBit(Math.max(4, expected * 2 - 1)) << 1;
+        floor = cap;
         keys = new long[cap];
         vals = new Object[cap];
         mask = cap - 1;
@@ -56,7 +58,7 @@ public final class LongMap<V> {
             if (keys[i] == key) { vals[i] = value; return (V) v; }
         }
         keys[i] = key; vals[i] = value;
-        if (++size * 2 > keys.length) grow();
+        if (++size * 2 > keys.length) resize(keys.length * 2);
         return null;
     }
 
@@ -79,17 +81,22 @@ public final class LongMap<V> {
             }
         }
         size--;
+        if (keys.length > floor && size <= keys.length / 8) resize(keys.length / 2);
         return old;
     }
 
     public void clear() {
-        java.util.Arrays.fill(vals, null);
+        if (keys.length > floor) {
+            keys = new long[floor];
+            vals = new Object[floor];
+            mask = floor - 1;
+        } else java.util.Arrays.fill(vals, null);
         size = 0;
     }
 
-    private void grow() {
+    private void resize(int capacity) {
         long[] oldKeys = keys; Object[] oldVals = vals;
-        keys = new long[oldKeys.length * 2]; vals = new Object[oldVals.length * 2]; mask = keys.length - 1;
+        keys = new long[capacity]; vals = new Object[capacity]; mask = capacity - 1;
         for (int i = 0; i < oldKeys.length; i++) {
             if (oldVals[i] == null) continue;
             int j = slot(oldKeys[i], mask);

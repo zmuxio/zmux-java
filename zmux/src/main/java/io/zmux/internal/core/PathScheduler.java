@@ -38,8 +38,6 @@ public final class PathScheduler {
         /** See {@link Tiers}. */
         boolean takes(Tiers.Gate g, Pipe p);
 
-        /** A direction that cannot send new data (here: its binding moves); see {@link Retention}. */
-        void heldBack(Stream st);
     }
 
     static final double ECF_BETA = 0.25;
@@ -57,6 +55,7 @@ public final class PathScheduler {
     private final StreamsView streams;
     private final PathMetrics metrics;
     private final Decision dec = new Decision();
+    private final Decision stallDecision = new Decision();
     // Affinity re-evaluation.
     private final ArrayList<Long> affSeen = new ArrayList<>(0);
     private long affEpoch;
@@ -87,9 +86,9 @@ public final class PathScheduler {
 
 
     /** Whether some stream direction would put data on lane ol of p now. */
-    boolean anyStreamOn(Pipe p, Pipe.OutLane ol) {
-        Decision d = dec;
-        newDecision(d, p);
+    boolean anyStreamOn(Pipe p, Pipe.OutLane ol, Tiers.Gate gate) {
+        Decision d = stallDecision;
+        newDecision(d, p, gate);
         StreamScheduler.Iter it = new StreamScheduler.Iter().reset(sched);
         for (Stream st = it.next(); st != null; st = it.next()) {
             if (!tx.canSendNow(st) || !onPipe(d, st)) continue;
@@ -143,6 +142,10 @@ public final class PathScheduler {
 
     /** Prepares the decision for pipe p now. */
     void newDecision(Decision d, Pipe p) {
+        newDecision(d, p, port.buildGate());
+    }
+
+    void newDecision(Decision d, Pipe p, Tiers.Gate gate) {
         LevelStats lv = d.lv;
         d.p = p;
         if (lv != null) lv.valid = false;
@@ -150,7 +153,7 @@ public final class PathScheduler {
         d.tier = -1;
         d.multiTier = d.usable = d.takes = false;
         d.open = metrics.open(p);
-        d.g = port.buildGate();
+        d.g = gate;
         d.joiningTakes = false;
         if (d.g == null) return;
         d.multiTier = d.g.tiers.size() > 1;
@@ -178,31 +181,19 @@ public final class PathScheduler {
         StreamSend.SendPart sp = st.snd;
         if (d.g == null) return d.joiningTakes;
         PathStreamState m = sp.mps();
-        if (m != null && (m.ret.resend().size() > 0 || m.ret.finResend())) return d.takes && d.fastest == p && port.reinjectRoom(p);
+        if (m != null && (m.ret.history.resendBytes() != 0 || m.ret.finResend())) return d.takes && d.fastest == p && port.reinjectRoom(p);
         if (d.takes && redundant(st)) {
             long l = Math.clamp(metrics.readyBytes(st), 1, cfg.spreadChunk());
             Pipe[] two = earliestTwo(d.g, d.tier, l, null);
             if (two[1] != null && (two[0] == p || two[1] == p)) return true;
         }
         return switch (policyOf(st)) {
-            case AFFINITY -> d.usable && chosen(p, affinityTarget(d, st));
+            case AFFINITY -> d.usable && p == affinityTarget(d, st);
             case CUSTOM -> customOk(d, st);
-            case SPREAD_ETA -> {
-                if (!d.takes) yield false;
-                if (spreadEtaOk(d, st)) yield true;
-                chosen(p, d.fastest);
-                yield false;
-            }
-            case SPREAD_ROUND_ROBIN, SPREAD_RATE_WEIGHTED -> d.takes && chosen(p, rrPick(d.g, d.tier, st));
-            case SESSION_AFFINITY -> d.takes && chosen(p, d.g.tiers.get(d.tier).active());
+            case SPREAD_ETA -> d.takes && spreadEtaOk(d, st);
+            case SPREAD_ROUND_ROBIN, SPREAD_RATE_WEIGHTED -> d.takes && p == rrPick(d.g, d.tier, st);
+            case SESSION_AFFINITY -> d.takes && p == d.g.tiers.get(d.tier).active();
         };
-    }
-
-    /** Whether the policy chose p; another chosen pipe's writer is woken to take the chunk. */
-    boolean chosen(Pipe p, Pipe q) {
-        if (q == p) return true;
-        if (q != null && q.out() != null) pipes.wake(q);
-        return false;
     }
 
     /** New stream data of st, [off, off+n), went on the decision's pipe. */
@@ -242,8 +233,29 @@ public final class PathScheduler {
 
     /** ETA_p(L) in seconds. */
     double eta(Pipe p, long l) {
-        double r = Math.max(placementRate(p), 1);
-        return (metrics.queued(p) + l) / r + metrics.owd(p) / 1e9;
+        return eta(l, metrics.queued(p), Math.max(placementRate(p), 1), metrics.owd(p));
+    }
+
+    private static double eta(long bytes, double queued, double rate, long oneWay) {
+        return (queued + bytes) / rate + oneWay / 1e9;
+    }
+
+    /** The scheduler inputs that determine ETA for a range of any length at handoff. */
+    record Arrival(double queued, double rate, long oneWay) {
+        long nanos(long bytes) {
+            long serialization = (long) Math.ceil((queued + bytes) / rate * Time.SECOND);
+            return Time.add(oneWay, serialization);
+        }
+    }
+
+    Arrival arrival(Pipe p) {
+        var measured = metrics.measured(p);
+        if (measured != null) return new Arrival(0, Double.POSITIVE_INFINITY, measured.eta());
+        return new Arrival(metrics.queued(p), Math.max(placementRate(p), 1), metrics.owd(p));
+    }
+
+    long repairEta(Pipe p, long bytes) {
+        return arrival(p).nanos(bytes);
     }
 
     Pipe fastestIn(Tiers.Gate g, int ti, long l, Pipe except) {
@@ -501,7 +513,7 @@ public final class PathScheduler {
 
     boolean affinityIdle(Stream st) {
         PathStreamState m = st.snd.mps();
-        return m == null || (m.ret.acked().prefix() >= st.snd.sent() && m.ret.resend().size() == 0);
+        return m == null || (m.ret.history.prefix() >= st.snd.sent() && m.ret.history.resendBytes() == 0);
     }
 
     /** The pipe an affinity direction sends on now. */
@@ -616,7 +628,6 @@ public final class PathScheduler {
             if (target != null && target.id != b.sched.bindPipe) {
                 b.sched.moving = true;
                 b.sched.moveTo = target.id;
-                port.heldBack(st);
             }
         }
     }
@@ -807,15 +818,13 @@ public final class PathScheduler {
         return dec;
     }
 
-    /** The custom policy's pick deadline; with apply an expired one wakes the writers. Time.NEVER when none. */
-    long pickTimer(long now, boolean apply) {
-        if (!pickTimer) return Time.NEVER;
-        if (now < pickDeadline) return pickDeadline;
-        if (apply) {
+    long pickDeadline() { return pickTimer ? pickDeadline : Time.NEVER; }
+
+    void expirePick(long now) {
+        if (pickTimer && now >= pickDeadline) {
             pickTimer = false;
             pipes.wakeWriters();
         }
-        return Time.NEVER;
     }
 
     /** The scheduler's per-attachment state. */

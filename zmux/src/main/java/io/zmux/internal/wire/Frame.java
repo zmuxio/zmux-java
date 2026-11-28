@@ -1,6 +1,6 @@
 package io.zmux.internal.wire;
 
-
+import io.zmux.internal.buffer.ReceiveSpans;
 import java.nio.ByteBuffer;
 
 /**
@@ -13,6 +13,23 @@ public final class Frame {
     /** Wire frame type. */
     public long type;
     public ByteBuffer src;
+    public ReceiveSpans spans;
+
+    public byte get(int pos) {
+        return ReceiveSpans.get(src, spans, pos);
+    }
+
+    public long varint(int pos, int end) {
+        return VarInt.get(src, spans, pos, end);
+    }
+
+    public void copy(int pos, byte[] dst) {
+        copy(pos, dst, 0, dst.length);
+    }
+
+    public void copy(int pos, byte[] dst, int offset, int length) {
+        ReceiveSpans.copy(src, spans, pos, dst, offset, length);
+    }
     /** STREAM and DATAGRAM data, CONNECTION_CLOSE reason, QX_TRANSPORT_PARAMETERS block. */
     public int dataPos;
     public int dataLen;
@@ -42,6 +59,10 @@ public final class Frame {
     public long seq;
     public long status;
     public long priority;
+    /** DATAGRAM_ACK: channel and microsecond delay, with largest Sequence in {@link #value}. */
+    public int datagramChannel;
+    public long datagramAckDelay;
+    public long firstDatagramRange;
     /** PADDING run length; PIPE_ACK entry count. */
     public int count;
     /** PIPE_ACK entries, validated: [entriesPos, entriesEnd). */
@@ -64,42 +85,49 @@ public final class Frame {
         urgency = 0;
         laneKeyPos = count = entriesPos = entriesEnd = 0;
         phase = locatorPos = locatorLen = bodyPos = bodyEnd = 0;
+        datagramChannel = 0;
+        datagramAckDelay = firstDatagramRange = 0;
     }
 
     /** A copy of the data range. */
     public byte[] dataBytes() {
         byte[] a = new byte[dataLen];
-        src.get(dataPos, a);
+        copy(dataPos, a);
         return a;
     }
 
     /** The Locator of a SESSION_EPOCH; empty keeps the sender's current one. */
     public byte[] locatorBytes() {
         byte[] a = new byte[locatorLen];
-        src.get(locatorPos, a);
+        copy(locatorPos, a);
         return a;
     }
 
     /** The body of a SESSION_EPOCH, from Phase through Locator. */
     public byte[] bodyBytes() {
         byte[] a = new byte[bodyEnd - bodyPos];
-        src.get(bodyPos, a);
+        copy(bodyPos, a);
         return a;
     }
 
-    public ByteBuffer data() {
-        return src.slice(dataPos, dataLen).asReadOnlyBuffer();
+    void writeData(ByteBuffer destination) {
+        if (spans == null) {
+            destination.put(destination.position(), src, dataPos, dataLen);
+            destination.position(destination.position() + dataLen);
+        } else {
+            spans.write(dataPos, destination, dataLen);
+        }
     }
 
     /** Iterator over the PIPE_ACK entries; reuse one instance per caller. */
     public AckEntries entries(AckEntries it) {
-        it.reset(src, entriesPos, entriesEnd);
+        it.reset(this, entriesPos, entriesEnd);
         return it;
     }
 
     /** Allocation-free cursor over PIPE_ACK entries. */
     public static final class AckEntries {
-        private ByteBuffer b;
+        private Frame frame;
         private int pos;
         private int end;
         public long pipeId;
@@ -107,8 +135,8 @@ public final class Frame {
         public long position;
         public long delay;
 
-        void reset(ByteBuffer b, int pos, int end) {
-            this.b = b;
+        void reset(Frame frame, int pos, int end) {
+            this.frame = frame;
             this.pos = pos;
             this.end = end;
         }
@@ -116,15 +144,17 @@ public final class Frame {
         /** Advances to the next entry; false at the end. */
         public boolean next() {
             if (pos >= end) return false;
-            pipeId = VarInt.get(b, pos, end);
-            pos += VarInt.lengthOf(b.get(pos));
-            lane = VarInt.get(b, pos, end);
-            pos += VarInt.lengthOf(b.get(pos));
-            position = VarInt.get(b, pos, end);
-            pos += VarInt.lengthOf(b.get(pos));
-            delay = VarInt.get(b, pos, end);
-            pos += VarInt.lengthOf(b.get(pos));
+            pipeId = read();
+            lane = read();
+            position = read();
+            delay = read();
             return true;
+        }
+
+        private long read() {
+            long value = frame.varint(pos, end);
+            pos += VarInt.lengthOf(frame.get(pos));
+            return value;
         }
     }
 }

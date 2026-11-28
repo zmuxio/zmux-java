@@ -21,6 +21,17 @@ public final class ZmuxPipe {
     private final long id;
     private final PipeId pipeId;
     private final CompletableFuture<Void> confirmation;
+    private volatile PipeAccounting.Ticket accounting;
+
+    /** An accounting receipt that can outlive this attachment. */
+    public Optional<PipeAccounting.Ticket> accounting() {
+        var current = accounting;
+        if (current == null) {
+            current = session.driver.accounting(id);
+            if (current != null) accounting = current;
+        }
+        return Optional.ofNullable(current);
+    }
     /** This handle aborted the pipe: its waits then report the abort even after the pipe's retirement. */
     private volatile boolean aborted;
 
@@ -33,6 +44,7 @@ public final class ZmuxPipe {
         this.id = id;
         this.pipeId = PipeId.of(id);
         this.confirmation = confirmation;
+        accounting = session.driver.accounting(id);
         this.held = session.heldOptions.get(id); // a pipe held before this handle was made keeps its options after its end
     }
 
@@ -82,6 +94,11 @@ public final class ZmuxPipe {
     /** The pipe ID. */
     public PipeId id() {
         return pipeId;
+    }
+
+    /** The pipe's directional health as of one turn of the session loop. */
+    public Optional<PipeHealth> health() throws IOException {
+        return Optional.ofNullable((PipeHealth) session.run(op -> session.core.pipeHealth(id)));
     }
 
     /** The pipe ID's value, for the session's own calls. */
@@ -283,9 +300,9 @@ public final class ZmuxPipe {
     }
 
     /**
-     * Retires the pipe gracefully: its data moves to the other pipes first. Returns once the
-     * removal started; {@link #closed()} completes when it finished. Idempotent: on a pipe already
-     * removed, or of an ended session, it does nothing.
+     * Plans a graceful drain when other attachments cover both directions. Its data moves to
+     * those attachments and {@link #closed()} completes when removal finishes. Repeated calls,
+     * coverage blocks and calls after session termination leave the attachment as it is.
      */
     public void close() {
         remove(true);
@@ -308,7 +325,7 @@ public final class ZmuxPipe {
             return;
         }
         try {
-            gone(() -> { strandWarning(core); core.removePipe(id, graceful); });
+            gone(() -> remove(core, graceful));
         } catch (PipeGoneException | SessionClosedException e) {
             // Already removed, or released by the session's end: nothing left to do.
         } catch (InterruptedIOException e) {
@@ -318,6 +335,15 @@ public final class ZmuxPipe {
             removeQueued(graceful);
         } catch (IOException e) {
             // Other failures of a removal leave the pipe to the session's own end.
+        }
+    }
+
+    private void remove(Session core, boolean graceful) throws CoreException {
+        if (graceful) {
+            core.drainPipe(id);
+        } else {
+            strandWarning(core);
+            core.removePipe(id, false);
         }
     }
 
@@ -393,7 +419,7 @@ public final class ZmuxPipe {
     private void removeQueued(boolean graceful) {
         Session core = session.core;
         session.driver.post(() -> {
-            try { strandWarning(core); core.removePipe(id, graceful); } catch (CoreException e) { /* Already retired. */ }
+            try { remove(core, graceful); } catch (CoreException e) { /* Already retired. */ }
         });
     }
 

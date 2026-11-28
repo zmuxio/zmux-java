@@ -2,6 +2,7 @@ package io.zmux.internal.loop;
 
 import io.zmux.CarrierCounts;
 import io.zmux.CarrierId;
+import io.zmux.CarrierLoss;
 import io.zmux.CarrierSample;
 import io.zmux.CarrierSource;
 import io.zmux.Direction;
@@ -77,6 +78,11 @@ public final class CarrierSampler {
         private CarrierSource source;
         private boolean canCollect;
         private CarrierCounts baseline;
+        private CarrierCounts intervalBase;
+        private long intervalStart;
+        private volatile CarrierLoss loss;
+
+        CarrierLoss publishedLoss() { return loss; }
 
         Connection(CarrierId id, LongSupplier clock, Executor background) {
             this.id = id;
@@ -84,18 +90,17 @@ public final class CarrierSampler {
             this.background = background;
         }
 
-        synchronized boolean attach(CarrierProvider.Query provider) {
+        synchronized void attach(CarrierProvider.Query provider) {
             boolean firstUser = ++users == 1;
             var nextSource = provider == null ? CarrierSource.UNKNOWN : provider.source();
             if (source == null || source == CarrierSource.UNKNOWN) {
                 if (source != nextSource) adopt(nextSource, provider != null && provider.collect() != null);
             } else if (!firstUser || source != nextSource) {
                 // Keep the first known provider while attached and its source across reattachments.
-                return false;
+                return;
             }
             query = canCollect && provider != null && provider.collect() != null ? provider : null;
             if (query == null && sample == null) publish(clock.getAsLong(), null);
-            return query != null && sample == null;
         }
 
         private void adopt(CarrierSource next, boolean collects) {
@@ -103,6 +108,8 @@ public final class CarrierSampler {
             canCollect = collects;
             sample = null;
             baseline = null;
+            intervalBase = null;
+            loss = null;
             epoch++;
         }
 
@@ -133,7 +140,7 @@ public final class CarrierSampler {
             var provider = query;
             if (provider == null || inFlight != null
                     || (observed && clock.getAsLong() - lastObservation < INTERVAL)) return null;
-            inFlight = new Poll(epoch, provider);
+            inFlight = new Poll(epoch, provider, clock.getAsLong());
             return inFlight;
         }
 
@@ -153,22 +160,58 @@ public final class CarrierSampler {
 
         private synchronized void complete(Poll poll, long sampledAt, CarrierCounts counts) {
             if (inFlight != poll) return;
-            observed = true;
-            lastObservation = sampledAt;
-            if (epoch == poll.epoch()) publish(sampledAt, counts);
             inFlight = null;
+            if (epoch != poll.epoch()) return;
+            observed = true;
+            lastObservation = poll.startedAt();
+            if (sampledAt - lastObservation < 0 || clock.getAsLong() - sampledAt < 0) return;
+            if (sample != null && sampledAt - sample.sampledAt() <= 0) return;
+            publish(sampledAt, counts);
+        }
+
+        private void recordInterval(CarrierCounts counts, long at, boolean reset) {
+            if (reset || intervalBase == null || intervalBase.getClass() != counts.getClass()) {
+                loss = null;
+            } else {
+                long sent = sent(counts);
+                if (Long.compareUnsigned(sent, sent(intervalBase)) <= 0) return;
+                if (below(lost(counts), lost(intervalBase))) {
+                    intervalBase = counts;
+                    intervalStart = at;
+                    return;
+                }
+                var unit = switch (counts) {
+                    case QuicCounters q -> CarrierLoss.Unit.QUIC_PACKETS;
+                    case TcpPacketCounters t -> CarrierLoss.Unit.TCP_PACKETS;
+                    case TcpSegmentCounters t -> CarrierLoss.Unit.TCP_SEGMENTS;
+                };
+                loss = new CarrierLoss(id, generation, source, unit, intervalStart, at,
+                        lost(counts) - lost(intervalBase), sent - sent(intervalBase));
+            }
+            intervalBase = counts;
+            intervalStart = at;
         }
 
         private void publish(long sampledAt, CarrierCounts counts) {
             if (counts != null) {
-                if (reset(baseline, counts)) generation++;
+                boolean reset = reset(baseline, counts);
+                if (reset) generation++;
+                recordInterval(counts, sampledAt, reset);
+                // Publishers hold the connection monitor. Readers see one immutable snapshot.
+                CarrierSample previous = sample;
+                if (!reset && sameSent(baseline, counts) && previous != null && previous.counts().isPresent()) {
+                    if (!baseline.equals(counts)) sample = new CarrierSample(id, generation, Direction.OUTBOUND,
+                            source, previous.sampledAt(), Optional.of(counts));
+                    baseline = counts;
+                    return;
+                }
                 baseline = counts;
             }
             sample = new CarrierSample(id, generation, Direction.OUTBOUND, source, sampledAt, Optional.ofNullable(counts));
         }
     }
 
-    private record Poll(long epoch, CarrierProvider.Query query) {}
+    private record Poll(long epoch, CarrierProvider.Query query, long startedAt) {}
 
     static final class Registry {
         private final LongSupplier clock;
@@ -183,16 +226,14 @@ public final class CarrierSampler {
 
         Connection attach(Object identity, CarrierProvider.Query query) {
             Connection connection;
-            boolean initial;
             synchronized (this) {
                 for (var ref = reclaimed.poll(); ref != null; ref = reclaimed.poll()) {
                     if (ref instanceof Key key) connections.remove(key);
                 }
                 connection = connections.computeIfAbsent(new Key(identity, reclaimed),
                         ignored -> new Connection(new CarrierIdentity(), clock, background));
-                initial = connection.attach(query);
+                connection.attach(query);
             }
-            if (initial) connection.refresh();
             return connection;
         }
 
@@ -204,6 +245,30 @@ public final class CarrierSampler {
         synchronized Connection connection(Object identity) {
             return connections.get(new Key(identity, null));
         }
+    }
+
+    private static long sent(CarrierCounts counts) {
+        return switch (counts) {
+            case QuicCounters c -> c.packetsSent();
+            case TcpPacketCounters c -> c.packetsSent();
+            case TcpSegmentCounters c -> c.dataSegsOut();
+        };
+    }
+
+    private static long lost(CarrierCounts counts) {
+        return switch (counts) {
+            case QuicCounters c -> c.packetsLost();
+            case TcpPacketCounters c -> c.packetsRetransmitted();
+            case TcpSegmentCounters c -> c.totalRetrans();
+        };
+    }
+
+    private static boolean sameSent(CarrierCounts previous, CarrierCounts current) {
+        return switch (current) {
+            case QuicCounters next -> previous instanceof QuicCounters old && next.packetsSent() == old.packetsSent();
+            case TcpPacketCounters next -> previous instanceof TcpPacketCounters old && next.packetsSent() == old.packetsSent();
+            case TcpSegmentCounters next -> previous instanceof TcpSegmentCounters old && next.dataSegsOut() == old.dataSegsOut();
+        };
     }
 
     private static boolean reset(CarrierCounts previous, CarrierCounts current) {

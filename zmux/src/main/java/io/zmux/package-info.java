@@ -44,7 +44,7 @@
  *   <dt>record mode</dt>
  *   <dd>How a pipe's records are protected ({@link io.zmux.RecordMode}).</dd>
  *   <dt>carrier choice</dt>
- *   <dd>The dialer's choice among carrier kinds ({@link io.zmux.CarrierChoice}), never called a
+ *   <dd>The dialer's choice among carrier kinds ({@link io.zmux.SessionController}), never called a
  *       mode.</dd>
  *   <dt>fate group, key group</dt>
  *   <dd>A number the joiner gives its pipes that are expected to fail together; the key-exchange

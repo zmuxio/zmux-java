@@ -36,7 +36,6 @@ import io.netty.handler.codec.quic.QuicServerCodecBuilder;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.codec.quic.QuicStreamResetException;
-import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.concurrent.Future;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -56,7 +55,6 @@ public final class H3WirePeer {
     private static final long TIMEOUT_SECONDS = 8;
     static final int RESET_CODE = 23;
     static final int BODY_LIMIT = 65_536;
-    private static final String QUIC_REGISTRATION = "quic-registration";
     private static final String PAIR_HEADER = "zmux-pipe-pair";
     private static final String PAIR_TOKEN = "d2lyZS1wZWVyLXBhaXItMQ";
     private static final QuicOptions OPTIONS = QuicOptions.builder().bidirectionalStreams(16).lanes(12)
@@ -66,20 +64,19 @@ public final class H3WirePeer {
 
     public static void main(String[] args) throws Exception {
         if (args.length != 5 || !(args[0].equals("server") || args[0].equals("client"))
-                || !(args[1].equals("h3") || args[1].equals("wt"))) {
-            throw new IllegalArgumentException("server|client h3|wt PORT CERT KEY");
+                || !args[1].equals("h3")) {
+            throw new IllegalArgumentException("server|client h3 PORT CERT KEY");
         }
         int port = Integer.parseInt(args[2]);
-        boolean wt = args[1].equals("wt");
         if (args[0].equals("server")) {
-            try (Endpoint server = Endpoint.server(port, Path.of(args[3]).toFile(), Path.of(args[4]).toFile(), wt)) {
+            try (Endpoint server = Endpoint.server(port, Path.of(args[3]).toFile(), Path.of(args[4]).toFile())) {
                 System.out.println("READY " + server.port());
                 // The matrix also bounds and terminates this process after each scenario.
                 server.udp.closeFuture().await(30, TimeUnit.SECONDS);
             }
         } else {
-            try (Endpoint client = Endpoint.client(port, Path.of(args[3]).toFile(), wt)) {
-                client.exercise(wt);
+            try (Endpoint client = Endpoint.client(port, Path.of(args[3]).toFile())) {
+                client.exercise();
             }
             System.out.println("PASS " + args[1]);
         }
@@ -154,15 +151,19 @@ public final class H3WirePeer {
         private QuicChannel connection;
         private Connection state;
 
-        static Endpoint server(int port, File cert, File key, boolean wt) throws Exception {
+        static Endpoint server(int port, File cert, File key) throws Exception {
+            return server(port, cert, key, OPTIONS);
+        }
+
+        static Endpoint server(int port, File cert, File key, QuicOptions options) throws Exception {
             var endpoint = new Endpoint();
             try {
                 var tls = QuicSslContextBuilder.forServer(key, null, cert).applicationProtocols("h3").earlyData(false);
-                var codec = OPTIONS.apply(new QuicServerCodecBuilder()).sslContext(tls.build())
+                var codec = options.apply(new QuicServerCodecBuilder()).sslContext(tls.build())
                         .tokenHandler(InsecureQuicTokenHandler.INSTANCE)
                         .handler(new ChannelInitializer<QuicChannel>() {
                             @Override protected void initChannel(QuicChannel channel) {
-                                new Connection(true, wt, channel).install();
+                                new Connection(true, channel).install();
                             }
                         })
                         .streamOption(ChannelOption.AUTO_READ, false)
@@ -175,7 +176,7 @@ public final class H3WirePeer {
             }
         }
 
-        static Endpoint client(int port, File cert, boolean wt) throws Exception {
+        static Endpoint client(int port, File cert) throws Exception {
             var endpoint = new Endpoint();
             try {
                 var tls = QuicSslContextBuilder.forClient().trustManager(cert).endpointIdentificationAlgorithm("HTTPS")
@@ -187,7 +188,7 @@ public final class H3WirePeer {
                 endpoint.connection = await(QuicChannel.newBootstrap(endpoint.udp)
                         .handler(new ChannelInitializer<QuicChannel>() {
                             @Override protected void initChannel(QuicChannel channel) {
-                                endpoint.state = new Connection(false, wt, channel);
+                                endpoint.state = new Connection(false, channel);
                                 endpoint.state.install();
                             }
                         })
@@ -207,16 +208,14 @@ public final class H3WirePeer {
             await(binding);
         }
 
+        Channel datagramChannel() { return udp; }
+
         int port() {
             return ((InetSocketAddress) udp.localAddress()).getPort();
         }
 
-        void exercise(boolean wt) throws Exception {
+        void exercise() throws Exception {
             await(state.settings);
-            if (wt) {
-                state.wt.runClient(state);
-                return;
-            }
             var streaming = new Response();
             var stream = request("POST", "/stream", streaming, null, null);
             await(stream.writeAndFlush(new DefaultHttp3DataFrame(bytes("stream-"))));
@@ -280,7 +279,9 @@ public final class H3WirePeer {
 
         void health() throws Exception {
             var health = new Response();
-            await(request("GET", "/health", health, null, null).shutdownOutput());
+            // End this bodyless request in the HEADERS write. A peer can finish its
+            // response and stop reading before a separate shutdownOutput runs.
+            state.requestWithFin(state.requestHeaders("GET", "/health"), health);
             health.expect("ok");
         }
 
@@ -306,19 +307,16 @@ public final class H3WirePeer {
         final QuicChannel channel;
         final boolean server;
         final CompletableFuture<Http3Settings> settings = new CompletableFuture<>();
-        final H3WireWebTransport wt;
         private final Map<String, SplitPair> pairs = new HashMap<>();
 
-        Connection(boolean server, boolean wt, QuicChannel channel) {
+        Connection(boolean server, QuicChannel channel) {
             this.server = server;
             this.channel = channel;
-            this.wt = wt ? new H3WireWebTransport(this) : null;
         }
 
         void install() {
             var control = new SimpleChannelInboundHandler<Http3SettingsFrame>() {
                 @Override protected void channelRead0(ChannelHandlerContext ctx, Http3SettingsFrame frame) {
-                    if (wt != null) System.err.println("SETTINGS " + frame.settings());
                     settings.complete(frame.settings());
                 }
 
@@ -329,7 +327,6 @@ public final class H3WirePeer {
             };
             channel.closeFuture().addListener(done ->
                     settings.completeExceptionally(new IOException("connection closed before SETTINGS")));
-            var local = wt == null ? null : wt.settings();
             // The first connection handler decides when reads may start. QUIC can mark a child
             // readable before emitting the child-channel event to the parent pipeline.
             channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
@@ -338,13 +335,7 @@ public final class H3WirePeer {
                         ctx.fireChannelRead(message);
                         return;
                     }
-                    if (server && wt != null && stream.type() == QuicStreamType.BIDIRECTIONAL) {
-                        wt.routeBidirectional(ctx, stream);
-                        // The parent tail applies QUIC stream options and registers the child.
-                        ctx.pipeline().context(QUIC_REGISTRATION).fireChannelRead(stream);
-                    } else {
-                        ctx.fireChannelRead(stream);
-                    }
+                    ctx.fireChannelRead(stream);
                     stream.config().setAutoRead(true);
                 }
             });
@@ -353,25 +344,9 @@ public final class H3WirePeer {
                     @Override protected void initChannel(QuicStreamChannel stream) {
                         stream.pipeline().addLast(new Request(Connection.this));
                     }
-                }, control, wt == null ? null : wt::unknownStream, local, true, H3WireWebTransport::keepSetting));
-                if (wt != null) {
-                    channel.pipeline().addLast(QUIC_REGISTRATION, new ChannelInboundHandlerAdapter() {
-                        @Override public void channelRead(ChannelHandlerContext ctx, Object message) {
-                            // The prefix probe replays an already registered request channel to H3.
-                            if (!(message instanceof QuicStreamChannel stream) || !stream.isRegistered()) {
-                                ctx.fireChannelRead(message);
-                            }
-                        }
-                    });
-                }
+                }, control, null, null, true));
             } else {
-                channel.pipeline().addLast(new Http3ClientConnectionHandler(control, null,
-                        wt == null ? null : wt::unknownStream, local, true, H3WireWebTransport::keepSetting) {
-                    @Override protected void initBidirectionalStream(ChannelHandlerContext ctx, QuicStreamChannel stream) {
-                        if (wt == null) super.initBidirectionalStream(ctx, stream);
-                        else wt.routeBidirectional(null, stream);
-                    }
-                });
+                channel.pipeline().addLast(new Http3ClientConnectionHandler(control, null, null, null, true));
             }
         }
 
@@ -385,6 +360,12 @@ public final class H3WirePeer {
         QuicStreamChannel request(DefaultHttp3HeadersFrame headers, ChannelHandler inbound) throws Exception {
             var stream = await(Http3.newRequestStream(channel, inbound));
             await(stream.writeAndFlush(headers));
+            return stream;
+        }
+
+        QuicStreamChannel requestWithFin(DefaultHttp3HeadersFrame headers, ChannelHandler inbound) throws Exception {
+            var stream = await(Http3.newRequestStream(channel, inbound));
+            await(writeHeadWithFin(stream, headers));
             return stream;
         }
 
@@ -415,15 +396,17 @@ public final class H3WirePeer {
                 if (up.ended) {
                     done = true;
                     fin(down.stream);
-                    headWithFin(up.stream);
+                    writeHeadWithFin(up.stream, status("200")).addListener(write -> {
+                        if (!write.isSuccess()) up.stream.close();
+                    });
                     pairs.remove(up.token);
                 }
             }
         }
     }
 
-    private static void headWithFin(QuicStreamChannel stream) {
-        // Put the header-only reply and FIN into one native write, with the original HEADERS
+    private static ChannelFuture writeHeadWithFin(QuicStreamChannel stream, Http3HeadersFrame headers) {
+        // Put HEADERS and FIN into one native write, with the original HEADERS
         // promise. The HTTP/3 encoder emits this HEADERS frame in one ByteBuf.
         stream.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
             @Override public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
@@ -432,9 +415,7 @@ public final class H3WirePeer {
                         promise);
             }
         });
-        stream.writeAndFlush(status("200")).addListener(done -> {
-            if (!done.isSuccess()) stream.close();
-        });
+        return stream.writeAndFlush(headers);
     }
 
     private static final class Request extends SimpleChannelInboundHandler<Http3RequestStreamFrame> {
@@ -458,10 +439,7 @@ public final class H3WirePeer {
                 Http3Headers headers = head.headers();
                 path = headers.path() == null ? "" : headers.path().toString();
                 switch (path) {
-                    case "/health" -> {
-                        if (connection.wt == null) respondHealth();
-                        else connection.wt.serverClosed.thenRun(this::respondHealth);
-                    }
+                    case "/health", "/health-stop" -> respondHealth();
                     case "/stream", "/reset" -> stream.writeAndFlush(status("200"));
                     case "/exchange" -> { }
                     case "/split" -> {
@@ -470,11 +448,6 @@ public final class H3WirePeer {
                         upload = "POST".contentEquals(headers.method());
                         if (!upload) stream.writeAndFlush(status("200"));
                         connection.pair(token, this);
-                    }
-                    case "/wt" -> {
-                        if (connection.wt != null && connection.wt.accept(ctx, headers)) return;
-                        terminal = true;
-                        finishAfter(stream.writeAndFlush(status("400")));
                     }
                     default -> {
                         terminal = true;
@@ -497,7 +470,10 @@ public final class H3WirePeer {
 
         private void respondHealth() {
             stream.write(status("200"));
-            finishAfter(stream.writeAndFlush(new DefaultHttp3DataFrame(bytes("ok"))));
+            var fin = finishAfter(stream.writeAndFlush(new DefaultHttp3DataFrame(bytes("ok"))));
+            if (path.equals("/health-stop")) fin.addListener(done -> {
+                if (done.isSuccess()) stream.shutdownInput(RESET_CODE);
+            });
         }
 
         @Override public void userEventTriggered(ChannelHandlerContext ctx, Object event) {

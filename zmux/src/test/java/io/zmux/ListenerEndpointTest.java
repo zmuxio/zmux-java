@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(45)
 class ListenerEndpointTest {
-    static ZmuxConfig config(EventLoops loops) { return PipePoolTest.config(loops,6); }
+    static ZmuxConfig config(EventLoops loops) { return SessionTestSupport.config(loops,6); }
     static void exchange(ZmuxSession client, ZmuxSession server) throws Exception {
         try (var s = client.openStream()) {
             s.write(new byte[] {8,5,2}); s.finish();
@@ -22,8 +22,13 @@ class ListenerEndpointTest {
     static void closed(ZmuxSession a, ZmuxSession b) throws Exception {
         a.close(); b.close(); a.awaitClosed(); b.awaitClosed();
     }
+    private static io.zmux.internal.loop.ListenerHub hub(ZmuxListener listener) throws Exception {
+        var f = ZmuxListener.class.getDeclaredField("hub");
+        f.setAccessible(true);
+        return (io.zmux.internal.loop.ListenerHub) f.get(listener);
+    }
     static int registered(ZmuxListener listener, String name) throws Exception {
-        var f = ZmuxListener.class.getDeclaredField("hub"); f.setAccessible(true); var hub = f.get(listener);
+        var hub = hub(listener);
         var route = hub.getClass().getDeclaredField(name); route.setAccessible(true);
         synchronized (hub) {
             var value = route.get(hub);
@@ -31,7 +36,7 @@ class ListenerEndpointTest {
         }
     }
     static void empty(ZmuxListener listener) throws Exception {
-        PipePoolTest.await(() -> registered(listener,"registrations") == 0 && registered(listener,"sessions") == 0
+        SessionTestSupport.await(listener.config().eventLoops(), () -> registered(listener,"registrations") == 0 && registered(listener,"sessions") == 0
                 && registered(listener,"resources") == 0);
     }
     @Test void bothEndpointsJoinTheSameTcpSessionThroughTheirOwnListener() throws Exception {
@@ -81,14 +86,18 @@ class ListenerEndpointTest {
                         var ar = Zmux.resolveDuplicate(a1,a2,DuplicateTest.ids(1,2)); assertSame(a1,ar.survivor());
                         var cancel = new Cancellation();
                         var br = Zmux.resolveDuplicate(b1,b2,DuplicateTest.ids(2,1)
-                                .withRejoin(PipePool.of(attempt -> attempt.join(a.localAddress()))).withCancellation(cancel));
+                                .withRejoin(new MemberSpec("", java.util.List.of(new AttachmentSpec(Directions.BOTH, PipeOptions.defaults()))),
+                                        (setup, request) -> {
+                                            var socket = java.nio.channels.SocketChannel.open(a.localAddress());
+                                            var pipe = io.zmux.carrier.PipeChannel.pipe(socket, socket, io.zmux.carrier.Framing.BYTE_STREAM, 65536);
+                                            return new CarrierOpener.Opened(java.util.List.of(pipe));
+                                        }).withCancellation(cancel));
                         assertSame(b1,br.survivor()); assertTrue(br.rejoinStarted());
                         var result = br.rejoin().completion().toCompletableFuture().get(4,TimeUnit.SECONDS);
-                        assertNull(result.cause()); assertEquals(1,result.joined());
-                        assertEquals(0,CancellationTest.registrations(cancel));
+                        assertNull(result.error()); assertEquals(Attempt.Disposition.CONFIRMED, result.disposition());
                         old.finish(); assertArrayEquals(new byte[] {7},SessionTest.readAll(accepted));
                         accepted.finish(); assertArrayEquals(new byte[0],SessionTest.readAll(old));
-                        PipePoolTest.await(() -> a1.pipes().size() > 1);
+                        SessionTestSupport.await(a1, () -> a1.pipes().size() > 1);
                         a1.pipes().stream().filter(p -> p.id().value() == 0).findFirst().orElseThrow().abort();
                         exchange(a1,b1); exchange(b1,a1);
                     }
@@ -147,22 +156,46 @@ class ListenerEndpointTest {
         }
     }
     @Test void failedExternalStartupRollsBackAllRoutingAndResources() throws Exception {
-        try (EventLoops loops = EventLoops.create(2); var endpoint = Zmux.listener(ListenerConfig.of(config(loops)))) {
-            var readerClosed = new java.util.concurrent.atomic.AtomicInteger();
-            var writerClosed = new java.util.concurrent.atomic.AtomicInteger();
-            PipeReader reader = new PipeReader() {
+        var physical = new CompletableFuture<Void>();
+        var memoryReturned = new CompletableFuture<Void>();
+        try (EventLoops loops = EventLoops.create(2);
+             var endpoint = Zmux.listener(ListenerConfig.builder().session(config(loops))
+                     .memoryPressureListener((used, limit) -> { if (used == 0) memoryReturned.complete(null); }).build())) {
+            var closed = new CountDownLatch(2);
+            var readerCloses = new java.util.concurrent.atomic.AtomicInteger();
+            var writerCloses = new java.util.concurrent.atomic.AtomicInteger();
+            class Reader implements PipeReader, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
                 @Override public void start(Sink sink) { throw new IllegalStateException("start failed"); }
-                @Override public void close() { readerClosed.incrementAndGet(); }
-            };
-            PipeWriter writer = new PipeWriter() {
-                @Override public void write(io.zmux.carrier.OutboundBatch data, Completion done) { done.failed(new java.io.IOException("not started")); }
-                @Override public void close() { writerClosed.incrementAndGet(); }
-            };
-            assertThrows(java.io.IOException.class,() -> endpoint.open(PipeIo.of(reader,writer), Role.CLIENT));
-            empty(endpoint);
-            // The halves are the host's code: they close off the loop, after open has thrown.
-            PipePoolTest.await(() -> readerClosed.get() == 1 && writerClosed.get() == 1);
-            assertEquals(1,readerClosed.get()); assertEquals(1,writerClosed.get()); assertEquals(0,endpoint.adapter().memoryUsed());
+                @Override public void close() { readerCloses.incrementAndGet(); closed.countDown(); }
+                @Override public CompletionStage<Void> released() { return physical; }
+            }
+            class Writer implements PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+                @Override public void write(OutboundBatch data, Completion done) { done.failed(new java.io.IOException("not started")); }
+                @Override public void close() { writerCloses.incrementAndGet(); closed.countDown(); }
+                @Override public CompletionStage<Void> released() { return physical; }
+            }
+            try {
+                assertThrows(java.io.IOException.class, () -> endpoint.open(PipeIo.of(new Reader(), new Writer()), Role.CLIENT));
+                closed.await();
+                long held = endpoint.adapter().memoryUsed();
+                assertTrue(held > 0, "the carrier still owns its input reservation after close was called");
+                endpoint.setLimits(endpoint.limits().toBuilder().memoryBudget(held).build());
+                var drained = new CompletableFuture<Void>();
+                var hub = hub(endpoint);
+                hub.beginShutdown("startup failure test");
+                hub.onDrained(() -> drained.complete(null));
+                physical.complete(null);
+                memoryReturned.get(30, TimeUnit.SECONDS);
+                drained.get(30, TimeUnit.SECONDS);
+                assertEquals(0, registered(endpoint, "registrations"));
+                assertEquals(0, registered(endpoint, "sessions"));
+                assertEquals(0, registered(endpoint, "resources"));
+                assertEquals(0, endpoint.adapter().memoryUsed());
+                assertEquals(1, readerCloses.get());
+                assertEquals(1, writerCloses.get());
+            } finally {
+                physical.complete(null);
+            }
         }
     }
     @Test void repeatedEndpointSessionsUnregisterWithoutRetainingClosedDrivers() throws Exception {

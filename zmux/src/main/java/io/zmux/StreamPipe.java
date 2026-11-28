@@ -91,7 +91,7 @@ final class StreamPipe {
                 int n = batch.segmentCount();
                 if (n == 0) { done.completed(); return; }
                 ByteBuffer[] views = batch.segments(null);
-                io.zmux.internal.core.ReadBuf holder = releasing(batch.retain());
+                io.zmux.internal.buffer.ReadBuf holder = releasing(batch.retain());
                 List<StreamRecv.Chunk> owned = new ArrayList<>(n);
                 for (int i = 0; i < n; i++) { holder.ref(); owned.add(new StreamRecv.Chunk(views[i], holder, false)); }
                 holder.unref();
@@ -162,7 +162,7 @@ final class StreamPipe {
     }
 
     /** A read buffer that owns kept: releasing its last reference closes the retained batch. */
-    private static io.zmux.internal.core.ReadBuf releasing(OutboundBatch.Retained kept) {
-        return new io.zmux.internal.core.ReadBuf(EMPTY, ignored -> kept.close());
+    private static io.zmux.internal.buffer.ReadBuf releasing(OutboundBatch.Retained kept) {
+        return new io.zmux.internal.buffer.ReadBuf(EMPTY, ignored -> kept.close());
     }
 }

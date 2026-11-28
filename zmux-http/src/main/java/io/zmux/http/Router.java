@@ -107,7 +107,8 @@ final class Router extends ChannelInboundHandlerAdapter implements HttpTransport
             host(r);
             return;
         }
-        if (Requests.earlyData(r)) {
+        if (Requests.earlyData(r) || (Requests.h3(ctx.channel())
+                && Requests.outerSecurity(ctx.channel()) == io.zmux.Admission.OuterSecurity.EARLY_DATA)) {
             // A request forwarded from early data takes no carrier: the intermediary repeats it. The upgrade
             // failed: a setup failure of the listener.
             ep.listener.adapter().countSetupFailure();
@@ -345,10 +346,25 @@ final class Router extends ChannelInboundHandlerAdapter implements HttpTransport
         }
     }
 
+    @Override public java.time.Duration setupTimeout() { return ep.listener.adapter().firstRecordTimeout(); }
+
+    @Override public io.zmux.adapter.Handled admitUpgrade(HttpRequest head, PipeIo first, io.zmux.adapter.Upgrade upgrade,
+            java.util.function.Function<java.util.function.BooleanSupplier, java.util.concurrent.CompletionStage<Void>> fallback) {
+        var ch = ctx.channel();
+        var hint = new JoinHint("", false, Requests.source(ch, head, ep.trusted), Requests.peer(ch),
+                RequestHead.of(Requests.fields(head.headers())));
+        var handled = ep.listener.adapter().admitFirst(Requests.tlsPipe(first, ch), hint, upgrade, requestFallback(fallback));
+        trackH3Setup(handled);
+        withdrawOnClose(ch, handled);
+        return handled;
+    }
+
     @Override public void afterSetup(Runnable done) {
         if (h3Setup == null) done.run();
         else AdapterPorts.setup(h3Setup).onFinished(() -> Loops.run(ctx.channel().eventLoop(), done, NOTHING));
     }
+
+    @Override public io.zmux.adapter.Handled currentSetup() { return h3Setup; }
 
     @Override public void stop() {
         var pending = h3Setup;

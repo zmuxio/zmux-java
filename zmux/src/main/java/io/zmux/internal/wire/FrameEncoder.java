@@ -190,12 +190,18 @@ public final class FrameEncoder {
         varints(b, pipeId, seq, status, priority);
     }
 
+    public static void datagramAckHeader(ByteBuffer b, long pipe, int channel, long largest, long delay, int ranges, long first) {
+        VarInt.put(b, FrameType.DATAGRAM_ACK);
+        VarInt.put(b, pipe);
+        b.put((byte) channel);
+        varints(b, largest, delay, ranges, first);
+    }
+
     /**
      * Re-encodes a decoded frame in its shortest form (tests and tools; the core
      * builds frames with the encoders above).
      */
     public static void encode(ByteBuffer b, Frame f) {
-        ByteBuffer s = f.src;
         switch (f.kind) {
             case PADDING -> {
                 for (int k = 0; k < f.count; k++) b.put((byte) 0);
@@ -211,7 +217,7 @@ public final class FrameEncoder {
                 } else {
                     streamHeader(b, f.streamId, f.offset, f.dataLen, f.fin, f.hasLength);
                 }
-                b.put(s.slice(f.dataPos, f.dataLen));
+                f.writeData(b);
             }
             case RESET_STREAM -> resetStream(b, f.streamId, f.code, f.finalSize);
             case RESET_STREAM_AT -> resetStreamAt(b, f.streamId, f.code, f.finalSize, f.reliableSize);
@@ -225,7 +231,14 @@ public final class FrameEncoder {
             case CONNECTION_CLOSE -> close(b, f.application, f.code, f.errorFrameType, f.dataBytes());
             case DATAGRAM -> {
                 datagramHeader(b, f.dataLen, f.hasLength);
-                b.put(s.slice(f.dataPos, f.dataLen));
+                f.writeData(b);
+            }
+            case DATAGRAM_ACK -> {
+                datagramAckHeader(b, f.pipeId, f.datagramChannel, f.value, f.datagramAckDelay, f.count, f.firstDatagramRange);
+                for (int pos = f.entriesPos; pos < f.entriesEnd; ) {
+                    VarInt.put(b, f.varint(pos, f.entriesEnd));
+                    pos += VarInt.lengthOf(f.get(pos));
+                }
             }
             case TRANSPORT_PARAMETERS -> transportParameters(b, f.dataBytes());
             case PING -> ping(b, f.response, f.value);
@@ -236,11 +249,7 @@ public final class FrameEncoder {
                 Frame.AckEntries it = f.entries(new Frame.AckEntries());
                 while (it.next()) ackEntry(b, it.pipeId, it.lane, it.position, it.delay);
             }
-            case PIPE_LANE -> {
-                byte[] key = new byte[16];
-                s.get(f.laneKeyPos, key);
-                pipeLane(b, key, f.pipeId, f.lane);
-            }
+            case PIPE_LANE -> pipeLane(b, io.zmux.internal.core.CarrierAdmission.laneKey(f), f.pipeId, f.lane);
             case PIPE_PING -> pipePing(b);
             case PIPE_ABANDON -> pipeAbandon(b, f.pipeId, f.code);
             case PIPE_STATUS -> pipeStatus(b, f.pipeId, f.seq, f.status, f.priority);

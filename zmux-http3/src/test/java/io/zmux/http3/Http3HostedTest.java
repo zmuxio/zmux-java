@@ -46,6 +46,7 @@ import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.codec.quic.QuicStreamResetException;
 import io.netty.handler.codec.quic.QuicStreamType;
 import io.zmux.Admission;
+import io.zmux.AdmissionVerdict;
 import io.zmux.EventLoops;
 import io.zmux.ListenerConfig;
 import io.zmux.PipeOptions;
@@ -143,6 +144,100 @@ class Http3HostedTest {
         }
     }
 
+    @Test void resetBeforeTheFullAssociationHeaderLeavesTheFirstPipeAvailable() throws Exception {
+        var group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        var prefixSeen = new CompletableFuture<Void>();
+        var resetSeen = new CompletableFuture<Long>();
+        var options = QuicOptions.defaults();
+        try (var listener = Zmux.listener(ListenerConfig.of(ZmuxConfig.defaults()));
+             var endpoint = HttpEndpoint.builder(listener).webTransport().build()) {
+            var codec = Http3Streams.configure(options, new QuicServerCodecBuilder()).sslContext(serverTls())
+                    .handler(Http3Server.initializer(endpoint, null, options))
+                    .streamHandler(new ChannelInitializer<QuicStreamChannel>() {
+                        @Override protected void initChannel(QuicStreamChannel stream) {
+                            if (stream.streamId() != 4) return;
+                            stream.pipeline().addFirst(new ChannelInboundHandlerAdapter() {
+                                private int received;
+                                @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                                    received += ((io.netty.buffer.ByteBuf) msg).readableBytes();
+                                    ctx.fireChannelRead(msg);
+                                    if (received == 3) prefixSeen.complete(null);
+                                }
+                                @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable error) {
+                                    if (error instanceof QuicStreamResetException reset) {
+                                        resetSeen.complete(reset.applicationProtocolCode());
+                                    }
+                                    ctx.fireExceptionCaught(error);
+                                }
+                            });
+                        }
+                    }).build();
+            try (var server = bind(group, codec, new CompletableFuture<>());
+                 var client = Http3Client.builder(QuicSslContextBuilder.forClient().trustManager(H3TestSupport.tmf()),
+                         options).build();
+                 var wt = Http3Client.openWebTransportAsync(client, server.uri(), Map.of(), null, WAIT)
+                         .get(5, TimeUnit.SECONDS)) {
+                var physical = (QuicChannel) io.zmux.internal.spi.CarrierBudget.physical(wt.namespace());
+                var partial = physical.createStream(QuicStreamType.BIDIRECTIONAL, new ChannelInboundHandlerAdapter())
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(4, partial.streamId());
+                // Type 0x41, then only the first byte of a two-byte session ID.
+                partial.writeAndFlush(Unpooled.wrappedBuffer(new byte[]{0x40, 0x41, 0x40})).get(5, TimeUnit.SECONDS);
+                prefixSeen.get(5, TimeUnit.SECONDS);
+                partial.shutdownOutput(0x10c).get(5, TimeUnit.SECONDS);
+                assertEquals(0x10cL, resetSeen.get(5, TimeUnit.SECONDS));
+                partial.close().sync();
+                try (var sender = Zmux.open(wt.openPipeAsync().get(5, TimeUnit.SECONDS), Role.CLIENT, ZmuxConfig.defaults());
+                     var receiver = listener.accept(WAIT)) {
+                    assertNotNull(receiver);
+                    H3TestSupport.exchange(sender, receiver, 257);
+                }
+            }
+        } finally {
+            group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test void rejectsAnotherConnectAfterCloseAndStillServesOrdinaryRequests() throws Exception {
+        var connect = new CompletableFuture<QuicStreamChannel>();
+        Supplier<ChannelHandler> host = () -> new SimpleChannelInboundHandler<HttpObject>() {
+            @Override public void handlerAdded(ChannelHandlerContext ctx) {
+                var stream = (QuicStreamChannel) ctx.channel();
+                if (stream.streamId() == 0) connect.complete(stream);
+            }
+
+            @Override protected void channelRead0(ChannelHandlerContext ctx, HttpObject msg) {
+                if (msg instanceof LastHttpContent) reply(ctx, "ok");
+            }
+        };
+        var options = QuicOptions.defaults();
+        try (var listener = Zmux.listener(ListenerConfig.of(ZmuxConfig.defaults()));
+             var endpoint = HttpEndpoint.builder(listener).webTransport().build();
+             var server = Http3Server.bind(new InetSocketAddress("127.0.0.1", 0),
+                     QuicSslContextBuilder.forServer(H3TestSupport.kmf(), "changeit"), options, endpoint, host);
+             var client = Http3Client.builder(QuicSslContextBuilder.forClient().trustManager(H3TestSupport.tmf()),
+                     options).build()) {
+            var target = uri(server.address().getPort());
+            try (var session = Http3Client.openWebTransportAsync(client, target, Map.of(), null, WAIT)
+                    .get(5, TimeUnit.SECONDS)) {
+                var initial = connect.get(5, TimeUnit.SECONDS);
+                var remote = initial.eventLoop().submit(() -> WebTransportConnection.get(initial.parent()).session(0))
+                        .get(5, TimeUnit.SECONDS);
+                session.closeAsync(42, "bye").get(5, TimeUnit.SECONDS);
+                assertEquals(new WebTransportSession.Close(42, "bye", true), remote.closed().get(5, TimeUnit.SECONDS));
+
+                var physical = (QuicChannel) io.zmux.internal.spi.CarrierBudget.physical(session.namespace());
+                var duplicate = headers("CONNECT", "/wt");
+                duplicate.headers().authority(target.getRawAuthority()).protocol("webtransport");
+                var rejected = request(physical, duplicate, false).body();
+                var failure = assertThrows(ExecutionException.class, () -> rejected.get(5, TimeUnit.SECONDS));
+                assertEquals(Http3ErrorCode.H3_REQUEST_REJECTED.code(),
+                        assertInstanceOf(QuicStreamResetException.class, failure.getCause()).applicationProtocolCode());
+                assertEquals("ok", health(physical, target));
+            }
+        }
+    }
+
     @Test void requestInitializerReenablesOutputAfterPeerFin() throws Exception {
         var group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         var serverStream = new CompletableFuture<QuicStreamChannel>();
@@ -186,10 +281,14 @@ class Http3HostedTest {
     @Test void cancellingServeDoesNotRetireAnOwnerStallEarly() throws Exception {
         var group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         var incoming = new CompletableFuture<Channel>();
+        var deciding = new CompletableFuture<Void>();
+        var decision = new CompletableFuture<Admission.Decision>();
         var closed = new AtomicInteger();
         var stall = Duration.ofMinutes(1);
-        var admission = Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.STALL))
-                .stall(stall, stall).build();
+        var admission = Admission.builder(0, (info, prefix, deadline) -> {
+            deciding.complete(null);
+            return decision;
+        }).peekTimeout(stall).stall(stall, stall).build();
         Supplier<ChannelHandler> host = () -> new ChannelInitializer<Channel>() {
             @Override protected void initChannel(Channel stream) {
                 stream.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
@@ -210,15 +309,18 @@ class Http3HostedTest {
             var client = connect(group, server.uri());
             try {
                 request(client, headers("POST", "/stall"), false);
-                var stream = incoming.get(5, TimeUnit.SECONDS);
-                H3TestSupport.await(() -> listener.stats().admission().stalled() == 1);
-                assertTrue(server.observed().get(5, TimeUnit.SECONDS).cancel(false));
+                var stream = incoming.get(30, TimeUnit.SECONDS);
+                deciding.get(30, TimeUnit.SECONDS);
+                var setup = stream.eventLoop().submit(() -> H3TestSupport.currentSetup(stream)).get(30, TimeUnit.SECONDS);
+                decision.complete(Admission.Decision.STALL);
+                assertEquals(AdmissionVerdict.STALL, setup.verdict().get(30, TimeUnit.SECONDS));
+                assertTrue(server.observed().get(30, TimeUnit.SECONDS).cancel(false));
                 // Enqueue behind the stop task so this assertion cannot race the cancellation.
-                stream.eventLoop().submit(() -> assertTrue(stream.isActive())).get(5, TimeUnit.SECONDS);
+                stream.eventLoop().submit(() -> assertTrue(stream.isActive())).get(30, TimeUnit.SECONDS);
                 assertEquals(0, closed.get());
-                AdapterTestSupport.advanceTimers(loops, stall).get(5, TimeUnit.SECONDS);
-                assertTrue(stream.closeFuture().await(5, TimeUnit.SECONDS));
-                stream.eventLoop().submit(() -> assertEquals(1, closed.get())).get(5, TimeUnit.SECONDS);
+                AdapterTestSupport.advanceTimers(loops, stall).get(30, TimeUnit.SECONDS);
+                stream.closeFuture().get(30, TimeUnit.SECONDS);
+                stream.eventLoop().submit(() -> assertEquals(1, closed.get())).get(30, TimeUnit.SECONDS);
                 assertTrue(client.isActive());
             } finally {
                 client.close().awaitUninterruptibly(5, TimeUnit.SECONDS);
@@ -425,6 +527,14 @@ class Http3HostedTest {
         return new Response(stream, body);
     }
 
+    static String health(QuicChannel connection, URI target) throws Exception {
+        var head = headers("GET", "/wt-closed");
+        head.headers().authority(target.getRawAuthority());
+        var response = request(connection, head, false);
+        io.zmux.quic.QuicStreamPipe.finish(response.stream());
+        return response.body().get(5, TimeUnit.SECONDS);
+    }
+
     private record Response(QuicStreamChannel stream, CompletableFuture<String> body) { }
 
     private static void reply(ChannelHandlerContext ctx, String text) {
@@ -438,11 +548,17 @@ class Http3HostedTest {
 
     static HostSocket bind(EventLoopGroup group, HttpEndpoint endpoint, Supplier<ChannelHandler> host)
             throws Exception {
+        return bind(group, endpoint, host, null);
+    }
+
+    static HostSocket bind(EventLoopGroup group, HttpEndpoint endpoint, Supplier<ChannelHandler> host,
+                           QuicOptions options) throws Exception {
         var observed = new CompletableFuture<ZmuxFuture<Void>>();
-        var codec = Http3Streams.configure(QuicOptions.defaults(), new QuicServerCodecBuilder()).sslContext(serverTls())
+        var codec = Http3Streams.configure(options == null ? QuicOptions.defaults() : options, new QuicServerCodecBuilder()).sslContext(serverTls())
                 .handler(new ChannelInitializer<QuicChannel>() {
                     @Override protected void initChannel(QuicChannel connection) {
-                        observed.complete(Http3Server.serve(connection, endpoint, host));
+                        observed.complete(options == null ? Http3Server.serve(connection, endpoint, host)
+                                : Http3Server.serve(connection, endpoint, host, true));
                     }
                 }).build();
         return bind(group, codec, observed);

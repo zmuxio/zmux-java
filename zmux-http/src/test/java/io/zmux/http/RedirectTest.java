@@ -3,10 +3,7 @@ package io.zmux.http;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.zmux.CarrierCache;
-import io.zmux.CarrierChoice;
 import io.zmux.CarrierChoiceException;
-import io.zmux.CarrierChoicePolicy;
 import io.zmux.HttpRedirectException;
 import io.zmux.PipeOptions;
 import io.zmux.Role;
@@ -161,6 +158,8 @@ class RedirectTest {
                 }, io.netty.channel.nio.NioIoHandler.newFactory());
         var up = new java.net.ServerSocket(0, 8, java.net.InetAddress.getLoopbackAddress());
         var body = new java.io.ByteArrayOutputStream();
+        String want = "before during";
+        var received = new java.util.concurrent.CompletableFuture<String>();
         Thread.ofVirtual().start(() -> {
             try (var s = up.accept(); var in = new java.io.DataInputStream(s.getInputStream())) {
                 for (String line = readLine(in); !line.isEmpty(); line = readLine(in)) { /* the head */ }
@@ -169,10 +168,11 @@ class RedirectTest {
                     if (n == 0) return;
                     byte[] b = in.readNBytes(n);
                     readLine(in);
-                    synchronized (body) { body.write(b); body.notifyAll(); }
+                    body.write(b);
+                    if (body.size() >= want.length()) received.complete(body.toString(java.nio.charset.StandardCharsets.ISO_8859_1));
                 }
-            } catch (java.io.IOException | RuntimeException ignored) {
-                // Gone.
+            } catch (java.io.IOException | RuntimeException error) {
+                received.completeExceptionally(error);
             }
         });
         var hold = new java.util.concurrent.CountDownLatch(1);
@@ -188,15 +188,13 @@ class RedirectTest {
             Object original = provider.carrierIdentity();
             assertNotNull(original);
             var changes = new java.util.concurrent.atomic.AtomicInteger();
-            var unwatch = provider.watchCarrier(changes::incrementAndGet);
+            var redirect = new java.util.concurrent.CompletableFuture<Void>();
+            var unwatch = provider.watchCarrier(() -> {
+                changes.incrementAndGet();
+                if (provider.carrierIdentity() == null) redirect.complete(null);
+            });
             write(pipe, "before ");
-            // The front answers once it read the head; the redirect's new connection then waits
-            // for the held loop to register it.
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
-            while (((io.netty.util.concurrent.SingleThreadEventExecutor) second).pendingTasks() == 0) {
-                assertTrue(System.nanoTime() < deadline, "no redirect");
-                Thread.sleep(1);
-            }
+            redirect.get(20, java.util.concurrent.TimeUnit.SECONDS);
             assertNull(provider.carrierIdentity());
             assertEquals(1, changes.get());
             var during = new java.util.concurrent.CompletableFuture<Void>();
@@ -207,11 +205,7 @@ class RedirectTest {
             assertNotSame(original, provider.carrierIdentity());
             assertEquals(2, changes.get());
             unwatch.run();
-            String want = "before during";
-            synchronized (body) {
-                while (body.size() < want.length() && System.nanoTime() < deadline) body.wait(100);
-                assertEquals(want, body.toString(java.nio.charset.StandardCharsets.ISO_8859_1));
-            }
+            assertEquals(want, received.get(20, java.util.concurrent.TimeUnit.SECONDS));
             pipe.writer().close();
         } finally {
             hold.countDown();
@@ -260,30 +254,28 @@ class RedirectTest {
             assertEquals("too many redirects", e.reason());
             assertEquals(Redirects.DEFAULT_MAX + 1, loop.seen.size());
             // A streaming carrier opens at once and fails with the refusal: the dial reports it as refused.
-            var mode = CarrierChoice.explicit(c.streamingCandidate(away.base, Map.of()));
-            var me = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(mode, f.config, null));
+            var mode = c.streamingCandidate(away.base, Map.of());
+            var me = assertThrows(CarrierChoiceException.class, () -> ModeHttpTest.open(f.config, List.of(mode)));
             assertEquals(io.zmux.CandidateOutcome.REFUSED, me.results().getFirst().outcome(), me.toString());
         }
     }
 
-    @Test void theModeCacheKeepsTheFinalUrl() throws Exception {
+    @Test void theAdapterKeepsTheValidatedFinalUrl() throws Exception {
         try (var f = Fixture.plain(b -> b.streaming()); var c = f.client(b -> b.http1());
              var front = new Front(f.base, 308, u -> "/z")) {
             f.diagnostics = front::describe;
-            CarrierCache cache = new CarrierCache();
             var cand = c.streamingCandidate(front.base, Map.of());
-            try (var s = Zmux.dial(CarrierChoice.auto(cand), f.config, CarrierChoicePolicy.of(cache, "k"))) {
+            try (var s = ModeHttpTest.open(f.config, List.of(cand))) {
                 f.echo(s);
             }
             String fin = front.base.resolve("/z").toString();
             assertEquals(fin, cand.target().url());
-            var entry = cache.snapshot().entries().getFirst();
-            assertEquals(fin, entry.url());
-            // A later carrier starts at the final URL: the front sees no more requests.
             int before = front.seen.size();
-            try (var s = Zmux.dial(CarrierChoice.auto(cand), f.config, CarrierChoicePolicy.of(cache, "k"))) {
+            assertTrue(before > 0);
+            try (var s = ModeHttpTest.open(f.config, List.of(cand))) {
                 f.echo(s);
             }
+            assertEquals(fin, cand.target().url());
             assertEquals(before, front.seen.size());
         }
     }

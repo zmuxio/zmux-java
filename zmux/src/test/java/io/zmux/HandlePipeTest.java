@@ -26,7 +26,7 @@ class HandlePipeTest {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         try (var loops = EventLoops.create(1);
              var listener = Zmux.listener(ListenerConfig.builder().session(ZmuxConfig.builder().eventLoops(loops).build())
-                     .maxPendingPerSource(1).inboundTransform((io, ctx) -> {
+                     .maxPendingPerSource(2).inboundTransform((io, ctx) -> {
                          calls.incrementAndGet(); return CompletableFuture.completedFuture(io);
                      }).build())) {
             loops.group().next().execute(() -> { paused.countDown(); release.join(); });
@@ -307,12 +307,18 @@ class HandlePipeTest {
         for (boolean allow : new boolean[]{true, false}) {
             var called = new CountDownLatch(1);
             try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-                var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+                AuthorizeJoin authorize = request -> {
+                    if (allow) return true;
+                    called.countDown();
+                    throw new IllegalStateException("authorization");
+                };
+                var cfg = ZmuxConfig.builder().eventLoops(loops).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+                        .sessionPolicy(new SessionPolicy(0, 0, authorize, new CapacityLimits(4)))
                         .allowRecordMode((i, m, v) -> { if (!allow) return true; called.countDown(); throw new IllegalStateException("mode"); })
-                        .authorizeJoin((s, id) -> { if (allow) return true; called.countDown(); throw new IllegalStateException("authorization"); }).build();
+                        .build();
                 var rejected = new java.util.concurrent.atomic.AtomicInteger();
-                try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(1)
-                        .onReject(info -> { rejected.incrementAndGet(); return RejectInfo.Action.STALL; }).build());
+                try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(2)
+                        .onReject(info -> rejected.incrementAndGet()).rejection(RejectInfo.Action.STALL).build());
                      var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept()) {
                     var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                     var counted = new TakeoverTest.Counted();
@@ -337,7 +343,7 @@ class HandlePipeTest {
     @Test void refusedReplyWithAStalledWriterIsClosedAtTheJoinDeadline() throws Exception {
         // HS-04.
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeHeadroom(0)
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2, 0)))
                     .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).joinTimeout(java.time.Duration.ofMillis(850)).build();
             try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var client = Zmux.connect(listener.localAddress(), ListenerEntryTest.config(loops)); var server = listener.accept()) {
@@ -443,7 +449,7 @@ class HandlePipeTest {
 
     @Test void readOnlySessionParametersCannotPublishABootstrap() throws Exception {
         try (EventLoops loops = EventLoops.create(1); var workers = Executors.newVirtualThreadPerTaskExecutor();
-             var listener = Zmux.listener(ListenerConfig.builder().session(ListenerEntryTest.config(loops)).maxPendingPerSource(1).build())) {
+             var listener = Zmux.listener(ListenerConfig.builder().session(ListenerEntryTest.config(loops)).maxPendingPerSource(2).build())) {
             var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
             var counted = new TakeoverTest.Counted();
             var dialing = workers.submit(() -> Zmux.open(pair[0], Role.CLIENT, listener.config()));
@@ -463,7 +469,7 @@ class HandlePipeTest {
         // HS-01.
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var cfg = ListenerEntryTest.config(loops);
-            var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(1).build();
+            var lc = ListenerConfig.builder().session(cfg).maxPendingPerSource(2).build();
             try (var listener = Zmux.listen(NetworkTest.any(), lc);
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept()) {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -720,10 +726,10 @@ class HandlePipeTest {
         var authorized = new CountDownLatch(1);
         var resume = new CompletableFuture<Void>();
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4)
+            var cfg = ZmuxConfig.builder().eventLoops(loops)
                     .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
-                    .authorizeJoin((s, id) -> { authorized.countDown(); resume.join(); return true; }).build();
-            try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(1).build());
+                    .sessionPolicy(new SessionPolicy(0, 0, request -> { authorized.countDown(); resume.join(); return true; }, new CapacityLimits(4))).build();
+            try (var listener = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(2).build());
                  var client = Zmux.connect(listener.localAddress(), cfg); var server = listener.accept()) {
                 var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var handled = listener.adapter().handle(pair[1], JoinHint.inBand(null));
@@ -780,7 +786,7 @@ class HandlePipeTest {
         var request = io.zmux.internal.loop.ListenerHub.Entry.Request.class.getRecordComponents();
         assertEquals(io.zmux.adapter.Upgrade.class, request[2].getType());
         // An explicit Java null is still possible in any reference-typed parameter.
-        try (var l = Zmux.listener(ListenerConfig.builder().maxPendingPerSource(1).fallback(t -> { throw new AssertionError("headless takeover"); })
+        try (var l = Zmux.listener(ListenerConfig.builder().maxPendingPerSource(2).fallback(t -> { throw new AssertionError("headless takeover"); })
                 .admission(Admission.builder(0, Admission.Decider.immediate((i,p) -> Admission.Decision.TAKEOVER)).build()).build())) {
             for (boolean reserved : new boolean[]{true, false}) {
                 var closed = new CountDownLatch(2);
@@ -888,7 +894,7 @@ class HandlePipeTest {
                 throw failure;
             }
         };
-        try (var l = Zmux.listener(ListenerConfig.builder().maxPendingPerSource(1)
+        try (var l = Zmux.listener(ListenerConfig.builder().maxPendingPerSource(2)
                 .admission(Admission.builder(0, Admission.Decider.immediate((i,p) -> Admission.Decision.FALLBACK)).build())
                 .fallback(t -> stage).build())) {
             var counted = new TakeoverTest.Counted();

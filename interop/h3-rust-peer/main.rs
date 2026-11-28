@@ -15,14 +15,18 @@ use quinn::rustls::{
     self,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
+use tokio::io::{copy_bidirectional, duplex, join};
 use tokio::sync::{Mutex, oneshot};
-use zmux_webtransport::{Url, web_transport_quinn as wt};
+use zmux::{Config, Listener, ListenerConfig, PipeId, PipeIo, Session};
+use zmux_webtransport as wt;
 
 type Fail = Box<dyn Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Fail>;
 type H3Send = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type PairTable = Arc<Mutex<HashMap<String, PairHalf>>>;
 
+const MARKER: &[u8] = b"owned-wt";
+const ARMED: &[u8] = b"cancel-ready";
 const PAIR_HEADER: &str = "zmux-pipe-pair";
 
 enum PairHalf {
@@ -357,10 +361,9 @@ async fn serve_wt(
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
     .with_single_cert(certificates, key)?;
+    let options = wt_options();
     let mut config = zmux_h3::server_config(tls, &zmux_h3::Options::default())?;
-    config.transport_config(Arc::new(
-        zmux_webtransport::Options::default().transport_config(),
-    ));
+    config.transport_config(Arc::new(options.transport_config()));
     let endpoint = quinn::Endpoint::server(config, loopback(port))?;
     println!("READY {}", endpoint.local_addr()?.port());
     let conn = endpoint.accept().await.ok_or("endpoint closed")?.await?;
@@ -368,36 +371,137 @@ async fn serve_wt(
         .await
         .map_err(|e| format!("WT negotiation failed: {e:?}"))?;
     let session = request.ok().await?;
+    if owned_webtransport() {
+        let listener = Listener::new(zmux_config(), ListenerConfig::default())?;
+        let _carrier = wt::Carrier::with_listener(session.clone(), &listener, &options)?;
+        let primary = listener
+            .accept()
+            .await
+            .ok_or("listener closed before bootstrap")?;
+        let probe = listener
+            .accept()
+            .await
+            .ok_or("listener closed before probe")?;
+        let pipe = probe.pipe(PipeId::new(0)).ok_or("missing probe pipe")?;
+        let (mut send, mut recv) = probe.accept_bi().await?;
+        if recv.read_to_end(ARMED.len()).await? != ARMED {
+            return Err("cancellation probe did not send its marker".into());
+        }
+        send.write_all(ARMED).await?;
+        send.finish()?;
+        let _ = pipe.closed().await;
+        expect_datagram(&primary, MARKER).await?;
+        primary
+            .send_datagram_wait(Bytes::from_static(MARKER))
+            .await?;
+        expect_peer_close(&session).await?;
+        println!("PASS wt server bootstrap=1 datagram=1 cancel=peer close=42 reason=done");
+        return Ok(());
+    }
     let (send, recv) = session.accept_bi().await?;
     expect_wt_fin(recv, b"client-bidi").await?;
     send_wt_fin(send, b"client-bidi").await?;
     expect_wt_fin(session.accept_uni().await?, b"client-uni").await?;
-    send_wt_fin(session.open_uni().await?, b"server-uni").await?;
     let (send, recv) = session.open_bi().await?;
     send_wt_fin(send, b"server-bidi").await?;
     expect_wt_fin(recv, b"server-bidi").await?;
-    let close = session.closed().await;
-    if !matches!(&close, wt::SessionError::WebTransportError(wt::WebTransportError::Closed(42, reason)) if reason == "done")
-    {
-        return Err(format!("unexpected WT close {close:?}").into());
-    }
+    send_wt_fin(session.open_uni().await?, b"server-uni").await?;
+    expect_peer_close(&session).await?;
     println!("PASS wt server close=42 reason=done");
     Ok(())
 }
 
 async fn run_wt(port: u16, certificates: Vec<CertificateDer<'static>>) -> Result<()> {
+    let options = wt_options();
     let mut config = client_config(certificates)?;
-    config.transport_config(Arc::new(
-        zmux_webtransport::Options::default().transport_config(),
-    ));
+    config.transport_config(Arc::new(options.transport_config()));
     let mut endpoint = quinn::Endpoint::client(loopback(0))?;
     endpoint.set_default_client_config(config);
     let conn = endpoint.connect(loopback(port), "localhost")?.await?;
-    let url: Url = format!("https://localhost:{port}/wt").parse()?;
+    let url: wt::Url = format!("https://localhost:{port}/wt").parse()?;
     let session = wt::Session::connect(conn, url)
         .await
         .map_err(|e| format!("WT negotiation failed: {e:?}"))?;
+    if owned_webtransport() {
+        let carrier = wt::Carrier::new(session.clone(), &options)?;
+        let primary = Session::connect(carrier.open_pipe().await?, zmux_config()).await?;
+        cancel_probe(&session).await?;
+        primary
+            .send_datagram_wait(Bytes::from_static(MARKER))
+            .await?;
+        expect_datagram(&primary, MARKER).await?;
+        session.close(42, b"done");
+        let _ = session.closed().await;
+        println!("PASS wt client bootstrap=1 datagram=1 cancel=1 close=42");
+        return Ok(());
+    }
     probe_wt(session).await
+}
+
+async fn cancel_probe(session: &wt::Session) -> Result<()> {
+    let (send, recv) = session.open_bi().await?;
+    let mut stream = join(recv, send);
+    let (app, mut relay) = duplex(4096);
+    // Keep the WT halves available to inject a transport reset after the
+    // peer acknowledges the independent probe's bootstrap.
+    let handshake = async {
+        let pipe = PipeIo::new(app).with_carrier_secure();
+        let probe = Session::connect(pipe, zmux_config()).await?;
+        let (mut send, mut recv) = probe.open_bi().await?;
+        send.write_all(ARMED).await?;
+        send.finish()?;
+        if recv.read_to_end(ARMED.len()).await? != ARMED {
+            return Err(Fail::from(
+                "peer did not acknowledge the cancellation probe",
+            ));
+        }
+        Ok(probe)
+    };
+    let _probe = tokio::select! {
+        result = handshake => result?,
+        result = copy_bidirectional(&mut relay, &mut stream) => {
+            return Err(format!("probe carrier stopped before acknowledgement: {result:?}").into());
+        }
+    };
+    let (mut recv, mut send) = stream.into_inner();
+    // The first application error code plus 42 and one reserved-code gap.
+    let code = quinn::VarInt::from_u64(0x52e4_a40f_a8db + 42 + 1)?;
+    send.reset(code)?;
+    recv.stop(code)?;
+    Ok(())
+}
+
+fn owned_webtransport() -> bool {
+    std::env::var("ZMUX_WT_OWNED").as_deref() != Ok("0")
+}
+
+fn wt_options() -> wt::Options {
+    let options = wt::Options::default();
+    let windows = options.windows;
+    options.with_windows(windows.with_established_receive_window(windows.receive_window()))
+}
+
+fn zmux_config() -> Config {
+    let mut config = Config::default();
+    config.enable_datagrams = true;
+    config
+}
+
+async fn expect_datagram(session: &Session, expected: &[u8]) -> Result<()> {
+    let actual = session.read_datagram().await?;
+    if actual.as_ref() != expected {
+        return Err(format!("WT datagram {actual:?} differs from {expected:?}").into());
+    }
+    Ok(())
+}
+
+async fn expect_peer_close(session: &wt::Session) -> Result<()> {
+    let close = session.closed().await;
+    if !matches!(&close, wt::SessionEnd::Closed { code: 42, reason, remote: true } if reason == "done")
+    {
+        return Err(format!("unexpected WT close {close:?}").into());
+    }
+    Ok(())
 }
 
 async fn probe_wt(session: wt::Session) -> Result<()> {
@@ -405,10 +509,11 @@ async fn probe_wt(session: wt::Session) -> Result<()> {
     send_wt_fin(send, b"client-bidi").await?;
     expect_wt_fin(recv, b"client-bidi").await?;
     send_wt_fin(session.open_uni().await?, b"client-uni").await?;
-    expect_wt_fin(session.accept_uni().await?, b"server-uni").await?;
     let (send, recv) = session.accept_bi().await?;
     expect_wt_fin(recv, b"server-bidi").await?;
     send_wt_fin(send, b"server-bidi").await?;
+    // The server sends this after reading the final bidirectional reply.
+    expect_wt_fin(session.accept_uni().await?, b"server-uni").await?;
     session.close(42, b"done");
     let _ = session.closed().await;
     println!("PASS wt client bidi=both uni=both close=42 reason=done");

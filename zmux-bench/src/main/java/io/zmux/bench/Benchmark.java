@@ -2,29 +2,36 @@ package io.zmux.bench;
 
 import io.zmux.*;
 import io.zmux.carrier.*;
+import java.io.IOException;
 import java.lang.management.*;
 import java.net.InetSocketAddress;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.ByteChannel;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Standalone public-API measurements, not a conformance or performance pass gate. */
+/** Standalone public-API measurements and the opt-in close latency gate. */
 // A command-line tool: its options are set once by main, it prints its results, and any failure ends the run.
 @SuppressWarnings({"NonFinalStaticField", "SystemOut", "InterruptedExceptionSwallowed"})
 public final class Benchmark {
     private Benchmark() {}
 
     private static final Map<String, Number> samples = new LinkedHashMap<>();
-    private static boolean quick, loadedOnly, footprintOnly;
+    private enum Family { STANDARD, LOADED, FOOTPRINT, CLOSE }
+
+    private static boolean quick;
+    private static Family family = Family.STANDARD;
     private record Pair(ZmuxSession client, ZmuxSession server) implements AutoCloseable {
         @Override public void close() throws java.io.IOException {
             client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
         }
     }
-    private static Pair memory(PipeIo[] pipes, ZmuxConfig config, ExecutorService workers) throws Exception {
+    private static Pair openPair(PipeIo[] pipes, ZmuxConfig config, ExecutorService workers) throws Exception {
         var accepting = workers.submit(() -> Zmux.open(pipes[1], Role.SERVER, config));
         var client = Zmux.open(pipes[0], Role.CLIENT, config);
         return new Pair(client, accepting.get(10, TimeUnit.SECONDS));
@@ -71,7 +78,7 @@ public final class Benchmark {
             try (var stream = pair.server.acceptStream(Duration.ofSeconds(10))) {
                 long count = 0;
                 for (Chunk data; (data = stream.readChunk(1 << 20)) != null;) {
-                    try (Chunk receivedChunk = data) { count += receivedChunk.buffer().remaining(); }
+                    try (Chunk receivedChunk = data) { count += receivedChunk.remaining(); }
                 }
                 return count;
             }
@@ -117,8 +124,8 @@ public final class Benchmark {
     /** A splice between two memory sessions: endpoint -> (a spliced to b) -> destination. */
     private static void splice(EventLoops loops, ExecutorService workers) throws Exception {
         var config = ZmuxConfig.builder().eventLoops(loops).build();
-        try (var left = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers);
-             var right = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
+        try (var left = openPair(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers);
+             var right = openPair(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
             long bytes = quick ? 8L << 20 : 128L << 20;
             var endpoint = left.client.openStream();
             endpoint.write(new byte[] {1});
@@ -133,7 +140,7 @@ public final class Benchmark {
             try (var to = destination.get(10, TimeUnit.SECONDS)) {
                 long count = 0;
                 for (Chunk data; (data = to.readChunk(1 << 20)) != null;) {
-                    try (Chunk c = data) { count += c.buffer().remaining(); }
+                    try (Chunk c = data) { count += c.remaining(); }
                 }
                 ns = System.nanoTime() - start;
                 if (count != bytes) throw new AssertionError("incomplete splice");
@@ -233,10 +240,60 @@ public final class Benchmark {
         samples.put(key + "_p99_ns", ns[(ns.length * 99) / 100]);
         samples.put(key + "_max_ns", ns[ns.length - 1]);
     }
+    /** Bench has no dependency on the core test fixtures. This channel exposes whole-close only. */
+    private record WholeSocket(SocketChannel channel) implements ByteChannel {
+        @Override public int read(ByteBuffer dst) throws IOException { return channel.read(dst); }
+        @Override public int write(ByteBuffer src) throws IOException { return channel.write(src); }
+        @Override public boolean isOpen() { return channel.isOpen(); }
+        @Override public void close() throws IOException { channel.close(); }
+    }
+
+    private static PipeIo closePipe(SocketChannel socket, boolean whole) {
+        ByteChannel channel = whole ? new WholeSocket(socket) : socket;
+        return PipeChannel.pipe(channel, channel, Framing.BYTE_STREAM, 1 << 16);
+    }
+
+    private static void closeExchange(EventLoops loops, ExecutorService workers) throws Exception {
+        var config = ZmuxConfig.builder().eventLoops(loops).build();
+        var timeout = Duration.ofSeconds(20);
+        var remote = new SessionError.ApplicationClosed(42, "benchmark", true);
+        var local = new SessionError.ApplicationClosed(42, "benchmark", false);
+        int warmup = quick ? 2 : 5;
+        int count = quick ? 10 : 100;
+        try (var listener = ServerSocketChannel.open().bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
+            for (boolean whole : new boolean[] {false, true}) {
+                long[] ns = new long[count];
+                for (int i = -warmup; i < count; i++) {
+                    try (var a = SocketChannel.open(listener.getLocalAddress()); var b = listener.accept();
+                         var pair = openPair(new PipeIo[] {closePipe(a, whole), closePipe(b, whole)}, config, workers)) {
+                        long start = System.nanoTime();
+                        pair.client.close(42, "benchmark");
+                        var serverEnd = pair.server.awaitClosed(timeout);
+                        var clientEnd = pair.client.awaitClosed(timeout);
+                        long elapsed = System.nanoTime() - start;
+                        if (!remote.equals(serverEnd) || !local.equals(clientEnd) || a.isOpen() || b.isOpen()) {
+                            throw new AssertionError("close exchange did not give both carriers back");
+                        }
+                        if (i >= 0) ns[i] = elapsed;
+                    }
+                }
+                Arrays.sort(ns);
+                String key = whole ? "close_whole_socket" : "close_tcp";
+                latencySamples(key, ns);
+                long p95 = ns[Math.ceilDiv(ns.length * 95, 100) - 1];
+                samples.put(key + "_p95_ns", p95);
+                long worst = ns[ns.length - 1];
+                if (!quick && (p95 >= TimeUnit.MILLISECONDS.toNanos(100) || worst >= TimeUnit.MILLISECONDS.toNanos(500))) {
+                    throw new AssertionError(key + " p95=" + p95 + " ns, max=" + worst + " ns");
+                }
+            }
+        }
+    }
+
     private static void loadedCase(EventLoops loops, ExecutorService workers, int pipes,
                                    Scheduler scheduler, int round, boolean reverse) throws Exception {
         var builder = ZmuxConfig.builder().eventLoops(loops).scheduler(scheduler);
-        if (pipes > 1) builder.maxPipes(pipes).pipeAuth(PipeAuth.psk(new byte[32])).probation(Duration.ZERO);
+        if (pipes > 1) builder.sessionPolicy(new SessionPolicy(new CapacityLimits(pipes))).pipeAuth(PipeAuth.psk(new byte[32])).probation(Duration.ZERO);
         var config = builder.build();
         String key = "rr_tcp" + pipes + "_" + scheduler + (reverse ? "_reverse" : "_forward") + "_round" + round;
         System.out.println("BENCH_PROGRESS," + key);
@@ -262,7 +319,9 @@ public final class Benchmark {
                     var crc = new java.util.zip.CRC32(); long bytes = 0;
                     for (Chunk data; (data = stream.readChunk(1 << 20)) != null;) {
                         try (Chunk chunk = data) {
-                            var b = chunk.buffer(); bytes += b.remaining(); crc.update(b); progress.set(bytes);
+                            bytes += chunk.remaining();
+                            chunk.withBuffer(crc::update);
+                            progress.set(bytes);
                         }
                         receiving.countDown();
                     }
@@ -336,7 +395,7 @@ public final class Benchmark {
     }
     private static void warmFootprint(ExecutorService workers, ZmuxConfig config) throws Exception {
         for (int i = 0; i < 8; i++) {
-            try (var pair = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
+            try (var pair = openPair(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) {
                 for (int j = 0; j < 32; j++) pair.client.openStream().close();
             }
         }
@@ -344,7 +403,7 @@ public final class Benchmark {
     private static void footprint(EventLoops loops, ExecutorService workers, boolean multipath) throws Exception {
         int count = quick ? 20 : 200;
         var builder = ZmuxConfig.builder().eventLoops(loops);
-        if (multipath) builder.maxPipes(8).pipeAuth(PipeAuth.psk(new byte[32]));
+        if (multipath) builder.sessionPolicy(new SessionPolicy(new CapacityLimits(8))).pipeAuth(PipeAuth.psk(new byte[32]));
         var config = builder.build();
         warmFootprint(workers, config);
         String prefix = multipath ? "mp_bootstrap_" : "";
@@ -354,7 +413,7 @@ public final class Benchmark {
         for (int i = 0; i < count; i++) pipes.add(MemoryPipe.pair(Framing.BYTE_STREAM));
         long baseline = heap(), directBaseline = direct();
         try {
-            for (var pipe : pipes) pairs.add(memory(pipe, config, workers));
+            for (var pipe : pipes) pairs.add(openPair(pipe, config, workers));
             long sessions = heap(), directSessions = direct();
             for (int i = 0; i < 200; i++) streams.add(pairs.getFirst().client.openStream());
             long withStreams = heap();
@@ -372,30 +431,36 @@ public final class Benchmark {
         }
     }
     private static String quote(String s) { return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
+    private static void select(Family requested) {
+        if (family != Family.STANDARD && family != requested) throw new IllegalArgumentException("choose one measurement family");
+        family = requested;
+    }
+
     static void main(String[] args) throws Exception {
         Path result = Path.of("target/benchmark.json");
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--quick")) quick = true;
-            else if (args[i].equals("--loaded-only")) loadedOnly = true;
-            else if (args[i].equals("--footprint-only")) footprintOnly = true;
+            else if (args[i].equals("--loaded-only")) select(Family.LOADED);
+            else if (args[i].equals("--footprint-only")) select(Family.FOOTPRINT);
+            else if (args[i].equals("--close-only")) select(Family.CLOSE);
             else if (args[i].equals("--result-file") && i + 1 < args.length) result = Path.of(args[++i]);
-            else throw new IllegalArgumentException("usage: [--quick] [--loaded-only|--footprint-only] --result-file PATH");
+            else throw new IllegalArgumentException("usage: [--quick] [--loaded-only|--footprint-only|--close-only] --result-file PATH");
         }
-        if (loadedOnly && footprintOnly) throw new IllegalArgumentException("choose one measurement family");
         Thread watchdog = Thread.ofPlatform().daemon(true).start(() -> {
             try { Thread.sleep(Duration.ofMinutes(5)); Runtime.getRuntime().halt(124); }
             catch (InterruptedException expected) { /* Measurements completed. */ }
         });
         try {
             try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-                if (loadedOnly) loaded(loops, workers);
-                else if (footprintOnly) {
+                if (family == Family.LOADED) loaded(loops, workers);
+                else if (family == Family.CLOSE) closeExchange(loops, workers);
+                else if (family == Family.FOOTPRINT) {
                     footprint(loops, workers, false);
                     footprint(loops, workers, true);
                 }
                 else {
                     var config = ZmuxConfig.builder().eventLoops(loops).build();
-                    try (var pair = memory(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) { control(pair.client); }
+                    try (var pair = openPair(MemoryPipe.pair(Framing.BYTE_STREAM), config, workers)) { control(pair.client); }
                     bulk(loops, workers);
                     splice(loops, workers);
                     exchange(loops, workers);
@@ -407,7 +472,7 @@ public final class Benchmark {
                     .append(",\n  \"os\": ").append(quote(System.getProperty("os.name") + " " + System.getProperty("os.arch")))
                     .append(",\n  \"profile\": ").append(quote(quick ? "quick" : "full"));
             json.append(",\n  \"family\": ");
-            json.append(quote(loadedOnly ? "loaded" : footprintOnly ? "footprint" : "standard"));
+            json.append(quote(family.name().toLowerCase(Locale.ROOT)));
             for (var entry : samples.entrySet()) json.append(",\n  ").append(quote(entry.getKey())).append(": ").append(entry.getValue());
             json.append("\n}\n");
             Path dir = result.toAbsolutePath().getParent();

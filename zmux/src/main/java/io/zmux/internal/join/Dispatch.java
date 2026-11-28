@@ -48,7 +48,7 @@ public final class Dispatch {
         if (n == 8) return other();
         if (n == 1 && first < MIN_FIRST_RECORD) return other();
         if (len < n) return new Result(Kind.INCOMPLETE, n + 1);
-        long size = Tlv.readVarint(b, off, n);
+        long size = VarInt.getKnownWidth(b, off, n);
         if (size < MIN_FIRST_RECORD || size > maxRecord) return other();
         if (len < n + 1) return new Result(Kind.INCOMPLETE, n + 1);
         return isLead(b[off + n] & 0xff) ? new Result(Kind.RECORD, 0) : other();

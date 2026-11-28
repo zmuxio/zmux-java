@@ -11,7 +11,12 @@ public final class Time {
     public static final long MILLISECOND = 1_000_000L;
     public static final long SECOND = 1_000_000_000L;
 
+    private static final long ORIGIN = System.nanoTime();
+
     private Time() {}
+
+    /** Converts an absolute reading of System.nanoTime to the protocol clock's origin. */
+    public static long fromNanoTime(long reading) { return reading - ORIGIN; }
 
     /** Monotonic deadline for a timeout, or NEVER beyond the clock's supported range. */
     public static long deadline(java.time.Duration timeout) {
@@ -25,6 +30,12 @@ public final class Time {
             return NEVER;
         }
         return nanos >= Long.MAX_VALUE / 2 ? NEVER : now + nanos;
+    }
+
+    /** Duration in nanoseconds, saturated to the supported range. */
+    public static long nanos(java.time.Duration duration) {
+        try { return duration.toNanos(); }
+        catch (ArithmeticException overflow) { return duration.isNegative() ? Long.MIN_VALUE : NEVER; }
     }
 
     /** t + d, saturating: an overflow is NEVER. */

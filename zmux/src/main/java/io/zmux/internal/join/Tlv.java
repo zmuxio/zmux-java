@@ -24,21 +24,12 @@ public final class Tlv {
 
     private Tlv() {}
 
-    /** Reads the {@code n}-byte varint at {@code off}; the bytes must be there. */
-    public static long readVarint(byte[] b, int off, int n) {
-        long v = b[off] & 0x3fL;
-        for (int i = 1; i < n; i++) {
-            v = (v << 8) | (b[off + i] & 0xffL);
-        }
-        return v;
-    }
-
     /** Reads a shortest varint at {@code off} of the range ending at {@code end}; the next index is {@code off + VarInt.length(v)}. */
     public static long minimalVarint(byte[] b, int off, int end) throws SecureCarrierException {
         if (off >= end) throw new SecureCarrierException(TLV_TRUNCATED);
         int n = VarInt.lengthOf(b[off]);
         if (end - off < n) throw new SecureCarrierException(TLV_TRUNCATED);
-        long v = readVarint(b, off, n);
+        long v = VarInt.getKnownWidth(b, off, n);
         if (VarInt.length(v) != n) throw new SecureCarrierException(TLV_NON_MINIMAL);
         return v;
     }

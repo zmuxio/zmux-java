@@ -14,8 +14,8 @@ import java.io.IOException;
  */
 public abstract sealed class ZmuxException extends IOException
         permits SessionClosedException, StreamException, PipeException, NotNegotiatedException,
-        DatagramTooLargeException, NotEstablishedException,
-        JoinPendingException, JoinSecretSetException, NoExporterException, ListenerClosedException,
+        DatagramTooLargeException, NotEstablishedException, CapacityChangeException,
+        JoinPendingException, JoinSecretSetException, NoExporterException, NoEligibleCandidateException, ListenerClosedException,
         CarrierChoiceException, CarrierRejectedException, CarrierFailedException, CarrierClientClosedException, CallbackFailedException, HttpRedirectException, HttpStatusException,
         io.zmux.seal.NoReplyException, io.zmux.seal.CredentialsFailedException, io.zmux.seal.VerifyRejectedException, io.zmux.seal.VerifyUnavailableException,
         io.zmux.seal.SecureCarrierException {

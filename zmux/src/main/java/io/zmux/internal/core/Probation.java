@@ -15,6 +15,7 @@ final class Probation {
 
         /** The usable capacity may have changed (quality floor). */
         void capacityChanged();
+        void healthChanged(Pipe p);
 
         /** See {@link Tiers}. */
         void checkTakeover();
@@ -78,7 +79,7 @@ final class Probation {
     }
 
     /** The pipe joined, or returned from SUSPECT to ACTIVE. */
-    void startProbation(Pipe p) {
+    void startProbation(Pipe p, boolean probeAnswered) {
         Attach a = p.mp();
         if (p.out() == null || (p.id == 0 && !a.prob.wasSuspect)) return;
         ProbHistory h = hist(p);
@@ -93,10 +94,11 @@ final class Probation {
         if (a.prob.probOn && a.liveOut()) {
             a.prob.probPing = port.now();
             a.prob.probPinged = true;
-            if (!a.health.needPing()) {
-                port.requestPing(p, port.now());
+            // A probe that just restored service is already the first probation probe.
+            if (!probeAnswered) {
+                if (!a.health.needPing()) port.requestPing(p, port.now());
+                pipes.wake(p);
             }
-            pipes.wake(p);
         }
         port.capacityChanged();
     }
@@ -137,6 +139,7 @@ final class Probation {
                         changed = true;
                         ProbHistory h = hist(p);
                         h.end(end, backoffBase(p));
+                        port.healthChanged(p);
                         port.checkTakeover();
                         pipes.wakeWriters();
                     } else {
@@ -198,6 +201,7 @@ final class Probation {
             if (a.health.out() != Attach.OUT_ACTIVE && a.health.out() != Attach.OUT_JOINING) continue;
             a.prob.reval = true;
             a.prob.revalPing = true;
+            port.healthChanged(p);
             if (!a.health.needPing()) {
                 port.requestPing(p, port.now());
             }
@@ -215,7 +219,11 @@ final class Probation {
 
     void revalAcked(Pipe p) {
         Attach a = p.mp();
-        if (a.prob.reval && !a.prob.revalPing && p.out().snd.cum() >= a.prob.revalEnd) endRevalidation(p);
+        if (a.prob.reval && !a.prob.revalPing && p.out().snd.cum() >= a.prob.revalEnd) {
+            endRevalidation(p);
+            a.projection.sendProven();
+            port.healthChanged(p);
+        }
     }
 
     void endRevalidation(Pipe p) {
@@ -223,6 +231,7 @@ final class Probation {
         if (a == null || !a.prob.reval) return;
         a.prob.reval = false;
         a.prob.revalPing = false;
+        port.healthChanged(p);
         port.capacityChanged();
         port.checkTakeover();
         pipes.wakeWriters();
@@ -275,6 +284,7 @@ final class Probation {
     /** The probation option was turned off: an attachment on probation leaves it. */
     void dropProbation(Pipe p) {
         p.mp().prob.probOn = false;
+        port.healthChanged(p);
     }
 
     /** The probation and revalidation state of one attachment. */

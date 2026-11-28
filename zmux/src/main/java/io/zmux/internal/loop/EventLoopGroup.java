@@ -18,6 +18,7 @@ public final class EventLoopGroup implements AutoCloseable {
     private final boolean daemon;
     private final Object lock = new Object();
     private int started;
+    private ArrayList<Runnable> roundObserversForTests;
     private volatile boolean closed;
 
     private final long idleBufferBytes;
@@ -57,9 +58,26 @@ public final class EventLoopGroup implements AutoCloseable {
             if (loops[i] == null) {
                 loops[i] = new EventLoop(THREAD_PREFIX + id + "-" +  started++, daemon, idleBufferBytes);
                 SessionHost.hostThread(loops[i].thread(), true);
+                if (roundObserversForTests != null)
+                    for (Runnable observer : roundObserversForTests) loops[i].observeRoundsForTests(observer);
             }
             return loops[i];
         }
+    }
+
+    /** Observes completed rounds on existing and future loops of an isolated test fixture. */
+    public Runnable observeRoundsForTests(Runnable observer) {
+        synchronized (lock) {
+            if (roundObserversForTests == null) roundObserversForTests = new ArrayList<>();
+            roundObserversForTests.add(observer);
+            for (EventLoop l : loops) if (l != null) l.observeRoundsForTests(observer);
+        }
+        return () -> {
+            synchronized (lock) {
+                roundObserversForTests.remove(observer);
+                for (EventLoop l : loops) if (l != null) l.removeRoundObserverForTests(observer);
+            }
+        };
     }
 
     /** Closes every loop: their sessions fail, their threads end. */

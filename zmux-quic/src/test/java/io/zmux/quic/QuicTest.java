@@ -153,7 +153,7 @@ class QuicTest {
 
     @Test void joinsOnAnotherConnectionAndSurvivesItsPeerConnectionLoss() throws Exception {
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(3).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).noProbation().build();
+            var config = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(3))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).scheduler(Scheduler.SPREAD_ETA).noProbation().build();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listener(ListenerConfig.of(config));
                  var server = new QuicServer(any(), TestTls.server, options, listener);

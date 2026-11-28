@@ -1,6 +1,7 @@
 package io.zmux.carrier;
 
 import io.zmux.Chunk;
+import io.zmux.internal.loop.ChunkAccess;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
@@ -55,7 +56,14 @@ public final class PipeChannel implements ByteChannel {
         if (io.reader() == null || !started.compareAndSet(false, true)) return;
         io.reader().start(new PipeReader.Sink() {
             @Override public void onChunk(Chunk chunk, Runnable consumed) {
-                offer(new Item(chunk.buffer(), () -> { chunk.close(); consumed.run(); }));
+                var owned = ChunkAccess.take(chunk);
+                offer(new Item(owned.data(), () -> {
+                    try {
+                        owned.buf().unref();
+                    } finally {
+                        consumed.run();
+                    }
+                }));
             }
             @Override public void onEnd() { offer(true); }
             @Override public void onError(Throwable cause) { offer(cause == null ? new IOException("carrier failed") : cause); }
@@ -210,23 +218,29 @@ public final class PipeChannel implements ByteChannel {
             }
             @Override public void write(OutboundBatch batch, Completion done) {
                 if (!run.offer(() -> {
+                    int confirmed = 0;
                     try {
                         if (framing == Framing.MESSAGES) {
                             for (int m = 0, from = 0; m < batch.messageCount(); m++) {
                                 int to = batch.messageEnd(m);
-                                writeFully(out, gather(batch, from, to));
+                                ByteBuffer message = gather(batch, from, to);
+                                int size = message.remaining();
+                                writeFully(out, message);
+                                confirmed += size;
                                 from = to;
                             }
                         } else if (batch.bytes() > 0) {
                             if (out instanceof GatheringByteChannel g) {
                                 ByteBuffer[] v = batch.segments(null);
-                                long left = batch.bytes();
-                                while (left > 0) left -= g.write(v, 0, batch.segmentCount());
-                            } else writeFully(out, gather(batch, 0, batch.segmentCount()));
+                                while (confirmed < batch.bytes()) confirmed += (int) g.write(v, 0, batch.segmentCount());
+                            } else {
+                                ByteBuffer bytes = gather(batch, 0, batch.segmentCount());
+                                while (bytes.hasRemaining()) confirmed += out.write(bytes);
+                            }
                         }
                         done.completed();
                     } catch (Throwable e) {
-                        done.failed(e);
+                        done.failed(e, confirmed);
                     }
                 })) done.failed(new java.nio.channels.ClosedChannelException());
             }

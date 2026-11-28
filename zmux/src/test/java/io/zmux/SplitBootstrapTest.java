@@ -18,7 +18,7 @@ class SplitBootstrapTest {
         // HS-40, HS-44.
         try (EventLoops loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var listener = Zmux.listener(ListenerConfig.of(config))) {
+            try (var listener = Zmux.listener(ListenerConfig.builder().session(config).maxPendingPerSource(2).build())) {
                 for (Framing framing : Framing.values()) for (boolean upFirst : new boolean[] {false, true}) {
                     var up = MemoryPipe.pair(framing); var down = MemoryPipe.pair(framing);
                     String token = token(1); // Reuse immediately after the preceding attachment retired.
@@ -39,7 +39,7 @@ class SplitBootstrapTest {
                         try (var send = client.openStream()) {
                             send.writeChunk(ByteBuffer.wrap(new byte[] {7,8,9})); send.finish();
                             try (var receive = server.acceptStream(); Chunk chunk = receive.readChunk(3)) {
-                                byte[] got = new byte[3]; chunk.buffer().get(got); assertArrayEquals(new byte[] {7,8,9}, got);
+                                byte[] got = chunk.copy(); assertArrayEquals(new byte[] {7,8,9}, got);
                             }
                         }
                         AtomicInteger closes = new AtomicInteger();
@@ -211,7 +211,7 @@ class SplitBootstrapTest {
     @Test void refusalDrainKeepsBothSplitHandlesAndTheTokenUntilItsWriteCompletes() throws Exception {
         // HS-44.
         try (var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeHeadroom(0)
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2, 0)))
                     .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).joinTimeout(Duration.ofSeconds(15)).build();
             try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.of(cfg));
                  var c = Zmux.connect(l.localAddress(), ListenerEntryTest.config(loops)); var s = l.accept()) {
@@ -302,8 +302,8 @@ class SplitBootstrapTest {
     @SuppressWarnings("try") // closes a resource of the try early on purpose; closing it again is a no-op
     @Test void splitExporterBindsBothHalvesInUplinkDownlinkOrder() throws Exception {
         try (EventLoops loops = EventLoops.create(2); var _ = Executors.newVirtualThreadPerTaskExecutor()) {
-            var config = ZmuxConfig.builder().eventLoops(loops).maxPipes(2).pipeAuth(PipeAuth.exporter().withEndToEnd()).noProbation().build();
-            try (var listener = Zmux.listener(ListenerConfig.of(config))) {
+            var config = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(2))).pipeAuth(PipeAuth.exporter().withEndToEnd()).noProbation().build();
+            try (var listener = Zmux.listener(ListenerConfig.builder().session(config).maxPendingPerSource(2).build())) {
                 PipeIo.Exporter upKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 3); return key; };
                 PipeIo.Exporter downKey = (label, context, length) -> { byte[] key = new byte[length]; java.util.Arrays.fill(key, (byte) 9); return key; };
                 var up = MemoryPipe.pair(Framing.BYTE_STREAM); var down = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -318,7 +318,7 @@ class SplitBootstrapTest {
                     client.close(); server.close(); client.awaitClosed(); server.awaitClosed();
                 }
             }
-            ListenerResourcesTest.until(() -> loops.outstandingBuffers() == 0);
+            SessionTestSupport.await(loops, () -> loops.outstandingBuffers() == 0);
         }
     }
     @Test void stalledPairInputHasABoundedQueueAndReleasesRejectedDeliveries() throws Exception {
@@ -332,7 +332,7 @@ class SplitBootstrapTest {
             PipeReader.Sink input = sink.get(5, TimeUnit.SECONDS);
             var peer = new io.zmux.internal.core.Session(io.zmux.internal.core.CoreConfig.defaults(), 0);
             var info = new io.zmux.internal.core.CarrierInfo(io.zmux.internal.core.Framing.BYTES, false, false, false, false);
-            peer.pipes().attachBootstrap(info, info, null); var batch = new io.zmux.internal.core.Batch();
+            peer.pipes().attachBootstrap(info, info); var batch = new io.zmux.internal.core.Batch();
             assertTrue(peer.pollTransmit(0, 0, batch, 65536, 0));
             input.onLent(ByteBuffer.wrap(io.zmux.internal.core.BatchFixture.flat(batch)), released::incrementAndGet); batch.discard();
             CompletableFuture<Void> parsed = new CompletableFuture<>();
@@ -360,17 +360,17 @@ class SplitBootstrapTest {
             }, r -> Thread.ofVirtual().start(r));
             ZmuxSession client = Zmux.open(new PipeIo(tapped, memory[0].writer(), Framing.BYTE_STREAM, "memory", null), Role.CLIENT, cfg);
             try (ZmuxSession _ = server.get(5, TimeUnit.SECONDS)) {
-                AtomicInteger released = new AtomicInteger();
+                var released = new CountDownLatch(2);
                 var entered = new CountDownLatch(1); var proceed = new CountDownLatch(1);
                 client.driver.executeCarrier(() -> { entered.countDown(); try { proceed.await(); } catch (InterruptedException ignored) { } });
                 try {
                     assertTrue(entered.await(5, TimeUnit.SECONDS));
                     // No receive memory declared: one unreleased batch may queue, the next one overflows.
-                    for (int i = 0; i < 2; i++) sink.get().onLent(ByteBuffer.allocate(96 << 10), released::incrementAndGet);
-                    assertEquals(1, released.get(), "the overflowing batch is released at once");
+                    for (int i = 0; i < 2; i++) sink.get().onLent(ByteBuffer.allocate(96 << 10), released::countDown);
+                    assertEquals(1, released.getCount(), "the overflowing batch is released at once");
                 } finally { proceed.countDown(); }
                 assertNotNull(client.awaitClosed());
-                ListenerResourcesTest.until(() -> released.get() == 2);
+                assertTrue(released.await(30, TimeUnit.SECONDS));
             } finally { client.close(); }
         }
     }

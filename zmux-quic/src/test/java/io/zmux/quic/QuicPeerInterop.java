@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.stream.Stream;
 import java.util.concurrent.Executors;
@@ -22,7 +21,7 @@ import org.junit.jupiter.api.Timeout;
  * QUIC sessions against the scripted peer of another implementation, named by {@code ZMUX_INTEROP_PEER} (zmux-rs's
  * {@code zmux-interop-peer}): its {@code quic-server 2} and {@code quic-client addr}, with or without the last
  * argument {@code exporter} (the join secret from the exporter alone, and {@code KEYS <hex>} per session). This side
- * drives: bulk echo, the {@code close} command (QUIC replies {@code closing} first), and a second, resumed session
+ * drives: bulk echo, the {@code close} command (QUIC replies {@code closing} first), and a second session
  * whose first stream is {@code early}. No 0-RTT is offered by this adapter, so the early stream goes after the
  * handshake and the peer's report says it was not sent early. Explicit selection only: a missing peer fails.
  */
@@ -39,7 +38,7 @@ class QuicPeerInterop {
     }
 
     private static ZmuxConfig config(EventLoops loops, boolean exporter) {
-        var b = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).earlyData(EarlyData.ZMUX_PEER).maxPipes(4).maxIncomingUniStreams(16)
+        var b = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).maxIncomingUniStreams(16)
                 .allowRecordMode((carrier, mode, peer) -> true);
         return (exporter ? b.pipeAuth(PipeAuth.exporter().withEndToEnd()) : b.pipeAuth(PipeAuth.psk(PSK).withEndToEnd())).build();
     }
@@ -80,11 +79,10 @@ class QuicPeerInterop {
     /** One line per prefix, in any order, by prefix without it; other lines are ignored. */
     private static java.util.Map<String, String> reports(QuicChannelInteropTest.Peer peer, String... prefixes) throws Exception {
         var got = new java.util.HashMap<String, String>();
-        for (long end = System.nanoTime() + 20_000_000_000L; got.size() < prefixes.length && System.nanoTime() < end; ) {
-            String line = peer.lines.poll(1, TimeUnit.SECONDS);
-            if (line != null) for (String prefix : prefixes) if (line.startsWith(prefix)) got.put(prefix, line.substring(prefix.length()).trim());
+        while (got.size() < prefixes.length) {
+            String line = peer.lines.take();
+            for (String prefix : prefixes) if (line.startsWith(prefix)) got.put(prefix, line.substring(prefix.length()).trim());
         }
-        assertEquals(prefixes.length, got.size(), "peer reports " + got + " of " + Arrays.toString(prefixes));
         return got;
     }
 
@@ -110,7 +108,6 @@ class QuicPeerInterop {
                 echo(second, 1 << 20);
                 if (exporter) exporterKeys(second, secondReports.get("KEYS "));
                 closeByPeer(second, peer);
-                Thread.sleep(300);
             }
         }
     }
@@ -141,7 +138,6 @@ class QuicPeerInterop {
                 echo(second, 1 << 20);
                 if (exporter) exporterKeys(second, secondReports.get("KEYS "));
                 closeByPeer(second, peer);
-                Thread.sleep(300);
             }
         }
     }

@@ -1,5 +1,12 @@
 package io.zmux;
 
+import io.zmux.internal.core.Session.DatagramAdmission;
+import io.zmux.internal.core.Session.DatagramMode;
+import io.zmux.internal.spi.Spi;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.concurrent.CompletionStage;
+
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
@@ -32,7 +39,21 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
     private final BooleanSupplier operation;
 
     static {
-        io.zmux.internal.spi.Spi.install(ZmuxFuture::of);
+        Spi.install(new Spi.Access() {
+            @Override public <V> ZmuxFuture<V> future(CompletionStage<V> stage, Runnable cancel) {
+                return of(stage, cancel);
+            }
+
+            @Override public DatagramAdmission submitPacketBlocking(ZmuxStream stream, long context, ByteBuffer payload,
+                    DatagramSendOptions options, DatagramMode mode) throws IOException {
+                return stream.session.submitDatagram(stream.st, context, payload, options, mode, false, Long.MAX_VALUE);
+            }
+
+            @Override public ZmuxFuture<DatagramAdmission> submitPacket(ZmuxStream stream, long context,
+                    ByteBuffer payload, DatagramSendOptions options, DatagramMode mode) {
+                return stream.session.submitPacketAsync(stream.st, context, payload, options, mode);
+            }
+        });
     }
 
     /**
@@ -46,7 +67,7 @@ public final class ZmuxFuture<T> extends CompletableFuture<T> {
         });
         stage.whenComplete((v, e) -> {
             if (e == null) f.publishOrDiscard(v);
-            else f.publishFailure(e instanceof java.util.concurrent.CompletionException c && c.getCause() != null ? c.getCause() : e);
+            else f.publishFailure(io.zmux.internal.spi.Spi.completionCause(e));
         });
         return f;
     }

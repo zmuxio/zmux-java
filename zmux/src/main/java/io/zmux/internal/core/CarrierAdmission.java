@@ -57,7 +57,9 @@ public final class CarrierAdmission {
     }
 
     public static byte[] laneKey(io.zmux.internal.wire.Frame frame) {
-        byte[] key = new byte[16]; frame.src.get(frame.laneKeyPos, key); return key;
+        byte[] key = new byte[16];
+        frame.copy(frame.laneKeyPos, key);
+        return key;
     }
 
     private static boolean matches(ByteBuffer b, int at, int limit, byte[] prefix) {
@@ -74,9 +76,6 @@ public final class CarrierAdmission {
     /** {@link #take}: every slot of the listener is taken; nothing was taken. */
     public static final int FULL = 2;
 
-    /** The default of {@link #CarrierAdmission}'s maxTotal. */
-    public static final int DEFAULT_MAX_TOTAL = 1024;
-
     private int maxPerSource;
     /** The source prefixes: the leading bits of an IPv4 and of an IPv6 address that name its client. */
     private final int prefixV4, prefixV6;
@@ -92,25 +91,17 @@ public final class CarrierAdmission {
     /** The default IPv6 source prefix. */
     public static final int DEFAULT_PREFIX_V6 = 64;
 
-    /**
-     * maxPerSource 0: 8; maxTotal 0: {@link #DEFAULT_MAX_TOTAL}, negative: unlimited;
-     * prefixV4 (1 to 32) and prefixV6 (1 to 128) 0: their defaults,
-     * validated by the caller.
-     */
+    /** Uses validated limits and normalized source prefixes from the listener configuration. */
     public CarrierAdmission(int maxPerSource, int maxTotal, int prefixV4, int prefixV6) {
-        if (prefixV4 < 0 || prefixV4 > 32 || prefixV6 < 0 || prefixV6 > 128) throw new IllegalArgumentException("source prefix out of range");
-        this.prefixV4 = prefixV4 == 0 ? DEFAULT_PREFIX_V4 : prefixV4;
-        this.prefixV6 = prefixV6 == 0 ? DEFAULT_PREFIX_V6 : prefixV6;
+        this.prefixV4 = prefixV4;
+        this.prefixV6 = prefixV6;
         bounds(maxPerSource, maxTotal);
     }
 
-    /**
-     * Replaces the per-source and listener-wide bounds, as the constructor reads them; slots
-     * already taken stay: a lowered bound refuses new carriers until the count is below it.
-     */
+    /** Applies validated bounds. Slots already taken stay. */
     public void bounds(int maxPerSource, int maxTotal) {
-        this.maxPerSource = maxPerSource > 0 ? maxPerSource : 8;
-        this.maxTotal = maxTotal == 0 ? DEFAULT_MAX_TOTAL : maxTotal;
+        this.maxPerSource = maxPerSource;
+        this.maxTotal = maxTotal;
     }
 
     /**

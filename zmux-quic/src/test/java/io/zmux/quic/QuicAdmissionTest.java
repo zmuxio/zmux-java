@@ -14,6 +14,20 @@ import org.junit.jupiter.api.Timeout;
 class QuicAdmissionTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
 
+    static final PrefixStore.Id TICKET_ID = new PrefixStore.Id(3, 4);
+    private static final Duration SLOT = Duration.ofSeconds(30);
+    private static final PrefixStore.Generation GENERATION = new PrefixStore.Generation(new byte[32], 0, -1);
+
+    static PrefixAuth presenter(boolean bound, byte[] ticketKey) {
+        return new PrefixAuth(new PrefixAuth.CarrierOptions(bound, false), SLOT, TICKET_ID, ticketKey, java.util.List.of(GENERATION));
+    }
+
+    static PrefixAuth.Verifier verifier(boolean bound, byte[] ticketKey) {
+        var store = new MemoryPrefixStore(new PrefixStore.Window(SLOT, 1), java.util.List.of(GENERATION));
+        store.addTicket(new PrefixStore.Ticket(TICKET_ID, ticketKey, 0, 0, -1, false));
+        return new PrefixAuth.Verifier(new PrefixAuth.CarrierOptions(bound, false), store);
+    }
+
     static ListenerConfig admitting(ZmuxConfig config, java.util.function.BiFunction<Admission.CarrierInfo, ByteBuffer, Admission.Decision> decider) {
         return ListenerConfig.builder().session(config)
                 .admission(Admission.builder(4, Admission.Decider.immediate(decider)).peekTimeout(Duration.ofSeconds(2)).build()).build();
@@ -22,7 +36,7 @@ class QuicAdmissionTest {
     @Test void existingConnectionsUseTheListenersSoleFallbackTarget() throws Exception {
         var serve = QuicServer.class.getMethod("serve", io.netty.handler.codec.quic.QuicChannel.class,
                 QuicOptions.class, ZmuxListener.class);
-        assertEquals(ZmuxFuture.class, serve.getReturnType());
+        assertEquals(QuicConnectionService.class, serve.getReturnType());
         assertEquals(1, java.util.Arrays.stream(QuicServer.class.getMethods()).filter(m -> m.getName().equals("serve")).count());
         assertFalse(java.util.Arrays.stream(QuicServer.class.getDeclaredClasses()).anyMatch(c -> c.getSimpleName().equals("Fallback")));
     }
@@ -73,9 +87,7 @@ class QuicAdmissionTest {
                 var all = new java.io.ByteArrayOutputStream();
                 t.pipe().reader().start(new PipeReader.Sink() {
                     @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
-                        ByteBuffer data = chunk.buffer();
-                        byte[] b = new byte[data.remaining()];
-                        data.get(b);
+                        byte[] b = chunk.copy();
                         chunk.close();
                         consumed.run();
                         all.writeBytes(b);
@@ -132,7 +144,8 @@ class QuicAdmissionTest {
                 Takeover t = taken.get(10, TimeUnit.SECONDS);
                 assertEquals(7, t.value());
                 var quic = QuicTakeover.connection(t).orElseThrow();
-                Thread.sleep(300); // a carrier zmux still owned would be closed by now
+                var service = quic.attr(ConnectionCarrier.KEY).get();
+                if (service != null) service.whenDrained().toCompletableFuture().get(20, TimeUnit.SECONDS);
                 assertTrue(quic.isActive(), "the detached stream and its connection are the host's");
                 t.pipe().reader().close();
                 t.pipe().writer().close();
@@ -164,14 +177,16 @@ class QuicAdmissionTest {
      * stream is opened at once; a connection without the credential is refused.
      */
     @Test void credentialsAdmitEveryConnectionTheClientOpens() throws Exception {
-        var auth = new PrefixAuth(new byte[32], Duration.ofSeconds(30), false, 1, 0);
-        var verifier = auth.verifier();
+        var auth = presenter(false, new byte[32]);
+        var verifier = verifier(false, new byte[32]);
         var verdicts = new LinkedBlockingQueue<String>();
-        Admission.Decider decider = Admission.Decider.immediate((info, prefix) -> {
-            var d = verifier.decide(info, prefix);
-            verdicts.add(prefix.remaining() + " " + d.verdict());
-            return d.verdict() == AdmissionVerdict.ACCEPT ? d : Admission.Decision.CLOSE;
-        });
+        Admission.Decider decider = (info, prefix, deadline) -> {
+            int length = prefix.remaining();
+            return verifier.decide(info, prefix, deadline).thenApply(d -> {
+                verdicts.add(length + " " + d.verdict());
+                return d;
+            });
+        };
         try (EventLoops loops = EventLoops.create(3); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var config = QuicEndpointTest.config(loops);
             var dialing = QuicEndpointTest.builder(loops).carrierCredential(auth).build();
@@ -184,11 +199,11 @@ class QuicAdmissionTest {
                 var a = client.connectAsync(server.address(), "localhost").get(10, TimeUnit.SECONDS);
                 var b = remote.accept(Duration.ofSeconds(5));
                 assertNotNull(b);
-                assertEquals("32 ACCEPT", verdicts.poll(1, TimeUnit.SECONDS));
+                assertEquals("64 ACCEPT", verdicts.poll(1, TimeUnit.SECONDS));
 
                 var joined = client.dialAsync(server.address(), "localhost", a, auth).get(5, TimeUnit.SECONDS);
                 a.addPipe(joined, PipeOptions.defaults());
-                assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
+                assertEquals("64 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
 
                 try (var pool = QuicPool.builder(client, server.address(), "localhost").limits(QuicPool.Limits.defaults().withMaxPipesPerConnection(2)).credential(auth).build()) {
                     var first = pool.openPipeAsync();
@@ -198,7 +213,7 @@ class QuicAdmissionTest {
                     assertSame(one.carrierConn(), two.carrierConn(), "one pooled connection");
                     a.addPipe(one, PipeOptions.defaults());
                     a.addPipe(two, PipeOptions.defaults());
-                    assertEquals("32 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
+                    assertEquals("64 ACCEPT", verdicts.poll(5, TimeUnit.SECONDS));
                     QuicTest.transfer(workers, a, b, 8, 128 << 10);
                     QuicTest.transfer(workers, b, a, 4, 64 << 10);
                 }
@@ -211,7 +226,7 @@ class QuicAdmissionTest {
                 }, workers);
                 String verdict = verdicts.poll(5, TimeUnit.SECONDS);
                 assertNotNull(verdict, "a connection without the credential is decided");
-                assertTrue(verdict.endsWith("FALLBACK"), verdict);
+                assertTrue(verdict.endsWith("CLOSE"), verdict);
                 try { refused.get(10, TimeUnit.SECONDS); } catch (ExecutionException expected) { }
                 a.close(); b.close(); a.awaitClosed(); b.awaitClosed();
             }
@@ -221,12 +236,12 @@ class QuicAdmissionTest {
 
     /** The session dialer with a configuration presents its credential; a bound one has the connection's exporter, and a listener that expects none refuses its prefix. */
     @Test void sessionDialersPresentTheConfiguredCredential() throws Exception {
-        var auth = new PrefixAuth(new byte[32], Duration.ofSeconds(30), false, 1, 0);
+        var auth = presenter(false, new byte[32]);
         try (EventLoops loops = EventLoops.create(2)) {
             var config = ZmuxConfig.builder().eventLoops(loops).build();
             var options = QuicOptions.defaults();
             try (var listener = Zmux.listener(ListenerConfig.builder().session(config)
-                         .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, auth.verifier()).peekTimeout(Duration.ofSeconds(5)).build()).build());
+                         .admission(Admission.builder(PrefixAuth.TOKEN_LENGTH, verifier(false, new byte[32])).peekTimeout(Duration.ofSeconds(5)).build()).build());
                  var server = new QuicServer(QuicTest.any(), TestTls.server, options, listener);
                  var endpoint = new QuicClient(TestTls.client, options)) {
                 var withCredential = ZmuxConfig.builder().eventLoops(loops).carrierCredential(auth).build();
@@ -235,7 +250,7 @@ class QuicAdmissionTest {
                     assertNotNull(accepted);
                 }
                 var bound = ZmuxConfig.builder().eventLoops(loops)
-                        .carrierCredential(new PrefixAuth(new byte[32], Duration.ofSeconds(30), true, 1, 0)).build();
+                        .carrierCredential(presenter(true, new byte[32])).build();
                 var failure = assertThrows(ExecutionException.class,
                         () -> endpoint.connectAsync(server.address(), "localhost", bound).get(30, TimeUnit.SECONDS));
                 assertInstanceOf(java.io.IOException.class, failure.getCause());

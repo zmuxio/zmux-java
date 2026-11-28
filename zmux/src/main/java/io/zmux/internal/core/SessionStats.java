@@ -13,6 +13,14 @@ public final class SessionStats {
     private long datagramsDroppedSend;
     private long datagramsDroppedRecv;
     private long datagramsDroppedLimit;
+    private long datagramDuplicatesDropped;
+    private long datagramStaleDropped;
+    private long datagramDeadlineDropped;
+    private long datagramNativeDropped;
+    private long datagramCopiesSent, datagramCopyBytes;
+    private long datagramCopyBudgetDropped;
+    private long datagramCopyPathDropped;
+    private long datagramCopyIndependenceDropped;
     /** Of datagramsSent and datagramsReceived: those on carrier datagram channels. */
     private long datagramsSentChannel;
     private long datagramsReceivedChannel;
@@ -41,7 +49,6 @@ public final class SessionStats {
     private long suspendedSince = -1;
     private long schedulerAnswers;
     private long schedulerFallbacks;
-    private long firstFlightTimeouts;
     /** Changes with every count: lets a reader publish only what changed. */
     private long version;
 
@@ -63,17 +70,26 @@ public final class SessionStats {
 
     void datagramDroppedLimit() { version++; datagramsDroppedLimit++; }
 
+    void datagramDuplicate() { version++; datagramDuplicatesDropped++; }
+
+    void datagramCopy(long bytes) { version++; datagramCopiesSent++; datagramCopyBytes += bytes; }
+
+    void datagramCopyBudgetDrop() { datagramCopyBudgetDropped++; }
+    public long datagramCopyBudgetDropped() { return datagramCopyBudgetDropped; }
+    void datagramCopyPathDrop() { version++; datagramCopyPathDropped++; }
+    long datagramCopyPathDropped() { return datagramCopyPathDropped; }
+    void datagramCopyIndependenceDrop() { datagramCopyIndependenceDropped++; }
+    public long datagramCopyIndependenceDropped() { return datagramCopyIndependenceDropped; }
+    void datagramDeadline() { version++; datagramDeadlineDropped++; }
+
+    void datagramNativeUnavailable() { version++; datagramNativeDropped++; datagramsDroppedSend++; }
+
+    public long datagramNativeDropped() { return datagramNativeDropped; }
+
+    void datagramStale() { version++; datagramStaleDropped++; }
+
     /** A datagram went on a channel (also counted as sent). */
     void datagramSentChannel() { version++; datagramsSent++; datagramsSentChannel++; }
-
-    /** A datagram of payload bytes counted as sent on a channel was refused by it: dropped instead. */
-    void channelSendFailed(int payload) {
-        version++;
-        datagramsSent--;
-        datagramsSentChannel--;
-        datagramsDroppedSend++;
-        datagramBytesSent -= payload;
-    }
 
     /** n of the datagrams received came on a channel. */
     void datagramsReceivedChannel(long n) { version++; datagramsReceivedChannel += n; }
@@ -130,7 +146,6 @@ public final class SessionStats {
     void schedulerAnswer() { version++; schedulerAnswers++; }
 
     void schedulerFallback() { version++; schedulerFallbacks++; }
-    void firstFlightTimeout() { version++; firstFlightTimeouts++; }
 
     public long bytesSent() { return bytesSent; }
 
@@ -186,19 +201,19 @@ public final class SessionStats {
                            long appBytesWritten, long appBytesRead, long datagramBytesSent, long datagramBytesReceived,
                            long streamsOpenedLocal, long streamsOpenedRemote, long streamCreditWaits,
                            long datagramsSent, long datagramsReceived, long datagramsSentChannel, long datagramsReceivedChannel,
-                           long datagramsDroppedSend, long datagramsDroppedRecv, long datagramsDroppedLimit,
+                           long datagramsDroppedSend, long datagramsDroppedRecv, long datagramsDroppedLimit, long datagramDuplicatesDropped, long datagramStaleDropped, long datagramDeadlineDropped, long datagramCopiesSent, long datagramCopyBytes,
                            long budgetTokens, long bytesReinjected, long bytesOpportunistic, long penalties, long reinjections,
                            long bytesRedundant, long bytesDuplicateReceived, long pipesAdded, long pipeFailures,
                            long joinAuthFailures, long joinReplays, long joinPending, long joinRefusals, long suspensions,
-                           long suspendedTotal, long suspendedSince, long schedulerAnswers, long schedulerFallbacks, long firstFlightTimeouts, long joinFailures, long joinBatchDropped,
+                           long suspendedTotal, long suspendedSince, long schedulerAnswers, long schedulerFallbacks, long joinFailures, long joinBatchDropped,
                            Gauges gauges) {}
 
     public Snapshot snapshot(long budgetTokens, Gauges g) {
         return new Snapshot(bytesSent, bytesReceived, recordsSent, recordsReceived, appBytesWritten, appBytesRead,
                 datagramBytesSent, datagramBytesReceived, streamsOpenedLocal, streamsOpenedRemote, streamCreditWaits,
                 datagramsSent, datagramsReceived, datagramsSentChannel, datagramsReceivedChannel, datagramsDroppedSend,
-                datagramsDroppedRecv, datagramsDroppedLimit, budgetTokens, bytesReinjected, bytesOpportunistic, penalties,
+                datagramsDroppedRecv, datagramsDroppedLimit, datagramDuplicatesDropped, datagramStaleDropped, datagramDeadlineDropped, datagramCopiesSent, datagramCopyBytes, budgetTokens, bytesReinjected, bytesOpportunistic, penalties,
                 reinjections, bytesRedundant, bytesDuplicateReceived, pipesAdded, pipeFailures, joinAuthFailures, joinReplays,
-                joinPending, joinRefusals, suspensions, suspendedTotal, suspendedSince, schedulerAnswers, schedulerFallbacks, firstFlightTimeouts, joinFailures, joinBatchDropped, g);
+                joinPending, joinRefusals, suspensions, suspendedTotal, suspendedSince, schedulerAnswers, schedulerFallbacks, joinFailures, joinBatchDropped, g);
     }
 }

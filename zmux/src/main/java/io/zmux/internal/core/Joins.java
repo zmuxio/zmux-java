@@ -32,6 +32,12 @@ import java.util.Iterator;
 public final class Joins {
     /** What Joins asks of the rest of the path layer and the session. */
     interface Port {
+        CoreSessionPolicy sessionPolicy();
+
+        boolean peerAttached(Pipe p);
+
+        void capacityChanged();
+
         /** See {@link PathHealth}. */
         void requestPing(Pipe p, long now);
 
@@ -50,6 +56,8 @@ public final class Joins {
         /** See {@link PathSession}. */
         void emitPipeState(Pipe p);
 
+        void healthChanged(Pipe p);
+
         /** Fails the session on a local protocol error. */
         void failLocal(WireException e);
 
@@ -57,7 +65,9 @@ public final class Joins {
         void failPipe(Pipe p, long code, Throwable cause);
 
         /** First batch frames of unacknowledged stream data, or null. */
-        byte[] firstBatch(int limit);
+        StreamSend.FirstBatch firstBatch(int limit, Batch receipt);
+        int firstBatchStreamCount();
+        void firstBatchAccepted(long own);
 
         /** Applies frames of a verified Hello or Reply. */
         void applyBatch(byte[] frames);
@@ -68,8 +78,8 @@ public final class Joins {
         /** A verified Reply refused: retired at once. */
         void retireDeclined(Pipe p);
 
-        /** A Join's message grew by n bytes. */
-        void joinPadding(long n);
+        long joinPaddingRoom();
+        boolean profileBounded();
 
         /** The session clock. */
         long now();
@@ -96,7 +106,6 @@ public final class Joins {
     private final Port port;
     private final CoreConfig cfg;
     private final PipeTable pipes;
-    private final Outbox outbox;
     private final boolean initiator;
     private final long[] usable;
     /** The exporter kept while the join keys wait. */
@@ -112,8 +121,7 @@ public final class Joins {
     /** The session epochs; empty while the join keys wait. */
     private final EpochSet ep;
     private long nextId;
-    private final int cap;
-    final int ownCap;
+    private final int peerCap;
     private final long replayW;
     private long h;
     private boolean hSet;
@@ -123,14 +131,17 @@ public final class Joins {
     private long backoffUntil;
     private int backoffExp;
     private final SessionStats stats;
+    private final ConnFlow conn;
+    private final java.util.ArrayDeque<JoinReservation> reservations = new java.util.ArrayDeque<>();
+    private int reserved;
 
-    Joins(CoreConfig cfg, SessionStats stats, TransportParams peer, boolean initiator, PipeTable pipes, Outbox outbox, Port port,
-          byte[] exporter, byte[] psk) {
+    Joins(CoreConfig cfg, SessionStats stats, TransportParams peer, boolean initiator, PipeTable pipes, Port port,
+          byte[] exporter, byte[] psk, ConnFlow conn) {
+        this.conn = conn;
         this.port = port;
         this.cfg = cfg;
         this.stats = stats;
         this.pipes = pipes;
-        this.outbox = outbox;
         this.initiator = initiator;
         TransportParams l = cfg.local();
         ep = new EpochSet(peer.locator);
@@ -154,14 +165,9 @@ public final class Joins {
         nextId = initiator ? 2 : 1;
         heldExporter = (l.secretFlags & TransportParams.SECRET_EXPORTER) != 0 && exporter != null ? exporter : new byte[0];
         keysPending = true;
-        int maxPipes = Math.max(1, cfg.maxPipes());
-        int c = maxPipes + cfg.headroom();
-        ownCap = c;
-        if (cfg.test().pipeCap() > 0) c = cfg.test().pipeCap();
-        cap = c;
-        long rw = Math.max(64, 2L * (maxPipes + cfg.headroom()));
-        if (cfg.replayWindow() > 0) rw = cfg.replayWindow(); // at least maxPipes + headroom: checked by the public configuration
-        replayW = rw;
+        int initialLimit = cfg.sessionPolicy().limits().attachmentLimit();
+        peerCap = cfg.test().pipeCap() > 0 ? cfg.test().pipeCap() : initialLimit;
+        replayW = Math.max(64, 2L * initialLimit);
         if (!initiator) {
             h = 0;
             hSet = true;
@@ -184,6 +190,7 @@ public final class Joins {
         java.util.Arrays.fill(heldExporter, (byte) 0);
         heldExporter = null;
         keysPending = false;
+        port.capacityChanged();
     }
 
     /** The session closed: an exporter still waiting for the deferred PSK and every epoch secret are cleared. */
@@ -354,22 +361,26 @@ public final class Joins {
         if (port.now() < backoffUntil) return false;
         int n = 0;
         for (Pipe q : pipes.all()) if (q != p && q.mp() != null && q.mp().joinerLocal && !q.mp().health.retired() && !q.mp().joining.held) n++;
-        if (n >= ownCap) {
+        if ((long) n + reserved >= localLimit()) {
             boolean in = p.in() != null, out = p.out() != null;
-            if (!mayDisplace || port.state() != SessionState.SUSPENDED || !lacks(in, out) || !makeRoom(true, in, out)) return false;
+            if (!mayDisplace || reserved != 0 || port.state() != SessionState.SUSPENDED || !makeRoom(true, in, out)) return false;
         }
         a.joining.held = false;
         return true;
     }
 
     boolean joinAllowed() {
-        return port.now() >= backoffUntil && ownAttachments() < ownCap;
+        return port.now() >= backoffUntil && (long) ownAttachments() + reserved < localLimit();
     }
 
     /** Maintenance targets exclude failed attachments; headroom is for their retained state. */
     boolean joinReady() {
-        if (keysPending || port.now() < backoffUntil) return false;
-        if (ownAttachments() >= ownCap && (port.state() != SessionState.SUSPENDED || !lacks(true, true) || roomCandidate(true, true, true) == null)) return false;
+        if (keysPending || port.now() < backoffUntil || steadyRoom() <= reserved) return false;
+        return (long) ownAttachments() + reserved < localLimit()
+                || (port.state() == SessionState.SUSPENDED && roomCandidate(true, true, true) != null);
+    }
+
+    private int steadyRoom() {
         int target = 0;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
@@ -377,8 +388,60 @@ public final class Joins {
                     || (a.health.out() == Attach.OUT_NONE && a.health.in() == Attach.IN_ENDED)) continue;
             target++;
         }
-        return target < Math.max(1, cfg.maxPipes());
+        return port.sessionPolicy().limits().steadyAttachments() - target;
     }
+
+    /** A batch's unused protocol attachments. The session owner alone may claim them. */
+    public static final class JoinReservation {
+        private final Joins owner;
+        private int remaining;
+
+        private JoinReservation(Joins owner, int remaining) {
+            this.owner = owner;
+            this.remaining = remaining;
+        }
+    }
+
+    int reservedJoins() { return reserved; }
+
+    JoinReservation reserve(int attachments, boolean replacement, int directions, java.util.function.BooleanSupplier grant) {
+        if (keysPending || port.now() < backoffUntil || attachments <= 0) return null;
+        int room = localLimit() - ownAttachments();
+        boolean in = (directions & Action.DIR_IN) != 0, out = (directions & Action.DIR_OUT) != 0;
+        boolean recovery = port.state() == SessionState.SUSPENDED && lacks(in, out);
+        if (!replacement && !recovery) room = Math.min(room, steadyRoom());
+        if (room == 0 && recovery && reserved == 0 && roomCandidate(true, in, out) != null) room = 1;
+        if (attachments > room - reserved || (grant != null && !grant.getAsBoolean())) return null;
+        var reservation = new JoinReservation(this, attachments);
+        reserved += attachments;
+        reservations.addLast(reservation);
+        port.capacityChanged();
+        return reservation;
+    }
+
+    boolean consume(JoinReservation reservation) {
+        if (reservation.owner != this || reservation.remaining == 0) return false;
+        reservation.remaining--;
+        reserved--;
+        if (reservation.remaining == 0) reservations.remove(reservation);
+        port.capacityChanged();
+        return true;
+    }
+
+    void release(JoinReservation reservation) {
+        if (reservation.owner != this || reservation.remaining == 0) return;
+        reserved -= reservation.remaining;
+        reservation.remaining = 0;
+        reservations.remove(reservation);
+        port.capacityChanged();
+        pipes.wakeWriters();
+    }
+
+    void invalidateReservations() {
+        while (!reservations.isEmpty()) release(reservations.getFirst());
+    }
+
+    int localLimit() { return port.sessionPolicy().limits().attachmentLimit(); }
 
     int ownAttachments() {
         int n = 0;
@@ -393,8 +456,10 @@ public final class Joins {
     }
 
     /** Takes a pipe ID and enters JOINING; returns the ID, -id - 1 when the cap or the backoff holds it. */
-    long addPipe(JoinOptions o) {
-        if (port.state() == SessionState.SUSPENDED && ownAttachments() >= ownCap && lacks(o.dir != 0, o.dir != 1)) makeRoom(true, o.dir != 0, o.dir != 1);
+    long addPipe(JoinOptions o, SessionCapacity.Member member) {
+        if (port.state() == SessionState.SUSPENDED && reserved == 0 && ownAttachments() >= localLimit()) {
+            makeRoom(true, o.dir != 0, o.dir != 1);
+        }
         long id = nextId;
         nextId += 2;
         Attach a = new Attach(true, o.dir, o.fateGroup, o.suspectFloor, o.deadTimeout, o.probeInterval, o.probeJitter, o.dir != 1 ? Attach.OUT_JOINING : Attach.OUT_NONE,
@@ -406,11 +471,12 @@ public final class Joins {
         initialRtt(a, id);
         CarrierInfo info = o.dir != 1 ? o.out : o.in;
         Pipe p = new Pipe(id, o.dir != 0 ? new Pipe.InDir(new Pipe.InLane(0, false, false)) : null,
-                o.dir != 1 ? new Pipe.OutDir(o.out, null) : null, a, info.kind());
+                o.dir != 1 ? new Pipe.OutDir(o.out) : null, a, info.kind());
         p.label(info.label());
         p.variant(info.variant());
         boolean pending = !joinAllowed();
         if (pending) a.joining.held = true;
+        if (member != null) p.member(member);
         pipes.add(p);
         stats.pipeAdded();
         port.emitPipeState(p);
@@ -474,7 +540,8 @@ public final class Joins {
     }
 
     /** The Hello of a prepared join, with a first batch while no other pipe is usable. overhead: what the carrier adds to a write. */
-    byte[] joinHello(Pipe p, Framing framing, int earlyLimit, UnitPlan plan, int overhead) throws SecureCarrierException, CoreException {
+    byte[] joinHello(Pipe p, Framing framing, int earlyLimit, UnitPlan plan, int overhead, Batch receipt)
+            throws SecureCarrierException, CoreException {
         Attach a = p == null ? null : p.mp();
         // No epoch once the session closed and cleared its secrets.
         Epoch e = ep.join;
@@ -490,18 +557,38 @@ public final class Joins {
         boolean up = a.dir == 0;
         JoinPipe pipe = new JoinPipe(p.id, a.dir, a.fate, up ? 0 : a.tier.recvPrio(), !up && a.tier.recvStandby());
         HelloPayload empty = new HelloPayload(pipe, null, 0);
-        int limit = a.joining.early ? firstBatchLimit(earlyLimit, plan.padTo(), j.helloLength(empty) + overhead) : 0;
+        int limit = a.joining.early ? firstBatchLimit(earlyLimit, port.profileBounded() ? 0 : plan.padTo(), j.helloLength(empty) + overhead) : 0;
         // The frames item stays within what the Hello's ciphertext holds.
         // and within the handshake message floor, which every acceptor takes.
         if (limit > 0) limit = Math.clamp(HandshakePlans.fit(Sealer.MESSAGE_FLOOR - j.helloLength(empty)), 0, limit);
-        byte[] batch = limit > 0 ? port.firstBatch(limit) : null;
-        HelloPayload bare = new HelloPayload(pipe, batch, 0);
-        int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, Sealer.MESSAGE_FLOOR - j.helloLength(bare));
-        byte[] hello = j.writeHello(new HelloPayload(pipe, batch, Tlv.paddingField(item)));
-        if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
-        a.joining.joinedEpoch = e.n;
-        a.joiner(j, framing);
-        return hello;
+        // Early encoding can own the sized arena, its compact copy, the temporary
+        // snapshot, and the plaintext TLV staging at the same time. Replay keeps
+        // only send queue pins, history and carrier receipts after this method.
+        long workspace = limit > 0 ? 2L * limit + 8L * port.firstBatchStreamCount()
+                + 4L * Sealer.MESSAGE_FLOOR + 256 : 0;
+        if (workspace > 0 && !conn.reserveOptional(workspace)) {
+            workspace = 0;
+            limit = 0; // Join control can proceed without optional early data.
+        }
+        try {
+            var first = limit > 0 ? port.firstBatch(limit, receipt) : null;
+            byte[] batch = first == null ? null : first.frames();
+            HelloPayload bare = new HelloPayload(pipe, batch, 0);
+            int item = HandshakePlans.item(plan, j.helloLength(bare) + overhead, paddingRoom(HandshakePlans.structuralRoom(j.helloLength(bare))));
+            byte[] hello = j.writeHello(new HelloPayload(pipe, batch, Tlv.paddingField(item)));
+            if (receipt != null && item != HandshakePlans.NO_ITEM)
+                receipt.handshakePadding(new HandshakePlans.Padding(j.helloPayloadOffset(), HandshakePlans.itemSize(item)));
+            a.joining.joinedEpoch = e.n;
+            a.joining.firstOwn = first == null ? 0 : first.own();
+            a.joiner(j, framing);
+            return hello;
+        } finally {
+            if (workspace > 0) conn.releaseOptional(workspace);
+        }
+    }
+
+    private int paddingRoom(int structuralRoom) {
+        return (int) Math.min(structuralRoom, port.joinPaddingRoom());
     }
 
     private boolean noUsablePipe(Pipe p) {
@@ -521,12 +608,12 @@ public final class Joins {
     }
 
     /** What {@link #joinFinish} made: the confirmation to write and the record keys. */
-    public record Finished(byte[] confirm, Result result) {}
+    public record Finished(byte[] confirm, Result result, HandshakePlans.Padding padding) {}
 
     /** The bound of what a joiner reads before a verified Reply: never max_record_size. */
     private static final int JOIN_READ_BOUND = 2 * 65535 + 64;
 
-    /** Feeds bytes read from a JOINING carrier; nothing of them reaches the session before they verify. PROVEN changes no state of the pipe. */
+    /** Feeds bytes read from a JOINING carrier. A verified Reply records the join time before confirmation. */
     JoinStep verifyReply(Pipe p, byte[] b, int off, int len) {
         Attach a = p.mp();
         if (a == null || !a.joining() || a.joiner() == null || a.verified() != null) return new JoinStep(Step.FAILED, 0, 0);
@@ -567,6 +654,8 @@ public final class Joins {
             return new JoinStep(Step.DECLINED, skip + used, 0);
         }
         a.verified(reply);
+        a.joined(port.now());
+        port.healthChanged(p);
         return new JoinStep(Step.PROVEN, skip + used, 0);
     }
 
@@ -580,20 +669,25 @@ public final class Joins {
         ReplyPayload reply = a.verified();
         Joiner j = a.joiner();
         byte[] confirm;
+        HandshakePlans.Padding padding;
         Result result;
         try {
-            int fill = HandshakePlans.fill(plan, j.confirmLength() + overhead, j.confirmRoom());
+            int fill = HandshakePlans.fill(plan, j.confirmLength() + overhead, paddingRoom(Math.min(j.confirmRoom(), HandshakePlans.structuralRoom(j.confirmLength()))));
             confirm = j.writeConfirm(fill);
-            if (fill > 0) port.joinPadding(fill);
+            padding = fill == 0 ? HandshakePlans.Padding.NONE : new HandshakePlans.Padding(
+                    j.confirmLength() - (a.mode() == Mode.SEALED ? Suite.TAG_LEN : 0), fill);
             result = j.finish();
         } catch (SecureCarrierException e) {
             failedStep(p, e);
             throw e;
         }
+        long own = a.joining.firstOwn;
+        a.joining.firstOwn = 0;
         a.endHandshake();
+        port.firstBatchAccepted(own);
         port.proven(p);
         port.applyBatch(reply.frames());
-        return new Finished(confirm, result);
+        return new Finished(confirm, result, padding);
     }
 
     private JoinStep failedStep(Pipe p, SecureCarrierException cause) {
@@ -612,22 +706,35 @@ public final class Joins {
     public enum JoinResult { ACCEPTED, HOLD, KEY_WAIT, CLOSE, REFUSED }
 
     /** The carrier of a peer join: the directions it gives the acceptor, its properties, and whether it would loop. */
-    public record JoinCarrier(boolean hasIn, boolean hasOut, CarrierInfo in, CarrierInfo out, Waiter outSig, boolean refuse) {}
+    public record JoinCarrier(boolean hasIn, boolean hasOut, CarrierInfo in, CarrierInfo out, boolean refuse) {}
 
-    /** An authenticated Hello: holds no session state until Confirmed. */
-    public static final class PeerJoin {
+    // Covers both supported groups' retained share, exchange and key schedule arrays, the
+    // authorization request, and the pending join, timer and map descriptors. Variable
+    // ciphertext and early data arrays are charged separately.
+    private static final long PEER_JOIN_STATE = 8192;
+
+    /** An authenticated Hello owned by authorization, then by the confirmation gate. */
+    public static final class PeerJoin implements AutoCloseable {
         private final JoinPipe pipe;
         private final Mode mode;
-        private final Acceptor acceptor;
-        private final HelloPayload payload;
+        private Acceptor acceptor;
+        private Runnable release;
         private final long epoch;
+        private final long authGeneration;
+        private final int directions;
 
-        private PeerJoin(JoinPipe pipe, Mode mode, Acceptor acceptor, HelloPayload payload, long epoch) {
+        private PeerJoin(JoinPipe pipe, Mode mode, Acceptor acceptor, long epoch, long authGeneration, Runnable release) {
             this.pipe = pipe;
             this.mode = mode;
             this.acceptor = acceptor;
-            this.payload = payload;
+            this.release = release;
             this.epoch = epoch;
+            this.authGeneration = authGeneration;
+            directions = switch (pipe.direction()) {
+                case 0 -> Action.DIR_IN;
+                case 1 -> Action.DIR_OUT;
+                default -> Action.DIR_BIDI;
+            };
         }
 
         //noinspection ClassEscapesItsScope
@@ -635,13 +742,32 @@ public final class Joins {
         //noinspection ClassEscapesItsScope
         public Mode mode() { return mode; }
 
+        public long epoch() { return epoch; }
+
+        public long authGeneration() { return authGeneration; }
+
+        /** Service directions relative to the accepting endpoint. */
+        public int directions() { return directions; }
+
+        public int firstBatchBytes() { return firstBatchBytes(acceptor.payload()); }
+
+        private static int firstBatchBytes(HelloPayload payload) {
+            return payload.firstBatch() == null ? 0 : payload.firstBatch().length;
+        }
+
+        @Override public void close() {
+            if (release == null) return;
+            acceptor = null;
+            Runnable refund = release;
+            release = null;
+            refund.run();
+        }
+
         /** Reads the confirmation; the bytes taken. In Bound there is none. INCOMPLETE carries the need. */
         public int readConfirm(byte[] b, int off, int len) throws SecureCarrierException {
             return mode == Mode.BOUND ? 0 : acceptor.readConfirm(b, off, len);
         }
 
-        //noinspection ClassEscapesItsScope
-        public Result result() throws SecureCarrierException { return acceptor.finish(); }
     }
 
     /**
@@ -666,7 +792,7 @@ public final class Joins {
         }
         // A Suite outside the session's set, refused before any AEAD.
         if (!usableSuite(h.suite().id())) return new Opened(JoinResult.CLOSE, null, "unknown_suite");
-        Epoch e = ep.byPhase(h.phase());
+        Epoch e = acceptedEpoch(h.phase());
         Acceptor acceptor;
         try {
             // The key of the joiner's role, which is the peer's, never inferred from the ID.
@@ -678,48 +804,104 @@ public final class Joins {
             port.emit(Event.joinAuthFailed(failed.kind().name().toLowerCase(java.util.Locale.ROOT)));
             return new Opened(JoinResult.CLOSE, null);
         }
-        if (e != null) epochPeerJoined(e.n); // a verified join of d+1: A uses d+1 too
+        if (e == null) return new Opened(JoinResult.CLOSE, null);
         HelloPayload payload = acceptor.payload();
         long id = payload.pipe().id();
-        if (ownParity(id)) {
-            port.failLocal(WireException.withDetails(TransportError.PROTOCOL_VIOLATION, "join with the wrong parity", "pipe", id));
-            return new Opened(JoinResult.CLOSE, null);
-        }
         if (pipes.get(id) != null || idRetired(id)) {
             stats.joinReplay();
             return new Opened(JoinResult.CLOSE, null);
         }
-        return new Opened(JoinResult.ACCEPTED, new PeerJoin(payload.pipe(), h.mode(), acceptor, payload, e == null ? -1 : e.n));
+        long charge = PEER_JOIN_STATE + h.ciphertext().length + PeerJoin.firstBatchBytes(payload);
+        if (!conn.reserveOptional(charge)) return new Opened(JoinResult.CLOSE, null, "memory_budget");
+        return new Opened(JoinResult.ACCEPTED, new PeerJoin(payload.pipe(), h.mode(), acceptor, e.n,
+                port.sessionPolicy().authGeneration(), () -> conn.releaseOptional(charge)));
+    }
+
+    private Epoch acceptedEpoch(int phase) {
+        Epoch epoch = ep.byPhase(phase);
+        return ep.st == EpochState.RETAINING && port.now() >= ep.dropAt && epoch != ep.join ? null : epoch;
     }
 
     /**
      * The reply of a claimed Hello, and whether it refuses; evicted, when not null, is the session's oldest
      * Unconfirmed join, which the caller closes as a failed join (MULTIPATH.md 5.4 step 7) before it writes the Reply.
      */
-    public record Claimed(JoinResult result, byte[] reply, PeerJoin evicted) {
-        public Claimed(JoinResult result, byte[] reply) { this(result, reply, null); }
+    public record Claimed(JoinResult result, byte[] reply, PeerJoin evicted, String reason, HandshakePlans.Padding padding) {
+        private Claimed(JoinResult result, byte[] reply, PeerJoin evicted, String reason) {
+            this(result, reply, evicted, reason, HandshakePlans.Padding.NONE);
+        }
+        public Claimed(JoinResult result, byte[] reply) { this(result, reply, null, "auth"); }
     }
 
-    /** The session's Unconfirmed peer joins, oldest first (MULTIPATH.md 5.6): a Bound join never holds one. */
-    private final java.util.ArrayDeque<PeerJoin> unconfirmed = new java.util.ArrayDeque<>();
+    /** Accepted Replies waiting for publication, in claim order. Bound needs no confirmation flight. */
+    private record PendingPeerJoin(JoinCarrier carrier, long deadline) {}
+    private final java.util.LinkedHashMap<PeerJoin, PendingPeerJoin> pending = new java.util.LinkedHashMap<>();
+    private int unconfirmed;
 
-    /**
-     * Admits an accepted join as Unconfirmed within cap: at the bound, the oldest is taken out and returned
-     * for the caller to close; below it nothing is evicted.
-     */
-    private PeerJoin holdUnconfirmed(PeerJoin pj, int cap) {
-        if (pj.mode == Mode.BOUND) return null;
-        PeerJoin evicted = unconfirmed.size() >= cap ? unconfirmed.pollFirst() : null;
-        unconfirmed.addLast(pj);
+    int pendingPeerJoins() { return pending.size(); }
+
+    private PeerJoin holdUnconfirmed(PeerJoin pj, JoinCarrier carrier, long deadline, int cap) {
+        PeerJoin evicted = null;
+        if (pj.mode != Mode.BOUND) {
+            if (unconfirmed >= cap) {
+                for (PeerJoin old : pending.keySet()) {
+                    if (old.mode != Mode.BOUND) {
+                        evicted = old;
+                        break;
+                    }
+                }
+                unconfirmedEnded(evicted);
+            }
+            unconfirmed++;
+        }
+        pending.put(pj, new PendingPeerJoin(carrier, deadline));
         return evicted;
     }
 
-    /** An Unconfirmed join ended without its confirmation (closed, timed out, failed): it holds no slot any more. */
-    void unconfirmedEnded(PeerJoin pj) { unconfirmed.remove(pj); }
+    private PendingPeerJoin takePending(PeerJoin pj) {
+        PendingPeerJoin join = pending.remove(pj);
+        if (join != null && pj.mode != Mode.BOUND) unconfirmed--;
+        return join;
+    }
 
-    /** The rest of step 7: sets the Pipe ID's bit, applies the first batch, writes the Reply. Moves no pipe, cap or suspension. */
-    Claimed claimHello(PeerJoin pj, JoinCarrier c, UnitPlan plan, int overhead, long received, int unconfirmedCap) {
+    /** An accepted Reply ended without publication. */
+    boolean unconfirmedEnded(PeerJoin pj) {
+        if (takePending(pj) == null) return false;
+        pj.close();
+        return true;
+    }
+
+    boolean currentAuthorization(PeerJoin pj) {
+        if (pj.authGeneration == port.sessionPolicy().authGeneration()) return true;
+        stats.joinAuthFailed();
+        port.emit(Event.joinAuthFailed("authorization_changed"));
+        return false;
+    }
+
+    private boolean currentEpoch(PeerJoin pj) {
+        Epoch epoch = acceptedEpoch((int) (pj.epoch & 1));
+        return epoch != null && epoch.n == pj.epoch;
+    }
+
+    /** Claims the ID and commits KEX/first batch before preparing the Reply. */
+    Claimed claimHello(PeerJoin pj, JoinCarrier c, UnitPlan plan, int overhead, long received, long deadline) {
+        try {
+            return claim(pj, c, plan, overhead, received, deadline);
+        } finally {
+            if (!pending.containsKey(pj)) pj.close();
+        }
+    }
+
+    private Claimed claim(PeerJoin pj, JoinCarrier c, UnitPlan plan, int overhead, long received, long deadline) {
+        if (pj.acceptor == null) return new Claimed(JoinResult.CLOSE, null);
+        if (!currentAuthorization(pj)) return new Claimed(JoinResult.CLOSE, null, null, "authorization_changed");
+        if (port.now() >= deadline) return new Claimed(JoinResult.CLOSE, null, null, "expired");
+        if (!currentEpoch(pj)) return new Claimed(JoinResult.CLOSE, null, null, "stale_or_replayed");
         long id = pj.pipe.id();
+        if (ownParity(id)) {
+            port.failLocal(WireException.withDetails(TransportError.PROTOCOL_VIOLATION, "join with the wrong parity", "pipe", id));
+            return new Claimed(JoinResult.CLOSE, null);
+        }
         if (pipes.get(id) != null || idRetired(id)) {
             stats.joinReplay();
             return new Claimed(JoinResult.CLOSE, null);
@@ -733,42 +915,70 @@ public final class Joins {
             port.emit(Event.joinAuthFailed("kex"));
             return new Claimed(JoinResult.CLOSE, null);
         }
-        port.applyBatch(pj.payload.firstBatch());
-        boolean needIn = pj.pipe.direction() != 1, needOut = pj.pipe.direction() != 0;
-        boolean refuse = (needIn && !c.hasIn()) || (needOut && !c.hasOut()) || c.refuse() || !capRoom(needIn, needOut);
+        epochPeerJoined(pj.epoch);
+        port.applyBatch(pj.acceptor.payload().firstBatch());
+        boolean needIn = (pj.directions & Action.DIR_IN) != 0, needOut = (pj.directions & Action.DIR_OUT) != 0;
+        int pendingLimit = port.sessionPolicy().limits().pendingPeerJoins();
+        boolean refuse = (needIn && !c.hasIn()) || (needOut && !c.hasOut()) || c.refuse()
+                || !capRoom(needIn, needOut);
         try {
             ReplyPayload bare = new ReplyPayload(refuse ? 1 : 0, null, 0);
             int wire = pj.acceptor.replyLength(bare) + overhead;
-            int room = Sealer.MESSAGE_FLOOR - pj.acceptor.replyLength(bare);
+            int room = HandshakePlans.structuralRoom(pj.acceptor.replyLength(bare));
             int limited = replyRoom(pj.mode, received, wire, 0).paddingRoom();
-            int item = HandshakePlans.item(plan, wire, limited < 0 ? room : Math.min(room, limited));
+            int item = HandshakePlans.item(plan, wire, paddingRoom(limited < 0 ? room : Math.min(room, limited)));
             byte[] reply = pj.acceptor.writeReply(new ReplyPayload(bare.decision(), null, Tlv.paddingField(item)));
-            if (item != HandshakePlans.NO_ITEM) port.joinPadding(HandshakePlans.itemSize(item));
-            return refuse ? new Claimed(JoinResult.REFUSED, reply) : new Claimed(JoinResult.ACCEPTED, reply, holdUnconfirmed(pj, unconfirmedCap));
+            var padding = item == HandshakePlans.NO_ITEM ? HandshakePlans.Padding.NONE
+                    : new HandshakePlans.Padding(pj.acceptor.replyPayloadOffset(), HandshakePlans.itemSize(item));
+            return refuse ? new Claimed(JoinResult.REFUSED, reply, null, "auth", padding)
+                    : new Claimed(JoinResult.ACCEPTED, reply, holdUnconfirmed(pj, c, deadline, pendingLimit), null, padding);
         } catch (SecureCarrierException failed) {
             return new Claimed(JoinResult.CLOSE, null);
         }
     }
 
     private boolean capRoom(boolean needIn, boolean needOut) {
-        if (peerAttachments() < cap) return true;
+        if (peerAttachments() < peerCap) return true;
         return port.state() == SessionState.SUSPENDED && roomCandidate(false, needIn, needOut) != null;
     }
 
-    /** Admission of a confirmed peer join: the only place where a peer join moves a pipe, the cap or a suspension. */
-    JoinResult confirmJoin(PeerJoin pj, JoinCarrier c) {
-        unconfirmed.remove(pj);
+    /** The result of publishing an accepted peer Join. */
+    public record Confirmed(JoinResult result, Result protection, String reason) {}
+
+    /** The only commit that installs the attachment of an accepted Reply. */
+    Confirmed confirmJoin(PeerJoin pj) {
+        PendingPeerJoin join = takePending(pj);
+        if (join == null) return new Confirmed(JoinResult.CLOSE, null, "session_closed");
+        try (pj) {
+            return confirm(pj, join);
+        }
+    }
+
+    private Confirmed confirm(PeerJoin pj, PendingPeerJoin join) {
+        if (port.isClosing()) return new Confirmed(JoinResult.CLOSE, null, "session_closed");
+        if (!currentAuthorization(pj)) return new Confirmed(JoinResult.CLOSE, null, "authorization_changed");
+        if (port.now() >= join.deadline()) return new Confirmed(JoinResult.CLOSE, null, "expired");
+        if (!currentEpoch(pj)) return new Confirmed(JoinResult.CLOSE, null, "stale_or_replayed");
+        if (!pj.acceptor.confirmed()) return new Confirmed(JoinResult.CLOSE, null, "confirmation_failed");
+        Result protection;
+        try {
+            protection = pj.acceptor.finish();
+        } catch (SecureCarrierException unverified) {
+            return new Confirmed(JoinResult.CLOSE, null, "confirmation_failed");
+        }
+        JoinCarrier c = join.carrier();
         JoinPipe j = pj.pipe;
         long id = j.id();
-        boolean needIn = j.direction() != 1, needOut = j.direction() != 0;
-        if (c.refuse() || (peerAttachments() >= cap && (port.state() != SessionState.SUSPENDED || !makeRoom(false, needIn, needOut)))) {
+        boolean needIn = (pj.directions & Action.DIR_IN) != 0, needOut = (pj.directions & Action.DIR_OUT) != 0;
+        if (c.refuse() || (peerAttachments() >= peerCap && (port.state() != SessionState.SUSPENDED || !makeRoom(false, needIn, needOut)))) {
             pendAbandon.put(id, TransportError.PIPE_RESOURCE_LIMIT);
             pipes.wakeWriters();
-            return JoinResult.REFUSED;
+            return new Confirmed(JoinResult.REFUSED, null, "capacity");
         }
         Attach a = new Attach(false, j.direction(), j.fateGroup(), 0, 0, -1, Double.NaN, needOut ? Attach.OUT_ACTIVE : Attach.OUT_NONE,
                 needIn ? Attach.IN_OPEN : Attach.IN_NONE, needOut, port.now());
         a.joining.joinedEpoch = pj.epoch;
+        a.peerAuthorization(pj.authGeneration);
         a.mode(pj.mode);
         a.ownFailure((c.hasOut() && c.out().ownFailure()) || (c.hasIn() && c.in().ownFailure()));
         a.usedGroup(pj.acceptor.joinerShare().group().id());
@@ -776,7 +986,7 @@ public final class Joins {
         initialRtt(a, id);
         CarrierInfo info = needOut ? c.out() : c.in();
         Pipe p = new Pipe(id, needIn ? new Pipe.InDir(new Pipe.InLane(0, false, false)) : null,
-                needOut ? new Pipe.OutDir(c.out(), c.outSig()) : null, a, info.kind());
+                needOut ? new Pipe.OutDir(c.out()) : null, a, info.kind());
         p.label(info.label());
         p.variant(info.variant());
         pipes.add(p);
@@ -787,12 +997,11 @@ public final class Joins {
             port.startReinjectHold(p);
         }
         port.emitPipeState(p);
-        if (p.out() != null) outbox.wake(c.outSig());
         port.checkTakeover();
         port.checkResumed();
         ep.joins++;
         epochPipeAdded(pj.mode);
-        return JoinResult.ACCEPTED;
+        return new Confirmed(JoinResult.ACCEPTED, protection, null);
     }
 
     /** The weakest record mode; firstMode is pipe 0's, which counts for life. */
@@ -821,9 +1030,17 @@ public final class Joins {
      * one choice of MULTIPATH.md Section 5.4 step 9 for the acceptor, the joiner and Section 8.4: the oldest failed attachment whose
      * own PIPE_ABANDON was acknowledged, else the oldest failed one whose PIPE_ABANDON was not; only when none has failed and the
      * new attachment provides a missing direction (provideIn: the local endpoint reads on it, provideOut: it writes), the live
-     * attachment with the oldest last progress. Held local joins are never chosen; null when nothing may be displaced.
+     * attachment with the oldest last progress that preserves coverage. Held local joins are never chosen;
+     * null when nothing may be displaced.
      */
     Pipe roomCandidate(boolean local, boolean provideIn, boolean provideOut) {
+        int confirmedIn = 0, confirmedOut = 0;
+        for (Pipe pipe : pipes.all()) {
+            int directions = confirmedCoverage(pipe);
+            if ((directions & Action.DIR_IN) != 0) confirmedIn++;
+            if ((directions & Action.DIR_OUT) != 0) confirmedOut++;
+        }
+        if ((confirmedIn != 0 || !provideIn) && (confirmedOut != 0 || !provideOut)) return null;
         Pipe acked = null, pending = null;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
@@ -837,29 +1054,37 @@ public final class Joins {
         }
         if (acked != null) return acked;
         if (pending != null) return pending;
-        if (!lacks(provideIn, provideOut)) return null;
         Pipe oldest = null;
         for (Pipe p : pipes.all()) {
             Attach a = p.mp();
             if (a == null || a.health.retired() || a.joinerLocal != local || a.joining.held) continue;
+            int directions = confirmedCoverage(p);
+            if (((directions & Action.DIR_IN) != 0 && confirmedIn == 1)
+                    || ((directions & Action.DIR_OUT) != 0 && confirmedOut == 1)) continue;
             if (oldest == null || a.progress() < oldest.mp().progress()) oldest = p;
         }
         return oldest;
     }
 
+    /** Service directions whose loss would reduce coverage. */
+    int confirmedCoverage(Pipe pipe) {
+        Attach a = pipe.mp();
+        if (a == null || a.health.retired() || a.health.draining() || !port.peerAttached(pipe)) return 0;
+        int mask = 0;
+        if (pipe.in() != null && a.health.in() == Attach.IN_OPEN) mask |= Action.DIR_IN;
+        if (pipe.out() != null && a.health.out() == Attach.OUT_ACTIVE) {
+            mask |= Action.DIR_OUT;
+        }
+        return mask & ~a.topologyExcluded();
+    }
+
     /**
-     * Whether an attachment providing these directions fills one the endpoint lacks: no unretired attachment has a live outbound
-     * (provideOut) or inbound (provideIn) direction. Held local joins are not live: they have not started.
+     * Whether an attachment can restore one of the required service directions.
      */
     boolean lacks(boolean provideIn, boolean provideOut) {
-        boolean out = false, in = false;
-        for (Pipe p : pipes.all()) {
-            Attach a = p.mp();
-            if (a == null || a.health.retired() || a.joining.held) continue;
-            out |= p.out() != null && a.liveOut();
-            in |= p.in() != null && (a.health.in() == Attach.IN_JOINING || a.health.in() == Attach.IN_OPEN);
-        }
-        return (provideOut && !out) || (provideIn && !in);
+        int coverage = 0;
+        for (Pipe pipe : pipes.all()) coverage |= confirmedCoverage(pipe);
+        return (provideOut && (coverage & Action.DIR_OUT) == 0) || (provideIn && (coverage & Action.DIR_IN) == 0);
     }
 
     boolean makeRoom(boolean local, boolean provideIn, boolean provideOut) {
@@ -928,6 +1153,7 @@ public final class Joins {
         backoffExp++;
         long d = Time.SECOND << Math.min(backoffExp - 1, 6);
         backoffUntil = Time.add(port.now(), Math.min(d, 60 * Time.SECOND));
+        port.capacityChanged();
     }
 
     /** A peer attachment retired: its ID stays used. */
@@ -937,6 +1163,7 @@ public final class Joins {
 
     /** A local attachment retired without a resource refusal: the backoff ends. */
     void backoffCleared() {
+        if (backoffUntil != 0) port.capacityChanged();
         backoffUntil = 0;
         pipes.wakeWriters();
     }
@@ -946,8 +1173,7 @@ public final class Joins {
         if (backoffUntil > now) return backoffUntil;
         if (backoffUntil == 0) return Time.NEVER;
         if (!apply) return backoffUntil; // Overdue: pending until applied.
-        backoffUntil = 0;
-        pipes.wakeWriters();
+        backoffCleared();
         return Time.NEVER;
     }
 
@@ -996,9 +1222,6 @@ public final class Joins {
         RETAINING
     }
 
-    /** A record carrying the answer of epoch n ends at pos on lane. */
-    private record AnswerSent(Pipe.OutLane lane, long pos, long n) {}
-
     private static final int OFFER = 0, ANSWER = 1;
 
     /**
@@ -1027,7 +1250,6 @@ public final class Joins {
         /** Whether a Sealed or Bound pipe has existed yet. */
         private boolean securePipeSeen;
         private long stableSince, joins;
-        final java.util.ArrayList<AnswerSent> answers = new java.util.ArrayList<>(0);
 
         EpochSet(byte[] peerLocator0) {
             this.peerLocator0 = peerLocator0;
@@ -1159,7 +1381,6 @@ public final class Joins {
         ep.last = -1;
         ep.frame = ep.offerBody = ep.nextLocal = null;
         ep.offer = null;
-        ep.answers.clear();
         ep.stableSince = port.now();
         ep.joins = 0;
     }
@@ -1172,7 +1393,7 @@ public final class Joins {
         port.epochInUse();
     }
 
-    /** A verified join of epoch n from the peer: A's switch. */
+    /** An authorized join of epoch n from the peer passed key exchange: A's switch. */
     private void epochPeerJoined(long n) {
         if (ep.st == EpochState.ANSWERED && n == ep.d + 1) useNext();
     }
@@ -1285,22 +1506,16 @@ public final class Joins {
         if (ep.last == ANSWER) w.epochAnswer(ep.d + 1);
     }
 
-    /** A batch carrying the answer of epoch n ended at pos on ol. */
+    /** An ACK for the first answer on any lane also covers every earlier record on that lane. */
     void answerSent(Pipe.OutLane ol, long pos, long n) {
-        ep.answers.add(new AnswerSent(ol, pos, n));
+        if (n == ep.d + 1 && ep.last == ANSWER) ol.rememberEpochAnswer(n, pos);
     }
 
     /** ol is acknowledged up to pos: an answer it carried is no longer repeated, and A switches. */
     void laneAcked(Pipe.OutLane ol, long pos) {
-        if (ep.answers.isEmpty()) return;
-        for (Iterator<AnswerSent> it = ep.answers.iterator(); it.hasNext(); ) {
-            AnswerSent a = it.next();
-            if (a.lane() != ol || a.pos() > pos) continue;
-            it.remove();
-            if (a.n() != ep.d + 1 || ep.last != ANSWER) continue;
-            if (ep.st == EpochState.ANSWERED || ep.st == EpochState.RETAINING) ep.frame = null;
-            if (ep.st == EpochState.ANSWERED) useNext();
-        }
+        if (ep.last != ANSWER || !ol.acknowledgedEpochAnswer(ep.d + 1, pos)) return;
+        if (ep.st == EpochState.ANSWERED || ep.st == EpochState.RETAINING) ep.frame = null;
+        if (ep.st == EpochState.ANSWERED) useNext();
     }
 
     /** The epoch deadlines: the repeat of each pipe, the retention and the policy; with apply the due ones act. */
@@ -1334,6 +1549,7 @@ public final class Joins {
         private final long attachedAt;
         /** The epoch selected for the Hello, or -1 while it is unset. */
         private long joinedEpoch = -1;
+        private long firstOwn;
         private boolean held;
         /** No other pipe was usable when the Hello was prepared. */
         private boolean early;

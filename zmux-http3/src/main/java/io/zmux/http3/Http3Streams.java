@@ -23,6 +23,7 @@ import io.zmux.internal.spi.Loops;
 import io.zmux.quic.QuicExporter;
 import io.zmux.quic.QuicOptions;
 import io.zmux.quic.internal.QuicCarrierStats;
+import io.zmux.quic.internal.QuicHandshake;
 import io.netty.util.AttributeKey;
 import java.net.InetSocketAddress;
 import java.util.List;
@@ -30,33 +31,42 @@ import javax.net.ssl.SSLEngine;
 
 /** Adapts each H3 request stream to the messages used by the shared HTTP carrier. */
 final class Http3Streams {
+    static HttpTransport.Stream requestStream(QuicStreamChannel stream) {
+        var request = HttpTransport.stream(stream);
+        assert request != null : "HTTP/3 request transport is installed before request handlers";
+        return request;
+    }
+
     private Http3Streams() { }
 
     static <B extends QuicCodecBuilder<B>> B configure(QuicOptions options, B builder) {
-        long uniStreams = Math.max(options.lanes(), Http3.MIN_INITIAL_MAX_STREAMS_UNIDIRECTIONAL);
-        long uniWindow = Math.max(options.streamWindow(), Http3.MIN_INITIAL_MAX_STREAM_DATA_UNIDIRECTIONAL);
-        long bidiCredit = options.streamWindow() * options.bidirectionalStreams();
-        long maxData = (1L << 62) - 1;
-        long connectionCredit = uniStreams > (maxData - bidiCredit) / uniWindow
-                ? maxData : bidiCredit + uniStreams * uniWindow;
-        return options.apply(builder)
-                .initialMaxStreamsUnidirectional(uniStreams)
-                .initialMaxData(connectionCredit)
-                .initialMaxStreamDataUnidirectional(uniWindow);
+        return options.apply(builder, Http3.MIN_INITIAL_MAX_STREAMS_UNIDIRECTIONAL,
+                Http3.MIN_INITIAL_MAX_STREAM_DATA_UNIDIRECTIONAL);
     }
 
     static void install(ChannelPipeline pipeline, boolean server) {
         var stream = (QuicStreamChannel) pipeline.channel();
-        HttpTransport.attach(stream, new RequestStream(stream));
+        var wt = WebTransportConnection.get(stream.parent());
+        if (stream.isLocalCreated() && wt != null) {
+            wt.observeRequest(stream);
+            pipeline.addFirst(new WebTransportHttpFrames(0));
+        }
+        HttpTransport.attach(stream, new RequestStream(stream, QuicHandshake.observe(stream)));
         pipeline.addLast(WireHeaders.INSTANCE, new Http3FrameToHttpObjectCodec(server), NoChunkedEncoding.INSTANCE);
     }
 
-    private record RequestStream(QuicStreamChannel stream) implements HttpTransport.Stream {
+    static void raw(QuicStreamChannel stream, ChannelHandler handler) {
+        var pipeline = stream.pipeline();
+        var conversion = pipeline.context(WireHeaders.INSTANCE);
+        if (conversion == null) pipeline.addLast(handler);
+        else pipeline.addBefore(conversion.name(), null, handler);
+    }
+
+    private record RequestStream(QuicStreamChannel stream, io.zmux.Admission.OuterSecurity outerSecurity) implements HttpTransport.Stream {
         @Override public Channel connection() { return stream.parent(); }
         @Override public Object carrierIdentity() { return connection(); }
         @Override public CarrierProvider.Query carrierQuery(Object identity) {
-            var connection = stream.parent();
-            return connection != null && connection == identity ? QuicCarrierStats.query(connection) : null;
+            return QuicCarrierStats.query(stream.parent(), identity);
         }
 
         @Override public InetSocketAddress peer() {
@@ -80,8 +90,17 @@ final class Http3Streams {
             AttributeKey.valueOf(Http3Streams.class, "wireProtocolFields");
 
     @ChannelHandler.Sharable
-    private static final class WireHeaders extends ChannelInboundHandlerAdapter {
+    private static final class WireHeaders extends io.netty.channel.ChannelDuplexHandler {
         static final WireHeaders INSTANCE = new WireHeaders();
+
+        @Override public void write(ChannelHandlerContext ctx, Object message, io.netty.channel.ChannelPromise promise) {
+            if (message instanceof Http3HeadersFrame frame && frame.headers().method() != null) {
+                var stream = (QuicStreamChannel) ctx.channel();
+                var wt = WebTransportConnection.get(stream.parent());
+                if (wt != null) wt.ordinary(stream);
+            }
+            ctx.write(message, promise);
+        }
 
         @Override public void channelActive(ChannelHandlerContext ctx) {
             // The QUIC codec runs host stream initializers during registration, after the

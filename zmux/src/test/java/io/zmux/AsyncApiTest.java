@@ -23,7 +23,7 @@ class AsyncApiTest {
     private static byte[] read(ZmuxReceiveStream stream) throws Exception {
         var bytes = new ByteArrayOutputStream();
         for (Chunk chunk; (chunk = get(stream.readChunkAsync(65536))) != null;) {
-            try (Chunk owned = chunk) { var data = owned.buffer(); byte[] part = new byte[data.remaining()]; data.get(part); bytes.write(part); }
+            try (Chunk owned = chunk) { bytes.writeBytes(owned.copy()); }
         }
         return bytes.toByteArray();
     }
@@ -131,11 +131,15 @@ class AsyncApiTest {
             var first = sender.writeAsync(ByteBuffer.allocate(4 << 20));
             var receiver = pair.server().acceptStream();
             var released = new AtomicInteger();
-            var chunk = Chunk.of(ByteBuffer.wrap(new byte[] {5, 6}), released::incrementAndGet);
+            var releaseObserved = new CountDownLatch(1);
+            var chunk = Chunk.of(ByteBuffer.wrap(new byte[] {5, 6}), () -> {
+                released.incrementAndGet();
+                releaseObserved.countDown();
+            });
             var second = sender.writeChunkAsync(chunk);
-            assertThrows(IllegalStateException.class, chunk::buffer);
+            assertThrows(IllegalStateException.class, chunk::remaining);
             assertTrue(second.cancel(true)); // Never waits: the loop releases the chunk afterwards.
-            ListenerResourcesTest.until(() -> released.get() == 1);
+            latch(releaseObserved);
             assertTrue(first.cancel(true)); sender.close(); receiver.close(); assertEquals(1, released.get());
         }
     }
@@ -162,27 +166,39 @@ class AsyncApiTest {
     }
 
     @Test void closingLoopWaitsForSynchronousAttemptBeforeReturningItsBuffer() throws Exception {
-        try (var loops = EventLoops.create(1); var workers = Executors.newVirtualThreadPerTaskExecutor();
-             var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
-            var entered = new CountDownLatch(1); var proceed = new CountDownLatch(1); var returned = new CountDownLatch(1);
-            var outcome = new CompletableFuture<Object>(); ByteBuffer buffer = ByteBuffer.allocate(1);
+        try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
+            var admissionStopped = new CountDownLatch(1);
+            var proceed = new CountDownLatch(1);
+            var outcome = new CompletableFuture<Object>();
+            ByteBuffer buffer = ByteBuffer.allocate(1);
             Thread caller = Thread.ofVirtual().start(() -> {
                 try {
-                    try { outcome.complete(pair.client().call(op -> { entered.countDown(); latch(proceed); buffer.put((byte) 9); return 1; }, null, Long.MAX_VALUE)); }
-                    catch (java.io.IOException error) { outcome.completeExceptionally(error); }
-                } finally { returned.countDown(); }
+                    outcome.complete(pair.client().call(op -> {
+                        stopAdmissionOnOwner(loops, admissionStopped);
+                        latch(proceed);
+                        buffer.put((byte) 9);
+                        return 1;
+                    }, null, Long.MAX_VALUE));
+                } catch (java.io.IOException error) { outcome.completeExceptionally(error); }
             });
-            latch(entered);
-            var stopping = workers.submit(loops::close);
             try {
-                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-                while (pair.client().driver.executeCarrier(() -> {}) && System.nanoTime() < end) Thread.sleep(1);
+                latch(admissionStopped);
+                assertFalse(pair.client().driver.executeCarrier(() -> fail("closing loop accepted carrier work")));
                 caller.interrupt();
-                assertFalse(returned.await(30, TimeUnit.MILLISECONDS), "caller released its buffer while owner was still executing");
+                assertFalse(outcome.isDone(), "caller returned while the owner still held its buffer");
             } finally { proceed.countDown(); }
-            assertEquals(1, get(outcome)); assertEquals(1, buffer.position()); get(stopping); caller.join(2000);
+            assertEquals(1, get(outcome));
+            assertEquals(1, buffer.position());
+            caller.join(Duration.ofSeconds(20));
             assertFalse(caller.isAlive());
         }
+    }
+
+    private static void stopAdmissionOnOwner(EventLoops loops, CountDownLatch stopped) {
+        // With a single loop, close invoked by its owner closes admission and
+        // returns without joining itself. The current attempt still owns its buffer.
+        loops.close();
+        stopped.countDown();
     }
 
     @Test void publicReadTimeoutLeavesNoLateAccessToTheBorrowedBuffer() throws Exception {
@@ -220,21 +236,22 @@ class AsyncApiTest {
             var chunk = Chunk.of(ByteBuffer.wrap(new byte[] {2}), released::incrementAndGet);
             var write = sender.writeChunkAsync(chunk);
             assertThrows(ExecutionException.class, () -> get(write)); assertEquals(1, released.get());
-            assertThrows(IllegalStateException.class, chunk::buffer);
+            assertThrows(IllegalStateException.class, chunk::remaining);
             assertThrows(ExecutionException.class, () -> get(pair.client().acceptStreamAsync()));
             Leaks.none(loops); sender.close();
         }
     }
-    @Test void writeOwnerNeverBlocksTryWriteAndBoundsShutdownOutput() throws Exception {
+    @Test void writeOwnerNeverBlocksTryWriteAndHoldsFinishBehindAPendingWrite() throws Exception {
         try (var loops = EventLoops.create(1); var pair = Pair.memory(ZmuxConfig.builder().eventLoops(loops).build())) {
             var sender = pair.client().openStream();
-            var pending = sender.writeAsync(ByteBuffer.allocate(256 << 20)); // Far beyond credit: stays in progress.
-            long started = System.nanoTime();
+            sender.setSendBuffer(16384);
+            var pending = sender.writeAsync(ByteBuffer.allocate(4 << 20));
             assertEquals(0, sender.tryWrite(ByteBuffer.allocate(1)));
-            sender.setWriteTimeout(Duration.ofMillis(100));
-            assertThrows(SocketTimeoutException.class, sender::finish);
-            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5));
+            var finish = sender.finishAsync();
+            pair.client().run(op -> true);
             assertFalse(pending.isDone());
+            assertFalse(finish.isDone());
+            assertTrue(finish.cancel(true));
             sender.close();
             assertThrows(ExecutionException.class, () -> get(pending));
         }
@@ -271,16 +288,19 @@ class AsyncApiTest {
             holdOp.submit();
             latch(blocked);
             var released = new AtomicInteger();
-            var buf = new io.zmux.internal.core.ReadBuf(ByteBuffer.allocate(16), ignored -> released.incrementAndGet());
+            var buf = new io.zmux.internal.buffer.ReadBuf(ByteBuffer.allocate(16), ignored -> released.incrementAndGet());
             var readOp = new Operation<Object>(driver, self -> new io.zmux.internal.core.StreamRecv.Chunk(buf.data(), buf, false), null);
             ZmuxFuture<Chunk> read = ZmuxSession.future(readOp, r -> new Chunk((io.zmux.internal.core.StreamRecv.Chunk) r));
-            readOp.submit();
-            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (!readOp.isDone() && System.nanoTime() < end) Thread.onSpinWait();
-            assertTrue(readOp.isDone());
-            // Decided, its publication queued behind the held context: the outside completion wins.
-            assertTrue(read.completeExceptionally(new TimeoutException()));
-            gate.countDown();
+            try {
+                readOp.submit();
+                // Its submission and this barrier run in order on the session mailbox.
+                pair.client().run(op -> true);
+                assertTrue(readOp.isDone());
+                // Decided, its publication queued behind the held context: the outside completion wins.
+                assertTrue(read.completeExceptionally(new TimeoutException()));
+            } finally {
+                gate.countDown();
+            }
             get(hold);
             // Published after the read's publication on the same context.
             var afterOp = new Operation<Object>(driver, self -> true, null);

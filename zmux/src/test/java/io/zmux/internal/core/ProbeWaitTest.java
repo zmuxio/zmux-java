@@ -36,6 +36,19 @@ class ProbeWaitTest {
         assertEquals(15 * Time.SECOND, PathHealth.probeInterval(0, 7 * Time.SECOND, true), "but not an unpaired attachment's");
     }
 
+    @Test void onlyTheSelectedPipeUsesItsOwnIdleProbeIntervalAndJitter() throws Exception {
+        var session = PipeTargetTest.session(CoreConfig.builder().probeInterval(K).probeJitter(0));
+        var other = PipeTargetTest.appendOut(session, true, Attach.OUT_ACTIVE, Attach.IN_OPEN);
+        var path = session.mp();
+        long interval = 2 * Time.SECOND;
+        session.setPipeLiveness(other.id, 0, 0, interval, 0);
+        assertEquals(interval, path.health.probeWait(other));
+        session.setPipeLiveness(other.id, 0, 0, interval, 0.9);
+        Poke.set(other.mp().health, "probeDraw", 0.5);
+        assertEquals(1100 * Time.MILLISECOND, path.health.probeWait(other));
+        assertEquals(K, path.health.probeWait(session.pipes.get(0)));
+    }
+
     @Test void theIntervalIsMeasuredToTheCarrier() {
         assertEquals(K, PathHealth.effectiveInterval(K, 0));
         assertEquals(13 * Time.SECOND, PathHealth.effectiveInterval(K, 2 * Time.SECOND), "k - H_p");

@@ -16,6 +16,13 @@ final class Attach {
     /** The direction of a join pipe from the joiner: 0 up, 1 down, 2 bidirectional. */
     final int dir;
     final long fate;
+    private int topologyExcluded;
+    private long peerAuthorization;
+
+    int topologyExcluded() { return topologyExcluded; }
+    void topologyExcluded(int mask) { topologyExcluded = mask; }
+    long peerAuthorization() { return peerAuthorization; }
+    void peerAuthorization(long generation) { peerAuthorization = generation; }
     /**
      * The carrier's record mode: set by the pipe's Join handshake, and for pipe 0 copied once from the
      * configuration ({@link CoreConfig#firstPipeMode()}), which is immutable. The two are one value, not
@@ -51,6 +58,7 @@ final class Attach {
 
     // The per-component state of the attachment; each part is written only by its component.
     final PathHealth.Slot health;
+    final HealthProjection.Slot projection = new HealthProjection.Slot();
     final Joins.Slot joining;
     final PathSession.Link link;
     final Tiers.Slot tier;
@@ -70,6 +78,7 @@ final class Attach {
         this.probeJitter = probeJitter;
         health = new PathHealth.Slot(out, in);
         joining = new Joins.Slot(now);
+        if (out != OUT_JOINING && in != IN_JOINING) joined(now);
         link = new PathSession.Link(now, firstRecord);
         tier = new Tiers.Slot();
         prob = new Probation.Slot();
@@ -77,6 +86,14 @@ final class Attach {
         ret = new Retention.Slot();
         res = new Resume.Slot();
     }
+
+    private Long joinedAt;
+
+    java.util.OptionalLong joinedAt() {
+        return joinedAt == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(joinedAt);
+    }
+
+    void joined(long now) { joinedAt = now; }
 
     /** The Group asked for this join; 0 for the default. */
     private long group;

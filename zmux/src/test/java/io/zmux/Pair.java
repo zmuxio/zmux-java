@@ -18,7 +18,10 @@ record Pair(ZmuxSession client, ZmuxSession server, ZmuxListener listener) imple
     }
 
     static Pair memory(ZmuxConfig ccfg, ZmuxConfig scfg, Framing framing) throws Exception {
-        PipeIo[] p = MemoryPipe.pair(framing);
+        return open(MemoryPipe.pair(framing), ccfg, scfg);
+    }
+
+    static Pair open(PipeIo[] p, ZmuxConfig ccfg, ZmuxConfig scfg) throws Exception {
         if (scfg.isMultipath()) {
             ZmuxListener l = Zmux.listener(ListenerConfig.of(scfg));
             l.adapter().handle(p[1], JoinHint.inBand(TestAddr.peer("pair")));

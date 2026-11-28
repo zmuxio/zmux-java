@@ -1,18 +1,13 @@
 package io.zmux.internal.core;
 
-/** What keeps a frame's data alive while a batch references it: a send block or a read buffer. */
-record Pin(SendBlock block, ReadBuf buf) {
-    static final Pin NONE = new Pin(null, null);
+import io.zmux.internal.buffer.ReadBuf;
 
-    boolean none() { return block == null && buf == null; }
+/** The backing a batch keeps across carrier handoff. */
+record Pin(ReadBuf buf) {
+    static final Pin NONE = new Pin(null);
 
-    void ref() {
-        if (block != null) block.ref();
-        else if (buf != null) buf.ref();
-    }
+    boolean none() { return buf == null; }
 
-    void unref() {
-        if (block != null) block.unref();
-        else if (buf != null) buf.unref();
-    }
+    void ref() { if (buf != null) buf.ref(); }
+    void unref() { if (buf != null) buf.unref(); }
 }

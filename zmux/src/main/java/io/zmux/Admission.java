@@ -34,10 +34,11 @@ public final class Admission {
     private final Duration peekTimeout, stallMin, stallMax;
     private final boolean fallbackOnPeekTimeout;
     private final Decider decider;
+    private final AdmissionVerdict refusal;
 
     private Admission(Builder b) {
         peek = b.peek; maxPeek = b.maxPeek; maxMessage = b.maxMessage == 0 ? MAX_MESSAGE : b.maxMessage; peekTimeout = b.peekTimeout; fallbackOnPeekTimeout = b.fallbackOnPeekTimeout;
-        stallMin = b.stallMin; stallMax = b.stallMax; decider = b.decider;
+        stallMin = b.stallMin; stallMax = b.stallMax; decider = b.decider; refusal = b.refusal;
     }
 
     /**
@@ -55,6 +56,9 @@ public final class Admission {
         if (peek < 0 || peek > MAX_PEEK) throw new IllegalArgumentException("peek outside [0, " + MAX_PEEK + "]");
         return new Builder(peek, decider);
     }
+
+    /** The entry's fixed authentication refusal, or null for a general classification decision. */
+    public AdmissionVerdict refusal() { return refusal; }
 
     /** The bytes read before the decision. */
     public int peek() { return peek; }
@@ -84,6 +88,7 @@ public final class Admission {
     public static final class Builder {
         private final int peek;
         private final Decider decider;
+        private AdmissionVerdict refusal;
         private int maxPeek, maxMessage;
         private Duration peekTimeout = Duration.ZERO, stallMin = Duration.ZERO, stallMax = Duration.ZERO;
         private boolean fallbackOnPeekTimeout;
@@ -148,6 +153,19 @@ public final class Admission {
             return this;
         }
 
+        /**
+         * Applies a single refusal policy through authentication. FALLBACK requires a host
+         * handler and a request head or a byte stream. A bounded first message cannot
+         * always be replayed, so that stage closes.
+         */
+        public Builder refusal(AdmissionVerdict verdict) {
+            if (verdict != AdmissionVerdict.CLOSE && verdict != AdmissionVerdict.STALL && verdict != AdmissionVerdict.FALLBACK) {
+                throw new IllegalArgumentException("invalid admission refusal");
+            }
+            refusal = verdict;
+            return this;
+        }
+
         public Admission build() { return new Admission(this); }
     }
 
@@ -159,9 +177,9 @@ public final class Admission {
      * the stage completes; info is each call's own (a deferred decision gets the head's
      * metadata at {@link Stage#CARRIER}). The decision is due by deadline (what is left of the peek
      * timeout): a stage not complete by then is cancelled ({@code toCompletableFuture().cancel(false)})
-     * and the carrier closed; so is it when the listener stops taking carriers. A decider
-     * that throws, a stage that fails, a null decision and a skip outside the prefix close
-     * the carrier.
+     * and the site's configured refusal applied. A decider that throws, a stage that fails,
+     * a null decision and a skip outside the prefix take the same refusal. Without a
+     * {@link Builder#refusal} the carrier closes. Stopping the listener closes pending carriers.
      */
     @FunctionalInterface
     public interface Decider {
@@ -175,7 +193,16 @@ public final class Admission {
     }
 
     /** When a decision is due, on the {@link System#nanoTime()} clock. */
-    public record Deadline(long nanoTime) {
+    public record Deadline(long nanoTime, java.util.function.BooleanSupplier cancellation) {
+        public Deadline(long nanoTime) { this(nanoTime, () -> false); }
+
+        public Deadline {
+            Objects.requireNonNull(cancellation, "cancellation");
+        }
+
+        /** Whether the listener withdrew the carrier. */
+        public boolean cancelled() { return cancellation.getAsBoolean(); }
+
         /** The time left, zero once passed. */
         public Duration remaining() {
             long left = nanoTime - System.nanoTime();
@@ -266,59 +293,120 @@ public final class Admission {
         HEAD
     }
 
+    /** Evidence supplied by the adapter for the actual carrier carrying the presentation. */
+    public enum OuterSecurity {
+        CLEAR, ENCRYPTED, TLS_1_3, QUIC, EARLY_DATA;
+
+        public boolean encrypted() { return this == ENCRYPTED || permitsBinding(); }
+
+        public boolean permitsBinding() { return this == TLS_1_3 || this == QUIC; }
+
+        /** The negotiated protocol of a completed TLS connection. */
+        public static OuterSecurity tls(String protocol) {
+            if ("TLSv1.3".equals(protocol)) return TLS_1_3;
+            return protocol != null && protocol.startsWith("TLSv") ? ENCRYPTED : CLEAR;
+        }
+    }
+
     /**
-     * The metadata of a carrier, immutable, as far as its adapter has it: an admission decides with it (each call
-     * gets its own), a {@link Takeover} carries it, and a client's {@link CarrierCredential} is given it. Fields
-     * that do not apply are empty.
-     *
-     * @param source the carrier's source, the one authority for every per-source limit: the
-     *     client address a trusted intermediary reports (port 0 when it reports none), or what
-     *     the host resolved and gave the listener, else the peer; for a client, the server's
-     *     address; null when unknown
-     * @param peer the address the carrier arrived from directly (the TCP or QUIC peer, an HTTP
-     *     request's remote address); null when unknown
-     * @param applicationProtocol the application protocol the TLS or QUIC handshake negotiated; empty without one
-     * @param serverName the server name (SNI) the client sent in its TLS handshake; empty when it sent none
-     * @param exporter the exporter of the carrier's completed TLS or QUIC handshake (RFC 8446
-     *     Section 7.5), for a carrier decided on its HTTP request head that of the connection
-     *     carrying the request; null without one
-     * @param request the HTTP request of the carrier; {@link RequestHead#NONE} for other carriers
-     * @param terminatedTls whether this process terminated the carrier's completed TLS or QUIC
-     *     handshake; no proof of an end-to-end handshake: an intermediary may have opened it
-     * @param stage what the decision is taken on: the carrier's start or an HTTP request head
-     * @param framing the carrier's framing, as {@link FirstBytes#classify} takes it: at {@link Stage#CARRIER} the
-     *     prefix is the start of a byte stream or, with {@link io.zmux.carrier.Framing#MESSAGES}, a first message
-     * @param upgrade the carrier of an HTTP upgrade (WebSocket), on its head and on the decision a
-     *     {@link AdmissionVerdict#DEFER} on that head takes on the carrier
+     * Immutable metadata supplied by the carrier adapter. Addresses are optional.
+     * The request is {@link RequestHead#NONE} for carriers without an HTTP request.
      */
-    public record CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
-                              io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls,
-                              Stage stage, io.zmux.carrier.Framing framing, boolean upgrade) {
-        /**
-         * A byte stream decided on its start, the carrier of a completed handshake exactly when it has an exporter;
-         * {@link #at} sets the stage.
-         */
+    public static final class CarrierInfo {
+        static { io.zmux.internal.exchange.ExchangeAccess.installInfo(CarrierInfo::verifiedExchange); }
+
+        private final InetSocketAddress source, peer;
+        private final String applicationProtocol, serverName;
+        private final io.zmux.carrier.PipeIo.Exporter exporter;
+        private final RequestHead request;
+        private final boolean terminatedTls, upgrade, authenticatedEnvelope;
+        private final Stage stage;
+        private final io.zmux.carrier.Framing framing;
+        private final OuterSecurity outerSecurity;
+
+        /** A byte stream decided on its start, using {@link OuterSecurity#CLEAR} initially. */
         public CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
                            io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request) {
             this(source, peer, applicationProtocol, serverName, exporter, request, exporter != null,
-                    Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false);
+                    Stage.CARRIER, io.zmux.carrier.Framing.BYTE_STREAM, false, OuterSecurity.CLEAR);
         }
 
-        public CarrierInfo {
-            Objects.requireNonNull(applicationProtocol, "applicationProtocol");
-            Objects.requireNonNull(serverName, "serverName");
-            Objects.requireNonNull(request, "request");
-            Objects.requireNonNull(stage, "stage");
-            Objects.requireNonNull(framing, "framing");
+        /** Creates metadata for a carrier adapter. */
+        public CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
+                           io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls,
+                           Stage stage, io.zmux.carrier.Framing framing, boolean upgrade, OuterSecurity outerSecurity) {
+            this(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing,
+                    upgrade, outerSecurity, false);
+        }
+
+        private CarrierInfo(InetSocketAddress source, InetSocketAddress peer, String applicationProtocol, String serverName,
+                            io.zmux.carrier.PipeIo.Exporter exporter, RequestHead request, boolean terminatedTls,
+                            Stage stage, io.zmux.carrier.Framing framing, boolean upgrade, OuterSecurity outerSecurity,
+                            boolean authenticatedEnvelope) {
+            this.source = source;
+            this.peer = peer;
+            this.applicationProtocol = Objects.requireNonNull(applicationProtocol, "applicationProtocol");
+            this.serverName = Objects.requireNonNull(serverName, "serverName");
+            this.exporter = exporter;
+            this.request = Objects.requireNonNull(request, "request");
+            this.terminatedTls = terminatedTls;
+            this.stage = Objects.requireNonNull(stage, "stage");
+            this.framing = Objects.requireNonNull(framing, "framing");
+            this.upgrade = upgrade;
+            this.outerSecurity = Objects.requireNonNull(outerSecurity, "outerSecurity");
+            this.authenticatedEnvelope = authenticatedEnvelope;
+        }
+
+        /** Source used for per-source limits, which may be reported by a trusted intermediary. */
+        public InetSocketAddress source() { return source; }
+        /** The address of the directly connected peer. */
+        public InetSocketAddress peer() { return peer; }
+        /** The negotiated ALPN, or an empty string without one. */
+        public String applicationProtocol() { return applicationProtocol; }
+        /** The server name sent by the client, or an empty string without one. */
+        public String serverName() { return serverName; }
+        /** The exporter of the completed handshake on the connection carrying this input. */
+        public io.zmux.carrier.PipeIo.Exporter exporter() { return exporter; }
+        /** The HTTP request, or {@link RequestHead#NONE}. */
+        public RequestHead request() { return request; }
+        /** Whether this process terminated the carrier's TLS or QUIC handshake. */
+        public boolean terminatedTls() { return terminatedTls; }
+        /** The current admission stage. */
+        public Stage stage() { return stage; }
+        /** The carrier framing, used to interpret the prefix at {@link Stage#CARRIER}. */
+        public io.zmux.carrier.Framing framing() { return framing; }
+        /** Whether the carrier belongs to an HTTP upgrade. */
+        public boolean upgrade() { return upgrade; }
+        /** The adapter's evidence of encryption, version and early data. */
+        public OuterSecurity outerSecurity() { return outerSecurity; }
+
+        boolean authenticatedEnvelope() { return authenticatedEnvelope; }
+
+        private CarrierInfo verifiedExchange() {
+            return new CarrierInfo(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing,
+                    upgrade, outerSecurity, true);
         }
 
         /** This metadata at stage, of a carrier of framing, upgrade as {@link #upgrade()}. */
         public CarrierInfo at(Stage stage, io.zmux.carrier.Framing framing, boolean upgrade) {
-            return new CarrierInfo(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing, upgrade);
+            return new CarrierInfo(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing,
+                    upgrade, outerSecurity);
+        }
+
+        /** This metadata with explicit evidence from the adapter's actual outer connection. */
+        public CarrierInfo withOuterSecurity(OuterSecurity security) {
+            return new CarrierInfo(source, peer, applicationProtocol, serverName, exporter, request, terminatedTls, stage, framing,
+                    upgrade, security);
         }
 
         /** Whether this process terminated the carrier's completed TLS or QUIC handshake. */
         public boolean tls() { return terminatedTls; }
+
+        /** Whether the adapter or a forwarding intermediary reported early data. */
+        public boolean earlyData() {
+            return outerSecurity == OuterSecurity.EARLY_DATA
+                    || header("Early-Data").stream().anyMatch(value -> "1".equals(value.strip()));
+        }
 
         /** length bytes of the exporter for label and context; null without an exporter or when it fails. */
         public byte[] exportKeyingMaterial(String label, byte[] context, int length) {

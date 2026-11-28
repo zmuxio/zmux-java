@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Timeout;
 class ListenerEntryTest {
     static ZmuxConfig config(EventLoops loops) {
         return ZmuxConfig.builder().eventLoops(loops)
-                .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
+                .sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().build();
     }
 
     static InetSocketAddress ip(String literal, int port) {
@@ -54,7 +54,7 @@ class ListenerEntryTest {
     @Test void theHostsSourceAndThePeerReachTheDecisionAndKeyTheSlots() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             var seen = new LinkedBlockingQueue<Admission.CarrierInfo>();
-            var lc = ListenerConfig.builder().session(config(loops)).maxPendingPerSource(1)
+            var lc = ListenerConfig.builder().session(config(loops)).maxPendingPerSource(2)
                     .admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> { seen.add(info); return Admission.Decision.accept(0); })).build())
                     .build();
             try (var l = Zmux.listener(lc)) {
@@ -65,10 +65,13 @@ class ListenerEntryTest {
                 var info = seen.poll(5, TimeUnit.SECONDS);
                 assertEquals(source, info.source());
                 assertEquals(peer, info.peer());
-                // Another address of the same /64, another port: the same client, whose one slot is held.
+                // Fill the other slot of the same /64 under another address and port.
+                var held = l.adapter().reserve(ip("2001:db8:1:2::8", 2), null);
+                assertNotNull(held);
                 var two = MemoryPipe.pair(Framing.BYTE_STREAM);
                 var refused = l.adapter().handle(two[1], JoinHint.inBand(peer).withSource(ip("2001:db8:1:2::99", 1)));
-                assertFalse(refused.taken().toCompletableFuture().get(5, TimeUnit.SECONDS));
+                try { assertFalse(refused.taken().toCompletableFuture().get(5, TimeUnit.SECONDS)); }
+                finally { held.release(); }
                 assertEquals(1, l.stats().refused());
                 assertTrue(seen.isEmpty(), "refused at its slot, before a decision");
                 // Without a source the peer is the source.
@@ -213,22 +216,23 @@ class ListenerEntryTest {
         try (EventLoops loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).handshakeTimeout(Duration.ofMillis(800)).build();
             for (boolean admission : new boolean[] {true, false}) {
-                var b = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).maxPendingPerSource(1);
+                var b = ListenerConfig.builder().session(cfg).tls(TlsOptions.server(TestTls.server())).maxPendingPerSource(2);
                 if (admission) b.admission(Admission.builder(0, Admission.Decider.immediate((info, prefix) -> Admission.Decision.accept(0))).build());
                 try (var l = Zmux.listen(new InetSocketAddress("127.0.0.1", 0), b.build());
+                     var _ = new Socket("127.0.0.1", l.localAddress().getPort());
                      var _ = new Socket("127.0.0.1", l.localAddress().getPort())) {
                     Thread.sleep(200);
                     try (var second = new Socket("127.0.0.1", l.localAddress().getPort())) {
                         second.setSoTimeout(3000);
                         InputStream in = second.getInputStream();
-                        assertEquals(-1, in.read(), "the source's one slot is taken before the handshake");
+                        assertEquals(-1, in.read(), "both source slots are taken before the handshake");
                     }
                     // Over the source's pending limit: the reject policy, which cannot stall it without a slot.
                     await(() -> l.stats().rejected() == 1);
                     // The silent carrier's handshake times out.
-                    await(() -> admission ? l.stats().admission().handshakeFailed() == 1 : l.stats().setupFailures() == 1);
-                    assertEquals(admission ? 0 : 1, l.stats().setupFailures());
-                    assertEquals(admission ? 1 : 0, l.stats().admission().handshakeFailed());
+                    await(() -> admission ? l.stats().admission().handshakeFailed() == 2 : l.stats().setupFailures() == 2);
+                    assertEquals(admission ? 0 : 2, l.stats().setupFailures());
+                    assertEquals(admission ? 2 : 0, l.stats().admission().handshakeFailed());
                 }
             }
         }

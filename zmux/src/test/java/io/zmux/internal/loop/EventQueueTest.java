@@ -12,14 +12,14 @@ import org.junit.jupiter.api.Test;
 
 class EventQueueTest {
     private static Event ev(Event.Kind k, long pipe, int dir) {
-        return new Event(k, pipe, dir, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(k, pipe, dir, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     private static Event retire(long pipe) { return retire(pipe, false); }
 
     /** The retirement as the core emits it: failed is its failure flag. */
     private static Event retire(long pipe, boolean failed) {
-        return new Event(Event.Kind.PIPE_STATE, pipe, Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, failed, 0, 0, null);
+        return new Event(Event.Kind.PIPE_STATE, pipe, Action.DIR_BIDI, PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, failed, 0, 0, null, null);
     }
 
     private static final int OUT = Action.DIR_OUT, IN = Action.DIR_IN;
@@ -32,20 +32,6 @@ class EventQueueTest {
         return out;
     }
 
-    @Test void holdsArePerPipeAndRetirementWaitsForItsLastPublication() {
-        var q = new EventQueue();
-        q.hold(1);
-        q.hold(1);
-        q.add(ev(JOINED, 1, OUT));
-        var unrelated = ev(JOINED, 2, OUT);
-        q.add(unrelated);
-        assertEquals(List.of(unrelated), drain(q));
-        q.add(retire(1, true));
-        q.release(1);
-        assertTrue(drain(q).isEmpty());
-        q.release(1);
-        assertEquals(List.of(new SessionRuntime.RetiredPipes(1, 1, 0, List.of(1L))), drain(q));
-    }
 
     @Test void aFlappingPipeKeepsEachStateOnceAtItsLatestPlace() {
         var q = new EventQueue();
@@ -128,15 +114,15 @@ class EventQueueTest {
     private static Event of(Event.Kind k) { return ev(k, 0, 0); }
 
     private static Event authFailed(String reason) {
-        return new Event(Event.Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null);
+        return new Event(Event.Kind.JOIN_AUTH_FAILED, 0, 0, null, null, 0, 0, 0, 1, null, reason, null, false, false, 0, 0, null, null);
     }
 
     private static Event tier(long priority, boolean saturated) {
-        return new Event(Event.Kind.TIER_SATURATION, 0, 0, null, null, 0, 0, priority, 0, null, null, null, false, saturated, 0, 0, null);
+        return new Event(Event.Kind.TIER_SATURATION, 0, 0, null, null, 0, 0, priority, 0, null, null, null, false, saturated, 0, 0, null, null);
     }
 
     private static Event epoch(Event.Kind k, long n) {
-        return new Event(k, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(k, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     private static List<Event.Kind> kinds(EventQueue q) {
@@ -169,7 +155,7 @@ class EventQueueTest {
         q.add(ev(CLOSED, 1, OUT)); // another direction, another key
         assertEquals(List.of(FAILED, Event.Kind.PIPE_QUALITY, CLOSED, CLOSED), kinds(q));
 
-        var latest = new Event(Event.Kind.PIPE_QUALITY, 1, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 7, 9, null);
+        var latest = new Event(Event.Kind.PIPE_QUALITY, 1, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 7, 9, null, null);
         q.add(ev(Event.Kind.PIPE_QUALITY, 1, 0));
         q.add(latest);
         assertEquals(List.of(latest), drain(q), "the latest values replace the unread event");

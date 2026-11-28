@@ -191,7 +191,8 @@ class SessionTest {
                     + second.get(5, java.util.concurrent.TimeUnit.SECONDS).context();
             assertEquals(3, contexts);
             // Establishment reports the path datagram payload once; nothing else is queued.
-            assertEquals(new SessionEvent.DatagramPathChanged(p.server().info().pathDatagramPayload()), p.server().nextEvent(Duration.ofSeconds(5)));
+            assertEquals(new SessionEvent.DatagramPathChanged(p.server().info().pathDatagramPayload(), p.server().info().nativeDatagramPayload(),
+                    p.server().info().nativeDatagramAvailable()), p.server().nextEvent(Duration.ofSeconds(5)));
             assertThrows(java.net.SocketTimeoutException.class, () -> p.server().nextEvent(Duration.ofMillis(20)));
             assertThrows(java.net.SocketTimeoutException.class, () -> p.server().datagrams().receive(Duration.ofMillis(20)));
             p.client().datagrams().send(ByteBuffer.wrap(new byte[] {7}));

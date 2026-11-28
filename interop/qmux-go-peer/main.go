@@ -22,12 +22,19 @@ import (
 const maxCommand = 1024
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: qmux-go-peer server|client <addr> [--rtt-ms <ms>] [--no-datagrams]")
+	fmt.Fprintln(os.Stderr, "usage: qmux-go-peer server|client <addr> [--rtt-ms <ms>] [--no-datagrams] | matrix")
 	os.Exit(2)
 }
 
 func main() {
 	args := os.Args[1:]
+	if len(args) == 1 && args[0] == "matrix" {
+		if err := matrix(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) < 2 {
 		usage()
 	}
@@ -35,7 +42,7 @@ func main() {
 	if !server && args[0] != "client" {
 		usage()
 	}
-	config := &qmux.Config{EnableDatagrams: true, MaxDatagramFrameSize: 16382, KeepAlivePeriod: time.Second}
+	config := configWithDatagrams()
 	for i := 2; i < len(args); i++ {
 		switch {
 		case args[i] == "--rtt-ms" && i+1 < len(args):
@@ -67,12 +74,7 @@ func main() {
 		panic(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	var session *qmux.Conn
-	if server {
-		session, err = qmux.Server(ctx, conn, config)
-	} else {
-		session, err = qmux.Dial(ctx, conn, config)
-	}
+	session, err := openSession(ctx, conn, server, config)
 	cancel()
 	if err != nil {
 		fmt.Printf("CLOSED handshake %v\n", err)
@@ -87,6 +89,17 @@ func main() {
 	<-session.Context().Done()
 	fmt.Printf("RTT %s\n", rtt(session))
 	fmt.Printf("CLOSED %s\n", describe(context.Cause(session.Context())))
+}
+
+func configWithDatagrams() *qmux.Config {
+	return &qmux.Config{EnableDatagrams: true, MaxDatagramFrameSize: 16382, KeepAlivePeriod: time.Second}
+}
+
+func openSession(ctx context.Context, conn net.Conn, server bool, config *qmux.Config) (*qmux.Conn, error) {
+	if server {
+		return qmux.Server(ctx, conn, config)
+	}
+	return qmux.Dial(ctx, conn, config)
 }
 
 func rtt(s *qmux.Conn) string {

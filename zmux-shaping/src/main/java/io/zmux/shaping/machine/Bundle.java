@@ -27,6 +27,7 @@ import java.util.function.Supplier;
  * entry, and a pipe of no declared kind, takes {@code default}.
  */
 public final class Bundle {
+    public static final int SCHEMA = 2;
     private static final List<String> KINDS = List.of("default", "websocket", "streaming", "split", "exchange", "quic", "http3", "webtransport");
     private static final Map<String, Set<String>> HANDSHAKES = Map.of(
             "establish", Set.of("hello", "reply", "finish"),
@@ -53,14 +54,19 @@ public final class Bundle {
 
     /** A selected candidate before its shared values are drawn. */
     record Candidate(Map<String, Unit> units, Definition machines, DefinitionJson.Budget budget, MachinePoolPolicy.Spec pool) {
-        private static final Set<String> FIELDS = Set.of("requires", "handshakes", "machines", "budget", "pool");
+        private static final Set<String> FIELDS = Set.of("requires", "handshakes", "machines", "budget", "pool", "include_control");
 
         static Candidate read(Object c, DefinitionJson.Tables tables) throws DefinitionException {
             Map<String, Object> d = DefinitionJson.members(c, FIELDS, "candidate");
             Map<String, Unit> units = d.containsKey("handshakes") ? handshakes(d.get("handshakes"), tables) : Map.of();
-            Definition machines = d.containsKey("machines") ? DefinitionJson.machines(d.get("machines"), tables) : null;
+            boolean includeControl = DefinitionJson.flag(d, "include_control");
+            Definition machines = d.containsKey("machines") ? DefinitionJson.machines(d.get("machines"), tables, includeControl) : null;
             DefinitionJson.Budget budget = d.containsKey("budget") ? DefinitionJson.budget(d.get("budget"), tables) : null;
             MachinePoolPolicy.Spec pool = d.containsKey("pool") ? MachinePoolPolicy.Spec.read(d.get("pool"), tables) : null;
+            var profile = budget != null && budget.profile() != null ? budget.profile() : io.zmux.shaping.ProfileLimits.LIGHTWEIGHT;
+            if (machines != null && !machines.gates.fits(profile.maxAddedDelay().toNanos() / 1000, 0)) {
+                throw err(CONFLICT, "rate and burst exceed max_added_delay");
+            }
             return new Candidate(units, machines, budget, pool);
         }
 
@@ -151,8 +157,9 @@ public final class Bundle {
             synchronized (sampler) {
                 int to = (int) val(u.padTo), multiple = (int) val(u.padMultiple), pad = (int) val(u.pad);
                 long delay = val(u.delay);
-                long bound = c.budget == null ? 0 : c.budget.maxDelay();
-                if (bound > 0) delay = Math.min(delay, bound);
+                if (c.budget != null && c.budget.profile() != null) {
+                    delay = Math.min(delay, c.budget.profile().maxAddedDelay().toNanos() / 1000);
+                }
                 return new HandshakeShaper.UnitPlan(to, multiple, pad, delay == 0 ? null : Duration.ofNanos(delay * 1000));
             }
         }
@@ -162,10 +169,8 @@ public final class Bundle {
     public static Bundle parse(byte[] json, MachineOptions o) throws DefinitionException {
         o.limits().check(json.length);
         Map<String, Object> d = DefinitionJson.members(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)),
-                Set.of("generated_at", "next_change", "tables", "kinds"), "bundle");
-        for (String k : List.of("generated_at", "next_change")) {
-            if (d.containsKey(k) && !(d.get(k) instanceof String)) throw err(TYPE, k);
-        }
+                Set.of("schema", "tables", "kinds"), "bundle");
+        if (!Long.valueOf(SCHEMA).equals(d.get("schema"))) throw err(SCHEMA_VERSION, "expected shaping schema " + SCHEMA);
         Map<String, Object> tables = DefinitionJson.tableSources(d.get("tables"));
         if (!(d.get("kinds") instanceof Map<?, ?> raw)) throw err(TYPE, "kinds");
         if (raw.get("default") == null) throw err(NO_DEFAULT, "kinds.default");
@@ -227,9 +232,15 @@ public final class Bundle {
 
     /** The shapers of pipes; a kind without machines is not shaped. */
     public ShaperFactory shaperFactory() {
-        return pipe -> {
-            Kind k = of(pipe.carrier());
-            return k == null || k.machines == null ? null : k.machines.newShaper();
+        var gates = kinds.values().stream().filter(k -> k.machines != null).map(k -> k.machines.d.gates)
+                .reduce(io.zmux.shaping.GateRequirement.NONE, io.zmux.shaping.GateRequirement::combine);
+        return new ShaperFactory() {
+            @Override public io.zmux.shaping.GateRequirement gateRequirement() { return gates; }
+            @Override public HandshakeShaper handshakeShaper() { return Bundle.this.handshakeShaper(); }
+            @Override public io.zmux.shaping.Shaper create(io.zmux.shaping.ShapedPipe pipe) {
+                Kind k = of(pipe.carrier());
+                return k == null || k.machines == null ? null : k.machines.newShaper();
+            }
         };
     }
 

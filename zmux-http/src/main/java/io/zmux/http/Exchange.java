@@ -9,6 +9,10 @@ import javax.crypto.spec.SecretKeySpec;
 
 /** The wire format of the exchange carrier: key derivation, request authentication and response MACs. */
 final class Exchange {
+    /** An Exchange half spans independent HTTP requests, so has no single physical source. */
+    interface Half extends io.zmux.internal.spi.CarrierProvider {
+        @Override default Object carrierIdentity() { return null; }
+    }
     private Exchange() {}
 
     static final int KIND_UP = 0x01, KIND_DOWN = 0x02, KIND_CLOSE = 0x03;
@@ -189,7 +193,14 @@ final class Exchange {
     }
 
     /** The length of the padded base64 encoding of n bytes. */
-    static int base64Length(int n) { return (n + 2) / 3 * 4; }
+    static long base64Length(long n) { return Math.multiplyExact(Math.ceilDiv(n, 3), 4); }
+
+    /** Largest decoded body for a limit on padded base64 bytes. */
+    static int base64DecodedLimit(int limit) { return limit / 4 * 3; }
+
+    static int bodyLimit(long bytes, boolean base64) {
+        return (int) Math.min(Integer.MAX_VALUE, base64 ? base64Length(bytes) : bytes);
+    }
 
     /**
      * Decodes a padded base64 body strictly: whole quanta, canonical padding and trailing bits;

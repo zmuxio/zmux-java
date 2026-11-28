@@ -1,5 +1,9 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.CarrierCharge;
+
+import io.zmux.internal.buffer.ReadBuf;
+
 import io.zmux.internal.wire.FrameEncoder;
 import io.zmux.internal.wire.TransportError;
 import io.zmux.internal.wire.TransportParams;
@@ -19,13 +23,10 @@ public final class StreamSend {
         /** The session's terminal error, or null. */
         SessionError error();
 
-        /** Whether the first flight is held. */
-        boolean firstHeld();
-
         /** Whether the peer's parameters arrived. */
         boolean established();
 
-        /** The peer's parameters (the assumed ones before establishment). */
+        /** The peer's parameters once established. */
         TransportParams peer();
 
         Features features();
@@ -38,6 +39,8 @@ public final class StreamSend {
 
         /** Stream data or a control frame wants to be written. */
         void wantWrite();
+
+        void memoryCommand(Runnable command);
     }
 
     private final SessionStats stats;
@@ -99,35 +102,12 @@ public final class StreamSend {
      * Takes as much of p as the send buffer admits and returns the count; 0 means wait.
      * With fin, FIN follows p once all of it was taken.
      */
-    public int write(Stream st, java.nio.ByteBuffer p, boolean fin) throws CoreException {
-        CoreException e = writeError(st);
-        if (e != null) throw e;
-        StreamSend.SendPart sp = st.snd;
-        int want = p.remaining();
-        int n = (int) Math.min(want, sendRoom(st));
-        long now = port.now();
-        long hc = st.heldClass();
-        if (n > 0) {
-            if (st.unsent() == 0) sp.waitAt = now;
-            java.nio.ByteBuffer part = p.slice(p.position(), n);
-            sp.q.write(part);
-            p.position(p.position() + n);
-            stats.appWritten(n);
-            sp.appWritten += n;
-        }
-        if (fin && n == want) sp.finWritten = true;
-        if (n == want) {
-            sp.wwait = false;
-            sp.writeDone = now;
-        }
-        conn.held(hc, st.heldAfter());
-        if (n > 0 || sp.finWritten) becomeSend(st);
-        return n;
+    public int write(Stream st, java.nio.ByteBuffer data, boolean fin) throws CoreException {
+        return writeChunk(st, data, null, fin);
     }
 
-    /** Queues data that buf keeps alive without copying; the queue takes its own reference. */
+    /** Queues data, taking an owned reference when the caller supplies a read buffer. */
     public int writeChunk(Stream st, java.nio.ByteBuffer data, ReadBuf buf, boolean fin) throws CoreException {
-        if (buf == null) return write(st, data, fin);
         CoreException e = writeError(st);
         if (e != null) throw e;
         StreamSend.SendPart sp = st.snd;
@@ -137,7 +117,13 @@ public final class StreamSend {
         long hc = st.heldClass();
         if (n > 0) {
             if (st.unsent() == 0) sp.waitAt = now;
-            sp.q.writeRef(data.slice(data.position(), n), buf);
+            var part = data.slice(data.position(), n);
+            if (buf != null && sp.q.backing().reserveSlice(buf)) sp.q.writeRef(part, buf, true, null);
+            else {
+                int accepted = sp.q.write(part);
+                if (accepted < n) sp.q.backing().waitForBacking(SendBacking.PAYLOAD_BLOCK, () -> port.memoryCommand(() -> changed(st)));
+                n = accepted;
+            }
             data.position(data.position() + n);
             stats.appWritten(n);
             sp.appWritten += n;
@@ -166,8 +152,7 @@ public final class StreamSend {
         if (room <= 0) return 0;
         long h = st.heldAfter();
         st.snd.leased += room;
-        conn.leased(room);
-        conn.held(h, st.heldAfter());
+        conn.held(h, st.heldAfter(), room);
         return room;
     }
 
@@ -177,9 +162,10 @@ public final class StreamSend {
         if (n <= 0) return;
         long h = st.heldAfter();
         st.snd.leased -= n;
-        conn.leased(-n);
-        conn.held(h, st.heldAfter());
+        conn.held(h, st.heldAfter(), -n);
     }
+
+    public SendBacking backing(Stream st) { return st.snd.q.backing(); }
 
     /** The bytes leased and not yet appended. */
     public long leased(Stream st) {
@@ -191,28 +177,29 @@ public final class StreamSend {
      * reference). When the part can no longer take data the bytes are dropped (they leave
      * the lease all the same) and the part's error is thrown.
      */
-    public void writeLeased(Stream st, java.nio.ByteBuffer data, ReadBuf rb) throws CoreException {
+    public void writeLeased(Stream st, java.nio.ByteBuffer data, ReadBuf rb, boolean paidView,
+                            CarrierCharge.Slice charge) throws CoreException {
         StreamSend.SendPart sp = st.snd;
         int n = data.remaining();
         long h = st.heldAfter();
         long used = Math.min(n, sp.leased);
         sp.leased -= used;
-        conn.leased(-used);
         CoreException e = writeError(st);
         if (e != null || sp.cancelled) {
-            conn.held(h, st.heldAfter());
+            if (paidView) sp.q.backing().releaseSlice();
+            conn.held(h, st.heldAfter(), -used);
             if (e != null) throw e;
             return;
         }
         long now = port.now();
         if (n > 0) {
             if (st.unsent() == 0) sp.waitAt = now;
-            sp.q.writeRef(data, rb);
+            sp.q.writeRef(data, rb, paidView, charge);
             stats.appWritten(n);
             sp.appWritten += n;
         }
         sp.writeDone = now;
-        conn.held(h, st.heldAfter());
+        conn.held(h, st.heldAfter(), -used);
         if (n > 0) becomeSend(st);
     }
 
@@ -298,8 +285,14 @@ public final class StreamSend {
 
     /** Marks the data written so far as delivered even if the stream is reset later. */
     public void setReliableBoundary(Stream st) {
-        st.snd.boundary = st.snd.appWritten;
-        st.snd.hasBound = true;
+        protectWrittenPrefix(st, 0);
+    }
+
+    /** Protects the application bytes before a trailing uncommitted region. */
+    public void protectWrittenPrefix(Stream st, long trailing) {
+        SendPart part = st.snd;
+        part.boundary = Math.max(part.boundary, Math.max(0, part.appWritten - trailing));
+        part.hasBound = true;
     }
 
     /** Resets the sending part with code. */
@@ -334,6 +327,8 @@ public final class StreamSend {
         if (sp.reset) {
             if (stopReply && sp.resetRel > sp.sent) {
                 sp.resetRel = sp.sent;
+                sp.trimResends();
+                sp.q.keepReceipts(sp.resetRel);
                 sp.resetSent = false;
                 ctl.stream(st, ControlQueue.RESET);
             }
@@ -355,6 +350,8 @@ public final class StreamSend {
             sp.resetRel = 0;
         }
         sp.resetRel = Math.min(sp.resetRel, sp.q.end());
+        sp.trimResends();
+        sp.q.keepReceipts(sp.resetRel);
         if (sp.resetRel == 0) sp.resetAt = false;
         sp.finWritten = false;
         ctl.stream(st, ControlQueue.RESET);
@@ -375,7 +372,7 @@ public final class StreamSend {
         table.unopenedGone(st);
         long h = st.heldClass();
         st.snd.wwait = false;
-        st.snd.q.drop();
+        st.snd.dropQueue();
         conn.held(h, st.heldAfter());
         sched.remove(st);
         table.unreserve(st);
@@ -423,7 +420,7 @@ public final class StreamSend {
         if (sp.sent > sp.q.base()) port.unretain(sp.sent - sp.q.base());
         long h = st.heldClass();
         sp.wwait = false;
-        sp.q.drop();
+        sp.dropQueue();
         conn.held(h, st.heldAfter());
         sched.remove(st);
         changed(st);
@@ -519,7 +516,6 @@ public final class StreamSend {
         if (sp.errState != null) throw CoreException.stream(sp.errState);
         if (sp.reset) return true;
         if (port.error() != null) throw CoreException.session(port.error());
-        if (port.firstHeld()) return true;
         if (st.tab.opened() && sp.sent >= Math.min(target, sp.q().end())) return true;
         var waits = ext(st).flushWaits;
         if (!waits.contains(sig)) waits.add(sig);
@@ -568,13 +564,12 @@ public final class StreamSend {
         boolean at = sp.resetAt;
         int n = 1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(code)
                 + io.zmux.internal.wire.VarInt.length(fin) + (at ? io.zmux.internal.wire.VarInt.length(rel) : 0);
-        if (!w.frame(n, true, bb -> {
+        if (!w.trackedFrame(n, sp.resetSent, bb -> {
             if (at) io.zmux.internal.wire.FrameEncoder.resetStreamAt(bb, id, code, fin, rel);
             else io.zmux.internal.wire.FrameEncoder.resetStream(bb, id, code, fin);
-        })) return false;
+        }, FrameDesc.id(FrameDesc.Kind.RESET, id))) return false;
         sp.resetSent = true;
         ControlQueue.done(st, ControlQueue.RESET);
-        w.logFrame(FrameDesc.id(FrameDesc.Kind.RESET, id));
         conn.consumed(fin - sp.sent);
         sp.sent = fin;
         w.wroteActivity();
@@ -591,8 +586,8 @@ public final class StreamSend {
         int u = x.reqUrgency;
         boolean inc = x.reqIncremental;
         int n = 4 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(seq) + 1;
-        if (!w.frame(n, true, bb -> io.zmux.internal.wire.FrameEncoder.priorityUpdate(bb, id, seq, u, inc))) return false;
-        w.logFrame(new FrameDesc(FrameDesc.Kind.PRIORITY, false, false, id, 0, 0, seq));
+        if (!w.trackedFrame(n, x.reqSent == seq, bb -> io.zmux.internal.wire.FrameEncoder.priorityUpdate(bb, id, seq, u, inc),
+                new FrameDesc(FrameDesc.Kind.PRIORITY, false, false, id, 0, 0, seq))) return false;
         x.reqSent = seq;
         return true;
     }
@@ -602,9 +597,10 @@ public final class StreamSend {
         StreamSend.SendPart sp = st.snd;
         if (sp.blocked != sp.maxData + 1) return true;
         long id = st.tab.id(), v = sp.maxData;
-        if (!w.frame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v), true,
-                bb -> io.zmux.internal.wire.FrameEncoder.streamDataBlocked(bb, id, v))) return false;
-        w.logFrame(FrameDesc.id(FrameDesc.Kind.STREAM_DATA_BLOCKED, id));
+        if (!w.trackedFrame(1 + io.zmux.internal.wire.VarInt.length(id) + io.zmux.internal.wire.VarInt.length(v),
+                sp.blockedWritten == v + 1, bb -> io.zmux.internal.wire.FrameEncoder.streamDataBlocked(bb, id, v),
+                FrameDesc.id(FrameDesc.Kind.STREAM_DATA_BLOCKED, id))) return false;
+        sp.blockedWritten = v + 1;
         return true;
     }
 
@@ -635,17 +631,22 @@ public final class StreamSend {
      * as reinjected information and the receiver deduplicates. A new stream's ID is allocated here and not
      * cancelled afterwards.
      */
-    byte[] firstBatch(int limit, java.util.function.Predicate<Stream> sendable, PathLayer path) {
-        java.util.List<Stream> live = new ArrayList<>();
-        table.live().forEach(live::add);
-        live.addAll(table.withoutId()); // A stream written and not yet opened has no identifier until here.
+    FirstBatch firstBatch(int limit, java.util.function.Predicate<Stream> sendable, PathLayer path) {
+        return firstBatch(limit, sendable, path, null);
+    }
+
+    FirstBatch firstBatch(int limit, java.util.function.Predicate<Stream> sendable, PathLayer path, Batch receipt) {
+        var live = table.earlyBatchStreams();
         for (Stream st : live) {
             if (st.hasSend && !st.tab.idSet() && !st.snd.cancelled && st.snd.q.end() > 0 && sendable.test(st)) {
                 try { table.pinId(st); } catch (CoreException full) { /* No credit: the stream stays out of the batch. */ }
             }
         }
         java.nio.ByteBuffer out = java.nio.ByteBuffer.allocate(limit);
+        long own = 0;
+        int fragments = Batch.MAX_CODEC_ENTRIES;
         for (Stream st : live) {
+            if (fragments == 0) break;
             if (!st.hasSend || st.snd.reset || !st.tab.idSet()) continue;
             SendPart sp = st.snd;
             long off = sp.q.base();
@@ -662,23 +663,30 @@ public final class StreamSend {
                 }
                 // The cut used the longer header; what is left may take a shorter one.
                 while (want > 0 && want < whole && FrameEncoder.streamHeaderLength(st.tab.id(), off, (int) want + 1, true) + want + 1 <= space) want++;
-                int have = 0;
-                while (have < want) {
+                int have = 0, available = fragments;
+                while (have < want && available-- > 0) {
                     SendQueue.Peek c = sp.q.peek(off + have, (int) want - have);
                     if (c == null || !c.data().hasRemaining()) break;
                     have += c.data().remaining();
+                }
+                if (have > 0 && (off > 0 || have >= sp.preLen) && path.retainsSent()) {
+                    have = (int) sp.reserveHistory(off, have);
+                    sp.finishHistory(Math.max(sp.sent, off + have));
                 }
                 // The frame at offset 0 carries the whole preamble.
                 if (have > 0 && (off > 0 || have >= sp.preLen)) {
                     FrameEncoder.streamHeader(out, st.tab.id(), off, have, false, true);
                     for (int n = 0; n < have; ) {
                         // The loop above found these have bytes queued, and nothing runs between: the peek finds them again.
-                        java.nio.ByteBuffer c = java.util.Objects.requireNonNull(sp.q.peek(off + n, have - n), "the counted bytes are queued").data();
-                        n += c.remaining();
-                        out.put(c);
+                        var c = java.util.Objects.requireNonNull(sp.q.peek(off + n, have - n), "the counted bytes are queued");
+                        n += c.data().remaining();
+                        out.put(c.data());
+                        fragments--;
+                        if (receipt != null) c.attachReceipt(receipt);
                     }
                     writing(st);
                     long grown = dataWritten(st, off + have, false);
+                    own += grown;
                     conn.consumed(grown);
                     path.retain(grown);
                     checkCapacity(st);
@@ -686,10 +694,16 @@ public final class StreamSend {
                 }
             }
         }
-        return out.position() == 0 ? null : java.util.Arrays.copyOf(out.array(), out.position());
+        return out.position() == 0 ? null : new FirstBatch(java.util.Arrays.copyOf(out.array(), out.position()), own);
     }
 
+    record FirstBatch(byte[] frames, long own) {}
+
     static final class SendPart {
+        private final Stream stream;
+
+        SendPart(Stream stream) { this.stream = stream; }
+
         private boolean cancelled;
         private Waiter wsig;
         private Ext ext;
@@ -699,7 +713,7 @@ public final class StreamSend {
         private final Lanes.Bind bind = new Lanes.Bind();
         private long sent;
         private long maxData;
-        private long blocked;
+        private long blocked, blockedWritten;
         private long preLen;
         private long boundary;
         private long resetCode;
@@ -726,8 +740,16 @@ public final class StreamSend {
         private PathStreamState mps;
 
         PathStreamState mp() {
-            if (mps == null) mps = new PathStreamState();
+            if (mps == null) mps = new PathStreamState(q.backing().newHistory(), stream);
             return mps;
+        }
+
+        long reserveHistory(long off, long length) {
+            return mp().ret.history.reserve(off, length);
+        }
+
+        void finishHistory(long through) {
+            mps.ret.history.finish(through);
         }
 
         /** The end of the data that may still be sent: the written end, cut at the Reliable Size once reset. */
@@ -737,6 +759,15 @@ public final class StreamSend {
 
         SendQueue q() {
             return q;
+        }
+
+        private void trimResends() {
+            if (mps != null) mps.ret.history.resent(resetRel, sent);
+        }
+
+        void dropQueue() {
+            if (mps != null) mps.ret.history.close();
+            q.drop();
         }
         long leased() {
             return leased;

@@ -20,13 +20,16 @@ import java.util.List;
 final class PathSession implements PathLayer {
     /** What the path layer asks of the session. */
     interface Port {
+        CoreSessionPolicy sessionPolicy();
         long now();
 
         /** See {@link Joins.Port#firstBatch}. */
-        byte[] firstBatch(int limit);
+        StreamSend.FirstBatch firstBatch(int limit, Batch receipt);
+        int firstBatchStreamCount();
+        void firstBatchAccepted(long own);
 
-        /** See {@link Joins.Port#joinPadding}. */
-        void joinPadding(long n);
+        long joinPaddingRoom();
+        boolean profileBounded();
 
         /** See {@link Joins.Port#applyBatch}. */
         void applyBatch(byte[] frames);
@@ -48,6 +51,7 @@ final class PathSession implements PathLayer {
 
         /** The usable capacity may have changed (quality floor). */
         void capacityChanged();
+        void memberHealth(Pipe pipe, io.zmux.PipeHealth before, io.zmux.PipeHealth after);
 
         SessionState state();
 
@@ -63,6 +67,7 @@ final class PathSession implements PathLayer {
 
     private final Port port;
     private final CoreConfig cfg;
+
     private final Features feat;
     private final PipeTable pipes;
     private final AckEngine ack;
@@ -71,12 +76,13 @@ final class PathSession implements PathLayer {
     final PathMetrics metrics;
     final Joins joins;
     final PathHealth health;
+    private final HealthProjection projection;
     final Probation probation;
     final Tiers tiers;
     final PathScheduler scheduler;
     final Retention retention;
     final Resume resume;
-    private long redundantAt;
+    private long redundantAt = Time.NEVER;
     private boolean ackChanged;
     private final Outbox outbox;
     /** Operations waiting for the peer to attach a pipe ({@link #peerAttached}). */
@@ -89,6 +95,8 @@ final class PathSession implements PathLayer {
               Lifecycle life, Outbox outbox, long now, Port port, byte[] exporter, byte[] psk) {
         this.port = port;
         this.cfg = cfg;
+
+        projection = new HealthProjection(cfg.settleFor(), this::syncHealth);
         this.feat = feat;
         this.pipes = pipes;
         this.ack = ack;
@@ -97,12 +105,12 @@ final class PathSession implements PathLayer {
         this.outbox = outbox;
         Wiring w = new Wiring();
         metrics = new PathMetrics(pipes, ack, feat);
-        joins = new Joins(cfg, stats, peer, initiator, pipes, outbox, w, exporter, psk);
+        joins = new Joins(cfg, stats, peer, initiator, pipes, w, exporter, psk, conn);
         health = new PathHealth(cfg, stats, feat, pipes, streams, ack, ka, outbox, metrics, w);
         probation = new Probation(cfg, pipes, metrics, now, w);
         tiers = new Tiers(cfg, conn, sched, pipes, metrics, w);
         scheduler = new PathScheduler(cfg, stats, conn, sched, tx, lanes, pipes, streams, metrics, w);
-        retention = new Retention(cfg, stats, ack, conn, ctl, sched, lanes, life, pipes, streams, metrics, w);
+        retention = new Retention(cfg, stats, ack, conn, ctl, sched, lanes, life, pipes, streams, metrics, tx.copyBudget(), health, w);
         resume = new Resume(cfg, peer, pipes, w);
         for (Pipe pp : pipes.all()) {
             Attach a = new Attach(initiator, 2, 0, 0, 0, -1, Double.NaN, Attach.OUT_ACTIVE, Attach.IN_OPEN, false, now);
@@ -110,6 +118,8 @@ final class PathSession implements PathLayer {
             a.ownFailure(pp.ownFailure());
             joins.initialRtt(a, pp.id);
             pp.attach(a);
+            health.refreshSilence(pp);
+            syncHealth(pp);
         }
     }
 
@@ -123,7 +133,7 @@ final class PathSession implements PathLayer {
     }
 
     /** One PIPE_ACK entry of a multipath session. */
-    void ackEntry(long pipeId, long lane, long position, long delay) throws WireException {
+    void ackEntry(Pipe received, long pipeId, long lane, long position, long delay) throws WireException {
         Pipe p = pipes.get(pipeId);
         if (p == null) {
             // The bootstrap pipe always existed: once retired, its entries are ignored.
@@ -140,13 +150,23 @@ final class PathSession implements PathLayer {
         if (ol == null) throw ackBeyondSent(pipeId, position);
         if (ol.st.refused()) return;
         if (position > ol.tx.pos()) throw ackBeyondSent(pipeId, position);
-        if (position <= ol.ack.acked()) return;
-        ack.acked(ol, position);
-        joins.laneAcked(ol, position);
-        if (!attachW.isEmpty()) attachW.wakeEvery(outbox);
-        health.laneAcked(p, ol);
-        retention.ackLog(ol, position);
-        ack.advanced(p, ol, position, delay, port.now());
+        boolean advanced = position > ol.ack.acked();
+        if (advanced) {
+            ack.acked(ol, position);
+            joins.laneAcked(ol, position);
+            if (!attachW.isEmpty()) attachW.wakeEvery(outbox);
+            health.laneAcked(p, ol);
+            retention.ackLog(ol, position);
+            var send = p.out().snd;
+            long previous = send.ackedElicitEnd();
+            ack.advanced(p, ol, position, delay, port.now());
+            if (send.ackedElicitEnd() > previous) {
+                health.ackDelivered(p, send.ackedElicitEnd(), send.rttSampleEnd(), port.now());
+            }
+        }
+        // A redundant ACK still proves the receive half if it returned on the pair.
+        boolean proved = ol.lane == 0 && a.projection.acknowledged(position, received == p);
+        if (advanced || proved) syncHealth(p);
     }
 
     WireException ackBeyondSent(long pipe, long pos) {
@@ -170,8 +190,11 @@ final class PathSession implements PathLayer {
         switch (a.health.out()) {
             case Attach.OUT_SUSPECT -> {
                 if (health.writeStall(p) == PathHealth.NO_STALL) {
+                    boolean probeAnswered = health.recoveryProbeAcknowledged(p);
+                    if (probeAnswered) a.projection.recoveredByProbe();
                     health.activated(p);
-                    probation.startProbation(p);
+                    a.link.liveAt = port.now();
+                    probation.startProbation(p, probeAnswered);
                     emitPipeState(p);
                     tiers.checkTakeover();
                     resume.checkResumed();
@@ -198,6 +221,7 @@ final class PathSession implements PathLayer {
         if (p.in() != null) health.opened(p);
         if (p.out() != null) {
             health.activated(p);
+            if (pipes.shaping() != null) pipes.shaping().of(p);
             health.requestPing(p, now);
             resume.startReinjectHold(p);
         }
@@ -216,7 +240,7 @@ final class PathSession implements PathLayer {
         a.link.liveAt = port.now();
         joins.confirmed();
         joins.epochPipeAdded(a.mode());
-        probation.startProbation(p);
+        probation.startProbation(p, false);
         if (a.tier.statusQ().size() > 1) {
             long[] last = a.tier.statusQ().getLast();
             a.tier.statusQ().clear();
@@ -306,11 +330,40 @@ final class PathSession implements PathLayer {
 
     void emitPipeState(Pipe p) {
         health.stateChanged();
+        if (port.state() != SessionState.CLOSED) health.refreshSilence(p);
         scheduler.pickChanged();
         PipeInfo.States st = pipeState(p);
         if (p.out() != null) port.emit(Event.pipeState(p.id, p.carrier(), Action.DIR_OUT, st.out()));
         if (p.in() != null) port.emit(Event.pipeState(p.id, p.carrier(), Action.DIR_IN, st.in()));
         reportPipeEvents(p, st);
+        syncHealth(p);
+    }
+
+    io.zmux.PipeHealth syncHealth(Pipe p) { return syncHealth(p, false); }
+
+    private io.zmux.PipeHealth syncHealth(Pipe p, boolean verifiedReceiveRecord) {
+        var slot = p.mp().projection;
+        var old = slot.snapshot();
+        boolean held = slot.outboundHeld();
+        boolean attached = peerAttached(p);
+        if (attached) p.member().confirmed(port.now());
+        var result = projection.sync(p, port.now(), attached, port.isClosing(), metrics.pipeUsable(p, false), verifiedReceiveRecord, port::emit);
+        projection.registerDeadline(p);
+        if (held != slot.outboundHeld()) scheduler.pickChanged();
+        if (slot.outboundHeld()) observeStability(p);
+        if (old != result) {
+            pipes.changed();
+            port.memberHealth(p, old, result);
+        }
+        return result;
+    }
+
+    void observeStability(Pipe pipe) {
+        Attach attachment = pipe.mp();
+        if (attachment.projection.needsProbe() && !attachment.health.needPing()) {
+            health.requestPing(pipe, port.now());
+            pipes.wake(pipe);
+        }
     }
 
     /**
@@ -389,30 +442,76 @@ final class PathSession implements PathLayer {
         return o.size() > 1 ? o.get(1) : null;
     }
 
+    private boolean routeBuilt;
+    private Tiers.Gate routeGate;
+    private Pipe.OutLane routeLane;
+    private Stream routeStream;
+
+    void beginRoute() {
+        routeBuilt = false;
+        routeLane = null;
+        routeStream = null;
+        routeGate = null;
+    }
+
+    boolean routeStream(Pipe pipe, Pipe.OutLane lane, Stream stream) {
+        if (!routeBuilt) {
+            routeGate = tiers.buildGate();
+            tiers.refreshTiers(routeGate);
+            scheduler.refreshBindings(routeGate);
+            routeBuilt = true;
+        }
+        var decision = scheduler.decision();
+        scheduler.newDecision(decision, pipe, routeGate);
+        if (!scheduler.onPipe(decision, stream)) return false;
+        routeLane = lane;
+        routeStream = stream;
+        return true;
+    }
+
     /** Builds a batch for one outbound lane of a multipath session. */
     @Override
     public void write(RecordWriter w, Pipe p, Pipe.OutLane ol) {
-        w.retainFor(p);
+        boolean ownsRoute = routeLane == ol;
+        boolean mayTakeData = ownsRoute || routeLane == null;
+        Stream reserved = ownsRoute ? routeStream : null;
+        Tiers.Gate prepared = ownsRoute ? routeGate : null;
+        if (ownsRoute) beginRoute();
+        w.retainFor(p, ol.log.room());
         Attach a = p.mp();
         if (a.handshaking()) return;
         if (ol.lane == 0) {
-            tiers.refreshTiers();
             joins.epochProgress();
             pipeFrames(w, p);
             Pipe prim = primary();
             if (prim == p || prim == null) tx.writeControl(w, p);
             else tx.writeDatagrams(w, p);
         }
+        if ((a.topologyExcluded() & Action.DIR_OUT) != 0) return;
+        boolean copies = ol.lane == 0 ? !a.ret.copyQ().isEmpty() || retention.prefixReady(p)
+                : ol == a.ret.copyLane() && !a.ret.selfCopyQ().isEmpty();
+        if (!w.historyRoom() || (!copies && !(mayTakeData && tx.dataPendingOn(p, ol)))) return;
+        Tiers.Gate gate = reserved == null ? tiers.buildGate() : prepared;
+        if (reserved == null) {
+            tiers.refreshTiers(gate);
+            if (ol.lane == 0) scheduler.refreshBindings(gate);
+        }
         PathScheduler.Decision d = scheduler.decision();
-        if (ol.lane == 0) scheduler.refreshBindings(tiers.buildGate());
-        scheduler.newDecision(d, p);
+        scheduler.newDecision(d, p, gate);
         if (ol.lane == 0) {
             retention.writeCopies(d, w, a.ret.copyQ());
-            retention.opportunistic(d, w);
+            if (retention.prefixReady(p) && health.pipeTimers(port.now(), false) > port.now()) {
+                retention.opportunistic(gate, w, p);
+            }
         } else if (ol == p.mp().ret.copyLane()) {
             retention.writeCopies(d, w, a.ret.selfCopyQ());
         }
-        tx.writeData(w, p, ol);
+        if (mayTakeData) tx.writeData(w, p, ol, reserved);
+    }
+
+    boolean priorityControl(Pipe p) {
+        Attach a = p.mp();
+        return a.health.needPing() || a.link.firstRecord || a.link.ackPair || ackRelease(p) <= port.now();
     }
 
     /** PIPE_ACK, PIPE_PING, PIPE_ABANDON and PIPE_STATUS for the pipe. */
@@ -437,7 +536,7 @@ final class PathSession implements PathLayer {
                 // PIPE_PING of its own once the pipe has been idle for R_p.
                 if (a.link.ackPair && idleForReturnPing(p, now)) health.requestPing(p, now);
                 snapped = ack.snapshot(w, now, false);
-            } else if (ackChanged && p == second && now >= redundantAt) {
+            } else if (redundantAckReady() && p == second) {
                 if (!quiet() && idleForReturnPing(p, now)) health.requestPing(p, now);
                 ack.snapshot(w, now);
                 ackChanged = false;
@@ -461,8 +560,8 @@ final class PathSession implements PathLayer {
             if (!abandonGoesOn(q, p, prim)) continue;
             long code = qa.health.abandonCode(), id = q.id;
             int n = VarInt.length(FrameType.PIPE_ABANDON) + VarInt.length(id) + VarInt.length(code);
-            if (!w.frame(n, true, bb -> FrameEncoder.pipeAbandon(bb, id, code))) return;
-            w.logFrame(FrameDesc.id(FrameDesc.Kind.ABANDON, id));
+            if (!w.trackedFrame(n, qa.health.abandonSent(), bb -> FrameEncoder.pipeAbandon(bb, id, code),
+                    FrameDesc.id(FrameDesc.Kind.ABANDON, id))) return;
             if (health.abandonWritten(q)) w.abandonsSent.add(q);
         }
         if (!joins.writeOwedAbandons(w)) return;
@@ -477,29 +576,52 @@ final class PathSession implements PathLayer {
         return k > 0 ? k : PathHealth.UNPAIRED_PROBE;
     }
 
-    /** Whether write() would produce bytes now on the lane (W8). */
-    @Override
-    public boolean wantsWrite(Pipe p, Pipe.OutLane ol) {
+    private static boolean writableControl(Pipe p) {
         Attach a = p.mp();
-        if (a.health.retired() || a.health.out() == Attach.OUT_FAILED || a.health.out() == Attach.OUT_CLOSED || a.handshaking()) return false;
-        if (ol.lane == 0) {
-            if ((a.link.firstRecord && ack != null && hasEntries()) || a.link.ackPair) {
-                return true;
-            }
-            if (a.health.needPing() && health.pingAllowed(port.now()) && health.oldestPingWaiter(p)) return true;
-            Pipe prim = primary();
-            if (ack != null && ack.due(port.now()) && (p == prim || prim == null)) return true;
-            if (ackChanged && p == second() && port.now() >= redundantAt) return true;
+        return !a.health.retired() && a.health.out() != Attach.OUT_FAILED
+                && a.health.out() != Attach.OUT_CLOSED && !a.handshaking();
+    }
+
+    boolean wantsPipeControl(Pipe p, Pipe.OutLane ol) {
+        if (!writableControl(p)) return false;
+        Attach a = p.mp();
+        if ((a.link.firstRecord && ack != null && hasEntries()) || a.link.ackPair) return true;
+        if (a.health.needPing() && health.pingAllowed(port.now()) && health.oldestPingWaiter(p)) return true;
+        Pipe primary = primary();
+        if (ack != null && ack.due(port.now()) && (p == primary || primary == null)) return true;
+        if (redundantAckReady() && p == second()) return true;
+        if (ol.log.room() != 0) {
             for (Pipe q : pipes.all()) {
-                if (q.mp() != null && !q.mp().health.retired() && ((q.mp().health.abandonQueued() && abandonGoesOn(q, p, prim)) || Tiers.statusReady(q, p))) return true;
+                if (q.mp() == null || q.mp().health.retired()) continue;
+                if ((q.mp().health.abandonQueued() && abandonGoesOn(q, p, primary)) || Tiers.statusReady(q, p)) return true;
             }
-            if (joins.owesAbandons() || (!port.isClosing() && joins.epochWanted(p))) return true;
-            if ((p == prim || prim == null) && tx.controlPending()) return true;
-            if (tx.datagramsPending(p, ol)) return true;
         }
-        if (ol.lane == 0 && !a.ret.copyQ().isEmpty() && metrics.open(p)) return true;
-        if (ol == p.mp().ret.copyLane() && !a.ret.selfCopyQ().isEmpty() && metrics.laneOpen(p, ol)) return true;
-        return tx.dataPendingOn(p, ol) && scheduler.anyStreamOn(p, ol) && (pipes.shaping() == null || !Shaping.held(p, port.now()));
+        return joins.owesAbandons() || (!port.isClosing() && joins.epochWanted(p));
+    }
+
+    @Override
+    public boolean wantsControl(Pipe p, Pipe.OutLane ol) {
+        return wantsControl(p, ol, true);
+    }
+
+    private boolean wantsControl(Pipe p, Pipe.OutLane ol, boolean checkPrefix) {
+        if (!writableControl(p)) return false;
+        Attach a = p.mp();
+        if (ol.lane == 0) {
+            if (wantsPipeControl(p, ol) || tx.datagramsPending(p, ol)) return true;
+            Pipe primary = primary();
+            if ((p == primary || primary == null) && tx.controlPending(ol.log.room() != 0)) return true;
+        }
+        if (ol.log.room() == 0) return false;
+        if (ol.lane == 0 && (!a.ret.copyQ().isEmpty() || (checkPrefix && retention.prefixReady(p))) && metrics.open(p)) return true;
+        return ol == a.ret.copyLane() && !a.ret.selfCopyQ().isEmpty() && metrics.laneOpen(p, ol);
+    }
+
+    private final Tiers.Gate stallGate = new Tiers.Gate();
+
+    private boolean waitsFor(Pipe p, Pipe.OutLane ol) {
+        return wantsControl(p, ol, false)
+                || (tx.dataPendingOn(p, ol) && scheduler.anyStreamOn(p, ol, tiers.buildGate(stallGate)));
     }
 
     /** Accounts a produced batch on a pipe of a multipath session. */
@@ -517,6 +639,7 @@ final class PathSession implements PathLayer {
         for (Pipe q : w.abandonsSent) health.abandonHanded(q);
         w.abandonsSent.clear();
         if (w.pingSent()) health.pingRecorded(p, ol.tx.pos());
+        if (w.suspPing()) health.recoveryProbeRecorded(p);
         if (w.revalPing()) probation.revalPingWritten(p);
         if (w.epochAnswer() != 0) joins.answerSent(ol, ol.tx.pos(), w.epochAnswer());
         if (w.activity()) probation.markBusy();
@@ -543,26 +666,45 @@ final class PathSession implements PathLayer {
         long gap = Time.sub(now, a.link.lastRecord);
         if (il.rx.recs() > 1 && gap > a.link.maxGap) a.link.maxGap = gap;
         a.link.lastRecord = now;
+        boolean receiveProof = p.out() == null && a.projection.needsReceiveRecord();
+        if (il.rx.recs() == 1 || receiveProof) syncHealth(p, receiveProof);
         if (il.rx.recs() == 1 && !attachW.isEmpty()) attachW.wakeEvery(outbox);
     }
 
-    /** Evaluates every path-layer deadline; with apply it acts on the due ones. Returns the earliest pending deadline. */
-    long timers(long now, boolean apply) {
-        long n = health.pipeTimers(now, apply);
-        n = Math.min(n, joins.backoffTimer(now, apply));
-        n = Math.min(n, joins.epochTimers(now, apply));
-        if (ackChanged) {
-            if (now < redundantAt) n = Math.min(n, redundantAt);
-            else if (apply) pipes.wakeWriters();
+    long protocolDeadline(ProtocolTimeline.Reason reason, long now) {
+        return switch (reason) {
+            case HEALTH -> health.pipeTimers(now, false);
+            case PREFIX_REPAIR -> port.isClosing() || !retention.hasPrefixWork() ? Time.NEVER
+                    : retention.prefixTimers(tiers.buildGate(), false);
+            case JOIN_BACKOFF -> joins.backoffTimer(now, false);
+            case EPOCH -> joins.epochTimers(now, false);
+            case ACK_COPY -> ackChanged ? redundantAt : Time.NEVER;
+            case PING -> health.pingTimer(now, false);
+            case CUSTOM_PICK -> scheduler.pickDeadline();
+            case PROBATION -> probation.probationTimers(now, false);
+            case HEALTH_PROJECTION -> projection.nextDeadline();
+            case TIER -> tiers.tierDeadline();
+            default -> Time.NEVER;
+        };
+    }
+
+    private void runDeadlines(long now) {
+        probation.probationTimers(now, true);
+        projection.onTimeout(now);
+        health.pipeTimers(now, true);
+        joins.backoffTimer(now, true);
+        joins.epochTimers(now, true);
+        if (ackChanged && redundantAt != Time.NEVER && now >= redundantAt) {
+            redundantAt = Time.NEVER;
+            pipes.wakeWriters();
         }
-        n = Math.min(n, health.pingTimer(now, apply));
-        n = Math.min(n, scheduler.pickTimer(now, apply));
-        n = Math.min(n, probation.probationTimers(now, apply));
-        if (apply) {
-            tiers.refreshTiers();
-            if (tiers.eligibleTiers() > 1) pipes.wakeWriters();
-        }
-        return Math.min(n, tiers.tierDeadline());
+        health.pingTimer(now, true);
+        scheduler.expirePick(now);
+        if (tiers.onTimeout(now)) pipes.wakeWriters();
+    }
+
+    private boolean redundantAckReady() {
+        return ackChanged && (redundantAt == Time.NEVER || port.now() >= redundantAt);
     }
 
     /** A pipe became SUSPECT: a changed acknowledgement waiting for its redundant copy goes now. */
@@ -575,7 +717,6 @@ final class PathSession implements PathLayer {
     @Override public boolean acksInControl() { return false; }
     @Override public void maxDataSent(boolean peerWaiting) { retention.maxDataSent(peerWaiting); }
     @Override public void maxStreamDataSent(Stream st, boolean peerWaiting) { retention.maxStreamDataSent(st, peerWaiting); }
-    @Override public void creditBlocked(Stream st) { retention.noteBlocked(st); }
     @Override public boolean urgentLane(Stream st) { return scheduler.redundant(st); }
     @Override public long sendBuffer(long configured) { return Math.max(configured, retention.retransmitBudget()); }
     @Override public long retainRoom() { return retention.retainRoom(); }
@@ -586,9 +727,9 @@ final class PathSession implements PathLayer {
     @Override public long retained() { return retention.retained(); }
 
     @Override
-    public void onPipeAck(io.zmux.internal.wire.Frame.AckEntries it) throws WireException {
+    public void onPipeAck(Pipe received, io.zmux.internal.wire.Frame.AckEntries it) throws WireException {
         resume.endReinjectHolds();
-        while (it.next()) ackEntry(it.pipeId, it.lane, it.position, it.delay);
+        while (it.next()) ackEntry(received, it.pipeId, it.lane, it.position, it.delay);
     }
 
     @Override
@@ -598,7 +739,11 @@ final class PathSession implements PathLayer {
 
     @Override public void outboundFailed(long id, Throwable cause) { health.outboundFailed(id, cause); }
     @Override public long srttMax() { return health.srttMax(); }
-    @Override public long deadline(long now) { return timers(now, false); }
+    @Override public void closeTimers() {
+        beginRoute();
+        health.closeTimers();
+        projection.closeTimers();
+    }
     /**
      * Acts on the due deadlines. A pipe state change can make other limits due at once (a suspicion whose T_dead is
      * T_suspect, a failure that turns another pipe into the last of its direction), so passes repeat until one
@@ -606,11 +751,12 @@ final class PathSession implements PathLayer {
      */
     @Override
     public void onTimeout(long t) {
-        for (int i = 0; i < 16; i++) {
-            long g = health.stateGen();
-            timers(t, true);
-            if (health.stateGen() == g || port.state() == SessionState.CLOSED) return;
-        }
+        long generation;
+        do {
+            generation = health.stateGen();
+            runDeadlines(t);
+        } while (health.stateGen() != generation && port.state() != SessionState.CLOSED);
+        if (!port.isClosing() && retention.hasPrefixWork()) retention.prefixTimers(tiers.buildGate(), true);
     }
     @Override public boolean joinReady() { return joins.joinReady(); }
 
@@ -685,19 +831,25 @@ final class PathSession implements PathLayer {
     /** The ports of the components: each forwards to the one owner of the effect. */
     private final class Wiring implements Joins.Port, PathHealth.Port, Resume.Port, Tiers.Port, PathScheduler.Port, Probation.Port,
             Retention.Port {
+        @Override public CoreSessionPolicy sessionPolicy() { return port.sessionPolicy(); }
+        @Override public boolean peerAttached(Pipe p) { return PathSession.this.peerAttached(p); }
         @Override public boolean admits(Tiers.Gate g, Pipe p) { return tiers.admits(g, p); }
         @Override public void backoffCleared() { joins.backoffCleared(); }
         @Override public void joinFailed() { joins.joinFailed(); }
         @Override public Tiers.Gate buildGate() { return tiers.buildGate(); }
         @Override public boolean busyBackup(Pipe p, long now) { return probation.busyBackup(p, now); }
         @Override public void capacityChanged() { port.capacityChanged(); }
+        @Override public void healthChanged(Pipe p) { syncHealth(p); }
         @Override public void checkLingerDone() { port.checkLingerDone(); }
         @Override public void checkResumed() { resume.checkResumed(); }
         @Override public void epochInUse() { wakeEpochWaiters(); }
-        @Override public boolean attended() { return cfg.redial() || attendants > 0; }
-        @Override public byte[] firstBatch(int limit) { return port.firstBatch(limit); }
+        @Override public boolean attended() { return attendants > 0; }
+        @Override public StreamSend.FirstBatch firstBatch(int limit, Batch receipt) { return port.firstBatch(limit, receipt); }
+        @Override public int firstBatchStreamCount() { return port.firstBatchStreamCount(); }
+        @Override public void firstBatchAccepted(long own) { port.firstBatchAccepted(own); }
         @Override public void applyBatch(byte[] frames) { port.applyBatch(frames); }
-        @Override public void joinPadding(long n) { port.joinPadding(n); }
+        @Override public long joinPaddingRoom() { return port.joinPaddingRoom(); }
+        @Override public boolean profileBounded() { return port.profileBounded(); }
         @Override public void proven(Pipe p) { joinProven(p); }
         @Override public void retireDeclined(Pipe p) { declined(p); }
         @Override public void checkTakeover() { tiers.checkTakeover(); }
@@ -705,9 +857,18 @@ final class PathSession implements PathLayer {
         @Override public void copyChunk(PathScheduler.Decision d, RecordWriter w, Stream st, long off, long n, boolean fin) { retention.copyChunk(d, w, st, off, n, fin); }
         @Override public void emit(Event e) { port.emit(e); }
         @Override public void emitPipeState(Pipe p) { PathSession.this.emitPipeState(p); }
+        @Override public void emitRetired(Pipe p) {
+            if (port.state() != SessionState.CLOSED) health.refreshSilence(p);
+            tx.datagramPathRetired(p);
+            scheduler.pickChanged();
+            syncHealth(p);
+            port.emit(Event.pipeRetired(p.id, p.carrier(), p.out() != null && p.mp().out() == Attach.OUT_FAILED));
+        }
         @Override public void endRevalidation(Pipe p) { probation.endRevalidation(p); }
         @Override public void failLocal(WireException e) { port.failLocal(e); }
         @Override public void failPipe(Pipe p, long code, Throwable cause) { health.failPipe(p, code, cause); }
+        @Override public long eta(Pipe p, long bytes) { return scheduler.repairEta(p, bytes); }
+        @Override public PathScheduler.Arrival arrival(Pipe p) { return scheduler.arrival(p); }
         @Override public Pipe fastestIn(Tiers.Gate g, int ti, long l, Pipe except) { return scheduler.fastestIn(g, ti, l, except); }
         @Override public boolean gateUsable(Tiers.Gate g, Pipe p) { return tiers.gateUsable(g, p); }
         @Override public boolean idleCopied(Stream st) { return scheduler.idleCopied(st); }
@@ -729,8 +890,9 @@ final class PathSession implements PathLayer {
         @Override public boolean redundant(Stream st) { return scheduler.redundant(st); }
         @Override public void refusedForResources() { joins.refusedForResources(); }
         @Override public void reinjectPipe(Pipe p) { retention.reinjectPipe(p); }
-        @Override public void heldBack(Stream st) { retention.noteBlocked(st); }
         @Override public boolean reinjectRoom(Pipe p) { return resume.reinjectRoom(p); }
+        @Override public long reinjectAllowance(Pipe p) { return resume.reinjectAllowance(p); }
+        @Override public void prefixResent(Pipe p, long bytes) { resume.resent(p, bytes); }
         @Override public void resumed() {
             port.resumed();
             joins.epochResumed();
@@ -738,7 +900,7 @@ final class PathSession implements PathLayer {
         @Override public void retire(Pipe p) { health.retire(p); }
         @Override public long sendBufferLimit() { return port.sendBufferLimit(); }
         @Override public long sessionSendBuffer() { return Math.max(cfg.sendBuffer(), retention.retransmitBudget()); }
-        @Override public void startProbation(Pipe p) { probation.startProbation(p); }
+        @Override public void startProbation(Pipe p) { probation.startProbation(p, false); }
         @Override public void startReinjectHold(Pipe p) { resume.startReinjectHold(p); }
         @Override public SessionState state() { return port.state(); }
         @Override public void statusLost(Pipe p, long seq) { tiers.statusLost(p, seq); }
@@ -752,7 +914,7 @@ final class PathSession implements PathLayer {
         @Override public boolean waitsFor(Pipe p, Pipe.OutLane ol) {
             metrics.openAs(p);
             try {
-                return PathSession.this.wantsWrite(p, ol);
+                return PathSession.this.waitsFor(p, ol);
             } finally {
                 metrics.openAs(null);
             }

@@ -6,7 +6,6 @@ import io.zmux.internal.wire.TransportParams;
 import io.zmux.internal.wire.VarInt;
 import java.time.Duration;
 import java.util.List;
-import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -26,29 +25,28 @@ import java.util.OptionalLong;
  * {@link OptionalLong} means the option's one setting that is not a value, as its documentation
  * names it: off or none ({@link #handshakeTimeout()}, {@link #resumeTimeout()}), unlimited
  * ({@link #memoryBudget()}), automatic ({@link #maxStreamReceiveWindow()},
- * {@link #maxConnectionReceiveWindow()}, {@link #sendBufferMax()}, {@link #replayWindow()},
+ * {@link #maxConnectionReceiveWindow()}, {@link #sendBufferMax()},
  * {@link #probation()}) or staged ({@link #maxIncomingUniStreams()}). No option has two such settings.
  */
 public final class ZmuxConfig {
     /** The default ALPN identifier, as of QMux draft-02. */
     public static final String DEFAULT_ALPN = "qmux-02";
     /** The default handshake timeout. */
-    public static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
+    public static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofNanos(CoreConfig.DEFAULT_HANDSHAKE_TIMEOUT);
     /** The default idle timeout. */
-    public static final Duration DEFAULT_MAX_IDLE_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration DEFAULT_MAX_IDLE_TIMEOUT = Duration.ofMillis(CoreConfig.DEFAULT_IDLE_TIMEOUT_MILLIS);
     /** The default initial stream and connection receive windows. */
-    public static final long DEFAULT_INITIAL_STREAM_RECEIVE_WINDOW = 256 << 10, DEFAULT_INITIAL_CONNECTION_RECEIVE_WINDOW = 1 << 20;
+    public static final long DEFAULT_INITIAL_STREAM_RECEIVE_WINDOW = CoreConfig.DEFAULT_STREAM_WINDOW,
+            DEFAULT_INITIAL_CONNECTION_RECEIVE_WINDOW = CoreConfig.DEFAULT_CONNECTION_WINDOW;
     /** The default send buffer. */
-    public static final long DEFAULT_SEND_BUFFER = 4L << 20;
+    public static final long DEFAULT_SEND_BUFFER = CoreConfig.DEFAULT_SEND_BUFFER;
     /** The default memory budget of a session without a listener. */
-    public static final long DEFAULT_MEMORY_BUDGET = 1L << 30;
+    public static final long DEFAULT_MEMORY_BUDGET = CoreConfig.DEFAULT_MEMORY_BUDGET;
     /** The default join timeout. */
-    public static final Duration DEFAULT_JOIN_TIMEOUT = Duration.ofSeconds(10);
+    public static final Duration DEFAULT_JOIN_TIMEOUT = Duration.ofNanos(CoreConfig.DEFAULT_JOIN_TIMEOUT);
     /** The longest join deadline: no {@link Builder#joinTimeout join timeout} is longer. */
-    public static final Duration MAX_JOIN_DEADLINE = Duration.ofSeconds(60);
+    public static final Duration MAX_JOIN_DEADLINE = Duration.ofNanos(CoreConfig.MAX_JOIN_DEADLINE);
 
-    /** The default number of extra attachments the peer may hold beyond {@link #maxPipes()}. */
-    public static final int DEFAULT_PIPE_HEADROOM = 8;
     /** The default number of lanes accepted on each inbound pipe ({@link Builder#maxLanes}). */
     public static final long DEFAULT_MAX_LANES = 258;
     /** The default size of a Hello's first batch. */
@@ -67,13 +65,15 @@ public final class ZmuxConfig {
     final long maxIncomingUniStreams; // -1: staged credit
     final long maxLanes;
     final boolean datagrams;
+    final int datagramWindow;
+    final Duration stabilityHold;
+    final DatagramSendOptions datagramDefaults;
+    final DatagramCopyPolicy datagramCopyPolicy;
     final int datagramSendQueue, datagramReceiveQueue, datagramStreamQueue;
     final long datagramReceiveBytes;
     final long datagramStreamBytes; // -1: no byte bound
     final long datagramQueueDelay; // nanoseconds, 0: off
     final long sendBuffer, sendBufferMax; // sendBufferMax 0: auto
-    final EarlyData earlyData;
-    final boolean holdFirstFlight;
     final List<String> alpn;
     final EventLoops eventLoops;
     final io.zmux.shaping.ShapingLimits shapingLimits;
@@ -81,16 +81,18 @@ public final class ZmuxConfig {
     final io.zmux.shaping.ShaperFactory shaper;
     final CarrierCredential carrierCredential;
     final io.zmux.internal.loop.DriverHooks hooks;
+    final ClockDomain clockDomain;
+
+    /** The session's resolved monotonic clock domain. */
+    public ClockDomain clockDomain() { return hooks.clockDomain(); }
     final int joinEarlyHello; // 0: off
-    final int maxPipes, pipeHeadroom, replayWindow; // replayWindow 0: unset
+    private final SessionPolicy sessionPolicy;
     final PipeAuth pipeAuth;
     final Duration resumeTimeout; // null: off
     final Duration joinTimeout;
     final Duration epochPeriod; // null: off
     final long epochJoins; // negative: off
     final boolean epochAfterFirstPipe, epochAfterResume;
-    final Redial redial;
-    final Backoff redialBackoff;
     final Scheduler scheduler;
     final Duration probation; // null: derived; zero: off
     final int spreadChunk;
@@ -108,19 +110,23 @@ public final class ZmuxConfig {
         datagramStreamQueue = b.datagramStreamQueue; datagramReceiveBytes = b.datagramReceiveBytes;
         datagramStreamBytes = b.datagramStreamBytes; datagramQueueDelay = b.datagramQueueDelay;
         sendBuffer = b.sendBuffer; sendBufferMax = b.sendBufferMax;
-        datagrams = b.datagrams; earlyData = b.earlyData; holdFirstFlight = b.holdFirstFlight; alpn = List.copyOf(b.alpn); eventLoops = b.eventLoops;
+        datagrams = b.datagrams;
+        datagramCopyPolicy = b.datagramCopyPolicy;
+        datagramWindow = b.datagramWindow;
+        stabilityHold = b.stabilityHold;
+        datagramDefaults = b.datagramDefaults; alpn = List.copyOf(b.alpn); eventLoops = b.eventLoops;
         shapingLimits = b.shapingLimits;
         shapingBudget = b.shapingBudget;
         shaper = b.shaper;
         carrierCredential = b.carrierCredential;
-        maxPipes = b.maxPipes; pipeHeadroom = b.pipeHeadroom; replayWindow = b.replayWindow; pipeAuth = b.pipeAuth;
-        resumeTimeout = b.resumeTimeout; joinTimeout = b.joinTimeout; redial = b.redial;
+        sessionPolicy = b.sessionPolicy; pipeAuth = b.pipeAuth;
+        resumeTimeout = b.resumeTimeout; joinTimeout = b.joinTimeout;
         epochPeriod = b.epochPeriod; epochJoins = b.epochJoins;
         epochAfterFirstPipe = b.epochAfterFirstPipe; epochAfterResume = b.epochAfterResume;
-        redialBackoff = b.redialBackoff;
         scheduler = b.scheduler; probation = b.probation;
         spreadChunk = b.spreadChunk; overflowDelay = b.overflowDelay;
         redundancy = b.redundancy; logger = b.logger;
+        clockDomain = b.clockDomain;
         Tracer tracer = b.tracer;
         hooks = new io.zmux.internal.loop.DriverHooks(tracer == null ? null : new io.zmux.internal.loop.DriverHooks.TraceSink() {
             @Override public SessionEvent view(io.zmux.internal.core.Event e) { return Events.traceEvent(e); }
@@ -130,17 +136,16 @@ public final class ZmuxConfig {
             @Override public void closed(SessionId session, io.zmux.internal.core.SessionError error) { tracer.closed(session, Errors.session(error)); }
         }, b.allowWindowGrowth,
                 b.datagramSend, b.datagramReceive, Scheduling.picker(scheduler), scheduler, joinPolicy(b), b.handshakeShaper, b.logger,
-                b.redial == null ? null : new io.zmux.internal.loop.DriverHooks.Redial(b.redial, nanos(b.redialBackoff.min()), nanos(b.redialBackoff.max()), b.redialBackoff.jitter()));
+                clockDomain == null ? ClockDomain.system() : clockDomain, b.accounting);
         joinEarlyHello = b.joinEarlyHello;
     }
 
     private static io.zmux.internal.loop.DriverHooks.JoinPolicy joinPolicy(Builder b) {
-        JoinOutcome outcome = b.joinOutcome;
         RecordPolicy policy = b.recordPolicy;
         AllowRecordMode allow = b.allowRecordMode;
-        java.util.function.BiPredicate<ZmuxSession, PipeId> authorize = b.authorizeJoin;
+        AuthorizeJoin authorizer = b.sessionPolicy.authorizeJoin();
         return new io.zmux.internal.loop.DriverHooks.JoinPolicy() {
-            @Override public JoinOutcome outcome() { return outcome; }
+            @Override public AuthorizeJoin initialAuthorizer() { return authorizer; }
             @Override public Throwable publicError(io.zmux.internal.core.CoreException terminal) { return Errors.io(terminal); }
 
             private RecordPolicyInput carrier(io.zmux.internal.loop.Transport c) {
@@ -151,41 +156,10 @@ public final class ZmuxConfig {
                 return allow == null ? mode == io.zmux.internal.join.Mode.SEALED : allow.allow(carrier(c), io.zmux.internal.join.Mode.record(mode), peer);
             }
 
-            @Override public boolean authorize(Object host, long pipe) {
-                return authorize == null || authorize.test((ZmuxSession) host, PipeId.of(pipe));
-            }
-
             @Override public io.zmux.internal.join.Mode choose(io.zmux.internal.loop.Transport c) {
                 return policy == null ? io.zmux.internal.join.Mode.SEALED : io.zmux.internal.join.Mode.of(policy.choose(carrier(c)));
             }
         };
-    }
-
-    /** This configuration with early data turned off. */
-    ZmuxConfig withoutEarlyData() {
-        return earlyData == EarlyData.OFF ? this : new ZmuxConfig(this, EarlyData.OFF);
-    }
-
-    private ZmuxConfig(ZmuxConfig o, EarlyData earlyData) {
-        handshakeTimeout = o.handshakeTimeout; maxIdleTimeout = o.maxIdleTimeout; liveness = o.liveness;
-        initialStreamReceiveWindow = o.initialStreamReceiveWindow; initialConnectionReceiveWindow = o.initialConnectionReceiveWindow;
-        maxStreamReceiveWindow = o.maxStreamReceiveWindow; maxConnectionReceiveWindow = o.maxConnectionReceiveWindow;
-        memoryBudget = o.memoryBudget; latencyBudget = o.latencyBudget;
-        maxIncomingStreams = o.maxIncomingStreams; maxIncomingUniStreams = o.maxIncomingUniStreams; maxLanes = o.maxLanes;
-        datagramSendQueue = o.datagramSendQueue; datagramReceiveQueue = o.datagramReceiveQueue;
-        datagramStreamQueue = o.datagramStreamQueue; datagramReceiveBytes = o.datagramReceiveBytes;
-        datagramStreamBytes = o.datagramStreamBytes; datagramQueueDelay = o.datagramQueueDelay;
-        sendBuffer = o.sendBuffer; sendBufferMax = o.sendBufferMax;
-        datagrams = o.datagrams; this.earlyData = earlyData; holdFirstFlight = false; alpn = o.alpn; eventLoops = o.eventLoops;
-        shapingLimits = o.shapingLimits; shapingBudget = o.shapingBudget; shaper = o.shaper; carrierCredential = o.carrierCredential; hooks = o.hooks; joinEarlyHello = o.joinEarlyHello;
-        maxPipes = o.maxPipes; pipeHeadroom = o.pipeHeadroom; replayWindow = o.replayWindow; pipeAuth = o.pipeAuth;
-        resumeTimeout = o.resumeTimeout; joinTimeout = o.joinTimeout; redial = o.redial;
-        epochPeriod = o.epochPeriod; epochJoins = o.epochJoins;
-        epochAfterFirstPipe = o.epochAfterFirstPipe; epochAfterResume = o.epochAfterResume;
-        redialBackoff = o.redialBackoff;
-        scheduler = o.scheduler; probation = o.probation;
-        spreadChunk = o.spreadChunk; overflowDelay = o.overflowDelay;
-        redundancy = o.redundancy; logger = o.logger;
     }
 
     /** The handshake timeout; empty: none. */
@@ -204,9 +178,9 @@ public final class ZmuxConfig {
     public OptionalLong maxConnectionReceiveWindow() { return maxConnectionReceiveWindow == 0 ? OptionalLong.empty() : OptionalLong.of(maxConnectionReceiveWindow); }
     /** The session's own memory budget; empty: unlimited. */
     public OptionalLong memoryBudget() { return memoryBudget < 0 ? OptionalLong.empty() : OptionalLong.of(memoryBudget); }
-    /** Concurrent peer bidirectional streams; 0: none. */
+    /** Configured peer bidirectional stream concurrency; 0: none. */
     public long maxIncomingStreams() { return maxIncomingStreams; }
-    /** Concurrent peer unidirectional streams advertised at once (0: none); empty: staged credit. */
+    /** Configured initial unidirectional stream concurrency (0: none); empty: staged credit. */
     public OptionalLong maxIncomingUniStreams() { return maxIncomingUniStreams < 0 ? OptionalLong.empty() : OptionalLong.of(maxIncomingUniStreams); }
     /** Lanes accepted on each inbound pipe; 1: none. */
     public long maxLanes() { return maxLanes; }
@@ -222,21 +196,13 @@ public final class ZmuxConfig {
     /** The fixed maximum the send buffer grows to in multipath sessions; empty: automatic. */
     public OptionalLong sendBufferMax() { return sendBufferMax == 0 ? OptionalLong.empty() : OptionalLong.of(sendBufferMax); }
 
-    /** s's budget; none without s, when it fails, or when it gives none. */
+    /** Resolves the direction budget. An absent supplier selects Lightweight with no cover account. */
     static io.zmux.shaping.ShapingBudget askBudget(java.util.function.Supplier<io.zmux.shaping.ShapingBudget> s) {
         if (s == null) return io.zmux.shaping.ShapingBudget.NONE;
-        try {
-            var b = s.get();
-            return b == null ? io.zmux.shaping.ShapingBudget.NONE : b;
-        } catch (RuntimeException e) {
-            return io.zmux.shaping.ShapingBudget.NONE;
-        }
+        return java.util.Objects.requireNonNull(s.get(), "shapingBudget");
     }
     /** Whether datagrams and datagram flows are on ({@link Builder#enableDatagrams}). */
     public boolean enableDatagrams() { return datagrams; }
-    public EarlyData earlyData() { return earlyData; }
-    /** Whether a client holds its first carrier write ({@link Builder#holdFirstFlight}). */
-    public boolean isHoldFirstFlight() { return holdFirstFlight; }
 
     /**
      * The credential presented on the carrier of a client session by the dialers that open it
@@ -249,15 +215,11 @@ public final class ZmuxConfig {
      */
     public Optional<CarrierCredential> carrierCredential() { return Optional.ofNullable(carrierCredential); }
 
-    /** Whether sessions offer multipath: more than one pipe, or resume. */
-    public boolean isMultipath() { return maxPipes > 1 || resumeTimeout != null; }
+    /** Whether sessions offer multipath: more than one steady attachment, or resume. */
+    public boolean isMultipath() { return sessionPolicy.limits().steadyAttachments() > 1 || resumeTimeout != null; }
 
-    /** The attachments a session aims for with its own joins; 1: multipath off. */
-    public int maxPipes() { return maxPipes; }
-    /** The attachments the peer may hold beyond {@link #maxPipes()}. */
-    public int pipeHeadroom() { return pipeHeadroom; }
-    /** The replay window of joins; empty: automatic, max(64, 2 x (maxPipes + headroom)). */
-    public OptionalInt replayWindow() { return replayWindow == 0 ? OptionalInt.empty() : OptionalInt.of(replayWindow); }
+    /** The initial authorization and capacity policy. */
+    public SessionPolicy sessionPolicy() { return sessionPolicy; }
     /** The secret sources of joins; empty: none (a secure first pipe is its own source). */
     public Optional<PipeAuth> pipeAuth() { return Optional.ofNullable(pipeAuth); }
     /** The size of a Hello's first batch while no other pipe is usable; empty: off. */
@@ -274,10 +236,6 @@ public final class ZmuxConfig {
     public boolean isEpochAfterFirstPipe() { return epochAfterFirstPipe; }
     /** Whether a multipath session advances once after leaving a suspension, back in Stable. */
     public boolean isEpochAfterResume() { return epochAfterResume; }
-    /** The redial hook; empty: none. */
-    public Optional<Redial> redial() { return Optional.ofNullable(redial); }
-    /** The backoff of the redial hook's attempts. */
-    public Backoff redialBackoff() { return redialBackoff; }
     public Scheduler scheduler() { return scheduler; }
     /** The base of a new pipe's probation, {@link Duration#ZERO} turning it off; empty: derived from the path (automatic). */
     public Optional<Duration> probation() { return Optional.ofNullable(probation); }
@@ -326,13 +284,7 @@ public final class ZmuxConfig {
         return out;
     }
 
-    static long nanos(Duration d) {
-        try {
-            return d.toNanos();
-        } catch (ArithmeticException e) {
-            return Time.NEVER;
-        }
-    }
+    static long nanos(Duration d) { return Time.nanos(d); }
 
     /** The handshake timeout as a bound; one beyond the clock's range for no timeout. */
     Duration handshakeBound() {
@@ -364,32 +316,17 @@ public final class ZmuxConfig {
     }
 
     /**
-     * Checks what depends on the role: early data toward a declared zmux peer needs a known
-     * stream ID parity, which the symmetric role learns only from the peer's parameters; a
-     * held first flight is a client's.
-     */
-    void checkRole(CoreConfig.Role role) {
-        if (earlyData == EarlyData.ZMUX_PEER && role == CoreConfig.Role.AUTO) {
-            throw new IllegalArgumentException("early data toward a zmux peer with the symmetric role: the stream ID parity is unknown before the peer's parameters");
-        }
-        if (holdFirstFlight && role != CoreConfig.Role.INITIATOR) {
-            throw new IllegalArgumentException("holdFirstFlight on a session that is no client");
-        }
-    }
-
-    /**
      * Checks a session that has no listener: it cannot accept joins, so neither more than one
      * pipe nor a rejoin works on it, unless it is the client, which joins its own.
      */
     void checkWithoutListener(CoreConfig.Role role) {
         if (role == CoreConfig.Role.INITIATOR) return;
-        if (maxPipes > 1) throw new IllegalArgumentException("maxPipes above 1 on a server or peer session without a listener, which cannot accept joins");
+        if (sessionPolicy.limits().steadyAttachments() > 1) throw new IllegalArgumentException("multipath requires a listener on a server or peer session");
         if (resumeTimeout != null) throw new IllegalArgumentException("resumeTimeout on a server or peer session without a listener, which cannot accept a rejoin");
     }
 
     /** The core configuration for a session in the given transport role. */
     CoreConfig toCore(CoreConfig.Role role, CoreConfig.Role transportRole) {
-        checkRole(role);
         CoreConfig.Builder c = CoreConfig.builder();
         c.role(role);
         c.transportRole(transportRole);
@@ -399,7 +336,6 @@ public final class ZmuxConfig {
         long period = epochPeriod == null ? Time.NEVER : nanos(epochPeriod);
         long joins = epochJoins < 0 ? Long.MAX_VALUE : epochJoins;
         c.epochs(new CoreConfig.Epochs(period, joins, epochAfterFirstPipe, epochAfterResume, ed.locatorPrefix()));
-        c.redial(redial != null);
         c.keepAlive(liveness.keepAlivePeriod().map(ZmuxConfig::nanos).orElse(CoreConfig.OFF));
         TransportParams p = c.local();
         p.maxIdleTimeoutMillis = maxIdleTimeout == null ? 0L : wireMillis(maxIdleTimeout);
@@ -418,12 +354,15 @@ public final class ZmuxConfig {
         c.memoryBudget(memoryBudget < 0 ? CoreConfig.UNLIMITED : memoryBudget);
         c.windowPredicate(hooks.allowWindowGrowth() != null);
         c.datagramReceiveLimited(hooks.datagramReceive() != null);
+        if (stabilityHold != null) c.settleFor(nanos(stabilityHold));
+        c.datagramWindow(datagramWindow).datagramDefaults(datagramDefaults);
+        c.datagramCopyPolicy(datagramCopyPolicy);
         c.sendBuffer(sendBuffer);
         c.sendBufferMax(sendBufferMax);
         if (datagrams) {
             c.datagrams(true);
-            p.present |= TransportParams.DATAGRAM | TransportParams.FLOWS;
-            p.maxDatagramFrameSize = 65535;
+            p.present |= TransportParams.DATAGRAM;
+            p.maxDatagramFrameSize = TransportParams.DEFAULT_DATAGRAM_FRAME_CAP;
             c.datagramSendQueue(datagramSendQueue);
             c.datagramReceiveQueue(datagramReceiveQueue);
             c.datagramStreamQueue(datagramStreamQueue);
@@ -441,14 +380,10 @@ public final class ZmuxConfig {
         long g = Math.floorMod(RANDOM.nextLong(), 1L << 20);
         p.greaseId = 31 * g + 27;
         p.greaseValue = randomBytes(RANDOM.nextInt(17));
-        c.earlyZmuxPeer(earlyData == EarlyData.ZMUX_PEER);
-        c.holdFirstFlight(holdFirstFlight);
         c.shapingLimits(shapingLimits);
         c.shapingBudget(askBudget(shapingBudget));
         c.shaper(shaper);
-        c.maxPipes(maxPipes);
-        c.headroom(pipeHeadroom);
-        c.replayWindow(replayWindow);
+        c.sessionPolicy(sessionPolicy.core());
         c.policy(Scheduling.policy(scheduler));
         c.spreadChunk(spreadChunk); c.overflowDelay(nanos(overflowDelay));
         c.standbyProbe(liveness.standbyProbe().map(ZmuxConfig::nanos).orElse(0L));
@@ -488,19 +423,6 @@ public final class ZmuxConfig {
         return b;
     }
 
-    /** Dials a replacement pipe for a session that runs on one pipe at a time. */
-    @FunctionalInterface
-    public interface Redial {
-        /**
-         * Opens a carrier for the direction the session lacks; the returned pipe input belongs to
-         * zmux. It must cooperate with cancellation and interruption. A failure, or an exception,
-         * is a failed attempt: the next one waits the backoff, except a
-         * {@link CarrierClientClosedException}, which ends the redialling. It runs on a thread of its own; an
-         * attempt still running at the session's join deadline is cancelled, interrupted and
-         * abandoned as failed, and a pipe input it returns afterwards is closed.
-         */
-        io.zmux.carrier.PipeIo dial(PipeOptions.Direction need, Cancellation cancellation) throws IOException, InterruptedException;
-    }
 
     /** Builds a {@link ZmuxConfig}; each method checks its value. */
     public static final class Builder {
@@ -511,40 +433,52 @@ public final class ZmuxConfig {
         private long maxStreamReceiveWindow, maxConnectionReceiveWindow;
         private long memoryBudget = DEFAULT_MEMORY_BUDGET;
         private Duration latencyBudget = Duration.ofNanos(CoreConfig.DEFAULT_LATENCY_BUDGET);
-        private long maxIncomingStreams = 256, maxIncomingUniStreams = -1, maxLanes = DEFAULT_MAX_LANES;
+        private long maxIncomingStreams = CoreConfig.DEFAULT_BIDI_STREAMS, maxIncomingUniStreams = -1, maxLanes = DEFAULT_MAX_LANES;
+        private DatagramCopyPolicy datagramCopyPolicy = DatagramCopyPolicy.DEFAULT;
+        private int datagramWindow = CoreConfig.DEFAULT_DATAGRAM_WINDOW;
+        private Duration stabilityHold;
+        private DatagramSendOptions datagramDefaults = DatagramSendOptions.INHERIT;
         private boolean datagrams;
-        private int datagramSendQueue = 64, datagramReceiveQueue = 128, datagramStreamQueue = 32;
-        private long datagramReceiveBytes = 1 << 20;
+        private int datagramSendQueue = CoreConfig.DEFAULT_SEND_DATAGRAMS, datagramReceiveQueue = CoreConfig.DEFAULT_RECEIVE_DATAGRAMS,
+                datagramStreamQueue = CoreConfig.DEFAULT_STREAM_DATAGRAMS;
+        private long datagramReceiveBytes = CoreConfig.DEFAULT_DATAGRAM_RECEIVE_BYTES;
         private long datagramStreamBytes = io.zmux.internal.core.CoreConfig.DEFAULT_DATAGRAM_STREAM_BYTES;
         private long datagramQueueDelay = io.zmux.internal.core.CoreConfig.DEFAULT_DATAGRAM_QUEUE_DELAY;
         private long sendBuffer = DEFAULT_SEND_BUFFER, sendBufferMax;
-        private EarlyData earlyData = EarlyData.OFF;
-        private boolean holdFirstFlight;
         private List<String> alpn = List.of(DEFAULT_ALPN);
         private EventLoops eventLoops = EventLoops.shared();
         private io.zmux.shaping.ShapingLimits shapingLimits = io.zmux.shaping.ShapingLimits.defaults();
         private java.util.function.Supplier<io.zmux.shaping.ShapingBudget> shapingBudget;
         private io.zmux.shaping.ShaperFactory shaper;
         private Tracer tracer;
+        private ClockDomain clockDomain;
+        private AccountingPolicy accounting = AccountingPolicy.OFF;
+
+        public Builder accounting(AccountingPolicy policy) {
+            accounting = java.util.Objects.requireNonNull(policy);
+            return this;
+        }
+
+        /** Uses the supplied time base for the session's protocol and controller timers. */
+        public Builder clockDomain(ClockDomain domain) {
+            clockDomain = java.util.Objects.requireNonNull(domain);
+            return this;
+        }
         private java.util.function.LongPredicate allowWindowGrowth;
         private io.zmux.helper.Limiter datagramSend;
         private io.zmux.helper.Limiter datagramReceive;
         private CarrierCredential carrierCredential;
         private RecordPolicy recordPolicy;
         private AllowRecordMode allowRecordMode;
-        private JoinOutcome joinOutcome;
-        private java.util.function.BiPredicate<ZmuxSession, PipeId> authorizeJoin;
         private int joinEarlyHello = DEFAULT_JOIN_EARLY_HELLO;
         private io.zmux.carrier.HandshakeShaper handshakeShaper;
-        private int maxPipes = 1, pipeHeadroom = DEFAULT_PIPE_HEADROOM, replayWindow;
+        private SessionPolicy sessionPolicy = SessionPolicy.defaults();
         private PipeAuth pipeAuth;
         private Duration resumeTimeout;
         private Duration joinTimeout = DEFAULT_JOIN_TIMEOUT;
         private Duration epochPeriod = Duration.ofNanos(CoreConfig.Epochs.DEFAULT.period());
         private long epochJoins = CoreConfig.Epochs.DEFAULT.joins();
         private boolean epochAfterFirstPipe = true, epochAfterResume = true;
-        private Redial redial;
-        private Backoff redialBackoff = Backoff.defaults();
         private Scheduler scheduler = Scheduler.AFFINITY;
         private Duration probation;
         private int spreadChunk = CoreConfig.DEFAULT_SPREAD_CHUNK;
@@ -560,10 +494,11 @@ public final class ZmuxConfig {
         /** The acceptor's check of a Hello's mode; null (the default): only Sealed passes. */
         public Builder allowRecordMode(AllowRecordMode a) { allowRecordMode = a; return this; }
 
-        /** Authorizes an authenticated Hello before record-mode policy. The default allows every authenticated Hello. */
-        public Builder authorizeJoin(java.util.function.BiPredicate<ZmuxSession, PipeId> a) { authorizeJoin = a; return this; }
-        /** Receives each authorized inbound and each carrier-backed outbound join result. */
-        public Builder joinOutcome(JoinOutcome callback) { joinOutcome = callback; return this; }
+        /** Sets the initial authorization and capacity policy. */
+        public Builder sessionPolicy(SessionPolicy value) {
+            sessionPolicy = Objects.requireNonNull(value, "sessionPolicy");
+            return this;
+        }
 
 
         /** The size of a Hello's first batch while no other pipe is usable, default 8 KiB, at least 1. */
@@ -648,8 +583,8 @@ public final class ZmuxConfig {
         public Builder noMemoryBudget() { memoryBudget = -1; return this; }
 
         /**
-         * Concurrent peer bidirectional streams, default 256: 0 (none), or from 4 to
-         * {@link Zmux#MAX_STREAM_CREDIT}.
+         * Target peer bidirectional stream concurrency, default 256: 0 (none), or from 4 to
+         * {@link Zmux#MAX_STREAM_CREDIT}. The endpoint advertises what its memory budget can back.
          */
         public Builder maxIncomingStreams(long n) {
             if ((n != 0 && n < 4) || n > Zmux.MAX_STREAM_CREDIT)
@@ -658,9 +593,10 @@ public final class ZmuxConfig {
         }
 
         /**
-         * Concurrent peer unidirectional streams advertised at once, 0 for none, at most
-         * {@link Zmux#MAX_STREAM_CREDIT}; not calling it: staged credit, 16 at first and 256 once
-         * the application first accepts a unidirectional stream.
+         * Target initial peer unidirectional stream concurrency, 0 for none, at most
+         * {@link Zmux#MAX_STREAM_CREDIT}. The endpoint advertises what its memory budget can back.
+         * By default the target is 16 until the application first accepts a unidirectional
+         * stream, then 256.
          */
         public Builder maxIncomingUniStreams(long n) {
             if (n < 0 || n > Zmux.MAX_STREAM_CREDIT)
@@ -741,32 +677,6 @@ public final class ZmuxConfig {
         }
 
         /**
-         * The attachments a session aims for with its own joins, at least 1 (default 1, multipath
-         * off; 8 is the recommended value with multipath). Above 1 the session offers multipath,
-         * which needs a secret source ({@link #pipeAuth()}, or a first pipe on the secure carrier)
-         * and, for a server, a listener.
-         */
-        public Builder maxPipes(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPipes below 1");
-            maxPipes = n; return this;
-        }
-
-        /** The attachments the peer may hold beyond maxPipes, at least 0 (default 8). */
-        public Builder pipeHeadroom(int h) {
-            if (h < 0) throw new IllegalArgumentException("negative pipeHeadroom");
-            pipeHeadroom = h; return this;
-        }
-
-        /**
-         * The replay window of joins, at least maxPipes + pipeHeadroom (checked by {@link #build()});
-         * default max(64, 2 x (maxPipes + pipeHeadroom)).
-         */
-        public Builder replayWindow(int w) {
-            if (w < 1) throw new IllegalArgumentException("replayWindow below 1");
-            replayWindow = w; return this;
-        }
-
-        /**
          * The secret sources of joins. Multipath and resume need one, unless the first pipe is on
          * the secure carrier, whose Establish is the source: then a pre-shared key or the exporter
          * here is rejected when the session starts, and {@link PipeAuth#withEndToEnd()} alone is
@@ -777,7 +687,7 @@ public final class ZmuxConfig {
         /**
          * Enables resume with this grace period, at least 1 ms (sent in milliseconds, a fraction
          * rounded up); not calling it leaves resume off. Resume needs a secret source and, for a
-         * server, a listener; a client should have a redial source ({@link #redial()} or a pool).
+         * server, a listener. A client can recover through a {@link SessionController}.
          */
         public Builder resumeTimeout(Duration d) {
             resumeTimeout = Liveness.atLeast(d, Duration.ofMillis(1), "resumeTimeout"); return this;
@@ -828,17 +738,6 @@ public final class ZmuxConfig {
             epochAfterResume = on; return this;
         }
 
-        /**
-         * The hook that replaces the pipe of a session running on one pipe at a time, called when
-         * the session suspends or lacks a direction; null (the default): none.
-         */
-        public Builder redial(Redial hook) { redial = hook; return this; }
-
-        /**
-         * The backoff of the redial hook's attempts, each wait measured from the start of the
-         * previous attempt (default {@link Backoff#defaults()}).
-         */
-        public Builder redialBackoff(Backoff b) { redialBackoff = Objects.requireNonNull(b, "redialBackoff"); return this; }
 
         /** The scheduling policy (default {@link Scheduler#AFFINITY}). */
         public Builder scheduler(Scheduler s) { scheduler = Objects.requireNonNull(s); return this; }
@@ -864,7 +763,7 @@ public final class ZmuxConfig {
         /**
          * The logger of what the application would otherwise not see: the removal of the last
          * pipe of a direction while streams are open, a resumable session suspending with nothing
-         * to redial it, and failures inside host callbacks that zmux contains. It is called
+         * to supply a carrier, and failures inside host callbacks that zmux contains. It is called
          * outside every lock and must not block. Null (the default): nothing is logged.
          */
         public Builder logger(System.Logger l) { logger = l; return this; }
@@ -872,20 +771,32 @@ public final class ZmuxConfig {
         /** Datagrams and datagram flows on or off (default off). */
         public Builder enableDatagrams(boolean on) { datagrams = on; return this; }
 
-        /**
-         * Early data: {@link EarlyData#ZMUX_PEER} declares the peer a zmux endpoint. It is
-         * rejected when the session starts with the role {@link Role#AUTO}, whose
-         * stream ID parity is unknown before the peer's parameters.
-         */
-        public Builder earlyData(EarlyData mode) { earlyData = Objects.requireNonNull(mode); return this; }
+        /** Required continuous healthy interval before a path can replace an old one. Default five seconds. */
+        public Builder stabilityHold(Duration hold) {
+            nonNegative(hold, "stabilityHold");
+            if (Time.nanos(hold) == Time.NEVER) throw new IllegalArgumentException("stability hold exceeds clock range");
+            stabilityHold = hold;
+            return this;
+        }
 
-        /**
-         * Keeps the bootstrap pipe's first carrier write until {@link ZmuxSession#releaseFirstFlight},
-         * or until the handshake timeout has passed since the start ({@link SessionStats#firstFlightTimeouts});
-         * the handshake timeout runs from the release. Streams written before the release leave in
-         * the same write as the transport parameters. A client with {@link EarlyData#ZMUX_PEER} only.
-         */
-        public Builder holdFirstFlight(boolean on) { holdFirstFlight = on; return this; }
+        /** Hard local bounds for optional outbound copies. */
+        public Builder datagramCopyPolicy(DatagramCopyPolicy policy) {
+            datagramCopyPolicy = Objects.requireNonNull(policy);
+            return this;
+        }
+
+        /** Length of the per-direction receive deduplication window, 64 through 16384. */
+        public Builder datagramWindow(int packets) {
+            if (packets < 64 || packets > 16384) throw new IllegalArgumentException("datagram window must be between 64 and 16384");
+            datagramWindow = packets;
+            return this;
+        }
+
+        /** Defaults for locally sent datagrams. */
+        public Builder datagramDefaults(DatagramSendOptions options) {
+            datagramDefaults = Objects.requireNonNull(options);
+            return this;
+        }
 
         /** The ALPN identifiers in preference order (default qmux-02). */
         public Builder alpn(List<String> ids) {
@@ -900,8 +811,8 @@ public final class ZmuxConfig {
         public Builder shapingLimits(io.zmux.shaping.ShapingLimits limits) { shapingLimits = Objects.requireNonNull(limits); return this; }
 
         /**
-         * Gives the shaping configuration's budget, called once per session; null (the default): none. It cannot widen
-         * {@link #shapingLimits}. A runtime exception is no budget.
+         * Gives the direction's shaping budget once per session. With no supplier, an enabled shaper uses Lightweight
+         * with no cover account. The budget cannot widen {@link #shapingLimits}. A supplier must return a budget.
          */
         public Builder shapingBudget(java.util.function.Supplier<io.zmux.shaping.ShapingBudget> budget) { shapingBudget = budget; return this; }
 
@@ -932,16 +843,10 @@ public final class ZmuxConfig {
         }
 
         /**
-         * The configuration. Rejects the combinations that cannot work: a held first flight
-         * without early data, a replay window below maxPipes + pipeHeadroom, a redial minimum
-         * above its maximum, and multipath or resume without {@link #pipeAuth()} carrying a source
-         * is left to the session's start, where a secure first pipe can supply it.
+         * The configuration. Multipath and resume secret sources are checked when the session starts,
+         * when a secure first carrier can supply them.
          */
         public ZmuxConfig build() {
-            if (holdFirstFlight && earlyData == EarlyData.OFF) throw new IllegalArgumentException("holdFirstFlight without early data");
-            if (replayWindow != 0 && (long) replayWindow < (long) maxPipes + pipeHeadroom) {
-                throw new IllegalArgumentException("replayWindow below maxPipes + pipeHeadroom");
-            }
             if (sendBufferMax != 0 && sendBufferMax < sendBuffer) throw new IllegalArgumentException("sendBufferMax below sendBuffer");
             return new ZmuxConfig(this);
         }

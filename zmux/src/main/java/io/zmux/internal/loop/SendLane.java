@@ -1,10 +1,13 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.buffer.CarrierCharge;
 import io.zmux.internal.core.CoreException;
-import io.zmux.internal.core.ReadBuf;
+import io.zmux.internal.buffer.ReadBuf;
 import io.zmux.internal.core.Session;
+import io.zmux.internal.core.SendBacking;
 import io.zmux.internal.core.Stream;
 import io.zmux.internal.core.StreamError;
+import io.zmux.internal.core.StreamRecv;
 import io.zmux.internal.core.Waiter;
 import java.io.InterruptedIOException;
 import java.lang.invoke.MethodHandles;
@@ -31,12 +34,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * ring's head and everything the core sees belong to the loop.
  */
 public final class SendLane {
-    private static final int BLOCK = 16384;
+    private static final int BLOCK = SendBacking.BLOCK_BYTES;
     private static final long FIRST_LEASE = 64 << 10;
-    private static final VarHandle WAITER;
+    private static final VarHandle WAITER, BACKING_NEEDED;
     static {
-        try { WAITER = MethodHandles.lookup().findVarHandle(SendLane.class, "waiter", Resumable.class); }
-        catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
+        try {
+            WAITER = MethodHandles.lookup().findVarHandle(SendLane.class, "waiter", Resumable.class);
+            BACKING_NEEDED = MethodHandles.lookup().findVarHandle(SendLane.class, "backingNeeded", BackingNeed.class);
+        } catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
     }
 
     /** Something that waits for the lease: resumed by whoever takes it out of {@link #waiter}. */
@@ -46,27 +51,62 @@ public final class SendLane {
 
     /** A ring entry: a block range the holder may still extend, a chunk, or FIN. */
     private static final class Entry {
-        final ReadBuf buf;
-        final ByteBuffer view;
+        private static final VarHandle CHARGE;
+        static {
+            try { CHARGE = MethodHandles.lookup().findVarHandle(Entry.class, "charge", CarrierCharge.Slice.class); }
+            catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
+        }
+
+        private volatile ReadBuf buf;
+        private ByteBuffer view;
+        private final boolean paidView;
+        private final boolean block;
+        private volatile boolean sealed;
         final int from;
         volatile int to;
         final Operation<?> fin;
+        // CHARGE atomically detaches the charge so only one caller can claim it.
+        @SuppressWarnings("FieldMayBeFinal")
+        private volatile CarrierCharge.Slice charge;
         volatile Entry next;
 
         Entry(ReadBuf buf, ByteBuffer view, int from, int to, Operation<?> fin) {
+            this(buf, view, from, to, fin, null, false);
+        }
+
+        Entry(ReadBuf buf, ByteBuffer view, int from, int to, Operation<?> fin, CarrierCharge.Slice charge, boolean paidView) {
             this.buf = buf;
             this.view = view;
             this.from = from;
             this.to = to;
             this.fin = fin;
+            this.charge = charge;
+            this.paidView = paidView;
+            this.block = view == null && fin == null && buf != null;
         }
 
-        boolean block() { return view == null && fin == null && buf != null; }
+        boolean block() { return block; }
+
+        void release() {
+            ReadBuf owner = buf;
+            buf = null;
+            view = null;
+            if (owner != null) owner.unref();
+        }
+
+        CarrierCharge.Slice takeCharge() {
+            return charge == null ? null : (CarrierCharge.Slice) CHARGE.getAndSet(this, null);
+        }
     }
 
     private final SessionRuntime driver;
     private final Session core;
     private final Stream st;
+    private final SendBacking backing;
+    private volatile BackingNeed backingNeeded;
+    private volatile boolean producerClosed;
+    private volatile boolean consumerClosed;
+    private final AtomicBoolean discarded = new AtomicBoolean();
     final Turn turn = new Turn("write (writeAsync, writeChunkAsync or finishAsync)");
     private final AtomicLong lease = new AtomicLong();
     /**
@@ -80,11 +120,16 @@ public final class SendLane {
     boolean appDone;
     @SuppressWarnings("unused") private volatile Resumable waiter;
     private final AtomicBoolean dirty = new AtomicBoolean();
-    private final Mailbox.Command drain = this::drain;
+    private final Mailbox.Command drain = new Mailbox.Command() {
+        @Override public void run() { drain(); }
+
+        @Override public void abandon(Throwable outcome) {
+            sessionEnded(CoreException.session(driver.terminal()));
+        }
+    };
     // Turn holder only.
     private Entry tail;
     private ReadBuf block;
-    private byte[] blockBytes;
     private int blockPos;
     private boolean finished;
     // Loop only.
@@ -107,6 +152,7 @@ public final class SendLane {
         this.driver = driver;
         this.core = driver.core;
         this.st = st;
+        backing = core.sending().backing(st);
         tail = head = new Entry(null, null, 0, 0, null);
     }
 
@@ -120,52 +166,101 @@ public final class SendLane {
         return null;
     }
 
-    /** Copies as much of src as the lease admits into the ring; the holder only. */
+    /** Copies as much of src as the lease and its physical backing admit. */
     private int fill(ByteBuffer src) {
-        int want = src.remaining();
-        if (want == 0) return 0;
-        long l;
+        int start = src.position();
+        while (src.hasRemaining() && lease.get() > 0) {
+            if (block == null || blockPos == BLOCK) {
+                sealBlock();
+                block = takeBlock();
+                blockPos = 0;
+                if (block == null) break;
+            }
+            int n = takeLease(Math.min(src.remaining(), BLOCK - blockPos));
+            if (n == 0) break;
+            src.get(block.data().array(), blockPos, n);
+            int from = blockPos;
+            blockPos += n;
+            if (tail.buf == block && tail.block()) tail.to = blockPos;
+            else {
+                block.ref();
+                link(new Entry(block, null, from, blockPos, null));
+            }
+        }
+        if (src.position() != start || backingNeeded != null) markDirty();
+        return src.position() - start;
+    }
+
+    private ReadBuf takeBlock() {
+        ReadBuf owner = backing.block();
+        backingNeeded = owner == null ? new BackingNeed(SendBacking.PAYLOAD_BLOCK) : null;
+        return owner;
+    }
+
+    private void sealBlock() {
+        if (block == null) return;
+        if (tail.buf == block && tail.block()) tail.sealed = true;
+        block.unref();
+        block = null;
+    }
+
+    private int takeLease(int want) {
+        long available;
         int n;
         do {
-            l = lease.get();
-            if (l <= 0) return 0;
-            n = (int) Math.min(want, l);
-        } while (!lease.compareAndSet(l, l - n));
-        for (int left = n; left > 0; ) {
-            if (block == null || blockPos == BLOCK) newBlock();
-            int c = Math.min(left, BLOCK - blockPos);
-            src.get(blockBytes, blockPos, c);
-            int from = blockPos;
-            blockPos += c;
-            left -= c;
-            Entry t = tail;
-            if (t.block() && t.buf == block && t.to == from) t.to = blockPos;
-            else { block.ref(); link(new Entry(block, null, from, blockPos, null)); }
-        }
-        markDirty();
+            available = lease.get();
+            if (available <= 0) return 0;
+            n = (int) Math.min(want, available);
+        } while (!lease.compareAndSet(available, available - n));
         return n;
     }
 
-    private void newBlock() {
-        if (block != null) block.unref();
-        blockBytes = new byte[BLOCK];
-        block = new ReadBuf(ByteBuffer.wrap(blockBytes), null);
-        blockPos = 0;
+    private int fillChunk(ByteBuffer data, ReadBuf buf) {
+        return fillChunk(data, buf, null, 0);
     }
 
-    /** Queues up to the lease of a chunk's bytes without copying; the chunk keeps its reference. */
-    private int fillChunk(ByteBuffer data, ReadBuf buf) {
+    /** Foreign views use optional backing. When unavailable, the prepaid direction can copy. */
+    private int fillChunk(ByteBuffer data, ReadBuf buf, CarrierCharge charge, long offset) {
         int want = data.remaining();
-        if (want == 0) return 0;
-        long l;
-        int n;
-        do {
-            l = lease.get();
-            if (l <= 0) return 0;
-            n = (int) Math.min(want, l);
-        } while (!lease.compareAndSet(l, l - n));
-        buf.ref();
-        link(new Entry(buf, data.slice(data.position(), n), 0, n, null));
+        if (want == 0 || lease.get() == 0) return 0;
+        if (charge != null && !backing.prepareReceipt(charge)) {
+            backingNeeded = new BackingNeed(charge.backingBytes());
+            return 0;
+        }
+        boolean paid = backing.reserveSlice(buf);
+        if (!paid && charge == null) return fill(data);
+        sealBlock();
+        ReadBuf owner;
+        if (paid) {
+            buf.ref();
+            owner = buf;
+        } else {
+            owner = takeBlock();
+            if (owner == null) {
+                markDirty();
+                return 0;
+            }
+            want = Math.min(want, BLOCK);
+        }
+        int n = takeLease(want);
+        if (n == 0) {
+            if (paid) backing.releaseSlice();
+            owner.unref();
+            markDirty();
+            return 0;
+        }
+        ByteBuffer view;
+        if (paid) view = data.slice(data.position(), n);
+        else {
+            owner.data().put(0, data, data.position(), n);
+            view = owner.data().slice(0, n);
+        }
+        if (charge != null) {
+            charge.retain();
+            charge.enqueued(n);
+        }
+        link(new Entry(owner, view, 0, n, null,
+                charge == null ? null : new CarrierCharge.Slice(charge, offset), paid));
         data.position(data.position() + n);
         markDirty();
         return n;
@@ -176,8 +271,59 @@ public final class SendLane {
         tail = e;
     }
 
-    private void markDirty() {
-        if (!dirty.get() && dirty.compareAndSet(false, true) && !driver.mailbox().offer(drain)) dirty.set(false);
+    /** A queued release belongs to the write that requested it. */
+    private final class BackingNeed implements Runnable {
+        private final long bytes;
+
+        BackingNeed(long bytes) { this.bytes = bytes; }
+
+        @Override public void run() {
+            if (BACKING_NEEDED.compareAndSet(SendLane.this, this, null)) markDirty();
+        }
+    }
+
+    private void cancelBackingWait() {
+        backingNeeded = null;
+        backing.cancelWait();
+    }
+
+    private boolean writableLease() { return lease.get() > 0 && backingNeeded == null; }
+
+    private void closeProducer() {
+        if (producerClosed) return;
+        sealBlock();
+        producerClosed = true;
+        if (!markDirty()) consumerClosed = true;
+        discardAbandoned();
+    }
+
+    private void discardAbandoned() {
+        if (!consumerClosed || !producerClosed || !discarded.compareAndSet(false, true)) return;
+        for (Entry e = head; e != null; e = e.next) {
+            if (e.paidView && e.buf != null) backing.releaseSlice();
+            releaseCharge(e.takeCharge());
+            e.release();
+            if (e.fin != null) e.fin.settle(terminal);
+        }
+    }
+
+    private void closeIdleProducer() {
+        if (!producerClosed && turn.tryEnter()) {
+            try { closeProducer(); }
+            finally { turn.leave(); }
+        }
+    }
+
+    private void leaveTurn() {
+        if (terminal != null) closeProducer();
+        turn.leave();
+        if (terminal != null) closeIdleProducer();
+    }
+
+    private boolean markDirty() {
+        if (dirty.get() || !dirty.compareAndSet(false, true) || driver.mailbox().offer(drain)) return true;
+        dirty.set(false);
+        return false;
     }
 
     /** Asks the loop for more lease and parks r until it is resumed; false when r was resumed already. */
@@ -186,7 +332,7 @@ public final class SendLane {
         if (r instanceof Operation<?> op) op.pause(); // After publishing: a cancel then finds it.
         if (!dirty.get() && dirty.compareAndSet(false, true) && !driver.mailbox().offer(drain)) dirty.set(false);
         // The loop may have granted (or ended the lane) before seeing the waiter.
-        return !((lease.get() > 0 || terminal != null) && WAITER.compareAndSet(this, r, null));
+        return !((writableLease() || terminal != null) && WAITER.compareAndSet(this, r, null));
     }
 
     /** Writes without waiting: what the lease admits now; 0 while another write holds the direction. */
@@ -199,7 +345,7 @@ public final class SendLane {
             if (e != null) throw e;
             return fill(src);
         } finally {
-            turn.leave();
+            leaveTurn();
         }
     }
 
@@ -221,7 +367,7 @@ public final class SendLane {
                 parkForLease(self, deadline, from.position() - start);
             }
         } finally {
-            turn.leave();
+            leaveTurn();
         }
     }
 
@@ -243,12 +389,12 @@ public final class SendLane {
                 e = ended();
                 if (e != null) throw e;
                 long l = lease.get();
-                if (l > 0) return l;
+                if (l > 0 && backingNeeded == null) return l;
                 if (self == null) self = new Blocked();
                 parkForLease(self, deadline, 0);
             }
         } finally {
-            turn.leave();
+            leaveTurn();
         }
     }
 
@@ -257,7 +403,10 @@ public final class SendLane {
         if (!awaitLease(self)) return;
         while (waiter == self) {
             if (Thread.currentThread().isInterrupted() || (deadline != Long.MAX_VALUE && deadline - System.nanoTime() <= 0)) {
-                if (WAITER.compareAndSet(this, self, null)) throw interrupted(bytes);
+                if (WAITER.compareAndSet(this, self, null)) {
+                    cancelBackingWait();
+                    throw interrupted(bytes);
+                }
                 return; // Resumed meanwhile: take the lease.
             }
             self.park(deadline);
@@ -329,7 +478,7 @@ public final class SendLane {
         try {
             queueFin(op);
         } finally {
-            turn.leave();
+            leaveTurn();
         }
         return op;
     }
@@ -340,7 +489,7 @@ public final class SendLane {
             Fin() { super(SendLane.this.driver, self -> turn.remove((Turn.Waiting) self), deadline); }
             @Override public boolean take() {
                 if (!grant()) return false;
-                driver.completions().execute(() -> { try { queueFin(this); } finally { turn.leave(); } });
+                driver.completions().execute(() -> { try { queueFin(this); } finally { leaveTurn(); } });
                 return true;
             }
         }
@@ -349,7 +498,7 @@ public final class SendLane {
             try {
                 if (op.grant()) queueFin(op);
             } finally {
-                turn.leave();
+                leaveTurn();
             }
         } else {
             op.armDeadline();
@@ -364,6 +513,7 @@ public final class SendLane {
         if (e != null) { op.settle(e); return; }
         if (finished) { op.settle(true); return; }
         finished = true;
+        sealBlock();
         link(new Entry(null, null, 0, 0, op));
         markDirty();
     }
@@ -371,7 +521,7 @@ public final class SendLane {
     /** Waits until operations that hold or wait for the direction have ended. */
     public void quiesce() throws InterruptedIOException {
         if (!turn.tryEnter()) waitTurn(Long.MAX_VALUE, 0);
-        turn.leave();
+        leaveTurn();
     }
 
     // ---- asynchronous writes ----
@@ -382,20 +532,33 @@ public final class SendLane {
         private final ByteBuffer src;
         private final ReadBuf buf;
         private final int start;
+        private final CarrierCharge charge;
+        private final long chargeOffset;
+        private final java.util.function.BooleanSupplier startAllowed;
+        private volatile boolean pauseRequested;
+        private volatile StreamRecv.Chunk paused;
 
-        AsyncWrite(ByteBuffer src, ByteBuffer data, ReadBuf buf, long deadline) {
+        AsyncWrite(ByteBuffer src, ByteBuffer data, ReadBuf buf, long deadline, CarrierCharge charge, long chargeOffset,
+                   java.util.function.BooleanSupplier startAllowed) {
             super(SendLane.this.driver, self -> ((AsyncWrite) self).withdraw(), deadline);
             this.src = src;
             this.data = data;
             this.buf = buf;
             this.from = data != null ? data : src;
             this.start = from.position();
+            this.charge = charge;
+            this.chargeOffset = chargeOffset;
+            this.startAllowed = startAllowed;
         }
 
         private void withdraw() {
-            if (WAITER.compareAndSet(SendLane.this, this, null)) turn.leave(); // Held the turn waiting for lease.
-            else turn.remove(this);
-            dropChunk();
+            if (WAITER.compareAndSet(SendLane.this, this, null)) {
+                cancelBackingWait();
+                leaveTurn();
+            } else turn.remove(this);
+            if (isCancelled() && pauseRequested && data != null && data.hasRemaining()) {
+                paused = new StreamRecv.Chunk(data, buf, false);
+            } else dropChunk();
         }
 
         /** The operation owned one reference of a chunk's buffer until it ended. */
@@ -415,14 +578,20 @@ public final class SendLane {
 
         /** One attempt by the turn holder. */
         void step() {
-            if (!begin()) { turn.leave(); return; }
+            if (!begin()) { leaveTurn(); return; }
             while (true) {
                 CoreException e = ended();
-                if (e != null) { dropChunk(); finish(e); turn.leave(); return; }
-                if (data != null) fillChunk(data, buf); else fill(src);
-                if (!from.hasRemaining()) { dropChunk(); finish(true); turn.leave(); return; }
+                if (e != null) { dropChunk(); finish(e); leaveTurn(); return; }
+                if (startAllowed != null && written() == 0 && !startAllowed.getAsBoolean()) {
+                    dropChunk();
+                    finish(false);
+                    leaveTurn();
+                    return;
+                }
+                if (data != null) fillChunk(data, buf, charge, chargeOffset + written()); else fill(src);
+                if (!from.hasRemaining()) { dropChunk(); finish(true); leaveTurn(); return; }
                 if (awaitLease(this)) return;
-                if (!begin()) { turn.leave(); return; }
+                if (!begin()) { leaveTurn(); return; }
             }
         }
 
@@ -434,17 +603,38 @@ public final class SendLane {
      * operation takes over. The outcome is TRUE or a core outcome.
      */
     public Operation<Void> writeAsync(ByteBuffer src, ByteBuffer data, ReadBuf buf, long deadline) {
-        AsyncWrite op = new AsyncWrite(src, data, buf, deadline);
+        return writeAsync(src, data, buf, deadline, null, 0);
+    }
+
+    public Operation<Void> writeAsync(ByteBuffer src, ByteBuffer data, ReadBuf buf, long deadline,
+                                      CarrierCharge charge, long chargeOffset) {
+        return writeAsync(src, data, buf, deadline, charge, chargeOffset, null);
+    }
+
+    /** Checks the optional start condition on the turn holder before committing the first range. */
+    public Operation<Void> writeAsync(ByteBuffer src, ByteBuffer data, ReadBuf buf, long deadline,
+                                      CarrierCharge charge, long chargeOffset, java.util.function.BooleanSupplier startAllowed) {
+        AsyncWrite op = new AsyncWrite(src, data, buf, deadline, charge, chargeOffset, startAllowed);
         CoreException e = ended();
         if (e != null) { op.settle(e); return op; }
         op.armDeadline();
         if (turn.tryEnterAsync()) {
             if (op.grant()) op.step();
-            else turn.leave();
+            else leaveTurn();
         } else {
             turn.enqueue(op);
         }
         return op;
+    }
+
+    /** Interrupts a splice byte write and transfers its unwritten range back to the caller. */
+    public static StreamRecv.Chunk pauseChunkWrite(Operation<?> operation) {
+        if (!(operation instanceof AsyncWrite write)) throw new IllegalArgumentException("not a send-lane write");
+        write.pauseRequested = true;
+        if (!write.cancel()) return null;
+        StreamRecv.Chunk remainder = write.paused;
+        write.paused = null;
+        return remainder;
     }
 
     /** Bytes an asynchronous write moved before it ended. */
@@ -461,10 +651,14 @@ public final class SendLane {
         if (e.next != null || waiter != null) used = true;
         activeRound = driver.lanes.round();
         while (true) {
-            if (e.block()) consume(e);
+            if (e.block() && e.buf != null) {
+                boolean sealed = e.sealed;
+                consume(e);
+                if (sealed) e.release();
+            }
             Entry n = e.next;
             if (n == null) break;
-            if (e.block()) { consume(e); e.buf.unref(); }
+            if (e.block() && e.buf != null) { consume(e); e.release(); }
             e = n;
             headPos = e.from;
             if (e.fin != null) {
@@ -480,8 +674,12 @@ public final class SendLane {
                 }
                 e.fin.settle(t == null ? true : t);
             } else if (!e.block()) {
-                put(e.buf, e.view);
-                e.buf.unref();
+                var charge = e.takeCharge();
+                try { put(e.buf, e.view, e.paidView, charge); }
+                finally {
+                    releaseCharge(charge);
+                    e.release();
+                }
             }
         }
         head = e;
@@ -503,8 +701,13 @@ public final class SendLane {
             }
         }
         Resumable w = waiter;
-        if (w != null && (lease.get() > 0 || terminal != null) && WAITER.compareAndSet(this, w, null)) w.resume();
-        else if (open && w != null) driver.lanes.leaseShort(this);
+        BackingNeed needed = backingNeeded;
+        if (open && w != null && needed != null) {
+            backing.waitForBacking(needed.bytes, needed);
+            if (waiter != w && backingNeeded != needed) backing.cancelWait();
+        }
+        if (w != null && (writableLease() || terminal != null) && WAITER.compareAndSet(this, w, null)) w.resume();
+        else if (open && w != null && backingNeeded == null) driver.lanes.leaseShort(this);
         if (open) {
             if (waiter != null) {
                 core.sending().waitWrite(st, hostWaiter);
@@ -523,30 +726,43 @@ public final class SendLane {
     private void consume(Entry e) {
         int to = e.to;
         if (headPos < to) {
-            put(e.buf, ByteBuffer.wrap(e.buf.data().array(), headPos, to - headPos));
+            put(e.buf, ByteBuffer.wrap(e.buf.data().array(), headPos, to - headPos), false, null);
             headPos = to;
         }
     }
 
-    private void put(ReadBuf buf, ByteBuffer view) {
+    private void put(ReadBuf buf, ByteBuffer view, boolean paidView, CarrierCharge.Slice charge) {
         if (terminal != null) {
+            if (paidView) backing.releaseSlice();
             core.sending().unlease(st, view.remaining());
             return;
         }
         try {
-            core.sending().writeLeased(st, view, buf);
+            core.sending().writeLeased(st, view, buf, paidView, charge);
         } catch (CoreException x) {
             terminate(x);
         }
     }
 
+    private static void releaseCharge(CarrierCharge.Slice charge) {
+        if (charge != null) charge.charge().release();
+    }
+
     /** Ends the lane with outcome: returns the lease, fails a waiting writer; later writes report it. */
     void terminate(CoreException outcome) { terminate(outcome, true); }
+
+    void sessionEnded(CoreException outcome) {
+        terminate(outcome);
+        consumerClosed = true;
+        discardAbandoned();
+    }
 
     /** As {@link #terminate(CoreException)}; the end watcher hears of it only when notify, never for a finish the part's owner already saw complete. */
     void terminate(CoreException outcome, boolean notify) {
         if (terminal != null) return;
         terminal = outcome;
+        cancelBackingWait();
+        closeIdleProducer();
         core.sending().unlease(st, lease.getAndSet(0));
         core.sending().cancelWriteWait(st, hostWaiter);
         Resumable w = (Resumable) WAITER.getAndSet(this, null);
@@ -563,6 +779,11 @@ public final class SendLane {
      * nothing written and no identifier stays unopened and completes at once.
      */
     public Operation<Void> awaitSent(boolean open, long deadline) {
+        return awaitSent(open, deadline, 0);
+    }
+
+    /** Waits for the written prefix, excluding a trailing region. */
+    public Operation<Void> awaitSent(boolean open, long deadline, long trailing) {
         long[] target = {-1};
         return new Operation<Void>(driver, self -> {
             drain();
@@ -573,7 +794,7 @@ public final class SendLane {
             // cleanly, must not fail a flush whose bytes all left, which an early return would.
             if (target[0] < 0) {
                 if (!open && core.streams().untouched(st)) return true;
-                target[0] = core.streams().flush(st);
+                target[0] = Math.max(0, core.streams().flush(st) - trailing);
             }
             return core.sending().flushDone(st, target[0], self) ? (Object) true : Operation.PENDING;
         }, op -> core.sending().cancelFlushWait(st, op), null, deadline).submit();
@@ -595,7 +816,7 @@ public final class SendLane {
 
     /** Whether a writer waits with no lease while the lane is open; on the loop. */
     boolean starved() {
-        return waiter != null && lease.get() <= 0 && terminal == null && !hostOwned;
+        return waiter != null && lease.get() <= 0 && backingNeeded == null && terminal == null && !hostOwned;
     }
 
     private void listLease() {

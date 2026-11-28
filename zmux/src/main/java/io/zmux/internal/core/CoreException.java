@@ -8,6 +8,9 @@ public final class CoreException extends Exception {
     /** API conditions that end nothing. */
     public enum Reason {
         STREAM, SESSION, STREAM_LIMIT, NOT_NEGOTIATED, NOT_ESTABLISHED, TOO_LATE, INVALID, DATAGRAM_TOO_LARGE,
+        DATAGRAM_DROPPED, INVALID_DATAGRAM_OPTIONS,
+        /** The next receive backing would exceed the application lease allowance. */
+        CHUNK_BUDGET,
         /** A pipe the session cannot take now: its carrier nests in this session, or it was retired. */
         PIPE_REFUSED,
         /** A stream preamble beyond the size the peer accepts (or the bound assumed before its parameters). */
@@ -22,19 +25,41 @@ public final class CoreException extends Exception {
         PIPE_ABORTED
     }
 
+    /** A datagram refused by the sender before queueing. */
+    public enum DatagramDrop {
+        DEADLINE("deadline"),
+        NO_NATIVE_PATH("no_native_path"),
+        LIMITER("limiter"),
+        QUEUE_OVERFLOW("queue_overflow"),
+        SEQUENCE_EXHAUSTED("sequence_exhausted");
+
+        private final String code;
+
+        DatagramDrop(String code) { this.code = code; }
+
+        public String code() { return code; }
+    }
+
     private final Reason reason;
     private final transient StreamError stream;
     private final transient SessionError session;
     private final int max;
     private final long pipe;
+    private final DatagramDrop datagramDrop;
 
     private CoreException(Reason reason, StreamError stream, SessionError session, int max, long pipe) {
+        this(reason, stream, session, max, pipe, null);
+    }
+
+    private CoreException(Reason reason, StreamError stream, SessionError session, int max, long pipe,
+                          DatagramDrop datagramDrop) {
         super(null, null, false, false);
         this.reason = reason;
         this.stream = stream;
         this.session = session;
         this.max = max;
         this.pipe = pipe;
+        this.datagramDrop = datagramDrop;
     }
 
     public static CoreException of(Reason r) {
@@ -76,6 +101,12 @@ public final class CoreException extends Exception {
         return new CoreException(Reason.DATAGRAM_TOO_LARGE, null, null, max, -1);
     }
 
+    public static CoreException datagramDropped(DatagramDrop reason) {
+        return new CoreException(Reason.DATAGRAM_DROPPED, null, null, 0, -1, reason);
+    }
+
+    public DatagramDrop datagramDrop() { return datagramDrop; }
+
     public Reason reason() { return reason; }
     public StreamError streamError() { return stream; }
     public SessionError sessionError() { return session; }
@@ -89,6 +120,7 @@ public final class CoreException extends Exception {
         return switch (reason) {
             case STREAM -> stream.toString();
             case SESSION -> session.message();
+            case DATAGRAM_DROPPED -> datagramDrop.code();
             case DATAGRAM_TOO_LARGE -> "datagram too large (max " + max + ")";
             default -> reason.name();
         };

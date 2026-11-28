@@ -6,13 +6,20 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /** The listener-wide bound of carriers before a session ({@link ListenerConfig#maxPending()}), through its real entries. */
 @Timeout(60)
 class GlobalBoundTest {
+    private static final long WATCHDOG_SECONDS = 20;
+
+    private interface ReleasedWriter extends PipeWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {}
+
+    @FunctionalInterface
+    interface Occupy { void awaitStage(ZmuxListener listener) throws Exception; }
+
     /** A carrier fed by the test; it records when the listener closes it. */
     static final class Fake {
         final CompletableFuture<PipeReader.Sink> sink = new CompletableFuture<>();
@@ -26,15 +33,19 @@ class GlobalBoundTest {
                 @Override public void start(Sink s) { sink.complete(s); }
                 @Override public void close() { closed.countDown(); }
             };
-            PipeWriter w = new PipeWriter() {
+            PipeWriter w = new ReleasedWriter() {
+                private final CompletableFuture<Void> released = new CompletableFuture<>();
                 @Override public void write(OutboundBatch data, Completion done) { written.addAndGet(data.bytes()); done.completed(); }
-                @Override public void close() { closed.countDown(); }
-                @Override public void abort(Throwable cause) { closed.countDown(); }
+                @Override public void close() { closed.countDown(); released.complete(null); }
+                @Override public void abort(Throwable cause) { close(); }
+                @Override public CompletionStage<Void> released() { return released; }
             };
             io = PipeIo.of(read ? r : null, write ? w : null);
         }
 
         Fake() { this(true, true); }
+
+        void sendZeros(int size) throws Exception { send(new byte[size]); }
 
         void send(byte... b) throws Exception { sink.get(5, TimeUnit.SECONDS).onLent(ByteBuffer.wrap(b), () -> {}); }
         boolean isClosed() { return closed.getCount() == 0; }
@@ -54,44 +65,74 @@ class GlobalBoundTest {
     }
 
     /** With maxPending 1, a carrier occupied in one stage leaves no slot: a new carrier is closed at once, counted rejected, nothing written. */
-    static void holdsTheSlot(String stage, ListenerConfig.Builder b, Consumer<ZmuxListener> occupy) throws Exception {
+    static void holdsTheSlot(String stage, ListenerConfig.Builder b, Occupy occupy) throws Exception {
         try (var l = Zmux.listener(b.maxPending(1).build())) {
-            occupy.accept(l);
-            Thread.sleep(50); // the occupying carrier reaches its stage
+            occupy.awaitStage(l);
             long rejected = l.stats().rejected();
             Fake late = handle(l, "late");
-            late.awaitClosed();
+            late.handled.closed().get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
             assertEquals(rejected + 1, l.stats().rejected(), stage);
             assertEquals(0, late.written.get(), stage);
         }
     }
 
     @Test void everyStageBeforeASessionHoldsASlot() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var never = new CompletableFuture<Admission.Decision>();
-            Admission deciding = Admission.builder(1, (info, prefix, deadline) -> never).peekTimeout(Duration.ofSeconds(30)).build();
-            Admission more = Admission.builder(1, Admission.Decider.immediate((info, prefix) -> Admission.Decision.more(2)))
+        try (EventLoops loops = EventLoops.create(1)) {
+            var deciding = new CompletableFuture<Void>();
+            Admission decision = Admission.builder(1, (info, prefix, deadline) -> {
+                deciding.complete(null);
+                return new CompletableFuture<>();
+            }).peekTimeout(Duration.ofSeconds(30)).build();
+            var observingMore = new CompletableFuture<Void>();
+            var more = new CompletableFuture<Admission.Decision>() {
+                @Override public CompletableFuture<Admission.Decision> whenComplete(
+                        BiConsumer<? super Admission.Decision, ? super Throwable> listener) {
+                    var result = super.whenComplete(listener);
+                    observingMore.complete(null);
+                    return result;
+                }
+            };
+            Admission longerPrefix = Admission.builder(1, (info, prefix, deadline) -> more)
                     .maxPeek(2).peekTimeout(Duration.ofSeconds(30)).build();
-            // The handshake: a slot reserved by an entry before its outer handshake.
+
             holdsTheSlot("handshake", base(loops), l -> assertNotNull(l.adapter().reserve(TestAddr.peer("a"), null)));
-            // The admission's prefix read, then its decision.
-            holdsTheSlot("prefix", base(loops).admission(deciding), l -> handle(l, "a"));
-            holdsTheSlot("decision", base(loops).admission(deciding), l -> {
-                try { handle(l, "a").send((byte) 1); } catch (Exception e) { throw new AssertionError(e); }
+            holdsTheSlot("prefix", base(loops).admission(decision), l -> {
+                handle(l, "a").sink.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                assertFalse(deciding.isDone(), "waiting for the first prefix");
             });
-            holdsTheSlot("more", base(loops).admission(more), l -> {
-                try { handle(l, "a").send((byte) 1); } catch (Exception e) { throw new AssertionError(e); }
+            holdsTheSlot("decision", base(loops).admission(decision), l -> {
+                handle(l, "a").send((byte) 1);
+                deciding.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
             });
-            // The inbound transform.
-            holdsTheSlot("transform", base(loops).inboundTransform((io, ctx) -> new CompletableFuture<>()), l -> handle(l, "a"));
-            // A split half waiting for its pair.
+            holdsTheSlot("more", base(loops).admission(longerPrefix), l -> {
+                var first = handle(l, "a");
+                first.send((byte) 1);
+                observingMore.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                more.complete(Admission.Decision.more(2));
+                afterOwnerTasks(loops);
+                assertFalse(first.handled.verdict().isDone(), "waiting for the second prefix byte");
+            });
+            var transforming = new CompletableFuture<Void>();
+            holdsTheSlot("transform", base(loops).inboundTransform((io, ctx) -> {
+                transforming.complete(null);
+                return new CompletableFuture<>();
+            }), l -> {
+                handle(l, "a");
+                transforming.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+            });
             holdsTheSlot("pairing", base(loops), l -> {
                 Fake half = new Fake(true, false);
                 l.adapter().handle(half.io, JoinHint.pair("AAAAAAAAAAAAAAAAAAAAAA", true, TestAddr.peer("a")));
+                half.sink.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
             });
-            // Classification: no first record yet.
-            holdsTheSlot("classification", base(loops), l -> handle(l, "a"));
+            holdsTheSlot("classification", base(loops), l -> handle(l, "a").sink.get(WATCHDOG_SECONDS, TimeUnit.SECONDS));
         }
+    }
+
+    private static void afterOwnerTasks(EventLoops loops) throws Exception {
+        var done = new CompletableFuture<Void>();
+        loops.next().execute(() -> done.complete(null));
+        done.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
     }
 
     @Test void stallsHoldHalfAndTheOldestMakesRoom() throws Exception {
@@ -108,7 +149,7 @@ class GlobalBoundTest {
                 assertEquals(AdmissionVerdict.STALL, s2.handled.verdict().get(5, TimeUnit.SECONDS));
                 // The third stall is beyond half of 4.
                 Fake s3 = handle(l, "s3"); s3.send((byte) 1);
-                s3.awaitClosed();
+                s3.handled.closed().get(30, TimeUnit.SECONDS);
                 assertEquals(1, l.stats().admission().stallOverflow());
                 assertEquals(2, l.stats().admission().stalled());
                 Fake d1 = handle(l, "d1"); d1.send((byte) 0);
@@ -141,15 +182,29 @@ class GlobalBoundTest {
         }
     }
 
+    @SuppressWarnings("try") // Stop the listener while the first TCP connection still holds its slot.
     @Test void socketsTakeTheSameBound() throws Exception {
-        try (EventLoops loops = EventLoops.create(1);
-             var l = Zmux.listen(new java.net.InetSocketAddress("127.0.0.1", 0), base(loops).maxPending(1).maxPendingPerSource(4).build());
-             var _ = java.nio.channels.SocketChannel.open(l.localAddress());
-             var second = java.nio.channels.SocketChannel.open(l.localAddress())) {
-            second.socket().setSoTimeout(5000);
-            assertEquals(-1, second.socket().getInputStream().read(), "no slot left, closed at once");
-            PipePoolTest.await(() -> l.stats().rejected() == 1);
-            assertEquals(0, l.stats().refused());
+        try (var loops = EventLoops.create(1)) {
+            var entered = new CompletableFuture<Void>();
+            var decision = new CompletableFuture<Admission.Decision>();
+            var admission = Admission.builder(0, (info, prefix, deadline) -> {
+                entered.complete(null);
+                return decision;
+            }).peekTimeout(Duration.ofMinutes(1)).build();
+            try (var listener = Zmux.listen(NetworkTest.any(),
+                    base(loops).maxPending(1).maxPendingPerSource(4).admission(admission).build());
+                 var first = java.nio.channels.SocketChannel.open(listener.localAddress())) {
+                entered.get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
+                try (var second = java.nio.channels.SocketChannel.open(listener.localAddress())) {
+                    second.socket().setSoTimeout((int) TimeUnit.SECONDS.toMillis(WATCHDOG_SECONDS));
+                    assertEquals(-1, second.socket().getInputStream().read(), "the held admission takes the only slot");
+                    listener.close();
+                }
+                first.socket().setSoTimeout((int) TimeUnit.SECONDS.toMillis(WATCHDOG_SECONDS));
+                assertEquals(-1, first.socket().getInputStream().read());
+                assertEquals(1, listener.stats().rejected());
+                assertEquals(0, listener.stats().refused());
+            }
         }
     }
 
@@ -160,7 +215,8 @@ class GlobalBoundTest {
             assertEquals(1024, base(loops).build().maxPending().orElseThrow());
             var all = new java.util.ArrayList<Fake>();
             for (int i = 0; i < 2000; i++) all.add(handle(l, "u" + i));
-            Thread.sleep(100);
+            var started = all.stream().map(f -> f.sink).toArray(CompletableFuture<?>[]::new);
+            CompletableFuture.allOf(started).get(WATCHDOG_SECONDS, TimeUnit.SECONDS);
             for (Fake f : all) assertFalse(f.isClosed());
             assertEquals(0, l.stats().rejected());
         }

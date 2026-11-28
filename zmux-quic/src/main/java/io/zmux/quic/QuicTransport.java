@@ -1,7 +1,6 @@
 package io.zmux.quic;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.internal.loop.AbstractTransport;
@@ -12,7 +11,7 @@ import io.zmux.internal.loop.TransportInfo;
 import io.zmux.internal.spi.CarrierProvider;
 import io.zmux.quic.internal.QuicCarrierStats;
 import java.io.IOException;
-import java.nio.ByteBuffer;
+
 import java.util.ArrayDeque;
 
 /**
@@ -28,7 +27,7 @@ final class QuicTransport extends AbstractTransport.Native {
     /** The properties as the pipe input declared them, without the channel. */
     private final TransportInfo declared;
     /** The pipe's datagram channel; null for a lane. */
-    private final io.zmux.internal.loop.CarrierChannel channel;
+    private final io.zmux.carrier.CarrierChannel channel;
     private final PipeIo.LaneOpener lanes;
     /** Reads that arrived while input was paused, oldest first. */
     private final ArrayDeque<ByteBuf> held = new ArrayDeque<>();
@@ -52,7 +51,7 @@ final class QuicTransport extends AbstractTransport.Native {
 
     @Override public boolean resumesAfterPeekTimeout() { return true; }
     @Override public TransportInfo info() { return info; }
-    @Override public io.zmux.internal.loop.CarrierChannel channel() { return channel; }
+    @Override public io.zmux.carrier.CarrierChannel channel() { return channel; }
     @Override public boolean isClosed() { return closed; }
     @Override public boolean exporterPresent() { return true; }
     @Override public boolean isSecure() { return true; }
@@ -61,7 +60,10 @@ final class QuicTransport extends AbstractTransport.Native {
     @Override public java.util.concurrent.CompletionStage<Void> whenClosed() { return carrier.whenClosed(); }
     @Override public void sessionEnded(io.zmux.internal.core.SessionError e) { carrier.sessionEnded(e); }
     @Override public java.util.concurrent.CompletionStage<Boolean> whenTaken() { return carrier.taken.stage(); }
-    @Override public void taken() { carrier.taken.decide(true); }
+    @Override public void taken() {
+        carrier.markAttached();
+        carrier.taken.decide(true);
+    }
     @Override public java.util.concurrent.CompletionStage<PipeIo> openLane() {
         if (lanes == null) return null;
         var opening = lanes.open();
@@ -76,8 +78,7 @@ final class QuicTransport extends AbstractTransport.Native {
 
     @Override public Object carrierIdentity() { return carrier.connectionChannel(); }
     @Override public CarrierProvider.Query carrierQuery(Object identity) {
-        var connection = carrier.connectionChannel();
-        return connection != null && connection == identity ? QuicCarrierStats.query(connection) : null;
+        return QuicCarrierStats.query(carrier.connectionChannel(), identity);
     }
 
     @Override public boolean writable() { return super.writable() && carrier.sends() && !closed; }
@@ -85,6 +86,7 @@ final class QuicTransport extends AbstractTransport.Native {
     @Override
     protected void begin() {
         openReader();
+        if (!redeliverBuffered()) return;
         carrier.attach(this);
         drain();
     }
@@ -132,14 +134,12 @@ final class QuicTransport extends AbstractTransport.Native {
 
     /** Parses data in place; what a pause leaves is held, what a move leaves goes to the next owner. */
     private void deliver(ByteBuf data) {
-        int start = data.readerIndex(), taken = 0;
-        ByteBuffer[] parts = data.nioBufferCount() == 1 ? new ByteBuffer[] {data.nioBuffer()} : data.nioBuffers();
-        for (ByteBuffer part : parts) {
-            int n = part.remaining();
-            data.retain(); // The part's own reference; the session may keep it past this call.
-            input(part, data::release);
-            taken += n - part.remaining();
-            if (part.hasRemaining()) break;
+        int start = data.readerIndex(), taken;
+        try {
+            taken = input(carrier.ownedChunk(data));
+        } catch (RuntimeException | Error failure) {
+            data.release();
+            throw failure;
         }
         if (taken == data.readableBytes()) { data.release(); return; }
         data.readerIndex(start + taken);
@@ -202,7 +202,7 @@ final class QuicTransport extends AbstractTransport.Native {
         // The batch stays referenced until Netty reports the write: only then is it released.
         carrier.write(b, cause -> {
             if (closed) {
-                dropWrite();
+                writeDone(cause);
                 if (closingWrite != null) closingWrite.complete(null);
                 return;
             }
@@ -225,7 +225,7 @@ final class QuicTransport extends AbstractTransport.Native {
         if ((inEnded && closed) || !carrier.receives()) return;
         inEnded = true;
         for (ByteBuf b; (b = held.poll()) != null; ) b.release();
-        takeUnread();
+        discardBufferedInput();
         carrier.closeInput();
     }
 
@@ -245,7 +245,7 @@ final class QuicTransport extends AbstractTransport.Native {
         if (carrier.receives()) {
             inEnded = true;
             for (ByteBuf b; (b = held.poll()) != null; ) b.release();
-            takeUnread();
+            discardBufferedInput();
             carrier.closeInput();
         }
         if (carrier.sends()) carrier.closeOutput(cause != null);
@@ -265,14 +265,20 @@ final class QuicTransport extends AbstractTransport.Native {
         java.util.Objects.requireNonNull(permit);
         if (closed || writing()) return null;
         closed = true;
+        boolean nativeOwner = to == loop();
+        Transport next;
+        if (nativeOwner) {
+            var nativeTarget = new QuicTransport((NettyHost) loop(), carrier, declared, lanes);
+            moveInputTo(nativeTarget);
+            next = nativeTarget;
+        } else {
+            next = bridgeWithInput(to, carrier.adapter(declared, lanes));
+        }
         if (started()) {
-            byte[] unread = takeUnread();
-            carrier.leave(this, unread == null ? null : Unpooled.wrappedBuffer(unread));
+            carrier.leave(this, null);
             if (!delivering) for (ByteBuf b; (b = held.poll()) != null; ) carrier.leave(this, b);
         }
-        if (to == loop()) return new QuicTransport((NettyHost) loop(), carrier, declared, lanes);
-        Transport next = Transport.of(to, carrier.adapter(declared, lanes));
-        carrier.taken.follow(next);
+        if (!nativeOwner) carrier.taken.follow(next);
         return next;
     }
 }

@@ -15,7 +15,7 @@ class PairingShutdownTest {
     @Test void downlinkOwnerShutdownRacesTransferWithoutDoubleClosingOrLosingHalves() throws Exception {
         Session peer = new Session(CoreConfig.defaults(), Clock.now());
         CarrierInfo info = new CarrierInfo(io.zmux.internal.core.Framing.BYTES, false, false, false, false);
-        peer.pipes().attachBootstrap(info, info, null); Batch batch = new Batch();
+        peer.pipes().attachBootstrap(info, info); Batch batch = new Batch();
         assertTrue(peer.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, Clock.now()));
         byte[] preface = io.zmux.internal.core.BatchFixture.flat(batch); batch.discard();
         for (int iteration=0; iteration<24; iteration++) {
@@ -100,7 +100,8 @@ class PairingShutdownTest {
                 @Override public CoreConfig config() { return CoreConfig.builder().role(CoreConfig.Role.RESPONDER).transportRole(CoreConfig.Role.RESPONDER).build(); }
                 @Override public DriverHooks hooks() { return DriverHooks.NONE; }
                 @Override public void started(SessionRuntime driver, String protocol, io.zmux.CarrierCredential credential, CarrierSetup setup) {}
-            }, null, new byte[0], 8, 0, 0, 0, 0, 0);
+            }, null, new byte[0], io.zmux.ListenerLimits.builder().maxSuspended(0).build(),
+                    io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V4, io.zmux.internal.core.CarrierAdmission.DEFAULT_PREFIX_V6);
     }
 
     static CarrierSetup reserved(ListenerHub hub) {
@@ -139,7 +140,7 @@ class PairingShutdownTest {
                     false, null, ListenerHub.Entry.Stream.CARRIER, null, input);
             var peer = new Session(CoreConfig.defaults(), Clock.now());
             var info = new CarrierInfo(io.zmux.internal.core.Framing.BYTES, false, false, false, false);
-            peer.pipes().attachBootstrap(info, info, null);
+            peer.pipes().attachBootstrap(info, info);
             var batch = new Batch();
             assertTrue(peer.pollTransmit(0, 0, batch, Session.DEFAULT_BATCH, Clock.now()));
             byte[] bytes = BatchFixture.flat(batch);

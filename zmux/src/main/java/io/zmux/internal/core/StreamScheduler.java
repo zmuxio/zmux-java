@@ -29,6 +29,11 @@ final class StreamScheduler {
         return mask == 0;
     }
 
+    /** First pending direction, without moving the service cursor. */
+    Stream first() {
+        return mask == 0 ? null : head[Integer.numberOfTrailingZeros(mask)].st;
+    }
+
     void ensure(Stream st) {
         Node x = st.sch;
         if (x.in || !st.sendable()) return;

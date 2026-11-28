@@ -13,7 +13,7 @@ class QuicEndpointTest {
     @BeforeAll static void tls() throws Exception { TestTls.init(); }
     static ZmuxConfig config(EventLoops loops) { return builder(loops).build(); }
     static ZmuxConfig.Builder builder(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(6).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().scheduler(Scheduler.SPREAD_ETA);
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(6))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation().scheduler(Scheduler.SPREAD_ETA);
     }
     static void closed(ZmuxSession a, ZmuxSession b) throws Exception {
         a.close(); b.close(); a.awaitClosed(); b.awaitClosed();
@@ -119,9 +119,18 @@ class QuicEndpointTest {
                         var ar = Zmux.resolveDuplicate(a1,a2,DuplicateOptions.defaults().withIdentities(new byte[] {1},new byte[] {2}));
                         assertSame(a1,ar.survivor());
                         var br = Zmux.resolveDuplicate(b1,b2,DuplicateOptions.defaults().withIdentities(new byte[] {2},new byte[] {1})
-                                .withRejoin(PipePool.of(attempt -> attempt.join(awaitPipe(rightClient.dialAsync(leftServer.address(),"localhost",b1))))));
+                                .withRejoin(new MemberSpec("", java.util.List.of(new AttachmentSpec(Directions.BOTH, PipeOptions.defaults()))),
+                                        (setup, request) -> {
+                                            try {
+                                                return new CarrierOpener.Opened(java.util.List.of(
+                                                        awaitPipe(rightClient.dialAsync(leftServer.address(), "localhost", b1))));
+                                            } catch (InterruptedException interrupted) {
+                                                Thread.currentThread().interrupt();
+                                                throw new java.io.InterruptedIOException("opening duplicate replacement");
+                                            }
+                                        }));
                         var result = br.rejoin().completion().toCompletableFuture().get(6,TimeUnit.SECONDS);
-                        assertNull(result.cause()); assertEquals(1,result.joined());
+                        assertNull(result.error()); assertEquals(Attempt.Disposition.CONFIRMED, result.disposition());
                         old.finish(); assertArrayEquals(new byte[] {7},QuicTest.read(receiving));
                         receiving.finish(); assertArrayEquals(new byte[0],QuicTest.read(old));
                         oldConnection.close().sync(); leftClient.connections().getFirst().close().sync();

@@ -1,129 +1,264 @@
 package io.zmux;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-import io.zmux.testutil.Json;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 
-/** CarrierCache snapshots: the vectors shared across implementations (src/test/resources/carrier-cache). */
-@Timeout(30)
+import static io.zmux.CarrierCache.Outcome.*;
+import static io.zmux.CarrierKind.QUIC;
+import static org.junit.jupiter.api.Assertions.*;
+
 class CarrierCacheSnapshotTest {
-    record Expect(String key, String kind, boolean usable, boolean failed, long backoffMs, String url) {}
+    private static final Instant ORIGIN = Instant.parse("2026-11-26T00:00:00Z");
+    private static final String KEY = "node";
+    private static final String VARIANT = "direct";
+    private static final double TOLERANCE = 1e-12;
 
-    private static final Pattern AT = Pattern.compile("\"@([+-])(\\d+)\"");
-
-    /** Substitutes "@+N" and "@-N" with the RFC 3339 time N seconds from now. */
-    private static String substitute(String text, Instant now) {
-        Matcher m = AT.matcher(text);
-        var b = new StringBuilder();
-        while (m.find()) {
-            long n = Long.parseLong(m.group(2));
-            Instant t = m.group(1).equals("+") ? now.plusSeconds(n) : now.minusSeconds(n);
-            m.appendReplacement(b, Matcher.quoteReplacement("\"" + SnapshotJson.formatTime(t) + "\""));
+    private static final class Time {
+        private Instant origin = ORIGIN;
+        private Duration elapsed = Duration.ZERO;
+        Instant now() { return origin.plus(elapsed); }
+        long monotonic() { return elapsed.toNanos(); }
+        void advance(Duration span) { elapsed = elapsed.plus(span); }
+        void rollBack(Duration span) { origin = origin.minus(span); }
+        CarrierCache open() {
+            var c = CarrierCache.Config.DEFAULT;
+            return open(new CarrierCache.Config(c.halfLife(), c.dropWindow(), c.performanceWindow(),
+                    c.healthReset(), new Backoff(Duration.ofMinutes(1), Duration.ofHours(6), 0),
+                    c.maxImportBytes(), c.maxImportEntries()), new Random(1));
         }
-        return m.appendTail(b).toString();
+        CarrierCache open(CarrierCache.Config config, Random random) {
+            return new CarrierCache(config, this::now, this::monotonic, random);
+        }
     }
 
-    private static List<Expect> entries(CarrierCache cache, Instant now) {
-        var out = new ArrayList<Expect>();
-        for (var e : cache.snapshot().entries()) {
-            out.add(new Expect(e.key(), e.kind().toString(), e.goodUntil() != null && e.goodUntil().isAfter(now),
-                    e.failUntil() != null && e.failUntil().isAfter(now), e.backoff().toMillis(), e.url()));
-        }
-        out.sort(Comparator.comparing(Expect::key).thenComparing(Expect::kind));
-        return out;
+    @Test void decayAndPerformanceStayAnchoredAcrossImportAndReplay() {
+        var time = new Time();
+        var first = time.open();
+        assertEquals(.125, first.score(KEY, QUIC, VARIANT).score(), TOLERANCE);
+        first.report(KEY, QUIC, VARIANT, USABLE);
+        first.report(KEY, QUIC, VARIANT, PERFORMANCE, new CarrierCache.Observation(time.now(), Duration.ZERO, Duration.ofMillis(50), 2_500_000));
+        assertEquals(1.0 / 3, first.score(KEY, QUIC, VARIANT).score(), TOLERANCE);
+        time.advance(Duration.ofSeconds(39));
+        byte[] saved = first.export();
+        var restarted = time.open();
+        restarted.importSnapshot(saved);
+        time.advance(Duration.ofSeconds(21));
+        restarted.importSnapshot(saved);
+        assertEquals((1 + Math.pow(2, -1.0 / 360)) / (2 + Math.pow(2, -1.0 / 360)) / 4,
+                restarted.score(KEY, QUIC, VARIANT).score(), TOLERANCE);
+        time.advance(Duration.ofMinutes(359));
+        assertEquals(.5, restarted.score(KEY, QUIC, VARIANT).weight(), TOLERANCE);
+        assertEquals(1, restarted.score(KEY, QUIC, VARIANT).attempts());
     }
 
-    @SuppressWarnings("unchecked") // parsed JSON: the vector file's schema fixes the type
-    @Test void sharedVectors() throws Exception {
-        var v = Json.object(Files.readString(Path.of("src", "test", "resources", "carrier-cache", "vectors.json")));
-        var exact = (List<String>) v.get("exact");
-        var cases = (List<Map<String, Object>>) v.get("cases");
-        assertFalse(exact.isEmpty());
-        assertFalse(cases.isEmpty());
-        for (String text : exact) assertEquals(text, CarrierCache.Snapshot.fromJson(text).toJson());
-        for (var c : cases) {
-            String name = (String) c.get("name");
-            Instant now = Instant.now();
-            var cache = new CarrierCache();
-            int step = 0;
-            for (var s : (List<Map<String, Object>>) c.get("steps")) {
-                String json = substitute((String) s.get("snapshot"), now);
-                boolean error = Boolean.TRUE.equals(s.get("error"));
-                if (error) {
-                    var before = entries(cache, now);
-                    assertThrows(CarrierCache.InvalidSnapshotException.class, () -> CarrierCache.Snapshot.fromJson(json), name + " step " + step + ": " + json);
-                    assertEquals(before, entries(cache, now), name + " unchanged");
-                } else {
-                    cache.restore(CarrierCache.Snapshot.fromJson(json));
-                }
-                step++;
+    @Test void coolingUsesOneSampleAndASuccessKeepsTheFailureLevel() {
+        var time = new Time();
+        var cache = time.open();
+        cache.report(KEY, QUIC, VARIANT, FAILED);
+        byte[] saved = cache.export();
+        assertEquals(Duration.ofMinutes(1), cache.score(KEY, QUIC, VARIANT).cooling().orElseThrow());
+        time.advance(Duration.ofSeconds(21));
+        cache.report(KEY, QUIC, VARIANT, USABLE);
+        var copy = time.open();
+        copy.importSnapshot(saved);
+        assertEquals(Duration.ofSeconds(39), copy.score(KEY, QUIC, VARIANT).cooling().orElseThrow());
+        time.advance(Duration.ofSeconds(39));
+        copy.importSnapshot(saved);
+        assertFalse(copy.backingOff(KEY, QUIC, VARIANT));
+        cache.report(KEY, QUIC, VARIANT, FAILED);
+        assertEquals(Duration.ofMinutes(2), cache.score(KEY, QUIC, VARIANT).nominalBackoff());
+        time.advance(Duration.ofMinutes(10));
+        cache.report(KEY, QUIC, VARIANT, RECOVERED, new CarrierCache.Observation(time.now(), Duration.ofMinutes(10), Duration.ZERO, 0));
+        assertEquals(Duration.ZERO, cache.score(KEY, QUIC, VARIANT).nominalBackoff());
+        assertEquals(3, cache.score(KEY, QUIC, VARIANT).attempts());
+    }
+
+    @Test void shortDropProfileHasAnOpenWindowAndUsesTheFlooredWaitAsItsBase() throws Exception {
+        var time = new Time();
+        var defaults = CarrierCache.Config.DEFAULT;
+        var profile = defaults.withShortDropResilience();
+        assertEquals(new Backoff(Duration.ofSeconds(30), Duration.ofMinutes(30), 0.2, 0.2), profile.backoff());
+        var plain = time.open(new CarrierCache.Config(defaults.halfLife(), defaults.dropWindow(), defaults.performanceWindow(),
+                defaults.healthReset(), profile.backoff(), defaults.maxImportBytes(), defaults.maxImportEntries()), new Random(0));
+        var resilient = time.open(profile, new Random(0) {
+            @Override public double nextDouble() { return 0; }
+        });
+        for (var span : new Duration[] { Duration.ZERO, Duration.ofMinutes(5), Duration.ofMinutes(5) }) {
+            time.advance(span);
+            plain.report(KEY, QUIC, VARIANT, SHORT_DROP);
+            resilient.report(KEY, QUIC, VARIANT, SHORT_DROP);
+        }
+        assertEquals(Duration.ofMinutes(2), resilient.score(KEY, QUIC, VARIANT).nominalBackoff());
+        time.advance(Duration.ofNanos(1));
+        plain.report(KEY, QUIC, VARIANT, SHORT_DROP);
+        var connection = new io.zmux.carrier.CarrierFaultException.Episode(new Object());
+        var cooled = new java.util.concurrent.CompletableFuture<CarrierCache.CooldownStarted>();
+        var subscribed = new java.util.concurrent.CompletableFuture<Void>();
+        resilient.cooldownEvents().subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+            @Override public void onSubscribe(java.util.concurrent.Flow.Subscription subscription) {
+                subscription.request(Long.MAX_VALUE);
+                subscribed.complete(null);
             }
-            var expect = new ArrayList<Expect>();
-            for (var e : (List<Map<String, Object>>) c.get("expect")) {
-                expect.add(new Expect((String) e.get("key"), (String) e.get("kind"), (Boolean) e.get("usable"), (Boolean) e.get("failed"),
-                        ((Number) e.get("backoff_ms")).longValue(), (String) e.get("url")));
+            @Override public void onNext(CarrierCache.CooldownEvent event) {
+                if (event instanceof CarrierCache.CooldownStarted started) cooled.complete(started);
             }
-            assertEquals(expect, entries(cache, now), name);
-            // The cache's own snapshot round-trips through JSON and into another cache.
-            var snap = cache.snapshot();
-            var again = CarrierCache.Snapshot.fromJson(snap.toJson());
-            assertEquals(snap, again, name);
-            var other = new CarrierCache();
-            other.restore(again);
-            assertEquals(expect, entries(other, now), name + " again");
-        }
+            @Override public void onError(Throwable failure) { cooled.completeExceptionally(failure); }
+            @Override public void onComplete() { }
+        });
+        subscribed.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        resilient.reportFault(KEY, QUIC, VARIANT, SHORT_DROP, time.now(), connection);
+        resilient.reportFault(KEY, QUIC, VARIANT, SHORT_DROP, time.now(), connection);
+        assertEquals(Duration.ofMinutes(8), cooled.get(5, java.util.concurrent.TimeUnit.SECONDS).sampledWait());
+        assertEquals(Duration.ofMinutes(4), plain.score(KEY, QUIC, VARIANT).nominalBackoff());
+        var raised = resilient.score(KEY, QUIC, VARIANT);
+        assertEquals(4, raised.cooldownLevel());
+        assertEquals(Duration.ofMinutes(10), raised.nominalBackoff());
+        assertEquals(Duration.ofMinutes(8), raised.cooling().orElseThrow());
+        resilient.report(KEY, QUIC, VARIANT, FAILED);
+        assertEquals(Duration.ofMinutes(20), resilient.score(KEY, QUIC, VARIANT).nominalBackoff());
+        time.advance(profile.healthReset());
+        resilient.report(KEY, QUIC, VARIANT, RECOVERED,
+                new CarrierCache.Observation(time.now(), profile.healthReset(), Duration.ZERO, 0));
+        resilient.report(KEY, QUIC, VARIANT, SHORT_DROP);
+        assertEquals(Duration.ofSeconds(30), resilient.score(KEY, QUIC, VARIANT).nominalBackoff());
     }
 
-    @Test void restoreConvertsMonotonicTimesAndKeepsTheNewer() {
-        var c = new CarrierCache();
-        c.record("k", CarrierKind.SPLIT, "", false, System.nanoTime());
-        c.record("k", CarrierKind.WEBSOCKET, "", true, System.nanoTime());
-        var snap = c.snapshot();
-        assertEquals(2, snap.entries().size());
-        var split = snap.entries().getFirst();
-        assertEquals(CarrierKind.SPLIT, split.kind());
-        assertEquals(Duration.ofMinutes(1), split.backoff());
-        long ahead = Duration.between(Instant.now(), split.failUntil()).toSeconds();
-        assertTrue(ahead > 50 && ahead <= 60, "fail time on the wall clock: " + ahead);
-        var other = new CarrierCache(Duration.ofHours(1), Duration.ofMinutes(5), Duration.ofHours(1));
-        other.restore(snap);
-        assertTrue(other.backingOff("k", CarrierKind.SPLIT));
-        assertTrue(other.usable("k", CarrierKind.WEBSOCKET));
-        assertEquals(Duration.ofMinutes(5), other.snapshot().entries().getFirst().backoff(), "within the bounds");
-        // An older import leaves the newer entry; the configuration stays.
-        var old = new CarrierCache.Snapshot(List.of(new CarrierCache.Snapshot.Entry("k", CarrierKind.WEBSOCKET, null,
-                Instant.now().plusSeconds(10), Duration.ofMinutes(1), "")));
-        other.restore(old);
-        assertTrue(other.usable("k", CarrierKind.WEBSOCKET));
-        assertEquals(Duration.ofHours(1), other.successTtl());
-        assertThrows(IllegalArgumentException.class, () -> new CarrierCache.Snapshot.Entry("k", CarrierKind.QUIC, null, null, Duration.ofMillis(-1), ""));
+    @Test void coolingLevelSurvivesExpiryAndImportWithoutDelayingRecovery() {
+        var time = new Time();
+        var cache = time.open();
+        cache.report(KEY, QUIC, VARIANT, FAILED);
+        cache.report(KEY, QUIC, VARIANT, FAILED);
+        time.advance(Duration.ofSeconds(5));
+        byte[] snapshot = cache.export();
+        var imported = time.open();
+        imported.importSnapshot(snapshot);
+        assertEquals(2, imported.score(KEY, QUIC, VARIANT).cooldownLevel());
+        try (var permit = imported.acquire(KEY, QUIC, VARIANT, true, () -> 0).attempt()) { assertNotNull(permit); }
+
+        String json = new String(snapshot, StandardCharsets.UTF_8);
+        var older = time.open();
+        older.importSnapshot(json.replace("\"level\":2,", "").getBytes(StandardCharsets.UTF_8));
+        assertEquals(0, older.score(KEY, QUIC, VARIANT).cooldownLevel());
+        assertEquals(Duration.ofSeconds(115), older.score(KEY, QUIC, VARIANT).cooling().orElseThrow());
+        older.report(KEY, QUIC, VARIANT, FAILED);
+        assertEquals(1, older.score(KEY, QUIC, VARIANT).cooldownLevel());
+        assertInvalid(imported, imported.export(), CarrierCache.SnapshotError.VALUE,
+                json.replace("\"level\":2", "\"level\":-1"));
+
+        time.advance(Duration.ofSeconds(115));
+        var expired = time.open();
+        expired.importSnapshot(imported.export());
+        assertFalse(expired.backingOff(KEY, QUIC, VARIANT));
+        assertEquals(2, expired.score(KEY, QUIC, VARIANT).cooldownLevel());
+        expired.report(KEY, QUIC, VARIANT, FAILED);
+        assertEquals(3, expired.score(KEY, QUIC, VARIANT).cooldownLevel());
     }
 
-    @Test void restoreBoundsTimes() {
-        Instant far = Instant.now().plus(Duration.ofDays(3650));
-        var c = new CarrierCache();
-        c.restore(new CarrierCache.Snapshot(List.of(
-                new CarrierCache.Snapshot.Entry("g", CarrierKind.SPLIT, far, null, Duration.ZERO, ""),
-                new CarrierCache.Snapshot.Entry("f", CarrierKind.SPLIT, null, far, Duration.ofMinutes(1), ""))));
-        Instant limit = Instant.now().plus(Duration.ofHours(6));
-        for (var e : c.snapshot().entries()) {
-            for (Instant t : new Instant[] {e.goodUntil(), e.failUntil()}) {
-                assertTrue(t == null || !t.isAfter(limit), e + " beyond its bound");
+    @Test void positiveCooldownLevelRequiresAnAnchor() {
+        var time = new Time();
+        var cache = time.open();
+        cache.report(KEY, QUIC, VARIANT, FAILED);
+        byte[] saved = cache.export();
+        String json = new String(saved, StandardCharsets.UTF_8).replace(
+                "\"cooling\":{\"at\":\"2026-11-26T00:00:00Z\"", "\"cooling\":{\"at\":\"0001-01-01T00:00:00Z\"");
+        assertInvalid(cache, saved, CarrierCache.SnapshotError.VALUE, json);
+    }
+
+    @Test void committedCooldownEventsAndMetricsReflectOneEpisode() throws Exception {
+        var time = new Time();
+        var cache = time.open();
+        var events = new java.util.concurrent.LinkedBlockingQueue<CarrierCache.CooldownEvent>();
+        var subscribed = new java.util.concurrent.CompletableFuture<Void>();
+        cache.cooldownEvents().subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+            @Override public void onSubscribe(java.util.concurrent.Flow.Subscription subscription) {
+                subscription.request(Long.MAX_VALUE);
+                subscribed.complete(null);
             }
+            @Override public void onNext(CarrierCache.CooldownEvent event) { events.add(event); }
+            @Override public void onError(Throwable failure) { subscribed.completeExceptionally(failure); }
+            @Override public void onComplete() { }
+        });
+        var seconds = java.util.concurrent.TimeUnit.SECONDS;
+        subscribed.get(5, seconds);
+        var connection = new io.zmux.carrier.CarrierFaultException.Episode(new Object());
+        for (int i = 0; i < 2; i++) cache.reportFault(KEY, QUIC, VARIANT, SHORT_DROP, time.now(), connection);
+
+        var key = new CarrierCache.Key(KEY, QUIC, VARIANT);
+        var minute = Duration.ofMinutes(1);
+        assertEquals(new CarrierCache.CooldownStarted(key, 1, 1, CarrierCache.CooldownReason.SHORT_DROP,
+                0, minute, minute, minute.toNanos()), events.poll(5, seconds));
+        assertEquals(1, cache.score(KEY, QUIC, VARIANT).cooldownLevel());
+        time.advance(Duration.ofSeconds(5));
+        try (var probe = cache.acquire(KEY, QUIC, VARIANT, true, () -> 0).attempt()) {
+            assertNotNull(probe);
+            assertNull(cache.acquire(KEY, QUIC, VARIANT, true, () -> 0).attempt());
+            assertTrue(probe.start());
         }
-        assertTrue(c.usable("g", CarrierKind.SPLIT));
-        assertTrue(c.backingOff("f", CarrierKind.SPLIT));
+        var metrics = cache.retryMetrics(KEY, QUIC, VARIANT);
+        assertEquals(new CarrierCache.RetryMetrics(1, 1, Duration.ZERO, Duration.ZERO, null,
+                java.util.Map.of(),
+                java.util.Optional.of(Duration.ofSeconds(5)), Duration.ofSeconds(55)), metrics);
+
+        var reset = cache.config().healthReset();
+        var before = reset.minusNanos(1);
+        time.advance(before.minusSeconds(5));
+        cache.report(KEY, QUIC, VARIANT, RECOVERED, new CarrierCache.Observation(time.now(), before, Duration.ZERO, 0));
+        assertEquals(1, cache.score(KEY, QUIC, VARIANT).cooldownLevel());
+        time.advance(Duration.ofNanos(1));
+        cache.report(KEY, QUIC, VARIANT, RECOVERED, new CarrierCache.Observation(time.now(), reset, Duration.ZERO, 0));
+        assertEquals(new CarrierCache.CooldownReset(key, 1, reset.toNanos()), events.poll(5, seconds));
+        assertEquals(0, cache.score(KEY, QUIC, VARIANT).cooldownLevel());
+        assertEquals(Duration.ZERO, cache.retryMetrics(KEY, QUIC, VARIANT).remaining());
+    }
+
+    @Test void rollbackAndReexportPreserveTheAgeOfHistoryAndPerformance() {
+        var publisherTime = new Time();
+        var publisher = publisherTime.open();
+        publisher.report(KEY, QUIC, VARIANT, USABLE);
+        publisher.report(KEY, QUIC, VARIANT, PERFORMANCE,
+                new CarrierCache.Observation(null, Duration.ZERO, Duration.ofMillis(1), 0));
+        publisherTime.advance(Duration.ofSeconds(39));
+        byte[] saved = publisher.export();
+
+        var receivingTime = new Time();
+        receivingTime.rollBack(Duration.ofHours(1));
+        var receiver = receivingTime.open();
+        receiver.importSnapshot(saved);
+        receivingTime.advance(Duration.ofSeconds(20));
+        assertEquals(Duration.ofSeconds(59), receiver.score(KEY, QUIC, VARIANT).age());
+        byte[] relayed = receiver.export();
+
+        var copy = receivingTime.open();
+        copy.importSnapshot(relayed);
+        assertEquals(receiver.score(KEY, QUIC, VARIANT), copy.score(KEY, QUIC, VARIANT));
+        receivingTime.advance(Duration.ofSeconds(1));
+        receiver.importSnapshot(saved); // An equal origin timestamp must leave the original local anchor intact.
+        var expired = receiver.score(KEY, QUIC, VARIANT);
+        assertEquals(expired, copy.score(KEY, QUIC, VARIANT));
+        assertEquals(Duration.ofMinutes(1), expired.age());
+        double weight = Math.pow(2, -1.0 / 360);
+        assertEquals(weight, expired.weight(), TOLERANCE);
+        assertEquals((1 + weight) / (2 + weight) / 4, expired.score(), TOLERANCE);
+    }
+
+    @Test void allThreeImportErrorsAreAtomic() {
+        var time = new Time();
+        var cache = time.open();
+        cache.report(KEY, QUIC, VARIANT, USABLE);
+        byte[] before = cache.export();
+        String json = new String(before, StandardCharsets.UTF_8);
+        assertInvalid(cache, before, CarrierCache.SnapshotError.VERSION, "{\"version\":1}");
+        assertInvalid(cache, before, CarrierCache.SnapshotError.FORMAT, "{");
+        assertInvalid(cache, before, CarrierCache.SnapshotError.FORMAT, "{\"version\":2,\"\\u１２３４\":0}");
+        assertInvalid(cache, before, CarrierCache.SnapshotError.VALUE, json.replace("\"attempts\":1", "\"attempts\":-1"));
+    }
+
+    private static void assertInvalid(CarrierCache cache, byte[] before, CarrierCache.SnapshotError reason, String fixture) {
+        assertEquals(reason, assertThrows(CarrierCache.InvalidSnapshotException.class,
+                () -> cache.importSnapshot(fixture.getBytes(StandardCharsets.UTF_8))).reason());
+        assertArrayEquals(before, cache.export());
     }
 }

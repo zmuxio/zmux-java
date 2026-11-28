@@ -492,9 +492,7 @@ final class ExchangeClient {
             Throwable refused = null;
             URI to = null;
             try {
-                if (status != 307 && status != 308) throw new HttpRedirectException(status, location == null ? "" : location, "would change POST to GET");
-                to = Redirects.check(uri, "POST", status, location);
-                if (hops >= Redirects.DEFAULT_MAX) throw new HttpRedirectException(status, to.toString(), "too many redirects");
+                to = Redirects.follow(uri, "POST", status, location, hops, false);
             } catch (HttpRedirectException e) {
                 refused = e;
             }
@@ -580,8 +578,8 @@ final class ExchangeClient {
         Collector(Attempt a, Channel ch) { this.a = a; this.ch = ch; }
 
         private int limit() {
-            int n = Exchange.RESP_HDR + cfg.downLimit();
-            return cfg.isBase64() ? Exchange.base64Length(n) : n;
+            long n = (long) Exchange.RESP_HDR + cfg.downLimit();
+            return Exchange.bodyLimit(n, cfg.isBase64());
         }
 
         @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -689,7 +687,8 @@ final class ExchangeClient {
         }
         long spread = (long) (st.backoff * cfg.backoff().jitter());
         st.retryAt = now + st.backoff - spread + ThreadLocalRandom.current().nextLong(spread + 1);
-        st.backoff = Math.min(2 * st.backoff, cfg.backoff().max().toNanos());
+        long max = cfg.backoff().max().toNanos();
+        st.backoff = st.backoff > max / 2 ? max : st.backoff * 2;
     }
 
     /** Takes downlink piece n. */
@@ -740,7 +739,7 @@ final class ExchangeClient {
 
     // ---- zmux's halves ----
 
-    private final class Reader implements PipeReader {
+    private final class Reader implements PipeReader, Exchange.Half {
         @Override public void start(Sink s) {
             submit(() -> {
                 if (rclosed) return;
@@ -765,7 +764,7 @@ final class ExchangeClient {
         }
     }
 
-    private final class Writer implements PipeWriter {
+    private final class Writer implements PipeWriter, Exchange.Half {
         @Override public void write(OutboundBatch batch, Completion done) {
             submit(() -> {
                 if (err != null || wclosed || ended) { done.failed(err != null ? err : new ClosedChannelException()); return; }

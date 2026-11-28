@@ -57,11 +57,11 @@ class TracerBacklogTest {
     }
 
     private static Event occurrence(long n) {
-        return new Event(Event.Kind.EPOCH_COMMITTED, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(Event.Kind.EPOCH_COMMITTED, 0, 0, null, null, 0, 0, n, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     private static Event bare(Event.Kind kind) {
-        return new Event(kind, 0, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null);
+        return new Event(kind, 0, 0, null, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null);
     }
 
     private static List<String> events(long from, long to) {
@@ -82,7 +82,7 @@ class TracerBacklogTest {
         EventLoop loop = new EventLoop("tracer-backlog", true, BufferPool.DEFAULT_IDLE_BYTES);
         try {
             Recorder tracer = new Recorder(awaitedEvents);
-            var hooks = new DriverHooks(tracer, null, null, null, null, null, DriverHooks.JoinPolicy.DEFAULT, null, null, null);
+            var hooks = new DriverHooks(tracer, null, null, null, null, null, DriverHooks.JoinPolicy.DEFAULT, null, null);
             SessionRuntime[] driver = new SessionRuntime[1];
             ExternalTransportTest.run(loop, () -> driver[0] = new SessionRuntime(loop, new Session(CoreConfig.defaults(), Clock.now()), hooks));
             script.run(loop, driver[0], tracer);
@@ -177,7 +177,7 @@ class TracerBacklogTest {
                 driver.deliver(occurrence(5));
                 driver.deliver(bare(Event.Kind.CLOSED));
                 driver.deliver(occurrence(6));
-                driver.deliver(new Event(Event.Kind.PIPE_STATE, 3, io.zmux.internal.core.Action.DIR_BIDI, io.zmux.internal.core.PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null));
+                driver.deliver(new Event(Event.Kind.PIPE_STATE, 3, io.zmux.internal.core.Action.DIR_BIDI, io.zmux.internal.core.PipeInfo.Out.RETIRED, null, 0, 0, 0, 0, null, null, null, false, false, 0, 0, null, null));
                 read[0] = driver.pollEvent(io.zmux.internal.core.Waiter.inert());
                 read[1] = driver.pollEvent(io.zmux.internal.core.Waiter.inert());
             });

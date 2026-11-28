@@ -24,6 +24,7 @@ import io.zmux.AdmissionVerdict;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
+import io.zmux.internal.exchange.ExchangeAccess;
 import io.zmux.internal.spi.AdapterPorts;
 import io.zmux.internal.spi.AttachmentRelease;
 import io.zmux.carrier.PipeReader;
@@ -79,17 +80,17 @@ final class ExchangeServer {
     /** The encoded body limit of a request. */
     private int limit() {
         long n = (long) Exchange.REQ_OVERHEAD + cfg.upLimit();
-        return (int) Math.min(Integer.MAX_VALUE, cfg.isBase64() ? Exchange.base64Length((int) n) : n);
+        return Exchange.bodyLimit(n, cfg.isBase64());
     }
 
     /** The encoded length of a body with Data of n bytes. */
     private long encoded(long n) {
         long b = Exchange.REQ_OVERHEAD + n;
-        return cfg.isBase64() ? (b + 2) / 3 * 4 : b;
+        return cfg.isBase64() ? Exchange.base64Length(b) : b;
     }
 
     /** The encoded length of the authentication header: 66 bytes, 88 characters in base64 (66 is a multiple of 3). */
-    private int headerLength() { return cfg.isBase64() ? Exchange.base64Length(Exchange.HDR) : Exchange.HDR; }
+    private int headerLength() { return Exchange.bodyLimit(Exchange.HDR, cfg.isBase64()); }
 
     /**
      * Starts reading a request that {@link HttpClass#classify} found an exchange request; null
@@ -336,7 +337,7 @@ final class ExchangeServer {
         var hint = new JoinHint("", false, slot.source(), slot.peer(), RequestHead.of(Requests.fields(c.req.headers())));
         boolean decide = ep.listener.admission() != null;
         nc.admitting = decide;
-        var handled = decide ? slot.handleRequest(io, hint, c.router.requestFallback(handoff -> {
+        var handled = decide ? ExchangeAccess.handle(slot, io, hint, c.router.requestFallback(handoff -> {
             var given = new java.util.concurrent.CompletableFuture<Void>();
             Loops.run(nc.loop, () -> {
                 try {
@@ -845,7 +846,7 @@ final class ExchangeServer {
             bufferedInput.close();
         }
 
-        final class Reader implements PipeReader, AdapterPorts.ReleasingHalf {
+        final class Reader implements PipeReader, Exchange.Half, AdapterPorts.ReleasingHalf {
             @Override public java.util.concurrent.CompletionStage<Void> released() { return cleanup.completion(); }
 
             @Override public void start(Sink s) {
@@ -858,7 +859,7 @@ final class ExchangeServer {
             }
         }
 
-        final class Writer implements PipeWriter, AdapterPorts.ReleasingHalf {
+        final class Writer implements PipeWriter, Exchange.Half, AdapterPorts.ReleasingHalf {
             @Override public java.util.concurrent.CompletionStage<Void> released() { return cleanup.completion(); }
 
             @Override public void write(OutboundBatch batch, Completion done) {

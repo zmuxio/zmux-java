@@ -8,6 +8,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.EventLoop;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.PromiseCombiner;
 import io.zmux.Chunk;
 import io.zmux.carrier.Framing;
 import io.zmux.carrier.OutboundBatch;
@@ -16,6 +17,7 @@ import io.zmux.carrier.PipeWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.function.Function;
 
@@ -50,6 +52,7 @@ final class BodyCarrier {
     // Inbound.
     /** What arrived and zmux has not taken: chunks from their arrival, so the carrier keeps no bare buffer. */
     private final LentInput input;
+    private final io.zmux.internal.spi.ProviderBackings backings = new io.zmux.internal.spi.ProviderBackings();
     private final boolean inHalf;
     /** zmux closed the inbound half (or it has none, or it went to the host). */
     private boolean inClosed;
@@ -69,7 +72,8 @@ final class BodyCarrier {
      * (the verdict, or {@link #lost}), and {@link #detach} hands them to the host.
      */
     private ArrayList<ByteBuf> log;
-    private final List<Runnable> pending = new ArrayList<>(0);
+    private final ArrayDeque<Runnable> pending = new ArrayDeque<>();
+    private boolean releasingPending;
     /** The latest write on the channel. */
     private ChannelFuture lastWrite;
     /** Why the carrier was lost (a refusing response, say); later writes fail with it. */
@@ -109,7 +113,7 @@ final class BodyCarrier {
     private boolean channelEnded;
 
     private void checkRelease() {
-        if (channelEnded && inClosed) afterWrites(() -> release.complete(null));
+        if (channelEnded && inClosed && !starting && !releasingPending) afterWrites(() -> release.complete(null));
     }
 
     PipeReader reader() { return inHalf ? new Reader() : null; }
@@ -163,15 +167,27 @@ final class BodyCarrier {
         if (log != null) log.add(data.retainedDuplicate());
         if (inClosed || (!data.isReadable() && framing != Framing.MESSAGES)) { data.release(); return; }
         int n = data.readableBytes();
-        if (data.nioBufferCount() == 1) {
-            input.offer(Chunk.of(data.nioBuffer(), data::release), n);
-            return;
+        Chunk chunk;
+        try { chunk = ownedChunk(data, n); }
+        finally { data.release(); }
+        input.offer(chunk, n);
+    }
+
+    private Chunk ownedChunk(ByteBuf data, int length) {
+        // Keep the Netty dependency in this adapter, independent of the QUIC module.
+        ByteBuf root = data;
+        for (ByteBuf parent; (parent = root.unwrap()) != null;) root = parent;
+        int capacity = root.writerIndex() + root.maxFastWritableBytes();
+        if (data.nioBufferCount() == 1 && !(root instanceof io.netty.buffer.CompositeByteBuf) && capacity < root.maxCapacity()
+                && (root.alloc() instanceof io.netty.buffer.PooledByteBufAllocator
+                    || root.alloc() instanceof io.netty.buffer.AdaptiveByteBufAllocator)) {
+            // The pooled allocators report their allocation size here unless clipped by maxCapacity.
+            return backings.chunk(root, capacity, data.nioBuffer(), data::retain, data::release);
         }
-        // A buffer of several components as one: the copy only a composite needs; it goes at once.
-        ByteBuffer c = ByteBuffer.allocate(n);
-        data.getBytes(data.readerIndex(), c);
-        data.release();
-        input.offer(Chunk.of(c.flip()), n);
+        // Composite messages must stay contiguous. An unattested backing becomes one exact owned copy.
+        ByteBuffer copy = ByteBuffer.allocate(length);
+        data.getBytes(data.readerIndex(), copy);
+        return Chunk.of(copy.flip());
     }
 
     /** The inbound body (or message stream) ended gracefully. */
@@ -186,7 +202,8 @@ final class BodyCarrier {
     /** Bounds a first message, for a carrier of messages (its frames set it). */
     java.util.function.IntConsumer firstLimit = n -> {};
 
-    private final class Reader implements PipeReader, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+    private final class Reader implements PipeReader, Requests.CarrierHalf, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
+        @Override public Channel carrierRequest() { return ch; }
         @Override public java.util.concurrent.CompletionStage<Void> released() { return release.minimalCompletionStage(); }
         @Override public void limitFirstMessage(int limit) { firstLimit.accept(limit); }
 
@@ -221,28 +238,38 @@ final class BodyCarrier {
     /** Writes the head now, if not yet (an uplink's empty response, an accepted carrier's header). */
     void start() {
         if (started || starting) return;
+        starting = true;
         ChannelFuture f;
         try {
             f = aborted || detached ? null : out.head();
         } catch (RuntimeException failure) {
-            started = true;
-            fail(failure);
+            headFinished(failure);
             return;
         }
         if (f == null) {
-            started = true;
+            headFinished(null);
             return;
         }
-        starting = true;
         lastWrite = f;
-        f.addListener(r -> {
-            starting = false;
-            started = true;
-            if (!r.isSuccess()) fail(r.cause());
-            List<Runnable> p = new ArrayList<>(pending);
-            pending.clear();
-            for (Runnable x : p) x.run();
-        });
+        f.addListener(r -> headFinished(r.cause()));
+    }
+
+    private void headFinished(Throwable cause) {
+        started = true;
+        starting = false;
+        releaseOutput(cause == null ? null : () -> fail(cause));
+    }
+
+    private void releaseOutput(Runnable first) {
+        releasingPending = true;
+        try {
+            if (first != null) first.run();
+            for (Runnable task; (task = pending.pollFirst()) != null; ) task.run();
+        } finally {
+            releasingPending = false;
+        }
+        check();
+        checkRelease();
     }
 
     boolean started() { return started || starting; }
@@ -271,9 +298,12 @@ final class BodyCarrier {
 
     /** After the head: run r, at once when it went out already. */
     private void afterHead(Runnable r) {
-        start();
-        if (started) r.run();
-        else pending.add(r);
+        if (started && !releasingPending) {
+            releaseOutput(r);
+        } else {
+            pending.addLast(r);
+            start();
+        }
     }
 
     private void fail(Throwable cause) {
@@ -287,32 +317,14 @@ final class BodyCarrier {
     private final class Writer implements Requests.CarrierWriter, io.zmux.internal.spi.AdapterPorts.ReleasingHalf {
         @Override public Channel carrierRequest() { return ch; }
         @Override public java.util.concurrent.CompletionStage<Void> released() { return release.minimalCompletionStage(); }
-        @Override public void write(OutboundBatch batch, Completion c) {
-            ByteBuffer[] segs = batch.segments(null);
+        @Override public void write(OutboundBatch batch, Completion completion) {
             run(() -> {
-                if (detached) { c.failed(new ClosedChannelException()); return; }
-                afterHead(() -> {
-                if (aborted || outClosed || !ch.isActive()) { c.failed(lostCause != null ? lostCause : new ClosedChannelException()); return; }
-                ChannelFuture last;
-                if (framing == Framing.MESSAGES) {
-                    last = null;
-                    for (int m = 0, from = 0; m < batch.messageCount(); m++) {
-                        int to = batch.messageEnd(m);
-                        ByteBuffer[] part = java.util.Arrays.copyOfRange(segs, from, to);
-                        last = lastWrite = ch.write(out.content(Unpooled.wrappedBuffer(part)));
-                        from = to;
-                    }
-                    ch.flush();
-                    if (last == null) { c.completed(); return; }
+                if (outClosed || detached || aborted) {
+                    completion.failed(lostCause != null ? lostCause : new ClosedChannelException());
                 } else {
-                    last = lastWrite = ch.writeAndFlush(out.content(Unpooled.wrappedBuffer(segs)));
+                    afterHead(() -> writeBody(batch, completion));
                 }
-                last.addListener(r -> {
-                    if (r.isSuccess()) c.completed();
-                    else c.failed(r.cause());
-                });
-                });
-            }, () -> c.failed(new ClosedChannelException()));
+            }, () -> completion.failed(new ClosedChannelException()));
         }
 
         @Override public void close() {
@@ -345,6 +357,50 @@ final class BodyCarrier {
         }
     }
 
+    private void writeBody(OutboundBatch batch, PipeWriter.Completion completion) {
+        if (detached || aborted || !ch.isActive()) {
+            completion.failed(lostCause != null ? lostCause : new ClosedChannelException());
+            return;
+        }
+        if (framing == Framing.MESSAGES && batch.messageCount() == 0) { completion.completed(); return; }
+        var segments = batch.segments(null);
+        var written = ch.newPromise();
+        lastWrite = written;
+        boolean multi = framing == Framing.MESSAGES && batch.messageCount() > 1;
+        java.util.List<ChannelFuture> messages = multi ? new java.util.ArrayList<>(batch.messageCount()) : java.util.List.of();
+        if (multi) {
+            var writes = new PromiseCombiner(loop);
+            for (int message = 0, from = 0; message < batch.messageCount(); message++) {
+                if (aborted) {
+                    writes.add(ch.newFailedFuture(lostCause != null ? lostCause : new ClosedChannelException()));
+                    break;
+                }
+                int to = batch.messageEnd(message);
+                var part = java.util.Arrays.copyOfRange(segments, from, to);
+                ChannelFuture sent = ch.write(out.content(Unpooled.wrappedBuffer(part)));
+                messages.add(sent);
+                writes.add(sent);
+                from = to;
+            }
+            writes.finish(written);
+            ch.flush();
+        } else {
+            ch.writeAndFlush(out.content(Unpooled.wrappedBuffer(segments)), written);
+        }
+        written.addListener(result -> {
+            if (result.isSuccess()) completion.completed();
+            else {
+                int confirmed = 0;
+                int from = 0;
+                for (int i = 0; i < messages.size() && messages.get(i).isSuccess(); i++) {
+                    int to = batch.messageEnd(i);
+                    for (; from < to; from++) confirmed += batch.segment(from).remaining();
+                }
+                completion.failed(result.cause(), confirmed);
+            }
+        });
+    }
+
     /** The adapter ends an outbound half that zmux does not own (an uplink's response). */
     void endOut(Runnable then) {
         afterHead(() -> {
@@ -373,7 +429,7 @@ final class BodyCarrier {
     }
 
     private void check() {
-        if (finished || !inClosed || !outClosed || starting) return;
+        if (finished || !inClosed || !outClosed || starting || releasingPending) return;
         finished = true;
         done.run();
     }

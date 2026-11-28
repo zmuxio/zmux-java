@@ -23,7 +23,7 @@ class PeerInterop {
     static byte[] read(ZmuxReceiveStream stream) throws Exception {
         var out = new ByteArrayOutputStream();
         for (Chunk chunk; (chunk = get(stream.readChunkAsync(65536))) != null;) {
-            try (Chunk owned = chunk) { var view = owned.buffer(); byte[] bytes = new byte[view.remaining()]; view.get(bytes); out.write(bytes); }
+            try (Chunk owned = chunk) { out.writeBytes(owned.copy()); }
         }
         return out.toByteArray();
     }
@@ -99,7 +99,7 @@ class PeerInterop {
         try (var loops = EventLoops.create(2); var jobs = Executors.newVirtualThreadPerTaskExecutor()) {
             var builder = ZmuxConfig.builder().eventLoops(loops).enableDatagrams(true).maxIncomingUniStreams(16);
             // The peer joins in Trusted mode, which an end admits only when told to.
-            if (multipath) builder.maxPipes(4).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
+            if (multipath) builder.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(PSK).withEndToEnd()).allowRecordMode((carrier, mode, peer) -> true);
             var config = builder.build();
             try (var endpoint = initiating ? Zmux.listener(ListenerConfig.of(config)) : Zmux.listen(address("127.0.0.1:0"), ListenerConfig.of(config));
                  var child = initiating ? new InteropProcess(binary, multipath ? "mp-server" : "server", "127.0.0.1:0")

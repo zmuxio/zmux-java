@@ -39,6 +39,10 @@ public final class Lanes {
     private final PipeTable pipes;
     private final Outbox outbox;
     private final Port port;
+    private final TimerHeap deadlines = new TimerHeap();
+    private Runnable deadlineChanged;
+
+    void onDeadlineChanged(Runnable changed) { deadlineChanged = changed; }
     /** What the last {@link #laneFor} found: the binding holds; a new lane is wanted. */
     private boolean keep, needNew;
 
@@ -72,6 +76,7 @@ public final class Lanes {
         Pipe.OutLane lane0 = d.lanes.getFirst();
         if (!d.lo.offered || port.urgentLane(st) || limit() <= 1) return lane0;
         Pipe.OutLane best = null;
+        int bestBound = Integer.MAX_VALUE;
         boolean free = false;
         for (int i = 1; i < d.lanes.size(); i++) {
             Pipe.OutLane x = d.lanes.get(i);
@@ -79,9 +84,10 @@ public final class Lanes {
             int bound = x.boundSt.size();
             if (sp.bind().laneBound && sp.bind().lanePipe == p.id && sp.bind().lane == x.lane) bound--;
             if (bound == 0) free = true;
-            if (best == null || bound < best.boundSt.size()
-                    || (bound == best.boundSt.size() && x.tx.pos() - x.ack.acked() < best.tx.pos() - best.ack.acked())) {
+            if (best == null || bound < bestBound
+                    || (bound == bestBound && x.tx.pos() - x.ack.acked() < best.tx.pos() - best.ack.acked())) {
                 best = x;
+                bestBound = bound;
             }
         }
         if (best == null) best = lane0;
@@ -89,19 +95,19 @@ public final class Lanes {
         return best;
     }
 
-    /** Binds the direction to the lane laneFor picks. */
-    Pipe.OutLane bind(Pipe p, Stream st) {
+    /** Binds the direction and wakes a different lane when it acquires the work. */
+    Pipe.OutLane bind(Pipe p, Stream st, Pipe.OutLane consumer) {
         Pipe.OutLane l = laneFor(p, st);
         if (keep) return l;
-        boolean wantNew = needNew;
+        if (needNew) want(p);
+        Bind bind = st.snd.bind();
+        if (bind.laneBound && bind.lanePipe == p.id && bind.lane == l.lane) return l;
         unbind(st);
-        if (wantNew) want(p);
-        st.snd.bind().lanePipe = p.id;
-        st.snd.bind().lane = l.lane;
-        st.snd.bind().laneBound = true;
+        bind.lanePipe = p.id;
+        bind.lane = l.lane;
+        bind.laneBound = true;
         l.boundSt.add(st);
-        // The new lane's writer may already have looked for work under the old binding.
-        outbox.wake(l.lane == 0 ? p.out().sig : l.st.sig());
+        if (l != consumer) l.requestWrite();
         return l;
     }
 
@@ -133,20 +139,20 @@ public final class Lanes {
     }
 
     /** Attaches the stream the driver opened for a requested lane; returns its lane number, or -1. */
-    public long opened(long pipeId, CarrierInfo info, Waiter sig) {
+    public long opened(long pipeId, CarrierInfo info) {
         Pipe p = pipes.get(pipeId);
-        if (p == null || p.out() == null || port.closing()) return -1;
+        if (p == null || p.out() == null || p.out().failed() || port.closing()) return -1;
         Lanes.Out lo = p.out().lo;
         lo.requested = false;
-        if (lo.refused) return -1;
+        if (lo.refused || lo.pending != null) return -1;
         if (lo.next == 0) lo.next = 1;
         // Lanes are streams of the pipe's carrier connection: the pipe's record limit holds on each.
         int cap = CarrierInfo.minRecord(info.maxRecord(), p.out().lanes.getFirst().st.info().maxRecord());
         Pipe.OutLane l = new Pipe.OutLane(lo.next++, cap == info.maxRecord() ? info : info.withMaxRecord(cap), false);
         l.st.laneFirst = true;
-        l.st.openedAt = port.now();
-        l.st.sig = sig;
-        lo.pending = l;
+        lo.pending = new LaneDeadline(p, l);
+        deadlines.schedule(lo.pending, Time.add(port.now(), cfg.joinDeadline()));
+        deadlineChanged.run();
         p.out().add(l);
         pipes.changed();
         pipes.wake(p);
@@ -163,7 +169,7 @@ public final class Lanes {
     void writeFirst(RecordWriter w, Pipe p, Pipe.OutLane ol) {
         byte[] key = port.peer().laneKey;
         int n = VarInt.length(FrameType.PIPE_LANE) + 16 + VarInt.length(p.id) + VarInt.length(ol.lane);
-        if (!w.frame(n, true, bb -> FrameEncoder.pipeLane(bb, key, p.id, ol.lane))) return;
+        if (!w.setupFrame(n, true, bb -> FrameEncoder.pipeLane(bb, key, p.id, ol.lane))) return;
         ol.st.laneFirst = false;
         w.end();
         w.closeLaneOnly();
@@ -172,16 +178,17 @@ public final class Lanes {
     private void confirmed(Pipe p, Pipe.OutLane ol) {
         if (ol.st.confirmed || ol.lane == 0) return;
         ol.st.confirmed = true;
-        if (p.out().lo.pending == ol) p.out().lo.pending = null;
+        p.out().lo.cancel(ol);
         pipes.wakeWriters();
     }
 
     /** A lane that ended before it was confirmed. */
     void refused(Pipe p, Pipe.OutLane ol) {
         ol.st.refused = true;
+        ol.retire();
         p.out().lo.refused = true;
         p.out().laneRefused();
-        if (p.out().lo.pending == ol) p.out().lo.pending = null;
+        p.out().lo.cancel(ol);
         outbox.action(new Action(Action.Kind.RESET_LANE, p.id, ol.lane, Action.DIR_OUT));
     }
 
@@ -220,27 +227,31 @@ public final class Lanes {
 
     /** The earliest handshake deadline of a lane not confirmed yet. */
     long deadline() {
-        return timeouts(0, false);
+        return deadlines.earliest();
     }
 
     /** Refuses the lanes not confirmed within the handshake timeout. */
     void onTimeout(long t) {
-        timeouts(t, true);
+        deadlines.fireDue(t);
     }
 
-    private long timeouts(long t, boolean apply) {
-        long r = Time.NEVER;
-        for (Pipe p : pipes.all()) {
-            if (p.out() == null || p.out().lo.pending == null) continue;
-            Pipe.OutLane l = p.out().lo.pending;
-            long d = Time.add(l.st.openedAt, cfg.joinDeadline());
-            if (apply && t >= d) {
-                refused(p, l);
-                continue;
-            }
-            r = Math.min(r, d);
+    void closeTimers() { deadlines.clear(); }
+
+    private final class LaneDeadline extends TimerHeap.Timer {
+        private final Pipe pipe;
+        private final Pipe.OutLane lane;
+
+        LaneDeadline(Pipe pipe, Pipe.OutLane lane) {
+            this.pipe = pipe;
+            this.lane = lane;
         }
-        return r;
+
+        @Override public void fire(long now) { refused(pipe, lane); }
+
+        void cancel() {
+            deadlines.remove(this);
+            deadlineChanged.run();
+        }
     }
 
     // ---- data turns ----
@@ -266,7 +277,7 @@ public final class Lanes {
         ol.st.waiting = false;
         for (int i = 1; i < p.out().lanes.size(); i++) {
             Pipe.OutLane x = p.out().lanes.get(i);
-            if (x.st.waiting) outbox.wake(x.st.sig);
+            if (x.st.waiting) x.requestWrite();
         }
     }
 
@@ -321,8 +332,6 @@ public final class Lanes {
         private boolean refused;
         private boolean served;
         private boolean waiting;
-        private Waiter sig;
-        private long openedAt;
 
         LaneState(CarrierInfo info, boolean confirmed) {
             this.info = info;
@@ -357,19 +366,12 @@ public final class Lanes {
             return waiting;
         }
 
-        Waiter sig() {
-            return sig;
-        }
-
-        long openedAt() {
-            return openedAt;
-        }
     }
 
     /** The lane state of an outbound pipe. */
     static final class Out {
         private long next;
-        private Pipe.OutLane pending;
+        private LaneDeadline pending;
         private final boolean offered;
         private boolean requested;
         private boolean refused;
@@ -382,8 +384,14 @@ public final class Lanes {
             return next;
         }
 
-        Pipe.OutLane pending() {
-            return pending;
+        void cancel(Pipe.OutLane lane) {
+            if (pending != null && pending.lane == lane) cancel();
+        }
+
+        void cancel() {
+            if (pending == null) return;
+            pending.cancel();
+            pending = null;
         }
 
         boolean offered() {

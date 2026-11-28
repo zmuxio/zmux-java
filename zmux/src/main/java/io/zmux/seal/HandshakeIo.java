@@ -54,11 +54,10 @@ final class HandshakeIo implements PipeReader.Sink {
         }
         switch (o) {
             case Item(Chunk chunk, Runnable consumed) -> {
-                ByteBuffer data = chunk.buffer();
                 int have = messages ? 0 : buf.length;
-                byte[] b = java.util.Arrays.copyOf(buf, have + data.remaining());
-                if (messages) b = new byte[data.remaining()];
-                data.get(b, have, b.length - have);
+                int length = chunk.remaining();
+                byte[] b = messages ? new byte[length] : java.util.Arrays.copyOf(buf, have + length);
+                chunk.withBuffer(data -> data.get(b, have, length));
                 buf = b;
                 chunk.close();
                 consumed.run();
@@ -75,6 +74,13 @@ final class HandshakeIo implements PipeReader.Sink {
     }
 
     void consume(int n) { buf = java.util.Arrays.copyOfRange(buf, n, buf.length); }
+
+    /** Detects data delivered after the Hello and before starting the Reply. */
+    synchronized void checkClientWaited() throws SecureCarrierException {
+        if (queue.peekFirst() instanceof Item) {
+            throw new SecureCarrierException(SecureCarrierException.Kind.TRAILING_BYTES, "client data before Reply");
+        }
+    }
 
     /** One write on the carrier: one message on a message carrier. */
     void write(byte[] unit) throws IOException {

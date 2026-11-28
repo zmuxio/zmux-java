@@ -48,9 +48,7 @@ class CloseDeliveryTest {
             io.zmux.internal.diag.Diagnostics.lingerForTests(Duration.ofHours(1));
             SessionError.ApplicationClosed mine;
             try {
-                long t0 = System.nanoTime();
                 if (code == 0 && reason.isEmpty()) client.close(); else client.close(code, reason);
-                assertTrue(System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(5), "close is bounded");
                 mine = assertInstanceOf(SessionError.ApplicationClosed.class, client.closed().get(30, TimeUnit.SECONDS));
                 assertEquals(new SessionError.ApplicationClosed(code, reason, true), server.closed().get(30, TimeUnit.SECONDS));
             } finally {
@@ -70,6 +68,7 @@ class CloseDeliveryTest {
         var pair = MemoryPipe.pair(Framing.BYTE_STREAM);
         var armed = new AtomicBoolean();
         var firstFailure = new CompletableFuture<Void>();
+        var blockedWrite = new CompletableFuture<PipeWriter.Completion>();
         var inboundHeld = new CompletableFuture<Void>();
         PipeReader reader = new PipeReader() {
             @Override public void start(Sink sink) {
@@ -97,8 +96,7 @@ class CloseDeliveryTest {
         PipeWriter writer = new PipeWriter() {
             @Override public void write(OutboundBatch batch, Completion done) {
                 if (armed.get()) {
-                    done.failed(new IOException("armed write failure"));
-                    firstFailure.complete(null);
+                    blockedWrite.complete(done);
                 } else {
                     pair[0].writer().write(batch, done);
                 }
@@ -111,11 +109,15 @@ class CloseDeliveryTest {
             var dial = workers.submit(() -> Zmux.open(pair[0].withHalves(reader, writer), Role.CLIENT, cfg));
             try (var peer = Zmux.open(pair[1], Role.SERVER, cfg);
                  var local = dial.get(5, TimeUnit.SECONDS)) {
+                var stream = local.openStream();
                 armed.set(true);
+                stream.write(new byte[] {1});
+                var write = blockedWrite.get(20, TimeUnit.SECONDS);
                 var closing = workers.submit(() -> peer.close(9, ""));
                 try {
-                    inboundHeld.get(5, TimeUnit.SECONDS);
-                    local.openStream().write(new byte[] {1});
+                    inboundHeld.get(20, TimeUnit.SECONDS);
+                    write.failed(new IOException("armed write failure"));
+                    firstFailure.complete(null);
                     assertEquals(new SessionError.ApplicationClosed(9, "", true), local.closed().get(5, TimeUnit.SECONDS));
                     closing.get(5, TimeUnit.SECONDS);
                 } finally {

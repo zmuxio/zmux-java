@@ -1,6 +1,9 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.CarrierCharge;
+
 import io.zmux.internal.wire.FrameEncoder;
+import io.zmux.shaping.RuntimeReason;
 import io.zmux.internal.wire.VarInt;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -12,6 +15,9 @@ import java.util.function.Consumer;
  * frame of a record is omitted.
  */
 final class RecordWriter {
+    /** Coalesces small outgoing segments with the encoded headers for vectored writes. */
+    private static final int INLINE_PAYLOAD_LIMIT = 4096;
+
     private Batch b;
     Batch b() { return b; }
     private Framing framing;
@@ -20,27 +26,38 @@ final class RecordWriter {
     int recMax() { return recMax; }
     /** The shaped pipe's state; null: not shaped. */
     private Shaping.PipeShape shape;
+    private Shaping.PipeShape stopShape;
+    void stopAfterCommit(Shaping.PipeShape ps) { stopShape = ps; }
+    void committed() { if (stopShape != null) stopShape.stop(true); }
     Shaping.PipeShape shape() { return shape; }
-    /** The plan's largest frames length of the open record; 0: recMax. */
-    private int cut;
-    /** Stream data the shaping gate lets through; negative: no limit. */
-    private long shapeRoom;
     /** Backs PADDING frames (0x00 bytes); never written to. */
     private static final ByteBuffer ZERO_PAD = ByteBuffer.allocateDirect(65535).asReadOnlyBuffer();
     private int budget;
-    /** The budget the batch started with. */
-    private int budget0;
+    private int recordWorkspace;
+    private int codecEntries;
     int budget() { return budget; }
     private boolean open;
     private int sizeSeg;
     private int recBytes;
+    private int own;
+    private boolean data, control, prefix;
+    private int added, coverStart, coverLength;
+    private int bareFrames, lengthStart, lengthBytes, paddingStart, paddingBytes;
+    private boolean mergeCover;
+    private CoverResult coverResult;
+
+    record CoverResult(Shaping.PipeShape shape, long id, int bytes, int cost, boolean standalone, RuntimeReason rejection) {}
+
+    int added() { return added; }
+    CoverResult coverResult() { return coverResult; }
+    boolean canCover() { return !closed && !held && !prefix && !noHold; }
     private int recs;
     int recs() { return recs; }
-    /** The next record starts a carrier write: every record of a message carrier, the first of a batch otherwise. */
-    boolean writeStart() { return recs == 0 || framing == Framing.RECORDS; }
     private boolean elicit;
     private boolean anyElicit;
     boolean anyElicit() { return anyElicit; }
+    private long deliveryPosition;
+    final LongList deliveryEnds = new LongList();
     private int elicitEnd;
     int elicitEnd() { return elicitEnd; }
     private boolean activity;
@@ -59,6 +76,9 @@ final class RecordWriter {
     private boolean laneOnly;
     boolean laneOnly() { return laneOnly; }
     final ArrayList<Stream> touched = new ArrayList<>(0);
+    private boolean deliveryConstrained;
+    void constrainDelivery() { deliveryConstrained = true; }
+    boolean deliveryConstrained() { return deliveryConstrained; }
     private boolean newData;
     private long dataSpent;
     long dataSpent() { return dataSpent; }
@@ -67,6 +87,7 @@ final class RecordWriter {
     long dataRoom() { return dataRoom; }
     /** Multipath: log the frames for retention. */
     private boolean retain;
+    private int historySlots;
     final ArrayList<FrameDesc> descs = new ArrayList<>(0);
     final ArrayList<Integer> descRecs = new ArrayList<>(0);
     private Pipe pipe;
@@ -90,32 +111,37 @@ final class RecordWriter {
     private boolean pendDatagram;
     private long pendId;
     private long pendOff;
-    private boolean pendFin;
+    private boolean pendFin, pendFinOnly;
     private int pendN;
     private final ArrayList<ByteBuffer> pendData = new ArrayList<>(2);
     private final ArrayList<Pin> pendPins = new ArrayList<>(2);
 
     void init(Batch b, Framing framing, int recMax, int budget) {
         this.b = b;
+        codecEntries = b.codecEntries();
         this.framing = framing;
         this.recMax = recMax;
-        this.budget = budget0 = budget;
+        this.budget = budget;
+        recordWorkspace = 0;
         open = false;
         sizeSeg = 0;
         recBytes = 0;
         recs = 0;
         elicit = anyElicit = activity = traffic = closed = laneOnly = newData = held = noHold = false;
         elicitEnd = 0;
+        deliveryPosition = 0;
+        deliveryEnds.clear();
         onlyPing = true;
         touched.clear();
+        deliveryConstrained = false;
         dataSpent = 0;
-        notEarned = 0;
-        cutWaived = false;
+        added = coverLength = 0;
+        mergeCover = false;
+        coverResult = null;
         dataRoom = -1;
-        shape = null;
-        cut = 0;
-        shapeRoom = -1;
+        shape = stopShape = null;
         retain = false;
+        historySlots = Integer.MAX_VALUE;
         descs.clear();
         descRecs.clear();
         pipe = null;
@@ -125,7 +151,7 @@ final class RecordWriter {
         suspPing = false;
         epochAnswer = 0;
         pingRequests = 0;
-        pendOn = false;
+        pendOn = pendFinOnly = false;
         pendData.clear();
         pendPins.clear();
     }
@@ -134,27 +160,27 @@ final class RecordWriter {
         return framing == Framing.RECORDS ? 0 : VarInt.length(recMax);
     }
 
+    void chargeRecordWorkspace(int bytes) { recordWorkspace = bytes; }
+
+    /** Batch room spent once per new record, independent of its wire size. */
+    private int startCost() { return sizeCost() + recordWorkspace; }
+
     private int pendLen(boolean withLen) {
         if (!pendOn) return 0;
         if (pendDatagram) return 1 + pendN + (withLen ? VarInt.length(pendN) : 0);
         return FrameEncoder.streamHeaderLength(pendId, pendOff, pendN, withLen) + pendN;
     }
 
-    /** The largest frames bytes of the open record. */
-    private int max() {
-        return cut > 0 && !cutWaived ? cut : recMax;
-    }
-
     /** Frame bytes that still fit in the open record (or a new one) within the batch budget. */
     int room() {
-        if (closed) return 0;
+        if (closed || codecEntries == 0) return 0;
         if (shape != null && !open) prep();
         if (held) return 0;
         if (open) {
-            int r = Math.min(max(), framesBound(true)) - recBytes - pendLen(true);
+            int r = recMax - recBytes - pendLen(true);
             return Math.min(r, budget - pendLen(true));
         }
-        return Math.min(Math.min(max(), framesBound(false)), budget - sizeCost());
+        return Math.min(recMax, budget - startCost());
     }
 
     private void prep() {
@@ -166,7 +192,11 @@ final class RecordWriter {
         if (open) return;
         if (shape != null) prep();
         open = true;
-        recBytes = 0;
+        budget -= recordWorkspace;
+        recBytes = own = 0;
+        bareFrames = -1;
+        lengthBytes = paddingBytes = 0;
+        data = control = prefix = false;
         elicit = false;
         sizeSeg = b.segmentCount();
         if (framing == Framing.BYTES) b.reserveSeg(); // filled at end()
@@ -174,38 +204,47 @@ final class RecordWriter {
 
     /** Whether a frame of n bytes fits, header included. */
     boolean fits(int n) {
-        if (closed) return false;
+        if (closed || codecEntries == 0) return false;
         if (shape != null && !open) prep();
         if (held) return false;
         if (open) {
             int len = recBytes + pendLen(true) + n;
-            return len <= max() && pendLen(true) + n <= budget && len <= framesBound(true);
+            return len <= recMax && pendLen(true) + n <= budget;
         }
-        return n <= max() && sizeCost() + n <= budget && n <= framesBound(false);
-    }
-
-    /**
-     * The most frames bytes the open record (open) or the next one may hold so that its plan's
-     * padded target fits the batch: 0 when the next record's target does not fit, so
-     * that it opens in the next batch. Unbounded unshaped, and for the batch's first record (a batch
-     * smaller than the target could never send it), which also takes what the batch holds once open.
-     */
-    private int framesBound(boolean open) {
-        Shaping.PipeShape ps = shape;
-        if (ps == null || !ps.planned()) return Integer.MAX_VALUE;
-        if (!open && recs == 0) return Integer.MAX_VALUE;
-        // The room clampPad gives the record's PADDING.
-        int total = Math.min(recMax, (open ? recBytes : 0) + budget - VarInt.length(recMax));
-        int bound = ps.framesBound(total);
-        return bound >= 0 ? bound : open ? Integer.MAX_VALUE : 0;
+        return n <= recMax && startCost() + n <= budget;
     }
 
     private boolean newRecordFits(int n) {
-        return !closed && n <= max() && sizeCost() + n <= budget - (open ? pendLen(false) : 0);
+        return !closed && codecEntries != 0 && n <= recMax && startCost() + n <= budget - (open ? pendLen(false) : 0);
     }
 
     /** Appends a frame of n bytes written by f; false when it does not fit. */
     boolean frame(int n, boolean elicits, Consumer<ByteBuffer> f) {
+        return controlFrame(n, elicits, false, f);
+    }
+
+    boolean copiedFrame(int n, boolean elicits, Consumer<ByteBuffer> f) {
+        return controlFrame(n, elicits, true, f);
+    }
+
+    boolean controlFrame(int n, boolean elicits, boolean repeated, Consumer<ByteBuffer> f) {
+        return frame(n, elicits, f, false, !repeated);
+    }
+
+    /** A frame that needs room in the retransmission history if multipath is in use. */
+    boolean trackedFrame(int bytes, boolean repeated, Consumer<ByteBuffer> encode, FrameDesc desc) {
+        if (!historyRoom() || !controlFrame(bytes, true, repeated, encode)) return false;
+        logFrame(desc);
+        return true;
+    }
+
+    boolean historyRoom() { return historySlots != 0; }
+
+    boolean setupFrame(int n, boolean elicits, Consumer<ByteBuffer> f) {
+        return frame(n, elicits, f, true, false);
+    }
+
+    private boolean frame(int n, boolean elicits, Consumer<ByteBuffer> f, boolean setup, boolean original) {
         // The record floor keeps every unsplittable frame within a record: one beyond it would wait forever.
         if (n > recMax) throw new IllegalStateException("a " + n + "-byte frame exceeds the " + recMax + "-byte record limit");
         if (!fits(n)) {
@@ -213,6 +252,7 @@ final class RecordWriter {
             end();
             if (!fits(n)) return false;
         }
+        codecEntries--;
         begin();
         flushPend(true);
         ByteBuffer a = b.arena(n);
@@ -223,21 +263,37 @@ final class RecordWriter {
         recBytes += l;
         budget -= l;
         if (elicits) elicit = true;
+        prefix |= setup;
+        if (original) {
+            own += l;
+            control |= shape != null && shape.wantsOutbound();
+        }
         return true;
     }
 
     /** Adds STREAM data; a contiguous continuation of the pending frame joins it. */
-    boolean stream(long id, long off, ByteBuffer data, Pin pn, boolean fin) {
+    boolean stream(Stream stream, long off, SendQueue.Peek fragment, boolean fin, boolean original) {
+        ByteBuffer data = fragment == null ? null : fragment.data();
+        Pin pin = fragment == null ? Pin.NONE : fragment.pin();
+        if (!stream(stream.tab.id(), off, data, pin, fin, original)) return false;
+        if (fragment != null) fragment.attachReceipt(b);
+        return true;
+    }
+
+    boolean stream(long id, long off, ByteBuffer data, Pin pn, boolean fin, boolean original) {
+        if (!historyRoom() || codecEntries == 0) return false;
         int len = data == null ? 0 : data.remaining();
         if (open && pendOn && !pendDatagram && !pendFin && pendId == id && pendOff + pendN == off && len > 0) {
             int grow = FrameEncoder.streamHeaderLength(id, pendOff, pendN + len, true) + len
                     - FrameEncoder.streamHeaderLength(id, pendOff, pendN, true);
             int grown = recBytes + pendLen(true) + grow;
-            if (grown <= max() && pendLen(true) + grow <= budget && grown <= framesBound(true)) {
+            if (grown <= recMax && pendLen(true) + grow <= budget) {
+                codecEntries--;
                 pendData.add(data);
                 pendPins.add(pn);
                 pendN += len;
                 pendFin = fin;
+                if (original) ownsStream(len, fin);
                 if (!pn.none()) b.pin(pn);
                 return true;
             }
@@ -248,6 +304,7 @@ final class RecordWriter {
             end();
             if (!fits(n)) return false;
         }
+        codecEntries--;
         begin();
         flushPend(true);
         pendOn = true;
@@ -256,6 +313,7 @@ final class RecordWriter {
         pendOff = off;
         pendFin = fin;
         pendN = len;
+        if (original) ownsStream(len, fin);
         pendData.add(data == null ? ByteBuffer.allocate(0) : data);
         pendPins.add(pn);
         if (!pn.none()) b.pin(pn);
@@ -271,17 +329,26 @@ final class RecordWriter {
     }
 
     /** Adds a DATAGRAM frame (LEN omitted when it ends its record). */
-    boolean datagram(byte[] data) {
+    boolean datagram(byte[] data, int ownPayload, Datagrams.NativeWork item, Datagrams.SendFlow flow,
+                     java.util.function.Predicate<Datagrams.NativeWork> eligible) {
         int n = 1 + VarInt.length(data.length) + data.length;
+        if (item != null && !open && shape != null && newRecordFits(n)) shape.recordDatagram(this, item, flow, eligible);
         if (!fits(n)) {
             if (!open || !newRecordFits(n)) return false;
             end();
+            if (item != null && shape != null) shape.recordDatagram(this, item, flow, eligible);
             if (!fits(n)) return false;
         }
+        if (item != null && shape != null) shape.recordDatagramSent(item);
+        codecEntries--;
         begin();
         flushPend(true);
         pendOn = true;
         pendDatagram = true;
+        if (ownPayload >= 0) {
+            own += ownPayload;
+            this.data = true;
+        }
         pendN = data.length;
         pendData.add(ByteBuffer.wrap(data));
         pendPins.add(Pin.NONE);
@@ -291,11 +358,17 @@ final class RecordWriter {
         return true;
     }
 
+    void chargeDatagram(CarrierCharge charge, int payloadLength) {
+        b.charge(charge, 0, payloadLength);
+    }
+
     private void flushPend(boolean withLen) {
         if (!pendOn) return;
         pendOn = false;
         int hl = pendDatagram ? 1 + (withLen ? VarInt.length(pendN) : 0)
                 : FrameEncoder.streamHeaderLength(pendId, pendOff, pendN, withLen);
+        if (pendFinOnly) own += hl - (withLen && bareFrames >= 0 ? lengthBytes : 0);
+        pendFinOnly = false;
         ByteBuffer a = b.arena(hl);
         int p0 = a.position();
         if (pendDatagram) FrameEncoder.datagramHeader(a, pendN, withLen);
@@ -304,7 +377,7 @@ final class RecordWriter {
         for (int i = 0; i < pendData.size(); i++) {
             ByteBuffer d = pendData.get(i);
             Pin pn = pendPins.get(i);
-            if (d.remaining() < RecvBuffer.REF_THRESHOLD || pn.none()) {
+            if (d.remaining() < INLINE_PAYLOAD_LIMIT || pn.none()) {
                 // Small or owned pieces are copied: they extend the arena segment.
                 a = b.arena(d.remaining());
                 int q0 = a.position();
@@ -323,16 +396,25 @@ final class RecordWriter {
 
     /** Closes the open record and writes its Size. */
     void end() {
-        cutWaived = false;
         if (!open) return;
         Shaping.PipeShape ps = shape;
         if (ps != null && ps.planned() && recBytes + pendLen(false) > 0) endShaped(ps);
         else flushPend(false);
         open = false;
         if (recBytes == 0) {
+            budget += recordWorkspace;
             if (framing == Framing.BYTES) b.dropSegs(sizeSeg);
             return;
         }
+        int head = sizeBytes(recBytes);
+        int start = b.bytes() - recBytes;
+        boolean standalone = coverLength > 0 && coverResult.standalone();
+        if (standalone) b.standalone(recs);
+        int baselineHead = standalone ? 0 : sizeBytes(bareFrames < 0 ? recBytes : bareFrames);
+        b.extraSpan(start + baselineHead, head - baselineHead);
+        b.extraSpan(head + lengthStart, lengthBytes);
+        b.extraSpan(head + paddingStart, paddingBytes);
+        b.extraSpan(head + coverStart, coverLength);
         int first = sizeSeg;
         if (framing == Framing.BYTES) {
             ByteBuffer a = b.arena(8);
@@ -341,111 +423,133 @@ final class RecordWriter {
             b.fillSeg(sizeSeg, p0);
             budget -= a.position() - p0;
         }
+        if (coverLength > 0) {
+            b.cover(coverStart + sizeBytes(recBytes), coverLength, coverResult.shape(), coverResult.id());
+            coverLength = 0;
+        }
         b.addRecord(first, b.segmentCount(), recBytes);
+        b.recordReceipt(own, data && !prefix, control && !prefix);
         recs++;
+        deliveryPosition += Batch.positionBytes(recBytes);
         if (elicit) {
+            if (pipe != null && pipe.mp() != null) deliveryEnds.addBounded(deliveryPosition, FrameHistory.SLOTS);
             anyElicit = true;
             elicitEnd = b.bytes();
         }
     }
 
-    /**
-     * Applies the plan to the record being closed; the pending frame is still to be flushed. A
-     * size target (pad_to, pad_multiple) is met exactly: the PADDING follows the last frame, which
-     * then keeps its Length field, unless the target falls within that field, where the PADDING
-     * goes before the last frame, which ends the record without it. Injected PADDING follows the
-     * last frame in full, on top of the target of the frames.
-     */
     private void endShaped(Shaping.PipeShape ps) {
-        int bare = recBytes + pendLen(false), full = recBytes + pendLen(true);
-        int extra = ps.extraPad();
-        if (cut > 0 && full >= cut) ps.owner().spend(ps.cutCost(cut)); // cut at the plan's largest record: the next record's head
-        if (extra > 0) {
+        int tail = pendLen(false);
+        int bare = recBytes + tail;
+        int full = recBytes + pendLen(true);
+        bareFrames = bare;
+        int target = ps.target(bare);
+        long room = extraRoom(ps);
+        int available = Math.min(maxFrames(), bare + (int) Math.min(recMax, room));
+        if (ps.owner().noPadding()) available = bare;
+        // Keep the existing record intact if the remaining budget has shrunk below its size.
+        //noinspection MathClampMigration
+        int padded = Math.max(bare, Math.min(target, available));
+        while (padded > bare && cost(bare, padded) > room) padded--;
+        if (padded < target) {
+            var reason = ps.owner().noPadding() ? RuntimeReason.DISABLED
+                    : cost(bare, Math.min(maxFrames(), target)) > room ? RuntimeReason.OVERHEAD_LIMIT : RuntimeReason.CLIPPED_ROOM;
+            ps.owner().clip(reason);
+        }
+        added += cost(bare, padded);
+
+        if (padded > full) {
+            lengthBytes = full - bare;
+            if (lengthBytes > 0) lengthStart = b.bytes() + pendLen(true) - pendN - lengthBytes;
             flushPend(true);
-            pad(clampPad(ps, ps.target(full) - full + extra, 0));
+            paddingStart = b.bytes();
+            paddingBytes = padded - full;
+            pad(paddingBytes);
+            if (mergeCover) merge(ps, padded);
         } else {
-            int t = ps.target(bare);
-            if (t == bare) {
-                flushPend(false);
-            } else if (t >= full) {
-                flushPend(true);
-                pad(clampPad(ps, t - full, 0));
-            } else {
-                pad(clampPad(ps, t - bare, pendLen(false)));
-                flushPend(false);
-            }
+            paddingStart = b.bytes();
+            paddingBytes = padded - bare;
+            pad(paddingBytes);
+            if (mergeCover) merge(ps, padded);
+            flushPend(false);
         }
         ps.ended(this);
     }
 
-    /** Bounds n bytes of PADDING by the record and batch room left besides rest bytes still to follow, and meters what is not yet. */
-    private int clampPad(Shaping.PipeShape ps, int n, int rest) {
-        int avail = Math.min(recMax - recBytes - rest, budget - rest - VarInt.length(recMax));
-        if (n > avail) {
-            n = Math.max(avail, 0);
-            ps.owner().clamp();
-        }
-        Shaping sh = ps.owner();
-        if (sh.noPadding()) {
-            if (n > 0) sh.clamp();
-            return 0;
-        }
-        sh.spend(n - ps.extraPad()); // the account already metered the injection
-        return n;
+    private int sizeBytes(int frames) { return framing == Framing.BYTES ? VarInt.length(frames) : 0; }
+
+    private int cost(int before, int after) { return after + sizeBytes(after) - before - sizeBytes(before); }
+
+    private long extraRoom(Shaping.PipeShape ps) {
+        return Math.max(0, ps.owner().profileRoom() - added);
     }
 
-    /** Appends n bytes of PADDING to the open record. */
+    /** Exact record capacity with the remaining batch budget, including a length-width transition. */
+    private int maxFrames() {
+        int total = (open ? recBytes : -recordWorkspace) + budget;
+        int fit = Math.min(recMax, total);
+        while (fit > 0 && fit + sizeBytes(fit) > total) fit--;
+        return fit;
+    }
+
     private void pad(int n) {
         if (n <= 0) return;
         b.refSeg(ZERO_PAD.slice(0, n));
         recBytes += n;
         budget -= n;
-        notEarned += n;
     }
 
-    /** Frame bytes of the open record, the pending frame included; 0 when none is open. */
-    int openBytes() {
-        return open ? recBytes + pendLen(false) : 0;
-    }
-
-    /** Nothing was written to the batch yet. */
-    boolean batchEmpty() { return budget == budget0; }
-
-    /** The largest PADDING-only record that fits the batch. */
-    int padRoom() {
-        return Math.min(recMax, budget - VarInt.length(recMax));
-    }
-
-    /** Writes a record of n bytes of PADDING only, outside the plan. */
-    void padRecord(int n) {
+    boolean cover() {
         Shaping.PipeShape ps = shape;
+        if (coverResult != null) return true;
+        if (open && recBytes + pendLen(false) > 0 && ps.planned()) {
+            mergeCover = true;
+            end();
+            mergeCover = false;
+            if (coverResult != null || !ps.active()) return true;
+        }
+        end();
+        if (closed || held || codecEntries == 0) return false;
+        int frames = Math.min(ps.injectionLength(), maxFrames());
+        if (frames < Math.min(ps.injectionLength(), recMax) && b.n() != 0) return false;
+        int cost = frames + sizeBytes(frames) + ps.overHere(this);
+        if (!acceptCover(ps, frames, cost, true)) return true;
         shape = null;
+        codecEntries--;
         begin();
-        pad(n);
+        coverPad(frames);
         end();
         shape = ps;
-        if (framing != Framing.RECORDS) notEarned += Batch.positionBytes(n) - n;
+        return true;
+    }
+
+    private void merge(Shaping.PipeShape ps, int frames) {
+        int padding = Math.clamp(maxFrames() - frames, 0, ps.injectionLength());
+        if (padding == 0 && ps.owner().coverRejection(1, 0, Long.MAX_VALUE, false, 0) == null) return;
+        if (acceptCover(ps, padding, cost(frames, frames + padding), false)) coverPad(padding);
+    }
+
+    private boolean acceptCover(Shaping.PipeShape ps, int frames, int cost, boolean standalone) {
+        if (frames < ps.injectionLength()) ps.owner().clip(RuntimeReason.CLIPPED_ROOM);
+        var reason = ps.owner().coverRejection(frames, cost, extraRoom(ps),
+                standalone && !ps.owner().peerZmux(), pingRequests);
+        long id = ps.injectionId();
+        ps.clearInjection();
+        if (frames < 0) throw new IllegalStateException("negative cover layout");
+        coverResult = new CoverResult(ps, id, reason == null ? frames : 0, reason == null ? cost : 0, standalone, reason);
+        if (reason != null) return false;
+        added += cost;
+        return true;
+    }
+
+    private void coverPad(int n) {
+        coverStart = b.bytes();
+        coverLength = n;
+        pad(n);
     }
 
     /** The shaped pipe of this batch. */
     void shape(Shaping.PipeShape ps) { shape = ps; }
-
-    /** The plan's largest frames length; 0: none. */
-    void cut(int n) { cut = n; }
-
-    /** The record's first frame carries a whole preamble, past the plan's largest record. */
-    private boolean cutWaived;
-
-    /**
-     * Whether the empty record, past a plan's largest record, takes a first frame of a head and a preamble that do not fit
-     * otherwise: the plan gives way, or the stream never opens.
-     */
-    boolean waiveCutFor(int head, long preamble) {
-        if (held || cut <= 0 || (recBytes + pendLen(false) > 0 && open)) return false;
-        if (Math.max(Math.min(recMax, budget - sizeCost()) - head, 0) < preamble) return false;
-        cutWaived = true;
-        return true;
-    }
 
     /** The planned record waits for its delay. */
     void holdRecord() { held = !noHold; }
@@ -456,20 +560,16 @@ final class RecordWriter {
         held = false;
     }
 
-    /** The gate's share of stream data in this batch. */
-    void shapeRoom(long n) { shapeRoom = n; }
-
     /** Bounds the data bytes of a STREAM frame, room, by the shaping gate. */
     int dataFit(int room) {
-        return shapeRoom >= 0 && room > shapeRoom ? (int) shapeRoom : room;
+        return shape == null ? room : shape.dataFit(this, room);
     }
-
-    /** The record ends its carrier write: nothing more goes into this batch. */
-    void flushBatch() { budget = 0; }
 
     /** Records a frame of the record being built (multipath retention only). */
     void logFrame(FrameDesc d) {
         if (!retain) return;
+        if (!historyRoom()) throw new IllegalStateException("missing history slot");
+        historySlots--;
         descs.add(d);
         descRecs.add(recs);
     }
@@ -512,8 +612,9 @@ final class RecordWriter {
     }
 
     /** Multipath: log the frames of a batch for pipe p for retention. */
-    void retainFor(Pipe p) {
+    void retainFor(Pipe p, int slots) {
         retain = true;
+        historySlots = slots;
         pipe = p;
     }
 
@@ -533,17 +634,18 @@ final class RecordWriter {
         dataRoom = room;
     }
 
-    /** Bytes of this batch that are not this endpoint's own: padding, injections and copies. */
-    private long notEarned;
-    long notEarned() { return notEarned; }
-
-    /** A frame of already sent stream data at off: it earns the account nothing. */
-    void copied(long id, long off, long n) { notEarned += FrameEncoder.streamHeaderLength(id, off, (int) n, true) + n; }
+    /** The just-written STREAM frame contains original bytes or an original FIN. */
+    private void ownsStream(int n, boolean fin) {
+        own += n;
+        data |= n > 0;
+        pendFinOnly = n == 0 && fin;
+        control |= pendFinOnly;
+    }
 
     /** Charges n bytes of stream data to the limiter's room. */
     void spendData(long n) {
         dataSpent += n;
         if (dataRoom > 0) dataRoom = Math.max(dataRoom - n, 0);
-        if (shapeRoom > 0) shapeRoom = Math.max(shapeRoom - n, 0);
+        if (shape != null) shape.spent(n);
     }
 }

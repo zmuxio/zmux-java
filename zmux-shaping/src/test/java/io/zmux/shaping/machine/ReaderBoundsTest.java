@@ -3,6 +3,9 @@ package io.zmux.shaping.machine;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -14,7 +17,7 @@ class ReaderBoundsTest {
     }
 
     private static byte[] bundle(String... machines) {
-        return ("{\"kinds\":{\"default\":[{\"machines\":[" + String.join(",", machines) + "]}]}}").getBytes(StandardCharsets.UTF_8);
+        return ("{\"schema\":2,\"kinds\":{\"default\":[{\"machines\":[" + String.join(",", machines) + "]}]}}").getBytes(StandardCharsets.UTF_8);
     }
 
     private static DefinitionException.Category failed(byte[] b, MachineOptions o) {
@@ -41,31 +44,27 @@ class ReaderBoundsTest {
 
     /** The handshake hook and the pool policy take their own locks, so they draw from sources of their own. */
     @Test void theHandshakeHookAndThePoolPolicyDrawFromSourcesOfTheirOwn() throws Exception {
-        var overlap = new java.util.concurrent.atomic.AtomicBoolean();
-        var o = MachineOptions.defaults().withNewSource(() -> new java.util.random.RandomGenerator() {
-            final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean();
-            long x;
-            @Override public long nextLong() {
-                if (!busy.compareAndSet(false, true)) overlap.set(true);
-                Thread.onSpinWait();
-                long v = ++x * 0x9E3779B97F4A7C15L;
-                busy.set(false);
-                return v;
-            }
+        var nextSource = new AtomicInteger();
+        var used = new HashSet<Integer>();
+        var o = MachineOptions.defaults().withNewSource(() -> {
+            int id = nextSource.getAndIncrement();
+            return () -> { used.add(id); return 0; };
         });
         String each = "{\"t\":\"a\"}";
         String candidate = "{\"handshakes\":{\"join\":{\"hello\":{\"pad\":" + each + "}}},"
                 + "\"pool\":{\"count\":1,\"retire\":[{\"metric\":\"age\",\"above\":" + each + "}]}}";
-        Bundle b = Bundle.parse(("{\"tables\":{\"a\":[[1,1,1000]]},\"kinds\":{\"default\":[" + candidate + "]}}").getBytes(StandardCharsets.UTF_8), o);
+        Bundle b = Bundle.parse(("{\"schema\":2,\"tables\":{\"a\":[[1,1,1000]]},\"kinds\":{\"default\":[" + candidate + "]}}").getBytes(StandardCharsets.UTF_8), o);
         var k = b.kind("default");
         assertNotNull(k.pool);
         var view = java.util.List.of(new MachinePoolPolicy.Metrics(1, 5, 0, 1, 0, 0));
-        Thread t = Thread.ofPlatform().start(() -> {
-            for (int i = 0; i < 300_000 && !overlap.get(); i++) k.plan("join", "hello");
-        });
-        for (int i = 0; i < 300_000 && !overlap.get(); i++) k.pool.decide(0, null, view);
-        t.join();
-        assertFalse(overlap.get(), "one source under two locks");
+        used.clear();
+        k.plan("join", "hello");
+        assertFalse(used.isEmpty());
+        var handshakeSources = Set.copyOf(used);
+        used.clear();
+        k.pool.decide(0, null, view);
+        assertFalse(used.isEmpty());
+        assertTrue(java.util.Collections.disjoint(handshakeSources, used), "one source under two locks");
     }
 
     @Test void slotsOfAllMachinesAreBoundedBeforeAnyPipeAllocatesThem() throws Exception {
@@ -111,7 +110,7 @@ class ReaderBoundsTest {
 
     @Test void maxBytesCountsTheTables() throws Exception {
         String pad = " ".repeat(500);
-        byte[] b = ("{\"tables\":{\"a\":[[1,1,1]" + pad + "]},\"kinds\":{\"default\":[{}]}}").getBytes(StandardCharsets.UTF_8);
+        byte[] b = ("{\"schema\":2,\"tables\":{\"a\":[[1,1,1]" + pad + "]},\"kinds\":{\"default\":[{}]}}").getBytes(StandardCharsets.UTF_8);
         assertEquals(DefinitionException.Category.LIMIT, failed(b, MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxBytes(100))));
         Bundle.parse(b, MachineOptions.defaults().withLimits(SizeLimits.NONE.withMaxBytes(b.length)));
     }
@@ -122,8 +121,8 @@ class ReaderBoundsTest {
         StringBuilder s = new StringBuilder("{\"machines\":[{\"start\":0,\"states\":[");
         for (int i = 0; i < n; i++) {
             s.append(i == 0 ? "" : ",");
-            if (i + 1 < n) s.append("{\"next\":[{\"on\":\"record_out\",\"to\":").append(i + 1).append("}]}");
-            else s.append("{\"next\":[{\"on\":\"record_out\",\"to\":0}]}");
+            if (i + 1 < n) s.append("{\"next\":[{\"on\":\"record_plan\",\"to\":").append(i + 1).append("}]}");
+            else s.append("{\"next\":[{\"on\":\"record_plan\",\"to\":0}]}");
         }
         s.append("]}]}");
         assertEquals(n, Definition.parse(s.toString()).machines.getFirst().states().size());

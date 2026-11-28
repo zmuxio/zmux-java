@@ -79,14 +79,10 @@ class CarrierHooksTest {
         c.report("k", CarrierKind.WEBSOCKET, "x", CarrierCache.Outcome.REJECTED);
         assertTrue(c.backingOff("k", CarrierKind.WEBSOCKET, "x"));
         assertFalse(c.backingOff("k", CarrierKind.WEBSOCKET));
-        assertEquals(1, c.snapshot().entries().size());
-        var e = c.snapshot().entries().getFirst();
-        assertEquals(c.backoffMax(), e.backoff(), "a definite verdict skips for the maximum backoff");
-        assertEquals("x", CarrierCache.Snapshot.fromJson(c.snapshot().toJson()).entries().getFirst().variant());
+        assertEquals(c.config().backoff().max(), c.score("k", CarrierKind.WEBSOCKET, "x").nominalBackoff());
         c.report("k", CarrierKind.WEBSOCKET, "x", CarrierCache.Outcome.USABLE);
-        assertTrue(c.usable("k", CarrierKind.WEBSOCKET, "x"));
-        c.report("k", CarrierKind.WEBSOCKET, "x", CarrierCache.Outcome.FAILED);
-        assertTrue(c.backingOff("k", CarrierKind.WEBSOCKET, "x"));
+        assertFalse(c.usable("k", CarrierKind.WEBSOCKET, "x"));
+        assertEquals(2, c.score("k", CarrierKind.WEBSOCKET, "x").attempts());
     }
 
     private record Pair(ZmuxSession client, ZmuxSession server, ZmuxListener listener) implements AutoCloseable {
@@ -94,8 +90,8 @@ class CarrierHooksTest {
     }
 
     private static Pair pair(EventLoops loops, PipeAuth clientM, PipeAuth serverM, java.util.function.UnaryOperator<PipeIo> side) throws IOException {
-        var s = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(serverM).build();
-        var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(clientM).build();
+        var s = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(serverM).build();
+        var c = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(clientM).build();
         var l = Zmux.listener(ListenerConfig.of(s));
         var p = MemoryPipe.pair(Framing.BYTE_STREAM);
         l.adapter().handle(side.apply(p[1]), JoinHint.inBand(TestAddr.peer("peer")));
@@ -116,34 +112,24 @@ class CarrierHooksTest {
     @Test void deferredPskOpensJoinsOnceSupplied() throws Exception {
         try (EventLoops loops = EventLoops.create(1);
              var p = pair(loops, mp(PipeAuth.deferred().withEndToEnd()), mp(PipeAuth.deferred().withEndToEnd()), x -> x)) {
-            assertTrue(p.client.info().joinPending() || waitPending(p.client));
+            SessionTestSupport.await(p.client, () -> p.client.info().joinPending());
             assertThrows(JoinPendingException.class, () -> join(p));
             assertThrows(IllegalArgumentException.class, () -> p.client.setJoinSecret(new byte[4]));
             p.client.setJoinSecret(PSK);
             assertThrows(JoinSecretSetException.class, () -> p.client.setJoinSecret(PSK));
-            // The peer's join is held until its own PSK arrives, then goes on.
             var j = MemoryPipe.pair(Framing.BYTE_STREAM);
             p.listener.adapter().handle(j[1], JoinHint.inBand(TestAddr.peer("peer")));
-            var pipe = Thread.ofVirtual().start(() -> {
-                try { p.client.addPipe(j[0], PipeOptions.defaults()); } catch (IOException e) { throw new AssertionError(e); }
-            });
-            long t0 = System.nanoTime();
-            while (p.server.stats().joinPending() == 0 && System.nanoTime() - t0 < WAIT.toNanos()) Thread.sleep(5);
-            assertEquals(1, p.server.stats().joinPending(), "held, not failed");
-            assertEquals(0, p.server.stats().joinAuthFailures());
-            p.server.setJoinSecret(PSK);
-            pipe.join(WAIT);
-            t0 = System.nanoTime();
-            while (p.server.pipes().size() < 2 && System.nanoTime() - t0 < WAIT.toNanos()) Thread.sleep(5);
-            assertEquals(2, p.server.pipes().size());
-            assertFalse(p.server.info().joinPending());
+            try (var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                var pipe = workers.submit(() -> p.client.addPipe(j[0], PipeOptions.defaults()));
+                SessionTestSupport.await(p.server, () -> p.server.stats().joinPending() == 1);
+                assertFalse(pipe.isDone(), "the peer is still waiting for authorization to start");
+                assertEquals(0, p.server.stats().joinAuthFailures());
+                p.server.setJoinSecret(PSK);
+                var attached = pipe.get(20, java.util.concurrent.TimeUnit.SECONDS);
+                assertTrue(PeerAttachedTest.held(p.server, attached));
+                assertFalse(p.server.info().joinPending());
+            }
         }
-    }
-
-    private static boolean waitPending(ZmuxSession s) throws InterruptedException {
-        long t0 = System.nanoTime();
-        while (!s.info().joinPending() && System.nanoTime() - t0 < WAIT.toNanos()) Thread.sleep(2);
-        return s.info().joinPending();
     }
 
     private static PipeIo.Exporter counting(AtomicInteger reads, byte tag) {
@@ -172,8 +158,8 @@ class CarrierHooksTest {
 
     @Test void failedExporterReadClosesWithInternalError() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var bad = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
-            var good = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
+            var bad = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
+            var good = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
             try (var l = Zmux.listener(ListenerConfig.of(good))) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(p[1].withExporter((x, y, z) -> new byte[z]), JoinHint.inBand(TestAddr.peer("peer")));
@@ -188,7 +174,7 @@ class CarrierHooksTest {
 
     @Test void exporterOnACarrierWithoutOneIsAConfigurationError() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.exporter().withEndToEnd())).build();
             var p = MemoryPipe.pair(Framing.BYTE_STREAM);
             assertThrows(IllegalArgumentException.class, () -> Zmux.open(p[0], Role.CLIENT, cfg));
             p[1].reader().close();
@@ -274,7 +260,7 @@ class CarrierHooksTest {
 
     @Test void shapingLimitsAreReplacedAtRuntime() throws Exception {
         try (EventLoops loops = EventLoops.create(1); var p = pair(loops, mp(PipeAuth.psk(new byte[32]).withEndToEnd()), mp(PipeAuth.psk(new byte[32]).withEndToEnd()), x -> x)) {
-            var l = ShapingLimits.defaults().withWire(new io.zmux.shaping.WireAccount(5, 0, 0));
+            var l = ShapingLimits.defaults().withWire(new io.zmux.shaping.WireAccount(5, 5, 0, 0));
             p.client.setShapingLimits(l);
             assertEquals(l, p.client.shapingLimits());
         }
@@ -318,9 +304,9 @@ class CarrierHooksTest {
     /** A join held for the deferred PSK keeps its source's slot until it has its result. */
     @Test void heldJoinKeepsItsSourceSlot() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
-            var s = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
-            var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
-            try (var l = Zmux.listener(ListenerConfig.builder().session(s).maxPendingPerSource(1).build())) {
+            var s = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
+            var c = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
+            try (var l = Zmux.listener(ListenerConfig.builder().session(s).maxPendingPerSource(2).build())) {
                 var boot = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(boot[1], JoinHint.inBand(TestAddr.peer("boot")));
                 try (var client = Zmux.open(boot[0], Role.CLIENT, c); var server = l.accept(WAIT)) {
@@ -328,20 +314,20 @@ class CarrierHooksTest {
                     var source = TestAddr.peer("joiner");
                     var j = MemoryPipe.pair(Framing.BYTE_STREAM);
                     l.adapter().handle(j[1], JoinHint.inBand(source));
-                    var pipe = Thread.ofVirtual().start(() -> {
-                        try { client.addPipe(j[0], PipeOptions.defaults()); } catch (IOException e) { throw new AssertionError(e); }
-                    });
-                    long t0 = System.nanoTime();
-                    while (server.stats().joinPending() == 0 && System.nanoTime() - t0 < WAIT.toNanos()) Thread.sleep(5);
-                    assertEquals(1, server.stats().joinPending());
-                    assertNull(l.adapter().reserve(source, source), "the held join holds the slot");
-                    server.setJoinSecret(PSK);
-                    pipe.join(WAIT);
-                    t0 = System.nanoTime();
-                    io.zmux.adapter.Slot slot;
-                    while ((slot = l.adapter().reserve(source, source)) == null && System.nanoTime() - t0 < WAIT.toNanos()) Thread.sleep(5);
-                    assertNotNull(slot, "the slot goes with the result");
-                    slot.release();
+                    try (var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                        var pipe = workers.submit(() -> client.addPipe(j[0], PipeOptions.defaults()));
+                        SessionTestSupport.await(server, () -> server.stats().joinPending() == 1);
+                        var held = l.adapter().reserve(source, source);
+                        assertNotNull(held);
+                        try {
+                            assertNull(l.adapter().reserve(source, source), "the deferred Join owns the other slot");
+                            server.setJoinSecret(PSK);
+                            assertTrue(PeerAttachedTest.held(server, pipe.get(20, java.util.concurrent.TimeUnit.SECONDS)));
+                            var returned = l.adapter().reserve(source, source);
+                            assertNotNull(returned, "the confirmed Join returned its admission slot");
+                            returned.release();
+                        } finally { held.release(); }
+                    }
                 }
             }
         }
@@ -529,8 +515,8 @@ class CarrierHooksTest {
         var infos = new AtomicInteger();
         try (EventLoops loops = EventLoops.create(1)) {
             var base = ZmuxConfig.builder().eventLoops(loops).build();
-            var chosen = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
-            var c = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
+            var chosen = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
+            var c = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(mp(PipeAuth.deferred().withEndToEnd())).build();
             var lc = ListenerConfig.builder().session(base).sessionConfigs((info, admitted) -> { infos.incrementAndGet(); return chosen; }).build();
             try (var l = Zmux.listener(lc)) {
                 var p = MemoryPipe.pair(Framing.BYTE_STREAM);
@@ -538,7 +524,7 @@ class CarrierHooksTest {
                 try (var _ = Zmux.open(p[0], Role.CLIENT, c); var s = l.accept(WAIT)) {
                     assertNotNull(s);
                     assertEquals(1, infos.get());
-                    assertTrue(waitPending(s), "the chosen configuration's deferred PSK");
+                    SessionTestSupport.await(s, () -> s.info().joinPending());
                 }
             }
             var failing = ListenerConfig.builder().session(base).sessionConfigs((info, a) -> { throw new IllegalStateException("no"); }).build();

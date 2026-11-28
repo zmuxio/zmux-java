@@ -1,5 +1,7 @@
 package io.zmux.internal.loop;
 
+import io.zmux.carrier.CarrierChannel;
+
 import io.zmux.internal.spi.AttachmentRelease;
 import io.zmux.internal.spi.CarrierProvider;
 
@@ -21,6 +23,12 @@ public sealed interface Transport extends AttachmentRelease.Resource, CarrierPro
     @Override default Object carrierIdentity() { return info().connection(); }
 
     SessionHost loop();
+
+    /** The physical resources shared with other transports. */
+    default java.util.List<Object> physicalConnections() {
+        Object connection = info().connection();
+        return java.util.List.of(connection == null ? this : connection);
+    }
 
     /** Close a carrier still in admission. Session and outbound transports have their own owner. */
     default void reject(Throwable cause) {
@@ -64,6 +72,30 @@ public sealed interface Transport extends AttachmentRelease.Resource, CarrierPro
      */
     default long unsent() { return -1; }
 
+    /** Occupancy of a separate consumer inbox on top of the carrier's declared receive storage. */
+    default long inputQueueCapacity() { return 0; }
+
+    /** Private workspace held for the lifetime of the transport. */
+    default long privateWorkspace() {
+        return (directions() & io.zmux.internal.core.Action.DIR_IN) != 0 ? ChannelReader.WORKING_BYTES : 0;
+    }
+
+    /** Physical staging cost to deduct from the batch budget for each record. */
+    default int recordWorkspace() { return 0; }
+
+    default io.zmux.carrier.CarrierHalfSource receiveSource() { return null; }
+
+    default io.zmux.carrier.CarrierHalfSource sendSource() { return null; }
+
+    default Batch.Tally accountedWrite(Batch batch, int confirmed) {
+        var tally = batch.tally(confirmed);
+        return new Batch.Tally(tally.bytes() + tally.records() * info().carrier().recordOverhead(),
+                tally.records(), tally.partial());
+    }
+
+    /** Known bytes of an incomplete input record when its carrier reports the end. */
+    default int partialInputBytes() { return 0; }
+
     /** Stops reading until {@link #resumeInput}; what was read stays buffered. */
     void pauseInput();
 
@@ -98,7 +130,7 @@ public sealed interface Transport extends AttachmentRelease.Resource, CarrierPro
     default Object carrierPeer() { return null; }
 
     /** The padding bytes a handshake run on the carrier before this transport added. */
-    default long handshakePadding() { return 0; }
+    default io.zmux.carrier.HandshakeCost handshakeCost() { return io.zmux.carrier.HandshakeCost.ZERO; }
 
     /** Whether this carrier has an exporter, whether or not its value exists yet. */
     default boolean exporterPresent() { return false; }

@@ -43,23 +43,26 @@ class DatagramsTest {
 
     /** A datagram queued while every pipe took it, then too large for the pipe that polls: no interest, no wait loop. */
     @Test void aDatagramThatOnlyALargerPipeHoldsIsNoInterestOfTheSmallOne() throws Exception {
-        int[] caps = {65535, 65535}; // the smallest and the largest record cap of the usable pipes
+        Session session = PipeTargetTest.session();
+        Pipe largePipe = session.pipes().get(0);
+        Pipe smallPipe = PipeTargetTest.appendOut(session, true, Attach.OUT_ACTIVE, Attach.IN_NONE);
+        int[] cap = {65535};
         SessionStats stats = new SessionStats();
         Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox(), () -> 0L);
-        dg.recordCaps(() -> caps[0], () -> caps[1]);
+        dg.recordCap(() -> cap[0]);
         dg.peer(65535, 65535, false);
-        dg.send(null, 0, new byte[3000], false);
-        caps[0] = 1000; caps[1] = 5000; // a small pipe joined
-        assertFalse(dg.sendable(null, 1000), "the small pipe has nothing to write: it must not ask to be polled");
-        assertTrue(dg.sendable(null, 5000));
+        dg.enqueueSingle(null, 0, new byte[3000], 0, Time.NEVER, io.zmux.DatagramSendOptions.INHERIT, null);
+        cap[0] = 5000;
+        assertFalse(dg.sendable(smallPipe, 1000), "the small pipe has nothing to write: it must not ask to be polled");
+        assertTrue(dg.sendable(largePipe, 5000));
         RecordWriter small = new RecordWriter();
         small.init(new Batch(), Framing.BYTES, 1000, Session.DEFAULT_BATCH);
-        dg.write(small, null);
+        dg.write(small, smallPipe);
         assertTrue(dg.queued(), "kept for the larger pipe");
         assertEquals(0, stats.datagramsDroppedSend());
         RecordWriter big = new RecordWriter();
         big.init(new Batch(), Framing.BYTES, 5000, Session.DEFAULT_BATCH);
-        dg.write(big, null);
+        dg.write(big, largePipe);
         assertFalse(dg.queued());
         assertEquals(0, stats.datagramsDroppedSend());
     }
@@ -69,11 +72,11 @@ class DatagramsTest {
         int[] caps = {65535, 65535};
         SessionStats stats = new SessionStats();
         Datagrams dg = new Datagrams(CoreConfig.builder().datagrams(true).build(), stats, new Outbox(), () -> 0L);
-        dg.recordCaps(() -> caps[0], () -> caps[1]);
+        dg.recordCap(() -> caps[1]);
         dg.peer(65535, 65535, false);
-        dg.send(null, 0, new byte[3000], false);
+        dg.enqueueSingle(null, 0, new byte[3000], 0, Time.NEVER, io.zmux.DatagramSendOptions.INHERIT, null);
         caps[0] = 1000; caps[1] = 2000; // the larger pipe left
-        assertTrue(dg.sendable(null, 1000), "dropping it is work for the next record of any pipe");
+        assertFalse(dg.sendable(null, 1000), "dropping a queued datagram needs no carrier write");
         RecordWriter w = new RecordWriter();
         w.init(new Batch(), Framing.BYTES, 1000, Session.DEFAULT_BATCH);
         dg.write(w, null);

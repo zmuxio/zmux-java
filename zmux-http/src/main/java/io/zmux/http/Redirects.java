@@ -42,6 +42,13 @@ public final class Redirects {
      * @param location the response's Location field; null or empty: none
      */
     public static URI check(URI from, String method, int status, String location) throws HttpRedirectException {
+        return follow(from, method, status, location, 0, true);
+    }
+
+    /** Applies method preservation, validates the target, then spends one redirect of the request's budget. */
+    static URI follow(URI from, String method, int status, String location, int hops, boolean allowSchemeUpgrade) throws HttpRedirectException {
+        boolean changesMethod = !method.equals("GET") && !method.equals("HEAD") && status != 307 && status != 308;
+        if (changesMethod && !allowSchemeUpgrade) throw methodChanged(method, status, location == null ? "" : location);
         if (location == null || location.isEmpty()) throw new HttpRedirectException(status, "", "no Location");
         URI to;
         try {
@@ -61,17 +68,23 @@ public final class Redirects {
         boolean upgrade = !fromTls && toTls;
         boolean ws = isWs(from.getScheme());
         String scheme = ws ? toTls ? "wss" : "ws" : toTls ? "https" : "http";
-        if (!method.equals("GET") && !method.equals("HEAD") && status != 307 && status != 308) {
+        if (changesMethod) {
             // A 301, 302 or 303 turns a POST into a GET; only a pure scheme upgrade is taken as meant for the same request.
             if (!upgrade || !same(to.getRawPath(), from.getRawPath()) || !same(to.getRawQuery(), from.getRawQuery())) {
-                throw new HttpRedirectException(status, location, "would change " + method + " to GET");
+                throw methodChanged(method, status, location);
             }
         }
         try {
-            return new URI(scheme + "://" + to.getRawAuthority() + HttpCarrierClient.target(to));
+            URI next = new URI(scheme + "://" + to.getRawAuthority() + HttpCarrierClient.target(to));
+            if (hops >= DEFAULT_MAX) throw new HttpRedirectException(status, next.toString(), "too many redirects");
+            return next;
         } catch (URISyntaxException e) {
             throw new HttpRedirectException(status, location, "invalid Location");
         }
+    }
+
+    private static HttpRedirectException methodChanged(String method, int status, String location) {
+        return new HttpRedirectException(status, location, "would change " + method + " to GET");
     }
 
     /** Whether to is from over a secure scheme: the same host, path and query, http to https (or ws to wss). */

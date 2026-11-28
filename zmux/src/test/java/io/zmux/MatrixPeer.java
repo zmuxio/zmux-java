@@ -266,7 +266,7 @@ public final class MatrixPeer {
 
     private static ZmuxConfig sessionConfig(Scenario s) {
         var b = ZmuxConfig.builder();
-        if (s.multipath) b.maxPipes(4).allowRecordMode(ANY_MODE);
+        if (s.multipath) b.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).allowRecordMode(ANY_MODE);
         return b.build();
     }
 

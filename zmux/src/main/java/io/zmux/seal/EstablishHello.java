@@ -72,7 +72,7 @@ final class EstablishHello {
             if (len < 2) throw Frames.shortInput(f, 2);
             int m = VarInt.lengthOf(b[off + 1]);
             if (len < 1 + m) throw Frames.shortInput(f, 1 + m);
-            value = Tlv.readVarint(b, off + 1, m);
+            value = VarInt.getKnownWidth(b, off + 1, m);
             if (VarInt.length(value) != m) throw new SecureCarrierException(MALFORMED, "escape encoding");
             if (value <= Profile.ESCAPE) throw new SecureCarrierException(UNKNOWN_PROFILE);
             n = 1 + m;

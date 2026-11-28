@@ -74,7 +74,7 @@ class NetworkTest {
         var context = javax.net.ssl.SSLContext.getInstance("TLSv1.3");
         try (var loops = EventLoops.create(1)) {
             var cfg = ZmuxConfig.builder().eventLoops(loops).build();
-            try (var listener = Zmux.listen(any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(1)
+            try (var listener = Zmux.listen(any(), ListenerConfig.builder().session(cfg).maxPendingPerSource(2)
                     .tls(TlsOptions.server(context)).build())) {
                 try (var socket = new java.net.Socket()) {
                     socket.connect(listener.localAddress(), 5000);
@@ -218,7 +218,7 @@ class NetworkTest {
                 out.write(new byte[64 << 10]);
                 var in = server.acceptStream();
                 // Pushed to the stream's lane without copying: the rest of the piece references a read buffer.
-                try (Chunk first = in.readChunk(1)) { assertEquals(1, first.buffer().remaining()); }
+                try (Chunk first = in.readChunk(1)) { assertEquals(1, first.remaining()); }
                 relay.blackhole = true;
                 server.abort(1, "gone");
                 assertTrue(loops.outstandingBuffers() > 0, "released before the session's end");

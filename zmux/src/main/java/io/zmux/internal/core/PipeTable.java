@@ -20,8 +20,11 @@ public final class PipeTable {
     private final LongMap<Pipe> byId = new LongMap<>(4);
     private final Outbox outbox;
 
-    PipeTable(Outbox outbox) {
+    private final java.util.function.LongConsumer carrierReplaced;
+
+    PipeTable(Outbox outbox, java.util.function.LongConsumer carrierReplaced) {
         this.outbox = outbox;
+        this.carrierReplaced = carrierReplaced;
     }
 
     /** The pipe with the ID, or null. */
@@ -43,24 +46,53 @@ public final class PipeTable {
     /** An outbound lane joined a pipe, or a pipe's outbound direction failed. */
     void changed() { version++; }
 
+    private long nextMember;
+
+    SessionCapacity.Member member(String candidate, int expected, int attachments) {
+        if (nextMember == -1L) throw new IllegalStateException("member IDs exhausted");
+        return new SessionCapacity.Member(new io.zmux.MemberId(++nextMember), candidate, expected, attachments);
+    }
+
     void add(Pipe p) {
+        if (p.member() == null) {
+            p.member(member("", SessionCapacity.configuredDirections(p), 1));
+        }
+        p.member().joined(io.zmux.PipeId.of(p.id));
         version++;
         list.add(p);
+        Pipe previous = byId.get(p.id);
+        if (previous != null) retireOutbound(previous);
         byId.put(p.id, p);
+        if (shaping != null && p.out() != null) shaping.of(p);
     }
 
     void remove(Pipe p) {
+        Shaping.pipeDown(p);
         version++;
         list.remove(p);
+        retireOutbound(p);
         if (byId.get(p.id) == p) byId.remove(p.id);
         if (!goneW.isEmpty()) goneW.wakeEvery(outbox);
     }
 
     void clear() {
         version++;
+        for (Pipe pipe : list) retireOutbound(pipe);
         list.clear();
         byId.clear();
         if (!goneW.isEmpty()) goneW.wakeEvery(outbox);
+    }
+
+    /** Releases outbound backing while retaining terminal pipe snapshots. */
+    void releaseOutbound() {
+        for (Pipe pipe : list) retireOutbound(pipe);
+    }
+
+    private static void retireOutbound(Pipe pipe) {
+        if (pipe.out() == null) return;
+        pipe.out().cancelDeadlines();
+        pipe.out().snd.clearHistory();
+        for (Pipe.OutLane lane : pipe.out().lanes) lane.retire();
     }
 
     /** The waiters for a pipe's removal. */
@@ -73,12 +105,11 @@ public final class PipeTable {
     void cancelRemovedWait(Waiter w) { goneW.remove(w); }
 
     /** Attaches pipe 0 in both directions; the driver then polls it for the first record. */
-    public void attachBootstrap(CarrierInfo in, CarrierInfo out, Waiter writerWaiter) {
-        Pipe p = new Pipe(0, bootstrapIn(), new Pipe.OutDir(out, writerWaiter), null, out.kind());
+    public void attachBootstrap(CarrierInfo in, CarrierInfo out) {
+        Pipe p = new Pipe(0, bootstrapIn(), new Pipe.OutDir(out), null, out.kind());
         p.label(out.label() != null ? out.label() : in != null ? in.label() : null);
         p.variant(out.variant());
         add(p);
-        outbox.wake(writerWaiter);
     }
 
     /** The bootstrap pipe's inbound side: its first record carries the peer's transport parameters. */
@@ -88,15 +119,61 @@ public final class PipeTable {
 
     // ---- wake-ups ----
 
-    /** Wakes the writers of every outbound pipe. */
+    private Runnable sharedWriter;
+
+    /** Registers the host's shared-work notification. The notification does not run IO. */
+    public void sharedWriter(Runnable ready) {
+        sharedWriter = ready;
+    }
+
+    /** One attachment's reservation identity, invalidated on replacement. */
+    public static final class Writer implements AutoCloseable {
+        private final Runnable changed;
+        private final Runnable channel;
+        private Runnable record;
+
+        Writer(Runnable changed, Runnable record, Runnable channel) {
+            this.changed = changed;
+            this.record = record;
+            this.channel = channel;
+        }
+
+        public boolean current() { return record != null; }
+
+        void changed() { if (current()) changed.run(); }
+        void record() { if (current()) record.run(); }
+        void channel() { if (current()) channel.run(); }
+
+        void invalidate() { record = null; }
+
+        @Override public void close() { invalidate(); }
+    }
+
+    /** Registers the writer of an outbound lane. */
+    public Writer writer(long id, long lane, Runnable record, Runnable channel) {
+        Pipe p = get(id);
+        Pipe.OutLane l = p == null || p.out() == null ? null : p.out().lane(lane);
+        Writer writer = new Writer(this::wakeWriters, record, channel);
+        if (l != null) l.writer(writer);
+        else writer.invalidate();
+        return writer;
+    }
+
+    /** Transfers the prepaid history of an attached outbound lane to its core lifetime. */
+    public void attachHistory(long id, long lane, io.zmux.internal.buffer.WriteWorkspace backing) {
+        Pipe p = get(id);
+        Pipe.OutLane l = p == null || p.out() == null ? null : p.out().lane(lane);
+        if (l != null) l.log.attach(backing);
+    }
+
+    /** Publishes session-wide work, coalesced by the host until a writer can claim it. */
     void wakeWriters() {
-        for (Pipe p : list) if (p.out() != null) wake(p);
+        if (sharedWriter != null) sharedWriter.run();
     }
 
     /** Wakes the writers of every lane of an outbound pipe. */
     void wake(Pipe p) {
-        outbox.wake(p.out().sig);
-        for (int i = 1; i < p.out().lanes.size(); i++) outbox.wake(p.out().lanes.get(i).st.sig());
+        for (Pipe.OutLane lane : p.out().lanes) lane.requestWrite();
     }
 
     /** Wakes the writers of a pipe (a carrier was attached). */
@@ -136,7 +213,9 @@ public final class PipeTable {
 
     public void setCarrierConn(long pipeId, Object c) {
         Pipe p = get(pipeId);
-        if (p != null) p.conn(c);
+        if (p == null) return;
+        if (p.conn() != null && p.conn() != c) carrierReplaced.accept(pipeId);
+        p.conn(c);
     }
 
     /** The kind of a pipe's carrier, null when undeclared or the pipe is gone. */
@@ -166,11 +245,15 @@ public final class PipeTable {
 
     /** Closes every pipe's carriers gracefully. */
     void closeAll() {
-        for (Pipe p : list) outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_BIDI));
+        for (Pipe p : list) closeCarrier(p, Action.Kind.CLOSE);
     }
 
     void abortAll() {
-        for (Pipe p : list) outbox.action(new Action(Action.Kind.ABORT, p.id, 0, Action.DIR_BIDI));
+        for (Pipe p : list) closeCarrier(p, Action.Kind.ABORT);
+    }
+
+    private void closeCarrier(Pipe p, Action.Kind kind) {
+        if (p.requestCarrierClose()) outbox.action(new Action(kind, p.id, 0, Action.DIR_BIDI));
     }
 
     // ---- queries ----
@@ -212,37 +295,40 @@ public final class PipeTable {
     }
 
     /**
-     * Whether CONNECTION_CLOSE was written and the write side shut after it (FIN or close_notify
-     * out, not only requested) on every outbound pipe that took it: a process may exit then.
+     * Whether each outbound pipe that took CONNECTION_CLOSE finished writing it and shut all
+     * of its live write sides (FIN or close_notify out, not only requested).
      */
     boolean closeShut() {
         for (Pipe p : list) {
             if (p.out() == null || p.out().failed()) continue;
             Pipe.OutLane l = p.out().lane(0);
-            if (l != null && l.tx.closeSent() && !(l.tx.closeDone() && l.tx.shutDone())) return false;
+            if (l != null && l.tx.closeSent() && !closeComplete(p)) return false;
         }
         return true;
     }
 
-    /**
-     * Ends the linger of every pipe whose peer's CONNECTION_CLOSE was read and whose own close is complete (written
-     * and the write side shut, or nothing to write): its inbound direction ends and its carrier closes gracefully.
-     */
+    /** Releases carriers whose protocol linger ended, independently of the application read drain. */
     void endLingeringPipes() {
         for (Pipe p : list) {
-            if (p.in() == null || p.in().ended() || !p.in().closeRead() || !closeComplete(p)) continue;
-            p.in().end();
-            outbox.action(new Action(Action.Kind.CLOSE, p.id, 0, Action.DIR_BIDI));
+            Pipe.InDir in = p.in();
+            // SPEC §6.5: EOF and CONNECTION_CLOSE both complete the inbound wait.
+            if (in != null && !in.ended() && !in.closeRead()) continue;
+            if (!closeComplete(p)) continue;
+            if (in != null) in.end();
+            closeCarrier(p, Action.Kind.CLOSE);
         }
     }
 
-    /** Whether this side's close on p is complete: CONNECTION_CLOSE written and the write side shut, or none to send. */
+    /** Whether this pipe has no more close bytes to write or outbound lanes to shut. */
     private static boolean closeComplete(Pipe p) {
         if (p.out() == null || p.out().failed()) return true;
-        Pipe.OutLane l = p.out().lane(0);
-        if (l == null) return true;
-        if (l.tx.closeSent()) return l.tx.closeDone() && l.tx.shutDone();
-        return !canCarryClose(p);
+        Pipe.OutLane first = p.out().lanes.getFirst();
+        boolean sentClose = first.tx.closeSent();
+        if (sentClose ? !first.tx.closeDone() : canCarryClose(p)) return false;
+        for (Pipe.OutLane lane : p.out().lanes) {
+            if (!lane.st.refused() && (sentClose || lane.st.shut()) && !lane.tx.shutDone()) return false;
+        }
+        return true;
     }
 
     /** Whether every inbound direction ended. */

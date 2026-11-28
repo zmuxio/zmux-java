@@ -47,11 +47,44 @@ final class Duplicates {
         boolean dialedLoser = comparison < 0 ? y.localDialer : x.localDialer;
         // Commit on the owner before returning: local openers cannot race a posted shutdown.
         loser.run(op -> { loser.core.shutdown(0, null); return true; });
-        PipeMaintenance rejoin = null;
+        Attempt attempt = null;
+        if (options.rejoin() != null && dialedLoser && survivor.info().multipath()) {
+            try { attempt = rejoin(survivor, options); }
+            catch (IOException ignored) { /* A lost survivor or admission race cannot undo resolution. */ }
+        }
+        return new DuplicateResult(survivor, loser, rule, attempt);
+    }
+
+    private static Attempt rejoin(ZmuxSession session, DuplicateOptions options) throws IOException {
+        var route = options.rejoin();
+        var capacity = session.capacity();
+        var request = new ChangeRequest(capacity.policyRevision(), capacity.observed(),
+                java.time.Duration.ofNanos(session.core.joinDeadline()), java.util.List.of(route.member()), java.util.Set.of(), 0);
+        // The attempt completion callback owns the change and cancellation registration after startup.
+        //noinspection resource
+        var change = session.beginChange(request);
         try {
-            if (options.rejoin() != null && dialedLoser && survivor.info().multipath() && survivor.joinReady())
-                rejoin = PipeMaintenance.startOnce(survivor, options.rejoin(), options.cancellation());
-        } catch (IOException ignored) { /* A lost survivor or admission race cannot undo resolution. */ }
-        return new DuplicateResult(survivor, loser, rule, rejoin);
+            // The callback closes this registration after the attempt, or startup closes it on failure.
+            //noinspection resource
+            Cancellation.Registration cancellation = options.cancellation() == null
+                    ? () -> {} : options.cancellation().onCancel(change::cancel);
+            try {
+                Attempt attempt = change.startMember(0, route.opener());
+                attempt.completion().whenComplete((result, failure) -> {
+                    try (change; cancellation) {
+                        if (result != null && result.disposition() == Attempt.Disposition.CONFIRMED) change.commit();
+                    } catch (IOException ignored) {
+                        // Duplicate resolution already committed.
+                    }
+                });
+                return attempt;
+            } catch (IOException | RuntimeException | Error failure) {
+                cancellation.close();
+                throw failure;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            change.close();
+            throw failure;
+        }
     }
 }

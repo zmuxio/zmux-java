@@ -4,14 +4,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.Candidate;
 import io.zmux.CandidateOutcome;
 import io.zmux.CarrierKind;
-import io.zmux.CarrierChoice;
 import io.zmux.CarrierChoiceException;
 import io.zmux.SessionEvent;
-import io.zmux.Zmux;
 import io.zmux.ZmuxSession;
 import java.net.URI;
-import java.time.Duration;
-import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -22,37 +19,23 @@ import org.junit.jupiter.api.Timeout;
  */
 @Timeout(180)
 class ProxyModeTest {
-    record Case(String name, TestProxy.Profile profile, CarrierKind want, int tries) {}
+    record Case(String name, TestProxy.Profile profile, CarrierKind want) {}
 
     /** Auto mode without joins, through each profile and directly: the first kind, by preference, that passes. */
     @Test void autoPicksTheBestKindThatPasses() throws Exception {
         List<Case> cases = List.of(
-                new Case("direct", null, CarrierKind.WEBSOCKET, 1),
-                new Case("pass-through", TestProxy.Profile.PASS, CarrierKind.WEBSOCKET, 1),
-                // No WebSocket (refused: the upgrade arrives as a plain GET), request bodies
-                // buffered (streaming and split time out), responses streamed on request.
-                new Case("nginx defaults", TestProxy.Profile.nginxDefaults(), CarrierKind.EXCHANGE, 4),
-                new Case("buffering cdn", TestProxy.Profile.bufferingCdn(3000), CarrierKind.EXCHANGE, 4));
+                new Case("direct", null, CarrierKind.WEBSOCKET),
+                new Case("pass-through", TestProxy.Profile.PASS, CarrierKind.WEBSOCKET),
+                // No WebSocket upgrade. Inject a failure on streaming and split uploads at the buffering boundary.
+                new Case("nginx defaults", TestProxy.Profile.nginxDefaults().withBufferedUploadFailure(), CarrierKind.EXCHANGE),
+                new Case("buffering cdn", TestProxy.Profile.bufferingCdn().withBufferedUploadFailure(), CarrierKind.EXCHANGE));
         try (var f = ModeHttpTest.fixture(false); var c = f.client(b -> b)) {
             for (Case k : cases) {
                 try (TestProxy px = k.profile == null ? null : new TestProxy(f.base, k.profile)) {
                     URI url = px == null ? f.base : px.base;
-                    try (var s = Zmux.dial(CarrierChoice.auto(ModeHttpTest.candidates(c, url)), f.config, ModeHttpTest.fast(true))) {
-                        var tries = s.stats().carrierCandidates();
-                        assertEquals(k.want, s.stats().carrier(), k.name + ": " + ModeHttpTest.tries(s));
-                        assertEquals(k.tries, tries.size(), k.name + ": " + ModeHttpTest.tries(s));
-                        for (int i = 0; i < tries.size(); i++) {
-                            assertEquals(i == tries.size() - 1, tries.get(i).outcome() == CandidateOutcome.USABLE, k.name + ": " + ModeHttpTest.tries(s));
-                        }
-                        if (k.tries > 1) assertEquals(CandidateOutcome.REFUSED, tries.getFirst().outcome(), k.name + ": the upgrade is refused");
-                        // One event per try, then the choice.
-                        List<SessionEvent> ev = new ArrayList<>();
-                        while (ev.size() <= k.tries) {
-                            SessionEvent e = s.nextEvent(Duration.ofSeconds(5));
-                            assertNotNull(e, k.name);
-                            if (e instanceof SessionEvent.CarrierCandidate || e instanceof SessionEvent.CarrierChosen) ev.add(e);
-                        }
-                        assertEquals(new SessionEvent.CarrierChosen(k.want), ev.getLast(), k.name);
+                    var candidates = ModeHttpTest.candidates(c, url);
+                    try (var s = ModeHttpTest.open(f.config, candidates)) {
+                        assertChoice(s, candidates, k.want, k.name);
                         f.echo(s);
                     }
                 }
@@ -64,16 +47,46 @@ class ProxyModeTest {
     @Test void aWebSocketOnlyFront() throws Exception {
         try (var f = ModeHttpTest.fixture(false); var c = f.client(b -> b); var px = new TestProxy(f.base, TestProxy.Profile.webSocketFront())) {
             List<Candidate> all = ModeHttpTest.candidates(c, px.base);
-            // WebSocket last; the exchange carrier, refused, fails at its deadline.
+            // WebSocket last; the other carriers are redirected to a host they refuse.
             List<Candidate> order = List.of(all.get(1), all.get(2), all.get(3), all.get(0));
-            try (var s = Zmux.dial(CarrierChoice.auto(order), f.config, ModeHttpTest.fast(true))) {
-                assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier(), ModeHttpTest.tries(s).toString());
-                var tries = s.stats().carrierCandidates();
-                assertEquals(4, tries.size());
-                assertEquals(CandidateOutcome.REFUSED, tries.get(0).outcome(), () -> String.valueOf(tries.get(0).error()) + " / " + (tries.get(0).error() instanceof io.zmux.SessionClosedException sc ? sc.error() : null));
-                assertEquals(CandidateOutcome.REFUSED, tries.get(1).outcome());
-                assertNotEquals(CandidateOutcome.USABLE, tries.get(2).outcome());
+            try (var s = ModeHttpTest.open(f.config, order)) {
+                assertChoice(s, order, CarrierKind.WEBSOCKET, "WebSocket-only front");
                 f.echo(s);
+            }
+        }
+    }
+
+    private static void assertChoice(ZmuxSession session, List<Candidate> order, CarrierKind winner, String name)
+            throws Exception {
+        var tries = session.stats().carrierCandidates();
+        var message = name + ": " + ModeHttpTest.tries(session);
+        assertEquals(winner, session.stats().carrier(), message);
+        assertEquals(order.getFirst().kind(), tries.getFirst().kind(), message);
+        assertEquals(winner, tries.getLast().kind(), message);
+        assertEquals(CandidateOutcome.USABLE, tries.getLast().outcome(), message);
+
+        // Once a prepared carrier succeeds, outcomes of pending speculative attempts can be discarded.
+        // The explicit cases below exercise individual refusals.
+        var refused = new HashSet<CarrierKind>();
+        for (var candidate : order) {
+            if (candidate.kind() == winner) break;
+            refused.add(candidate.kind());
+        }
+        for (var attempt : tries.subList(0, tries.size() - 1)) {
+            assertTrue(refused.remove(attempt.kind()), message);
+            assertEquals(CandidateOutcome.REFUSED, attempt.outcome(), message);
+        }
+
+        int reported = 0;
+        while (true) {
+            switch (session.nextEvent()) {
+                case SessionEvent.CarrierCandidate attempt -> assertEquals(tries.get(reported++), attempt.result(), message);
+                case SessionEvent.CarrierChosen choice -> {
+                    assertEquals(tries.size(), reported, message);
+                    assertEquals(new SessionEvent.CarrierChosen(winner), choice, message);
+                    return;
+                }
+                default -> { }
             }
         }
     }
@@ -81,18 +94,18 @@ class ProxyModeTest {
     /** An explicit kind that the path does not pass fails, without another kind being tried. */
     @Test void anExplicitKindNeverFallsBack() throws Exception {
         try (var f = ModeHttpTest.fixture(false); var c = f.client(b -> b);
-             var nginx = new TestProxy(f.base, TestProxy.Profile.nginxDefaults()); var ws = new TestProxy(f.base, TestProxy.Profile.webSocketFront())) {
+             var nginx = new TestProxy(f.base, TestProxy.Profile.nginxDefaults().withBufferedUploadFailure());
+             var ws = new TestProxy(f.base, TestProxy.Profile.webSocketFront())) {
             var nc = ModeHttpTest.candidates(c, nginx.base);
             var wc = ModeHttpTest.candidates(c, ws.base);
-            var policy = ModeHttpTest.fast(true);
             for (Candidate k : List.of(nc.get(0), nc.get(1), nc.get(2), wc.get(3))) {
-                var e = assertThrows(CarrierChoiceException.class, () -> Zmux.dial(CarrierChoice.explicit(k), f.config, policy), k.kind().toString());
+                var e = assertThrows(CarrierChoiceException.class, () -> ModeHttpTest.open(f.config, List.of(k)), k.kind().toString());
                 assertEquals(1, e.results().size(), k.kind() + ": " + e.results());
                 assertEquals(k.kind(), e.results().getFirst().kind());
-                assertNotEquals(CandidateOutcome.USABLE, e.results().getFirst().outcome());
+                assertEquals(CandidateOutcome.REFUSED, e.results().getFirst().outcome());
             }
             // Explicit and passing: nothing else is tried.
-            try (ZmuxSession s = Zmux.dial(CarrierChoice.explicit(nc.get(3)), f.config, policy)) {
+            try (ZmuxSession s = ModeHttpTest.open(f.config, List.of(nc.get(3)))) {
                 assertEquals(CarrierKind.EXCHANGE, s.stats().carrier());
                 assertEquals(1, s.stats().carrierCandidates().size());
                 f.echo(s);

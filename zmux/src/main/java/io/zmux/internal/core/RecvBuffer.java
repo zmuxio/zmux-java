@@ -1,212 +1,378 @@
 package io.zmux.internal.core;
 
+import io.zmux.internal.buffer.OffsetPageBits;
+
+import io.zmux.internal.memory.SharedMemory;
+
+import io.zmux.internal.buffer.ReceiveLoans;
+
+import io.zmux.internal.buffer.IdentityIndex;
+import io.zmux.internal.buffer.ReadBuf;
+
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Received, unread data of one receiving part as disjoint pieces sorted by
- * offset: pieces below {@link #REF_THRESHOLD} are
- * copied, larger ones reference the read buffer.
- */
+/** Unread disjoint intervals. In-order input needs only the head and tail links. */
 final class RecvBuffer {
-    static final int REF_THRESHOLD = 4096;
-
-    /** One piece: [off, off + data.remaining()), data absolute in its buffer. */
+    /** An owned range retained on the ordinary receive path. */
     static final class Piece {
         private long off;
-        private ByteBuffer data;
-        private final ReadBuf buf;
+        private final ByteBuffer data;
+        private int pos;
+        private int length;
+        private Storage.Block block;
+        private Piece prev, next;
 
-        Piece(long off, ByteBuffer data, ReadBuf buf) {
+        Piece(long off, ByteBuffer data, int pos, int length) {
             this.off = off;
             this.data = data;
-            this.buf = buf;
+            this.pos = pos;
+            this.length = length;
         }
 
-        long end() { return off + data.remaining(); }
+        long end() { return off + length; }
     }
 
-    private final ArrayList<Piece> ps = new ArrayList<>(0);
+    private Piece first, last;
+    /** Set once input needs a gap search, released when the queue is drained. */
+    private TreeMap<Long, Piece> index;
+    private Storage storage;
     private long bytes;
+    private PackedReceive packed;
 
-    boolean isEmpty() { return ps.isEmpty(); }
+    boolean isEmpty() { return bytes() == 0; }
 
-    /** The bytes stored. */
-    long bytes() { return bytes; }
+    long bytes() { return packed == null ? bytes : packed.bytes(); }
 
-    private static Piece newPiece(long off, ByteBuffer d, ReadBuf buf) {
-        if (d.remaining() >= REF_THRESHOLD && buf != null) {
-            buf.ref();
-            return new Piece(off, d.slice(), buf);
+    boolean packed() { return packed != null; }
+
+    /** Retains only the portions not already queued. */
+    long insert(Storage in, long off, ByteBuffer data, int pos, int len, ReadBuf owner) {
+        if (len == 0) return 0;
+        if (packed != null) return packed.insert(off, data, pos, len);
+        storage = in;
+        if (last == null || off >= last.end()) {
+            if (insertAfter(last, off, data, pos, len, owner)) return len;
+            return pack().insert(off, data, pos, len);
         }
-        byte[] c = new byte[d.remaining()];
-        d.duplicate().get(c);
-        return new Piece(off, ByteBuffer.wrap(c), null);
-    }
-
-    /** Stores the parts of [off, off + d.remaining()) not already present; returns the new bytes. */
-    long insert(long off, ByteBuffer d, ReadBuf buf) {
-        long end = off + d.remaining();
-        int n = ps.size();
-        if (n == 0 || off >= ps.get(n - 1).end()) {
-            append(off, d, buf);
-            return d.remaining();
+        if (index == null) {
+            index = new TreeMap<>();
+            for (Piece p = first; p != null; p = p.next) index.put(p.off, p);
         }
-        long added = 0, cur = off;
-        for (int i = 0; i <= ps.size() && cur < end; i++) {
-            long gapEnd = end;
-            if (i < ps.size()) {
-                Piece p = ps.get(i);
-                long pe = p.end();
-                if (pe <= cur) continue;
-                if (p.off <= cur) {
-                    cur = pe;
-                    continue;
+        var floor = index.floorEntry(off);
+        Piece previous = floor == null ? null : floor.getValue();
+        Piece next = previous == null ? first : previous.next;
+        long cur = previous == null ? off : Math.max(off, previous.end());
+        long end = off + len;
+        long added = 0;
+        while (cur < end) {
+            long hi = next == null ? end : Math.min(end, next.off);
+            if (cur < hi) {
+                int n = (int) (hi - cur);
+                if (!insertAfter(previous, cur, data, pos + (int) (cur - off), n, owner)) {
+                    return added + pack().insert(off, data, pos, len);
                 }
-                gapEnd = Math.min(end, p.off);
+                added += n;
+                cur = hi;
             }
-            ByteBuffer part = d.slice(d.position() + (int) (cur - off), (int) (gapEnd - cur));
-            bytes += part.remaining();
-            ps.add(i, newPiece(cur, part, buf));
-            added += part.remaining();
-            cur = gapEnd;
+            if (next == null || cur >= end) break;
+            cur = Math.max(cur, next.end());
+            previous = next;
+            next = next.next;
         }
         return added;
     }
 
-    private void append(long off, ByteBuffer d, ReadBuf buf) {
-        bytes += d.remaining();
-        int n = ps.size();
-        if (n > 0 && (d.remaining() < REF_THRESHOLD || buf == null)) {
-            Piece last = ps.get(n - 1);
-            if (last.buf == null && last.end() == off && last.data.remaining() + d.remaining() <= REF_THRESHOLD) {
-                byte[] c = new byte[last.data.remaining() + d.remaining()];
-                int l = last.data.remaining();
-                last.data.duplicate().get(c, 0, l);
-                d.duplicate().get(c, l, d.remaining());
-                last.data = ByteBuffer.wrap(c);
-                return;
-            }
+    private boolean insertAfter(Piece prev, long off, ByteBuffer data, int pos, int len, ReadBuf owner) {
+        if (prev != null && prev.block.source == owner && prev.data == data && prev.end() == off && prev.pos + prev.length == pos) {
+            prev.length += len;
+            bytes += len;
+            return true;
         }
-        ps.add(newPiece(off, d, buf));
+        if (!storage.reserveView(ReceiveLayout.VIEW_PIECE)) return false;
+        Storage.Block block = storage.block(owner);
+        if (block == null) {
+            storage.releaseView(ReceiveLayout.VIEW_PIECE);
+            return false;
+        }
+        bytes += len;
+        Piece p = new Piece(off, data, pos, len);
+        p.block = block;
+        storage.add(block);
+        p.prev = prev;
+        p.next = prev == null ? first : prev.next;
+        if (prev == null) first = p;
+        else prev.next = p;
+        if (p.next == null) last = p;
+        else p.next.prev = p;
+        if (index != null) index.put(off, p);
+        return true;
     }
 
-    /** End of the data contiguous from off. */
-    long contiguous(long off) {
-        for (Piece p : ps) {
-            if (p.off > off) break;
-            long e = p.end();
-            if (e > off) off = e;
+    private PackedReceive pack() {
+        packed = new PackedReceive(storage);
+        while (first != null) {
+            Piece piece = first;
+            packed.insert(piece.off, piece.data, piece.pos, piece.length);
+            drop(piece);
         }
+        return packed;
+    }
+
+    /** End of the contiguous data from off. */
+    long contiguous(long off) {
+        if (packed != null) return packed.contiguous(off);
+        for (Piece p = first; p != null && p.off <= off; p = p.next) off = Math.max(off, p.end());
         return off;
     }
 
-    /** Copies contiguous data at off into dst and consumes it; returns the bytes copied. */
-    int read(long off, ByteBuffer dst) {
+    /** Copies the available prefix to its final destination. */
+    int read(long off, ByteBuffer dst, int max) {
+        if (packed != null) return packed.read(off, dst, max);
         int n = 0;
-        while (!ps.isEmpty() && dst.hasRemaining()) {
-            Piece p = ps.getFirst();
-            if (p.off > off + n) break;
-            int skip = (int) (off + n - p.off);
-            ByteBuffer src = p.data;
-            int c = Math.min(dst.remaining(), src.remaining() - skip);
-            dst.put(dst.position(), src, src.position() + skip, c);
-            dst.position(dst.position() + c);
-            n += c;
-            if (skip + c == src.remaining()) {
-                dropFirst();
-            } else {
-                src.position(src.position() + skip + c);
-                p.off += skip + c;
-            }
+        while (first != null && first.off == off + n && n < max) {
+            Piece p = first;
+            int count = Math.min(max - n, p.length);
+            dst.put(dst.position(), p.data, p.pos, count);
+            dst.position(dst.position() + count);
+            consume(p, count);
+            n += count;
         }
-        bytes -= n;
         return n;
     }
 
-    /** A chunk taken without copying: its data and, when it references a read buffer, a reference for the caller. */
-    record Chunk(ByteBuffer data, ReadBuf buf) {}
+    /** Takes one view. The caller gets a reference across the execution boundary. */
+    StreamRecv.Chunk take(long off, int max) {
+        if (packed != null) return packed.take(off, max);
+        Piece p = available(off, max);
+        if (p == null) return null;
+        ReadBuf buf = p.block.source;
+        int len = Math.min(p.length, max);
+        ByteBuffer view = p.data.slice(p.pos, len);
+        boolean move = moveBacking(p, len);
+        if (!move) buf.ref();
+        return take(p, view, buf, move);
+    }
 
-    /** Consumes up to max contiguous bytes at off without copying; null when none. */
-    Chunk take(long off, int max) {
-        if (ps.isEmpty() || max <= 0) return null;
-        Piece p = ps.getFirst();
-        if (p.off > off) return null;
-        int skip = (int) (off - p.off);
-        int len = Math.min(p.data.remaining() - skip, max);
-        ByteBuffer d = p.data.slice(p.data.position() + skip, len);
-        ReadBuf buf = p.buf;
-        if (buf != null) buf.ref();
-        if (skip + len == p.data.remaining()) {
-            dropFirst();
-        } else {
-            if (buf == null) {
-                byte[] c = new byte[len];
-                d.get(c);
-                d = ByteBuffer.wrap(c);
-            }
-            p.data.position(p.data.position() + skip + len);
-            p.off += skip + len;
+    StreamRecv.Chunk borrow(long off, int max, ReceiveLoans loans) throws CoreException {
+        if (packed != null) return packed.borrow(off, max, loans);
+        Piece p = available(off, max);
+        if (p == null) return null;
+        int len = Math.min(p.length, max);
+        ByteBuffer view = p.data.slice(p.pos, len);
+        boolean move = moveBacking(p, len);
+        ReadBuf loan = loans.acquire(p.block.source, move);
+        if (loan == null) throw CoreException.of(CoreException.Reason.CHUNK_BUDGET);
+        return take(p, view, loan, move);
+    }
+
+    private static boolean moveBacking(Piece p, int len) {
+        return len == p.length && p.block.pieces == 1;
+    }
+
+    private Piece available(long off, int max) {
+        return first != null && first.off == off && max > 0 ? first : null;
+    }
+
+    private StreamRecv.Chunk take(Piece p, ByteBuffer view, ReadBuf buf, boolean move) {
+        if (move) drop(p, true);
+        else consume(p, view.remaining());
+        return new StreamRecv.Chunk(view, buf, false);
+    }
+
+    private void consume(Piece p, int n) {
+        if (n == p.length) {
+            drop(p);
+            return;
         }
-        bytes -= len;
-        return new Chunk(d, buf);
+        if (index != null) index.remove(p.off);
+        p.off += n;
+        p.pos += n;
+        trim(p, n);
+        if (index != null) index.put(p.off, p);
     }
 
-    private void dropFirst() {
-        Piece p = ps.removeFirst();
-        if (p.buf != null) p.buf.unref();
+    private void trim(Piece p, int n) {
+        p.length -= n;
+        bytes -= n;
     }
 
-    /** Drops everything below off; returns the bytes dropped. */
+    private void drop(Piece p) {
+        drop(p, false);
+    }
+
+    private void drop(Piece p, boolean moveBacking) {
+        if (p.prev == null) first = p.next;
+        else p.prev.next = p.next;
+        if (p.next == null) last = p.prev;
+        else p.next.prev = p.prev;
+        if (index != null) {
+            index.remove(p.off);
+            if (first == null) index = null;
+        }
+        bytes -= p.length;
+        storage.remove(p.block, moveBacking);
+    }
+
     long discard(long off) {
-        long d = 0;
-        while (!ps.isEmpty()) {
-            Piece p = ps.getFirst();
-            long pe = p.end();
-            if (p.off >= off) break;
-            if (pe <= off) {
-                d += p.data.remaining();
-                dropFirst();
-                continue;
-            }
-            int cut = (int) (off - p.off);
-            d += cut;
-            p.data.position(p.data.position() + cut);
-            p.off = off;
-            break;
+        if (packed != null) return packed.discard(0, off);
+        long old = bytes;
+        while (first != null && first.off < off) {
+            Piece p = first;
+            consume(p, (int) Math.min(p.length, off - p.off));
         }
-        bytes -= d;
-        return d;
+        return old - bytes;
     }
 
-    /** Drops everything at or above off; returns the bytes dropped. */
     long discardFrom(long off) {
-        long d = 0;
-        while (!ps.isEmpty()) {
-            int i = ps.size() - 1;
-            Piece p = ps.get(i);
-            long pe = p.end();
-            if (pe <= off) break;
-            if (p.off >= off) {
-                d += p.data.remaining();
-                if (p.buf != null) p.buf.unref();
-                ps.remove(i);
-                continue;
-            }
-            d += pe - off;
-            p.data.limit(p.data.position() + (int) (off - p.off));
-            break;
+        if (packed != null) return packed.discard(off, Long.MAX_VALUE);
+        long old = bytes;
+        while (last != null && last.end() > off) {
+            Piece p = last;
+            if (off <= p.off) drop(p);
+            else trim(p, (int) (p.end() - off));
         }
-        bytes -= d;
-        return d;
+        return old - bytes;
     }
 
-    /** Drops everything; returns the bytes dropped. */
     long clear() {
-        long d = bytes;
-        for (Piece p : ps) if (p.buf != null) p.buf.unref();
-        ps.clear();
-        bytes = 0;
-        return d;
+        long dropped = bytes;
+        if (packed != null) {
+            dropped += packed.discard(0, Long.MAX_VALUE);
+            packed = null;
+        }
+        while (first != null) drop(first);
+        return dropped;
+    }
+
+    /** Accounts for the roots and descriptors shared by receive streams. */
+    static final class Storage {
+        private IdentityIndex<ReadBuf, Block> others;
+        private final RootAccount roots;
+        private final RootAccount pages;
+        private final SharedMemory.Receive budget;
+        private long descriptors;
+        private long copied;
+        private Block last;
+
+        Storage(SharedMemory.Receive budget) {
+            this.budget = budget;
+            roots = new RootAccount(budget, false);
+            pages = new RootAccount(budget, true);
+        }
+
+        /** Root release can run after the core and its queue are gone. */
+        private static final class RootAccount implements ReadBuf.Account {
+            private final AtomicLong capacity = new AtomicLong();
+            private final SharedMemory.Receive budget;
+            private final boolean packed;
+
+            RootAccount(SharedMemory.Receive budget, boolean packed) {
+                this.budget = budget;
+                this.packed = packed;
+            }
+
+            @Override public Object domain() { return budget == null ? null : budget.domain(); }
+
+            @Override public boolean reserve(long bytes) {
+                if (budget != null && !(packed ? budget.tryRetainReceive(bytes) : budget.reserveView(bytes))) return false;
+                capacity.addAndGet(bytes);
+                return true;
+            }
+
+            @Override public void release(long bytes) {
+                capacity.addAndGet(-bytes);
+                if (budget == null) return;
+                if (packed) budget.releaseRetainedReceive(bytes);
+                else budget.releaseView(bytes);
+            }
+        }
+
+        static final class Block {
+            private final ReadBuf source;
+            private int pieces;
+
+            Block(ReadBuf source) { this.source = source; }
+        }
+
+        long bytes() { return roots.capacity.get() + pages.capacity.get() + descriptors; }
+
+        long copied() { return copied; }
+
+        void packedCopy(long n) { copied += n; }
+
+        boolean reserveView(long n) {
+            if (budget != null && !budget.reserveView(n)) return false;
+            descriptors += n;
+            return true;
+        }
+
+        void releaseView(long n) {
+            descriptors -= n;
+            if (budget != null) budget.releaseView(n);
+        }
+
+        Block block(ReadBuf source) {
+            if (source.capacity() > ReceiveLoans.DEFAULT_BYTES) return null;
+            if (last != null && last.source == source) return last;
+            Block block = others == null ? null : others.get(source);
+            if (block == null) {
+                if (!reserveView(ReceiveLayout.VIEW_ROOT)) return null;
+                if (!source.cover(roots)) {
+                    releaseView(ReceiveLayout.VIEW_ROOT);
+                    return null;
+                }
+                source.ref();
+                block = new Block(source);
+            } else {
+                others.remove(source);
+            }
+            if (last != null) {
+                if (others == null) others = new IdentityIndex<>();
+                others.put(last.source, last);
+            }
+            last = block;
+            return block;
+        }
+
+        void add(Block block) { block.pieces++; }
+
+        void remove(Block block, boolean move) {
+            releaseView(ReceiveLayout.VIEW_PIECE);
+            if (--block.pieces != 0) return;
+            if (last == block) last = null;
+            else others.remove(block.source);
+            if (others != null && others.isEmpty()) others = null;
+            releaseView(ReceiveLayout.VIEW_ROOT);
+            if (!move) block.source.unref();
+        }
+
+        ReadBuf packedPage() {
+            if (budget != null && !budget.tryRetainReceive(ReceiveLayout.PAGE_CHARGE)) {
+                throw new IllegalStateException("receive page outside its reserved backing");
+            }
+            descriptors += ReceiveLayout.PACKED_DESCRIPTOR;
+            try {
+                var page = new ReadBuf(ByteBuffer.allocate(OffsetPageBits.SIZE), null);
+                pages.capacity.addAndGet(OffsetPageBits.SIZE);
+                page.prepaid(pages, true);
+                return page;
+            } catch (RuntimeException | Error failure) {
+                descriptors -= ReceiveLayout.PACKED_DESCRIPTOR;
+                if (budget != null) budget.releaseRetainedReceive(ReceiveLayout.PAGE_CHARGE);
+                throw failure;
+            }
+        }
+
+        void dropPackedPage(ReadBuf page, boolean move) {
+            dropPackedDescriptor();
+            if (!move) page.unref();
+        }
+
+        private void dropPackedDescriptor() {
+            descriptors -= ReceiveLayout.PACKED_DESCRIPTOR;
+            if (budget != null) budget.releaseRetainedReceive(ReceiveLayout.PACKED_DESCRIPTOR);
+        }
     }
 }

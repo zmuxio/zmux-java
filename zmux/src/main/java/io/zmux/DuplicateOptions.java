@@ -1,7 +1,15 @@
 package io.zmux;
 
 /** Application-verified endpoint identities and an optional best-effort route rejoin. The identities are copied in and out and compared by content. */
-public record DuplicateOptions(byte[] localIdentity, byte[] peerIdentity, PipePool rejoin, Cancellation cancellation) {
+public record DuplicateOptions(byte[] localIdentity, byte[] peerIdentity, Rejoin rejoin, Cancellation cancellation) {
+    /** An exact member and carrier opener for a one-shot rejoin. */
+    public record Rejoin(MemberSpec member, CarrierOpener opener) {
+        public Rejoin {
+            java.util.Objects.requireNonNull(member);
+            java.util.Objects.requireNonNull(opener);
+        }
+    }
+
     public DuplicateOptions {
         localIdentity = localIdentity == null ? new byte[0] : localIdentity.clone();
         peerIdentity = peerIdentity == null ? new byte[0] : peerIdentity.clone();
@@ -12,7 +20,9 @@ public record DuplicateOptions(byte[] localIdentity, byte[] peerIdentity, PipePo
     @Override public byte[] peerIdentity() { return peerIdentity.clone(); }
     public static DuplicateOptions defaults() { return new DuplicateOptions(null, null, null, null); }
     public DuplicateOptions withIdentities(byte[] local, byte[] peer) { return new DuplicateOptions(local, peer, rejoin, cancellation); }
-    public DuplicateOptions withRejoin(PipePool route) { return new DuplicateOptions(localIdentity, peerIdentity, route, cancellation); }
+    public DuplicateOptions withRejoin(MemberSpec member, CarrierOpener opener) {
+        return new DuplicateOptions(localIdentity, peerIdentity, new Rejoin(member, opener), cancellation);
+    }
     public DuplicateOptions withCancellation(Cancellation value) { return new DuplicateOptions(localIdentity, peerIdentity, rejoin, value); }
 
     @Override

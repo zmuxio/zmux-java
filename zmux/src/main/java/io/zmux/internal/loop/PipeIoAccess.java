@@ -31,6 +31,9 @@ public final class PipeIoAccess {
         /** The outbound connection identity, even when a split has two different connections. */
         Object sendingConnection(PipeIo io);
 
+        /** The physical connection identities of the carrier, or empty when unavailable. */
+        java.util.List<Object> physicalConnections(PipeIo io);
+
         /** The record protection of a Sealed io; null otherwise. */
         RecordProtection records(PipeIo io);
     }

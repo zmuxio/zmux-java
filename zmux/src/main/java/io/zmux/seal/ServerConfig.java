@@ -2,6 +2,8 @@ package io.zmux.seal;
 
 import io.zmux.AllowRecordMode;
 import io.zmux.carrier.HandshakeShaper;
+import io.zmux.shaping.ProfileLimits;
+import io.zmux.shaping.ShapingBudget;
 import io.zmux.shaping.ShapingLimits;
 import java.util.List;
 import java.util.Objects;
@@ -22,11 +24,13 @@ public final class ServerConfig {
     private final AllowRecordMode allowRecordMode;
     private final HandshakeShaper shaper;
     private final ShapingLimits shapingLimits;
+    private final ProfileLimits shapingProfile;
     private final Anchor anchor;
     private final Object localContext;
     private final boolean requirePqAuth;
     private final Signer signer;
     private final AppDataSource appData;
+    private final HandshakeLimits handshakeLimits;
     private final int maxAppData; // NO_BOUND: none
 
     private ServerConfig(Builder b) {
@@ -49,11 +53,16 @@ public final class ServerConfig {
         allowRecordMode = b.allowRecordMode;
         shaper = b.shaper;
         shapingLimits = b.shapingLimits;
+        shapingProfile = b.shapingProfile;
         anchor = b.anchor;
         localContext = b.localContext;
         requirePqAuth = b.requirePqAuth;
         signer = b.signer;
         appData = b.appData;
+        handshakeLimits = b.handshakeLimits == null ? HandshakeLimits.defaults() : b.handshakeLimits;
+        if (!handshakeLimits.allowsAnonymous() && acceptedProfiles.stream().anyMatch(p -> !p.isPskBased())) {
+            throw new IllegalArgumentException("invalid_config: anonymous profiles require an anonymous handshake permit");
+        }
         maxAppData = b.maxAppData;
     }
 
@@ -69,11 +78,13 @@ public final class ServerConfig {
         b.allowRecordMode = allowRecordMode;
         b.shaper = shaper;
         b.shapingLimits = shapingLimits;
+        b.shapingProfile = shapingProfile;
         b.anchor = anchor;
         b.localContext = localContext;
         b.requirePqAuth = requirePqAuth;
         b.signer = signer;
         b.appData = appData;
+        b.handshakeLimits = handshakeLimits;
         b.maxAppData = maxAppData;
         return b;
     }
@@ -96,6 +107,13 @@ public final class ServerConfig {
     /** The limits on the shaper's plans. */
     public ShapingLimits shapingLimits() { return shapingLimits; }
 
+    /** The selected Establish profile. Defaults to Lightweight. */
+    public ProfileLimits shapingProfile() { return shapingProfile; }
+
+    ShapingLimits.Effective establishLimits() {
+        return shapingLimits.under(new ShapingBudget(null, shapingProfile, false));
+    }
+
     /** Judges the client after message 3; null: clients are not judged. */
     public Anchor anchor() { return anchor; }
 
@@ -111,6 +129,9 @@ public final class ServerConfig {
     /** Supplies the application data of message 2; null: none. */
     public AppDataSource appData() { return appData; }
 
+    /** The shared permits for reply construction. */
+    public HandshakeLimits handshakeLimits() { return handshakeLimits; }
+
     /** The stored bound on received application data: bytes, or {@link ClientConfig#NO_BOUND}. */
     int maxAppDataBound() { return maxAppData; }
 
@@ -125,11 +146,13 @@ public final class ServerConfig {
         private AllowRecordMode allowRecordMode;
         private HandshakeShaper shaper;
         private ShapingLimits shapingLimits = ShapingLimits.defaults();
+        private ProfileLimits shapingProfile = ProfileLimits.LIGHTWEIGHT;
         private Anchor anchor;
         private Object localContext;
         private boolean requirePqAuth;
         private Signer signer;
         private AppDataSource appData;
+        private HandshakeLimits handshakeLimits;
         private int maxAppData = ClientConfig.DEFAULT_MAX_APP_DATA;
 
         private Builder(Gate gate, StaticKey key) {
@@ -160,6 +183,12 @@ public final class ServerConfig {
         /** The limits on the shaper's plans; the defaults unless set. */
         public Builder shapingLimits(ShapingLimits l) { shapingLimits = Objects.requireNonNull(l, "shapingLimits"); return this; }
 
+        /** Supplies the session's selected profile before Establish writes its first message. */
+        public Builder shapingProfile(ProfileLimits profile) {
+            shapingProfile = Objects.requireNonNull(profile, "shapingProfile");
+            return this;
+        }
+
         /** Judges the client after message 3, with its credential or none; null: clients are not judged. */
         public Builder anchor(Anchor a) { anchor = a; return this; }
 
@@ -174,6 +203,12 @@ public final class ServerConfig {
          * can ask for it, so it limits its own rate. Null: no proof.
          */
         public Builder signer(Signer s) { signer = s; return this; }
+
+        /** Shares the limits for reply work. The default has one permit per available processor, with a minimum of two. */
+        public Builder handshakeLimits(HandshakeLimits limits) {
+            handshakeLimits = Objects.requireNonNull(limits);
+            return this;
+        }
 
         /** Supplies the application data of message 2 ({@link AppDataSource}); null: none. */
         public Builder appData(AppDataSource s) { appData = s; return this; }

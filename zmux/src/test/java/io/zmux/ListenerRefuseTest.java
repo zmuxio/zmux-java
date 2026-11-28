@@ -82,11 +82,10 @@ class ListenerRefuseTest {
     /** Expose only the server parameters. The client can try to join before seeing CONNECTION_CLOSE. */
     @Test void drainedBootstrapHasNoJoinRouteEvenWhileItsRefusalIsInFlight() throws Exception {
         // HS-33.
-        var outcome = new java.util.concurrent.LinkedBlockingQueue<Throwable>();
         var resume = new java.util.concurrent.CompletableFuture<Void>();
         try (var loops = EventLoops.create(2)) {
-            var cfg = ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
-                    .joinOutcome((s,p,e) -> outcome.add(e)).build();
+            var cfg = ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+                    .build();
             try (var listener = Zmux.listener(ListenerConfig.of(cfg))) {
                 listener.drain("emptying");
                 var pair = io.zmux.carrier.MemoryPipe.pair(io.zmux.carrier.Framing.BYTE_STREAM);
@@ -117,8 +116,7 @@ class ListenerRefuseTest {
                     assertThrows(IOException.class, bootstrap::awaitSetup);
                     var extra = io.zmux.carrier.MemoryPipe.pair(io.zmux.carrier.Framing.BYTE_STREAM);
                     var join = listener.adapter().handle(extra[1], JoinHint.inBand(null));
-                    IOException error = assertThrows(IOException.class, () -> client.addPipe(extra[0], PipeOptions.defaults()));
-                    assertSame(error, outcome.poll(3, java.util.concurrent.TimeUnit.SECONDS));
+                    assertThrows(IOException.class, () -> client.addPipe(extra[0], PipeOptions.defaults()));
                     assertThrows(IOException.class, join::awaitSetup);
                     assertEquals(0, listener.stats().joins());
                     resume.complete(null);
@@ -164,7 +162,7 @@ class ListenerRefuseTest {
         try (var l = Zmux.listen(LOOPBACK, ListenerConfig.builder().backlog(1).build());
              var _ = Zmux.connect(l.localAddress())) {
             // The one backlog slot is taken by a session nobody accepts.
-            PipePoolTest.await(() -> l.queued.get() == 1);
+            SessionTestSupport.await(l.config().eventLoops(), () -> l.queued.get() == 1);
             var before = l.stats();
             assertRefused(l);
             var after = l.stats();

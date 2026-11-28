@@ -27,9 +27,9 @@ class ZeroTimeoutTest {
                 assertThrows(SocketTimeoutException.class, () -> s.acceptStream(Duration.ofSeconds(-1)));
                 // session datagrams
                 assertThrows(SocketTimeoutException.class, () -> s.datagrams().receive(Duration.ZERO));
-                assertTrue(c.datagrams().send(ByteBuffer.allocate(3)));
+                c.datagrams().send(ByteBuffer.allocate(3));
                 assertEquals(3, s.datagrams().receive(Duration.ofSeconds(5)).length);
-                assertTrue(c.datagrams().send(ByteBuffer.allocate(4)));
+                c.datagrams().send(ByteBuffer.allocate(4));
                 long end = System.nanoTime() + FAST.toNanos();
                 byte[] got = null;
                 while (got == null && System.nanoTime() < end) {
@@ -45,7 +45,7 @@ class ZeroTimeoutTest {
                 assertThrows(SocketTimeoutException.class, () -> peer.receiveDatagram(Duration.ZERO));
                 assertThrows(SocketTimeoutException.class, () -> peer.receiveDatagram(Duration.ofSeconds(-5)));
                 assertTrue(System.nanoTime() - t0 < FAST.toNanos(), "zero waits return at once");
-                assertTrue(st.sendDatagram(7, ByteBuffer.allocate(5)));
+                st.sendDatagram(7, ByteBuffer.allocate(5));
                 StreamDatagram d = null;
                 end = System.nanoTime() + FAST.toNanos();
                 while (d == null && System.nanoTime() < end) {

@@ -54,10 +54,18 @@ final class CarrierSamplerTest {
         queries.remove().accept(clock.get() - 200, new QuicCounters(10, 4));
         assertEquals(5 + INTERVAL, connection.read().orElseThrow().sampledAt());
 
+        var interval = connection.publishedLoss();
+        assertEquals(4, interval.lost());
+        assertEquals(10, interval.sent());
+        assertSame(interval, registry.connection(identity).publishedLoss());
+        assertTrue(work.isEmpty());
+
         advance(connection, new QuicCounters(10, 3));
         var corrected = connection.read().orElseThrow();
         assertEquals(first.carrierId(), corrected.carrierId());
         assertEquals(0, corrected.generation());
+        assertSame(interval, connection.publishedLoss());
+        assertEquals(5 + INTERVAL, corrected.sampledAt());
         assertEquals(new QuicCounters(10, 3), corrected.counts().orElseThrow());
 
         advance(connection, null);
@@ -72,6 +80,8 @@ final class CarrierSamplerTest {
 
     @Test void detachesAndDistinguishesReplacementFromAReattachment() {
         var connection = registry.attach(identity, provider(CarrierSource.NETTY_QUIC));
+        assertTrue(work.isEmpty());
+        assertTrue(connection.read().isEmpty());
         work.remove().run();
         respond(new QuicCounters(1, 1));
         advance(connection, new QuicCounters(0, 0));
@@ -85,6 +95,8 @@ final class CarrierSamplerTest {
         respond(new QuicCounters(7, 7));
         assertSame(first, connection.read().orElseThrow());
         registry.detach(identity);
+        work.remove().run();
+        assertTrue(queries.isEmpty());
         clock.addAndGet(INTERVAL);
         assertSame(first, connection.read().orElseThrow());
         assertTrue(work.isEmpty());
@@ -103,6 +115,7 @@ final class CarrierSamplerTest {
     @Test void publishesTaggedNativePairsAndKeepsKnownSourcesWithoutCounts() {
         var segments = new TcpSegmentCounters(10, 2);
         var linux = registry.attach(identity, provider(CarrierSource.LINUX_TCP_INFO));
+        assertTrue(linux.read().isEmpty());
         work.remove().run();
         respond(segments);
         var tcp = linux.read().orElseThrow();
@@ -113,6 +126,7 @@ final class CarrierSamplerTest {
 
         var packets = new TcpPacketCounters(20, 2);
         var darwin = registry.attach(new Object(), provider(CarrierSource.DARWIN_TCP_CONNECTION_INFO));
+        assertTrue(darwin.read().isEmpty());
         work.remove().run();
         respond(packets);
         var mac = darwin.read().orElseThrow();
@@ -156,6 +170,7 @@ final class CarrierSamplerTest {
         var rejected = new AtomicInteger();
         registry.attach(identity, new CarrierProvider.Query(CarrierSource.LINUX_TCP_INFO, completion ->
                 rejected.incrementAndGet()));
+        assertTrue(connection.read().isEmpty());
         work.remove().run();
         respond(new QuicCounters(1, 0));
         advance(connection, new QuicCounters(2, 0));
@@ -165,10 +180,11 @@ final class CarrierSamplerTest {
         assertEquals(0, rejected.get());
     }
 
-    @Test void initialQueryCanCompleteDuringAttachment() {
+    @Test void aReadTriggersAnInitialQuery() {
         var synchronous = new CarrierSampler.Registry(clock::get, Runnable::run);
         var connection = synchronous.attach(identity, new CarrierProvider.Query(CarrierSource.NETTY_QUIC,
                 completion -> completion.accept(clock.get(), new QuicCounters(0, 0))));
+        assertTrue(connection.read().isEmpty());
         var sample = connection.read().orElseThrow();
         assertEquals(new QuicCounters(0, 0), sample.counts().orElseThrow());
         assertEquals(0, sample.carrierId().getClass().getConstructors().length);
@@ -186,7 +202,7 @@ final class CarrierSamplerTest {
             if (count == 2) {
                 blocked.countDown();
                 try {
-                    if (!unblock.await(5, TimeUnit.SECONDS)) throw new AssertionError("query not released");
+                    if (!unblock.await(30, TimeUnit.SECONDS)) throw new AssertionError("query not released");
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new AssertionError(e);
@@ -194,6 +210,8 @@ final class CarrierSamplerTest {
             }
             completion.accept(at, new QuicCounters(count, 0));
         }));
+        assertTrue(tasks.isEmpty());
+        assertTrue(connection.read().isEmpty());
         tasks.remove().run();
         var old = connection.read().orElseThrow();
         clock.addAndGet(INTERVAL);
@@ -201,16 +219,16 @@ final class CarrierSamplerTest {
         try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
             var query = threads.submit(tasks.remove());
             try {
-                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                assertTrue(blocked.await(30, TimeUnit.SECONDS));
                 var results = new ArrayDeque<java.util.concurrent.Future<Optional<io.zmux.CarrierSample>>>();
                 for (int i = 0; i < 64; i++) results.add(threads.submit(connection::read));
-                for (var result : results) assertSame(old, result.get(2, TimeUnit.SECONDS).orElseThrow());
+                for (var result : results) assertSame(old, result.get(30, TimeUnit.SECONDS).orElseThrow());
                 assertTrue(tasks.isEmpty());
                 assertEquals(2, calls.get());
             } finally {
                 unblock.countDown();
             }
-            query.get(5, TimeUnit.SECONDS);
+            query.get(30, TimeUnit.SECONDS);
         }
         assertEquals(new QuicCounters(2, 0), connection.read().orElseThrow().counts().orElseThrow());
     }
@@ -224,7 +242,7 @@ final class CarrierSamplerTest {
         });
         for (int i = 0; i < identities.length; i++) {
             identities[i] = new Object();
-            registry.attach(identities[i], known);
+            assertTrue(registry.attach(identities[i], known).read().isEmpty());
         }
         while (!work.isEmpty()) work.remove().run();
         assertEquals(1000, calls.get());

@@ -1,6 +1,8 @@
 package io.zmux.shaping.machine;
 
 import io.zmux.shaping.Capability;
+import io.zmux.shaping.DatagramView;
+import io.zmux.shaping.UnitPlan;
 import io.zmux.shaping.Effects;
 import io.zmux.shaping.Event;
 import io.zmux.shaping.RecordPlan;
@@ -27,7 +29,10 @@ public final class Machines {
     /** A factory running d; its shared values are drawn here from the options' source. */
     public static ShaperFactory factory(Definition d, MachineOptions o) {
         Compiled c = new Compiled(d, Sampler.of(o), o);
-        return pipe -> c.newShaper();
+        return new ShaperFactory() {
+            @Override public Shaper create(io.zmux.shaping.ShapedPipe pipe) { return c.newShaper(); }
+            @Override public io.zmux.shaping.GateRequirement gateRequirement() { return d.gates; }
+        };
     }
 
     /** Reads a JSON definition and returns its factory. */
@@ -41,11 +46,7 @@ public final class Machines {
         return MachinePoolPolicy.read(new String(json, StandardCharsets.UTF_8), o);
     }
 
-    /**
-     * Reads local limits: a JSON object with the optional members {@code wire} ({@code initial} up to 2^53, {@code per_mb} and
-     * {@code per_sec} up to 2^43, integers), {@code max_delay} (microseconds up to 10^15; 0 the default, negative no bound)
-     * and the switches {@code no_padding}, {@code no_pause} and {@code no_injection}. A wire of zeros allows no injection.
-     */
+    /** Reads local account and profile limits. Durations in JSON are microseconds. */
     public static ShapingLimits limits(byte[] json, MachineOptions o) throws DefinitionException {
         o.limits().check(json.length);
         return DefinitionJson.limits(DefinitionJson.parse(new String(json, StandardCharsets.UTF_8)));
@@ -65,11 +66,14 @@ public final class Machines {
             shared = new long[d.sharedSlots];
             for (Value v : d.sites()) if (v.scope == Scope.SHARED) shared[v.slot] = compile.draw(v.segments);
             Set<Capability> caps = EnumSet.of(Capability.PLAN);
+            if (d.includeControl) caps.add(Capability.INCLUDE_CONTROL);
             for (Machine m : d.machines) {
                 for (State st : m.states()) {
+                    if (st.datagram() != null) caps.add(Capability.DATAGRAM_PLAN);
                     for (Transition t : st.next()) {
                         switch (t.on()) {
-                            case RECORD_IN, PADDING_IN -> caps.add(Capability.RECORD_IN);
+                            case OUTBOUND -> caps.add(Capability.OUTBOUND);
+                            case DATAGRAM_PLAN -> caps.add(Capability.DATAGRAM_PLAN);
                             case STREAM_OPEN, STREAM_END -> caps.add(Capability.STREAMS);
                             default -> { }
                         }
@@ -90,8 +94,8 @@ public final class Machines {
         private final Sampler s;
         private final int[] cur, gen;
         private final long[][] counters, timers;
-        private final long[] injectAt, rate, burst, weight;
-        private final int[] injectLen;
+        private final long[] rate, burst, weight;
+        private final UnitPlan sizes = new UnitPlan();
         private long pauseUntil, seq;
         /** Length of the triggering event. */
         private long len;
@@ -105,9 +109,11 @@ public final class Machines {
         private int[] q = new int[64];
         private int qHead, qTail;
         /** The machine of the injection last reported; -1: none. */
-        private int surfaced = -1;
-        private long lastInjectAt = NONE, lastWake = NONE, lastUntil, lastRate, lastBurst, lastWeight;
-        private int lastInjectLen;
+        private int injectionOwner = -1;
+        private boolean canInject, consumedWake;
+        private long requestId, requestSeq, injectAt, lastInjection;
+        private int injectLength;
+        private long lastWake = NONE, lastUntil, lastRate, lastBurst, lastWeight;
 
         MachineShaper(Compiled c, Sampler s) {
             this.c = c;
@@ -118,12 +124,9 @@ public final class Machines {
             gen = new int[n];
             counters = new long[n][];
             timers = new long[n][];
-            injectAt = new long[n];
-            injectLen = new int[n];
             rate = new long[n];
             burst = new long[n];
             weight = new long[n];
-            Arrays.fill(injectAt, NONE);
             for (int i = 0; i < n; i++) {
                 cur[i] = ms.get(i).start();
                 counters[i] = new long[ms.get(i).counters()];
@@ -134,6 +137,7 @@ public final class Machines {
             pipeHas = new BitsOf(c.d.pipeSlots);
         }
 
+        @Override public io.zmux.shaping.GateRequirement gateRequirement() { return c.d.gates; }
         @Override public Set<Capability> capabilities() { return c.caps; }
 
         int state(int machine) { return cur[machine]; }
@@ -143,60 +147,78 @@ public final class Machines {
         @Override public void plan(RecordView view, RecordPlan p) {
             now = view.nowNanos() / NANOS;
             meters = view.meters();
-            long maxLen = 0, padTo = 0, multiple = 0, pad = 0, delay = 0;
+            sizes.clear();
+            int maxLen = 0;
             boolean flush = false;
             for (int i = 0; i < ms.size(); i++) {
-                RecordRule r = ms.get(i).states().get(cur[i]).record();
-                if (r == null) continue;
-                long ml = 0;
-                if (r.target() != null) {
-                    ml = val(r.target());
-                    padTo = Math.max(padTo, ml);
-                } else if (r.maxLen() != null) {
-                    ml = val(r.maxLen());
-                }
-                if (ml != 0 && (maxLen == 0 || ml < maxLen)) maxLen = ml;
-                if (r.padTo() != null) padTo = Math.max(padTo, val(r.padTo()));
-                if (r.padMultiple() != null) multiple = Math.max(multiple, val(r.padMultiple()));
-                if (r.pad() != null) pad = Math.min(pad + val(r.pad()), Integer.MAX_VALUE);
-                if (r.delay() != null) delay = Math.max(delay, val(r.delay()));
-                flush |= r.flush();
+                RecordRule rule = ms.get(i).states().get(cur[i]).record();
+                if (rule == null) continue;
+                int target = drawUnit(rule, sizes);
+                if (target > 0 && (maxLen == 0 || target < maxLen)) maxLen = target;
+                flush |= rule.flush();
             }
-            p.maxLength((int) maxLen).padTo((int) padTo).padMultiple((int) multiple).pad((int) pad).delayNanos(delay * NANOS).flush(flush);
-            fire(Trigger.RECORD_OUT, -1, 0, -1);
+            p.maxLength(maxLen).padTo(sizes.padTo()).padMultiple(sizes.padMultiple()).pad(sizes.pad())
+                    .delayNanos(sizes.delayNanos()).flush(flush);
+            fire(Trigger.RECORD_PLAN, -1, 0, -1);
             seq++;
             p.stop(stopped);
             effects(p.effects());
         }
 
+        @Override public void planDatagram(DatagramView view, UnitPlan p, Effects out) {
+            now = view.nowNanos() / NANOS;
+            meters = view.meters();
+            for (int i = 0; i < ms.size(); i++) {
+                RecordRule rule = ms.get(i).states().get(cur[i]).datagram();
+                if (rule != null) drawUnit(rule, p);
+            }
+            fire(Trigger.DATAGRAM_PLAN, -1, view.length(), -1);
+            effects(out);
+            consumedWake = false;
+            if (stopped) out.stop();
+        }
+
+        private int drawUnit(RecordRule rule, UnitPlan p) {
+            int maxLen = 0;
+            if (rule.target() != null) {
+                maxLen = (int) val(rule.target());
+                p.padTo(Math.max(p.padTo(), maxLen));
+            } else if (rule.maxLen() != null) {
+                maxLen = (int) val(rule.maxLen());
+            }
+            if (rule.padTo() != null) p.padTo(Math.max(p.padTo(), (int) val(rule.padTo())));
+            if (rule.padMultiple() != null) p.padMultiple(Math.max(p.padMultiple(), (int) val(rule.padMultiple())));
+            if (rule.pad() != null) p.pad((int) Math.min(p.pad() + val(rule.pad()), Integer.MAX_VALUE));
+            if (rule.delay() != null) p.delayNanos(Math.max(p.delayNanos(), val(rule.delay()) * NANOS));
+            return maxLen;
+        }
+
         @Override public void onEvent(Event e, Effects out) {
             now = e.nowNanos() / NANOS;
             meters = e.meters();
+            canInject = e.kind() == io.zmux.shaping.EventKind.OUTBOUND || e.kind() == io.zmux.shaping.EventKind.TIMER;
+            consumedWake = e.kind() == io.zmux.shaping.EventKind.TIMER && lastWake != NONE && lastWake <= now;
             switch (e.kind()) {
                 case START -> {
                     for (int i = 0; i < ms.size(); i++) enter(i, ms.get(i).start());
                     drain();
                 }
-                case RECORD_IN -> fire(e.paddingOnly() ? Trigger.PADDING_IN : Trigger.RECORD_IN, -1, e.length(), -1);
-                case INJECTED -> {
-                    clearSurfaced();
-                    fire(Trigger.INJECTED, -1, e.length(), -1);
+                case OUTBOUND -> fire(Trigger.OUTBOUND, -1, e.length(), -1);
+                case INJECTION_ACCEPTED, INJECTION_REJECTED -> {
+                    if (e.requestId() != requestId || requestId == 0) return;
+                    requestId = 0;
+                    if (e.kind() == io.zmux.shaping.EventKind.INJECTION_ACCEPTED) fire(Trigger.INJECTION_ACCEPTED, -1, e.length(), -1);
+                    else fire(Trigger.INJECTION_REJECTED, -1, 0, injectionOwner);
                 }
-                case INJECT_DROPPED -> {
-                    clearSurfaced();
-                    if (surfaced >= 0) fire(Trigger.INJECT_DROPPED, -1, 0, surfaced);
-                }
-                case WAKE -> wake();
+                case TIMER -> wake();
                 case STREAM_OPEN -> fire(Trigger.STREAM_OPEN, -1, 0, -1);
                 case STREAM_END -> fire(Trigger.STREAM_END, -1, 0, -1);
-                default -> { return; } // replaced, stopped, pipe failed: no machine hears them
+                default -> { return; }
             }
+            canInject = false;
             effects(out);
+            consumedWake = false;
             if (stopped) out.stop();
-        }
-
-        private void clearSurfaced() {
-            if (surfaced >= 0) injectAt[surfaced] = NONE;
         }
 
         private void wake() {
@@ -268,7 +290,7 @@ public final class Machines {
                 case WIRE_LEFT -> meters.wireLeft();
                 case STALL_LEFT -> meters.stallLeft();
                 case WIRE_SPENT -> meters.wireSpent();
-                case SENT_BYTES -> meters.sentBytes();
+                case EARNED_BYTES -> meters.earnedBytes();
                 case WIRE_PPM -> meters.wirePpm();
             };
             return k.cmp().holds(x, val(k.value()));
@@ -291,11 +313,12 @@ public final class Machines {
             switch (a.op()) {
                 case INJECT -> {
                     if (a.cancel()) {
-                        injectAt[m] = NONE;
-                    } else {
-                        long after = val(a.after());
-                        injectLen[m] = (int) val(a.len());
-                        injectAt[m] = now + after;
+                        if (m == injectionOwner) requestId = 0;
+                    } else if (canInject) {
+                        requestId = ++requestSeq;
+                        injectAt = now + val(a.after());
+                        injectLength = (int) val(a.len());
+                        injectionOwner = m;
                     }
                 }
                 case PAUSE -> pauseUntil = Math.max(pauseUntil, now + val(a.after()));
@@ -340,22 +363,14 @@ public final class Machines {
 
         /** What differs from the last report. */
         private void effects(Effects out) {
-            int best = -1;
-            for (int m = 0; m < injectAt.length; m++) {
-                if (injectAt[m] != NONE && (best < 0 || injectAt[m] < injectAt[best])) best = m;
-            }
-            surfaced = best;
-            long at = best < 0 ? NONE : injectAt[best];
-            int l = best < 0 ? 0 : injectLen[best];
-            if (at != lastInjectAt || l != lastInjectLen) {
-                if (best < 0) out.noInject();
-                else out.inject(at * NANOS, l);
-                lastInjectAt = at;
-                lastInjectLen = l;
+            if (requestId != lastInjection) {
+                if (requestId == 0) out.noInject();
+                else out.inject(requestId, injectAt * NANOS, injectLength);
+                lastInjection = requestId;
             }
             long wake = NONE;
             for (long[] ts : timers) for (long t : ts) if (t != NONE && (wake == NONE || t < wake)) wake = t;
-            if (wake != lastWake) {
+            if (wake != lastWake || (wake != NONE && wake <= now && consumedWake)) {
                 if (wake == NONE) out.noWake();
                 else out.wake(wake * NANOS);
                 lastWake = wake;

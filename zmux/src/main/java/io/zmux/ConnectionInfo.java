@@ -28,10 +28,9 @@ import java.util.Optional;
  * @param suspended whether the session is suspended, waiting for a join to resume it
  * @param peerGoAway the watermarks of the GOAWAY frames received and the latest code; empty while none was received
  * @param maxDatagramPayload the largest session datagram payload the peer accepts now, 0 when none
- * @param pathDatagramPayload the largest session datagram payload that leaves as one datagram of the carrier (a QUIC
- *     DATAGRAM, its size as the carrier last reported it, path MTU discovery included) instead of in a record; on a
- *     carrier without a datagram channel it is {@code maxDatagramPayload}, since every datagram rides the records
- *     there. Packet-carrying applications use it as their MTU; {@link SessionEvent.DatagramPathChanged} reports changes
+ * @param pathDatagramPayload the largest payload on an eligible path
+ * @param nativeDatagramPayload the largest payload on an eligible native channel, zero when unavailable
+ * @param nativeDatagramAvailable whether an eligible native channel can carry at least an empty datagram
  * @param preamble whether stream preambles are in use
  * @param priority whether stream priorities are in use
  * @param datagramFlows whether datagram flows are in use
@@ -42,7 +41,7 @@ public record ConnectionInfo(boolean established, boolean initiator, String qmux
                              boolean peerDatagrams, boolean localResetStreamAt, boolean peerResetStreamAt,
                              boolean multipath, boolean pipeAck, boolean resume, boolean joinSecurityUnavailable,
                              boolean joinPending, boolean suspended, Optional<GoAway> peerGoAway, int maxDatagramPayload,
-                             int pathDatagramPayload,
+                             int pathDatagramPayload, int nativeDatagramPayload, boolean nativeDatagramAvailable,
                              boolean preamble, boolean priority, boolean datagramFlows, boolean lanesToPeer) {
     /** The QMux version of every session. */
     public static final String QMUX_VERSION = "draft-02";

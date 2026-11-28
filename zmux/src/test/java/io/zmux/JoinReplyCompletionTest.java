@@ -7,84 +7,147 @@ import io.zmux.carrier.MemoryPipe;
 import io.zmux.carrier.OutboundBatch;
 import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeWriter;
-import java.net.InetSocketAddress;
 import java.time.Duration;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** A Reply whose write reports after the joiner's Confirm and first records: none of them is lost. */
+/** Exercises the acceptor while its Reply has reached the peer and its write is still outstanding. */
 @Timeout(60)
 class JoinReplyCompletionTest {
-    private static final long DELAY = 300;
+    private static final class ReplyGate implements PipeWriter {
+        private final PipeWriter delegate;
+        private final CompletableFuture<Completion> replyDelivered = new CompletableFuture<>();
+        private final CompletableFuture<Void> release = new CompletableFuture<>();
+        private boolean first = true;
+        private int replyBytes;
 
-    private static void join(RecordMode mode, Framing framing) throws Exception {
-        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            return t;
-        });
-        try (EventLoops loops = EventLoops.create(1); var readers = Executors.newVirtualThreadPerTaskExecutor()) {
-            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops)
-                    .maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation()
-                    .allowRecordMode((c, x, p) -> true).build();
-            try (var l = Zmux.listen(NetworkTest.any(), ListenerConfig.builder().session(cfg).build());
-                 var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(Duration.ofSeconds(5))) {
-                PipeIo[] p = MemoryPipe.pair(framing);
-                PipeWriter w = p[1].writer();
-                AtomicBoolean first = new AtomicBoolean(true);
-                PipeWriter late = new PipeWriter() {
-                    @Override public void write(OutboundBatch b, Completion d) {
-                        if (!first.getAndSet(false)) { w.write(b, d); return; }
-                        w.write(b, new Completion() {
-                            @Override public void completed() { timer.schedule(d::completed, DELAY, TimeUnit.MILLISECONDS); }
-                            @Override public void failed(Throwable t) { d.failed(t); }
-                        });
-                    }
-                    @Override public void close() { w.close(); }
-                    @Override public void abort(Throwable t) { w.abort(t); }
-                };
-                PipeIo server = new PipeIo(p[1].reader(), late, framing, "memory", null);
-                boolean bound = mode == RecordMode.BOUND;
-                l.adapter().handle(bound ? server.withExporter((x, y, n) -> new byte[n]).withCarrierSecure() : server, JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
-                ZmuxPipe pipe = c.addPipe(bound ? p[0].withExporter((x, y, n) -> new byte[n]).withCarrierSecure() : p[0], PipeOptions.builder().recordMode(mode).build());
-                int streams = 30, size = 8000;
-                var received = readers.submit(() -> {
-                    long total = 0;
-                    var done = new java.util.ArrayList<java.util.concurrent.Future<Integer>>();
-                    for (int i = 0; i < streams; i++) {
-                        var st = s.acceptStream(Duration.ofSeconds(10));
-                        done.add(readers.submit(() -> st.readAll(1 << 20).length));
-                    }
-                    for (var f : done) total += f.get(20, TimeUnit.SECONDS);
-                    return total;
-                });
-                // Most of it while the Reply's report is outstanding.
-                for (int i = 0; i < streams; i++) {
-                    var st = c.openStream();
-                    st.write(new byte[size]);
-                    st.finish();
-                    Thread.sleep(DELAY * 2 / streams);
-                }
-                assertEquals((long) streams * size, received.get(30, TimeUnit.SECONDS));
-                Thread.sleep(DELAY);
-                assertEquals(0, s.stats().pipeFailures(), "acceptor");
-                assertEquals(0, c.stats().pipeFailures(), "joiner");
-                assertEquals(2, s.pipes().size(), "the join is attached");
-                assertTrue(pipe.stats().orElseThrow().bytesSent() > 0, "the pipe carried records");
-                // Nothing the joiner wrote on it went missing, what a later retransmission would hide.
-                long sent = pipe.stats().orElseThrow().bytesSent();
-                for (var ps : s.pipeStats()) if (ps.pipe().equals(pipe.id())) assertEquals(sent, ps.bytesReceived(), "bytes of the pipe");
+        ReplyGate(PipeWriter delegate) {
+            this.delegate = delegate;
+            replyDelivered.thenAccept(completion -> release.thenRun(completion::completed));
+        }
+
+        @Override public void write(OutboundBatch batch, Completion completion) {
+            if (!first) {
+                delegate.write(batch, completion);
+                return;
             }
-        } finally {
-            timer.shutdownNow();
+            first = false;
+            replyBytes = batch.bytes();
+            delegate.write(batch, new Completion() {
+                @Override public void completed() { replyDelivered.complete(completion); }
+                @Override public void failed(Throwable cause) {
+                    replyDelivered.completeExceptionally(cause);
+                    completion.failed(cause);
+                }
+            });
+        }
+
+        void awaitDelivery() throws Exception { replyDelivered.get(30, TimeUnit.SECONDS); }
+        void release() { release.complete(null); }
+        @Override public void close() { delegate.close(); }
+        @Override public void abort(Throwable cause) { delegate.abort(cause); }
+    }
+
+    private static void join(RecordMode mode, Framing framing, boolean changeGeneration) throws Exception {
+        try (var loops = EventLoops.create(2)) {
+            ZmuxConfig cfg = ZmuxConfig.builder().eventLoops(loops)
+                    .sessionPolicy(new SessionPolicy(new CapacityLimits(4)))
+                    .pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+                    .noProbation().joinTimeout(Duration.ofMinutes(1))
+                    .allowRecordMode((carrier, recordMode, peer) -> true).build();
+            try (var f = new SessionTestSupport.Fixture(cfg)) {
+                PipeIo[] pair = MemoryPipe.pair(framing);
+                var gate = new ReplyGate(pair[1].writer());
+                PipeIo server = new PipeIo(pair[1].reader(), gate, framing, "memory", null);
+                try {
+                    var handled = f.listener.adapter().handle(bound(server, mode), JoinHint.inBand(null));
+                    var pipe = f.client.addPipe(bound(pair[0], mode),
+                            PipeOptions.builder().recordMode(mode).returnOnReply(true).build());
+                    gate.awaitDelivery();
+
+                    if (changeGeneration) {
+                        var policy = f.server.sessionPolicy();
+                        f.server.setSessionPolicy(new SessionPolicy(1, 1, policy.authorizeJoin(), policy.limits()));
+                        gate.release();
+                        assertThrows(JoinAuthorizationChangedException.class, handled::awaitSetup);
+                        assertEquals(1, f.server.pipes().size());
+                    } else {
+                        assertEquals(1, f.server.pipes().size());
+                        try (var stream = f.client.openStream()) {
+                            byte[] payload = {1, 3, 5};
+                            stream.write(payload);
+                            stream.finish();
+                            gate.release();
+                            handled.awaitSetup();
+                            try (var peer = f.server.acceptStream()) {
+                                assertArrayEquals(payload, peer.readAll(16));
+                            }
+                        }
+                        assertTrue(f.server.pipes().stream().anyMatch(p -> p.id().equals(pipe.id())));
+                        assertEquals(0, f.server.stats().pipeFailures());
+                        assertEquals(0, f.client.stats().pipeFailures());
+                    }
+                } finally {
+                    gate.release();
+                }
+            }
         }
     }
 
-    @Test void sealedOnMessages() throws Exception { join(RecordMode.SEALED, Framing.MESSAGES); }
-    @Test void boundOnMessages() throws Exception { join(RecordMode.BOUND, Framing.MESSAGES); }
-    @Test void sealedOnAByteStream() throws Exception { join(RecordMode.SEALED, Framing.BYTE_STREAM); }
+    @Test
+    @Timeout(15)
+    void timedOutReplySettlesItsLateCarrierPrefixAgainstTheOriginalDispatch() throws Exception {
+        var clock = new SpliceHooksTest.ManualClock();
+        var deadline = Duration.ofMillis(5);
+        try (var loops = EventLoops.create(2)) {
+            var config = SessionTestSupport.configBuilder(loops, 4).clockDomain(clock.domain())
+                    .joinTimeout(deadline).handshakeShaper(view -> view.message().equals("reply")
+                            ? new io.zmux.carrier.HandshakeShaper.UnitPlan(700, 0, 0, null)
+                            : io.zmux.carrier.HandshakeShaper.UnitPlan.NONE)
+                    .allowRecordMode((carrier, mode, peer) -> true).build();
+            try (var fixture = new SessionTestSupport.Fixture(config)) {
+                PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
+                var gate = new ReplyGate(pair[1].writer());
+                try {
+                    var server = pair[1].withHalves(pair[1].reader(), gate);
+                    var admission = fixture.listener.adapter().handle(server, JoinHint.inBand(null));
+                    var joined = fixture.client.driver.addPipe(pair[0], PipeOptions.builder()
+                            .recordMode(RecordMode.SEALED).returnOnReply(true).build().join());
+                    gate.awaitDelivery();
+                    joined.get(5, TimeUnit.SECONDS);
+
+                    var dispatched = fixture.server.shapingMeters().overhead();
+                    long padding = dispatched.handshakeReservedBytes();
+                    assertTrue(padding > 0);
+                    clock.advance(deadline);
+                    assertThrows(JoinTimeoutException.class, admission::awaitSetup);
+                    assertEquals(padding, fixture.server.shapingMeters().overhead().handshakeReservedBytes());
+                    gate.release();
+                    var completed = fixture.server.shapingMeters().overhead();
+                    assertEquals(0, completed.handshakeReservedBytes());
+                    assertEquals(0, completed.handshakeUnresolvedBytes());
+                    assertEquals(dispatched.handshakePaddingBytes() + padding, completed.handshakePaddingBytes());
+                    assertEquals(dispatched.policy().baselineBytes() + gate.replyBytes - padding,
+                            completed.policy().baselineBytes());
+                } finally {
+                    gate.release();
+                    fixture.client.abort(0x10, "test complete");
+                    fixture.server.abort(0x10, "test complete");
+                    clock.advance(Duration.ofMinutes(1));
+                }
+            }
+        }
+    }
+
+    private static PipeIo bound(PipeIo carrier, RecordMode mode) {
+        return mode == RecordMode.BOUND ? carrier.withExporter((label, context, length) -> new byte[length]).withCarrierSecure() : carrier;
+    }
+
+    @Test void sealedOnMessages() throws Exception { join(RecordMode.SEALED, Framing.MESSAGES, false); }
+    @Test void boundOnMessages() throws Exception { join(RecordMode.BOUND, Framing.MESSAGES, false); }
+    @Test void sealedOnAByteStream() throws Exception { join(RecordMode.SEALED, Framing.BYTE_STREAM, false); }
+    @Test void sealedAuthorizationChangesAfterReply() throws Exception { join(RecordMode.SEALED, Framing.BYTE_STREAM, true); }
+    @Test void boundAuthorizationChangesAfterReply() throws Exception { join(RecordMode.BOUND, Framing.MESSAGES, true); }
 }

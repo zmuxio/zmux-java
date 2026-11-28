@@ -1,5 +1,8 @@
 package io.zmux.http;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.PipeAuth;
 import io.zmux.PipeOptions;
@@ -22,7 +25,7 @@ class StreamingSecureTest {
     @Test void http1OverTlsTakesABoundJoin() throws Exception { boundJoin(true); }
 
     private static void boundJoin(boolean h1) throws Exception {
-        try (var f = new Fixture(b -> b.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((c, m, p) -> true).maxPipes(4),
+        try (var f = new Fixture(b -> b.pipeAuth(PipeAuth.exporter().withEndToEnd()).allowRecordMode((c, m, p) -> true).sessionPolicy(new SessionPolicy(new CapacityLimits(4))),
                 b -> b, b -> b.streaming(), true, null);
              var http = f.client(b -> h1 ? b.http1() : b.http2())) {
             var io = http.pipe(f.base, Map.of(), BIDI, null);

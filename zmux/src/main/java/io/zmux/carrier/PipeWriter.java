@@ -14,7 +14,17 @@ public interface PipeWriter {
     interface Completion {
         void completed();
 
+        /** Cumulative accepted prefix while this ordered write is still in flight. */
+        default void progress(int confirmedBytes) {}
+
+        /** Failure of an atomic write, or failure before any confirmed bytes. */
         void failed(Throwable cause);
+
+        /** Failure after accepting a prefix, in batch bytes. Message carriers count complete messages.  */
+        default void failed(Throwable cause, int confirmedBytes) { failed(cause); }
+
+        /** Terminal failure with a proved prefix and unidentified progress beyond that prefix. */
+        default void failedUnknown(Throwable cause, int provedBytes) { failed(cause, provedBytes); }
     }
 
     /**
@@ -23,7 +33,8 @@ public interface PipeWriter {
      * {@link OutboundBatch#messageEnd}). Completion reports that the carrier took the bytes;
      * the batch is valid until then, and a writer that still needs the payload afterwards
      * calls {@link OutboundBatch#retain()} first. The completion may be reported on any
-     * thread, also from inside this call.
+     * thread, also from inside this call. A writer that may accept a prefix before failing must
+     * report that progress through {@link Completion#failed(Throwable, int)}.
      */
     void write(OutboundBatch batch, Completion done);
 

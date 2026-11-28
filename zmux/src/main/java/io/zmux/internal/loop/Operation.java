@@ -1,5 +1,6 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.core.TimerHeap;
 import io.zmux.internal.core.CoreException;
 import io.zmux.internal.core.Time;
 import io.zmux.internal.core.Waiter;
@@ -71,6 +72,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     private TimerHeap.Timer timer;
     /** A lane operation's deadline timer; set and removed on the loop. */
     private volatile TimerHeap.Timer laneTimer;
+    private volatile boolean laneExpired;
     Operation<?> prevLive, nextLive;
     boolean live;
 
@@ -125,7 +127,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         long left = deadline - System.nanoTime();
         if (left <= 0) { if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); return; }
         timer = new TimerHeap.Timer() {
-            @Override void fire(long now) { timer = null; if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); }
+            @Override public void fire(long now) { timer = null; if (settle(new SocketTimeoutException("timed out"))) withdrawNow(); }
         };
         driver.loop.schedule(timer, Time.add(Clock.now(), left));
     }
@@ -153,7 +155,7 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         Step body = Objects.requireNonNull(step, "a lane operation is never attempted on the loop");
         Object r;
         try {
-            driver.core.setNow(Clock.now()); // what the attempt queues or takes is timed now (datagram sojourns)
+            driver.core.setNow(driver.now()); // what the attempt queues or takes is timed now (datagram sojourns)
             r = body.attempt(this);
         } catch (CoreException e) {
             r = e;
@@ -238,6 +240,9 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
     /** The attempt must wait; the operation becomes cancellable again. */
     void pause() {
         STATE.setVolatile(this, WAITING);
+        // A timer that fired in RUNNING could not settle the operation. The turn holder
+        // has now published its waiter and can withdraw it with the accepted prefix intact.
+        if (laneExpired) settle(new SocketTimeoutException("timed out"));
     }
 
     /** Ends the attempt with r. */
@@ -252,15 +257,20 @@ public class Operation<T> extends Waiter implements Mailbox.Command {
         if (deadline == Long.MAX_VALUE) return;
         driver.post(() -> {
             if (isDone()) return;
-            long left = deadline - System.nanoTime();
-            if (left <= 0) { settle(new SocketTimeoutException("timed out")); return; }
+            if (deadline - System.nanoTime() <= 0) { expireLane(); return; }
             TimerHeap.Timer t = new TimerHeap.Timer() {
-                @Override void fire(long now) { laneTimer = null; settle(new SocketTimeoutException("timed out")); }
+                @Override public void fire(long now) { expireLane(); }
             };
-            driver.loop.schedule(t, Time.add(Clock.now(), left));
+            driver.loop.schedule(t, Clock.fromNanoTime(deadline));
             laneTimer = t;
             if (isDone()) disarm(); // Decided meanwhile: released() may have missed the timer.
         });
+    }
+
+    private void expireLane() {
+        laneTimer = null;
+        laneExpired = true;
+        settle(new SocketTimeoutException("timed out"));
     }
 
     /** Removes an armed lane deadline; on the loop. */

@@ -6,5 +6,11 @@ package io.zmux.shaping;
  */
 @FunctionalInterface
 public interface ShaperFactory {
+    /** Static rate constraints to validate before installation. */
+    default GateRequirement gateRequirement() { return GateRequirement.NONE; }
+
+    /** Join handshake plans installed with this selection. */
+    default io.zmux.carrier.HandshakeShaper handshakeShaper() { return null; }
+
     Shaper create(ShapedPipe pipe);
 }

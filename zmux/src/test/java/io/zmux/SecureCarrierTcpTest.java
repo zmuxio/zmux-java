@@ -24,7 +24,7 @@ class SecureCarrierTcpTest {
     private static final Duration WAIT = Duration.ofSeconds(5);
 
     private static ZmuxConfig.Builder multipath(ZmuxConfig.Builder b, PipeAuth auth) {
-        return b.maxPipes(4).pipeAuth(auth).noProbation();
+        return b.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(auth).noProbation();
     }
 
     private static ZmuxConfig.Builder config(EventLoops loops) {
@@ -126,7 +126,7 @@ class SecureCarrierTcpTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var cfg = config(loops).build();
             var infos = new CopyOnWriteArrayList<RejectInfo>();
-            var close = ListenerConfig.builder().session(cfg).onReject(i -> { infos.add(i); return RejectInfo.Action.CLOSE; }).build();
+            var close = ListenerConfig.builder().session(cfg).onReject(i -> infos.add(i)).build();
             try (var l = Zmux.listen(NetworkTest.any(), close); SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 writeAll(ch, unknownHello());
                 assertEquals(0, readToEnd(ch));
@@ -134,7 +134,7 @@ class SecureCarrierTcpTest {
                 assertEquals("unknown_locator", infos.getFirst().reason());
                 assertEquals(RecordMode.SEALED, infos.getFirst().recordMode());
             }
-            var stall = ListenerConfig.builder().session(cfg).onReject(i -> RejectInfo.Action.STALL).build();
+            var stall = ListenerConfig.builder().session(cfg).rejection(RejectInfo.Action.STALL).build();
             try (var l = Zmux.listen(NetworkTest.any(), stall); SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 writeAll(ch, unknownHello());
                 ListenerEntryTest.await(() -> l.stats().rejected() == 1);
@@ -161,7 +161,7 @@ class SecureCarrierTcpTest {
         try (EventLoops loops = EventLoops.create(2)) {
             var infos = new CopyOnWriteArrayList<RejectInfo>();
             var cfg = config(loops).build();
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { infos.add(i); return RejectInfo.Action.CLOSE; }).build();
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> infos.add(i)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc); var c = Zmux.connect(l.localAddress(), cfg); var s = l.accept(WAIT);
                  SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 var peer = (io.zmux.internal.wire.TransportParams) c.run(op -> c.core.peerParams());

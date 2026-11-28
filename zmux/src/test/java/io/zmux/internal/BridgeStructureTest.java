@@ -36,9 +36,9 @@ class BridgeStructureTest {
             Map.entry("Operation.live", "loop (the session's live list)"),
             Map.entry("SendLane.tail", "turn holder (ring producer)"),
             Map.entry("SendLane.block", "turn holder (ring producer)"),
-            Map.entry("SendLane.blockBytes", "turn holder (ring producer)"),
             Map.entry("SendLane.blockPos", "turn holder (ring producer)"),
             Map.entry("SendLane.finished", "turn holder (ring producer)"),
+            Map.entry("SendLane$Entry.view", "ring consumer, including final disposal"),
             Map.entry("SendLane.head", "loop (ring consumer)"),
             Map.entry("SendLane.headPos", "loop (ring consumer)"),
             Map.entry("SendLane.leaseListed", "loop"),
@@ -57,6 +57,8 @@ class BridgeStructureTest {
             Map.entry("RecvLane.endReported", "loop"),
             Map.entry("RecvLane.appDone", "loop"),
             Map.entry("RecvLane.hostReader", "loop"),
+            Map.entry("RecvLane$Piece.buf", "turn holder returns the published owner"),
+            Map.entry("RecvLane$Piece.data", "turn holder consumes and clears the published view"),
             Map.entry("RecvLane$Piece.off", "turn holder (ring consumer); published with the piece's next link"));
 
     @Test

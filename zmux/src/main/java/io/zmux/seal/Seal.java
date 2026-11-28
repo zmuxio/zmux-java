@@ -114,7 +114,8 @@ public final class Seal {
             CompletableFuture<PipeIo> f = new CompletableFuture<>();
             Thread t = Thread.ofVirtual().name("zmux-seal-server").start(() -> {
                 try {
-                    f.complete(server(carrier, cfg, ctx.hint().source()));
+                    PipeIo established = server(carrier, cfg, ctx, f::isCancelled);
+                    if (!f.complete(established)) Bootstrap.discard(established, new java.util.concurrent.CancellationException());
                 } catch (Throwable e) {
                     f.completeExceptionally(e); // The listener closes it, or sends it to OnReject.
                 }
@@ -152,23 +153,41 @@ public final class Seal {
      * The plan of a message under the limits, after its wait: the padding field that takes the message from its length to the
      * planned one, wire and noise being what it is without padding.
      */
-    private static int shape(HandshakeShaper s, io.zmux.shaping.ShapingLimits limits, PipeIo p, String message, int wire, int noise, long[] padded) throws InterruptedIOException {
-        if (s == null) return 0;
-        // Each handshake family has its own name: a plan made for the lengths of one is never applied to another.
-        HandshakeShaper.UnitPlan plan = HandshakePlans.ask(s, new HandshakeShaper.View(p.carrier(), Profile.HANDSHAKE_ESTABLISH, message), () -> { });
-        if (plan == null) return 0;
-        plan = HandshakePlans.limited(plan, limits);
-        if (plan.delay() != null && plan.delay().isPositive()) {
-            try {
-                Thread.sleep(plan.delay());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new InterruptedIOException();
-            }
-        }
-        int item = HandshakePlans.item(plan, wire + p.capabilities().writeOverhead(), Math.min(io.zmux.internal.join.Sealer.MAX_MESSAGE - noise, io.zmux.internal.join.Sealer.MESSAGE_FLOOR - wire));
-        if (item != HandshakePlans.NO_ITEM) padded[0] += HandshakePlans.itemSize(item);
+    private static int shape(HandshakeShaper s, io.zmux.shaping.ShapingLimits.Effective limits, PipeIo p,
+                             String message, int wire, int noise, ShapeCost cost) throws InterruptedIOException {
+        return shape(s, limits, p, message, wire, noise, cost, Seal::waitForShape);
+    }
+
+    @FunctionalInterface
+    interface ShapeWait {
+        void delay(long nanos) throws InterruptedIOException;
+    }
+
+    static int shape(HandshakeShaper s, io.zmux.shaping.ShapingLimits.Effective limits, PipeIo p,
+                     String message, int wire, int noise, ShapeCost cost, ShapeWait clock) throws InterruptedIOException {
+        var plan = s == null ? null : HandshakePlans.ask(s,
+                new HandshakeShaper.View(p.carrier(), Profile.HANDSHAKE_ESTABLISH, message), () -> { });
+        plan = HandshakePlans.limited(plan == null ? HandshakeShaper.UnitPlan.NONE : plan, limits);
+        long wait = HandshakePlans.delayNanos(plan);
+        if (wait > 0) clock.delay(wait);
+        int room = Math.min(io.zmux.internal.join.Sealer.MAX_MESSAGE - noise, HandshakePlans.structuralRoom(wire));
+        int baseline = Math.addExact(wire, p.capabilities().writeOverhead());
+        int allowance = HandshakePlans.fill(plan, baseline, room);
+        int item = HandshakePlans.fit(allowance);
+        int added = item == HandshakePlans.NO_ITEM ? 0 : HandshakePlans.itemSize(item);
+        cost.allowance = allowance;
+        cost.extra = added;
+        cost.delay = wait;
         return Tlv.paddingField(item);
+    }
+
+    private static void waitForShape(long nanos) throws InterruptedIOException {
+        try {
+            Thread.sleep(java.time.Duration.ofNanos(nanos));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException();
+        }
     }
 
     /** What a framed unit of n Noise bytes takes on the carrier. */
@@ -192,12 +211,12 @@ public final class Seal {
         // Message 1 carries application data only under a pre-shared key.
         EstablishPayload first = new EstablishPayload(null, profile.isPskBased() ? appData(c.appData(), 1, new AppDataSource.Known(profile, null, null)) : null, null, 0);
         int noise = Handshake.minLength(profile, 0) + first.length();
-        long[] padded = new long[1];
-        int pad = shape(c.shaper(), c.shapingLimits(), p, "hello", EstablishHello.headerLength(profile) + unit(p, noise), noise, padded);
+        ShapeCost cost = new ShapeCost();
+        int pad = shape(c.shaper(), c.establishLimits(), p, "hello", EstablishHello.headerLength(profile) + unit(p, noise), noise, cost);
         byte[] hello = hs.writeHello(first.withPadding(pad, false));
         HandshakeIo io = new HandshakeIo(p);
         try {
-            io.write(hello);
+            cost.write(io, hello, p.capabilities().writeOverhead());
             EstablishClient.Reply reply;
             try {
                 reply = readUnit(io, b -> hs.readReply(b, 0, b.length));
@@ -228,11 +247,11 @@ public final class Seal {
             EstablishPayload last = new EstablishPayload(c.credential(), appData(c.appData(), 3, hs.known()), null, 0)
                     .withProof(c.signer() == null ? null : Proof.placeholder(c.signer()));
             noise = Handshake.minLength(profile, 2) + last.length();
-            pad = shape(c.shaper(), c.shapingLimits(), p, "finish", unit(p, noise), noise, padded);
-            io.write(hs.writeFinish(last.withPadding(pad, false), c.signer()));
+            pad = shape(c.shaper(), c.establishLimits(), p, "finish", unit(p, noise), noise, cost);
+            cost.write(io, hs.writeFinish(last.withPadding(pad, false), c.signer()), p.capabilities().writeOverhead());
             Established done = hs.finish();
             Peer peer = new Peer(reply.peerStatic(), reply.credential(), verdict, null, profile, c.mode(), hs.peerAppData(), profile.pqConfidential(), pqAuth);
-            return padded(wrap(io, done, peer), padded[0]);
+            return cost.attach(wrap(io, done, peer));
         } catch (Throwable e) {
             io.fail(); // what the handshake held of the carrier goes with it
             throw e;
@@ -283,7 +302,24 @@ public final class Seal {
     }
 
     /** A handshake on a layered carrier adds to what the layers below it padded. */
-    private static PipeIo padded(PipeIo p, long n) { return p.withHandshakePadding(p.capabilities().handshakePadding() + n); }
+    static final class ShapeCost {
+        final java.util.List<io.zmux.carrier.HandshakeCost.Unit> units = new java.util.ArrayList<>();
+
+        int allowance, extra;
+        long delay;
+
+        void write(HandshakeIo io, byte[] bytes, int fixed) throws IOException {
+            long dispatched = System.nanoTime();
+            io.write(bytes);
+            units.add(new io.zmux.carrier.HandshakeCost.Unit(dispatched, (long) bytes.length + fixed - extra,
+                    allowance, extra, delay));
+        }
+
+        PipeIo attach(PipeIo pipe) {
+            var total = pipe.capabilities().handshakeCost().plus(new io.zmux.carrier.HandshakeCost(units));
+            return pipe.withHandshakeCost(total);
+        }
+    }
 
     /** The carrier of a finished handshake, with the carrier first bytes before any later byte. */
     private static PipeIo wrap(HandshakeIo io, Established done, Peer peer) {
@@ -307,9 +343,22 @@ public final class Seal {
 
     private static String reason(SecureCarrierException e) { return e.kind().name().toLowerCase(Locale.ROOT); }
 
-    private static PipeIo server(PipeIo p, ServerConfig c, SocketAddress src) throws Exception {
-        if (p.reader() == null || p.writer() == null) throw new SecureCarrierException(INVALID_CONFIG, "an Establish needs both halves");
-        HandshakeIo io = new HandshakeIo(p);
+    private static PipeIo server(PipeIo p, ServerConfig c, InboundTransform.Context context,
+                                 java.util.function.BooleanSupplier cancelled) throws Exception {
+        SocketAddress src = context.hint().source();
+        if (p.reader() == null || p.writer() == null) {
+            throw new CarrierRejectedException(0, null, "invalid_config",
+                    new SecureCarrierException(INVALID_CONFIG, "an Establish needs both halves"));
+        }
+        HandshakeIo io;
+        try {
+            io = new HandshakeIo(p);
+        } catch (RuntimeException failed) {
+            throw new CarrierRejectedException(0, null, "local_error", failed);
+        }
+        int wireProfile = 0;
+        RecordMode mode = null;
+        boolean authenticated = false;
         try {
             var f = framing(p);
             // What the first bytes begin.
@@ -346,9 +395,11 @@ public final class Seal {
                     io.fill();
                 }
             }
-            int wireProfile = (int) h.profile().value();
-            RecordMode mode = Mode.record(h.mode());
-            Refuser refuse = (why, cause) -> new CarrierRejectedException(wireProfile, mode, why, cause);
+            int profile = (int) h.profile().value();
+            RecordMode receivedMode = Mode.record(h.mode());
+            wireProfile = profile;
+            mode = receivedMode;
+            Refuser refuse = (why, cause) -> new CarrierRejectedException(profile, receivedMode, why, cause);
             boolean withPsk = h.profile().isPskBased();
             if (!c.acceptedProfiles().contains(h.profile())) throw refuse.of("profile_disabled", null);
             if (mode != RecordMode.SEALED && c.allowRecordMode() == null) throw refuse.of("record_mode", null);
@@ -362,42 +413,66 @@ public final class Seal {
                 if (psk == null) throw refuse.of("unknown_handle", null);
             }
             // A carrier without the Bound contract has no Binding to check it with, whatever the client mixed.
-            byte[] binding = h.mode() == Mode.BOUND ? binding(p) : null;
+            byte[] binding;
+            try {
+                binding = h.mode() == Mode.BOUND ? binding(p) : null;
+            } catch (SecureCarrierException | RuntimeException e) {
+                throw refuse.of("binding_unavailable", e);
+            }
             if (h.mode() == Mode.BOUND && binding == null) throw refuse.of("binding_unavailable", null);
             io.consume(io.buf.length);
             EstablishServer hs;
             try {
                 hs = EstablishServer.create(h, f, psk, binding, c.staticKey()).maxAppData(ClientConfig.appDataLimit(c.maxAppDataBound()));
                 hs.readHello();
+                io.checkClientWaited();
             } catch (SecureCarrierException e) {
                 throw refuse.of(reason(e), e);
             }
-            Credential cred;
-            try {
-                cred = c.gate().credential(h.handle(), h.profile(), src);
-            } catch (Exception failed) {
-                throw refuse.of("gate_error", failed);
-            }
-            byte[] data;
-            try {
-                data = appData(c.appData(), 2, hs.known(c.localContext()));
-            } catch (InterruptedIOException e) {
-                throw e;
-            } catch (IOException failed) {
-                throw refuse.of("gate_error", failed);
-            }
-            EstablishPayload second = new EstablishPayload(cred, data, null, 0).withProof(c.signer() == null ? null : Proof.placeholder(c.signer()));
-            int noise = Handshake.minLength(h.profile(), 1) + second.length();
-            long[] padded = new long[1];
-            int pad = shape(c.shaper(), c.shapingLimits(), p, "reply", unit(p, noise), noise, padded);
-            // The client's e or ek is checked here: a low-order e or an ek coefficient out of range is refused.
+            boolean anonymous = !withPsk;
+            if (!c.handshakeLimits().tryAcquire(anonymous)) throw refuse.of("handshake_capacity", null);
+            ShapeCost cost = new ShapeCost();
             byte[] reply;
             try {
-                reply = hs.writeReply(second.withPadding(pad, false), c.signer());
+                if (cancelled.getAsBoolean() || context.deadline().cancelled() || context.deadline().expired()) throw refuse.of("timeout", null);
+                Credential cred;
+                try {
+                    cred = c.gate().credential(h.handle(), h.profile(), src);
+                } catch (Exception failed) {
+                    throw refuse.of("gate_error", failed);
+                }
+                byte[] data;
+                try {
+                    data = appData(c.appData(), 2, hs.known(c.localContext()));
+                } catch (InterruptedIOException e) {
+                    throw refuse.of("timeout", e);
+                } catch (IOException failed) {
+                    throw refuse.of("gate_error", failed);
+                }
+                EstablishPayload second = new EstablishPayload(cred, data, null, 0).withProof(c.signer() == null ? null : Proof.placeholder(c.signer()));
+                int noise = Handshake.minLength(h.profile(), 1) + second.length();
+                int pad;
+                try {
+                    pad = shape(c.shaper(), c.establishLimits(), p, "reply", unit(p, noise), noise, cost);
+                } catch (InterruptedIOException e) {
+                    throw refuse.of("timeout", e);
+                }
+                // The client's e or ek is checked here: a low-order e or an ek coefficient out of range is refused.
+                try {
+                    reply = hs.writeReply(second.withPadding(pad, false), c.signer());
+                } catch (SecureCarrierException e) {
+                    throw refuse.of(reason(e), e);
+                }
+            } finally {
+                c.handshakeLimits().release(anonymous);
+            }
+            if (cancelled.getAsBoolean() || context.deadline().cancelled() || context.deadline().expired()) throw refuse.of("timeout", null);
+            try {
+                io.checkClientWaited();
             } catch (SecureCarrierException e) {
                 throw refuse.of(reason(e), e);
             }
-            io.write(reply);
+            cost.write(io, reply, p.capabilities().writeOverhead());
             EstablishServer.Finish finish;
             try {
                 finish = readUnit(io, b -> hs.readFinish(b, 0, b.length));
@@ -413,16 +488,20 @@ public final class Seal {
                 } catch (CredentialsFailedException e) {
                     throw refuse.of("credentials_failed", e);
                 } catch (VerifyUnavailableException e) {
-                    throw new IOException(e.getMessage(), e); // closes the carrier without counting a refusal
+                    throw refuse.of("verifier_unavailable", e);
                 }
                 verdict = j.verdict();
                 pqAuth = j.pqAuthenticated();
             }
+            authenticated = true;
             List<AppData> clientData = c.anchor() != null ? AppData.verified(finish.appData()) : finish.appData();
             Peer early = new Peer(finish.peerStatic(), finish.credential(), verdict, null, h.profile(), mode, clientData, h.profile().pqConfidential(), pqAuth);
             if (c.allowRecordMode() != null) {
                 boolean exporter = p.capabilities().exporter() != null;
                 if (!c.allowRecordMode().allow(new RecordPolicyInput(exporter, p.isCarrierSecure(), java.util.Optional.ofNullable(p.label()), true), mode, early)) throw refuse.of("record_mode", null);
+            }
+            if (cancelled.getAsBoolean() || context.deadline().cancelled() || context.deadline().expired()) {
+                throw refuse.of("timeout", null);
             }
             Object value;
             try {
@@ -436,9 +515,12 @@ public final class Seal {
             } catch (SecureCarrierException e) {
                 throw refuse.of(reason(e), e);
             }
-            return padded(wrap(io, done, early.withValue(value)), padded[0]);
+            return cost.attach(wrap(io, done, early.withValue(value)));
         } catch (Throwable e) {
             io.fail(); // what the handshake held of the carrier goes with it
+            if (!authenticated && e instanceof RuntimeException failed) {
+                throw new CarrierRejectedException(wireProfile, mode, "local_error", failed);
+            }
             throw e;
         }
     }

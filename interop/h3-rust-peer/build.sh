@@ -38,6 +38,7 @@ dependencies = [
  "http",
  "quinn",
  "tokio",
+ "zmux",
  "zmux-h3",
  "zmux-webtransport",
 ]

@@ -345,9 +345,26 @@ class EstablishTest {
         assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES, Profile.of(6)).build());
         assertEquals(List.of(Profile.XXHFS_AES), ok.toBuilder().acceptedProfiles(Profile.XXHFS_AES).build().acceptedProfiles());
         assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().anchor(null).requirePqAuth(true).build());
+        var onlyPsk = ok.toBuilder().handshakeLimits(new HandshakeLimits(1, 0));
+        assertEquals(ServerConfig.DEFAULT_PROFILES, onlyPsk.build().acceptedProfiles());
+        var invalid = assertThrows(IllegalArgumentException.class,
+                () -> onlyPsk.acceptedProfiles(Profile.XXHFS_AES).build());
+        assertTrue(invalid.getMessage().startsWith("invalid_config"));
         assertEquals(256, ok.maxAppData().getAsInt());
         assertTrue(ok.toBuilder().noMaxAppData().build().maxAppData().isEmpty());
         assertThrows(IllegalArgumentException.class, () -> ok.toBuilder().maxAppData(-1));
+    }
+
+    @Test
+    void aSingleProcessorStillProvidesAnAnonymousAndAReservedPskPermit() {
+        var limits = HandshakeLimits.defaults(1);
+        assertTrue(limits.tryAcquire(true));
+        assertFalse(limits.tryAcquire(true));
+        assertTrue(limits.tryAcquire(false));
+        assertFalse(limits.tryAcquire(false));
+        limits.release(true);
+        limits.release(false);
+        assertTrue(limits.tryAcquire(true));
     }
 
     @Test

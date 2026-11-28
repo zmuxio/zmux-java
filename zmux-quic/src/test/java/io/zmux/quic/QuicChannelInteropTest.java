@@ -1,6 +1,5 @@
 package io.zmux.quic;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -13,9 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyStore;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -42,24 +39,6 @@ class QuicChannelInteropTest {
         assumeTrue(p != null && !p.isEmpty(), env + " not set");
         assertTrue(Files.isExecutable(Path.of(p)), env + " is not executable: " + p);
         return p;
-    }
-
-    /**
-     * The test certificate and key as PEM files, for the peer's server. Test-only key: TestTls
-     * generates it with keytool into target/tls on first use (self-signed, CN=localhost); it is
-     * never committed and never used outside the tests.
-     */
-    static Path[] pem() throws Exception {
-        Path dir = Path.of("target", "tls");
-        KeyStore store = KeyStore.getInstance("PKCS12");
-        try (var in = Files.newInputStream(dir.resolve("localhost.p12"))) { store.load(in, "changeit".toCharArray()); }
-        var mime = Base64.getMimeEncoder(64, "\n".getBytes(UTF_8));
-        Path cert = dir.resolve("localhost.crt"), key = dir.resolve("localhost.key");
-        Files.writeString(cert, "-----BEGIN CERTIFICATE-----\n" + mime.encodeToString(store.getCertificate("localhost").getEncoded())
-                + "\n-----END CERTIFICATE-----\n");
-        Files.writeString(key, "-----BEGIN PRIVATE KEY-----\n"
-                + mime.encodeToString(store.getKey("localhost", "changeit".toCharArray()).getEncoded()) + "\n-----END PRIVATE KEY-----\n");
-        return new Path[] {cert, key};
     }
 
     /** A running peer and its output lines. */
@@ -104,7 +83,7 @@ class QuicChannelInteropTest {
 
     /** This side dials the peer's server, plain or through a lossy relay. */
     void javaClient(String env, boolean lossy) throws Exception {
-        Path[] pem = pem();
+        Path[] pem = io.zmux.nettytest.TestTls.pem();
         try (var peer = new Peer(peer(env), "server", pem[0].toString(), pem[1].toString());
              var loops = EventLoops.create(2); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             InetSocketAddress server = address(peer.expect("LISTEN "));

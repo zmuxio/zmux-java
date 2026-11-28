@@ -13,6 +13,7 @@ import io.zmux.carrier.PipeIo;
 import io.zmux.carrier.PipeReader;
 import io.zmux.carrier.PipeWriter;
 import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -44,9 +45,7 @@ class WebSocketTakeoverTest {
             var done = new CompletableFuture<Void>();
             p.reader().start(new PipeReader.Sink() {
                 @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
-                    ByteBuffer b = chunk.buffer();
-                    byte[] m = new byte[b.remaining()];
-                    b.get(m);
+                    byte[] m = chunk.copy();
                     chunk.close();
                     consumed.run();
                     String s = new String(m, StandardCharsets.US_ASCII);
@@ -67,8 +66,19 @@ class WebSocketTakeoverTest {
     /** A minimal WebSocket client on a socket: masked binary messages out, unmasked messages in, the close. */
     private record Client(java.net.Socket socket, java.io.InputStream in, java.io.OutputStream out) {
         static Client open(java.net.URI uri) throws Exception {
-            var socket = new java.net.Socket(uri.getHost(), uri.getPort());
-            socket.setSoTimeout(10_000);
+            var socket = new java.net.Socket();
+            try {
+                socket.setSoTimeout(10_000);
+                return open(uri, socket);
+            } catch (Exception | Error failure) {
+                try { socket.close(); }
+                catch (java.io.IOException closing) { failure.addSuppressed(closing); }
+                throw failure;
+            }
+        }
+
+        static Client open(java.net.URI uri, java.net.Socket socket) throws Exception {
+            socket.connect(new java.net.InetSocketAddress(uri.getHost(), uri.getPort()));
             var out = socket.getOutputStream();
             out.write(("GET " + uri.getPath() + " HTTP/1.1\r\nHost: " + uri.getHost() + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                     + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: qmux-02\r\n\r\n")
@@ -142,35 +152,46 @@ class WebSocketTakeoverTest {
             return FirstBytes.classify(prefix, info.framing()).kind() == FirstBytes.Kind.RECORD
                     ? Admission.Decision.accept(0).withVariant("zmux") : Admission.Decision.CLOSE;
         });
-        var got = new LinkedBlockingQueue<String>();
-        var taken = new LinkedBlockingQueue<Takeover>();
+        var taken = new CompletableFuture<Takeover>();
+        var finished = new CompletableFuture<Void>();
         try (var f = new Fixture(b -> b, b -> b.admission(Admission.builder(0, decider).peekTimeout(java.time.Duration.ofSeconds(10)).build())
-                .fallback(echo(got, taken)), b -> b.webSocket(), false, null); var c = f.client(b -> b)) {
+                .fallback(t -> { taken.complete(t); return finished; }), b -> b.webSocket(), false, null); var c = f.client(b -> b)) {
             var uri = WebSocketTest.ws(f.base);
             // Accepted on its first record: a working session.
             PipeIo p = c.webSocketPipe(uri, Map.of(), List.of(), null);
             try (var s = Zmux.open(p, Role.CLIENT, f.config)) {
                 f.echo(s);
             }
-            assertEquals("HEAD true", stages.poll(5, TimeUnit.SECONDS));
-            assertEquals("CARRIER true", stages.poll(5, TimeUnit.SECONDS));
+            assertEquals("HEAD true", stages.take());
+            assertEquals("CARRIER true", stages.take());
 
-            // Taken over on its first message: the fallback gets exactly it, then what follows, and answers.
-            var t = Client.open(uri);
-            assertEquals("echo:TUN1 open", t.send("TUN1 open"));
-            assertEquals("TUN1 open", got.poll(5, TimeUnit.SECONDS), "the first message, replayed whole");
-            assertEquals("echo:second", t.send("second"));
-            assertEquals("second", got.poll(5, TimeUnit.SECONDS));
-            Takeover tk = taken.poll(5, TimeUnit.SECONDS);
-            assertNotNull(tk);
-            assertEquals(Admission.Stage.CARRIER, tk.info().stage());
-            assertTrue(tk.info().upgrade());
-            assertEquals("127.0.0.1", tk.info().source().getAddress().getHostAddress());
-            assertTrue(tk.socket().isEmpty(), "a WebSocket carrier has no socket view");
-            t.sendOnly("bye");
-            assertEquals("bye", got.poll(5, TimeUnit.SECONDS));
-            assertEquals("close", t.receive(), "zmux closed the carrier once the fallback was done");
-            t.socket().close();
+            // Wait for handoff, replay, and writes independently. The test timeout can interrupt
+            // the channel's socket reads, so none of these synchronization steps needs its own clock.
+            try (var channel = SocketChannel.open()) {
+                var t = Client.open(uri, channel.socket());
+                t.sendOnly("TUN1 open");
+                Takeover tk = taken.get();
+                assertEquals(Admission.Stage.CARRIER, tk.info().stage());
+                assertTrue(tk.info().upgrade());
+                assertEquals("127.0.0.1", tk.info().source().getAddress().getHostAddress());
+                assertTrue(tk.socket().isEmpty(), "a WebSocket carrier has no socket view");
+                Takeover.Messages messages = tk.messages().orElseThrow();
+                var got = RequestTakeoverTest.reading(messages.reader());
+                assertEquals("TUN1 open", got.take(), "the first message, replayed whole");
+                RequestTakeoverTest.writeAsync(messages.writer(), "echo:TUN1 open").get();
+                assertEquals("echo:TUN1 open", t.receive());
+
+                t.sendOnly("second");
+                assertEquals("second", got.take());
+                RequestTakeoverTest.writeAsync(messages.writer(), "echo:second").get();
+                assertEquals("echo:second", t.receive());
+                t.sendOnly("bye");
+                assertEquals("bye", got.take());
+                finished.complete(null);
+                assertEquals("close", t.receive(), "zmux closed the carrier once the fallback was done");
+            } finally {
+                finished.complete(null);
+            }
 
             assertEquals(2, perSource.get("127.0.0.1").get(), "both carriers counted on their first message");
             var st = f.listener.stats().admission();
@@ -189,10 +210,8 @@ class WebSocketTakeoverTest {
             var client = Client.open(WebSocketTest.ws(f.base));
             try (var _ = client.socket()) {
                 client.sendOnly("first");
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                while (f.listener.stats().admission().stalled() == 0 && System.nanoTime() - deadline < 0) {
-                    Thread.sleep(10);
-                }
+                io.zmux.nettytest.Eventually.await(java.time.Duration.ofSeconds(20), "deferred carrier stalled",
+                        () -> f.listener.stats().admission().stalled() == 1);
                 var stats = f.listener.stats().admission();
                 assertEquals(1, stats.stalled());
                 assertEquals(0, stats.fallback());
@@ -211,21 +230,28 @@ class WebSocketTakeoverTest {
         Admission.Decider decider = Admission.Decider.immediate((info, prefix) -> info.stage() == Admission.Stage.HEAD
                 ? new Admission.Decision(AdmissionVerdict.DEFER, 0) : Admission.Decision.fallback("tunnel"));
         var taken = new LinkedBlockingQueue<Takeover>();
+        var fallbackReturned = new CompletableFuture<Void>();
+        var fallback = new CompletableFuture<Void>() {
+            @Override public CompletableFuture<Void> whenComplete(java.util.function.BiConsumer<? super Void, ? super Throwable> action) {
+                var observed = super.whenComplete(action);
+                fallbackReturned.complete(null);
+                return observed;
+            }
+        };
         try (var f = new Fixture(b -> b, b -> b.admission(Admission.builder(0, decider).peekTimeout(java.time.Duration.ofSeconds(10)).build())
-                .fallback(t -> { assertTrue(t.detach()); taken.add(t); return null; }), b -> b.webSocket(), false, null)) {
+                .fallback(t -> { assertTrue(t.detach()); taken.add(t); return fallback; }), b -> b.webSocket(), false, null)) {
             var c = Client.open(WebSocketTest.ws(f.base));
             c.sendOnly("TUN1 open");
             Takeover t = taken.poll(5, TimeUnit.SECONDS);
             assertNotNull(t);
             assertEquals("tunnel", t.value());
             Takeover.Messages m = t.messages().orElseThrow();
-            Thread.sleep(200); // the fallback has returned: a carrier it did not detach would be closed by now
+            fallbackReturned.get(20, TimeUnit.SECONDS);
+            fallback.complete(null);
             var got = new LinkedBlockingQueue<String>();
             m.reader().start(new PipeReader.Sink() {
                 @Override public void onChunk(io.zmux.Chunk chunk, Runnable consumed) {
-                    ByteBuffer b = chunk.buffer();
-                    byte[] x = new byte[b.remaining()];
-                    b.get(x);
+                    byte[] x = chunk.copy();
                     chunk.close();
                     consumed.run();
                     got.add(new String(x, StandardCharsets.US_ASCII));

@@ -1,5 +1,6 @@
 package io.zmux.internal.loop;
 
+import io.zmux.internal.core.TimerHeap;
 import io.zmux.internal.core.Time;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -34,11 +35,17 @@ public abstract class SessionHost implements Executor {
     private final ArrayList<Runnable> shutdownHooks = new ArrayList<>();
     final BufferPool pool;
     private boolean ending;
+    private ArrayList<Runnable> roundObserversForTests;
     /** The deadline the native wake-up is armed for. */
     private long armed = Time.NEVER;
+    private boolean runningTimers;
 
     protected SessionHost(long idleBufferBytes) {
-        pool = new BufferPool(idleBufferBytes);
+        this(BufferPool.forHost(idleBufferBytes));
+    }
+
+    SessionHost(BufferPool pool) {
+        this.pool = pool;
     }
 
     /** Whether the calling thread is this host's. */
@@ -56,7 +63,7 @@ public abstract class SessionHost implements Executor {
     /** Arranges {@link #endRound} on the host thread after the current iteration of its loop. */
     protected abstract void requestRoundEnd();
 
-    /** Arranges {@link #runTimers} on the host thread at deadline; an earlier call supersedes a later one. */
+    /** Replaces the host wake-up, or cancels it when the deadline is {@link Time#NEVER}. */
     protected abstract void wakeAt(long deadline);
 
     /** Whether the calling thread hosts sessions (blocking zmux calls are refused there). */
@@ -91,7 +98,8 @@ public abstract class SessionHost implements Executor {
     /** Bytes of owned input buffers sessions still keep references to (a gauge). */
     public final long retainedInputBytes() { return retainedInput.sum(); }
 
-    final void retainedInput(long n) { retainedInput.add(n); }
+    /** Tracks provider backing capacity through the last reference. */
+    public final void retainedInput(long n) { retainedInput.add(n); }
 
     /** Transports created on this host for carriers whose callbacks come from other threads. */
     public final long externalTransports() { return externals.sum(); }
@@ -114,10 +122,14 @@ public abstract class SessionHost implements Executor {
 
     final void schedule(TimerHeap.Timer t, long deadline) {
         timers.schedule(t, deadline);
-        long e = timers.earliest();
-        if (e < armed) {
-            armed = e;
-            wakeAt(e);
+        if (!runningTimers) updateWake();
+    }
+
+    private void updateWake() {
+        long earliest = timers.earliest();
+        if (earliest != armed) {
+            armed = earliest;
+            wakeAt(earliest);
         }
     }
 
@@ -150,18 +162,37 @@ public abstract class SessionHost implements Executor {
         return done;
     }
 
-    /** Fires the timers due at now, then arms the wake-up for the next one. */
-    protected final void runTimers(long now) {
+    /** A native wake-up stopped being armed; an early callback can rearm the same deadline. */
+    protected final void nativeTimerFired(long now) {
         armed = Time.NEVER;
-        for (TimerHeap.Timer t; (t = timers.pollDue(now)) != null; ) {
-            TimerHeap.Timer ft = t;
-            safe(() -> ft.fire(now));
+        runTimers(now);
+    }
+
+    /** Fires the due timers and publishes the new heap top once after the batch. */
+    protected final void runTimers(long now) {
+        runningTimers = true;
+        try {
+            for (TimerHeap.Timer t; (t = timers.pollDue(now)) != null; ) {
+                TimerHeap.Timer ft = t;
+                safe(() -> ft.fire(now));
+            }
+        } finally {
+            runningTimers = false;
+            updateWake();
         }
-        long e = timers.earliest();
-        if (e < armed) { // armed is at most NEVER, so e is a real deadline
-            armed = e;
-            wakeAt(e);
-        }
+    }
+
+    /** Observes completed owner rounds on an isolated test fixture. */
+    public final Runnable observeRoundsForTests(Runnable observer) {
+        execute(() -> {
+            if (roundObserversForTests == null) roundObserversForTests = new ArrayList<>();
+            roundObserversForTests.add(observer);
+        });
+        return () -> removeRoundObserverForTests(observer);
+    }
+
+    final void removeRoundObserverForTests(Runnable observer) {
+        tryExecute(() -> roundObserversForTests.remove(observer));
     }
 
     /**
@@ -180,6 +211,8 @@ public abstract class SessionHost implements Executor {
         } finally {
             ending = false;
         }
+        if (roundObserversForTests != null)
+            for (Runnable observer : roundObserversForTests) safe(observer);
         if (!dirty.isEmpty()) requestRoundEnd();
     }
 
@@ -198,6 +231,14 @@ public abstract class SessionHost implements Executor {
     /** Terminal session work runs after the current protocol round, including during shutdown. */
     final void enqueueRelease(Runnable cleanup) {
         if (!tryExecute(cleanup)) stopped.thenRun(cleanup);
+    }
+
+    // A stopped host's committed write receipts still have one owner. Carrier callbacks can arrive
+    // concurrently, but must settle against the same ledgers as the last live owner turn.
+    private final SerialCallbacks stoppedWrites = new SerialCallbacks();
+
+    final void releaseWriteWhenStopped(Runnable receipt) {
+        stopped.thenRun(() -> stoppedWrites.execute(receipt));
     }
 
     /** On the host thread as it closes: runs the shutdown hooks and the round ends they cause. */

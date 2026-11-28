@@ -16,17 +16,17 @@ class PromptAckTest {
     private static final long DELAY = 25 * MS; // default zmux_max_ack_delay
     private final CarrierInfo info = new CarrierInfo(Framing.BYTES, false, false, false, true);
     private final Pipe.InLane lane = new Pipe.InLane(0, false, false);
-    private final Pipe pipe = new Pipe(0, new Pipe.InDir(lane), new Pipe.OutDir(info, null), null, null);
+    private final Pipe pipe = new Pipe(0, new Pipe.InDir(lane), new Pipe.OutDir(info), null, null);
     private final AckEngine engine;
     private long pos;
 
     PromptAckTest() {
         TransportParams none = new TransportParams();
         List<Pipe> pipes = List.of(pipe);
-        Pacer pacer = new Pacer(CoreConfig.defaults(), 65536, AckEngine.peerDelay(none), pipes, null);
+        Pacer pacer = new Pacer(CoreConfig.defaults(), 65536, AckEngine.peerDelay(none), null);
         engine = new AckEngine(none, none, pipes, pacer, new AckEngine.Port() {
             @Override public void activity() { }
-            @Override public void rttSampled(long min) { }
+            @Override public void rttSampled(Pipe pipe, long min) { }
             @Override public void advanced(Pipe p, Pipe.OutLane ol, boolean cum) { }
             @Override public boolean quiet() { return false; }
         });
@@ -89,6 +89,21 @@ class PromptAckTest {
         assertEquals(200, lane.ack.reported());
     }
 
+    @Test void theAckDeadlineIsIndexedAtEqualityAndRemovedOnRetirement() throws Exception {
+        long start = Time.SECOND;
+        assertTrue(record(100, start));
+        assertTrue(engine.snapshot(writer(), start));
+        long at = start + MS;
+        assertFalse(record(100, at));
+        assertEquals(at + DELAY, engine.deadline());
+        assertFalse(engine.onTimeout(at + DELAY - 1));
+        assertTrue(engine.onTimeout(at + DELAY));
+        assertEquals(Time.NEVER, engine.deadline());
+        assertEquals(at + DELAY, engine.release());
+        engine.pipeRetired(pipe);
+        assertEquals(Time.NEVER, engine.release());
+    }
+
     @Test void theReleaseTimeDoesNotMoveWithEvents() throws Exception {
         Limiter.Params pp = new Limiter.Params(100 * Time.MICROSECOND, 64 << 10, DELAY, 16 << 10);
         long now = Time.SECOND;
@@ -116,5 +131,36 @@ class PromptAckTest {
             if (!l.held()) break;
             assertEquals(release, l.release(), "at " + (e - at));
         }
+    }
+
+    @Test void pacingFiresTheDueKeyAndCancelsARetiredDirection() {
+        var turns = new java.util.ArrayList<Long>();
+        var pacer = new Pacer(CoreConfig.defaults(), 64 << 10, DELAY, new Pacer.Port() {
+            @Override public void wakeAllWriters() {}
+            @Override public void wakePipe(Pipe p) { turns.add(p.id); }
+        });
+        var info = new CarrierInfo(Framing.BYTES, false, false, false, false);
+        var first = new Pipe(1, null, new Pipe.OutDir(info), null, null);
+        var second = new Pipe(2, null, new Pipe.OutDir(info), null, null);
+        arm(pacer, first, 0);
+        long at = pacer.deadline(true);
+        assertTrue(at > 0 && at < Time.NEVER);
+        arm(pacer, second, at);
+        assertEquals(at, pacer.deadline(true));
+        assertEquals(Time.NEVER, pacer.deadline(false));
+        pacer.onTimeout(at - 1);
+        assertTrue(turns.isEmpty());
+        pacer.onTimeout(at);
+        assertEquals(List.of(1L), turns);
+        assertTrue(Pacer.held(second));
+        second.out().fail();
+        assertEquals(Time.NEVER, pacer.deadline(true));
+    }
+
+    private static void arm(Pacer pacer, Pipe pipe, long now) {
+        long room = pacer.room(pipe, now);
+        assertTrue(room > 0);
+        pacer.onSent(pipe, room + (64 << 10), now);
+        assertTrue(Pacer.held(pipe));
     }
 }

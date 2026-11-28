@@ -1,5 +1,7 @@
 package io.zmux;
 
+import static io.zmux.internal.core.SessionError.*;
+
 /** Why a session ended; the first cause wins. */
 public sealed interface SessionError {
     /** Whether the peer caused it. */
@@ -11,8 +13,7 @@ public sealed interface SessionError {
     /** A close by either application, CONNECTION_CLOSE 0x1d. */
     record ApplicationClosed(long code, String reason, boolean remote) implements SessionError {
         @Override public String message() {
-            return "application close (" + (remote ? "remote" : "local") + ") code 0x" + Long.toHexString(code)
-                    + (reason.isEmpty() ? "" : ": " + reason);
+            return applicationMessage(code, reason, remote);
         }
     }
 
@@ -27,27 +28,21 @@ public sealed interface SessionError {
         public boolean isConnectionRefused() { return remote && code == io.zmux.internal.wire.TransportError.CONNECTION_REFUSED; }
 
         @Override public String message() {
-            return "transport close (" + (remote ? "remote" : "local") + ") " + name + (reason.isEmpty() ? "" : ": " + reason);
+            return transportMessage(name, reason, remote);
         }
     }
 
     /** The idle timeout; remote when the peer's timer expired. */
     record IdleTimeout(boolean remote) implements SessionError {
         @Override public String message() {
-            return "idle timeout (" + (remote ? "remote" : "local") + ")";
+            return idleMessage(remote);
         }
     }
 
     /** No peer parameters within the handshake timeout. */
     record HandshakeTimeout() implements SessionError {
         @Override public boolean remote() { return false; }
-        @Override public String message() { return "handshake timeout"; }
-    }
-
-    /** The peer cannot take the early data it was sent and processed none of it; retry without early data. */
-    record EarlyDataRejected() implements SessionError {
-        @Override public boolean remote() { return false; }
-        @Override public String message() { return "early data rejected"; }
+        @Override public String message() { return HANDSHAKE_TIMEOUT_MESSAGE; }
     }
 
     /**
@@ -60,22 +55,21 @@ public sealed interface SessionError {
         }
 
         @Override public String message() {
-            return "resume failed (" + (remote ? "remote" : "local") + ")"
-                    + (reason.isEmpty() ? "" : ": " + reason);
+            return resumeFailedMessage(reason, remote);
         }
     }
 
     /** The resume grace period expired; lastPipeError is the error of the last pipe lost, or null. */
     record ResumeTimeout(Throwable lastPipeError) implements SessionError {
         @Override public boolean remote() { return false; }
-        @Override public String message() { return "resume timeout"; }
+        @Override public String message() { return RESUME_TIMEOUT_MESSAGE; }
     }
 
     /** Every pipe in a direction was lost, or the single carrier failed; lastPipeError is the error of the last pipe lost, or null. */
     record PipesLost(Throwable lastPipeError) implements SessionError {
         @Override public boolean remote() { return false; }
         @Override public String message() {
-            return lastPipeError == null ? "pipes lost" : "pipes lost: " + lastPipeError.getMessage();
+            return pipesLostMessage(lastPipeError);
         }
     }
 }

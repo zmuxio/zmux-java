@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -55,7 +56,7 @@ class SealTest {
     }
 
     static ZmuxConfig.Builder sessions(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).noProbation();
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).noProbation();
     }
 
     static ClientConfig.Builder client() {
@@ -126,7 +127,7 @@ class SealTest {
                 for (long end = System.nanoTime() + 5_000_000_000L; listener.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
             }
         }
-        assertEquals(List.of("the listener's onReject failed; the carrier is closed"), listener);
+        assertEquals(List.of("the listener's onReject failed"), listener);
         assertEquals(List.of(), session);
     }
 
@@ -188,7 +189,7 @@ class SealTest {
                 assertTrue(p == Profile.XXHFS_PSK0_CHACHA || p == Profile.XXHFS_PSK0_AES, p.toString());
                 echo(c, s);
             }
-            var server = ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.values()).build();
+            var server = ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.values()).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build();
             for (Profile profile : Profile.values()) {
                 var b = client().allowedProfiles(profile);
                 if (!profile.isPskBased()) b.psk(null, null);
@@ -206,23 +207,23 @@ class SealTest {
         record Case(String name, Profile client, ServerConfig server, String refused) {}
         var cases = List.of(
                 new Case("no-psk-hybrid-off-by-default", Profile.XXHFS_CHACHA, ServerConfig.builder(gate(null), NODE).build(), "profile_disabled"),
-                new Case("no-psk-hybrid-allowed", Profile.XXHFS_AES, ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_AES).build(), null),
+                new Case("no-psk-hybrid-allowed", Profile.XXHFS_AES, ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_AES).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build(), null),
                 new Case("psk-by-default", Profile.XXHFS_PSK0_AES, ServerConfig.builder(gate(null), NODE).build(), null),
                 new Case("allowed-list", Profile.XXHFS_PSK0_AES, ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_PSK0_CHACHA).build(), "profile_disabled"));
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
             for (Case k : cases) {
-                List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
-                var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(k.server())).build();
+                var rejected = new CompletableFuture<RejectInfo>();
+                var lc = ListenerConfig.builder().session(cfg).onReject(i -> rejected.complete(i)).inboundTransform(Seal.server(k.server())).build();
                 var b = client().allowedProfiles(k.client()).handshakeTimeout(Duration.ofSeconds(5));
                 if (!k.client().isPskBased()) b.psk(null, null);
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                     var f = Seal.establish(tcp(l.localAddress()), b.build()).toCompletableFuture();
                     if (k.refused() != null) {
                         assertThrows(ExecutionException.class, () -> f.get(10, TimeUnit.SECONDS), k.name());
-                        for (long end = System.nanoTime() + 5_000_000_000L; rejected.isEmpty() && System.nanoTime() < end; ) Thread.sleep(10);
-                        assertEquals(k.refused(), rejected.getFirst().reason(), k.name());
-                        assertEquals(k.client().value(), rejected.getFirst().profile(), k.name());
+                        var refusal = rejected.get(30, TimeUnit.SECONDS);
+                        assertEquals(k.refused(), refusal.reason(), k.name());
+                        assertEquals(k.client().value(), refusal.profile(), k.name());
                     } else {
                         try (var c = Zmux.open(f.get(10, TimeUnit.SECONDS), Role.CLIENT, cfg); var s = l.accept(WAIT)) {
                             echo(c, s);
@@ -323,13 +324,13 @@ class SealTest {
         }
     }
 
-    /** A server's Anchor judges the client's credential: a rejection is a refused carrier, an unavailable verifier is not. */
+    /** Both verifier failure modes follow the configured rejection policy. */
     @Test void aServerAnchorRejectsOrIsUnavailable() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
             Credential mine = new Credential(9, new byte[] {4, 2});
             for (String verdict : List.of("pass", "reject", "unavailable")) {
-                List<RejectInfo> reasons = new CopyOnWriteArrayList<>();
+                var reasons = new java.util.concurrent.LinkedBlockingQueue<RejectInfo>();
                 List<VerifyInput> seen = new CopyOnWriteArrayList<>();
                 var refusal = new VerifyRejectedException("unknown client");
                 Anchor anchor = in -> {
@@ -342,26 +343,33 @@ class SealTest {
                 };
                 var sc = ServerConfig.builder(gate(null), NODE).anchor(anchor).localContext("edge").build();
                 var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
-                        .onReject(i -> { reasons.add(i); return RejectInfo.Action.CLOSE; }).build();
+                        .onReject(reasons::add).rejection(RejectInfo.Action.STALL).build();
                 try (var l = Zmux.listen(NetworkTest.any(), lc)) {
-                    var f = Seal.establish(tcp(l.localAddress()), client().credential(mine).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
+                    var pipe = MemoryPipe.pair(Framing.BYTE_STREAM);
+                    var handled = l.adapter().handle(pipe[1], JoinHint.inBand(TestAddr.peer("client")));
+                    var f = Seal.establish(pipe[0], client().credential(mine).handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
                     PipeIo p = f.get(10, TimeUnit.SECONDS); // the client is done after message 3
                     if (verdict.equals("pass")) {
                         try (var _ = Zmux.open(p, Role.CLIENT, cfg); var srv = l.accept(WAIT)) {
                             assertEquals(Principal.NODE_KEY, ((Peer) srv.admitted().orElseThrow()).verdict().principal().type());
                         }
                     } else {
-                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                        while (seen.isEmpty() && System.nanoTime() < until) Thread.sleep(2);
+                        RejectInfo info = reasons.poll(5, TimeUnit.SECONDS);
+                        assertNotNull(info);
                         if (verdict.equals("reject")) {
-                            while (reasons.isEmpty() && System.nanoTime() < until) Thread.sleep(2);
-                            assertEquals(1, reasons.size());
-                            RejectInfo info = reasons.getFirst();
                             assertEquals("credentials_failed", info.reason());
                             var failed = assertInstanceOf(CredentialsFailedException.class, info.error().getCause());
                             assertEquals(CredentialsFailedException.Detail.VERIFIER, failed.detail());
                             assertSame(refusal, failed.getCause());
+                        } else {
+                            assertEquals("verifier_unavailable", info.reason());
+                            assertInstanceOf(VerifyUnavailableException.class, info.error().getCause());
                         }
+                        var applied = new CompletableFuture<Void>();
+                        assertTrue(loops.next().tryExecute(() -> applied.complete(null)));
+                        applied.get(5, TimeUnit.SECONDS);
+                        assertFalse(handled.closed().isDone(), "the fixed policy holds the carrier");
+                        assertEquals(0, l.stats().setupFailures());
                         assertEquals(0, l.stats().sessions());
                     }
                     assertEquals(1, seen.size());
@@ -369,7 +377,7 @@ class SealTest {
                     assertEquals(9, seen.get(0).credential().type());
                     assertEquals("edge", seen.get(0).localContext());
                 }
-                if (verdict.equals("unavailable")) assertEquals(List.of(), reasons);
+                assertTrue(reasons.isEmpty());
             }
         }
     }
@@ -386,7 +394,7 @@ class SealTest {
             };
             var anonymous = ClientConfig.builder().anchor(new PinAnchor(io.zmux.seal.KeyId.of(io.zmux.seal.KeyAlg.X25519, NODE.publicKey()))).allowedProfiles(Profile.XXHFS_CHACHA)
                     .handshakeTimeout(Duration.ofSeconds(5)).build();
-            var byDefault = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; })
+            var byDefault = ListenerConfig.builder().session(cfg).onReject(i -> reasons.add(i.reason()))
                     .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), byDefault)) {
                 var f = Seal.establish(tcp(l.localAddress()), anonymous).toCompletableFuture();
@@ -399,7 +407,7 @@ class SealTest {
                 assertEquals(List.of("profile_disabled", "unknown_handle"), reasons);
             }
             var listed = ListenerConfig.builder().session(cfg)
-                    .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).acceptedProfiles(Profile.XXHFS_CHACHA).build())).build();
+                    .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).acceptedProfiles(Profile.XXHFS_CHACHA).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), listed)) {
                 assertEquals(Profile.XXHFS_CHACHA, Seal.peerOf(establish(tcp(l.localAddress()), anonymous)).orElseThrow().profile());
                 assertEquals(List.of(Profile.XXHFS_CHACHA), asked);
@@ -417,7 +425,7 @@ class SealTest {
                 @Override public Credential credential(byte[] h, Profile p, SocketAddress src) { return null; }
                 @Override public Object commit(io.zmux.seal.CommitRequest a, SocketAddress src) { return "ok"; }
             };
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { reasons.add(i); return RejectInfo.Action.CLOSE; })
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> reasons.add(i))
                     .inboundTransform(Seal.server(ServerConfig.builder(gate, NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 var f = Seal.establish(tcp(l.localAddress()), client().handshakeTimeout(Duration.ofSeconds(5)).build()).toCompletableFuture();
@@ -467,7 +475,7 @@ class SealTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).build();
             List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; })
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> rejected.add(i))
                     .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 // A wrong key: a Hello the Noise AEAD refuses.
@@ -500,7 +508,7 @@ class SealTest {
     @Test void aStalledCarrierEndsAtTheHandshakeTimeout() throws Exception {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = sessions(loops).handshakeTimeout(Duration.ofMillis(1500)).build();
-            var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).onReject(i -> RejectInfo.Action.STALL)
+            var lc = ListenerConfig.builder().session(cfg).firstRecordTimeout(Duration.ofMillis(100)).rejection(RejectInfo.Action.STALL)
                     .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).build())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc); SocketChannel ch = SocketChannel.open(l.localAddress())) {
                 long start = System.nanoTime();
@@ -548,7 +556,7 @@ class SealTest {
             ZmuxConfig cfg = sessions(loops).allowRecordMode((c, m, p) -> true).build();
             List<RejectInfo> rejected = new CopyOnWriteArrayList<>();
             var server = ServerConfig.builder(gate(null), NODE).allowRecordMode((c, m, p) -> true).build();
-            var lc = ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.CLOSE; }).inboundTransform(Seal.server(server)).build();
+            var lc = ListenerConfig.builder().session(cfg).onReject(i -> rejected.add(i)).inboundTransform(Seal.server(server)).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 PipeIo[] pair = MemoryPipe.pair(Framing.BYTE_STREAM);
                 l.adapter().handle(pair[1].withExporter((a, b, n) -> new byte[n]).withCarrierSecure(), JoinHint.inBand(new InetSocketAddress("127.0.0.1", 1)));
@@ -579,8 +587,8 @@ class SealTest {
     }
 
     static ListenerConfig profile4(ZmuxConfig cfg, List<RejectInfo> rejected) {
-        return ListenerConfig.builder().session(cfg).onReject(i -> { rejected.add(i); return RejectInfo.Action.STALL; })
-                .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_AES).build())).build();
+        return ListenerConfig.builder().session(cfg).onReject(i -> rejected.add(i)).rejection(RejectInfo.Action.STALL)
+                .inboundTransform(Seal.server(ServerConfig.builder(gate(null), NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_AES).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build())).build();
     }
 
     /** A Profile 4 or 5 Hello whose e is of low order or whose ek has a coefficient out of range is refused as kex: OnReject and a stall, no byte. */

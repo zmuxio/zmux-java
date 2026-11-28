@@ -16,16 +16,17 @@ public interface PipeReader {
          * no longer needs it. consumed runs once parsing is done, independently of payload
          * retention: it is the carrier's backpressure. A reader delivers more before earlier
          * chunks were consumed only within the receive memory it declared
-         * ({@link PipeIo.Capabilities#receiveMemory()}); zmux fails a carrier that queues beyond that.
+         * ({@link PipeIo.Capabilities#receiveMemory()}). The queue charges the backing capacity
+         * and a descriptor per delivery. Declare receive memory for backing larger than a
+         * reader batch, including when the chunk exposes only a small range of it.
          */
         void onChunk(Chunk chunk, Runnable consumed);
 
         /**
          * Lends data, a buffer the reader keeps: zmux copies it before returning and never touches
-         * data afterwards, so the reader may reuse the buffer at once. consumed runs when the copy
-         * was parsed, as for {@link #onChunk}, not when it was taken: it is the carrier's
-         * backpressure, and the copies not yet consumed count against the receive memory the
-         * reader declared. A reader whose buffer zmux may keep without a copy uses {@link #onChunk}.
+         * data afterwards, so the reader may reuse the buffer at once. As for {@link #onChunk},
+         * consumed runs once parsing is done. Until then, the copy counts against the reader's
+         * declared receive memory. Use {@link #onChunk} to transfer a buffer without a copy.
          */
         default void onLent(ByteBuffer data, Runnable consumed) {
             ByteBuffer copy = ByteBuffer.allocate(data.remaining()).put(data).flip();

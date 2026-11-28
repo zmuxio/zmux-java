@@ -1,6 +1,7 @@
 package io.zmux.internal.wire;
 
 
+import io.zmux.internal.buffer.ReceiveSpans;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -10,7 +11,7 @@ import java.util.List;
  * A transport parameter set. Presence is a bit per known
  * parameter in {@link #present}.
  */
-public final class TransportParams {
+public final class TransportParams implements Cloneable {
     public static final long ID_MAX_IDLE_TIMEOUT = 0x01;
     public static final long ID_INITIAL_MAX_DATA = 0x04;
     public static final long ID_MAX_STREAM_DATA_BIDI_LOCAL = 0x05;
@@ -25,7 +26,8 @@ public final class TransportParams {
     public static final long ID_GOAWAY = 0x04528a5fL;
     public static final long ID_PREAMBLE = 0x0439e07aL;
     public static final long ID_PRIORITY = 0x31e7139dL;
-    public static final long ID_DATAGRAM_FLOWS = 0x0af391edL;
+    public static final long ID_RETIRED_DATAGRAM_FLOWS = 0x0af391edL;
+    public static final long ID_DATAGRAM_FAMILY = 0x27e7a042L;
     public static final long ID_MULTIPATH = 0x30dc2978L;
     public static final long ID_ACK_THRESHOLD = 0x2762c7e5L;
     public static final long ID_SESSION_CRYPTO = 0x026f24b5L;
@@ -36,10 +38,14 @@ public final class TransportParams {
     /** The qmux crate's application_protocols hook. */
     public static final long ID_APP_PROTOCOLS = 0x3d4f9c2a8b1e6075L;
     /** zmux_carrier_datagrams. */
+    public static final long ID_CARRIER_DATAGRAM_PADDING = 0x2071d4eeL;
     public static final long ID_CARRIER_DATAGRAMS = 0x3d274c5fL;
 
     /** The largest zmux_preamble value a peer may advertise: the 8192-byte record floor less 32 bytes of STREAM frame and record headers. */
     public static final int MAX_PREAMBLE_SIZE = 8160;
+
+    /** The DATAGRAM frame cap advertised by default when datagrams are enabled. */
+    public static final int DEFAULT_DATAGRAM_FRAME_CAP = 65535;
 
     /** The record size limit when max_record_size is absent. */
     public static final int DEFAULT_MAX_RECORD_SIZE = io.zmux.shaping.RecordPlan.MAX_RECORD_LENGTH;
@@ -55,21 +61,20 @@ public final class TransportParams {
     /** Presence bits, in the order of {@link #IDS}. */
     public static final int IDLE = 1, MAX_DATA = 1 << 1, BIDI_LOCAL = 1 << 2, BIDI_REMOTE = 1 << 3, UNI = 1 << 4,
             STREAMS_BIDI = 1 << 5, STREAMS_UNI = 1 << 6, RESET_AT = 1 << 7, DATAGRAM = 1 << 8, RECORD_SIZE = 1 << 9,
-            ROLE = 1 << 10, GOAWAY = 1 << 11, PREAMBLE = 1 << 12, PRIORITY = 1 << 13, FLOWS = 1 << 14,
+            ROLE = 1 << 10, GOAWAY = 1 << 11, PREAMBLE = 1 << 12, PRIORITY = 1 << 13, FAMILY = 1 << 14,
             MULTIPATH = 1 << 15, ACK_THRESHOLD = 1 << 16, PIPE_ACK = 1 << 17, ACK_DELAY = 1 << 18, LANES = 1 << 19,
-            RESUME = 1 << 20, APP_PROTOCOLS = 1 << 21, CARRIER_DATAGRAMS = 1 << 22, SESSION_CRYPTO = 1 << 23;
+            RESUME = 1 << 20, APP_PROTOCOLS = 1 << 21, CARRIER_DATAGRAMS = 1 << 22, SESSION_CRYPTO = 1 << 23, CARRIER_DATAGRAM_PADDING = 1 << 24;
 
     /** The zmux parameters whose presence identifies a zmux peer. */
-    public static final int ANY_ZMUX = ROLE | GOAWAY | PREAMBLE | PRIORITY | FLOWS | MULTIPATH | ACK_THRESHOLD
-            | PIPE_ACK | ACK_DELAY | LANES | RESUME | CARRIER_DATAGRAMS;
+    public static final int ANY_ZMUX = ROLE | GOAWAY | PREAMBLE | PRIORITY | FAMILY | MULTIPATH | ACK_THRESHOLD
+            | PIPE_ACK | ACK_DELAY | LANES | RESUME | CARRIER_DATAGRAMS | SESSION_CRYPTO | CARRIER_DATAGRAM_PADDING;
 
     private static final long[] IDS = {ID_MAX_IDLE_TIMEOUT, ID_INITIAL_MAX_DATA, ID_MAX_STREAM_DATA_BIDI_LOCAL,
             ID_MAX_STREAM_DATA_BIDI_REMOTE, ID_MAX_STREAM_DATA_UNI, ID_MAX_STREAMS_BIDI, ID_MAX_STREAMS_UNI,
             ID_RESET_STREAM_AT, ID_MAX_DATAGRAM_FRAME_SIZE, ID_MAX_RECORD_SIZE, ID_ROLE, ID_GOAWAY, ID_PREAMBLE,
-            ID_PRIORITY, ID_DATAGRAM_FLOWS, ID_MULTIPATH, ID_ACK_THRESHOLD, ID_PIPE_ACK, ID_MAX_ACK_DELAY,
-            ID_MAX_LANES, ID_RESUME, ID_APP_PROTOCOLS, ID_CARRIER_DATAGRAMS, ID_SESSION_CRYPTO};
+            ID_PRIORITY, ID_DATAGRAM_FAMILY, ID_MULTIPATH, ID_ACK_THRESHOLD, ID_PIPE_ACK, ID_MAX_ACK_DELAY,
+            ID_MAX_LANES, ID_RESUME, ID_APP_PROTOCOLS, ID_CARRIER_DATAGRAMS, ID_SESSION_CRYPTO, ID_CARRIER_DATAGRAM_PADDING};
 
-    private static final long MAX_60 = 1L << 60;
 
     public int present;
     public int secretFlags;
@@ -101,13 +106,27 @@ public final class TransportParams {
     public long greaseId;
     public byte[] greaseValue = new byte[0];
 
+    /** The handshake parameters with the session's reserved connection credit. */
+    public TransportParams withReceiveLimits(long credit, long bidi, long uni) {
+        if (initialMaxData == credit && maxStreamsBidi == bidi && maxStreamsUni == uni) return this;
+        try {
+            var copy = (TransportParams) super.clone();
+            copy.initialMaxData = credit;
+            copy.maxStreamsBidi = bidi;
+            copy.maxStreamsUni = uni;
+            return copy;
+        } catch (CloneNotSupportedException impossible) {
+            throw new AssertionError(impossible);
+        }
+    }
+
     public boolean has(int bit) {
         return (present & bit) != 0;
     }
 
     /** Whether the parameters identify a zmux endpoint. */
     public boolean isZmux() {
-        return (present & ANY_ZMUX) != 0;
+        return has(FAMILY);
     }
 
     private static int bitOf(long id) {
@@ -126,22 +145,19 @@ public final class TransportParams {
 
     /** Decodes and validates a parameter block; every failure is TRANSPORT_PARAMETER_ERROR. */
     public static TransportParams decode(ByteBuffer b, int pos, int len) throws WireException {
+        return decode(b, null, pos, len);
+    }
+
+    public static TransportParams decode(ByteBuffer b, ReceiveSpans spans, int pos, int len) throws WireException {
         TransportParams p = new TransportParams();
-        int end = pos + len;
-        int i = pos;
+        var values = new TlvCursor(b, spans, pos, pos + len);
         long[] unknown = null;
         int unknownCount = 0;
-        while (i < end) {
-            long id = VarInt.get(b, i, end);
-            if (id < 0) throw WireException.param("truncated parameter block");
-            i += VarInt.lengthOf(b.get(i));
-            long vl = VarInt.get(b, i, end);
-            if (vl < 0) throw WireException.param("truncated parameter block");
-            i += VarInt.lengthOf(b.get(i));
-            if (vl > end - i) throw WireException.param("truncated parameter block");
-            int vp = i;
-            i += (int) vl;
+        while (values.hasNext()) {
+            if (!values.advance()) throw WireException.param("truncated parameter block");
+            long id = values.type();
             if (prohibited(id)) throw WireException.param("prohibited QUIC parameter");
+            if (id == ID_RETIRED_DATAGRAM_FLOWS) throw WireException.param("retired zmux_datagram_flows parameter");
             int bit = bitOf(id);
             if (bit == 0) {
                 if (unknown == null) unknown = new long[8];
@@ -151,7 +167,7 @@ public final class TransportParams {
             }
             if ((p.present & bit) != 0) throw WireException.param("duplicate parameter");
             p.present |= bit;
-            p.decodeOne(id, b, vp, (int) vl);
+            p.decodeOne(id, values, values.offset(), values.length());
         }
         // Unknown identifiers come in any order: one sort, then neighbours (O(n log n), no quadratic scan).
         if (unknownCount > 1) {
@@ -164,15 +180,15 @@ public final class TransportParams {
         return p;
     }
 
-    private static long varintValue(ByteBuffer b, int pos, int len) throws WireException {
-        long v = len == 0 ? -1 : VarInt.get(b, pos, pos + len);
+    private static long varintValue(TlvCursor b, int pos, int len) throws WireException {
+        long v = len == 0 ? -1 : b.varint(pos, pos + len);
         if (v < 0 || VarInt.lengthOf(b.get(pos)) != len) throw WireException.param("malformed varint parameter");
         return v;
     }
 
-    private void decodeOne(long id, ByteBuffer b, int vp, int vl) throws WireException {
-        if (id == ID_RESET_STREAM_AT || id == ID_GOAWAY || id == ID_PRIORITY || id == ID_DATAGRAM_FLOWS || id == ID_PIPE_ACK
-                || id == ID_CARRIER_DATAGRAMS) {
+    private void decodeOne(long id, TlvCursor b, int vp, int vl) throws WireException {
+        if (id == ID_RESET_STREAM_AT || id == ID_GOAWAY || id == ID_PRIORITY || id == ID_DATAGRAM_FAMILY || id == ID_PIPE_ACK
+                || id == ID_CARRIER_DATAGRAMS || id == ID_CARRIER_DATAGRAM_PADDING) {
             if (vl != 0) throw WireException.param("non-empty flag parameter");
         } else if (id == ID_MAX_IDLE_TIMEOUT) {
             maxIdleTimeoutMillis = varintValue(b, vp, vl);
@@ -186,17 +202,17 @@ public final class TransportParams {
             maxStreamDataUni = varintValue(b, vp, vl);
         } else if (id == ID_MAX_STREAMS_BIDI) {
             maxStreamsBidi = varintValue(b, vp, vl);
-            if (maxStreamsBidi > MAX_60) throw WireException.param("initial_max_streams_bidi above 2^60");
+            if (maxStreamsBidi > VarInt.MAX_STREAM_COUNT) throw WireException.param("initial_max_streams_bidi above 2^60");
         } else if (id == ID_MAX_STREAMS_UNI) {
             maxStreamsUni = varintValue(b, vp, vl);
-            if (maxStreamsUni > MAX_60) throw WireException.param("initial_max_streams_uni above 2^60");
+            if (maxStreamsUni > VarInt.MAX_STREAM_COUNT) throw WireException.param("initial_max_streams_uni above 2^60");
         } else if (id == ID_MAX_DATAGRAM_FRAME_SIZE) {
             maxDatagramFrameSize = varintValue(b, vp, vl);
         } else if (id == ID_MAX_RECORD_SIZE) {
             maxRecordSize = varintValue(b, vp, vl);
             if (maxRecordSize < DEFAULT_MAX_RECORD_SIZE) throw WireException.param("max_record_size below 16382");
         } else if (id == ID_ROLE) {
-            long x = vl == 0 ? -1 : VarInt.get(b, vp, vp + vl);
+            long x = vl == 0 ? -1 : b.varint(vp, vp + vl);
             if (x < 0 || x > 2) throw WireException.param("zmux_role");
             role = (int) x;
             int n = VarInt.lengthOf(b.get(vp));
@@ -212,14 +228,14 @@ public final class TransportParams {
         } else if (id == ID_MULTIPATH) {
             if (vl < 18) throw WireException.param("zmux_multipath too short");
             secretFlags = b.get(vp) & 0xff;
-            b.get(vp + 1, sessionNonce);
+            b.copy(vp + 1, sessionNonce);
             int ll = b.get(vp + 17) & 0xff;
             if (vl != 18 + ll) throw WireException.param("zmux_multipath locator");
             locator = new byte[ll];
-            b.get(vp + 18, locator);
+            b.copy(vp + 18, locator);
         } else if (id == ID_SESSION_CRYPTO) {
             byte[] v = new byte[vl];
-            b.get(vp, v);
+            b.copy(vp, v);
             try {
                 sessionCrypto = io.zmux.internal.join.SessionCrypto.decode(v);
             } catch (io.zmux.seal.SecureCarrierException e) {
@@ -232,12 +248,12 @@ public final class TransportParams {
             maxAckDelayMillis = varintValue(b, vp, vl);
             if (maxAckDelayMillis >= 1 << 14) throw WireException.param("zmux_max_ack_delay out of range");
         } else if (id == ID_MAX_LANES) {
-            long x = vl == 0 ? -1 : VarInt.get(b, vp, vp + vl);
+            long x = vl == 0 ? -1 : b.varint(vp, vp + vl);
             if (x <= 0) throw WireException.param("zmux_max_lanes");
             int n = VarInt.lengthOf(b.get(vp));
             if (vl - n != 16) throw WireException.param("zmux_max_lanes");
             maxLanes = x;
-            b.get(vp + n, laneKey);
+            b.copy(vp + n, laneKey);
         } else if (id == ID_RESUME) {
             resumeGraceMillis = varintValue(b, vp, vl);
             if (resumeGraceMillis == 0) throw WireException.param("zmux_resume grace 0");
@@ -248,7 +264,7 @@ public final class TransportParams {
                 int l = b.get(i) & 0xff;
                 if (1 + l > end - i) throw WireException.param("application_protocols");
                 byte[] a = new byte[l];
-                b.get(i + 1, a);
+                b.copy(i + 1, a);
                 list.add(a);
                 i += 1 + l;
             }
@@ -257,12 +273,16 @@ public final class TransportParams {
     }
 
     private void validate() throws WireException {
+        if ((present & ANY_ZMUX) != 0 && !isZmux()) throw WireException.param("incompatible zmux family");
         boolean ackish = (present & (MULTIPATH | PIPE_ACK)) != 0;
         if ((present & (ACK_THRESHOLD | ACK_DELAY | LANES)) != 0 && !ackish) {
             throw WireException.param("companion parameter without zmux_multipath or zmux_pipe_ack");
         }
         if (has(SESSION_CRYPTO) != has(MULTIPATH)) throw WireException.param("zmux_session_crypto and zmux_multipath go together");
         if (has(RESUME) && !has(MULTIPATH)) throw WireException.param("zmux_resume without zmux_multipath");
+        if (has(CARRIER_DATAGRAM_PADDING) && (!has(CARRIER_DATAGRAMS) || maxDatagramFrameSize == 0)) {
+            throw WireException.param("zmux_carrier_datagram_padding requires carrier datagrams and a positive max_datagram_frame_size");
+        }
         if (has(PREAMBLE)) {
             if (!has(RESET_AT)) throw WireException.param("zmux_preamble without reset_stream_at");
             if (maxPreambleSize < 1 || maxPreambleSize > MAX_PREAMBLE_SIZE || maxPreambleSize > maxRecordSize - 32
@@ -317,8 +337,9 @@ public final class TransportParams {
         if (has(GOAWAY)) param(b, ID_GOAWAY, EMPTY);
         if (has(PREAMBLE)) varintParam(b, ID_PREAMBLE, maxPreambleSize);
         if (has(PRIORITY)) param(b, ID_PRIORITY, EMPTY);
-        if (has(FLOWS)) param(b, ID_DATAGRAM_FLOWS, EMPTY);
+        if (has(FAMILY)) param(b, ID_DATAGRAM_FAMILY, EMPTY);
         if (has(CARRIER_DATAGRAMS)) param(b, ID_CARRIER_DATAGRAMS, EMPTY);
+        if (has(CARRIER_DATAGRAM_PADDING)) param(b, ID_CARRIER_DATAGRAM_PADDING, EMPTY);
         if (has(MULTIPATH)) {
             byte[] v = new byte[18 + locator.length];
             v[0] = (byte) secretFlags;

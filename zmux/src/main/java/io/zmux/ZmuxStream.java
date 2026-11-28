@@ -402,17 +402,17 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     public byte[] readAll(long maxBytes) throws IOException {
         if (maxBytes < 0) throw new IllegalArgumentException("negative maxBytes");
         var out = new java.io.ByteArrayOutputStream();
-        for (Chunk next; (next = readChunk(64 << 10)) != null; ) {
-            try (Chunk c = next) {
-                ByteBuffer b = c.buffer();
-                if (out.size() + (long) b.remaining() > maxBytes) {
-                    stop(0);
-                    throw new LimitExceededException(st.id(), maxBytes);
-                }
-                byte[] a = new byte[b.remaining()];
-                b.get(a);
-                out.writeBytes(a);
+        byte[] data = new byte[64 << 10];
+        while (true) {
+            long left = maxBytes - out.size();
+            int limit = left >= data.length ? data.length : (int) left + 1;
+            int n = read(data, 0, limit);
+            if (n < 0) break;
+            if (n > left) {
+                stop(0);
+                throw new LimitExceededException(st.id(), maxBytes);
             }
+            out.write(data, 0, n);
         }
         return out.toByteArray();
     }
@@ -544,29 +544,55 @@ public final class ZmuxStream implements ZmuxSendStream, ZmuxReceiveStream {
     }
 
     /**
-     * The largest payload of a datagram of this stream's flow with the given context that leaves as one datagram of
-     * the carrier instead of in a record ({@link ConnectionInfo#pathDatagramPayload()}), 0 when the peer accepts none
-     * on this stream. As of the loop's last round; no I/O.
+     * The largest payload of a datagram of this stream's flow on an eligible path, as of the loop's last round.
      */
     public int pathDatagramPayload(long context) {
         var i = session.driver.info();
         return flowPayload(i, i.datagramPathLimit(), context);
     }
 
-    /** What a limit before the flow prefix leaves for a datagram of this stream's flow with context, 0 without flows. */
-    private int flowPayload(io.zmux.internal.loop.SessionRuntime.SessionInfo i, int limit, long context) {
-        if (!i.datagramFlows()) return 0;
-        // The flow prefix: the stream's flow (its ID + 1) and the context, as variable-length integers.
-        int flow = st.idSet() ? io.zmux.internal.wire.VarInt.length(st.id() + 1) : 8;
-        return Math.max(0, limit - flow - io.zmux.internal.wire.VarInt.length(context));
+    /** The current native-channel payload limit for this flow, zero without native carriage. */
+    public int nativeDatagramPayload(long context) {
+        var i = session.driver.info();
+        return flowPayload(i, i.datagramNativeLimit(), context);
     }
 
-    /**
-     * Datagram of this stream's flow (datagram flows in use); never blocks. Returns false when
-     * the session's datagram limiter dropped it.
-     */
-    public boolean sendDatagram(long context, ByteBuffer payload) throws IOException {
-        return session.sendDatagram(st, context, payload);
+    /** Whether an eligible native channel can carry at least an empty datagram on this flow. */
+    public boolean nativeDatagramAvailable(long context) {
+        var i = session.driver.info();
+        return i.datagramFlows() && i.datagramNativeLimit() >= flowPrefixLength(context);
+    }
+
+    /** What a limit before the flow prefix leaves for a datagram. */
+    private int flowPayload(io.zmux.internal.loop.SessionRuntime.SessionInfo i, int limit, long context) {
+        return i.datagramFlows() ? Math.max(0, limit - flowPrefixLength(context)) : 0;
+    }
+
+    private int flowPrefixLength(long context) {
+        int flow = st.idSet() ? io.zmux.internal.wire.VarInt.length(st.id() + 1) : 8;
+        return flow + io.zmux.internal.wire.VarInt.length(context);
+    }
+
+    /** Queues a datagram with this flow's inherited options. */
+    public void sendDatagram(long context, ByteBuffer payload) throws IOException {
+        sendDatagram(context, payload, DatagramSendOptions.INHERIT);
+    }
+
+    /** Sets the maximum receive age for subsequent arrivals on this flow. A null duration clears the bound. */
+    public void datagramReceiveLifetime(Duration age) {
+        if (age != null && age.isNegative()) throw new IllegalArgumentException("negative datagram receive lifetime");
+        st.datagramReceiveLifetime(age == null ? io.zmux.internal.core.Time.NEVER : io.zmux.internal.core.Time.nanos(age));
+    }
+
+    /** Sets defaults for datagrams of this stream's sending direction. */
+    public void datagramDefaults(DatagramSendOptions options) throws IOException {
+        java.util.Objects.requireNonNull(options);
+        session.run(op -> { st.datagramDefaults(options); return null; });
+    }
+
+    /** Queues a datagram with hop-local options. A local drop throws {@link DatagramDroppedException}. */
+    public void sendDatagram(long context, ByteBuffer payload, DatagramSendOptions options) throws IOException {
+        session.submitDatagram(st, context, payload, options, Session.DatagramMode.DATAGRAM_ONLY, false, Long.MAX_VALUE);
     }
 
     /** Waits for the next datagram of this stream's flow. */

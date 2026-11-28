@@ -1,14 +1,17 @@
 package io.zmux.http;
 
+import io.zmux.CapacityLimits;
+import io.zmux.SessionPolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import io.zmux.Candidate;
 import io.zmux.CandidateOutcome;
 import io.zmux.CarrierKind;
-import io.zmux.CarrierChoice;
-import io.zmux.CarrierChoicePolicy;
+import io.zmux.ClockDomain;
 import io.zmux.PipeAuth;
-import io.zmux.SessionEvent;
-import io.zmux.Zmux;
+import io.zmux.SessionController;
+import io.zmux.SessionTarget;
+import io.zmux.CarrierOpener;
 import io.zmux.ZmuxConfig;
 import io.zmux.ZmuxSession;
 import io.zmux.shaping.ShapedPipe;
@@ -16,25 +19,29 @@ import io.zmux.shaping.Shaper;
 import io.zmux.shaping.ShaperFactory;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** The HTTP candidates in the carrier selection of {@link Zmux#dial(CarrierChoice, io.zmux.ZmuxConfig, CarrierChoicePolicy)}. */
+/** The HTTP candidates in the bootstrap selection of the session controller. */
 @Timeout(120)
 class ModeHttpTest {
     static final byte[] PSK = ExchangeTest.PSK;
 
-    /** The server's exchange carrier: its hold time below the buffering CDN's 3 s response timeout. */
+    /** A short hold for the exchange carrier keeps the fixture's idle polls short. */
     static ExchangeConfig serverExchange() { return ExchangeConfig.builder(PSK).holdTime(Duration.ofSeconds(1)).build(); }
 
-    /** The client's exchange carrier: a short deadline, so that a refused path fails within the test. */
-    static ExchangeConfig clientExchange() { return ExchangeConfig.builder(PSK).deadline(Duration.ofSeconds(3)).build(); }
+    static ExchangeConfig clientExchange() { return ExchangeConfig.builder(PSK).build(); }
 
     /** A unified endpoint with every adapter; multipath: joins allowed. */
     static Fixture fixture(boolean multipath) throws Exception {
@@ -42,7 +49,7 @@ class ModeHttpTest {
     }
 
     static Function<ZmuxConfig.Builder, ZmuxConfig.Builder> session(boolean multipath, ShaperFactory shaper) {
-        return b -> (multipath ? b.maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation() : b).shaper(shaper);
+        return b -> (multipath ? b.sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd()).noProbation() : b).shaper(shaper);
     }
 
     /** The same, its sessions shaped by shaper. */
@@ -53,13 +60,17 @@ class ModeHttpTest {
     /** A factory that records the pipes it is asked for and shapes none of them. */
     static final class Seen implements ShaperFactory {
         final List<ShapedPipe> pipes = new CopyOnWriteArrayList<>();
-        @Override public Shaper create(ShapedPipe pipe) { pipes.add(pipe); return null; }
-        List<CarrierKind> kinds() { return pipes.stream().map(ShapedPipe::carrier).toList(); }
-        void awaitKind(CarrierKind k) throws InterruptedException {
-            long until = System.nanoTime() + 5_000_000_000L;
-            while (!kinds().contains(k) && System.nanoTime() < until) Thread.sleep(5);
-            assertTrue(kinds().contains(k), "no " + k + " pipe: " + pipes);
+        private final Map<CarrierKind, CompletableFuture<Void>> created = new ConcurrentHashMap<>();
+        @Override public Shaper create(ShapedPipe pipe) {
+            pipes.add(pipe);
+            signal(pipe.carrier()).complete(null);
+            return null;
         }
+        List<CarrierKind> kinds() { return pipes.stream().map(ShapedPipe::carrier).toList(); }
+        private CompletableFuture<Void> signal(CarrierKind kind) {
+            return created.computeIfAbsent(kind, ignored -> new CompletableFuture<>());
+        }
+        void awaitKind(CarrierKind kind) throws Exception { signal(kind).get(); }
     }
 
     /** The HTTP kinds to url, by preference. */
@@ -68,8 +79,56 @@ class ModeHttpTest {
                 c.splitCandidate(url, Map.of()), c.exchangeCandidate(url.toString(), clientExchange()));
     }
 
-    static CarrierChoicePolicy fast(boolean noJoin) {
-        return CarrierChoicePolicy.defaults().withTimer(3, Duration.ofMillis(400), Duration.ofSeconds(1)).withSettle(Duration.ofMillis(200)).withJoin(!noJoin);
+    static ZmuxSession open(ZmuxConfig config, List<Candidate> carriers) throws java.io.IOException {
+        var registrations = carriers.stream().map(carrier -> new SessionController.Candidate(carrier.kind().toString(),
+                carrier.kind().toString(), carrier.kind(), carrier.variant(), 0, false, true, List.of(),
+                (setup, request) -> new CarrierOpener.Opened(List.of(carrier.dialer().dial(request.credential(), request.timeout()))))).toList();
+        var preparation = carriers.size() > 1 ? new PreparationClock() : null;
+        var options = new SessionController.Options(java.util.UUID.randomUUID().toString(), registrations,
+                SessionController.Choice.STATIC,
+                SessionController.Limits.DEFAULT.withMaximumOpeners(1).withAttemptTimeout(Duration.ofSeconds(6)),
+                null, preparation == null ? ClockDomain.system() : new ClockDomain(preparation), Map.of());
+        try (var controller = new SessionController(options)) {
+            try {
+                return controller.open(config, SessionTarget.empty()).session();
+            } finally {
+                if (preparation != null) preparation.resume();
+            }
+        }
+    }
+
+    /** During setup, opener and handshake results drive progress. Resume live timers for the opened session. */
+    private static final class PreparationClock implements ClockDomain.Source {
+        private final CompletableFuture<Long> resumed = new CompletableFuture<>();
+
+        @Override public long nanoTime() {
+            Long origin = resumed.getNow(null);
+            return origin == null ? 0 : System.nanoTime() - origin;
+        }
+
+        @Override public Instant wallTime() { return Instant.EPOCH.plusNanos(nanoTime()); }
+
+        @Override public Runnable schedule(long delay, Runnable task) {
+            var scheduled = new AtomicReference<Runnable>();
+            var cancelled = (Runnable) () -> {};
+            if (delay == 0) {
+                task.run();
+                return cancelled;
+            }
+            long deadline = nanoTime() + delay;
+            resumed.thenRun(() -> {
+                if (scheduled.get() == cancelled) return;
+                ClockDomain system = ClockDomain.system();
+                var stop = system.schedule(system.now() + Math.max(0, deadline - nanoTime()), task);
+                if (!scheduled.compareAndSet(null, stop)) stop.run();
+            });
+            return () -> {
+                var stop = scheduled.getAndSet(cancelled);
+                if (stop != null) stop.run();
+            };
+        }
+
+        void resume() { resumed.complete(System.nanoTime()); }
     }
 
     static List<String> tries(ZmuxSession s) {
@@ -81,7 +140,7 @@ class ModeHttpTest {
     @Test void eachKindExplicitly() throws Exception {
         try (var f = fixture(false); var c = f.client(b -> b)) {
             for (Candidate k : candidates(c, f.base)) {
-                try (var s = Zmux.dial(CarrierChoice.explicit(k), f.config, null)) {
+                try (var s = open(f.config, List.of(k))) {
                     assertEquals(k.kind(), s.stats().carrier());
                     assertEquals(List.of(k.kind() + ":" + CandidateOutcome.USABLE), tries(s));
                     f.echo(s);
@@ -98,7 +157,7 @@ class ModeHttpTest {
                 Seen client = new Seen();
                 server.pipes.clear();
                 var cfg = session(false, client).apply(ZmuxConfig.builder().eventLoops(f.loops)).build();
-                try (var s = Zmux.dial(CarrierChoice.explicit(k), cfg, null)) {
+                try (var s = open(cfg, List.of(k))) {
                     f.echo(s);
                     client.awaitKind(k.kind());
                     server.awaitKind(k.kind());
@@ -109,48 +168,10 @@ class ModeHttpTest {
         }
     }
 
-    /** A pipe the mode layer joins to move to another kind is shaped as that kind on both sides. */
-    @Test void aJoinedKindIsShapedAsTheNewKind() throws Exception {
-        Seen server = new Seen(), client = new Seen();
-        try (var f = fixture(true, server); var c = f.client(b -> b)) {
-            var cfg = session(true, client).apply(ZmuxConfig.builder().eventLoops(f.loops)).build();
-            try (var s = Zmux.dial(CarrierChoice.auto(candidates(c, f.base)), cfg, fast(false))) {
-                assertEquals(CarrierKind.EXCHANGE, s.stats().carrier());
-                client.awaitKind(CarrierKind.WEBSOCKET);
-                server.awaitKind(CarrierKind.WEBSOCKET);
-                assertEquals(CarrierKind.EXCHANGE, client.pipes.getFirst().carrier());
-                assertEquals(CarrierKind.EXCHANGE, server.pipes.getFirst().carrier());
-                for (ShapedPipe p : client.pipes) assertEquals(p.id().value() == 0, p.carrier() == CarrierKind.EXCHANGE, p.toString());
-                f.echo(s);
-            }
-        }
-    }
-
-    /** Established on the exchange carrier, the session moves to the most preferred kind by joining it, without a second session. */
-    @Test void autoJoinsThePreferredKind() throws Exception {
-        try (var f = fixture(true); var c = f.client(b -> b)) {
-            try (var s = Zmux.dial(CarrierChoice.auto(candidates(c, f.base)), f.config, fast(false))) {
-                assertEquals(CarrierKind.EXCHANGE, s.stats().carrier(), "established on the exchange carrier");
-                SessionEvent e;
-                do {
-                    e = s.nextEvent(Duration.ofSeconds(10));
-                    assertNotNull(e, "no choice of a preferred kind: " + tries(s));
-                } while (!(e instanceof SessionEvent.CarrierChosen ch && ch.kind() == CarrierKind.WEBSOCKET));
-                assertEquals(CarrierKind.WEBSOCKET, s.stats().carrier());
-                long until = System.nanoTime() + 5_000_000_000L;
-                while (s.pipes().stream().anyMatch(p -> p.id().value() == 0) && System.nanoTime() < until) Thread.sleep(10);
-                assertTrue(s.pipes().stream().noneMatch(p -> p.id().value() == 0), "the exchange pipe retired: " + s.pipes());
-                f.echo(s);
-                assertThrows(java.net.SocketTimeoutException.class, () -> f.listener.accept(Duration.ofMillis(200)), "a second session");
-            }
-            ExchangeTest.waitFor(() -> f.endpoint.exchange.live() == 0, "the retired exchange carrier ends");
-        }
-    }
-
     @Test void anExplicitKindThatIsRefusedIsReported() throws Exception {
         try (var f = new Fixture(b -> b, b -> b, b -> b.streaming(), false, null); var c = f.client(b -> b)) {
             var e = assertThrows(io.zmux.CarrierChoiceException.class,
-                    () -> Zmux.dial(CarrierChoice.explicit(candidates(c, f.base).getFirst()), f.config, null));
+                    () -> open(f.config, List.of(candidates(c, f.base).getFirst())));
             assertEquals(1, e.results().size());
             assertEquals(CandidateOutcome.REFUSED, e.results().getFirst().outcome());
         }

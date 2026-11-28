@@ -17,8 +17,8 @@ import java.util.concurrent.CompletionStage;
  * <p>Grant: a successful {@code acquire} or {@code tryAcquire} takes and returns n with {@code min' <= n <= max},
  * where min' is {@code min}, or less when the limiter can never allow {@code min} at once (its burst). A limiter
  * that grants {@code min} anyway and records the excess as debt is conforming. The limiter chooses n in that range;
- * callers assume neither {@code n == max} nor {@code n > min}. For an atomic unit (a capsule, a datagram) requested
- * as {@code (n, n)}, a successful grant means that the whole unit may be sent, even when fewer bytes were returned.
+ * callers assume neither {@code n == max} nor {@code n > min}. Atomic splice outputs use {@link Permit#acquireExact} or {@link Permit#tryAcquireExact} and require
+ * the full grant. Other byte and datagram wrappers accept a short grant according to their own policy.
  * When {@code max} allows, a limiter should not grant much less than its quantum (about 20 ms of traffic at its rate,
  * at most its burst), so that a stream is not fed in slivers.
  *
@@ -26,12 +26,15 @@ import java.util.concurrent.CompletionStage;
  * limiter grants {@code max} at once; one whose rate is zero makes {@code acquire} wait until cancelled and
  * {@code tryAcquire} return 0.
  *
- * <p>zmux calls every method off its event loops and outside every session lock, and never holds a buffer of its
- * own while it waits in {@code acquire}. A limiter that fails is treated alike everywhere: in {@code acquire} (an
+ * <p>zmux calls every method off its event loops and outside every session lock, and never calls it from within a carrier callback. A splice may retain a bounded
+ * transformed output during an acquisition. A limiter that fails is treated alike everywhere: in {@code acquire} (an
  * exception, a failed stage, or a grant outside {@code 1..max}) it fails the operation that asked; in
  * {@code tryAcquire} it counts as nothing taken; a failure of {@code refund} is ignored.
  */
 public interface Limiter {
+    /** Maximum atomic grant in bytes, Long.MAX_VALUE for unlimited, or negative when unknown. */
+    default long maxBurstBytes() { return -1; }
+
     /**
      * Waits until it can grant, then takes and returns n bytes as the class describes. Cancelling the stage before
      * it completes takes nothing: a limiter without a native rollback gives the bytes back itself, and an

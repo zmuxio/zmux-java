@@ -111,6 +111,9 @@ public final class Joiner {
         return 1 + VarInt.length(suite) + 1 + 1 + locatorLen + rLen + Frames.unitLength(f, ciphertext);
     }
 
+    /** Start of the encrypted TLVs after the clear header and framing. */
+    public int helloPayloadOffset() { return helloLength(c.suite.id(), locator.length, c.suite.nonceLen(), c.framing, 0); }
+
     /** The ciphertext of a Hello with this payload. */
     public int helloCiphertext(HelloPayload p) throws SecureCarrierException {
         return Schedule.encodeHello(p, kex.share()).length + Suite.TAG_LEN;

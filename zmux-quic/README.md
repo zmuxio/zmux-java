@@ -146,7 +146,7 @@ without a new admission. A client presents a `CarrierCredential` on stream 0 of
 every connection it opens, in 1-RTT data: `connect` takes the session
 configuration's (`ZmuxConfig.carrierCredential()`, the bound listener's for a
 listener-backed client), `dial` and `QuicPool` take one per call. A token
-bound to the connection's TLS exporter (`PrefixAuth` with `bindTls`) works here:
+bound to the connection's TLS exporter (`PrefixAuth.CarrierOptions` with `bound` enabled) works here:
 see [Joins and the exporter](#joins-and-the-exporter). A source is the
 remote IP address, not the QUIC connection ID. Native stream credit bounds
 the number of streams awaiting classification. Listener closure leaves
@@ -158,11 +158,21 @@ A host that runs its own QUIC endpoint hands each established connection to
 connection's loop once its handshake completes: the connection takes a slot of
 its source, its first bidirectional stream the listener's admission, then the
 inbound transform, as on a `QuicServer` endpoint. Its codec hands streams on
-with `QuicServer.streamHandler()`. The returned stage completes when the
-connection ends; cancelling it stops handing new streams to the listener and
-closes neither the connection nor its sessions. Netty offers no query for
+with `QuicServer.streamHandler()`. The returned `QuicConnectionService` offers
+`stopAdmission()` to withdraw new bidirectional pipes while attached pipes
+still accept authenticated lanes. `stop()` also stops accepting lanes.
+`whenDrained()` completes after the adapter drains, hands back the connection,
+or the connection ends. A stopped external service leaves the connection to
+its owner. A managed endpoint provides the same admission boundary through
+`QuicServer.stopAdmission()`, and closes its owned connections after they drain.
+Netty offers no query for
 whether a connection used 0-RTT, so a host whose listener has an admission
 refuses early data in its TLS configuration.
+
+For native datagrams on an externally served connection, call
+`QuicServer.observeDatagramCapacity(connection)` from the codec's connection
+initializer to capture Netty's activation event. A detached host can receive
+later streams via the supplier overload of `QuicServer.streamHandler()`.
 
 Both `FALLBACK` and `TAKEOVER` hand the connection and its first stream
 to the listener's `ListenerConfig.fallback` as a `Takeover`: its pipe
@@ -239,8 +249,8 @@ past its age limit also closes without another pool call.
 
 `QuicPool.builder(client, address, serverName)` takes the `limits`, a
 `credential`, a `policy`, a `decisionRejected` callback and a `logger`. The
-policy is a `PoolPolicy`, the same `PoolView`/`PoolDecision` model as
-`PipePool.withPolicy`. Each member is a connection: its fate group, its age,
+policy takes a `PoolView` and returns a `PoolDecision`. Each member is a
+connection with a fate group, its age,
 the time since its last pipe ended as idle, its active pipes, zero byte
 counts, and `usable` while it is not retired and has room; `PoolView.dialing`
 counts a dial in progress. The policy is asked when a pipe is taken or
@@ -269,10 +279,10 @@ endpoint or application listener. To force all underlying connections to stop,
 close their owning client. Use explicit cancellation of an unfinished open and
 return the carrier's halves when it will not be joined.
 
-Pipe maintenance can use `PipePool.carriers` with a factory that
-calls `pool.openPipeAsync()`, waits for it and propagates cancellation/interruption to that future. If
-cancellation races a completed open, reclaim the completed carrier too. This
-reuses maintenance's existing scoped ownership and retry policy.
+A session controller's `CarrierOpener` can call `pool.openPipeAsync()`.
+Propagate the setup cancellation signal to the open request. Return opened
+carriers to the attempt executor, including those opened before a later
+failure in the layout.
 
 These are connection-lifecycle and wire-grouping guarantees. Creating more
 streams does not establish more independent physical bandwidth. Existing

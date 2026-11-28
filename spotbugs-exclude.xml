@@ -93,6 +93,13 @@
     <Bug pattern="AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE, AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
   </Match>
 
+  <!-- The sibling transport's admission tests observe the same live setup handle used by the router. -->
+  <Match>
+    <Class name="io.zmux.http.Router"/>
+    <Method name="currentSetup"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
+
   <!-- Zero-copy handoff. The internal.* packages (exported only to the sibling modules) pass byte arrays,
        buffers and live objects between the core, the loop and the carriers without copying: a defensive copy on
        these hot paths would add an allocation and a copy per frame. The ownership of each array is documented where
@@ -109,11 +116,14 @@
   <Match>
     <Bug pattern="EI_EXPOSE_REP, EI_EXPOSE_REP2"/>
     <Or>
+      <Class name="io.zmux.Attempt$Result"/>
+      <Class name="io.zmux.CarrierOpener$Opened"/>
+      <Class name="io.zmux.SessionController$Opened"/>
       <Class name="~io\.zmux\.CandidateResult"/>
       <Class name="~io\.zmux\.DuplicateResult"/>
-      <Class name="~io\.zmux\.PipeMaintenance\$Result"/>
-      <Class name="~io\.zmux\.PipePool\$Attempt"/>
       <Class name="~io\.zmux\.PipeStats\$Failure"/>
+      <Class name="io.zmux.PipeHealth"/>
+      <Class name="io.zmux.PipeHealthChange"/>
       <Class name="~io\.zmux\.RejectInfo"/>
       <Class name="~io\.zmux\.SessionError\$(PipesLost|ResumeTimeout)"/>
       <Class name="~io\.zmux\.SessionEvent\$PipesRetired"/>
@@ -199,6 +209,7 @@
       <Class name="io.zmux.ZmuxPipe"/>
       <Class name="io.zmux.carrier.PipeChannel"/>
       <Class name="io.zmux.internal.loop.SessionRuntime$JoinerGate"/>
+      <And><Class name="io.zmux.internal.loop.NioTransport"/><Method name="shutdownInput"/></And>
       <Class name="io.zmux.internal.loop.SocketTransport"/>
       <Class name="io.zmux.internal.loop.TlsTransport"/>
       <And><Class name="io.zmux.ZmuxFuture"/><Method name="discard"/></And>
@@ -248,10 +259,13 @@
     </Or>
   </Match>
 
-  <!-- CarrierSample defines a typed direction and publishes only the local sender in this release. -->
+  <!-- A typed direction for carrier samples, and typed singleton options for datagram overrides. -->
   <Match>
     <Bug pattern="ENMI_ONE_ENUM_VALUE"/>
-    <Class name="io.zmux.Direction"/>
+    <Or>
+      <Class name="io.zmux.Direction"/>
+      <Class name="~io\.zmux\.DatagramSendOptions\$(Copies\$(Single|Adaptive)|Deadline\$None)"/>
+    </Or>
   </Match>
 
   <!-- Locals javac synthesises for record patterns in a switch, and collections handed to a constructor that the
@@ -269,7 +283,6 @@
   <Match>
     <Bug pattern="WOC_WRITE_ONLY_COLLECTION_LOCAL"/>
     <Or>
-      <And><Class name="io.zmux.PipeMaintenance"/><Method name="consult"/></And>
       <And><Class name="io.zmux.quic.QuicPool"/><Method name="consultLocked"/></And>
     </Or>
   </Match>
@@ -305,8 +318,7 @@
       <Class name="io.zmux.http.ExchangeClient"/>
       <Class name="io.zmux.quic.QuicPool"/>
       <Class name="~io\.zmux\.Chunk(\$.*)?"/>
-      <Class name="io.zmux.PipeMaintenance"/>
-      <Class name="io.zmux.Redialer"/>
+      <Class name="io.zmux.CarrierCache"/>
     </Or>
   </Match>
 
@@ -315,12 +327,6 @@
     <Bug pattern="PA_PUBLIC_MUTABLE_OBJECT_ATTRIBUTE"/>
     <Class name="io.zmux.internal.loop.SessionRuntime"/>
     <Field name="pickers"/>
-  </Match>
-
-  <!-- One MAC per thread for each verifier's key: the thread-local belongs to the key, not to the class. -->
-  <Match>
-    <Bug pattern="PMB_INSTANCE_BASED_THREAD_LOCAL"/>
-    <Class name="io.zmux.PrefixAuth$Verifier"/>
   </Match>
 
   <!-- Passes itself to the shared static end-of-transport routine. -->

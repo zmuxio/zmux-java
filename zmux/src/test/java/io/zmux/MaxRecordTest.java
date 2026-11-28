@@ -18,7 +18,7 @@ class MaxRecordTest {
     static final int SEAL = 16;
 
     static ZmuxConfig config(EventLoops loops) {
-        return ZmuxConfig.builder().eventLoops(loops).maxPipes(4).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
+        return ZmuxConfig.builder().eventLoops(loops).sessionPolicy(new SessionPolicy(new CapacityLimits(4))).pipeAuth(PipeAuth.psk(new byte[32]).withEndToEnd())
                 .noProbation().enableDatagrams(true).build();
     }
 
@@ -49,7 +49,7 @@ class MaxRecordTest {
     static void capped(ZmuxSession sender, ZmuxSession receiver, AtomicInteger largest, AtomicInteger records, int plain, int cap) throws Exception {
         int max = sender.datagrams().maxPayload();
         assertTrue(max > 0 && max <= plain - 3, "max datagram payload " + max);
-        assertTrue(sender.datagrams().send(ByteBuffer.allocate(max)));
+        sender.datagrams().send(ByteBuffer.allocate(max));
         assertEquals(max, receiver.datagrams().receive(Duration.ofSeconds(5)).length);
         assertThrows(DatagramTooLargeException.class, () -> sender.datagrams().send(ByteBuffer.allocate(max + 1)));
         int before = records.get();
@@ -199,41 +199,6 @@ class MaxRecordTest {
                     }
                     assertTrue(largest.get() <= CAP + SEAL, "largest record " + largest.get());
                     assertFalse(client.isClosed() || server.isClosed());
-                }
-            }
-        }
-    }
-
-    /**
-     * A queued datagram that fits the pipe it was sized for but no pipe left is dropped and counted once that pipe
-     * goes; the datagrams behind it are not held up.
-     */
-    @Test void aDatagramNoPipeHoldsIsDropped() throws Exception {
-        try (EventLoops loops = EventLoops.create(2)) {
-            var cfg = config(loops);
-            var gate = new NonBlockingCallsTest.Gate();
-            try (var a = Zmux.listener(ListenerConfig.of(cfg)); var b = Zmux.listener(ListenerConfig.of(cfg))) {
-                var bootstrap = MemoryPipe.pair(Framing.MESSAGES);
-                b.adapter().handle(bootstrap[1], JoinHint.inBand(TestAddr.peer("bootstrap")));
-                try (var client = a.open(gate.wrap(bootstrap[0]), Role.CLIENT); var server = b.accept(Duration.ofSeconds(5))) {
-                    int big = client.datagrams().maxPayload();
-                    assertTrue(big > CAP);
-                    // The bootstrap pipe's write stays in progress: the next datagrams wait in the session's queue.
-                    synchronized (gate) { gate.closed = true; }
-                    assertTrue(client.datagrams().send(ByteBuffer.allocate(1)));
-                    Thread.sleep(50);
-                    assertTrue(client.datagrams().send(ByteBuffer.allocate(big)));
-                    var pair = MemoryPipe.pair(Framing.MESSAGES);
-                    b.adapter().handle(pair[1], JoinHint.inBand(TestAddr.peer("joined")));
-                    var joined = client.addPipe(pair[0].withMaxRecord(CAP + SEAL), PipeOptions.defaults());
-                    long dropped = client.stats().datagramsDroppedSend();
-                    client.pipes().stream().filter(p -> !p.id().equals(joined.id())).findFirst().orElseThrow().abort();
-                    assertTrue(client.datagrams().send(ByteBuffer.allocate(7)));
-                    long until = System.nanoTime() + 5_000_000_000L;
-                    byte[] got;
-                    do got = server.datagrams().receive(Duration.ofSeconds(5)); while (got.length != 7 && System.nanoTime() < until);
-                    assertEquals(7, got.length, "the datagram behind the dropped one arrives");
-                    assertTrue(client.stats().datagramsDroppedSend() > dropped, "the large datagram is dropped and counted");
                 }
             }
         }

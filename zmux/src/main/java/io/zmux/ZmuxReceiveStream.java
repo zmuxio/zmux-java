@@ -10,7 +10,11 @@ public sealed interface ZmuxReceiveStream extends AutoCloseable permits ZmuxStre
     /** Reads at least one byte, waiting; -1 at the end of a finished stream; a reset fails with {@link StreamResetException}. */
     int read(ByteBuffer dst) throws IOException;
 
-    /** Takes up to max bytes without copying; null at FIN. Close or forward the returned chunk. */
+    /**
+     * Takes up to max bytes without copying; null at FIN. Close or forward the returned chunk.
+     * @throws ChunkBudgetException if the next backing cannot be leased. The bytes remain available
+     *         for a normal read, or for a retry after other chunks are released.
+     */
     Chunk readChunk(int max) throws IOException;
 
     int read(byte[] b, int off, int len) throws IOException;

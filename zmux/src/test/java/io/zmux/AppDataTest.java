@@ -91,9 +91,9 @@ class AppDataTest {
         try (EventLoops loops = EventLoops.create(1)) {
             ZmuxConfig cfg = SealTest.sessions(loops).build();
             List<String> reasons = new CopyOnWriteArrayList<>();
-            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES).build();
+            var sc = ServerConfig.builder(SealTest.gate(null), SealTest.NODE).acceptedProfiles(Profile.XXHFS_CHACHA, Profile.XXHFS_PSK0_CHACHA, Profile.XXHFS_PSK0_AES).handshakeLimits(new io.zmux.seal.HandshakeLimits(2, 1)).build();
             var lc = ListenerConfig.builder().session(cfg).inboundTransform(Seal.server(sc))
-                    .onReject(i -> { reasons.add(i.reason()); return RejectInfo.Action.CLOSE; }).build();
+                    .onReject(i -> reasons.add(i.reason())).build();
             try (var l = Zmux.listen(NetworkTest.any(), lc)) {
                 List<Asked> asked = new CopyOnWriteArrayList<>();
                 var noPsk = io.zmux.seal.ClientConfig.builder().anchor(SealTest.client().build().anchor()).allowedProfiles(Profile.XXHFS_CHACHA)

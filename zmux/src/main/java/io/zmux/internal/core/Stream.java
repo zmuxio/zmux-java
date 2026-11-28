@@ -14,7 +14,7 @@ public final class Stream {
     static final int RECV_RECV = 0, RECV_SIZE_KNOWN = 1, RECV_DATA_RECVD = 2, RECV_DATA_READ = 3,
             RECV_RESET_RECVD = 4, RECV_RESET_READ = 5;
 
-    final StreamSend.SendPart snd = new StreamSend.SendPart();
+    final StreamSend.SendPart snd = new StreamSend.SendPart(this);
     /** The stream's own statistics counters that its parts do not keep. */
     final Counters counters = new Counters();
     /** The final statistics, taken when the session released the stream; null before. */
@@ -24,6 +24,19 @@ public final class Stream {
     /** The stream's place in the scheduler and in the control queue. */
     final StreamScheduler.Node sch = new StreamScheduler.Node(this);
     final ControlQueue.Entry cq = new ControlQueue.Entry(this);
+
+    private io.zmux.DatagramSendOptions datagramDefaults = io.zmux.DatagramSendOptions.INHERIT;
+
+    private volatile long receiveLifetime = Time.NEVER;
+
+    public long datagramReceiveLifetime() { return receiveLifetime; }
+    public void datagramReceiveLifetime(long nanos) { receiveLifetime = nanos; }
+
+    public io.zmux.DatagramSendOptions datagramDefaults() { return datagramDefaults; }
+
+    public void datagramDefaults(io.zmux.DatagramSendOptions options) {
+        datagramDefaults = java.util.Objects.requireNonNull(options);
+    }
 
     final boolean local;
     final boolean bidi;
@@ -85,7 +98,7 @@ public final class Stream {
             long pre = snd.preLen();
             written = snd.appWritten();
             PathStreamState m = snd.mps();
-            acked = m != null ? m.ret.acked().covered(pre, Long.MAX_VALUE) : Math.max(0, snd.sent() - pre);
+            acked = m != null ? m.ret.history.applicationAcked() : Math.max(0, snd.sent() - pre);
             sendBuffered = Math.max(0, snd.q().end() - Math.max(snd.q().base(), pre));
             if (m != null && m.sched.bound() >= 0) pipe = java.util.Optional.of(io.zmux.PipeId.of(m.sched.bound()));
             sent = counters.bytesSent;
@@ -94,7 +107,7 @@ public final class Stream {
         if (hasRecv) {
             StreamRecv.RecvPart r = rcv;
             long pre = r.preSize();
-            received = r.stopped() ? Math.max(0, r.highest() - pre) : r.arrived().covered(pre, Long.MAX_VALUE);
+            received = Math.max(0, (r.stopped() ? r.highest() : r.arrived().total()) - pre);
             recvBuffered = r.buf().bytes() + Math.max(0, r.pushOff() - r.readOff());
             window = r.window();
         }
@@ -145,7 +158,7 @@ public final class Stream {
         int st = snd.state();
         if (st == SEND_DATA_RECVD || st == SEND_RESET_RECVD || st == SEND_RESET_SENT) return false;
         if (unsent() > 0) return true;
-        if (snd.mps() != null && (snd.mps().ret.resend().size() > 0 || snd.mps().ret.finResend())) return true;
+        if (snd.mps() != null && (snd.mps().ret.history.resendBytes() != 0 || snd.mps().ret.finResend())) return true;
         if (snd.finWritten() && !snd.finSent() && !snd.reset()) return true;
         return ((tab.pinned() || tab.openWant()) && !tab.opened()) || (!tab.idSet() && (snd.finWritten() || snd.q().end() > snd.q().base()));
     }
@@ -158,11 +171,6 @@ public final class Stream {
     public boolean bidirectional() { return bidi; }
 
     public Preamble peerPreamble() { return rcv.peerPre(); }
-
-    public void setWaiters(Waiter r, Waiter w) {
-        StreamRecv.waiter(this, r);
-        StreamSend.waiter(this, w);
-    }
 
     static long streamId(long idx, boolean bidi, boolean responder) {
         long id = idx << 2;

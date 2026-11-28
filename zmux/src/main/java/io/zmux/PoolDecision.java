@@ -12,10 +12,9 @@ import java.util.Set;
  * a value out of range. Durations are durations, not points in time, so a policy reads no clock of its own.
  *
  * @param count the members to keep, at least 1; members above it close gracefully, those in retirePipes (or
- *     retireConnections) first, then the longest idle. Unset: the pool's {@link PipePool#count()}
- * @param dialAfter the wait from the start of the last dial attempt (the start of the pool before the first) to the
- *     next dial, redial or replacement, in place of the backoff's wait and its jitter; zero or more, its effect
- *     bounded by the backoff's maximum. Unset: the backoff
+ *     retireConnections) first, then the longest idle. Unset: the pool's configured count
+ * @param dialAfter a minimum wait from the start of the last dial attempt (the start of the pool before the first)
+ *     to the next dial, redial or replacement. The pool also honours the sampled backoff
  * @param retirePipes members of a pipe pool to replace now, make before break, by pipe ID; a member that is not usable
  *     or already being replaced is skipped
  * @param retireConnections connections of a connection pool to retire, by fate group
@@ -50,7 +49,7 @@ public record PoolDecision(OptionalInt count, Optional<Duration> dialAfter, Set<
         return new PoolDecision(OptionalInt.of(n), dialAfter, retirePipes, retireConnections, recheck, liveness);
     }
 
-    /** The wait from the start of the last dial attempt to the next, zero or more. */
+    /** The minimum wait from the start of the last dial attempt to the next, zero or more. */
     public PoolDecision withDialAfter(Duration d) {
         return new PoolDecision(count, Optional.of(Objects.requireNonNull(d, "dialAfter")), retirePipes, retireConnections, recheck, liveness);
     }
@@ -73,12 +72,13 @@ public record PoolDecision(OptionalInt count, Optional<Duration> dialAfter, Set<
     }
 
     /** The recheck in nanoseconds with {@link #MIN_RECHECK} applied, saturated; 0: none. */
-    long recheckNanos() {
-        return recheck.map(d -> Math.max(saturated(d), MIN_RECHECK.toNanos())).orElse(0L);
+    public long recheckNanos() {
+        return recheck.map(d -> Math.max(io.zmux.internal.core.Time.nanos(d), MIN_RECHECK.toNanos())).orElse(0L);
     }
 
-    /** d in nanoseconds, saturated at Long.MAX_VALUE. */
-    static long saturated(Duration d) {
-        try { return d.toNanos(); } catch (ArithmeticException tooLong) { return Long.MAX_VALUE; }
+    /** The policy's minimum dial wait in nanoseconds, saturated. */
+    public long dialAfterNanos() {
+        return dialAfter.map(io.zmux.internal.core.Time::nanos).orElse(0L);
     }
+
 }

@@ -2,7 +2,7 @@ package io.zmux;
 
 import java.util.List;
 
-/** {@link Zmux#dial(CarrierChoice, ZmuxConfig, CarrierChoicePolicy)} found no usable candidate: the outcome of every one it tried. */
+/** {@link SessionController#open} found no usable candidate: the outcome of every one it tried. */
 public final class CarrierChoiceException extends ZmuxException {
     private final transient List<CandidateResult> results;
 

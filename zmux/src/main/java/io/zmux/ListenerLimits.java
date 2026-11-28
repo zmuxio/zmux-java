@@ -28,13 +28,12 @@ public final class ListenerLimits {
 
     private final int maxPending; // NO_MAX_PENDING: unlimited
     private final int maxPendingPerSource;
-    private final int maxPendingPerSession;
     private final int maxSuspended;
     private final Duration firstRecordTimeout;
     private final long memoryBudget; // NO_BUDGET: unlimited
 
     private ListenerLimits(Builder b) {
-        maxPending = b.maxPending; maxPendingPerSource = b.maxPendingPerSource; maxPendingPerSession = b.maxPendingPerSession;
+        maxPending = b.maxPending; maxPendingPerSource = b.maxPendingPerSource;
         maxSuspended = b.maxSuspended; firstRecordTimeout = b.firstRecordTimeout; memoryBudget = b.memoryBudget;
     }
 
@@ -45,7 +44,7 @@ public final class ListenerLimits {
     /** A builder starting from these limits. */
     public Builder toBuilder() {
         Builder b = new Builder();
-        b.maxPending = maxPending; b.maxPendingPerSource = maxPendingPerSource; b.maxPendingPerSession = maxPendingPerSession;
+        b.maxPending = maxPending; b.maxPendingPerSource = maxPendingPerSource;
         b.maxSuspended = maxSuspended; b.firstRecordTimeout = firstRecordTimeout; b.memoryBudget = memoryBudget;
         return b;
     }
@@ -54,8 +53,6 @@ public final class ListenerLimits {
     public OptionalInt maxPending() { return maxPending == NO_MAX_PENDING ? OptionalInt.empty() : OptionalInt.of(maxPending); }
     /** {@link ListenerConfig#maxPendingPerSource()}. */
     public int maxPendingPerSource() { return maxPendingPerSource; }
-    /** {@link ListenerConfig#maxPendingPerSession()}. */
-    public int maxPendingPerSession() { return maxPendingPerSession; }
     /** {@link ListenerConfig#maxSuspended()}. */
     public int maxSuspended() { return maxSuspended; }
     /** {@link ListenerConfig#firstRecordTimeout()}. */
@@ -66,17 +63,17 @@ public final class ListenerLimits {
     @Override
     public boolean equals(Object o) {
         return o instanceof ListenerLimits l && maxPending == l.maxPending && maxPendingPerSource == l.maxPendingPerSource
-                && maxPendingPerSession == l.maxPendingPerSession && maxSuspended == l.maxSuspended
+                && maxSuspended == l.maxSuspended
                 && firstRecordTimeout.equals(l.firstRecordTimeout) && memoryBudget == l.memoryBudget;
     }
 
     @Override
-    public int hashCode() { return Objects.hash(maxPending, maxPendingPerSource, maxPendingPerSession, maxSuspended, firstRecordTimeout, memoryBudget); }
+    public int hashCode() { return Objects.hash(maxPending, maxPendingPerSource, maxSuspended, firstRecordTimeout, memoryBudget); }
 
     @Override
     public String toString() {
         return "ListenerLimits[maxPending=" + (maxPending == NO_MAX_PENDING ? "unlimited" : maxPending) + ", maxPendingPerSource=" + maxPendingPerSource
-                + ", maxPendingPerSession=" + maxPendingPerSession + ", maxSuspended=" + maxSuspended + ", firstRecordTimeout=" + firstRecordTimeout
+                + ", maxSuspended=" + maxSuspended + ", firstRecordTimeout=" + firstRecordTimeout
                 + ", memoryBudget=" + (memoryBudget == NO_BUDGET ? "unlimited" : memoryBudget) + "]";
     }
 
@@ -84,7 +81,6 @@ public final class ListenerLimits {
     public static final class Builder {
         private int maxPending = 1024;
         private int maxPendingPerSource = 8;
-        private int maxPendingPerSession = 4;
         private int maxSuspended = 1024;
         private Duration firstRecordTimeout = ListenerConfig.DEFAULT_FIRST_RECORD_TIMEOUT;
         private long memoryBudget = 1L << 30;
@@ -100,16 +96,10 @@ public final class ListenerLimits {
         /** No bound of the listener's carriers before a session; the per-source bound still applies. */
         public Builder noMaxPending() { maxPending = NO_MAX_PENDING; return this; }
 
-        /** Carriers of one source before a session, default 8; at least 1. */
+        /** Carriers of one source before a session, default 8; at least 2. */
         public Builder maxPendingPerSource(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPendingPerSource below 1");
+            if (n < 2) throw new IllegalArgumentException("maxPendingPerSource below 2");
             maxPendingPerSource = n; return this;
-        }
-
-        /** The Unconfirmed join carriers one session keeps, default 4; at least 1. */
-        public Builder maxPendingPerSession(int n) {
-            if (n < 1) throw new IllegalArgumentException("maxPendingPerSession below 1");
-            maxPendingPerSession = n; return this;
         }
 
         /** The suspended session bound, default 1024; zero permits none. */

@@ -3,7 +3,6 @@ package io.zmux;
 import static org.junit.jupiter.api.Assertions.*;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -21,21 +20,25 @@ class InteropProcessTest {
     }
     @Test void interruptedCloseStillReapsChild() throws Exception {
         var process = child("wait");
-        long pid = Long.parseLong(process.expect("PID "));
-        Thread.currentThread().interrupt();
-        try {
-            process.close();
-            assertTrue(Thread.currentThread().isInterrupted(), "interrupt must be restored");
-            assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
-        } finally { Thread.interrupted(); process.close(); }
+        try (process) {
+            process.expect("READY");
+            Thread.currentThread().interrupt();
+            try {
+                process.close();
+                assertTrue(Thread.currentThread().isInterrupted(), "interrupt must be restored");
+                assertFalse(process.isAlive());
+            } finally {
+                Thread.interrupted();
+            }
+        }
     }
     public static final class Child {
         public static void main(String[] args) throws Exception {
             if (args[0].equals("oversize")) {
                 for (int i = 0; i < 128; i++) System.out.print("x".repeat(1024));
                 System.out.flush();
-            } else System.out.println("PID " + ProcessHandle.current().pid());
-            TimeUnit.SECONDS.sleep(60);
+            } else System.out.println("READY");
+            System.in.read();
         }
     }
 }
