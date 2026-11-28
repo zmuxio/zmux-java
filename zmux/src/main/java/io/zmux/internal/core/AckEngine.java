@@ -282,7 +282,7 @@ final class AckEngine {
             ps.elicitEnd = Math.max(ps.elicitEnd, end);
             boolean bubble = ps.re.bubbleInFlight(ps.cum);
             var sample = new Pipe.Sample(end, now, ps.delivered, ps.deliveredAt, ps.firstSentAt,
-                    ps.re.blockEpoch(), bubble, ps.cum < so, queue, w.suspPing());
+                    ps.re.blockEpoch(), bubble, Math.max(0, so - ps.cum), queue, w.suspPing());
             // Reserve the oldest unacknowledged samples for stall timing. Emergency
             // control may replace the last estimator sample while data stays held.
             if (ps.samples.size() == FrameHistory.SLOTS) ps.samples.set(FrameHistory.SLOTS - 1, sample);
@@ -364,12 +364,14 @@ final class AckEngine {
             // Queue-proven: the range's adjusted RTT exceeded min_rtt by at least 4 x min_rtt, so the
             // path held it back and was busy throughout (a deep carrier or path buffer that never
             // refuses bytes). Its rate sample is a bottleneck sample, also for bytes sent before
-            // the pipe became SUSPECT; its RTT sample is skipped there all the same. Only a range
-            // sent behind unacknowledged bytes of the pipe can be: a lone range has no backlog to
-            // wait behind, a rise of the propagation delay alone delays it as much, and its interval
-            // spans the idle time before it.
+            // the pipe became SUSPECT; its RTT sample is skipped there all the same. It must also have
+            // been sent behind a backlog of the pipe that takes at least 4 x min_rtt at R_p: a smaller
+            // one (none, or a few control bytes) does not explain the delay, which a rise of the
+            // propagation delay alone gives as well, and its sample of a few bytes over an idle
+            // interval would replace R_p with a few hundred bytes a second.
             long minRtt = r.min();
-            boolean proven = last.queued() && minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4);
+            boolean proven = minRtt > 0 && Time.sub(rtt, Math.min(ad, peerDelay)) - minRtt >= Time.mul(minRtt, 4)
+                    && last.backlog() >= ps.re.value() * Time.mul(minRtt, 4) / 1e9;
             boolean sampleOk = p.mp() == null || p.mp().sampleOk(last.sent());
             boolean rateOk = sampleOk || (proven && p.mp().health.out() != Attach.OUT_FAILED);
             if (!late && (sampleOk || (last.probe() && ps.paced(i, last, now)))) {

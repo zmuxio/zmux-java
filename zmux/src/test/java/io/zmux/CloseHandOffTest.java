@@ -97,8 +97,12 @@ class CloseHandOffTest {
             writers[0].held.set(true);
             long bound = io.zmux.internal.core.Session.closeLimit;
             CloseLingerTest.closeOnOwner(client, 0x2a, "stalled");
+            long start = clock.now();
             writers[0].pending.get(20, TimeUnit.SECONDS);
             var settled = client.closed();
+            // The loop converts the deadline to a delay and the clock back to a time: advanced in
+            // between, the wake would land later than the bound. Advance once it is armed.
+            clock.whenScheduled(start + bound).get(20, TimeUnit.SECONDS);
             clock.advance(Duration.ofNanos(bound - 1));
             CloseLingerTest.afterRound(client);
             assertFalse(settled.isDone(), "the close writer is still within its hand-off bound");

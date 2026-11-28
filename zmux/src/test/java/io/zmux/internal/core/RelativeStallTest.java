@@ -139,10 +139,16 @@ class RelativeStallTest {
             long before = send.delivered();
             long sent = r.session.now();
             r.open("s", "bootstrap", 3000, 0);
-            if (!lone) r.open("t", "bootstrap", 3000, 0); // sent behind the unacknowledged "s"
+            // Sent behind the unacknowledged "s" and "b": at an R_p of 10 kB/s a backlog of 6000
+            // bytes takes 4 x min RTT and more, so it explains the delay.
+            if (!lone) {
+                send.re().bound(10_000);
+                r.open("b", "bootstrap", 3000, 0);
+                r.open("t", "bootstrap", 3000, 0);
+            }
             r.session.setNow(sent + lag);
             r.ackPosition(pipe, pipe.out().lanes.getFirst().tx.pos());
-            assertTrue(send.delivered() - before >= (lone ? 3000 : 6000), "the cumulative advance includes the complete stream records");
+            assertTrue(send.delivered() - before >= (lone ? 3000 : 9000), "the cumulative advance includes the complete stream records");
             if (lone) {
                 assertFalse(send.re().measured(), "a lone range proves no queue");
             } else if (lag == 500 * Time.MILLISECOND) {

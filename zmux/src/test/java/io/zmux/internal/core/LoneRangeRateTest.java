@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 /**
  * A rise of the propagation delay delays a lone range as much as a queue would: with nothing of the
  * pipe unacknowledged ahead it proves no queue, so its few bytes over the idle time before it do not
- * replace R_p. The same delay behind a backlog of the pipe is queue-proven.
+ * replace R_p, nor do a few control bytes ahead. The same delay behind a deep backlog is queue-proven.
  */
 class LoneRangeRateTest {
     private static final long MS = Time.MILLISECOND;
@@ -34,7 +34,7 @@ class LoneRangeRateTest {
 
     /** Acknowledges n bytes sent at sent, at now, in an application-limited bubble. */
     @SuppressWarnings("unchecked") // the field's declared type
-    private void ack(long sent, long now, long n, boolean queued) throws Exception {
+    private void ack(long sent, long now, long n, long backlog) throws Exception {
         AckEngine.Send ps = pipe.out().snd;
         long start = end;
         end += n;
@@ -42,7 +42,7 @@ class LoneRangeRateTest {
         Field samples = AckEngine.Send.class.getDeclaredField("samples");
         samples.setAccessible(true);
         ((ArrayList<Pipe.Sample>) samples.get(ps)).add(
-                new Pipe.Sample(end, sent, start, now - 100 * MS, sent, 0, true, queued, 0, false));
+                new Pipe.Sample(end, sent, start, now - 100 * MS, sent, 0, true, backlog, 0, false));
         Poke.set(ps, "deliveredAt", now - 100 * MS);
         lane.segs.add(start, end, start);
         engine.acked(lane, end);
@@ -50,17 +50,21 @@ class LoneRangeRateTest {
     }
 
     @Test
-    void aLoneRangeAfterADelayRiseIsNotQueueProven() throws Exception {
-        ack(0, 50 * MS, 3000, false); // min_rtt 50 ms
+    void aSmallBacklogAfterADelayRiseIsNotQueueProven() throws Exception {
+        ack(0, 50 * MS, 3000, 0); // min_rtt 50 ms
         double before = pipe.out().snd.re().value();
         long at = Time.SECOND;
-        for (int i = 0; i < 20; i++) {
-            ack(at, at + 400 * MS, 36, false);
-            at += Time.SECOND;
+        // Alone, then behind a few unacknowledged bytes (a PIPE_PING ahead): neither backlog
+        // explains a 400 ms delay at R_p.
+        for (long ahead : new long[] {0, 36}) {
+            for (int i = 0; i < 20; i++) {
+                ack(at, at + 400 * MS, 36, ahead);
+                at += Time.SECOND;
+            }
+            assertEquals(before, pipe.out().snd.re().value(), "backlog " + ahead + " replaced R_p");
         }
-        assertEquals(before, pipe.out().snd.re().value(), "lone ranges on a slower path replaced R_p");
         for (int i = 0; i < 20; i++) {
-            ack(at, at + 400 * MS, 3000, true);
+            ack(at, at + 400 * MS, 3000, 1 << 20);
             at += 100 * MS;
         }
         assertEquals(3e4, pipe.out().snd.re().value(), "a backlog behind the same delay is queue-proven");
